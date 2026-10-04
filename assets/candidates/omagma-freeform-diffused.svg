@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <defs>
+    <radialGradient id="omagma-spread" cx="12" cy="13.3" r="6.4" gradientUnits="userSpaceOnUse">
+      <stop offset="0.35" stop-color="#ef7a3a" stop-opacity="0.8"/>
+      <stop offset="0.62" stop-color="#d4572f" stop-opacity="0.4"/>
+      <stop offset="0.92" stop-color="#a9411e" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="omagma-wax" x1="0" y1="9.2" x2="0" y2="17.7" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f6b366"/>
+      <stop offset="0.5" stop-color="#e9803f"/>
+      <stop offset="1" stop-color="#c24a24"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="4.75" width="18" height="14.5" rx="2.6" fill="none" stroke="#e2d6c6" stroke-width="1.8"/>
+  <path d="M4.4 6.5 12 12.1 19.6 6.5" fill="none" stroke="#e2d6c6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M11.6 8.4C13.6 8.1 15.4 9.1 16.9 10.2C18.2 11.2 18.6 12.8 17.7 14C17 15 16.6 16.4 15.2 16.9C14 17.3 13.3 16.9 12.9 17.6C12.5 18.4 10.6 18.4 9.8 17.9C9.1 17.4 8.4 16.9 7.3 16.6C6 16.2 5.8 14.6 6.3 13.4C6.8 12.2 7.6 10.9 8.6 9.9C9.4 9.1 10.4 8.6 11.6 8.4Z" fill="url(#omagma-spread)"/>
+  <path d="M11.4 9.5C12.6 9.2 13.9 9.6 14.9 10.3C15.9 11 16.9 11.6 16.7 12.7C16.5 13.7 15.5 13.8 15.3 14.7C15.1 15.6 14.2 16.1 13.3 15.8C12.6 15.6 12.3 16.1 12.1 16.8C11.9 17.5 10.9 17.7 10.5 17.1C10.2 16.6 10.4 15.9 9.8 15.6C9.1 15.3 8 15.4 7.6 14.5C7.2 13.6 7.7 12.6 8.3 11.8C9 10.8 10.1 9.8 11.4 9.5Z" fill="url(#omagma-wax)"/>
+  <path d="M9.9 11.9C10.6 11 11.9 10.6 13.3 10.8" fill="none" stroke="#ffd08a" stroke-width="1.1" stroke-linecap="round" opacity="0.85"/>
+</svg>

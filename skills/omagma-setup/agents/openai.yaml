@@ -1,0 +1,4 @@
+interface:
+  display_name: "Set up omagma"
+  short_description: "Install omagma and connect separate Gmail accounts"
+  default_prompt: "Use $omagma-setup to install omagma and onboard my Gmail accounts in their configured Chrome profiles."

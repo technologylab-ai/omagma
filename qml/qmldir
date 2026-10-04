@@ -1,0 +1,7 @@
+MailView 1.0 MailView.qml
+MailButton 1.0 MailButton.qml
+QuickPanel 1.0 QuickPanel.qml
+OffscreenShell 1.0 OffscreenShell.qml
+OffscreenBaseline 1.0 OffscreenBaseline.qml
+TestShell 1.0 TestShell.qml
+BaselineShell 1.0 BaselineShell.qml

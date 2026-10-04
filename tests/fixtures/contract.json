@@ -1,0 +1,12 @@
+{
+  "accounts": [
+    {"address": "personal@example.com", "profile": "Profile 3", "required": true},
+    {"address": "work@example.com", "profile": "Profile 1", "required": true},
+    {"address": "optional@example.com", "profile": "Profile 2", "required": false}
+  ],
+  "maxRowsPerAccount": 30,
+  "maxInputBytes": 16384,
+  "maxOutputBytes": 524288,
+  "reservationBytes": 16777216,
+  "backendRssLimitKiB": 65536
+}

@@ -1,0 +1,1 @@
+.{ .name = .omagma, .version = "0.1.0", .fingerprint = 0xd26a637562e3f5f, .minimum_zig_version = "0.16.0", .dependencies = .{}, .paths = .{ "src", "qml", "assets", "tests", "docs", "BarWidget.qml", "Service.qml", "Model.mjs", "LICENSE", "manifest.json", "build.zig", "build.zig.zon", "README.md", "EVIDENCE.md" } }

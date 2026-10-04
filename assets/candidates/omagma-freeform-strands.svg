@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <defs>
+    <linearGradient id="omagma-lava" x1="0" y1="7.8" x2="0" y2="17.2" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4ad62"/>
+      <stop offset="1" stop-color="#d4572f"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="4.75" width="18" height="14.5" rx="2.6" fill="none" stroke="#e2d6c6" stroke-width="1.8"/>
+  <path d="M4.4 6.5 12 12.1 19.6 6.5" fill="none" stroke="#e2d6c6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M12.3 7.85C14.5 7.75 16.2 9.15 16.35 10.85C16.42 11.6 17.1 11.75 17.95 12C18.85 12.25 19.05 13.45 18.5 13.95C17.95 14.45 17.25 14.4 16.7 14C16.2 13.65 15.65 13.6 15.15 13.85C14.5 14.2 13.75 14.35 12.95 14.75C11.9 15.3 11 16.6 9.85 17C8.85 17.35 7.85 16.75 8.05 15.85C8.2 15.15 8.95 14.75 9.35 14.15C9.6 13.75 9.45 13.2 9 12.75C8.45 12.2 7.95 11.45 8.05 10.6C8.25 8.95 10.2 7.95 12.3 7.85Z" fill="url(#omagma-lava)"/>
+  <path d="M11.4 9.45C12.45 9.25 13.6 9.5 14.15 10.15C14.7 10.8 14.6 11.95 14.05 12.6C13.5 13.25 12.45 13.35 11.6 13.15C10.75 12.95 10.05 12.4 9.95 11.55C9.85 10.65 10.35 9.65 11.4 9.45Z" fill="#7a2a15"/>
+  <path d="M13.55 10.55 12.35 11.25 11.55 12.6 11 13.75C10.7 14.4 10.3 14.95 9.8 15.45" fill="none" stroke="#ffd06a" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

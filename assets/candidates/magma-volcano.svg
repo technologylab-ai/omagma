@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <defs>
+    <linearGradient id="rock" x1="2" y1="0" x2="22" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8e5a4d"/>
+      <stop offset="1" stop-color="#77493f"/>
+    </linearGradient>
+    <linearGradient id="lava" x1="0" y1="10.25" x2="0" y2="17.3" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd166"/>
+      <stop offset=".45" stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#f2542d"/>
+    </linearGradient>
+    <linearGradient id="burst" x1="0" y1="10.7" x2="0" y2="2.9" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffe08a"/>
+      <stop offset=".5" stop-color="#ffa847"/>
+      <stop offset="1" stop-color="#ff7a35"/>
+    </linearGradient>
+  </defs>
+  <path d="M2 21.5Q6.4 18.2 8.75 10.25H15.25Q17.6 18.2 22 21.5Z" fill="url(#rock)"/>
+  <path d="M8.75 10.25H15.25Q15.84 12.24 16.55 13.93Q15.6 13.9 15.6 14.8V16.3A1 1 0 0 1 13.6 16.3V15Q13.6 14 12.4 14Q11.2 14 11.2 15V15.3A1 1 0 0 1 9.2 15.3V14.6Q9.2 13.9 7.45 13.93Q8.16 12.24 8.75 10.25Z" fill="url(#lava)"/>
+  <path d="M10.3 10.7Q8.7 9.4 7.6 5.8Q9.7 6.5 10.6 7.7Q10.5 5.1 12 2.9Q13.5 5.1 13.4 7.7Q14.3 6.5 16.4 5.8Q15.3 9.4 13.7 10.7Z" fill="url(#burst)"/>
+  <circle cx="5" cy="8.7" r="1.15" fill="#ff8a3d"/>
+  <circle cx="19.1" cy="7.7" r="1" fill="#ff6b35"/>
+</svg>

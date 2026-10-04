@@ -1,0 +1,11 @@
+.zig-cache/
+zig-out/
+tests/results/
+.local-notes/
+__pycache__/
+
+.verification*/
+client_secret*.json
+oauth-client*.json
+config.local.json
+*.secret.json
