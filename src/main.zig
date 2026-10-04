@@ -43,6 +43,13 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
+    if (std.mem.eql(u8, mode, "build-info")) {
+        var buffer: [256]u8 = undefined;
+        var writer = std.Io.File.stdout().writer(io, &buffer);
+        try writer.interface.print("{{\"version\":\"{s}\",\"zigVersion\":\"{s}\",\"optimizeMode\":\"{s}\"}}\n", .{ @import("build_options").version, builtin.zig_version_string, @tagName(builtin.mode) });
+        try writer.interface.flush();
+        return;
+    }
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     try config.defaults(home);
     if (std.mem.eql(u8, mode, "budget")) {
@@ -141,6 +148,8 @@ fn app(init: std.process.Init) !void {
     } else return error.UnknownMode;
 }
 test {
+    std.testing.refAllDecls(@import("daemon.zig"));
+    std.testing.refAllDecls(@import("platform.zig"));
     std.testing.refAllDecls(@import("bounded.zig"));
     std.testing.refAllDecls(@import("model.zig"));
     std.testing.refAllDecls(@import("protocol.zig"));

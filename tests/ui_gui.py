@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic Quickshell offscreen lifecycle/PSS acceptance harness; not a runtime helper.
 
-Requires Quickshell and a ReleaseSafe omagma. Forces the offscreen Qt platform.
+Requires Quickshell and a safe omagma. Forces the offscreen Qt platform.
 Uses only --fixtures --dry-run-open. Never edits installed shell configuration.
 """
 import argparse
@@ -12,6 +12,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+
+from build_info import read_build_info
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESSES = ["personal@example.com", "work@example.com", "optional@example.com"]
@@ -54,16 +56,17 @@ def main():
     parser.add_argument("--cycles", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=200)
     parser.add_argument("--idle-seconds", type=float, default=60)
-    parser.add_argument("--output", type=Path, default=ROOT / "tests/results/ui-offscreen.json")
+    parser.add_argument("--output", type=Path, default=ROOT / "tests/results/zig017-ui-offscreen.json")
     args = parser.parse_args()
-    assert args.binary.is_file(), "Build the ReleaseSafe Zig fixture backend first"
+    assert args.binary.is_file(), "Build the safe Zig fixture backend first"
+    backend_build = read_build_info(args.binary, "safe")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = {"quickshell": subprocess.check_output(["quickshell", "--version"], text=True).strip(),
               "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "cycles": args.cycles,
               "warmup": args.warmup, "fontBase": args.font_base, "mode": "Qt offscreen fixture lifecycle, dry-run browser opening", "compositorVerified": False,
               "baselineSamples": [], "warmupSamples": [], "soakSamples": [],
               "sourceSha256": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in ["Model.mjs", "Service.qml", "qml/MailView.qml", "qml/MailButton.qml", "qml/QuickPanel.qml", "qml/OffscreenShell.qml", "qml/OffscreenBaseline.qml", "tests/ui_gui.py"]},
-              "backendSha256": hashlib.sha256(args.binary.read_bytes()).hexdigest()}
+              "backendSha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(), **backend_build}
     env = dict(os.environ, OMAGMA_TEST_BINARY=str(args.binary.resolve()), QT_QPA_PLATFORM="offscreen", OMAGMA_TEST_FONT_BASE=str(args.font_base))
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)

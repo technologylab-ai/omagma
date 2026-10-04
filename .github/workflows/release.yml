@@ -9,23 +9,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: omagma-release
+  group: omagma-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   version:
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      needed: ${{ steps.version.outputs.needed }}
+      version: ${{ steps.version.outputs.version || steps.branch.outputs.version }}
+      needed: ${{ steps.version.outputs.needed || steps.branch.outputs.needed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check package version
+        if: github.ref == 'refs/heads/main'
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/publish_release.py --check
+      - name: Verify a migration branch without publishing
+        if: github.ref != 'refs/heads/main'
+        id: branch
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          version = subprocess.check_output(['python3', 'scripts/release.py', '--print-version'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\nneeded=true\n')
+          PY
 
   build:
     needs: version
@@ -43,47 +53,39 @@ jobs:
             zig_arch: aarch64
             target: aarch64-linux-musl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared Zig compiler
-        env:
-          ZIG_ARCH: ${{ matrix.zig_arch }}
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess, tarfile, urllib.request
-          version = subprocess.check_output(['python3', 'scripts/release.py', '--print-zig-version'], text=True).strip()
-          with urllib.request.urlopen('https://ziglang.org/download/index.json', timeout=30) as response:
-              item = json.load(response)[version][os.environ['ZIG_ARCH'] + '-linux']
-          with urllib.request.urlopen(item['tarball'], timeout=60) as response:
-              data = response.read()
-          if len(data) != int(item['size']) or hashlib.sha256(data).hexdigest() != item['shasum']:
-              raise RuntimeError('Zig archive checksum mismatch')
-          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'zig'
-          directory.mkdir()
-          archive = directory / 'zig.tar.xz'
-          archive.write_bytes(data)
-          with tarfile.open(archive) as package:
-              package.extractall(directory, filter='data')
-          executables = list(directory.glob('*/zig'))
-          if len(executables) != 1:
-              raise RuntimeError('Unexpected Zig archive layout')
-          with open(os.environ['GITHUB_PATH'], 'a') as output:
-              output.write(str(executables[0].parent) + '\n')
-          PY
+        run: python3 .github/install_zig.py
       - name: Debug correctness checks
         run: |
-          zig build test -Dtarget=${{ matrix.target }} -Dcpu=baseline --summary all
+          zig version
+          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug
+          zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-debug
+          python3 tests/integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/zig017-debug-integration.json
+          python3 tests/probes/transport_check.py --binary .verification-debug/bin/omagma --build-mode debug --https --output tests/results/zig017-debug-transport.json
+          .verification-debug/bin/auth_probe launch
+          .verification-debug/bin/auth_probe callback
+          .verification-debug/bin/callback_budget
+          .verification-debug/bin/transport_probe
           node tests/ui_model.mjs
+      - name: Safe correctness and standalone probes
+        run: |
+          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe
+          .verification-safe/bin/auth_probe launch
+          .verification-safe/bin/auth_probe callback
+          .verification-safe/bin/callback_budget
+          .verification-safe/bin/transport_probe
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
         run: python3 tests/release_check.py --arch ${{ matrix.arch }}
-      - name: ReleaseSafe account and lifecycle checks
-        run: python3 tests/integration.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode ReleaseSafe --output tests/results/release-integration.json
-      - name: ReleaseSafe transport checks
+      - name: Safe account and lifecycle checks
+        run: python3 tests/integration.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/zig017-safe-integration.json
+      - name: Safe transport checks
         run: |
-          python3 tests/probes/transport_check.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode ReleaseSafe --https --output tests/results/release-transport.json
+          python3 tests/probes/transport_check.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --https --output tests/results/zig017-safe-transport.json
           dist/omagma-linux-${{ matrix.arch }} probe-callback
       - name: Isolated synthetic Secret Service check
         env:
@@ -110,19 +112,31 @@ jobs:
             done
             test "$task_keyring_ready" = true
             dist/omagma-linux-$RELEASE_ARCH probe-keyring
+            .verification-debug/bin/auth_probe keyring
+            .verification-safe/bin/auth_probe keyring
           '
-      - name: ReleaseSafe memory gate
-        run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/release-memory.json
+      - name: Safe memory gate
+        run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-memory.json
+      - name: Safe background scheduling memory gate
+        run: python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-background.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
+      - name: Preserve synthetic verification receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-${{ matrix.arch }}
+          path: tests/results/zig017-*.json
+          if-no-files-found: warn
+          retention-days: 30
 
   publish:
     needs: [version, build]
-    if: needs.version.outputs.needed == 'true'
+    if: github.ref == 'refs/heads/main' && needs.version.outputs.needed == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

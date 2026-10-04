@@ -20,11 +20,16 @@ To have an agent install it, point the agent at this repository and say **“Ins
 
 ## Build from source
 
-If a compatible release asset is unavailable, build from a source checkout with **Zig 0.16.0 exactly**, the current tested compiler pin:
+If a compatible release asset is unavailable, build from a source checkout with **Zig 0.17.0 exactly**. Omarchy may still ship Zig 0.16.x. Download the exact 0.17.0 archive for your OS and CPU from [the versioned Zig release directory](https://ziglang.org/download/0.17.0/), verify its published checksum/signature, and extract it into a task-owned directory. Keep the system compiler unchanged. Before shared-host builds or runtime tests, follow the [measurement reservation protocol](docs/VERIFICATION.md#cooperative-host-measurement-lock).
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+omagma_zig_dir=/absolute/path/to/extracted-zig-0.17.0
+export PATH="$omagma_zig_dir:$PATH"
+zig version
+zig build -Doptimize=safe
 ```
+
+Confirm `zig version` prints exactly `0.17.0` before building; nested build/test tools must inherit this task's `PATH`. Release bundles still need no compiler.
 
 Python 3 and Node.js are development tools. For a synthetic test without Gmail, credentials or desktop installation:
 

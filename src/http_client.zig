@@ -106,8 +106,9 @@ pub const Client = struct {
         var req = try self.inner.?.request(method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
-            // Zig 0.16.0's sendHead does not emit privileged_headers. Use the
-            // standard override; redirects remain unhandled and hosts restricted.
+            // Exact Zig 0.17.0 sendHead still omits privileged_headers while
+            // emitting the standard authorization override. Keep this override;
+            // redirects remain unhandled and destination hosts restricted.
             .headers = .{ .authorization = if (bearer) |value| .{ .override = value } else .omit, .accept_encoding = .{ .override = "identity" }, .content_type = if (form != null) .{ .override = "application/x-www-form-urlencoded" } else .omit },
         });
         defer req.deinit();
@@ -120,7 +121,7 @@ pub const Client = struct {
             try req.connection.?.flush();
         } else try req.sendBodiless();
         var response = try req.receiveHead(&.{});
-        const status: u16 = @intFromEnum(response.head.status);
+        const status: u16 = @backingInt(response.head.status);
         if (status >= 300 and status < 400) return error.RedirectRejected;
         if (response.head.content_encoding != .identity) return error.CompressionRejected;
         if (response.head.content_length) |len| if (len > out.len) return error.ResponseTooLarge;

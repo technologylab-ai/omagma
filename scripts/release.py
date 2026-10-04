@@ -141,13 +141,17 @@ def main():
         raise ValueError(f"Use Zig {zig_version}; found {actual_zig}")
     prefix = ROOT / (".verification-release-" + args.arch)
     subprocess.run(["zig", "build", "-Dtarget=" + TARGETS[args.arch][0], "-Dcpu=baseline",
-                    "-Doptimize=ReleaseSafe", "-Dstrip=true", "--prefix", str(prefix)], cwd=ROOT, check=True)
+                    "-Doptimize=safe", "-Dstrip=true", "--prefix", str(prefix)], cwd=ROOT, check=True)
     binary = prefix / "bin/omagma"
     report = verify_binary(binary, args.arch)
     if platform.machine() in ({"x86_64", "AMD64"} if args.arch == "x86_64" else {"aarch64", "arm64"}):
         actual_version = subprocess.check_output([str(binary), "--version"], text=True, timeout=5).strip()
         if actual_version != "omagma " + version:
             raise ValueError("Binary version differs from build.zig.zon")
+        info = json.loads(subprocess.check_output([str(binary), "build-info"], text=True, timeout=5))
+        if info != {"version": version, "zigVersion": zig_version, "optimizeMode": "safe"}:
+            raise ValueError("Binary compiler or optimization differs from the release contract")
+        report["buildInfo"] = info
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     raw = output / ("omagma-linux-" + args.arch)

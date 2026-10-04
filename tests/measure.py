@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ReleaseSafe synthetic soak and Linux RSS/CPU evidence; never contacts Gmail."""
+"""Safe synthetic soak and Linux RSS/CPU evidence; never contacts Gmail."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,7 @@ import threading
 import time
 
 from integration import ACCOUNTS, CONTRACT, Daemon, REQUIRED, check_reply, proc_sample, require, validate_metrics
+from build_info import read_build_info
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,12 +62,12 @@ def main():
     parser.add_argument("--cycles", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--idle-seconds", type=float, default=60)
-    parser.add_argument("--output", type=Path, default=ROOT / "tests/results/backend-releasesafe.json")
+    parser.add_argument("--output", type=Path, default=ROOT / "tests/results/zig017-backend-safe.json")
     args = parser.parse_args()
     require(args.cycles >= 1 and args.warmup >= 0 and args.idle_seconds > 0 and 0 <= args.fixture_rows <= 30, "invalid measurement durations/rows")
     args.binary = args.binary.resolve()
     result = {"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "buildMode": "ReleaseSafe (caller supplies binary)", "binary": str(args.binary),
+              "binary": str(args.binary),
               "binarySha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               "platform": platform.platform(), "python": platform.python_version(),
               "syntheticOnly": True, "cycles": args.cycles, "warmup": args.warmup,
@@ -74,6 +75,7 @@ def main():
               "idleRequestedSeconds": args.idle_seconds, "sampleIntervalMs": 5,
               "limits": {"rssKiB": 65536, "warmMedianGrowthKiB": 2048, "idlePercentOfOneCore": 0.5}}
     try:
+        result.update(read_build_info(args.binary, "safe"))
         with Daemon(args.binary, args.config, ["--fixture-delay-ms", "2", "--fixture-rows", str(args.fixture_rows)]) as daemon:
             hello = daemon.hello()
             baseline = proc_sample(daemon.process.pid)

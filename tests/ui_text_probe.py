@@ -71,7 +71,9 @@ def memory(pid):
 
 
 def main():
-    report = {"mode": "QV4 offscreen normalization only; 270 synthetic maximum-size display fields"}
+    report = {"mode": "QV4 offscreen normalization only; 270 synthetic maximum-size display fields",
+              "backendUsed": False, "zigVersion": None, "buildMode": None}
+    (ROOT / "tests/results").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
@@ -101,7 +103,7 @@ FUNCTION
 '''.replace("FUNCTION", function)
             path = Path(temporary) / f"{mode}.qml"
             path.write_text(code)
-            log_path = ROOT / "tests/results" / f"ui-text-{mode}.log"
+            log_path = ROOT / "tests/results" / f"zig017-ui-text-{mode}.log"
             with log_path.open("w") as log:
                 process = subprocess.Popen(["quickshell", "--path", str(path), "--no-color"],
                                            stdout=log, stderr=subprocess.STDOUT, env=env)
@@ -121,7 +123,7 @@ FUNCTION
                     report[mode] = result
                 finally:
                     process.terminate(); process.wait(timeout=5)
-    target = ROOT / "tests/results/ui-text-probe.json"
+    target = ROOT / "tests/results/zig017-ui-text-probe.json"
     target.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 

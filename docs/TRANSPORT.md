@@ -1,6 +1,6 @@
 # Bounded backend transport
 
-The backend uses Zig 0.16.0 standard-library HTTP/TLS with certificate and hostname validation. There are no external Zig dependencies. One worker performs network work, with one active account job and at most one pending job flag per account.
+The backend targets exact Zig 0.17.0 standard-library HTTP/TLS with certificate and hostname validation. There are no external Zig dependencies. One worker performs network work, with one active account job and at most one pending job flag per account. Release/memory checks use `-Doptimize=safe`; correctness also runs with `-Doptimize=debug`.
 
 | Storage or deadline | Bound |
 | --- | --- |
@@ -22,4 +22,4 @@ The HTTP client is destroyed before its slab is reset. Exhaustion fails within t
 
 Each refresh lists one Inbox page without pagination, fetches metadata sequentially, and replaces the account snapshot only after validation. The retained page is sorted by received time. This sorts the fetched page; it does not prove a universal guarantee about which messages the provider places on that first page. A failed job preserves the previous successful rows. Allowed list/get races can produce a partial page when a message disappears between calls.
 
-The 16 MiB reservation covers application-owned storage, not the entire process. Zig I/O runtime structures, thread stacks, TLS call stacks, kernel memory and external browser/keyring processes are separate. Requested runtime/worker stacks are bounded, and the whole process is measured independently. See [verification gates](VERIFICATION.md) and [evidence](../EVIDENCE.md).
+The 16 MiB reservation covers application-owned storage, not the entire process. Zig I/O runtime structures, thread stacks, TLS call stacks, kernel memory and external browser/keyring processes are separate. Requested runtime/worker stacks are bounded, and the whole process is measured independently. See [verification gates](VERIFICATION.md). Historical [evidence](../EVIDENCE.md) keeps the compiler version actually measured; a compiler migration requires separate correctness and memory qualification.

@@ -8,7 +8,9 @@ The root `AGENTS.md` directs installation/onboarding requests to `skills/omagma-
 
 Add your account addresses, existing Chrome profile directories, and whether you want five-minute background refresh. Provide a downloaded OAuth client JSON's local path when available; do not paste its contents or account tokens into chat. The agent can prepare and validate local configuration while you approve Google consent in Chrome.
 
-The preferred installation needs no Zig compiler. Static musl backends are published for Linux x86_64 and arm64; use the complete bundle so the UI and instructions are included. Omarchy/Quickshell, Chrome, the keyring and system CA certificates must already be available. If no compatible release asset exists, the agent can use a source checkout and its declared compiler pin, currently Zig 0.16.0. ARM backend build/test checks do not establish ARM desktop integration.
+The preferred installation needs no Zig compiler. Static musl backends are published for Linux x86_64 and arm64; use the complete bundle so the UI and instructions are included. Omarchy/Quickshell, Chrome, the keyring and system CA certificates must already be available. ARM backend build/test checks do not establish ARM desktop integration.
+
+If no compatible release asset exists, use a source checkout with exact Zig **0.17.0**. Omarchy may still ship 0.16.x: download the verified 0.17.0 archive matching the host OS/CPU from [the versioned release directory](https://ziglang.org/download/0.17.0/), extract it, prepend its directory to the task's `PATH`, and confirm `zig version` before invoking any build or nested Python tool. Keep the system compiler unchanged. Use `-Doptimize=debug` and `-Doptimize=safe` for the appropriate checks, under the [shared-host reservation protocol](VERIFICATION.md#cooperative-host-measurement-lock).
 
 ## Optional setup skill
 

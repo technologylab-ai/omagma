@@ -13,6 +13,7 @@ import time
 
 from integration import Daemon, ROOT, proc_sample, require
 from measure import Sampler
+from build_info import read_build_info
 
 
 @contextmanager
@@ -49,6 +50,7 @@ def main():
               "backgroundDisabledInTemporaryProbeConfig": True,
               "checks": {}, "refreshes": []}
     try:
+        result.update(read_build_info(args.binary, "safe"))
         with manual_config(config) as probe_config, Daemon(args.binary, probe_config, fixture_mode=args.fixtures) as daemon:
             initial = daemon.hello()
             require(initial["metrics"]["refreshJobs"] == 0, "closed startup scheduled a mailbox job")

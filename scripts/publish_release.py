@@ -52,7 +52,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Report whether this commit needs a release")
     args = parser.parse_args()
-    version, _zig = package_versions()
+    version, zig = package_versions()
     tag = "v" + version
     repo, commit = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
     existing = find_release(repo, tag)
@@ -80,6 +80,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omagma-release-notes-") as temporary:
         notes = Path(temporary) / "notes.md"
         notes.write_text(f"Complete Quickshell plugin bundles and stripped, static musl backends for Linux x86_64 and arm64.\n\n"
+                         f"Built with exact Zig {zig} in assertion-enabled safe mode.\n\n"
                          f"Download the matching `omagma-{version}-linux-ARCH.tar.gz` bundle and `SHA256SUMS`; Zig is not needed for installation. Native backend correctness, transport and memory checks passed on both architectures. ARM desktop integration requires local verification.\n\n"
                          f"[Installation and checksum verification](https://github.com/{repo}/blob/{tag}/docs/INSTALL.md) · [Agent setup workflow](https://github.com/{repo}/blob/{tag}/skills/omagma-setup/SKILL.md)\n")
         # With asset arguments, gh creates an internal draft, uploads all assets,

@@ -5,6 +5,7 @@
 for README/social sharing. It never reads a user's configuration or mailbox.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import struct
 import subprocess
 import tempfile
 import time
+
+from build_info import read_build_info
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESSES = ["personal@example.com", "work@example.com", "optional@example.com"]
@@ -63,7 +66,7 @@ ShellRoot {{
   }}
 }}
 '''
-    log_path = ROOT / "tests/results/ui-capture-social.log"
+    log_path = ROOT / "tests/results/zig017-ui-capture-social.log"
     with tempfile.TemporaryDirectory(prefix="omagma-social-") as directory, log_path.open("w") as log:
         config = Path(directory) / "shell.qml"
         config.write_text(qml)
@@ -106,6 +109,7 @@ ShellRoot {{
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", type=Path, default=ROOT / "zig-out/bin/omagma")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--selected", action="store_true")
     parser.add_argument("--backend-fixtures", action="store_true")
@@ -114,17 +118,19 @@ def main():
     parser.add_argument("--font-base", type=int)
     parser.add_argument("--scale-factor", type=int, choices=(1, 2, 3))
     args = parser.parse_args()
+    args.binary = args.binary.resolve()
+    backend_build = read_build_info(args.binary, "safe")
     if args.publication and args.backend_fixtures:
         parser.error("--publication uses dedicated fictional data, not backend row fixtures")
     if args.social_output and not args.publication:
         parser.error("--social-output requires --publication")
-    output = args.output or ROOT / ("docs/images/omagma.png" if args.publication else "tests/results/ui-compact.png")
+    output = args.output or ROOT / ("docs/images/omagma.png" if args.publication else "tests/results/zig017-ui-compact.png")
     if args.social_output and args.social_output.resolve() == output.resolve():
         parser.error("the popup and social card require distinct output paths")
     font_base = args.font_base or (12 if args.publication else 9)
     scale_factor = args.scale_factor or (2 if args.publication else 1)
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QPA_PLATFORMTHEME="", QT_SCALE_FACTOR=str(scale_factor),
-               OMAGMA_TEST_BINARY=str(ROOT / "zig-out/bin/omagma"), OMAGMA_TEST_FONT_BASE=str(font_base))
+               OMAGMA_TEST_BINARY=str(args.binary), OMAGMA_TEST_FONT_BASE=str(font_base))
     for key in ("WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY"):
         env.pop(key, None)
     if args.publication:
@@ -133,7 +139,7 @@ def main():
         env.pop("OMAGMA_TEST_CONFIG", None)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.unlink(missing_ok=True)
-    log_path = ROOT / "tests/results/ui-capture.log"
+    log_path = ROOT / "tests/results/zig017-ui-capture.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w") as log:
         process = subprocess.Popen(["quickshell", "--path", str(ROOT / "offscreen.qml"), "--no-color"],
@@ -215,8 +221,11 @@ def main():
     width, height = struct.unpack(">II", output.read_bytes()[16:24])
     if args.social_output:
         capture_social(output, args.social_output, env)
-    print(json.dumps({"image": str(output), "width": width, "height": height, "publication": args.publication,
-                      "syntheticOnly": True, "offscreen": True, "scaleFactor": scale_factor}))
+    receipt = {"image": str(output), "width": width, "height": height, "publication": args.publication,
+               "syntheticOnly": True, "offscreen": True, "scaleFactor": scale_factor,
+               "backendSha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(), **backend_build}
+    (ROOT / "tests/results/zig017-ui-capture.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    print(json.dumps(receipt))
 
 
 if __name__ == "__main__":

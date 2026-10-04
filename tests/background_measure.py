@@ -12,6 +12,7 @@ import time
 
 from integration import Daemon, ROOT, proc_sample, require, validate_metrics
 from measure import Sampler
+from build_info import read_build_info
 
 
 def main():
@@ -38,6 +39,7 @@ def main():
               "privacy": "Only counts, states and process metrics. No mail content, IDs, tokens or callback URLs. Popup remains closed; browser opening is dry-run.",
               "checks": {}}
     try:
+        result.update(read_build_info(args.binary, "safe"))
         extra = ["--fixture-auto-refresh-ms", str(args.fixture_interval_ms), "--fixture-delay-ms", "2", "--fixture-rows", "30"] if args.fixtures else []
         with Daemon(args.binary, args.config, extra, fixture_mode=args.fixtures) as daemon:
             daemon.hello()

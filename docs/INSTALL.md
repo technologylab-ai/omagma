@@ -65,11 +65,16 @@ To remove the widget, remove its bar entry and user plugin symlink. This leaves 
 
 ## Source fallback
 
-If there is no compatible release asset, build a source checkout with the current tested compiler, **Zig 0.16.0 exactly**:
+If there is no compatible release asset, build a source checkout with **Zig 0.17.0 exactly**. Omarchy may still provide 0.16.x. Download and verify the [0.17.0 archive](https://ziglang.org/download/0.17.0/) matching your OS/CPU, extract it into a task-owned directory, and select it only for this shell. Before a shared-host build or runtime check, acquire the [verification reservation](VERIFICATION.md#cooperative-host-measurement-lock).
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+omagma_zig_dir=/absolute/path/to/extracted-zig-0.17.0
+export PATH="$omagma_zig_dir:$PATH"
+zig version
+zig build -Doptimize=safe
 zig-out/bin/omagma --version
 ```
+
+Confirm the compiler reports exactly `0.17.0` before building. The task's `PATH` also selects the compiler for nested Python/release tools; do not replace the system compiler.
 
 Link the absolute checkout directory as the user plugin folder, then use the same bar entry and account setup. Development checks are described in [verification](VERIFICATION.md).

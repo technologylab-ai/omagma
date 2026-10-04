@@ -16,6 +16,8 @@ import time
 import traceback
 from urllib.parse import parse_qs, unquote, urlparse
 
+from build_info import build_mode, read_build_info
+
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = json.loads((ROOT / "tests/fixtures/contract.json").read_text())
 ACCOUNTS = [item["address"] for item in CONTRACT["accounts"]]
@@ -590,15 +592,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "zig-out/bin/omagma")
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--build-mode", choices=["Debug", "ReleaseSafe"], default="Debug")
+    parser.add_argument("--build-mode", type=build_mode, choices=["debug", "safe"], default="debug")
     parser.add_argument("--case", choices=CASES)
-    parser.add_argument("--output", type=Path, default=ROOT / "tests/results/integration-debug.json")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     args.binary = args.binary.resolve()
-    result = {"buildMode": args.build_mode, "binary": str(args.binary),
+    args.output = args.output or ROOT / f"tests/results/zig017-integration-{args.build_mode}.json"
+    result = {"requestedBuildMode": args.build_mode, "binary": str(args.binary),
               "sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(), "syntheticOnly": True,
               "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "checks": {}}
-    for name in [args.case] if args.case else CASES:
+    try:
+        result.update(read_build_info(args.binary, args.build_mode))
+        result["buildIdentityVerified"] = True
+    except Exception as error:
+        result["buildIdentityVerified"] = False
+        result["error"] = str(error)
+        print(f"FAIL build identity: {error}", flush=True)
+    cases = ([args.case] if args.case else CASES) if result["buildIdentityVerified"] else []
+    for name in cases:
         started = time.monotonic()
         try:
             details = CASES[name](args.binary, args.config)
@@ -608,7 +619,7 @@ def main():
             result["checks"][name] = {"passed": False, "seconds": round(time.monotonic() - started, 4), "error": str(error)}
             print(f"FAIL {name}: {error}", flush=True)
             traceback.print_exc()
-    result["passed"] = all(check["passed"] for check in result["checks"].values())
+    result["passed"] = result["buildIdentityVerified"] and all(check["passed"] for check in result["checks"].values())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     return 0 if result["passed"] else 1

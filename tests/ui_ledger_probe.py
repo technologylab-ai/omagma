@@ -21,7 +21,9 @@ def memory(pid):
 
 
 def main():
-    report = {"mode": "QV4 offscreen ledger only; no window/backend/mail"}
+    report = {"mode": "QV4 offscreen ledger only; no window/backend/mail",
+              "backendUsed": False, "zigVersion": None, "buildMode": None}
+    (ROOT / "tests/results").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen",
                QT_LOGGING_RULES="qt.qml.gc.statistics.debug=true;qt.qml.gc.allocatorStats.debug=true")
     env.pop("WAYLAND_DISPLAY", None)
@@ -62,7 +64,7 @@ ShellRoot {
 '''.replace("MODE", json.dumps(mode))
             path = Path(temporary) / f"{mode}.qml"
             path.write_text(code)
-            log_path = ROOT / "tests/results" / f"ui-ledger-{mode}.log"
+            log_path = ROOT / "tests/results" / f"zig017-ui-ledger-{mode}.log"
             with log_path.open("w") as log:
                 process = subprocess.Popen(["quickshell", "--path", str(path), "--no-color"],
                                            stdout=log, stderr=subprocess.STDOUT, env=env)
@@ -87,7 +89,7 @@ ShellRoot {
                 finally:
                     process.terminate()
                     process.wait(timeout=5)
-    target = ROOT / "tests/results/ui-ledger-probe.json"
+    target = ROOT / "tests/results/zig017-ui-ledger-probe.json"
     target.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 

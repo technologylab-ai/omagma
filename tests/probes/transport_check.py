@@ -15,6 +15,8 @@ import time
 from transport_server import server
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tests"))
+from build_info import build_mode, read_build_info
 
 
 def run_probe(argv, timeout=15):
@@ -88,14 +90,23 @@ def run_probe(argv, timeout=15):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "zig-out/bin/omagma")
-    parser.add_argument("--output", type=Path, default=ROOT / "tests/results/transport-debug.json")
-    parser.add_argument("--build-mode", choices=["Debug", "ReleaseSafe"], default="Debug")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--build-mode", type=build_mode, choices=["debug", "safe"], default="debug")
     parser.add_argument("--https", action="store_true", help="Also run credential-free Google HTTPS profile request (expected401)")
     args = parser.parse_args()
     args.binary = args.binary.resolve()
-    result = {"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "syntheticOnly": True, "buildMode": args.build_mode,
+    args.output = args.output or ROOT / f"tests/results/zig017-transport-{args.build_mode}.json"
+    result = {"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "syntheticOnly": True, "requestedBuildMode": args.build_mode,
               "memoryAccounting": "wait4 peak may include inherited Python spawn footprint; /proc samples are checked post-exec, sampled every1ms and can miss short peaks",
               "binarySha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(), "checks": {}}
+    try:
+        result.update(read_build_info(args.binary, args.build_mode))
+    except Exception as error:
+        result.update(passed=False, error=str(error))
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        print(f"FAIL build identity: {error}", flush=True)
+        return 1
     with server() as peer:
         origin = f"http://127.0.0.1:{peer.server_port}"
         for path in ["/ok", "/chunk", "/bearer", "/bearer-missing", "/bearer-redirect", "/oversize", "/oversize-chunk", "/gzip", "/redirect", "/largeheader", "/hang", "/trickle"]:
@@ -104,6 +115,8 @@ def main():
             try:
                 mode = "probe-http-bearer" if path in {"/bearer", "/bearer-redirect"} else "probe-http"
                 process = run_probe([str(args.binary), mode, origin + path])
+                if process["exitCode"] != 0 or process["stderr"]:
+                    raise AssertionError("probe failed or emitted unexpected diagnostics")
                 elapsed = time.monotonic() - started
                 frames = process["stdout"].splitlines()
                 if len(frames) != 1:
@@ -127,6 +140,8 @@ def main():
                     raise AssertionError("bearer transport followed redirect")
                 if path in {"/hang", "/trickle"} and not 8 <= elapsed <= 12:
                     raise AssertionError(f"internal 10s deadline did not bound request: {elapsed:.3f}s")
+                if path in {"/hang", "/trickle"} and frame.get("error") != "Timeout":
+                    raise AssertionError("request did not report the internal deadline's Timeout result")
                 result["checks"][path] = {"passed": True, "wallSeconds": round(elapsed, 4),
                                          **{key: value for key, value in process.items() if key not in {"stdout", "stderr"}}, **frame}
                 print(f"PASS {path}: {elapsed:.3f}s", flush=True)
@@ -137,6 +152,8 @@ def main():
     if args.https:
         try:
             process = run_probe([str(args.binary), "probe-https"])
+            if process["exitCode"] != 0 or process["stderr"]:
+                raise AssertionError("HTTPS probe failed or emitted unexpected diagnostics")
             frame = json.loads(process["stdout"])
             if not frame["ok"] or frame["status"] != 401:
                 raise AssertionError(f"credential-free Google HTTPS did not return expected401: {frame}")

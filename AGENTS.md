@@ -8,7 +8,9 @@ Use [agent setup](docs/AGENT-SETUP.md) for the handoff and [account setup](docs/
 
 ## Developing omagma
 
-Use Zig **0.16.0 exactly**, the current tested pin in `build.zig.zon`. All project-authored runtime helpers outside QML/JavaScript must be Zig. Python and Node.js support tests and release packaging, not runtime helpers. Keep the dependency-free Zig build and the read-only Gmail behavior. [Release instructions](docs/RELEASING.md) describe version-driven Linux musl packaging; changing the package version drives a new release without replacing an existing one.
+Use Zig **0.17.0 exactly**, the pin in `build.zig.zon`. An Omarchy system compiler may still be 0.16.x: use the official archive matching the task's OS/CPU, prepend its extracted directory to the task's `PATH`, and check `zig version`. Keep the global compiler unchanged so nested tools inherit the correct task-local compiler. Use `-Doptimize=debug` for correctness and `-Doptimize=safe` for release/memory checks.
+
+All project-authored runtime helpers outside QML/JavaScript must be Zig. Python and Node.js support tests and release packaging, not runtime helpers. Keep the dependency-free Zig build and the read-only Gmail behavior. [Release instructions](docs/RELEASING.md) describe version-driven Linux musl packaging; changing the package version drives a new release without replacing an existing one.
 
 Preserve the bounded design: at most three configured accounts, 30 rows per account, one network worker, one pending job flag per account, bounded frames and a 64-entry UI request ledger. Replace snapshots instead of appending history. Check generations and the active handshake’s account identities. Treat all mail-derived UI strings as plain text.
 
@@ -16,6 +18,8 @@ Keep OAuth tokens out of argv, logs, IPC and repository files. Use Secret Servic
 
 Use synthetic fixtures first. `tests/ui_gui.py` forces the offscreen Qt platform; automated tests must not map windows, grab the user’s keyboard or edit an installed desktop configuration. Real account, authorization and desktop installation checks need explicit user direction. Do not change package-owned Omarchy files.
 
-Run the checks appropriate to the change, as described in [verification](docs/VERIFICATION.md). Debug builds establish correctness; ReleaseSafe builds establish memory evidence. Preserve failed measurements and retain the existing acceptance thresholds. State the test platform and distinguish RSS, PSS and application-owned allocation limits.
+Before heavy builds or runtime measurement suites on a shared host, follow the [cooperative host measurement lock](docs/VERIFICATION.md#cooperative-host-measurement-lock). Acquire the host-local directory atomically; hold it through child cleanup, and release only your verified ownership token. Keep lightweight editing available while another owner is active.
+
+Run the checks appropriate to the change, as described in [verification](docs/VERIFICATION.md). `debug` checks correctness; `safe` additionally establishes release memory evidence. Receipts must use binary-reported compiler/mode information. Preserve failed measurements and existing acceptance thresholds. State the test platform and distinguish RSS, PSS and application-owned allocation limits. Historical evidence retains its actual compiler version; qualify 0.17.0 separately.
 
 Public examples and captures use fictional accounts and synthetic mail. Never commit tokens, OAuth client downloads, private configurations, real messages or identifiers, personal paths, installation backups, raw local receipts or screenshots containing real mail. Keep public documentation generic and link only public artifacts.

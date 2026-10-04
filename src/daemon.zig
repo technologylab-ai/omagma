@@ -345,13 +345,31 @@ const Daemon = struct {
 };
 fn nonblocking(fd: i32) !void {
     const flags = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (std.posix.errno(flags) != .SUCCESS) return error.FcntlFailed;
+    if (linux.errno(flags) != .SUCCESS) return error.FcntlFailed;
     const extra: linux.O = .{ .NONBLOCK = true };
-    if (std.posix.errno(linux.fcntl(fd, linux.F.SETFL, flags | @as(u32, @bitCast(extra)))) != .SUCCESS) return error.FcntlFailed;
+    // O has an explicit u32 backing integer on both supported architectures.
+    // Preserve its scalar flag value without a memory or lane conversion.
+    if (linux.errno(linux.fcntl(fd, linux.F.SETFL, flags | flagBits(extra))) != .SUCCESS) return error.FcntlFailed;
+}
+fn flagBits(flags: linux.O) u32 {
+    return @backingInt(flags);
+}
+test "fcntl flags preserve Linux x86_64 and arm64 scalar bits" {
+    // Linux UAPI O_NONBLOCK=00004000 on both supported architectures.
+    try std.testing.expectEqual(@as(u32, 0x800), flagBits(.{ .NONBLOCK = true }));
+    try std.testing.expectEqual(@as(u32, 0x400), flagBits(.{ .APPEND = true }));
+    try std.testing.expectEqual(@as(u32, 0xc00), flagBits(.{ .APPEND = true, .NONBLOCK = true }));
+    try std.testing.expectEqual(@as(u32, 0), flagBits(.{}));
+}
+test "raw fcntl errors remain kernel errors when linked with musl" {
+    // Linux UAPI EBADF=9. Raw syscalls return -9, whereas libc returns -1
+    // and stores errno separately. Never decode a raw result via posix.errno.
+    try std.testing.expectEqual(@as(u16, 9), @as(u16, @intCast(@backingInt(linux.errno(linux.fcntl(-1, linux.F.GETFL, 0))))));
+    try std.testing.expectError(error.FcntlFailed, nonblocking(-1));
 }
 pub fn run(io: std.Io, config: *Config, options: Options) !void {
     const result = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
-    if (std.posix.errno(result) != .SUCCESS) return error.EventFdFailed;
+    if (linux.errno(result) != .SUCCESS) return error.EventFdFailed;
     const fd: i32 = @intCast(result);
     defer _ = linux.close(fd);
     try nonblocking(0);
@@ -379,8 +397,8 @@ pub fn run(io: std.Io, config: *Config, options: Options) !void {
             .{ .fd = if (state.out_pos < state.out_len) 1 else -1, .events = linux.POLL.OUT, .revents = 0 },
         };
         const p = linux.poll(&fds, fds.len, if (eof) -1 else state.pollTimeout());
-        if (std.posix.errno(p) == .INTR) continue;
-        if (std.posix.errno(p) != .SUCCESS) return error.PollFailed;
+        if (linux.errno(p) == .INTR) continue;
+        if (linux.errno(p) != .SUCCESS) return error.PollFailed;
         if (fds[1].revents & linux.POLL.IN != 0) {
             var n: u64 = 0;
             _ = linux.read(fd, std.mem.asBytes(&n).ptr, 8);
@@ -388,7 +406,7 @@ pub fn run(io: std.Io, config: *Config, options: Options) !void {
         if (fds[2].revents & linux.POLL.OUT != 0) {
             const bytes = output_storage[state.out_pos..state.out_len];
             const written = linux.write(1, bytes.ptr, bytes.len);
-            switch (std.posix.errno(written)) {
+            switch (linux.errno(written)) {
                 .SUCCESS => state.out_pos += written,
                 .AGAIN, .INTR => {},
                 else => return error.OutputClosed,
@@ -399,7 +417,7 @@ pub fn run(io: std.Io, config: *Config, options: Options) !void {
             // Input is consumed even with stalled output so close/cancel commands
             // stay effective; receipts have a fixed64-request window.
             const n = linux.read(0, &chunk, 1);
-            switch (std.posix.errno(n)) {
+            switch (linux.errno(n)) {
                 .SUCCESS => {
                     if (n == 0) {
                         eof = true;

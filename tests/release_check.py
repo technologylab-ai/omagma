@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--arch", choices=TARGETS, required=True)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
-    version, _compiler = package_versions()
+    version, compiler = package_versions()
     directory = args.output_dir.resolve()
     raw = directory / ("omagma-linux-" + args.arch)
     bundle = directory / f"omagma-{version}-linux-{args.arch}.tar.gz"
@@ -74,6 +74,9 @@ def main():
                 env.pop("HOME", None)
                 actual = subprocess.check_output([str(binary), "--version"], env=env, text=True, timeout=5).strip()
                 require(actual == "omagma " + version, "Extracted binary cannot report its package version")
+                info = json.loads(subprocess.check_output([str(binary), "build-info"], env=env, text=True, timeout=5))
+                require(info == {"version": version, "zigVersion": compiler, "optimizeMode": "safe"}, "Extracted binary compiler/mode differs from release contract")
+                report["buildInfo"] = info
                 budget = json.loads(subprocess.check_output([str(binary), "budget"], text=True, timeout=5))
                 require(budget["reservationBytes"] == 16 * 1024 * 1024, "Release changed the application memory reservation")
                 require(budget["assignedBytes"] + budget["unassignedBytes"] == budget["reservationBytes"], "Invalid reservation accounting")

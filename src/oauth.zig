@@ -432,6 +432,12 @@ fn syntheticCallback(io: std.Io, address: std.Io.net.IpAddress, head: []const u8
     var expected: [32]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&expected, "HTTP/1.1 {d} ", .{expected_status});
     if (!std.mem.startsWith(u8, first, prefix)) return error.UnexpectedCallbackStatus;
+    // Read the bounded reply through EOF before closing the client. Closing
+    // after only the status line can reset a still-writing server connection,
+    // turning a valid callback into a harness-induced response-write failure.
+    var remainder: [1024]u8 = undefined;
+    const remaining = try reader.interface.readSliceShort(&remainder);
+    if (remaining == remainder.len) return error.CallbackResponseTooLarge;
 }
 
 // Static reservations exclude caller-provided tokens and response storage.
