@@ -5,11 +5,14 @@ description: Install the omagma Omarchy bar plugin, configure separate Gmail acc
 
 # Set up omagma
 
-Work from a checkout of omagma. Resolve this skill directory's real path before locating the repository root (`../..`), or use the user's supplied checkout. Read `AGENTS.md`, `README.md`, `docs/SETUP.md`, `docs/INSTALL.md` and `docs/PRIVACY.md`. The checkout, private account config and downloaded Google client JSON are separate resources.
+Work from an extracted complete omagma release or source checkout. Resolve this skill directory's real path before locating the omagma root (`../..`), or use the user's supplied folder. Read `AGENTS.md`, `README.md`, `docs/SETUP.md`, `docs/INSTALL.md` and `docs/PRIVACY.md`. The app folder, private account config and downloaded Google client JSON are separate resources.
 
 ## Prepare the installation
 
-- Check the actual compiler pin in `build.zig` and use that version. Verify a Debug build/tests and build the installed binary with ReleaseSafe. Use fixture mode until consent is available; continue independent fixture work while the user handles Google setup.
+- Prefer a complete bundle from `https://github.com/technologylab-ai/omagma/releases/latest`. Map Linux `uname -m` values `x86_64` to the x86_64 bundle and `aarch64`/`arm64` to arm64. Download `omagma-VERSION-linux-ARCH.tar.gz` and `SHA256SUMS` from the same release. Verify the selected bundle's checksum before extraction. Raw `omagma-linux-ARCH` assets contain only the backend and are insufficient for a new bar installation.
+- Extract into a new persistent versioned directory and locate its top-level `omagma/`. Run its `zig-out/bin/omagma --version` and check the reported `omagma VERSION` before consent or desktop activation. Link the absolute `omagma/` folder as the user plugin. Inspect an existing plugin path before updating it; prepare the new folder before changing an installed symlink, and preserve private configuration and credentials.
+- End users do not need Zig. Static musl linking applies to the backend; check that the Omarchy/Quickshell host, Chrome, Secret Service/`secret-tool` and system CA certificates are available. ARM backend build/test checks do not establish ARM desktop integration. If a compatible asset is unavailable, obtain a source checkout, read `.minimum_zig_version` in `build.zig.zon`, and use that compiler (currently exactly 0.16.0). Verify Debug checks and build ReleaseSafe for this fallback.
+- Use fixtures and `--dry-run-open` until consent is available. Continue independent preparation while the user handles Google setup. Available source-checkout UI harnesses run offscreen; release installation does not require a compiler or development test tools.
 - Inspect the existing Omarchy/Quickshell installation and user configuration. For a requested installation, add only omagma's user plugin and bar entry, backing up the affected config and preserving unrelated settings. Never edit package-owned Omarchy files. Prefer installed Omarchy commands; follow any applicable local desktop instructions.
 - Request only missing account addresses, enabled/optional choices, Chrome profile directories, OAuth client file location and background-refresh preference. Use the user's existing answers. Named profile directories such as `Profile 1` are distinct from Chrome display names; this build rejects `Default`, so use an existing named profile or help the user create one if necessary. Inspect existing profile metadata locally if needed; do not publish it or create a separate browser data directory.
 - Resolve the private config location from `XDG_CONFIG_HOME` when set, otherwise `$HOME/.config`, or use the user's existing explicit config location. Create its `omagma/config.json` from the example with real addresses and existing profile directories, mode 0600 in a mode-0700 directory. Set the bar entry's `configPath` to this tested absolute filename so onboarding and the service read the same file. Keep the downloaded client JSON private and outside Git. Configure `refreshIntervalSeconds` as integer `0` (disabled) or `60..86400`; `300` enables five-minute refresh while closed.
@@ -21,7 +24,7 @@ The current app has a CLI entry point for consent and does not bundle a shared O
 
 If no suitable client exists, guide the user through Google Cloud project/Gmail API, consent configuration and Desktop client download using `docs/SETUP.md`. Do not claim a service-account key or another application's tokens replace this flow. Consult current primary Google documentation before making policy promises. External Testing Gmail grants expire after seven days; publishing status, public verification and Workspace policy are separate issues. Report actual console/policy errors without widening scope.
 
-Use the tested absolute ReleaseSafe binary path; building does not automatically put `omagma` on PATH. Resolve the config filename prepared above. For each enabled account, run:
+Use the verified included binary's absolute path; extraction does not put `omagma` on PATH. A source fallback uses its tested ReleaseSafe binary. Resolve the config filename prepared above. For each enabled account, run:
 
 ```sh
 "/absolute/path/to/omagma/zig-out/bin/omagma" auth --account ACCOUNT_ADDRESS --config "/absolute/private/path/config.json"
@@ -29,7 +32,7 @@ Use the tested absolute ReleaseSafe binary path; building does not automatically
 
 Explain which configured Chrome profile opens and which exact account to select. Tell the user to approve read-only Gmail access. After the page says authorization was received, tell them they can close that tab; also verify the CLI finishes successfully. Do not claim a callback page alone proves identity verification or token storage. Authorize accounts sequentially so the user knows which tab needs attention. Close agent-owned setup/test tabs when no longer needed; never close unrelated browsing tabs.
 
-A successful consent does not refresh an already disconnected daemon automatically. Manually refresh that account while the popup is open, or restart the omagma service after onboarding/config changes. The installed binary path must point to the tested ReleaseSafe build.
+A successful consent does not refresh an already disconnected daemon automatically. Manually refresh that account while the popup is open, or restart the omagma service after onboarding/config changes. The installed binary path must point to the verified release backend or tested source fallback.
 
 ## Verify and hand off
 

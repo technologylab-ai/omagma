@@ -19,7 +19,7 @@ SECRET_PATTERNS = [
     re.compile(rb"1//[A-Za-z0-9_-]{30,}"),
     re.compile(rb"[0-9]{8,}-[A-Za-z0-9_-]{10,}\.apps\.googleusercontent\.com"),
 ]
-IGNORED_PARTS = {".local-notes", ".zig-cache", "zig-out", "__pycache__"}
+IGNORED_PARTS = {".local-notes", ".zig-cache", "zig-out", "dist", "__pycache__"}
 
 
 def staged(name):

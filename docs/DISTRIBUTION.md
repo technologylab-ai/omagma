@@ -6,4 +6,4 @@ A shared public OAuth registration would require a maintained application identi
 
 External Testing is suitable for intended test users but its Gmail refresh grants expire after seven days. A Production registration removes that Testing-specific expiry; other expiration and revocation rules still apply. [Google’s token rules](https://developers.google.com/identity/protocols/oauth2#expiration).
 
-The current release is a locally built Omarchy plugin with CLI consent, not a packaged one-click sign-in flow. See [setup](SETUP.md), [installation](INSTALL.md) and [privacy](PRIVACY.md). Do not bundle private credentials, configuration, raw live-test receipts or real-mail captures in releases.
+The current release is a downloadable Omarchy plugin with CLI consent. See [setup](SETUP.md), [installation](INSTALL.md) and [privacy](PRIVACY.md). Do not bundle private credentials, configuration, raw live-test receipts or real-mail captures in releases.

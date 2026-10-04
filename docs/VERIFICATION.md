@@ -30,3 +30,17 @@ The default backend and UI soaks run 1,000 cycles and a 60-second quiet interval
 UI memory uses a separate baseline with the same shell/runtime and reads Linux `smaps_rollup`. PSS accounts for shared mappings proportionally; private memory and warm trends reveal retained memory. RSS, PSS and the backend’s application-owned allocation budget are different quantities. A passing offscreen test cannot establish compositor placement, desktop dismissal or browser routing on every installation.
 
 Real authorization/fetch/timer tests are explicit opt-in checks with private configuration. Verify the returned identity, per-account isolation and browser profile routing without publishing mail, identifiers, token material or personal paths. Preserve failed local receipts, but keep raw test output out of public releases. Published summaries are in [evidence](../EVIDENCE.md).
+
+## Static release checks
+
+The [release workflow](../.github/workflows/release.yml) tests both backends on native Linux x86_64 and ARM runners. To package locally, stage or commit tracked changes first so the bundle matches the privacy-audited index:
+
+```sh
+python3 scripts/release.py --arch x86_64
+python3 tests/release_check.py --arch x86_64
+python3 tests/integration.py --binary dist/omagma-linux-x86_64 --build-mode ReleaseSafe
+python3 tests/probes/transport_check.py --binary dist/omagma-linux-x86_64 --build-mode ReleaseSafe --https
+python3 tests/measure.py --binary dist/omagma-linux-x86_64
+```
+
+Use `--arch arm64` to cross-build and inspect the ARM bundle. Native executable checks need an ARM machine. Packaging rejects a dynamic loader, shared-library dependencies, debug symbols and private build paths. Archive checks verify checksums, exact tracked contents, normalized metadata, executable permissions and the version from `build.zig.zon`. See [release maintenance](RELEASING.md) for publication and draft recovery.

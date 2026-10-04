@@ -36,6 +36,13 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (std.mem.eql(u8, mode, "--version")) {
+        var buffer: [256]u8 = undefined;
+        var writer = std.Io.File.stdout().writer(io, &buffer);
+        try writer.interface.print("omagma {s}\n", .{@import("build_options").version});
+        try writer.interface.flush();
+        return;
+    }
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     try config.defaults(home);
     if (std.mem.eql(u8, mode, "budget")) {
@@ -48,7 +55,7 @@ fn app(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "help") or std.mem.eql(u8, mode, "--help")) {
         var buffer: [2048]u8 = undefined;
         var writer = std.Io.File.stdout().writer(io, &buffer);
-        try writer.interface.writeAll("omagma (Zig 0.16.0)\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n");
+        try writer.interface.print("omagma {s} (Zig {s})\n  --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
         try writer.interface.flush();
         return;
     }

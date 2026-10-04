@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omagma-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      needed: ${{ steps.version.outputs.needed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check package version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish_release.py --check
+
+  build:
+    needs: version
+    if: needs.version.outputs.needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            zig_arch: x86_64
+            target: x86_64-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            zig_arch: aarch64
+            target: aarch64-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the declared Zig compiler
+        env:
+          ZIG_ARCH: ${{ matrix.zig_arch }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, tarfile, urllib.request
+          version = subprocess.check_output(['python3', 'scripts/release.py', '--print-zig-version'], text=True).strip()
+          with urllib.request.urlopen('https://ziglang.org/download/index.json', timeout=30) as response:
+              item = json.load(response)[version][os.environ['ZIG_ARCH'] + '-linux']
+          with urllib.request.urlopen(item['tarball'], timeout=60) as response:
+              data = response.read()
+          if len(data) != int(item['size']) or hashlib.sha256(data).hexdigest() != item['shasum']:
+              raise RuntimeError('Zig archive checksum mismatch')
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'zig'
+          directory.mkdir()
+          archive = directory / 'zig.tar.xz'
+          archive.write_bytes(data)
+          with tarfile.open(archive) as package:
+              package.extractall(directory, filter='data')
+          executables = list(directory.glob('*/zig'))
+          if len(executables) != 1:
+              raise RuntimeError('Unexpected Zig archive layout')
+          with open(os.environ['GITHUB_PATH'], 'a') as output:
+              output.write(str(executables[0].parent) + '\n')
+          PY
+      - name: Debug correctness checks
+        run: |
+          zig build test -Dtarget=${{ matrix.target }} -Dcpu=baseline --summary all
+          node tests/ui_model.mjs
+      - name: Build static release bundle
+        run: python3 scripts/release.py --arch ${{ matrix.arch }}
+      - name: Validate archive and executable
+        run: python3 tests/release_check.py --arch ${{ matrix.arch }}
+      - name: ReleaseSafe account and lifecycle checks
+        run: python3 tests/integration.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode ReleaseSafe --output tests/results/release-integration.json
+      - name: ReleaseSafe transport checks
+        run: |
+          python3 tests/probes/transport_check.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode ReleaseSafe --https --output tests/results/release-transport.json
+          dist/omagma-linux-${{ matrix.arch }} probe-callback
+      - name: Isolated synthetic Secret Service check
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libsecret-tools gnome-keyring dbus libglib2.0-bin
+          dbus-run-session -- bash -euc '
+            task_keyring_root=$(mktemp -d)
+            export XDG_CONFIG_HOME="$task_keyring_root/config" XDG_DATA_HOME="$task_keyring_root/data" XDG_RUNTIME_DIR="$task_keyring_root/run"
+            mkdir -m 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
+            unset GNOME_KEYRING_CONTROL
+            printf "synthetic-ci-password\n" | gnome-keyring-daemon --foreground --unlock --components=secrets >/dev/null &
+            task_keyring_pid=$!
+            trap '\''kill "$task_keyring_pid" 2>/dev/null || true; wait "$task_keyring_pid" 2>/dev/null || true; rm -rf "$task_keyring_root"'\'' EXIT
+            task_keyring_ready=false
+            for attempt in {1..50}; do
+              kill -0 "$task_keyring_pid"
+              if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner org.freedesktop.secrets | grep -q true; then
+                task_keyring_ready=true
+                break
+              fi
+              sleep 0.1
+            done
+            test "$task_keyring_ready" = true
+            dist/omagma-linux-$RELEASE_ARCH probe-keyring
+          '
+      - name: ReleaseSafe memory gate
+        run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/release-memory.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [version, build]
+    if: needs.version.outputs.needed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Combine and verify checksums
+        working-directory: dist
+        run: |
+          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 > SHA256SUMS
+          sha256sum LICENSES.txt >> SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Publish new version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: python3 scripts/publish_release.py

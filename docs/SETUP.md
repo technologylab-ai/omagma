@@ -1,9 +1,10 @@
 # Account setup
 
-Build with Zig 0.16.0 before connecting an account:
+[Download and verify the matching plugin bundle](INSTALL.md) first. Run these commands from its extracted `omagma/` directory; the included backend lives at `zig-out/bin/omagma`. Zig is not required for release installation. A source build uses the same relative binary path.
+
+If a private config already exists, edit it instead of copying the example over it. For a new configuration:
 
 ```sh
-zig build -Doptimize=ReleaseSafe
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/omagma"
 chmod 700 "${XDG_CONFIG_HOME:-$HOME/.config}/omagma"
 cp examples/config.json "${XDG_CONFIG_HOME:-$HOME/.config}/omagma/config.json"
@@ -54,4 +55,4 @@ zig-out/bin/omagma auth --account personal@example.com --config "${XDG_CONFIG_HO
 
 Complete Google consent in the opened Chrome profile within **180 seconds**. omagma checks the returned Gmail identity against the configured address before storing a refresh token in Secret Service. Repeat the command for each other enabled address. The keyring must be available and unlocked.
 
-After connecting, install the [bar widget](INSTALL.md) and turn off its synthetic fixture setting. If consent expires or access is revoked, run `auth` again for that account. There is currently no in-dropdown Connect action. Verify that **Open inbox** and message links reach the intended account in the intended profile before relying on browser routing.
+After connecting, turn off the [bar widget’s](INSTALL.md) synthetic fixture setting. If consent expires or access is revoked, run `auth` again using the included binary for that account. There is currently no in-dropdown Connect action. Verify that **Open inbox** and message links reach the intended account in the intended profile before relying on browser routing.
