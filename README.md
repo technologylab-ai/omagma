@@ -8,7 +8,7 @@ Each account keeps its own unread count and message list. The dropdown shows rea
 
 The backend is Zig; the UI is Quickshell QML. Mail stays in a bounded memory cache of at most 30 messages per account. There is no local mail database. Background refresh is optional: the default is manual refresh, and `refreshIntervalSeconds: 300` enables a five-minute interval even while the dropdown is closed.
 
-Omagma started because a single Gmail tab was using roughly **2 GB of RAM** on the author's desktop. Omagma's backend and UI together measured approximately **30 MB for three connected accounts** in v0.1.0 on Linux x86_64. This excludes Chrome and the shared Omarchy shell; it is a measured footprint, not a memory guarantee or a controlled browser benchmark. See [memory measurements](docs/MEMORY.md) for the accounting and version details.
+Omagma started because a single Gmail tab was using roughly **2 GB of RAM** on the author's desktop. Omagma's backend and UI together measured approximately **31 MB for three connected accounts** in v0.1.1 on Linux x86_64. This excludes Chrome and the shared Omarchy shell; it is a measured footprint, not a memory guarantee or a controlled browser benchmark. See [memory measurements](docs/MEMORY.md) for the accounting and version details.
 
 ## Install
 

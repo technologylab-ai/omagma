@@ -71,7 +71,7 @@ The default backend and UI soaks run 1,000 cycles and a 60-second quiet interval
 
 UI memory uses a separate baseline with the same shell/runtime and reads Linux `smaps_rollup`. PSS accounts for shared mappings proportionally; private memory and warm trends reveal retained memory. RSS, PSS and the backend’s application-owned allocation budget are different quantities. A passing offscreen test cannot establish compositor placement, desktop dismissal or browser routing on every installation.
 
-Real authorization/fetch/timer tests are explicit opt-in checks with private configuration. Verify the returned identity, per-account isolation and browser profile routing without publishing mail, identifiers, token material or personal paths. Preserve failed local receipts, but keep raw test output out of public releases. Published summaries are in [evidence](../EVIDENCE.md).
+Real authorization/fetch/timer tests are explicit opt-in checks with private configuration. Verify the returned identity, per-account isolation and browser profile routing without publishing mail, identifiers, token material or personal paths. Preserve failed local receipts, but keep raw test output out of public releases. Published summaries are in [current Zig 0.17 evidence](evidence/zig-0.17.0.md), [memory accounting](MEMORY.md) and [historical Zig 0.16 evidence](../EVIDENCE.md).
 
 ## Static release checks
 
