@@ -35,7 +35,7 @@ def capture_social(image, output, env):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.unlink(missing_ok=True)
     image_url = json.dumps(image.resolve().as_uri())
-    logo_url = json.dumps((ROOT / "assets/magma.svg").as_uri())
+    logo_url = json.dumps((ROOT / "assets/omagma-logo.png").as_uri())
     qml = f'''import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -49,7 +49,7 @@ ShellRoot {{
       id: card
       anchors.fill: parent
       color: "#000000"
-      Image {{ id: logo; x: 30; y: 13; width: 24; height: 24; source: {logo_url} }}
+      Image {{ id: logo; x: 30; y: 13; width: 24; height: 24; source: {logo_url}; sourceSize.width: 48; sourceSize.height: 48; fillMode: Image.PreserveAspectFit; smooth: true }}
       Text {{ x: 64; y: 12; text: "omagma"; color: "#e4e7ed"; font.family: "monospace"; font.pixelSize: 20; font.bold: true }}
       Text {{ x: 180; y: 18; text: "Gmail, one account at a time"; color: "#a2adbd"; font.family: "monospace"; font.pixelSize: 12 }}
       Image {{ id: preview; x: 30; y: 50; width: 740; height: 440; source: {image_url}; smooth: false; fillMode: Image.PreserveAspectFit }}

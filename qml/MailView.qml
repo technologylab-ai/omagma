@@ -122,7 +122,9 @@ FocusScope {
         Image {
           Layout.preferredWidth: root.px(16)
           Layout.preferredHeight: root.px(16)
-          source: Qt.resolvedUrl("../assets/magma.svg")
+          source: Qt.resolvedUrl("../assets/omagma-logo.png")
+          sourceSize.width: 48
+          sourceSize.height: 48
           fillMode: Image.PreserveAspectFit
           smooth: true
         }

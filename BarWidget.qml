@@ -68,7 +68,7 @@ BarWidget {
       width: Style.bar.iconCanvas
       height: Style.bar.iconCanvas
       readonly property real tightWidth: width
-      source: Qt.resolvedUrl("assets/magma.svg")
+      source: Qt.resolvedUrl("assets/omagma-logo.png")
       sourceSize.width: 48
       sourceSize.height: 48
       fillMode: Image.PreserveAspectFit
