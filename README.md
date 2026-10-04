@@ -50,5 +50,6 @@ The UI harness runs offscreen and closes its processes when finished. See [verif
 - [Memory measurements](docs/MEMORY.md), [Zig 0.17 qualification](docs/evidence/zig-0.17.0.md) and [historical Zig 0.16 evidence](EVIDENCE.md)
 - [Distribution](docs/DISTRIBUTION.md) and [compiler findings for wiki review](docs/ZIG017-WIKI-FOLLOWUP.md)
 - [Building and publishing releases](docs/RELEASING.md)
+- Social images: [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)
 
 MIT licensed. Copyright technologylab.ai. Static distributions include [Zig and musl notices](LICENSES).

@@ -14,4 +14,4 @@ The historical release remains at `851ee30c5953a28fe0535fea03737ce85ec745fd`. Pr
 
 ## Zig 0.17 qualification
 
-The compiler port has separate [dated evidence](evidence/zig-0.17.0.md). Its native x86_64 Safe synthetic backend peak RSS was 11,624 KiB with 90 rows. Final UI and installed-release totals are recorded after qualification; historical measurements are not relabeled as new-version results.
+The compiler port has separate [dated evidence](evidence/zig-0.17.0.md). Its native x86_64 Safe synthetic backend peak RSS was 11,624 KiB with 90 rows; the qualified full offscreen UI run attributed 15,514 KiB PSS after 1,000 cycles. Matched old/new UI diagnostics showed no compiler-linked increase. An earlier UI attribution gate failed and is preserved in the evidence: baseline initialization varies, so individual measurements are not guarantees. Installed-release totals are recorded after deployment; historical measurements are not relabeled as new-version results.
