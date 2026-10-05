@@ -2,6 +2,8 @@
 
 Use the verified release binary (`--version`, `build-info`). No compiler is needed for release use. For setup, read [AGENTS.md](../AGENTS.md) and [the setup workflow](../skills/omagma-setup/SKILL.md). For terminal permissions read [TERMINAL.md](TERMINAL.md). Never widen permissions or send mail merely because an agent has read access. Development uses `--fixtures`; initial live write acceptance requires an explicitly provided dedicated test mailbox. Production writes need separate explicit user intent and suitable account authorization.
 
+Fixture accounts expose mock send, mailbox-change, contact and RSVP capabilities without OAuth or Google access. Inspect `accounts.list` when selecting capabilities for an actual account.
+
 ## Protocol
 
 `omagma cli` (alias `omagma agent`) reads one JSON object per line and emits one response per line. stdout contains only protocol frames. EOF ends the process; malformed/oversized frames produce errors and the next frame can proceed. Each response echoes id and account:

@@ -26,7 +26,7 @@ To have an agent install it, point the agent at this repository and say **“Ins
 
 `omagma cli` / `omagma agent` provide a JSONL interface; one-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands use the same executor. Fetch beyond the bar's 30 messages using explicit continuation cursors. The terminal cache defaults to **2,000 message metadata entries and 256 MiB of disk per account**. Terminal heap allocations are capped at 64 MiB, in addition to the existing 16 MiB fixed backend storage reservation. Native x86_64 synthetic measurements settled around **7 MB for the agent CLI and 9 MB for the TUI**, with peaks around 11 MB and 13 MB respectively, across three accounts and 1,000 cycles. These are whole terminal process measurements; see [memory measurements](docs/MEMORY.md) for workload and accounting. Allocation ceilings are separate from resident memory.
 
-Try everything without Google credentials or desktop installation:
+Try the TUI and agent client without Google credentials or desktop installation. Fixture mode enables mock sends, mailbox changes, contacts and RSVP; it never contacts Google:
 
 ```sh
 omagma tui --fixtures

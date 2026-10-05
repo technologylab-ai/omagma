@@ -116,6 +116,27 @@ def invitation(account, recurring=False, method="REQUEST", status="NEEDS-ACTION"
     return ("\r\n".join(lines + ["END:VEVENT", "END:VCALENDAR"]) + "\r\n").encode()
 
 
+def inbound_address_cases():
+    """Fictional delivered headers are distinct from a valid send envelope."""
+    accounts = {}
+    for address in ACCOUNTS:
+        key = address.split("@")[0]
+        wide = [address] + [f"many-{key}-{index:02}@example.org" for index in range(33)]
+        local65 = (f"reply-{key}-" + "x" * 65)[:65] + "@example.org"
+        accounts[address] = {
+            "manyRecipients": {"messageId": "shared-msg-095", "headerName": "To",
+                               "headerValue": ", ".join(wide), "expectedAddresses": wide,
+                               "normalReplyRecipient": "alex@example.org"},
+            "longReplyTo": {"messageId": "shared-msg-094", "headerName": "Reply-To",
+                            "headerValue": f"Fictional reply boundary <{local65}>",
+                            "expectedAddresses": [local65], "localPartBytes": 65},
+        }
+    return {"synthetic": True, "networkRequired": False, "accounts": accounts,
+            "incomingRecipientCount": 34, "outgoingRecipientLimit": 32,
+            "outgoingLocalPartLimit": 64,
+            "expected": "read all delivered participants; refuse oversized or invalid outgoing envelopes without truncation"}
+
+
 def main():
     cases = {1: "quoted-printable", 2: "base64", 3: "alternative-attachment", 4: "html-only",
              5: "reply-all", 6: "missing-message-id", 7: "controls", 8: "invitation",
@@ -214,6 +235,7 @@ def main():
                         "depth33": nested,
                         "parts513": {"partId": "", "mimeType": "multipart/mixed", "filename": "", "headers": [],
                                      "body": {"size": 0}, "parts": [leaf] * 513}}})
+    save_json("inbound-addresses.json", inbound_address_cases())
 
 
 if __name__ == "__main__":

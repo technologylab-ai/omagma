@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.technologylab_ai.omagma",
   "name": "omagma",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "technologylab.ai",
   "license": "MIT",
   "description": "Read-only recent Gmail messages in three separate account Inboxes.",

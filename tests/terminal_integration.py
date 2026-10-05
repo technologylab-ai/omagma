@@ -351,6 +351,100 @@ def invalid_message_id_reply(client):
     require(client.request("draft.list") == before, "invalid threading created an orphan reply draft")
 
 
+def install_inbound_address_fixtures(client):
+    """Override only two fictional delivered headers; preserve baseline workload."""
+    fixture = json.loads((FIXTURES / "inbound-addresses.json").read_text())
+    root = client.directory / "inbound-address-fixture"
+    (root / "accounts").mkdir(parents=True)
+    for account, cases in fixture["accounts"].items():
+        source = json.loads((FIXTURES / f"accounts/{account.split('@')[0]}.json").read_text())
+        for case in cases.values():
+            message = next(m for m in source["messages"] if m["id"] == case["messageId"])
+            headers = message["payload"]["headers"]
+            headers[:] = [h for h in headers if h["name"].lower() != case["headerName"].lower()]
+            headers.append({"name": case["headerName"], "value": case["headerValue"]})
+        (root / f"accounts/{account.split('@')[0]}.json").write_text(json.dumps(source))
+    client.extra = ("--fixture-root", str(root))
+    client.restart()
+    return fixture
+
+
+def incoming_recipient_over32(client):
+    fixture = install_inbound_address_fixtures(client)
+    for account in ACCOUNTS:
+        case = fixture["accounts"][account]["manyRecipients"]
+        listed = client.request("mail.list", account, limit=100)["messages"]
+        require(len(listed) == 96, "one delivered wide header aborted mailbox listing")
+        metadata = next(m for m in listed if m["id"] == case["messageId"])
+        require(addresses(metadata["to"]) == case["expectedAddresses"], "incoming metadata recipients were truncated or crossed accounts")
+        full = client.request("mail.read", account, messageId=case["messageId"])
+        require(addresses(full["to"]) == case["expectedAddresses"] and account in full["bodyText"],
+                "full wide-header message lost participants or account-specific content")
+        thread = client.request("mail.thread", account, threadId=full["threadId"])["messages"]
+        received = next(m for m in thread if m["id"] == full["id"])
+        require(addresses(received["to"]) == case["expectedAddresses"] and received["bodyText"] == full["bodyText"],
+                "thread context changed wide-header participants or account body")
+        reply = client.request("mail.reply", account, messageId=full["id"], all=False)
+        require(addresses(reply["to"]) == [case["normalReplyRecipient"]] and addresses(reply["cc"]) == [],
+                "ordinary reply unnecessarily copied the oversized incoming recipient list")
+        before = client.request("draft.list", account)
+        rejected = client.request("mail.reply", account, messageId=full["id"], all=True, ok=False)
+        require(rejected["code"] == "TooManyRecipients", "reply-all silently truncated an oversized outgoing envelope")
+        require(client.request("draft.list", account) == before, "failed wide reply-all created or modified a local draft")
+        require(cache_limits(client, account)["fixtureSends"] == 0, "wide-header planning submitted mail")
+    client.evidence = {"incomingRecipientsPerAccount": 34, "ordinaryReplyRecipients": 1,
+                       "replyAllRefusedWithoutTruncation": True, "accountsChecked": 3}
+
+
+def incoming_reply_to_local65(client):
+    fixture = install_inbound_address_fixtures(client)
+    for account in ACCOUNTS:
+        case = fixture["accounts"][account]["longReplyTo"]
+        listed = client.request("mail.list", account, limit=100)["messages"]
+        metadata = next(m for m in listed if m["id"] == case["messageId"])
+        require(addresses(metadata["replyTo"]) == case["expectedAddresses"], "delivered65-byte local-part blocked metadata or was changed")
+        full = client.request("mail.read", account, messageId=case["messageId"])
+        require(addresses(full["replyTo"]) == case["expectedAddresses"] and account in full["bodyText"],
+                "long Reply-To full read was rejected, shortened, or routed to another account")
+        thread = client.request("mail.thread", account, threadId=full["threadId"])["messages"]
+        received = next(m for m in thread if m["id"] == full["id"])
+        require(addresses(received["replyTo"]) == case["expectedAddresses"], "thread reading weakened delivered Reply-To identity")
+        before = client.request("draft.list", account)
+        for all_recipients in (False, True):
+            rejected = client.request("mail.reply", account, messageId=full["id"], all=all_recipients, ok=False)
+            require(rejected["code"] == "InvalidAddress", "reading a long Reply-To granted permission to send to it")
+        require(client.request("draft.list", account) == before, "invalid outgoing Reply-To created an orphan draft")
+        require(cache_limits(client, account)["fixtureSends"] == 0, "long Reply-To inspection submitted mail")
+    client.evidence = {"incomingReplyToLocalBytes": 65, "outgoingReplyRefused": True, "accountsChecked": 3}
+
+
+def outgoing_address_limits_unchanged(client):
+    recipients32 = [f"boundary-{i:02}@example.org" for i in range(32)]
+    local64 = "a" * 64 + "@example.org"
+    local65 = "b" * 65 + "@example.org"
+    for account in ACCOUNTS:
+        boundary = client.request("draft.create", account, draft={"to": recipients32, "subject": "Fictional32-recipient boundary", "bodyText": "Synthetic draft only."})
+        require(addresses(boundary["to"]) == recipients32, "valid32-recipient outgoing boundary was changed")
+        address_boundary = client.request("draft.create", account, draft={"to": [local64], "subject": "Fictional64-byte local boundary", "bodyText": "Synthetic draft only."})
+        require(addresses(address_boundary["to"]) == [local64], "valid64-byte local-part outgoing boundary was changed")
+        drafts = client.request("draft.list", account)
+        operations = client.request("operation.list", account)
+        calls = cache_limits(client, account)["fixtureCalls"]
+        for suffix, to, code in [("many", recipients32 + ["boundary-33@example.org"], "TooManyRecipients"),
+                                  ("long", [local65], "InvalidAddress")]:
+            draft = {"to": to, "subject": "Fictional invalid outgoing boundary", "bodyText": "Never dispatch."}
+            rejected = client.request("draft.create", account, draft=draft, ok=False)
+            require(rejected["code"] == code, "incoming compatibility loosened outgoing draft limits")
+            rejected = client.request("mail.send", account, draft=draft, operationId=f"fixture-invalid-outgoing-{suffix}", ok=False)
+            require(rejected["code"] == code, "incoming compatibility loosened outgoing send limits")
+        require(client.request("draft.list", account) == drafts, "rejected outgoing boundary changed drafts")
+        require(client.request("operation.list", account) == operations, "rejected outgoing boundary created a submission journal")
+        metrics = cache_limits(client, account)
+        require(metrics["fixtureCalls"] == calls and metrics["fixtureSends"] == 0, "invalid outgoing boundary reached the provider")
+    client.evidence = {"outgoingRecipientLimit": 32, "outgoingLocalPartLimit": 64,
+                       "invalidBoundaryHasNoProviderOrJournalSideEffect": True, "accountsChecked": 3}
+
+
 def set_private_fixture_body(client, data):
     """Keep large boundary inputs out of the public fixture corpus and receipts."""
     source = json.loads((FIXTURES / "accounts/personal.json").read_text())
@@ -1017,6 +1111,9 @@ CASES = [("pagination-account-isolation", pagination_and_isolation, None),
          ("header-injection", header_injection, None), ("labels-trash-restore", labels_and_trash, None),
          ("draft-wrong-type-rollback", draft_wrong_type_rollback, None),
          ("invalid-message-id-reply", invalid_message_id_reply, None),
+         ("incoming-recipient-over32", incoming_recipient_over32, None),
+         ("incoming-reply-to-local65", incoming_reply_to_local65, None),
+         ("outgoing-address-limits-unchanged", outgoing_address_limits_unchanged, None),
          ("quote-body-limit-rollback", quote_body_limit_rollback, None),
          ("decoded-body-boundary", decoded_body_boundary, None),
          ("mime-refusal-preserves-valid-cache", mime_refusal_preserves_valid_cache, None),
@@ -1061,6 +1158,7 @@ def main():
     report = {"date": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **identity,
               "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "fixtureManifestSha256": hashlib.sha256((FIXTURES / "manifest.json").read_bytes()).hexdigest(),
+              "inboundAddressFixtureSha256": hashlib.sha256((FIXTURES / "inbound-addresses.json").read_bytes()).hexdigest(),
               "synthetic": True, "liveWrites": False, "desktopUsed": False, "cases": []}
     with tempfile.TemporaryDirectory(prefix="omagma-terminal-test-") as directory:
         for name, check, scenario in CASES:

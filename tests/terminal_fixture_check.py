@@ -146,6 +146,34 @@ class FixtureCheck(unittest.TestCase):
             header = next(h["value"] for h in message["payload"]["headers"] if h["name"].lower() == "from")
             self.assertIn("=?utf-8?B?", header)
 
+    def test_incoming_address_regressions_have_independent_mailbox_oracles(self):
+        fixture = load("inbound-addresses.json")
+        self.assertTrue(fixture["synthetic"])
+        self.assertEqual(set(fixture["accounts"]), set(self.accounts))
+        long_addresses = []
+        for account, cases in fixture["accounts"].items():
+            wide = cases["manyRecipients"]
+            raw = f"{wide['headerName']}: {wide['headerValue']}\r\n\r\n".encode()
+            parsed = BytesParser(policy=policy.default).parsebytes(raw)
+            actual = [mailbox.addr_spec for mailbox in parsed["To"].addresses]
+            self.assertEqual(actual, wide["expectedAddresses"])
+            self.assertEqual(len(actual), 34)
+            self.assertEqual(len(set(actual)), 34)
+            self.assertIn(account, actual)
+            self.assertGreater(len(actual) - 1, fixture["outgoingRecipientLimit"])
+            long = cases["longReplyTo"]
+            raw = f"{long['headerName']}: {long['headerValue']}\r\n\r\n".encode()
+            parsed = BytesParser(policy=policy.default).parsebytes(raw)
+            actual = [mailbox.addr_spec for mailbox in parsed["Reply-To"].addresses]
+            self.assertEqual(actual, long["expectedAddresses"])
+            local, domain = actual[0].split("@")
+            self.assertEqual(len(local.encode()), 65)
+            self.assertEqual(domain, "example.org")
+            self.assertLessEqual(len(actual[0]), 254)
+            self.assertGreater(len(local), fixture["outgoingLocalPartLimit"])
+            long_addresses.append(actual[0])
+        self.assertEqual(len(set(long_addresses)), 3)
+
     def test_contact_source_etags_are_account_specific(self):
         etags = []
         for address in self.accounts:

@@ -152,7 +152,7 @@ pub const Session = struct {
             const threading = try @import("mime.zig").threading(message.messageId, message.references, message.inReplyTo, a);
             var envelope: recipients.Envelope = .{};
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
-            try recipients.reply(address, aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), try j.boolean(req, "all", false), &envelope);
+            try recipients.replyIncoming(a, address, aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), try j.boolean(req, "all", false), &envelope);
             const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = try quote(a, message.bodyText), .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references };
             try validateDraft(d, false);
             return j.value(a, try store.putDraft(d, null));

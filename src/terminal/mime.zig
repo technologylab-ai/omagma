@@ -15,11 +15,11 @@ pub const Header = struct { name: []const u8, value: []const u8 };
 pub const Attachment = struct { id: []const u8 = "", filename: []const u8, mime_type: []const u8, content_id: []const u8 = "", size: usize = 0, data: []const u8 };
 pub const ParsedMessage = struct {
     headers: []const Header = &.{},
-    from: []const recipients.Mailbox = &.{},
-    to: []const recipients.Mailbox = &.{},
-    cc: []const recipients.Mailbox = &.{},
-    bcc: []const recipients.Mailbox = &.{},
-    reply_to: []const recipients.Mailbox = &.{},
+    from: []const recipients.IncomingMailbox = &.{},
+    to: []const recipients.IncomingMailbox = &.{},
+    cc: []const recipients.IncomingMailbox = &.{},
+    bcc: []const recipients.IncomingMailbox = &.{},
+    reply_to: []const recipients.IncomingMailbox = &.{},
     subject: []const u8 = "",
     date: []const u8 = "",
     message_id: []const u8 = "",
@@ -92,7 +92,7 @@ pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, exter
     return .{
         .id = try allocator.dupe(u8, id),
         .threadId = try allocator.dupe(u8, thread),
-        .from = if (parsed.from.len == 1) .{ .address = try allocator.dupe(u8, parsed.from[0].address.slice()), .name = try allocator.dupe(u8, parsed.from[0].name.slice()) } else .{ .address = "" },
+        .from = if (parsed.from.len == 1) .{ .address = try allocator.dupe(u8, parsed.from[0].address), .name = try allocator.dupe(u8, parsed.from[0].name) } else .{ .address = "" },
         .replyTo = try dtoAddresses(parsed.reply_to, allocator),
         .to = try dtoAddresses(parsed.to, allocator),
         .cc = try dtoAddresses(parsed.cc, allocator),
@@ -119,9 +119,9 @@ fn safeFilename(filename: []const u8, allocator: std.mem.Allocator) ![]const u8 
     if (base.len > 512) return error.FilenameTooLarge;
     return try sanitizeText(if (base.len == 0) "attachment" else base, allocator);
 }
-fn dtoAddresses(source: []const recipients.Mailbox, allocator: std.mem.Allocator) ![]const types.Address {
+fn dtoAddresses(source: []const recipients.IncomingMailbox, allocator: std.mem.Allocator) ![]const types.Address {
     const out = try allocator.alloc(types.Address, source.len);
-    for (source, out) |*item, *dest| dest.* = .{ .address = try allocator.dupe(u8, item.address.slice()), .name = try allocator.dupe(u8, item.name.slice()) };
+    for (source, out) |*item, *dest| dest.* = .{ .address = try allocator.dupe(u8, item.address), .name = try allocator.dupe(u8, item.name) };
     return out;
 }
 
@@ -205,11 +205,17 @@ pub fn header(headers: []const Header, name: []const u8) ![]const u8 {
     return found orelse "";
 }
 
-fn addressList(raw: []const u8, allocator: std.mem.Allocator) ![]const recipients.Mailbox {
-    var list: recipients.List = .{};
-    try recipients.parse(raw, &list);
-    for (list.items[0..list.count]) |*mailbox| try mailbox.name.set(try decodeHeader(mailbox.name.slice(), allocator));
-    return try allocator.dupe(recipients.Mailbox, list.slice());
+fn addressList(raw: []const u8, allocator: std.mem.Allocator) ![]const recipients.IncomingMailbox {
+    const list = try recipients.parseIncoming(raw, allocator);
+    errdefer recipients.deinitIncoming(list, allocator);
+    for (list) |*mailbox| {
+        const decoded = try decodeHeader(mailbox.name, allocator);
+        errdefer allocator.free(decoded);
+        if (decoded.len > 256) return error.CapacityExceeded;
+        allocator.free(mailbox.name);
+        mailbox.name = decoded;
+    }
+    return list;
 }
 fn envelope(headers: []const Header, allocator: std.mem.Allocator) !ParsedMessage {
     return .{
@@ -938,7 +944,7 @@ test "literal MIME quoted printable charset and HTML text decode independently" 
     const parsed = try parse(raw, a);
     try std.testing.expectEqualStrings("Olá", parsed.subject);
     try std.testing.expectEqualStrings("Café\nline two\n", parsed.body_text);
-    try std.testing.expectEqualStrings("Doe, Jane", parsed.from[0].name.slice());
+    try std.testing.expectEqualStrings("Doe, Jane", parsed.from[0].name);
     const rendered = try htmlToText("<p>Hello &amp; café</p><script>secret()</script><p><a href=\"https://example.test/x\">Link</a></p>", a);
     try std.testing.expectEqualStrings("Hello & café\nLink (https://example.test/x)", rendered);
     try std.testing.expectError(error.UnsupportedCharset, convertCharset("bytes", "unknown", a));
@@ -1038,4 +1044,56 @@ test "encoded address name overflow is explicit and does not truncate via bar di
     const word = std.base64.standard.Encoder.encode(&encoded, &latin);
     const raw = try std.fmt.allocPrint(a, "From: =?ISO-8859-1?B?{s}?= <sender@example.test>\r\nTo: self@example.test\r\nContent-Type: text/plain\r\n\r\nBody", .{word});
     try std.testing.expectError(error.CapacityExceeded, parse(raw, a));
+}
+
+test "inbound literal long local and 33 member MIME headers preserve all addresses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.test";
+    var raw: std.ArrayList(u8) = .empty;
+    try raw.appendSlice(a, "From: sender@example.test\r\nReply-To: " ++ long ++ "\r\nTo: ");
+    for (0..33) |i| {
+        if (i != 0) try raw.appendSlice(a, ", ");
+        try raw.appendSlice(a, try std.fmt.allocPrint(a, "member{d}@example.test", .{i}));
+    }
+    try raw.appendSlice(a, "\r\n\r\nLiteral body");
+    const parsed = try parse(raw.items, a);
+    try std.testing.expectEqual(@as(usize, 33), parsed.to.len);
+    try std.testing.expectEqualStrings("member32@example.test", parsed.to[32].address);
+    try std.testing.expectEqualStrings(long, parsed.reply_to[0].address);
+    try std.testing.expectEqualStrings("Literal body", parsed.body_text);
+}
+test "inbound name wire size is distinct from decoded display name bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const word = "=?UTF-8?Q?=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9?=";
+    const name = word ++ " " ++ word ++ " " ++ word ++ " " ++ word ++ " " ++ word;
+    try std.testing.expect(name.len > 256);
+    const raw = "From: " ++ name ++ " <sender@example.test>\r\nTo: Undisclosed:;\r\n\r\nHello";
+    const parsed = try parse(raw, a);
+    try std.testing.expectEqual(@as(usize, 90), parsed.from[0].name.len);
+    try std.testing.expectEqualStrings("ééééééééééééééééééééééééééééééééééééééééééééé", parsed.from[0].name);
+    try std.testing.expectEqual(@as(usize, 0), parsed.to.len);
+}
+
+test "decoded incoming display names accept literal 256 bytes and reject 257" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const word = "=?UTF-8?Q?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?=";
+    var name: std.ArrayList(u8) = .empty;
+    for (0..8) |i| {
+        if (i != 0) try name.append(a, ' ');
+        try name.appendSlice(a, word);
+    }
+    const raw = try std.fmt.allocPrint(a, "From: {s} <sender@example.test>\r\n\r\nBody", .{name.items});
+    const accepted = try parse(raw, a);
+    try std.testing.expectEqual(@as(usize, 256), accepted.from[0].name.len);
+    const expected: [256]u8 = @splat('A');
+    try std.testing.expectEqualStrings(&expected, accepted.from[0].name);
+    try name.appendSlice(a, " =?UTF-8?Q?A?=");
+    const refused = try std.fmt.allocPrint(a, "From: {s} <sender@example.test>\r\n\r\nBody", .{name.items});
+    try std.testing.expectError(error.CapacityExceeded, parse(refused, a));
 }

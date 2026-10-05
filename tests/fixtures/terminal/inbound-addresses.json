@@ -1,0 +1,169 @@
+{
+  "synthetic": true,
+  "networkRequired": false,
+  "accounts": {
+    "personal@example.com": {
+      "manyRecipients": {
+        "messageId": "shared-msg-095",
+        "headerName": "To",
+        "headerValue": "personal@example.com, many-personal-00@example.org, many-personal-01@example.org, many-personal-02@example.org, many-personal-03@example.org, many-personal-04@example.org, many-personal-05@example.org, many-personal-06@example.org, many-personal-07@example.org, many-personal-08@example.org, many-personal-09@example.org, many-personal-10@example.org, many-personal-11@example.org, many-personal-12@example.org, many-personal-13@example.org, many-personal-14@example.org, many-personal-15@example.org, many-personal-16@example.org, many-personal-17@example.org, many-personal-18@example.org, many-personal-19@example.org, many-personal-20@example.org, many-personal-21@example.org, many-personal-22@example.org, many-personal-23@example.org, many-personal-24@example.org, many-personal-25@example.org, many-personal-26@example.org, many-personal-27@example.org, many-personal-28@example.org, many-personal-29@example.org, many-personal-30@example.org, many-personal-31@example.org, many-personal-32@example.org",
+        "expectedAddresses": [
+          "personal@example.com",
+          "many-personal-00@example.org",
+          "many-personal-01@example.org",
+          "many-personal-02@example.org",
+          "many-personal-03@example.org",
+          "many-personal-04@example.org",
+          "many-personal-05@example.org",
+          "many-personal-06@example.org",
+          "many-personal-07@example.org",
+          "many-personal-08@example.org",
+          "many-personal-09@example.org",
+          "many-personal-10@example.org",
+          "many-personal-11@example.org",
+          "many-personal-12@example.org",
+          "many-personal-13@example.org",
+          "many-personal-14@example.org",
+          "many-personal-15@example.org",
+          "many-personal-16@example.org",
+          "many-personal-17@example.org",
+          "many-personal-18@example.org",
+          "many-personal-19@example.org",
+          "many-personal-20@example.org",
+          "many-personal-21@example.org",
+          "many-personal-22@example.org",
+          "many-personal-23@example.org",
+          "many-personal-24@example.org",
+          "many-personal-25@example.org",
+          "many-personal-26@example.org",
+          "many-personal-27@example.org",
+          "many-personal-28@example.org",
+          "many-personal-29@example.org",
+          "many-personal-30@example.org",
+          "many-personal-31@example.org",
+          "many-personal-32@example.org"
+        ],
+        "normalReplyRecipient": "alex@example.org"
+      },
+      "longReplyTo": {
+        "messageId": "shared-msg-094",
+        "headerName": "Reply-To",
+        "headerValue": "Fictional reply boundary <reply-personal-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.org>",
+        "expectedAddresses": [
+          "reply-personal-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.org"
+        ],
+        "localPartBytes": 65
+      }
+    },
+    "work@example.com": {
+      "manyRecipients": {
+        "messageId": "shared-msg-095",
+        "headerName": "To",
+        "headerValue": "work@example.com, many-work-00@example.org, many-work-01@example.org, many-work-02@example.org, many-work-03@example.org, many-work-04@example.org, many-work-05@example.org, many-work-06@example.org, many-work-07@example.org, many-work-08@example.org, many-work-09@example.org, many-work-10@example.org, many-work-11@example.org, many-work-12@example.org, many-work-13@example.org, many-work-14@example.org, many-work-15@example.org, many-work-16@example.org, many-work-17@example.org, many-work-18@example.org, many-work-19@example.org, many-work-20@example.org, many-work-21@example.org, many-work-22@example.org, many-work-23@example.org, many-work-24@example.org, many-work-25@example.org, many-work-26@example.org, many-work-27@example.org, many-work-28@example.org, many-work-29@example.org, many-work-30@example.org, many-work-31@example.org, many-work-32@example.org",
+        "expectedAddresses": [
+          "work@example.com",
+          "many-work-00@example.org",
+          "many-work-01@example.org",
+          "many-work-02@example.org",
+          "many-work-03@example.org",
+          "many-work-04@example.org",
+          "many-work-05@example.org",
+          "many-work-06@example.org",
+          "many-work-07@example.org",
+          "many-work-08@example.org",
+          "many-work-09@example.org",
+          "many-work-10@example.org",
+          "many-work-11@example.org",
+          "many-work-12@example.org",
+          "many-work-13@example.org",
+          "many-work-14@example.org",
+          "many-work-15@example.org",
+          "many-work-16@example.org",
+          "many-work-17@example.org",
+          "many-work-18@example.org",
+          "many-work-19@example.org",
+          "many-work-20@example.org",
+          "many-work-21@example.org",
+          "many-work-22@example.org",
+          "many-work-23@example.org",
+          "many-work-24@example.org",
+          "many-work-25@example.org",
+          "many-work-26@example.org",
+          "many-work-27@example.org",
+          "many-work-28@example.org",
+          "many-work-29@example.org",
+          "many-work-30@example.org",
+          "many-work-31@example.org",
+          "many-work-32@example.org"
+        ],
+        "normalReplyRecipient": "alex@example.org"
+      },
+      "longReplyTo": {
+        "messageId": "shared-msg-094",
+        "headerName": "Reply-To",
+        "headerValue": "Fictional reply boundary <reply-work-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.org>",
+        "expectedAddresses": [
+          "reply-work-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.org"
+        ],
+        "localPartBytes": 65
+      }
+    },
+    "optional@example.com": {
+      "manyRecipients": {
+        "messageId": "shared-msg-095",
+        "headerName": "To",
+        "headerValue": "optional@example.com, many-optional-00@example.org, many-optional-01@example.org, many-optional-02@example.org, many-optional-03@example.org, many-optional-04@example.org, many-optional-05@example.org, many-optional-06@example.org, many-optional-07@example.org, many-optional-08@example.org, many-optional-09@example.org, many-optional-10@example.org, many-optional-11@example.org, many-optional-12@example.org, many-optional-13@example.org, many-optional-14@example.org, many-optional-15@example.org, many-optional-16@example.org, many-optional-17@example.org, many-optional-18@example.org, many-optional-19@example.org, many-optional-20@example.org, many-optional-21@example.org, many-optional-22@example.org, many-optional-23@example.org, many-optional-24@example.org, many-optional-25@example.org, many-optional-26@example.org, many-optional-27@example.org, many-optional-28@example.org, many-optional-29@example.org, many-optional-30@example.org, many-optional-31@example.org, many-optional-32@example.org",
+        "expectedAddresses": [
+          "optional@example.com",
+          "many-optional-00@example.org",
+          "many-optional-01@example.org",
+          "many-optional-02@example.org",
+          "many-optional-03@example.org",
+          "many-optional-04@example.org",
+          "many-optional-05@example.org",
+          "many-optional-06@example.org",
+          "many-optional-07@example.org",
+          "many-optional-08@example.org",
+          "many-optional-09@example.org",
+          "many-optional-10@example.org",
+          "many-optional-11@example.org",
+          "many-optional-12@example.org",
+          "many-optional-13@example.org",
+          "many-optional-14@example.org",
+          "many-optional-15@example.org",
+          "many-optional-16@example.org",
+          "many-optional-17@example.org",
+          "many-optional-18@example.org",
+          "many-optional-19@example.org",
+          "many-optional-20@example.org",
+          "many-optional-21@example.org",
+          "many-optional-22@example.org",
+          "many-optional-23@example.org",
+          "many-optional-24@example.org",
+          "many-optional-25@example.org",
+          "many-optional-26@example.org",
+          "many-optional-27@example.org",
+          "many-optional-28@example.org",
+          "many-optional-29@example.org",
+          "many-optional-30@example.org",
+          "many-optional-31@example.org",
+          "many-optional-32@example.org"
+        ],
+        "normalReplyRecipient": "alex@example.org"
+      },
+      "longReplyTo": {
+        "messageId": "shared-msg-094",
+        "headerName": "Reply-To",
+        "headerValue": "Fictional reply boundary <reply-optional-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.org>",
+        "expectedAddresses": [
+          "reply-optional-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@example.org"
+        ],
+        "localPartBytes": 65
+      }
+    }
+  },
+  "incomingRecipientCount": 34,
+  "outgoingRecipientLimit": 32,
+  "outgoingLocalPartLimit": 64,
+  "expected": "read all delivered participants; refuse oversized or invalid outgoing envelopes without truncation"
+}
