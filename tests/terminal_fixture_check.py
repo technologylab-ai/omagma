@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from email import policy
 from email.parser import BytesParser
+from html.parser import HTMLParser
 import hashlib
 import importlib.util
 import json
@@ -72,6 +73,41 @@ class FixtureCheck(unittest.TestCase):
         for address, account in self.accounts.items():
             self.assertEqual(account["account"], address)
             self.assertTrue(all(address.split("@")[0] in m["snippet"] for m in account["messages"]))
+
+    def test_inline_underestimate_has_independent_complete_utf8_oracles(self):
+        spec = load("inline-text-size.json")
+        self.assertTrue(spec["synthetic"])
+        self.assertFalse(spec["networkRequired"])
+        self.assertEqual({v["mimeType"] for v in spec["positive"]}, {"text/plain", "text/html"})
+
+        class VisibleText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.parts = []
+
+            def handle_data(self, data):
+                self.parts.append(data)
+
+        for address in self.accounts:
+            for vector in spec["positive"]:
+                literal = vector["literalTemplate"].format(account=address)
+                expected_text = vector["expectedTextTemplate"].format(account=address)
+                raw = literal.encode("utf-8")
+                self.assertGreater(len(raw), len(literal))
+                self.assertEqual(vector["declaredOffset"], -1)
+                encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+                self.assertEqual(decode(encoded), raw)
+                self.assertEqual(decode(encoded).decode("utf-8"), literal)
+                if vector["mimeType"] == "text/html":
+                    parser = VisibleText()
+                    parser.feed(literal)
+                    self.assertEqual("".join(parser.parts), expected_text)
+                else:
+                    self.assertEqual(literal, expected_text)
+        controls = {v["kind"] for v in spec["rejected"]}
+        self.assertTrue({"inline", "empty", "named", "disposition", "external",
+                         "declared-over-cap", "actual-over-cap"}.issubset(controls))
+        self.assertEqual(spec["decodedLeafLimitBytes"], 2 * 1024 * 1024)
 
     def test_independent_mime_decoding(self):
         expected = self.manifest["bodyExpected"]

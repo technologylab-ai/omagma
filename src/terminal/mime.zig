@@ -234,6 +234,11 @@ fn envelope(headers: []const Header, allocator: std.mem.Allocator) !ParsedMessag
     };
 }
 
+fn isAttached(headers: []const Header, filename: []const u8) !bool {
+    const disposition = try header(headers, "Content-Disposition");
+    return filename.len > 0 or std.ascii.startsWithIgnoreCase(disposition, "attachment");
+}
+
 const Context = struct {
     allocator: std.mem.Allocator,
     parts: usize = 0,
@@ -253,8 +258,7 @@ const Context = struct {
         self.decoded += size;
     }
     fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8) !void {
-        const disposition = try header(headers, "Content-Disposition");
-        const attached = filename.len > 0 or std.ascii.startsWithIgnoreCase(disposition, "attachment");
+        const attached = try isAttached(headers, filename);
         if (std.ascii.eqlIgnoreCase(mime_type, "text/calendar")) {
             if (self.calendar != null) return error.AmbiguousCalendarPart;
             self.calendar = try convertCharset(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator);
@@ -317,8 +321,10 @@ const Context = struct {
         const mime_type = if (b.optional(part, "mimeType")) |value| try b.string(value) else if (b.optional(part, "body") == null and b.optional(part, "parts") == null) return else return error.MissingMimeType;
         try validateMimeType(mime_type);
         const headers = try gmailHeaders(part, self.allocator);
+        var child_count: usize = 0;
         if (b.optional(part, "parts")) |children| {
             if (children != .array or children.array.items.len > max_parts) return error.TooManyMimeParts;
+            child_count = children.array.items.len;
             for (children.array.items) |child| try self.gmailPart(child, depth + 1);
         }
         const body = b.optional(part, "body") orelse return;
@@ -350,7 +356,18 @@ const Context = struct {
             return;
         }
         const decoded = try decodeBase64Url(data, self.allocator);
-        if (b.optional(body, "size") != null and @as(usize, @intCast(declared)) != decoded.len) return error.BodySizeMismatch;
+        if (b.optional(body, "size") != null) {
+            // Compatibility with understated Gmail inline-text metadata, not a
+            // change to Google's documented byte-count contract. Complete,
+            // validated decoded bytes still govern every existing size cap.
+            // An absent/empty parts array is a leaf; size zero can understate
+            // nonempty inline text. Empty or shorter bodies remain refused.
+            const inline_text = child_count == 0 and external_id == null and
+                (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) and
+                !(try isAttached(headers, filename));
+            const expected: usize = @intCast(declared);
+            if (decoded.len < expected or (!inline_text and decoded.len != expected)) return error.BodySizeMismatch;
+        }
         try self.accountBytes(decoded.len);
         const old_count = self.attachments.items.len;
         try self.add(headers, mime_type, filename, decoded);
@@ -1133,4 +1150,143 @@ test "incoming raw and Gmail headers accept routing-rich mail within fixed budge
     } }, .{});
     const oversized = try std.json.parseFromSliceLeaky(std.json.Value, a, large, .{ .allocate = .alloc_always });
     try std.testing.expectError(error.HeadersTooLarge, gmailHeaders(oversized, a));
+}
+
+const GmailSizeOracle = struct {
+    fn json(a: std.mem.Allocator, source: []const u8) !std.json.Value {
+        return std.json.parseFromSliceLeaky(std.json.Value, a, source, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" });
+    }
+    fn wrap(a: std.mem.Allocator, payload: std.json.Value) !std.json.Value {
+        var value: std.json.Value = .{ .object = .empty };
+        try value.object.put(a, "payload", payload);
+        return value;
+    }
+    fn part(a: std.mem.Allocator, kind: []const u8, size: i64, data: []const u8) !std.json.Value {
+        var body: std.json.Value = .{ .object = .empty };
+        try body.object.put(a, "size", .{ .integer = size });
+        try body.object.put(a, "data", .{ .string = data });
+        var value: std.json.Value = .{ .object = .empty };
+        try value.object.put(a, "mimeType", .{ .string = kind });
+        try value.object.put(a, "headers", .{ .array = .init(a) });
+        try value.object.put(a, "body", body);
+        return value;
+    }
+    fn children(a: std.mem.Allocator, parent: *std.json.Value, parts: []const std.json.Value) !void {
+        var values = std.json.Array.init(a);
+        try values.appendSlice(parts);
+        try parent.object.put(a, "parts", .{ .array = values });
+    }
+    fn filled(a: std.mem.Allocator, bytes: usize) ![]const u8 {
+        const raw = try a.alloc(u8, bytes);
+        @memset(raw, 'x');
+        const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(bytes));
+        return std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+    }
+};
+
+test "Gmail inline size underestimates preserve literal full HTML and plain text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var html = try GmailSizeOracle.json(a, "{\"id\":\"size-html\",\"threadId\":\"size-thread\",\"internalDate\":\"42\",\"payload\":{\"mimeType\":\"text/html\",\"headers\":[],\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}");
+    const first = try normalizeGmail(html, a, null);
+    try std.testing.expectEqualStrings("<p>X</p>", first.bodyHtml.?);
+    try std.testing.expectEqualStrings("X", first.bodyText);
+    var payload = try b.field(html, "payload");
+    var body = try b.field(payload, "body");
+    // Pin zero-size metadata with nonempty data and the valid empty-parts form.
+    try body.object.put(a, "size", .{ .integer = 0 });
+    try GmailSizeOracle.children(a, &payload, &.{});
+    try html.object.put(a, "payload", payload);
+    const zero = try normalizeGmail(html, a, null);
+    try std.testing.expectEqualStrings("<p>X</p>", zero.bodyHtml.?);
+    try std.testing.expectEqualStrings("X", zero.bodyText);
+    const plain = try GmailSizeOracle.json(a, "{\"id\":\"size-plain\",\"threadId\":\"size-thread\",\"internalDate\":\"42\",\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"}],\"body\":{\"size\":7,\"data\":\"YWJjZGVmZ2g\"}}}");
+    try std.testing.expectEqualStrings("abcdefgh", (try normalizeGmail(plain, a, null)).bodyText);
+}
+
+test "Gmail external attached calendar binary and container sizes remain exact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const external = try GmailSizeOracle.json(a, "{\"external-fixture\":{\"size\":8,\"data\":\"PHA-WDwvcD4\"}}");
+    const cases = [_][]const u8{
+        "{\"payload\":{\"mimeType\":\"text/html\",\"filename\":\"fixture.html\",\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/html\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"}],\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"ATTACHMENT; filename=fixture.txt\"}],\"body\":{\"size\":7,\"data\":\"YWJjZGVmZ2g\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":7,\"attachmentId\":\"external-fixture\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/calendar\",\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"application/octet-stream\",\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"parts\":[],\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/html\",\"parts\":[{\"mimeType\":\"text/plain\",\"body\":{\"size\":0}}],\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}}}",
+    };
+    for (cases) |source| try std.testing.expectError(error.BodySizeMismatch, parseGmailExternal(try GmailSizeOracle.json(a, source), a, external));
+    const mixed = try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"body\":{\"size\":0},\"parts\":[{\"mimeType\":\"text/html\",\"body\":{\"size\":7,\"data\":\"PHA-WDwvcD4\"}},{\"partId\":\"attachment-part\",\"mimeType\":\"text/plain\",\"filename\":\"fixture.txt\",\"body\":{\"size\":8,\"data\":\"YWJjZGVmZ2g\"}}]}}");
+    const parsed = try parseGmail(mixed, a);
+    try std.testing.expectEqualStrings("<p>X</p>", parsed.body_html);
+    try std.testing.expectEqual(@as(usize, 1), parsed.attachments.len);
+    try std.testing.expectEqualStrings("attachment-part", parsed.attachments[0].id);
+    try std.testing.expectEqualStrings("fixture.txt", parsed.attachments[0].filename);
+    try std.testing.expectEqual(@as(usize, 8), parsed.attachments[0].size);
+    try std.testing.expectEqualStrings("abcdefgh", parsed.attachments[0].data);
+}
+
+test "Gmail inline shorter empty invalid and declared-over-budget data stays refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{
+        "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":9,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/plain\",\"body\":{\"size\":9,\"data\":\"YWJjZGVmZ2g\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":1,\"data\":\"\"}}}",
+    }) |source| try std.testing.expectError(error.BodySizeMismatch, parseGmail(try GmailSizeOracle.json(a, source), a));
+    for ([_][]const u8{
+        "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":-1,\"data\":\"PHA-WDwvcD4\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":2097153,\"data\":\"PHA-WDwvcD4\"}}}",
+    }) |source| try std.testing.expectError(error.BodyTooLarge, parseGmail(try GmailSizeOracle.json(a, source), a));
+    for ([_][]const u8{
+        "{\"payload\":{\"mimeType\":\"text/plain\",\"body\":{\"size\":0,\"data\":\"?invalid\"}}}",
+        "{\"payload\":{\"mimeType\":\"text/plain\",\"body\":{\"size\":0,\"data\":\"YWJjZGVmZ2g===\"}}}",
+    }) |source| try std.testing.expectError(error.InvalidBase64, parseGmail(try GmailSizeOracle.json(a, source), a));
+    try std.testing.expectError(error.ExternalBodyRequired, parseGmail(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":8,\"attachmentId\":\"external-fixture\"}}}"), a));
+    const empty = try parseGmail(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"text/plain\",\"body\":{\"size\":0,\"data\":\"\"}}}"), a);
+    try std.testing.expectEqualStrings("", empty.body_text);
+}
+
+test "Actual Gmail decoded leaf and accumulated text caps ignore smaller metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const too_large = try GmailSizeOracle.part(a, "text/plain", 1, try GmailSizeOracle.filled(a, 2097153));
+    try std.testing.expectError(error.BodyTooLarge, parseGmail(try GmailSizeOracle.wrap(a, too_large), a));
+    const text = try GmailSizeOracle.filled(a, 1048576);
+    const first = try GmailSizeOracle.part(a, "text/html", 0, text);
+    const second = try GmailSizeOracle.part(a, "text/html", 0, text);
+    var parent = try GmailSizeOracle.part(a, "multipart/alternative", 0, "");
+    try GmailSizeOracle.children(a, &parent, &.{ first, second });
+    // Two one-MiB HTML parts plus the inter-part newline exceed two MiB.
+    try std.testing.expectError(error.BodyTooLarge, parseGmail(try GmailSizeOracle.wrap(a, parent), a));
+    const external_data = try GmailSizeOracle.filled(a, 1572864);
+    var external_part = try GmailSizeOracle.part(a, "text/plain", 1572864, "");
+    var external_body = try b.field(external_part, "body");
+    try external_body.object.put(a, "attachmentId", .{ .string = "external-caps" });
+    try external_part.object.put(a, "body", external_body);
+    const html = try GmailSizeOracle.part(a, "text/html", 1, try GmailSizeOracle.filled(a, 1572865));
+    try GmailSizeOracle.children(a, &parent, &.{ external_part, html });
+    var map: std.json.Value = .{ .object = .empty };
+    var attachment_body: std.json.Value = .{ .object = .empty };
+    try attachment_body.object.put(a, "data", .{ .string = external_data });
+    try attachment_body.object.put(a, "size", .{ .integer = 1572864 });
+    try map.object.put(a, "external-caps", attachment_body);
+    // Individually valid plain/html leaves total 3,145,729 decoded bytes.
+    try std.testing.expectError(error.DecodedMessageTooLarge, parseGmailExternal(try GmailSizeOracle.wrap(a, parent), a, map));
+}
+
+test "Raw MIME and outgoing attachment bytes retain their independent rules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nYWJjZGVmZ2g=\r\n";
+    try std.testing.expectEqualStrings("abcdefgh", (try parse(raw, a)).body_text);
+    try std.testing.expectError(error.BodySizeMismatch, composeAttachments(&.{.{ .id = "", .filename = "fixture.txt", .size = 7, .data = "YWJjZGVmZ2g" }}, a));
 }

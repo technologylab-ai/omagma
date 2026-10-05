@@ -1,0 +1,34 @@
+{
+  "synthetic": true,
+  "networkRequired": false,
+  "historyId": "1500",
+  "threadId": "shared-thread-031",
+  "decodedLeafLimitBytes": 2097152,
+  "positive": [
+    {
+      "messageId": "shared-msg-096",
+      "mimeType": "text/plain",
+      "literalTemplate": "Fictional {account}: café ∴ plain complete.\n",
+      "expectedTextTemplate": "Fictional {account}: café ∴ plain complete.\n",
+      "declaredOffset": -1
+    },
+    {
+      "messageId": "shared-msg-095",
+      "mimeType": "text/html",
+      "literalTemplate": "<span>Fictional {account}: café ∴ HTML complete.</span>",
+      "expectedTextTemplate": "Fictional {account}: café ∴ HTML complete.",
+      "declaredOffset": -1
+    }
+  ],
+  "rejected": [
+    {"messageId": "inline-short-plain", "kind": "inline", "mimeType": "text/plain", "declaredOffset": 1, "expectedError": "BodySizeMismatch"},
+    {"messageId": "inline-short-html", "kind": "inline", "mimeType": "text/html", "declaredOffset": 1, "expectedError": "BodySizeMismatch"},
+    {"messageId": "inline-empty-data", "kind": "empty", "mimeType": "text/plain", "declaredOffset": 1, "expectedError": "BodySizeMismatch"},
+    {"messageId": "named-text-size", "kind": "named", "mimeType": "text/plain", "declaredOffset": -1, "expectedError": "BodySizeMismatch"},
+    {"messageId": "disposition-text-size", "kind": "disposition", "mimeType": "text/html", "declaredOffset": -1, "expectedError": "BodySizeMismatch"},
+    {"messageId": "external-text-size", "kind": "external", "mimeType": "text/plain", "declaredOffset": -1, "expectedError": "BodySizeMismatch"},
+    {"messageId": "inline-declared-over-cap", "kind": "declared-over-cap", "mimeType": "text/plain", "expectedError": "BodyTooLarge"},
+    {"messageId": "inline-actual-over-cap", "kind": "actual-over-cap", "mimeType": "text/plain", "expectedError": "BodyTooLarge"}
+  ],
+  "expected": "complete fictional UTF-8 inline plain/HTML survives a one-byte declared underestimate; shorter data, external or attached text, and declared or actual cap overflows remain explicit refusals"
+}

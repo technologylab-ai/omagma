@@ -500,6 +500,137 @@ def incoming_header_count_and_budget(client):
                        "independentCountAndByteRejections": True, "validBodyDigestsPreserved": True, "accountsChecked": 3}
 
 
+def gmail_inline_underdeclared_text(client):
+    spec = json.loads((FIXTURES / "inline-text-size.json").read_text())
+    root = client.directory / "inline-size-fixture"
+    (root / "accounts").mkdir(parents=True, mode=0o700)
+    sources = {}
+
+    def leaf(message, mime_type, data, declared):
+        headers = [h for h in message["payload"]["headers"]
+                   if h["name"].lower() not in {"content-type", "content-transfer-encoding", "content-disposition"}]
+        headers.append({"name": "Content-Type", "value": mime_type + "; charset=utf-8"})
+        message["payload"] = {"partId": "", "mimeType": mime_type, "filename": "", "headers": headers,
+                              "body": {"size": declared, "data": base64.urlsafe_b64encode(data).decode().rstrip("=")}}
+
+    def check_full(message, account, vector):
+        text = vector["expectedTextTemplate"].format(account=account)
+        literal = vector["literalTemplate"].format(account=account)
+        require(message["id"] == vector["messageId"] and message["threadId"] == spec["threadId"],
+                "inline text size compatibility changed message/thread identity")
+        require(message["bodyText"] == text, "inline declared underestimate truncated or changed the full UTF-8 text")
+        require(hashlib.sha256(message["bodyText"].encode()).digest() == hashlib.sha256(text.encode()).digest(),
+                "inline text failed the independent literal digest")
+        require(message.get("bodyHtml") == (literal if vector["mimeType"] == "text/html" else None),
+                "inline HTML size compatibility changed the original full HTML")
+        require(message["attachments"] == [], "inline text unexpectedly became an attachment")
+
+    def cached_identity(account, vector):
+        directory = client.directory / "cache/fixtures" / hashlib.sha256(account.encode()).hexdigest()
+        state = json.loads((directory / "index.json").read_bytes())
+        require(state["schema"] == 1 and state["account"] == account, "inline prefetch cache crossed accounts")
+        entry = next(e for e in state["entries"] if e["message"]["id"] == vector["messageId"])
+        path = directory / ("mail-" + hashlib.sha256(vector["messageId"].encode()).hexdigest() + ".json")
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        record = json.loads(raw)
+        require(entry["bytes"] == len(raw) and entry["bodyHash"] == digest and not entry.get("bodyError"),
+                "inline prefetch left a refusal or invalid full-body reference")
+        require(record["schema"] == 1 and record["account"] == account, "inline cached body has wrong account identity")
+        check_full(record["message"], account, vector)
+        return path, digest
+
+    for account in ACCOUNTS:
+        source = json.loads((FIXTURES / "accounts" / f"{account.split('@')[0]}.json").read_text())
+        source["sync"] = {"historyId": spec["historyId"], "history": []}
+        for vector in spec["positive"]:
+            target = next(m for m in source["messages"] if m["id"] == vector["messageId"])
+            data = vector["literalTemplate"].format(account=account).encode()
+            require(len(data) > len(data.decode()), "size fixture did not exercise multibyte UTF-8")
+            require(vector["declaredOffset"] == -1, "inline underestimate fixture is not exactly one byte")
+            leaf(target, vector["mimeType"], data, len(data) - 1)
+            target["historyId"] = spec["historyId"]
+        sources[account] = source
+        (root / "accounts" / f"{account.split('@')[0]}.json").write_text(json.dumps(source, ensure_ascii=False))
+    client.extra = ("--fixture-root", str(root))
+    client.restart()
+
+    saved = {}
+    for account in ACCOUNTS:
+        for vector in spec["positive"]:
+            check_full(client.request("mail.read", account, messageId=vector["messageId"]), account, vector)
+        thread = client.request("mail.thread", account, threadId=spec["threadId"])["messages"]
+        for vector in spec["positive"]:
+            check_full(next(m for m in thread if m["id"] == vector["messageId"]), account, vector)
+        client.request("cache.clear", account)
+        before = cache_limits(client, account)
+        refreshed = client.request("mail.refresh", account, limit=32)
+        require(refreshed["refreshed"] is True and refreshed["refreshInProgress"] is False,
+                "inline UTF-8 compatibility did not complete cache refresh")
+        after = cache_limits(client, account)
+        require(after["historyId"] == spec["historyId"], "inline prefetch did not establish the requested checkpoint")
+        require(after["syncMetadataGets"] - before["syncMetadataGets"] == 32 and
+                after["syncBodyGets"] - before["syncBodyGets"] == 32, "head refresh did not prefetch its full32-message head")
+        page = client.request("mail.list", account, cacheOnly=True, limit=32)["messages"]
+        expected_ids = [m["id"] for m in sorted(sources[account]["messages"], key=lambda m: -int(m["internalDate"]))[:32]]
+        require([m["id"] for m in page] == expected_ids, "inline MIME refresh changed newest-head membership")
+        for vector in spec["positive"]:
+            check_full(client.request("mail.read", account, messageId=vector["messageId"], cacheOnly=True), account, vector)
+            saved[(account, vector["messageId"])] = cached_identity(account, vector)
+        thread = client.request("mail.thread", account, threadId=spec["threadId"], cacheOnly=True)["messages"]
+        for vector in spec["positive"]:
+            check_full(next(m for m in thread if m["id"] == vector["messageId"]), account, vector)
+        read_metrics = cache_limits(client, account)
+        require(read_metrics["fixtureCalls"] == after["fixtureCalls"], "cached full text/thread fetched the provider")
+        client.request("mail.refresh", account, limit=32)
+        unchanged = cache_limits(client, account)
+        require(unchanged["historyId"] == spec["historyId"] and
+                all(unchanged[k] == read_metrics[k] for k in ("syncListCalls", "syncMetadataGets", "syncBodyGets")),
+                "unchanged inline UTF-8 history refetched mail or lost its checkpoint")
+
+    # Refusal vectors have fresh IDs; none can be answered from a valid old body.
+    # The literal rejection controls are independent of the runtime MIME decoder.
+    account = ACCOUNTS[0]
+    source = sources[account]
+    template = next(m for m in source["messages"] if m["id"] == spec["positive"][0]["messageId"])
+    for vector in spec["rejected"]:
+        bad = copy.deepcopy(template)
+        bad["id"], bad["threadId"] = vector["messageId"], vector["messageId"] + "-thread"
+        data = ("Fictional refusal for " + account + ": café ∴.").encode()
+        if vector["kind"] == "empty": data = b""
+        if vector["kind"] == "actual-over-cap": data = b"x" * (spec["decodedLeafLimitBytes"] + 1)
+        declared = len(data) + vector.get("declaredOffset", -1)
+        if vector["kind"] == "declared-over-cap": declared = spec["decodedLeafLimitBytes"] + 1
+        leaf(bad, vector["mimeType"], data, declared)
+        if vector["kind"] == "named": bad["payload"]["filename"] = "fictional.txt"
+        if vector["kind"] == "disposition":
+            bad["payload"]["headers"].append({"name": "Content-Disposition", "value": "attachment"})
+        if vector["kind"] == "external":
+            encoded = bad["payload"]["body"].pop("data")
+            external_id = "fictional-size-external"
+            bad["payload"]["body"]["attachmentId"] = external_id
+            source.setdefault("externalBodies", {})[external_id] = {"size": len(data), "data": encoded}
+        source["messages"].append(bad)
+        (root / "accounts/personal.json").write_text(json.dumps(source, ensure_ascii=False))
+        error = client.request("mail.read", account, messageId=bad["id"], ok=False)
+        require(error["code"] == vector["expectedError"], "inline compatibility weakened a strict MIME size/cap refusal")
+        source["messages"].pop()
+    client.restart()
+    for account in ACCOUNTS:
+        for vector in spec["positive"]:
+            check_full(client.request("mail.read", account, messageId=vector["messageId"], cacheOnly=True), account, vector)
+            path, digest = saved[(account, vector["messageId"])]
+            require(hashlib.sha256(path.read_bytes()).hexdigest() == digest,
+                    "size refusal or restart changed a valid prefetched body")
+        metrics = cache_limits(client, account)
+        require(metrics["historyId"] == spec["historyId"] and metrics["fixtureSends"] == 0,
+                "MIME compatibility changed a checkpoint or dispatched mail")
+    client.evidence = {"accountsChecked": 3, "inlineMimeTypes": ["text/plain", "text/html"],
+                       "declaredUnderestimateBytes": 1, "fullUtf8LiteralDigestsMatch": True,
+                       "refreshPrefetchedBodies": True, "checkpointPreserved": True,
+                       "strictRefusalVectors": len(spec["rejected"]), "cachedBodyDigestsPreserved": True}
+
+
 def set_private_fixture_body(client, data):
     """Keep large boundary inputs out of the public fixture corpus and receipts."""
     source = json.loads((FIXTURES / "accounts/personal.json").read_text())
@@ -1245,6 +1376,7 @@ CASES = [("pagination-account-isolation", pagination_and_isolation, None),
          ("incoming-reply-to-local65", incoming_reply_to_local65, None),
          ("outgoing-address-limits-unchanged", outgoing_address_limits_unchanged, None),
          ("incoming-header-count-and-budget", incoming_header_count_and_budget, None),
+         ("gmail-inline-underdeclared-text", gmail_inline_underdeclared_text, None),
          ("quote-body-limit-rollback", quote_body_limit_rollback, None),
          ("decoded-body-boundary", decoded_body_boundary, None),
          ("mime-refusal-preserves-valid-cache", mime_refusal_preserves_valid_cache, None),
@@ -1292,6 +1424,7 @@ def main():
               "fixtureManifestSha256": hashlib.sha256((FIXTURES / "manifest.json").read_bytes()).hexdigest(),
               "inboundAddressFixtureSha256": hashlib.sha256((FIXTURES / "inbound-addresses.json").read_bytes()).hexdigest(),
               "inboundHeaderFixtureSha256": hashlib.sha256((FIXTURES / "inbound-headers.json").read_bytes()).hexdigest(),
+              "inlineTextSizeFixtureSha256": hashlib.sha256((FIXTURES / "inline-text-size.json").read_bytes()).hexdigest(),
               "synthetic": True, "liveWrites": False, "desktopUsed": False, "cases": []}
     with tempfile.TemporaryDirectory(prefix="omagma-terminal-test-") as directory:
         for name, check, scenario in CASES:
