@@ -51,6 +51,7 @@ python3 tests/terminal_status_screen.py
 python3 tests/terminal_reader.py
 python3 tests/terminal_html_screen.py
 python3 tests/terminal_html_fixture_check.py
+python3 tests/terminal_repaint_screen.py
 python3 tests/terminal_cache.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_ui.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_cache_max.py --binary zig-out/bin/omagma --build-mode debug
