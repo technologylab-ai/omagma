@@ -15,6 +15,17 @@ Rounded decimal footprints are approximately **7 MB for the CLI and 8–9 MB for
 
 The observed footprints remain close to the previous release below. These are separate process lifetimes, not an isolated compiler comparison; both terminal releases use the same exact Zig 0.17.0 compiler. Existing acceptance thresholds were unchanged.
 
+Native [v0.2.1 release CI run 37258436358](https://github.com/technologylab-ai/omagma/actions/runs/37258436358) measured the same Safe workloads independently on Linux x86_64 and arm64 runners. Each used 100 warm-ups, 1,000 measured cycles and a 60-second quiet interval. The runtime source remains `858ce32d21625a136fbed102d265e97bb95b0a48`; publication/tag revision `b8d25227681090a9be0d8364330e8115bb672ffb` records the release without changing it.
+
+| Native CI process | Settled RSS / PSS | OS peak RSS | Terminal heap peak | Warm RSS/PSS growth | Quiet CPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| x86_64 agent CLI | 6,908 / 6,908 KiB | 12,304 KiB | 6,692,585 bytes | 0 KiB | 0 ticks |
+| x86_64 TUI | 8,644 / 8,636 KiB | 14,252 KiB | 7,621,981 bytes | 0 KiB | 0 ticks |
+| arm64 agent CLI | 6,252 / 6,252 KiB | 10,032 KiB | 6,725,051 bytes | 0 KiB | 0 ticks |
+| arm64 TUI | 7,856 / 7,852 KiB | 11,628 KiB | 7,645,603 bytes | 0 KiB | 0 ticks |
+
+All four gates passed with zero private-memory growth and no rejected allocations; both TUIs emitted no quiet-window bytes. These are whole-process measurements on native CI hosts, with the same separate 64 MiB heap and 16 MiB fixed-storage accounting as the local results. Runner and process-lifetime differences affect high-water RSS, so the tables do not establish an architecture cost or an absolute RSS limit. The downloaded x86_64 release is byte-identical to the locally and natively qualified Safe executable and passed its own 45 CLI, 19 PTY and seven wire checks. No additional soak was needed for identical bytes. Terminal measurements do not include a desktop deployment or establish arm64 desktop behavior.
+
 ## Preserved terminal modes, 0.2.0
 
 On 2026-10-05, native Linux x86_64 static-musl Safe builds from source `7568a2467b5a93142259bc50057a177c3acf7150` passed separate 1,000-cycle CLI and TUI measurements. Each used three fictional accounts with 96 messages each, after 100 warm-up cycles, followed by a 60-second quiet interval.
@@ -28,7 +39,21 @@ These numbers include the complete Omagma terminal process: touched storage, hea
 
 The terminal allocator peaked at 7,235,433 bytes for CLI and 7,617,129 bytes for TUI, with no rejected allocations. Its **64 MiB heap ceiling** is separate from the **16 MiB fixed backend/HTTP reservation**. The whole-process RSS/PSS measurements include their touched pages; summing allocation ceilings does not predict resident memory. See [terminal qualification](TERMINAL-VERIFICATION.md) for reproduction and limits. Historical bar measurements below retain their original version and accounting.
 
-## Three-account bar measurement, v0.1.1
+## Three-account bar measurement, v0.2.1
+
+On 2026-10-05, the installed downloaded **v0.2.1 / Zig 0.17.0** static-musl backend with three connected accounts and five-minute background refresh used **15,472 KiB PSS** (15,480 KiB RSS), stable across five samples. A separate full offscreen UI qualification with 90 rows attributed **12,476 KiB PSS** after 1,000 open/close cycles and 200 warm-ups. Together:
+
+| Component | Attributed PSS |
+| --- | ---: |
+| Running backend | 15,472 KiB |
+| Warm, closed Omagma UI over Quickshell baseline | 12,476 KiB |
+| Approximate Omagma total | **27,948 KiB: 27.3 MiB / 28.6 MB** |
+
+The README rounds this estimate to **29 MB**. It includes the complete backend and Omagma's attributed UI share, excluding Chrome and unrelated shell widgets. Combining a live backend sample with a separate synthetic UI baseline is an estimate, not a direct isolated desktop-process total. The actual installed executable SHA-256 is `4e936b367cdd6dd9ed5eac71ead732cb3b5f301cc047753ad8d5144b58b6e511`. A separate downloaded-artifact live read-only test fetched 30 messages per account and passed a 60-second quiet interval with zero CPU ticks, added jobs or events; its backend PSS was 15,232 KiB. The plugin reload preserved the shell PID, private account/profile settings and closed popup.
+
+The changed totals across versions include process-lifetime and UI-baseline variation. They do not isolate a compiler effect, and allocation ceilings still do not predict resident memory. Historical measurements remain attached to their actual versions.
+
+## Preserved three-account bar measurement, v0.1.1
 
 On 2026-10-05, the installed **v0.1.1 / Zig 0.17.0** static-musl backend with three connected accounts and five-minute background refresh used **14,444 KiB PSS** (14,452 KiB RSS), stable across five samples. A separate full offscreen UI qualification with 90 rows attributed **15,514 KiB PSS** after 1,000 open/close cycles. Together:
 
@@ -38,7 +63,7 @@ On 2026-10-05, the installed **v0.1.1 / Zig 0.17.0** static-musl backend with th
 | Warm, closed Omagma UI over Quickshell baseline | 15,514 KiB |
 | Approximate Omagma total | **29,958 KiB: 29.3 MiB / 30.7 MB** |
 
-The README rounds that total to **31 MB**. The installed executable is the actual downloaded x86_64 release, SHA-256 `36d6c76847b44dbc4e4aac8255af75901ee6b3d17e6c20e1259a7a00c6d37e75`. An independent read-only live test fetched 30 messages per account using existing grants and passed a 60-second manual-probe quiet interval. It measured 15,712 KiB backend PSS, illustrating variation between process lifetimes.
+The README at that release rounded this total to **31 MB**. The then-installed executable was the actual downloaded x86_64 release, SHA-256 `36d6c76847b44dbc4e4aac8255af75901ee6b3d17e6c20e1259a7a00c6d37e75`. An independent read-only live test fetched 30 messages per account using existing grants and passed a 60-second manual-probe quiet interval. It measured 15,712 KiB backend PSS, illustrating variation between process lifetimes.
 
 ## Preserved historical measurement
 
@@ -54,4 +79,4 @@ The historical release remains at `851ee30c5953a28fe0535fea03737ce85ec745fd`. Pr
 
 The compiler port has separate [dated evidence](evidence/zig-0.17.0.md). Its native x86_64 Safe synthetic backend peak RSS was 11,624 KiB with 90 rows; the actual downloaded release's soak reached 11,636 KiB, the same peak as the historical 0.16 static release soak. Matched old/new UI diagnostics showed no compiler-linked increase. An earlier UI attribution gate failed and is preserved in the evidence: baseline initialization varies, so individual measurements are not guarantees.
 
-The roughly 29 MB historical and 31 MB current live estimates come from different process lifetimes and UI baseline runs. They do not isolate the compiler's effect. Historical measurements remain attached to their actual version.
+The roughly 29 MB v0.1.0, 31 MB v0.1.1 and 29 MB v0.2.1 estimates come from different process lifetimes and UI baseline runs. They do not isolate the compiler's effect. Historical measurements remain attached to their actual version.

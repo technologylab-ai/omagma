@@ -15,6 +15,7 @@ Incoming address lists now own heap storage with at most 1,024 participants per 
 Outgoing envelopes remain limited to 32 recipients and 64-byte local parts. Ordinary replies avoid copying unrelated To/Cc participants. Reply-all removes self and duplicates before enforcing the final sending limit, and returns an error without creating a draft if that envelope is too large. No recipients are silently dropped.
 
 - Runtime source: `858ce32d21625a136fbed102d265e97bb95b0a48`.
+- Publication/tag revision: `b8d25227681090a9be0d8364330e8115bb672ffb`; subsequent publication changes preserve that runtime source.
 - Package/manifest version: **0.2.1**.
 - Exact compiler: **Zig 0.17.0**, source `7647adab80dd088f4de3610fd245915a912eb6ad`.
 - Local platform: native Linux x86_64, baseline CPU, static musl.
@@ -50,4 +51,21 @@ A separate private read-only test passed all three configured accounts using exi
 
 ## Release boundaries
 
-Both static-musl architectures must pass native release CI before publication. Actual downloaded artifact verification and deployment are recorded after publication, separately from source-built results. ARM backend coverage does not establish ARM desktop integration. Live sends, People changes and invitation delivery still need separate terminal permissions and an explicitly provided dedicated test mailbox; fictional write success does not establish remote delivery.
+[Native release CI run 37258436358](https://github.com/technologylab-ai/omagma/actions/runs/37258436358) passed on Linux x86_64 and arm64 with exact Zig 0.17.0. Each architecture passed 45 CLI cases, 19 isolated PTY workflows and seven wire checks in both Debug and Safe. Each also passed separate Safe CLI and TUI measurements with 100 warm-ups, 1,000 measured cycles and 60 quiet seconds. All four measurements had zero warm RSS/PSS/private growth, zero quiet CPU and no rejected allocations; neither TUI emitted quiet-window output. [Memory accounting](../MEMORY.md#terminal-modes-021) preserves these native CI measurements separately from the local table above.
+
+| Native release artifact | Safe SHA-256 | Debug and Safe, each |
+| --- | --- | --- |
+| Linux x86_64 | `4e936b367cdd6dd9ed5eac71ead732cb3b5f301cc047753ad8d5144b58b6e511` | 45/45 CLI, 19/19 PTY, 7/7 wire |
+| Linux arm64 | `6922dd901dda3b3d11becce72e8105ce12f7429b1739ea57fc569c07a76cf582` | 45/45 CLI, 19/19 PTY, 7/7 wire |
+
+The published [v0.2.1 assets](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.1) were downloaded and all five checksum entries verified. Both architectures passed static-executable, 207-member bundle, version/mode and bundled PATH checks. The actual downloaded x86_64 executable then passed **45/45 CLI, 19/19 PTY and 7/7 wire checks** in Safe mode. Its SHA-256 is identical to the local and native CI Safe executable above; the existing 1,000-cycle and private read-only qualifications therefore apply to those exact bytes without another soak or live terminal read. Downloaded receipts are retained as `terminal-v021-downloaded-{cli,pty,wire}.json`; earlier receipts remain unchanged. All owned test processes and peer threads were joined/reaped.
+
+The initial raw download lacked execute permission and was refused before backend startup. Adding owner execute permission changed no executable bytes; its preflight receipt is preserved separately. Native arm64 terminal coverage does not establish arm64 desktop integration. Live sends, People changes and invitation delivery still need separate terminal permissions and an explicitly provided dedicated test mailbox; fictional write success does not establish remote delivery.
+
+## Downloaded-release desktop deployment
+
+The actual downloaded x86_64 executable additionally passed all 13 bar integration cases, all 13 HTTPS transport checks and the callback probe. A private read-only bar check fetched 30 messages for each of three accounts, retained 90 rows, checked account-specific Chrome launch arguments without opening a browser, and passed a 60-second quiet interval with zero CPU ticks, added jobs or events. It preserved the private configuration. The earlier full terminal live check of identical bytes fetched 40 messages per account and verified full messages and threads; neither check performed production writes or new consent.
+
+The verified release executable was then installed atomically, with a private backup of the previous backend. The supported `shell rescanPlugins` call reloaded ordinary plugins while preserving keepLoaded authentication services. The Omarchy shell PID stayed unchanged, the old backend was reaped, and the running replacement's executable hash and reported version matched the release. Account/client/profile settings and the existing CLI/plugin links remained unchanged; the popup stayed closed. A fresh closed UI has no delivered snapshots until opened, so its row count was not used as proof of the backend's mail cache. No desktop window was mapped or keyboard input sent.
+
+Five installed-backend samples were stable at 15,480 KiB RSS and 15,472 KiB PSS. Combined with the separately qualified 12,476 KiB UI attribution, the approximate three-account bar footprint is 27,948 KiB (28.6 MB), rounded to 29 MB in the README. [Memory accounting](../MEMORY.md) retains the distinction between live samples, synthetic UI attribution and historical versions. The published 0.1.0, 0.1.1 and 0.2.0 assets were not replaced.

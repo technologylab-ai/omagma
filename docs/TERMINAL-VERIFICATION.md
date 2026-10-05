@@ -124,3 +124,18 @@ The TUI emitted no bytes during its quiet window. These observations retain the 
 An explicitly authorized private live read-only smoke against this Safe binary then passed for all three configured accounts: two pages totaling 40 messages each, mismatched account/query cursor refusal, one full message and its thread, and consistent unread state across reads. It used existing bar read-only credentials with an absent terminal grant registry and an isolated temporary cache. It issued no mutation or explicit attachment-download commands; decoding may fetch required external MIME body parts. All children were joined/reaped and the temporary mail cache was removed. Only anonymous counts, fixed status codes, build identity and the binary hash were retained in an owner-only private receipt. Failed 0.2.0 live receipts remain preserved privately; no mail, account identities or raw headers are published. This limited smoke does not exhaust Gmail MIME/thread variants or qualify terminal write permissions.
 
 Live gates remain separate: authorization upgrades, real Gmail paging/MIME/thread behavior, People read/write conflicts, actual send outcomes and delivery of invitation replies. Fixture tests cannot establish provider deduplication or successful recipient delivery. No real mailbox, contact or invitation is changed by these tests.
+
+### 0.2.1 native CI and downloaded release
+
+[Release CI run 37258436358](https://github.com/technologylab-ai/omagma/actions/runs/37258436358) passed native Linux x86_64 and arm64 qualification with exact Zig 0.17.0. The v0.2.1 publication/tag revision is `b8d25227681090a9be0d8364330e8115bb672ffb`; its runtime remains the qualified `858ce32d21625a136fbed102d265e97bb95b0a48` source described above. Publication changes did not alter runtime bytes.
+
+| Native CI platform | Debug | Safe |
+| --- | --- | --- |
+| Linux x86_64 | 45/45 CLI, 19/19 PTY, 7/7 wire | 45/45 CLI, 19/19 PTY, 7/7 wire |
+| Linux arm64 | 45/45 CLI, 19/19 PTY, 7/7 wire | 45/45 CLI, 19/19 PTY, 7/7 wire |
+
+Both native platforms also passed separate Safe CLI and TUI 1,000-cycle/60-second quiet gates with unchanged thresholds. All four workloads had zero warm RSS/PSS/private growth, zero quiet CPU and no rejected allocations. The TUI quiet windows emitted no bytes. [The memory table](MEMORY.md#terminal-modes-021) records those CI process lifetimes separately from the local measurements.
+
+The actual downloaded [v0.2.1](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.1) x86_64 raw executable passed **45/45 CLI, 19/19 PTY and 7/7 wire checks** in Safe mode. Its SHA-256 is `4e936b367cdd6dd9ed5eac71ead732cb3b5f301cc047753ad8d5144b58b6e511`, identical to both the locally qualified and native CI Safe executables. The published arm64 Safe SHA-256 is `6922dd901dda3b3d11becce72e8105ce12f7429b1739ea57fc569c07a76cf582`, matching its native CI receipts. Both architectures passed downloaded checksum/static/bundle/version checks. Native arm64 PTY coverage does not qualify arm64 desktop integration.
+
+Downloaded receipts are `terminal-v021-downloaded-{cli,pty,wire}.json`; all previous receipts remain unchanged. A separate preflight receipt preserves the raw download's initial missing execute permission, corrected by adding owner execute permission without changing its bytes. Every owned test child, editor and HTTP peer thread was joined/reaped. No additional soak or private terminal live read was needed for the byte-identical x86_64 executable. Desktop deployment is pending at this checkpoint; release publication and artifact qualification do not claim installation.
