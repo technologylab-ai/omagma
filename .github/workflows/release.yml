@@ -26,7 +26,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/publish_release.py --check
-      - name: Verify a migration branch without publishing
+      - name: Verify a development branch without publishing
         if: github.ref != 'refs/heads/main'
         id: branch
         run: |
@@ -53,7 +53,7 @@ jobs:
             zig_arch: aarch64
             target: aarch64-linux-musl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared Zig compiler
@@ -70,6 +70,11 @@ jobs:
           .verification-debug/bin/callback_budget
           .verification-debug/bin/transport_probe
           node tests/ui_model.mjs
+          python3 tests/terminal_fixture_check.py
+          python3 tests/terminal_screen.py
+          python3 tests/terminal_integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-integration.json
+          python3 tests/terminal_transport.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-transport.json
+          python3 tests/terminal_pty.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-pty.json
       - name: Safe correctness and standalone probes
         run: |
           zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe
@@ -115,6 +120,13 @@ jobs:
             .verification-debug/bin/auth_probe keyring
             .verification-safe/bin/auth_probe keyring
           '
+      - name: Safe terminal workflows and memory
+        run: |
+          python3 tests/terminal_integration.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-integration.json
+          python3 tests/terminal_transport.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-transport.json
+          python3 tests/terminal_pty.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-pty.json
+          python3 tests/terminal_measure.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-cli-memory.json
+          python3 tests/terminal_measure.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-tui-memory.json
       - name: Safe memory gate
         run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-memory.json
       - name: Safe background scheduling memory gate
@@ -130,7 +142,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verification-${{ matrix.arch }}
-          path: tests/results/zig017-*.json
+          path: tests/results/*.json
           if-no-files-found: warn
           retention-days: 30
 

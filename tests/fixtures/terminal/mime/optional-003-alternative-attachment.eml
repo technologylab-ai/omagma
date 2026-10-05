@@ -1,0 +1,43 @@
+From: Fixture account <optional@example.com>
+To: alex@example.org, teammate@example.org
+Subject: Synthetic optional thread 000
+Message-ID: <fixture-003-optional@example.org>
+Date: Sat, 7 Nov 2026 09:00:00 +0000
+MIME-Version: 1.0
+References: <fixture-001-optional@example.org> <fixture-002-optional@example.org>
+In-Reply-To: <fixture-002-optional@example.org>
+Content-Type: multipart/mixed; boundary="fixture-mixed"
+
+--fixture-mixed
+Content-Type: multipart/alternative; boundary="fixture-alt"
+
+--fixture-alt
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Ol=C3=A1, fixture team =F0=9F=91=8B
+Caf=C3=A9 costs =E2=82=AC3.50.
+Literal <b>text</b> stays text.
+Literal =3D3D stays =3D3D.
+
+--fixture-alt
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PGh0bWw+PGhlYWQ+PHN0eWxlPmJvZHl7ZGlzcGxheTpub25lfTwvc3R5bGU+PHNjcmlwdD5hbGVy
+dCgiZml4dHVyZSIpPC9zY3JpcHQ+PC9oZWFkPjxib2R5PjxoMT5TeW50aGV0aWMgaW52aXRhdGlv
+bjwvaDE+PHA+Q2Fmw6kgJmFtcDsgdGVhIPCfkYs8L3A+PGltZyBzcmM9Imh0dHBzOi8vdHJhY2tl
+ci5leGFtcGxlLmludmFsaWQvcGl4ZWwiPjxhIGhyZWY9ImphdmFzY3JpcHQ6YWxlcnQoMSkiPnVu
+c2FmZTwvYT48YSBocmVmPSJodHRwczovL2RvY3MuZXhhbXBsZS5vcmcvZml4dHVyZSI+c2FmZSBs
+aW5rPC9hPjwvYm9keT48L2h0bWw+
+
+--fixture-alt--
+--fixture-mixed
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="../../escape.txt"
+Content-Transfer-Encoding: base64
+
+U3ludGhldGljIGF0dGFjaG1lbnQgb25seS4KTm8gcHJpdmF0ZSBkYXRhLgpCaW5hcnkgZml4dHVy
+ZSBieXRlczogAAF/gP8K
+
+--fixture-mixed--

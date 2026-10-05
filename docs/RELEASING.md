@@ -26,13 +26,13 @@ Each architecture produces a raw binary and a complete plugin bundle:
 | `omagma-linux-x86_64` / `omagma-linux-arm64` | Static backend executable |
 | `omagma-VERSION-linux-x86_64.tar.gz` / `omagma-VERSION-linux-arm64.tar.gz` | Complete plugin under one top-level `omagma/` directory |
 | `SHA256SUMS` | Checksums for the published binary and bundle assets, using basenames |
-| `LICENSES.txt` | Project, Zig and musl license notices, also included in the bundles |
+| `LICENSES.txt` | Project, Zig, musl, libvaxis, zigimg and uucode notices, also included in the bundles |
 
 The bundle includes tracked public project contents: the runtime QML/JavaScript, manifest, assets, examples, docs and setup skill. Its added backend is `omagma/zig-out/bin/omagma`, preserving the plugin's default binary lookup. Packaging stamps the bundle manifest with the version from `build.zig.zon`. Private config, OAuth downloads, local notes and raw live-test output must remain excluded. `--version` reports `omagma VERSION`.
 
 ## Continuous release checks
 
-The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks. `safe` additionally validates the release artifacts and 1,000-job backend/background memory workloads. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After both architectures succeed, the `main` publication step collects the bundles, raw binaries and combined `SHA256SUMS` for the package version.
+The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After both architectures succeed, the `main` publication step collects the bundles, raw binaries and combined `SHA256SUMS` for the package version.
 
 The GitHub CLI uploads all six assets through an internal draft before publishing; it cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The workflow refuses to replace an existing release, draft or tag. It does not expose an incomplete release as latest.
 

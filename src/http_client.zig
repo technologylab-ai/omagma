@@ -45,6 +45,17 @@ const Workspace = struct {
 };
 
 pub const Response = struct { status: u16, body: []const u8, retry_after: u32 = 0 };
+pub const terminal_probe_body_bytes = 128 * 1024;
+/// Credential-free wire oracle input. Only the caller's bounded storage is used.
+pub fn terminalProbeBody(out: []u8) ![]const u8 {
+    if (out.len < terminal_probe_body_bytes) return error.ProbeBufferTooSmall;
+    const body = out[0..terminal_probe_body_bytes];
+    const prefix = "{\"payload\":\"";
+    @memcpy(body[0..prefix.len], prefix);
+    @memset(body[prefix.len .. body.len - 2], 'x');
+    @memcpy(body[body.len - 2 ..], "\"}");
+    return body;
+}
 pub const Client = struct {
     io: std.Io,
     workspace: Workspace,
@@ -70,31 +81,42 @@ pub const Client = struct {
         const remaining = self.job_deadline.durationFromNow(self.io);
         if (remaining.raw.toNanoseconds() <= 0) return error.Timeout;
         const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
-        return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, token, form, out, false });
+        return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, token, form, out, false, false });
+    }
+    /// Terminal-only JSON policy. The bar wrapper retains its original hosts,
+    /// form cap and response cap. Caller-owned storage remains bounded.
+    pub fn requestTerminal(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, json_body: ?[]const u8, out: []u8) !Response {
+        const remaining = self.job_deadline.durationFromNow(self.io);
+        if (remaining.raw.toNanoseconds() <= 0) return error.Timeout;
+        const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
+        return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, token, json_body, out, false, true });
     }
     /// Credential-free loopback only, for synthetic transport verification.
     pub fn requestLoopback(self: *Client, url: []const u8, out: []u8) !Response {
-        return try platform.deadline(self.io, platform.seconds(limits.request_seconds), requestInner, .{ self, url, .GET, null, null, out, true });
+        return try platform.deadline(self.io, platform.seconds(limits.request_seconds), requestInner, .{ self, url, .GET, null, null, out, true, false });
     }
     /// Wire regression probe: a fixed fake bearer, never user credentials,
     /// and requestInner restricts the destination to plain HTTP 127.0.0.1.
     pub fn requestLoopbackBearerProbe(self: *Client, url: []const u8, out: []u8) !Response {
-        return try platform.deadline(self.io, platform.seconds(limits.request_seconds), requestInner, .{ self, url, .GET, @as(?[]const u8, "synthetic-omagma-bearer"), null, out, true });
+        return try platform.deadline(self.io, platform.seconds(limits.request_seconds), requestInner, .{ self, url, .GET, @as(?[]const u8, "synthetic-omagma-bearer"), null, out, true, false });
     }
-    fn requestInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool) anyerror!Response {
-        if (out.len > limits.response) return error.ResponseBufferTooLarge;
+    /// Test-only POST policy: fixed synthetic bearer, JSON terminal limits, and
+    /// plain HTTP 127.0.0.1 only. This cannot transmit real credentials or reach
+    /// production hosts, and it exercises the same requestInner wire path.
+    pub fn requestLoopbackTerminalProbe(self: *Client, url: []const u8, json_body: []const u8, out: []u8) !Response {
+        const remaining = self.job_deadline.durationFromNow(self.io);
+        if (remaining.raw.toNanoseconds() <= 0) return error.Timeout;
+        const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
+        return try platform.deadline(self.io, duration, requestInner, .{ self, url, .POST, @as(?[]const u8, "synthetic-omagma-bearer"), @as(?[]const u8, json_body), out, true, true });
+    }
+    fn requestInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool) anyerror!Response {
+        if (out.len > (if (terminal) @as(usize, 3 * limits.MiB) else limits.response)) return error.ResponseBufferTooLarge;
         if (url.len > 4096) return error.UrlTooLarge;
         const uri = try std.Uri.parse(url);
-        if (loopback) {
-            if (!std.mem.eql(u8, uri.scheme, "http")) return error.InsecureUrl;
-            const host = uri.host orelse return error.InvalidHost;
-            if (!std.mem.eql(u8, host.percent_encoded, "127.0.0.1")) return error.InvalidHost;
-        } else {
-            if (!std.mem.eql(u8, uri.scheme, "https")) return error.InsecureUrl;
-            const host = uri.host orelse return error.InvalidHost;
-            if (!std.mem.eql(u8, host.percent_encoded, "gmail.googleapis.com") and !std.mem.eql(u8, host.percent_encoded, "oauth2.googleapis.com")) return error.InvalidHost;
-        }
-        if (uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidUrl;
+        try validateDestination(uri, loopback, terminal);
+        // Refuse oversized payloads before client.request can acquire a TCP
+        // connection. This applies equally to the existing bar form wrapper.
+        if (form) |f| if (f.len > (if (terminal) @as(usize, 3 * limits.MiB) else 32 * 1024)) return error.FormTooLarge;
         if (self.inner == null) self.inner = .{ .allocator = self.workspace.allocator(), .io = self.io, .read_buffer_size = limits.headers, .connection_pool = .{ .free_size = 0 } };
         var authorization: [limits.secret + 7]u8 = undefined;
         defer std.crypto.secureZero(u8, &authorization);
@@ -109,11 +131,10 @@ pub const Client = struct {
             // Exact Zig 0.17.0 sendHead still omits privileged_headers while
             // emitting the standard authorization override. Keep this override;
             // redirects remain unhandled and destination hosts restricted.
-            .headers = .{ .authorization = if (bearer) |value| .{ .override = value } else .omit, .accept_encoding = .{ .override = "identity" }, .content_type = if (form != null) .{ .override = "application/x-www-form-urlencoded" } else .omit },
+            .headers = .{ .authorization = if (bearer) |value| .{ .override = value } else .omit, .accept_encoding = .{ .override = "identity" }, .content_type = if (form != null) .{ .override = if (terminal) "application/json" else "application/x-www-form-urlencoded" } else .omit },
         });
         defer req.deinit();
         if (form) |f| {
-            if (f.len > 32 * 1024) return error.FormTooLarge;
             req.transfer_encoding = .{ .content_length = f.len };
             var body = try req.sendBodyUnflushed(&.{});
             try body.writer.writeAll(f);
@@ -145,6 +166,18 @@ pub const Client = struct {
         return .{ .status = status, .body = out[0..n], .retry_after = retry_after };
     }
 };
+fn validateDestination(uri: std.Uri, loopback: bool, terminal: bool) !void {
+    if (loopback) {
+        if (!std.mem.eql(u8, uri.scheme, "http")) return error.InsecureUrl;
+        const host = uri.host orelse return error.InvalidHost;
+        if (!std.mem.eql(u8, host.percent_encoded, "127.0.0.1")) return error.InvalidHost;
+    } else {
+        if (!std.mem.eql(u8, uri.scheme, "https")) return error.InsecureUrl;
+        const host = uri.host orelse return error.InvalidHost;
+        if (!std.mem.eql(u8, host.percent_encoded, "gmail.googleapis.com") and !std.mem.eql(u8, host.percent_encoded, "oauth2.googleapis.com") and !(terminal and std.mem.eql(u8, host.percent_encoded, "people.googleapis.com"))) return error.InvalidHost;
+    }
+    if (uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidUrl;
+}
 
 test "HTTP slab rejects excess requests and captures high-water" {
     var bytes: [128]u8 = undefined;
@@ -155,6 +188,29 @@ test "HTTP slab rejects excess requests and captures high-water" {
     a.free(mem);
     try std.testing.expectEqual(@as(usize, 120), work.peak);
     try std.testing.expectEqual(@as(usize, 1), work.rejected);
+}
+test "terminal HTTPS policy adds only People and preserves bar and loopback hosts" {
+    for ([_][]const u8{ "https://gmail.googleapis.com/gmail/v1/users/me/profile", "https://oauth2.googleapis.com/token" }) |url| {
+        const uri = try std.Uri.parse(url);
+        try validateDestination(uri, false, false);
+        try validateDestination(uri, false, true);
+    }
+    const people = try std.Uri.parse("https://people.googleapis.com/v1/people/me/connections");
+    try std.testing.expectError(error.InvalidHost, validateDestination(people, false, false));
+    try validateDestination(people, false, true);
+    for ([_][]const u8{ "https://gmail.googleapis.com.attacker.invalid/", "https://people.googleapis.com.attacker.invalid/", "https://www.googleapis.com/", "https://accounts.google.com/" }) |url| {
+        const uri = try std.Uri.parse(url);
+        try std.testing.expectError(error.InvalidHost, validateDestination(uri, false, false));
+        try std.testing.expectError(error.InvalidHost, validateDestination(uri, false, true));
+    }
+    try std.testing.expectError(error.InsecureUrl, validateDestination(try std.Uri.parse("http://people.googleapis.com/"), false, true));
+    var credentialed = people;
+    credentialed.user = .{ .percent_encoded = "synthetic" };
+    try std.testing.expectError(error.InvalidUrl, validateDestination(credentialed, false, true));
+    try std.testing.expectError(error.InvalidUrl, validateDestination(try std.Uri.parse("https://@people.googleapis.com/"), false, true));
+    try std.testing.expectError(error.InvalidUrl, validateDestination(try std.Uri.parse("https://people.googleapis.com/#fragment"), false, true));
+    try validateDestination(try std.Uri.parse("http://127.0.0.1:1234/"), true, false);
+    try std.testing.expectError(error.InvalidHost, validateDestination(try std.Uri.parse("http://localhost:1234/"), true, false));
 }
 
 pub const reservation_bytes = @sizeOf(@TypeOf(slab)) + @sizeOf(@TypeOf(reserved)) + 64;

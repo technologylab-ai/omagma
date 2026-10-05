@@ -68,7 +68,11 @@ fn formField(w: *std.Io.Writer, name: []const u8, value: []const u8) !void {
     try percent(w, value);
 }
 pub fn refresh(io: std.Io, client: *http.Client, desktop: *const DesktopClient, refresh_token: []const u8, out_access: []u8) !TokenResult {
+    return try refreshScoped(io, client, desktop, refresh_token, out_access, &.{readonly_scope});
+}
+pub fn refreshScoped(io: std.Io, client: *http.Client, desktop: *const DesktopClient, refresh_token: []const u8, out_access: []u8, scopes: []const []const u8) !TokenResult {
     _ = io;
+    try validateScopeSet(scopes);
     try tokenValid(refresh_token);
     var form = std.Io.Writer.fixed(&form_buffer);
     defer std.crypto.secureZero(u8, &form_buffer);
@@ -78,10 +82,12 @@ pub fn refresh(io: std.Io, client: *http.Client, desktop: *const DesktopClient, 
     try formField(&form, "refresh_token", refresh_token);
     try formField(&form, "grant_type", "refresh_token");
     const response = try client.request("https://oauth2.googleapis.com/token", .POST, null, form.buffered(), &token_body);
-    return try parseTokens(response.status, response.body, out_access, null);
+    return try parseTokensScoped(response.status, response.body, out_access, null, scopes);
 }
 pub fn parseTokens(status: u16, data: []const u8, out_access: []u8, out_refresh: ?[]u8) !TokenResult {
-    if (data.len > limits.token_response) return error.TokenResponseTooLarge;
+    return try parseTokensScoped(status, data, out_access, out_refresh, &.{readonly_scope});
+}
+pub fn parseTokensScoped(status: u16, data: []const u8, out_access: []u8, out_refresh: ?[]u8, scopes: []const []const u8) !TokenResult {
     if (out_access.len > limits.secret) return error.InvalidSecretBuffer;
     errdefer std.crypto.secureZero(u8, out_access);
     if (out_refresh) |out| {
@@ -90,6 +96,8 @@ pub fn parseTokens(status: u16, data: []const u8, out_access: []u8, out_refresh:
     errdefer if (out_refresh) |out| {
         std.crypto.secureZero(u8, out);
     };
+    try validateScopeSet(scopes);
+    if (data.len > limits.token_response) return error.TokenResponseTooLarge;
     var fixed = std.heap.FixedBufferAllocator.init(&json_workspace);
     defer std.crypto.secureZero(u8, json_workspace[0..fixed.end_index]);
     const parsed = try b.parse(fixed.allocator(), data);
@@ -106,12 +114,20 @@ pub fn parseTokens(status: u16, data: []const u8, out_access: []u8, out_refresh:
     if (expires <= 0 or expires > 86400) return error.InvalidTokenExpiry;
     if (b.optional(parsed.value, "scope")) |scope| {
         var parts = std.mem.tokenizeScalar(u8, try b.string(scope), ' ');
+        var seen: [8]bool = @splat(false);
         var count: usize = 0;
         while (parts.next()) |part| {
-            if (!std.mem.eql(u8, part, readonly_scope)) return error.UnexpectedScope;
+            var found = false;
+            for (scopes, 0..) |expected, index| if (std.mem.eql(u8, part, expected)) {
+                if (seen[index]) return error.UnexpectedScope;
+                seen[index] = true;
+                found = true;
+                break;
+            };
+            if (!found) return error.UnexpectedScope;
             count += 1;
         }
-        if (count != 1) return error.UnexpectedScope;
+        if (count != scopes.len) return error.UnexpectedScope;
     }
     if (out_refresh) |out| {
         const refresh_token = try b.string(b.optional(parsed.value, "refresh_token") orelse return error.MissingRefreshToken);
@@ -123,6 +139,16 @@ pub fn parseTokens(status: u16, data: []const u8, out_access: []u8, out_refresh:
     std.crypto.secureZero(u8, out_access);
     @memcpy(out_access[0..access.len], access);
     return .{ .access_token = out_access[0..access.len], .expires_in = @intCast(expires) };
+}
+pub fn validateScopeSet(scopes: []const []const u8) !void {
+    if (scopes.len == 0 or scopes.len > 8) return error.UnexpectedScope;
+    const allowed = [_][]const u8{ readonly_scope, "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/contacts.readonly", "https://www.googleapis.com/auth/contacts" };
+    for (scopes, 0..) |scope, index| {
+        var valid = false;
+        for (allowed) |option| valid = valid or std.mem.eql(u8, option, scope);
+        if (!valid) return error.UnexpectedScope;
+        for (scopes[0..index]) |previous| if (std.mem.eql(u8, previous, scope)) return error.UnexpectedScope;
+    }
 }
 pub fn verifyIdentity(data: []const u8, expected: []const u8) !void {
     try b.address(expected);
@@ -240,6 +266,12 @@ var auth_header: [8192]u8 = undefined;
 var auth_desktop: DesktopClient = .{};
 
 pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8) !void {
+    try authorizeScoped(io, client_file, address, profile, chrome, &.{readonly_scope}, null);
+}
+pub const TerminalCredential = struct { grant_id: []const u8 };
+pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, terminal: ?TerminalCredential) !void {
+    try validateScopeSet(scopes);
+    if (terminal == null and (scopes.len != 1 or !std.mem.eql(u8, scopes[0], readonly_scope))) return error.UnexpectedScope;
     try b.address(address);
     try b.profile(profile);
     defer {
@@ -280,7 +312,13 @@ pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profi
     try percent(&url, auth_desktop.client_id.slice());
     try formField(&url, "redirect_uri", redirect);
     try formField(&url, "response_type", "code");
-    try formField(&url, "scope", readonly_scope);
+    var scope_bytes: [1024]u8 = undefined;
+    var scope_writer = std.Io.Writer.fixed(&scope_bytes);
+    for (scopes, 0..) |scope, index| {
+        if (index != 0) try scope_writer.writeByte(' ');
+        try scope_writer.writeAll(scope);
+    }
+    try formField(&url, "scope", scope_writer.buffered());
     try formField(&url, "code_challenge", &challenge);
     try formField(&url, "code_challenge_method", "S256");
     try formField(&url, "state", &state);
@@ -304,11 +342,11 @@ pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profi
     try formField(&form, "redirect_uri", redirect);
     try formField(&form, "grant_type", "authorization_code");
     const token_response = try client.request("https://oauth2.googleapis.com/token", .POST, null, form.buffered(), &token_body);
-    const tokens = try parseTokens(token_response.status, token_response.body, &auth_access, &auth_refresh);
+    const tokens = try parseTokensScoped(token_response.status, token_response.body, &auth_access, &auth_refresh, scopes);
     const identity = try client.request("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, tokens.access_token, null, &token_body);
     try verifyProfile(identity.status, identity.body, address);
     const refresh_token = std.mem.sliceTo(&auth_refresh, 0);
-    try keyring.store(io, address, refresh_token);
+    if (terminal) |credential| try keyring.storeTerminal(io, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token) else try keyring.store(io, address, refresh_token);
 }
 fn acceptCallback(io: std.Io, listener: *std.Io.net.Server, callback: *Callback) anyerror![]const u8 {
     for (0..2) |_| {
@@ -465,4 +503,17 @@ test "callback rejects encoded duplicate keys controls and wrong path" {
     try std.testing.expectError(error.InvalidCallback, callback.parse("GET /oauth2/callback?code=%00&state=expected HTTP/1.1\r\n\r\n", &code));
     try std.testing.expectError(error.InvalidCallbackPath, callback.parse("GET /other?code=synthetic&state=expected HTTP/1.1\r\n\r\n", &code));
     try std.testing.expectError(error.InvalidCallback, callback.parse("GET /oauth2/callback?code=synthetic&state=expected HTTP/1.1\r\nContent-Length: 1\r\n\r\n", &code));
+}
+test "terminal scopes match complete returned grant without relaxing bar policy" {
+    var access: [128]u8 = @splat(0x7f);
+    const expected = [_][]const u8{ readonly_scope, "https://www.googleapis.com/auth/gmail.send" };
+    const complete = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-access\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly\"}";
+    _ = try parseTokensScoped(200, complete, &access, null, &expected);
+    try std.testing.expectError(error.UnexpectedScope, parseTokens(200, complete, &access, null));
+    for (access) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    const missing = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-access\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly\"}";
+    try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, missing, &access, null, &expected));
+    const repeated = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-access\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.readonly\"}";
+    try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, repeated, &access, null, &expected));
+    try std.testing.expectError(error.UnexpectedScope, authorizeScoped(std.testing.io, "/nonexistent-synthetic-client", "synthetic@example.test", "synthetic-profile", "/usr/bin/true", &expected, null));
 }

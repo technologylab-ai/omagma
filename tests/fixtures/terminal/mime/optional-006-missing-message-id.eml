@@ -1,0 +1,15 @@
+From: Fixture account <optional@example.com>
+To: alex@example.org, teammate@example.org
+Subject: Synthetic optional thread 001
+Date: Sat, 7 Nov 2026 09:00:00 +0000
+MIME-Version: 1.0
+References: <fixture-004-optional@example.org> <fixture-005-optional@example.org>
+In-Reply-To: <fixture-005-optional@example.org>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Synthetic optional@example.com message 006.
+Olá, fixture team 👋
+Café costs €3.50.
+Literal <b>text</b> stays text.
+Literal =3D stays =3D.

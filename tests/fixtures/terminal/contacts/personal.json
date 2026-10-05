@@ -1,0 +1,54 @@
+{
+  "account": "personal@example.com",
+  "connections": [
+    {
+      "resourceName": "people/shared-contact-001",
+      "etag": "fixture-personal-person-v1",
+      "metadata": {
+        "sources": [
+          {
+            "type": "CONTACT",
+            "id": "shared-contact-001",
+            "etag": "fixture-personal-source-v1"
+          }
+        ]
+      },
+      "names": [
+        {
+          "displayName": "Alex Personal Fixture",
+          "givenName": "Alex",
+          "familyName": "Fixture"
+        }
+      ],
+      "emailAddresses": [
+        {
+          "value": "alex-personal@example.org",
+          "type": "work"
+        }
+      ]
+    },
+    {
+      "resourceName": "people/shared-contact-002",
+      "etag": "fixture-personal-person-v1b",
+      "metadata": {
+        "sources": [
+          {
+            "type": "CONTACT",
+            "id": "shared-contact-002",
+            "etag": "fixture-personal-source-v1b"
+          }
+        ]
+      },
+      "names": [
+        {
+          "displayName": "Unicode Café Fixture 👋"
+        }
+      ],
+      "emailAddresses": [
+        {
+          "value": "unicode@example.net"
+        }
+      ]
+    }
+  ]
+}

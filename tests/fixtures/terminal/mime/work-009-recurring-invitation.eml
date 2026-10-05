@@ -1,0 +1,21 @@
+From: Fixture account <work@example.com>
+To: alex@example.org, teammate@example.org
+Subject: Synthetic work thread 002
+Message-ID: <fixture-009-work@example.org>
+Date: Sat, 7 Nov 2026 09:00:00 +0000
+MIME-Version: 1.0
+References: <fixture-007-work@example.org> <fixture-008-work@example.org>
+In-Reply-To: <fixture-008-work@example.org>
+Content-Type: text/calendar; charset=utf-8; method=REQUEST
+Content-Transfer-Encoding: base64
+
+QkVHSU46VkNBTEVOREFSDQpWRVJTSU9OOjIuMA0KUFJPRElEOi0vL09tYWdtYS8vU3ludGhldGlj
+IGZpeHR1cmUvL0VODQpNRVRIT0Q6UkVRVUVTVA0KQkVHSU46VkVWRU5UDQpVSUQ6Zml4dHVyZS1t
+ZWV0aW5nQGV4YW1wbGUub3JnDQpEVFNUQU1QOjIwMjYxMTAxVDA4MDAwMFoNClNFUVVFTkNFOjQN
+CkRUU1RBUlQ6MjAyNjExMDdUMTAwMDAwWg0KRFRFTkQ6MjAyNjExMDdUMTAzMDAwWg0KT1JHQU5J
+WkVSOm1haWx0bzpvcmdhbml6ZXJAZXhhbXBsZS5vcmcNCkFUVEVOREVFO0NOPUZpeHR1cmUgYWNj
+b3VudDtSU1ZQPVRSVUU7UEFSVFNUQVQ9TkVFRFMtQUNUSU9OOm1haWx0bzp3b3JrQGV4YW1wbGUu
+Y29tDQpTVU1NQVJZOlN5bnRoZXRpYyBtZWV0aW5nDQpERVNDUklQVElPTjpDYWbDqVwsIHRlYSBh
+bmQgZml4dHVyZSBkaXNjdXNzaW9uLg0KUkVDVVJSRU5DRS1JRDoyMDI2MTEwN1QxMDAwMDBaDQpB
+VFRFTkRFRTtDTj1PdGhlciBmaXh0dXJlO1BBUlRTVEFUPUFDQ0VQVEVEOm1haWx0bzpvdGhlckBl
+eGFtcGxlLm5ldA0KRU5EOlZFVkVOVA0KRU5EOlZDQUxFTkRBUg0K

@@ -63,6 +63,25 @@ User plugin/configuration changes normally hot reload. If discovery needs refres
 
 To remove the widget, remove its bar entry and user plugin symlink. This leaves your configuration and keyring credentials intact. See [privacy](PRIVACY.md) for local disconnection and Google-side revocation.
 
+## Optional terminal command
+
+The verified backend also runs the [TUI and agent CLI](TERMINAL.md). To make
+`omagma tui` available after bar installation, link the plugin's executable into
+an existing user PATH directory. Inspect any existing `omagma` command first;
+do not overwrite an unrelated executable. For a first link:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -s "$HOME/.config/omarchy/plugins/io.github.technologylab_ai.omagma/zig-out/bin/omagma" "$HOME/.local/bin/omagma"
+omagma --version
+omagma tui --fixtures
+```
+
+Confirm `$HOME/.local/bin` is already on PATH, or invoke the executable by its
+absolute path. Linking through the plugin path follows future verified plugin
+upgrades. Terminal-only installations can use the raw release binary and its
+`LICENSES.txt` without installing the bar.
+
 ## Source fallback
 
 If there is no compatible release asset, build a source checkout with **Zig 0.17.0 exactly**. Omarchy may still provide 0.16.x. Download and verify the [0.17.0 archive](https://ziglang.org/download/0.17.0/) matching your OS/CPU, extract it into a task-owned directory, and select it only for this shell. Before a shared-host build or runtime check, acquire the [verification reservation](VERIFICATION.md#cooperative-host-measurement-lock).

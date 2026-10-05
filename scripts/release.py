@@ -32,7 +32,12 @@ def package_versions():
 
 
 def distribution_licenses():
-    return b"omagma\n======\n" + (ROOT / "LICENSE").read_bytes() + b"\n\nZig\n===\n" + (ROOT / "LICENSES/zig.txt").read_bytes() + b"\n\nmusl\n====\n" + (ROOT / "LICENSES/musl.txt").read_bytes()
+    parts = [b"omagma\n======\n", (ROOT / "LICENSE").read_bytes()]
+    for path in sorted((ROOT / "LICENSES").iterdir()):
+        if path.suffix in {".txt", ".md"}:
+            parts.extend([b"\n\n" + path.name.encode() + b"\n" + b"=" * len(path.name) + b"\n", path.read_bytes()])
+    return b"".join(parts)
+
 
 
 def verify_binary(path, arch):

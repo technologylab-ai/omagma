@@ -1,0 +1,18 @@
+{
+  "headers": [
+    {
+      "to": [
+        "fixture@example.org\r\nBcc: hidden@example.net"
+      ]
+    },
+    {
+      "subject": "hello\r\nX-Injected: true"
+    }
+  ],
+  "base64urlBodies": [
+    "A",
+    "***",
+    "a\u0000b"
+  ],
+  "unsupportedCharset": "x-fixture-unsupported"
+}

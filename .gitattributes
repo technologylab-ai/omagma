@@ -1,0 +1,3 @@
+# Protocol fixtures retain their literal CRLF bytes and intentional body space.
+tests/fixtures/terminal/mime/*.eml -text whitespace=cr-at-eol,-blank-at-eof
+tests/fixtures/terminal/calendar/*.ics -text whitespace=cr-at-eol,-blank-at-eof

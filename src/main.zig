@@ -5,13 +5,22 @@ const Config = @import("config.zig").Config;
 const daemon = @import("daemon.zig");
 const oauth = @import("oauth.zig");
 const http = @import("http_client.zig");
+// The upstream parser's Debug paste log contains input text. Never log private
+// compose/paste content or interleave library diagnostics with terminal paint.
+pub const std_options: std.Options = .{ .log_scope_levels = &.{ .{ .scope = .vaxis, .level = .err }, .{ .scope = .vaxis_parser, .level = .err } } };
+pub const panic = std.debug.FullPanic(struct {
+    fn call(message: []const u8, address: ?usize) noreturn {
+        if (@import("build_options").tui) @import("terminal/tui.zig").recover();
+        std.debug.defaultPanic(message, address);
+    }
+}.call);
 var config: Config = undefined;
 var startup_storage: [64 * 1024]u8 = undefined;
 var config_storage: [16 * 1024]u8 = undefined;
 var probe_storage: [l.response]u8 = undefined;
 // All module-owned static storage is accounted at compile time; unassigned
 // capacity is physically reserved and touched once, with no allocator fallback.
-const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes;
+const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0);
 comptime {
     if (assigned_bytes > l.app_reservation) @compileError("Application reservation exceeds16MiB");
 }
@@ -50,6 +59,10 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
+    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "mail") or std.mem.eql(u8, mode, "contacts") or std.mem.eql(u8, mode, "invitations") or std.mem.eql(u8, mode, "draft") or std.mem.eql(u8, mode, "cache") or std.mem.eql(u8, mode, "operation") or std.mem.eql(u8, mode, "terminal-auth")) {
+        try @import("terminal/cli.zig").run(init, io, mode, &args);
+        return;
+    }
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     try config.defaults(home);
     if (std.mem.eql(u8, mode, "budget")) {
@@ -64,6 +77,7 @@ fn app(init: std.process.Init) !void {
         var writer = std.Io.File.stdout().writer(io, &buffer);
         try writer.interface.print("omagma {s} (Zig {s})\n  --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
         try writer.interface.flush();
+        try @import("terminal/cli.zig").help(io);
         return;
     }
     if (std.mem.eql(u8, mode, "probe-keyring") or std.mem.eql(u8, mode, "probe-callback")) {
@@ -77,15 +91,26 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
-    if (std.mem.eql(u8, mode, "probe-http") or std.mem.eql(u8, mode, "probe-http-bearer") or std.mem.eql(u8, mode, "probe-https")) {
+    if (std.mem.eql(u8, mode, "probe-http") or std.mem.eql(u8, mode, "probe-http-bearer") or std.mem.eql(u8, mode, "probe-https") or std.mem.eql(u8, mode, "probe-terminal-http") or std.mem.eql(u8, mode, "probe-terminal-http-oversize")) {
         const bearer_probe = std.mem.eql(u8, mode, "probe-http-bearer");
+        const oversized_terminal = std.mem.eql(u8, mode, "probe-terminal-http-oversize");
+        const terminal_probe = oversized_terminal or std.mem.eql(u8, mode, "probe-terminal-http");
         const url = if (!std.mem.eql(u8, mode, "probe-https")) args.next() orelse return error.UrlRequired else "https://gmail.googleapis.com/gmail/v1/users/me/profile";
+        const terminal_output: []u8 = if (terminal_probe) try init.gpa.alloc(u8, 3 * l.MiB) else &.{};
+        defer if (terminal_probe) init.gpa.free(terminal_output);
+        const terminal_body: []u8 = if (terminal_probe) try init.gpa.alloc(u8, if (oversized_terminal) 3 * l.MiB + 1 else 131072) else &.{};
+        defer if (terminal_probe) init.gpa.free(terminal_body);
+        if (oversized_terminal) @memset(terminal_body, 'x');
+        if (terminal_probe and !oversized_terminal) _ = try http.terminalProbeBody(terminal_body);
         var client = try http.Client.init(io);
         defer client.deinit();
         const start = std.Io.Timestamp.now(io, .awake);
         var response: ?http.Response = null;
         var failure: ?anyerror = null;
-        if (bearer_probe) response = client.requestLoopbackBearerProbe(url, &probe_storage) catch |err| result: {
+        if (terminal_probe) response = client.requestLoopbackTerminalProbe(url, terminal_body, terminal_output) catch |err| result: {
+            failure = err;
+            break :result null;
+        } else if (bearer_probe) response = client.requestLoopbackBearerProbe(url, &probe_storage) catch |err| result: {
             failure = err;
             break :result null;
         } else if (std.mem.eql(u8, mode, "probe-http")) response = client.requestLoopback(url, &probe_storage) catch |err| result: {
@@ -159,4 +184,16 @@ test {
     std.testing.refAllDecls(@import("http_client.zig"));
     std.testing.refAllDecls(@import("oauth.zig"));
     std.testing.refAllDecls(@import("keyring.zig"));
+    std.testing.refAllDecls(@import("terminal/capped_allocator.zig"));
+    std.testing.refAllDecls(@import("terminal/core.zig"));
+    std.testing.refAllDecls(@import("terminal/mime.zig"));
+    std.testing.refAllDecls(@import("terminal/recipients.zig"));
+    std.testing.refAllDecls(@import("terminal/invitation.zig"));
+    std.testing.refAllDecls(@import("terminal/editor.zig"));
+    // Import its pure tests without instantiating run() against libvaxis's
+    // deliberately different TestTty. Real terminal paths use isolated PTYs.
+    if (@import("build_options").tui) {
+        _ = @import("terminal/tui.zig");
+        std.testing.refAllDecls(@import("terminal/input.zig"));
+    }
 }

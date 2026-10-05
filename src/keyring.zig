@@ -2,6 +2,7 @@ const std = @import("std");
 const limits = @import("limits.zig");
 const platform = @import("platform.zig");
 pub const service = "io.github.technologylab_ai.omagma";
+pub const terminal_service = "io.github.technologylab_ai.omagma.terminal";
 pub var last_child_peak_rss: usize = 0;
 
 fn addressValid(address: []const u8) !void {
@@ -34,6 +35,36 @@ pub fn clear(io: std.Io, address: []const u8) !void {
     try addressValid(address);
     var out: [1]u8 = undefined;
     _ = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "clear", "service", service, "account", address }, @as(?[]const u8, null), out[0..], false });
+}
+
+/// Scope/client identity forms part of the lookup, never a write-token fallback
+/// for the bar. OAuth client/grant identifiers are public metadata, not secrets.
+pub fn lookupTerminal(io: std.Io, address: []const u8, client_id: []const u8, grant_id: []const u8, out: []u8) !?[]const u8 {
+    try terminalIdentity(address, client_id, grant_id);
+    if (out.len == 0 or out.len > limits.secret) return error.InvalidSecretBuffer;
+    errdefer std.crypto.secureZero(u8, out);
+    const n = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "lookup", "service", terminal_service, "account", address, "client", client_id, "grant", grant_id }, @as(?[]const u8, null), out, true });
+    if (n == 0) return null;
+    const secret = std.mem.trimEnd(u8, out[0..n], "\r\n");
+    try validSecret(secret);
+    return secret;
+}
+pub fn storeTerminal(io: std.Io, address: []const u8, client_id: []const u8, grant_id: []const u8, secret: []const u8) !void {
+    try terminalIdentity(address, client_id, grant_id);
+    try validSecret(secret);
+    var out: [1]u8 = undefined;
+    _ = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "store", "--label=omagma terminal refresh token", "service", terminal_service, "account", address, "client", client_id, "grant", grant_id }, @as(?[]const u8, secret), out[0..], false });
+}
+pub fn clearTerminal(io: std.Io, address: []const u8) !void {
+    try addressValid(address);
+    var out: [1]u8 = undefined;
+    _ = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "clear", "service", terminal_service, "account", address }, @as(?[]const u8, null), out[0..], false });
+}
+fn terminalIdentity(address: []const u8, client_id: []const u8, grant_id: []const u8) !void {
+    try addressValid(address);
+    if (client_id.len == 0 or client_id.len > 4096 or grant_id.len != 64) return error.InvalidGrantIdentity;
+    for (client_id) |c| if (c <= 32 or c >= 127) return error.InvalidGrantIdentity;
+    for (grant_id) |c| if (!std.ascii.isHex(c)) return error.InvalidGrantIdentity;
 }
 fn run(io: std.Io, argv: []const []const u8, input: ?[]const u8, out: []u8, allow_absent: bool) anyerror!usize {
     var child = try std.process.spawn(io, .{ .argv = argv, .stdin = if (input != null) .pipe else .ignore, .stdout = .pipe, .stderr = .ignore, .request_resource_usage_statistics = true });

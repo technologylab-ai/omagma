@@ -2,6 +2,8 @@
 
 [Download and verify the matching plugin bundle](INSTALL.md) first. Run these commands from its extracted `omagma/` directory; the included backend lives at `zig-out/bin/omagma`. Zig is not required for release installation. A source build uses the same relative binary path.
 
+This guide connects the bar's read-only grant. The terminal can reuse it for mail reading; additional terminal capabilities use the separate authorization described below.
+
 If a private config already exists, edit it instead of copying the example over it. For a new configuration:
 
 ```sh
@@ -21,7 +23,7 @@ If `XDG_CONFIG_HOME` is set, the default location is `$XDG_CONFIG_HOME/omagma/co
 4. Create an OAuth client of type **Desktop app** and download its JSON file to a private local location, with file mode 0600. omagma uses a browser consent flow, PKCE and a loopback callback. [Google’s installed-app documentation](https://developers.google.com/identity/protocols/oauth2/native-app).
 5. Set `oauthClientFile` to the file’s absolute path in your configuration.
 
-The requested `gmail.readonly` scope is a restricted Gmail scope. Although omagma fetches only a bounded Inbox page and metadata, the permission itself allows broader mailbox reading. [Gmail scope definitions](https://developers.google.com/workspace/gmail/api/auth/scopes).
+The requested `gmail.readonly` scope is a restricted Gmail scope. Although the bar fetches only a bounded Inbox page and metadata, the permission itself allows broader mailbox reading. Terminal read-only commands can use that grant to fetch full bodies, threads and attachments within their separate limits. [Gmail scope definitions](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
 External applications in **Testing** receive refresh tokens that expire after seven days for this scope. Production removes that Testing-specific expiry; tokens can still expire or be revoked for other reasons. Public availability and verification are separate decisions governed by Google’s requirements. [Token expiration](https://developers.google.com/identity/protocols/oauth2#expiration), [distribution](DISTRIBUTION.md).
 
@@ -56,3 +58,9 @@ zig-out/bin/omagma auth --account personal@example.com --config "${XDG_CONFIG_HO
 Complete Google consent in the opened Chrome profile within **180 seconds**. omagma checks the returned Gmail identity against the configured address before storing a refresh token in Secret Service. Repeat the command for each other enabled address. The keyring must be available and unlocked.
 
 After connecting, turn off the [bar widget’s](INSTALL.md) synthetic fixture setting. If consent expires or access is revoked, run `auth` again using the included binary for that account. There is currently no in-dropdown Connect action. Verify that **Open inbox** and message links reach the intended account in the intended profile before relying on browser routing.
+
+## Optional terminal authorization
+
+For mail sends, mailbox changes, contacts or invitation replies, follow [terminal permissions](TERMINAL.md#live-permissions). Use a second Desktop OAuth client and a separate terminal Secret Service grant; leave the bar client and its read-only authorization unchanged. Request only the required complete capability set with `terminal-auth authorize`, and use `--config`, `--client-file` and, if needed, `--grant-file` to select the intended private files. The terminal guide lists exact commands and scopes.
+
+Develop and review these workflows with `--fixtures`. Initial live write acceptance requires an explicitly provided dedicated test mailbox; setting up the bar or granting read access does not authorize production mail or contact changes.

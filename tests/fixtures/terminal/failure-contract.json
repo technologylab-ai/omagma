@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "permission-denied",
+      "expected": "reject before provider call; state unchanged"
+    },
+    {
+      "name": "label-remote-rejected",
+      "expected": "rollback labels; unrelated account unchanged"
+    },
+    {
+      "name": "trash-remote-rejected",
+      "expected": "rollback trash; original message remains readable"
+    },
+    {
+      "name": "send-applied-response-lost",
+      "expected": "unknown outcome; no automatic second send"
+    },
+    {
+      "name": "send-not-applied-response-lost",
+      "expected": "unknown outcome; no claim of success"
+    },
+    {
+      "name": "send-known-operation-replayed",
+      "expected": "same result; exactly one provider send"
+    },
+    {
+      "name": "operation-id-content-conflict",
+      "expected": "reject reused operation id with different payload"
+    },
+    {
+      "name": "contact-stale-source-etag",
+      "expected": "conflict; no lost update"
+    },
+    {
+      "name": "foreign-page-token",
+      "expected": "reject account/filter/generation mismatch"
+    },
+    {
+      "name": "recipient-crlf",
+      "input": "fixture@example.org\r\nBcc: hidden@example.net",
+      "expected": "reject header injection"
+    },
+    {
+      "name": "terminal-controls",
+      "expected": "render escaped/inert; never emit mail-derived terminal control bytes"
+    },
+    {
+      "name": "mime-budget",
+      "expected": "bounded error for size, parts, depth or charset policy; retain valid cache"
+    },
+    {
+      "name": "invitation-not-attendee",
+      "expected": "reject RSVP for account absent from ATTENDEE"
+    },
+    {
+      "name": "permanent-delete",
+      "expected": "unsupported; never substitute trash or delete"
+    }
+  ]
+}

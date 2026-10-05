@@ -1,0 +1,13 @@
+From: Alex Fixture <alex@example.org>
+To: optional@example.com, teammate@example.org
+Subject: Synthetic optional thread 000
+Message-ID: <fixture-001-optional@example.org>
+Date: Sat, 7 Nov 2026 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Ol=C3=A1, fixture team =F0=9F=91=8B
+Caf=C3=A9 costs =E2=82=AC3.50.
+Literal <b>text</b> stays text.
+Literal =3D3D stays =3D3D.

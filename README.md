@@ -1,12 +1,12 @@
 # omagma
 
-A small Gmail dropdown for the Omarchy bar. Check recent Inbox messages from up to three separate accounts, then open Gmail in each account’s configured Chrome profile.
+Gmail in the Omarchy bar, your terminal, and agent workflows. Check recent Inbox messages from up to three separate accounts, then open Gmail in each account’s configured Chrome profile.
 
 ![omagma showing fictional accounts and messages](docs/images/omagma.png)
 
 Each account keeps its own unread count and message list. The dropdown shows read and unread messages with sender, subject, time and a plain-text snippet. It keeps the selected account between openings and distinguishes loading, cached data, disconnected accounts and a verified empty Inbox.
 
-The backend is Zig; the UI is Quickshell QML. Mail stays in a bounded memory cache of at most 30 messages per account. There is no local mail database. Background refresh is optional: the default is manual refresh, and `refreshIntervalSeconds: 300` enables a five-minute interval even while the dropdown is closed.
+The backend is Zig; the bar UI is Quickshell QML. Bar mail stays in a bounded memory cache of at most 30 messages per account. The bar does not persist mail. Background refresh is optional: the default is manual refresh, and `refreshIntervalSeconds: 300` enables a five-minute interval even while the dropdown is closed.
 
 Omagma started because a single Gmail tab was using roughly **2 GB of RAM** on the author's desktop. Omagma's backend and UI together measured approximately **31 MB for three connected accounts** in v0.1.1 on Linux x86_64. This excludes Chrome and the shared Omarchy shell; it is a measured footprint, not a memory guarantee or a controlled browser benchmark. See [memory measurements](docs/MEMORY.md) for the accounting and version details.
 
@@ -19,6 +19,22 @@ Requires Omarchy with its Quickshell plugin host, Google Chrome, an unlocked Sec
 Follow [bundle verification and bar installation](docs/INSTALL.md), then [account and OAuth setup](docs/SETUP.md). The plugin ID is `io.github.technologylab_ai.omagma`. This release uses your own Google Desktop OAuth client; connect accounts with the included CLI. There is no Connect action in the dropdown yet.
 
 To have an agent install it, point the agent at this repository and say **“Install omagma on my Omarchy.”** [AGENTS.md](AGENTS.md) routes installation requests to the [setup workflow](skills/omagma-setup/SKILL.md), including account configuration and browser consent. No separate skill installation is needed. The [agent setup guide](docs/AGENT-SETUP.md) also explains optional skill discovery.
+
+## Terminal and agent client
+
+`omagma tui` opens a Vim-oriented, account-separated mail client: complete messages and threads, search and pagination, local drafts, replies/reply-all, contacts, attachments, archive/Trash/restore, and invitation replies. The split composer keeps the mail context visible; `$EDITOR` temporarily takes over the terminal and returns afterward. **No tmux is required.** Calendar views and permanent deletion are excluded.
+
+`omagma cli` / `omagma agent` provide a JSONL interface; one-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands use the same executor. Fetch beyond the bar's 30 messages using explicit continuation cursors. The terminal cache defaults to **2,000 message metadata entries and 256 MiB of disk per account**. Terminal heap allocations are capped at 64 MiB, in addition to the existing 16 MiB fixed backend storage reservation. These bounds are separate from the measured process footprint above.
+
+Try everything without Google credentials or desktop installation:
+
+```sh
+omagma tui --fixtures
+omagma mail list --fixtures --account personal@example.com --limit 100
+omagma cli --fixtures
+```
+
+Use [the terminal guide](docs/TERMINAL.md) for keys, commands and capabilities, or give your agent [the CLI contract](docs/AGENT-CLI.md). Existing bar credentials allow read-only mail access. Sending, changing mail, contacts and RSVP require **separate terminal authorization**; the bar keeps its read-only grant. Write workflows are qualified with synthetic fixtures. Initial live write acceptance requires an explicitly provided dedicated test mailbox; development authorization does not permit production writes.
 
 ## Build from source
 
@@ -52,4 +68,4 @@ The UI harness runs offscreen and closes its processes when finished. See [verif
 - [Building and publishing releases](docs/RELEASING.md)
 - Social images: [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)
 
-MIT licensed. Copyright technologylab.ai. Static distributions include [Zig and musl notices](LICENSES).
+MIT licensed. Copyright technologylab.ai. Static distributions include [third-party notices](LICENSES), including Zig, musl, libvaxis, zigimg and uucode.

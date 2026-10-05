@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -19,7 +20,9 @@ SECRET_PATTERNS = [
     re.compile(rb"1//[A-Za-z0-9_-]{30,}"),
     re.compile(rb"[0-9]{8,}-[A-Za-z0-9_-]{10,}\.apps\.googleusercontent\.com"),
 ]
-IGNORED_PARTS = {".local-notes", ".zig-cache", "zig-out", "dist", "__pycache__"}
+# Exact upstream license notice retains required public author attribution.
+PUBLIC_LICENSES = {'LICENSES/uucode-LICENSE_Bjoern_Hoehrmann.txt': 'de219cece932aad5a817bf763393d8d149d378a15d2ad5320e3331eac07626dd'}
+IGNORED_PARTS = {".local-notes", ".zig-cache", "zig-pkg", "zig-out", "dist", "__pycache__"}
 
 
 def staged(name):
@@ -60,7 +63,7 @@ def main():
             issues.append({"file": name, "reason": "personal/local absolute path"})
         if any(pattern.search(data) for pattern in SECRET_PATTERNS):
             issues.append({"file": name, "reason": "credential-like literal"})
-        if any(domain.lower() not in EXAMPLE_DOMAINS and not domain.lower().endswith((b".example", b".invalid")) for domain in EMAIL.findall(data)):
+        if PUBLIC_LICENSES.get(name) != hashlib.sha256(data).hexdigest() and any(domain.lower() not in EXAMPLE_DOMAINS and not domain.lower().endswith((b".example", b".invalid")) for domain in EMAIL.findall(data)):
             issues.append({"file": name, "reason": "nonfictional literal email address"})
     result = {"filesChecked": len(names), "passed": bool(names) and not issues, "issues": issues,
               "scope": "Staged text, artifact paths and PNG metadata; screenshot content requires visual review."}

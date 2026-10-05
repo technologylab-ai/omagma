@@ -7,6 +7,8 @@ description: Install the omagma Omarchy bar plugin, configure separate Gmail acc
 
 Work from an extracted complete omagma release or source checkout. Resolve this skill directory's real path before locating the omagma root (`../..`), or use the user's supplied folder. Read `AGENTS.md`, `README.md`, `docs/SETUP.md`, `docs/INSTALL.md` and `docs/PRIVACY.md`. The app folder, private account config and downloaded Google client JSON are separate resources.
 
+For a terminal-only request, use the optional terminal workflow below and its linked guides. Do not install or change the bar merely to enable the TUI or CLI.
+
 ## Prepare the installation
 
 - Prefer a complete bundle from `https://github.com/technologylab-ai/omagma/releases/latest`. Map Linux `uname -m` values `x86_64` to the x86_64 bundle and `aarch64`/`arm64` to arm64. Download `omagma-VERSION-linux-ARCH.tar.gz` and `SHA256SUMS` from the same release. Verify the selected bundle's checksum before extraction. Raw `omagma-linux-ARCH` assets contain only the backend and are insufficient for a new bar installation.
@@ -21,7 +23,7 @@ Work from an extracted complete omagma release or source checkout. Resolve this 
 
 ## Connect accounts
 
-The current app has a CLI entry point for consent and does not bundle a shared OAuth client. One Google Desktop-app client can cover multiple organizations with an External audience, while every account has a separate grant. The backend requests only Gmail read-only scope and checks the actual Gmail identity before storing the refresh token.
+The bar has a CLI entry point for consent and does not bundle a shared OAuth client. One Google Desktop-app client can cover multiple organizations with an External audience, while every account has a separate grant. Bar authorization requests only Gmail read-only scope and checks the actual Gmail identity before storing the refresh token. Terminal write capabilities use the separate setup described below; never broaden the bar grant.
 
 If no suitable client exists, guide the user through Google Cloud project/Gmail API, consent configuration and Desktop client download using `docs/SETUP.md`. Do not claim a service-account key or another application's tokens replace this flow. Consult current primary Google documentation before making policy promises. External Testing Gmail grants expire after seven days; publishing status, public verification and Workspace policy are separate issues. Report actual console/policy errors without widening scope.
 
@@ -42,3 +44,7 @@ A successful consent does not refresh an already disconnected daemon automatical
 - Check bounded storage, one refresh worker and no work for disabled/disconnected accounts. Automatic refresh is opt-in: a positive interval continues while closed; zero cancels on close. Do not describe zero-idle results from timer-disabled fixtures as proof of enabled background behavior.
 - Keep live receipts, mailbox text, local paths and screenshots with real accounts in ignored local notes. Read-only snapshot stdout contains mail display text and must not be recorded publicly. Credentials never belong in command arguments, chat, Git or reports.
 - Finish with the bar launch action, configured refresh behavior, account-specific reconnection command, any remaining Google setup gate and where private configuration/backups live. Stop and report an actual blocked account while continuing independent accounts; do not repeat a rejected consent indefinitely.
+
+## Optional terminal workflows
+
+If the user requests TUI or agent mail operations, read `docs/TERMINAL.md` and `docs/AGENT-CLI.md`. The verified backend also provides `omagma tui`, `omagma cli` and one-shot command families. Use its absolute path or follow `docs/INSTALL.md` to link it into an existing user PATH directory after inspecting any existing command; verify `--version` before use. Fixtures need no consent. Existing bar credentials support mail-read; contacts, sends, modifications and RSVP need a separate terminal Desktop-client grant. Keep both namespaces isolated. Prepare and test using fictional fixtures before any additional Google consent, and never use development authorization to send production mail. Initial live write acceptance uses a dedicated test mailbox explicitly provided by the user; production mail and contact changes require their own explicit task authorization. Explain the built-in split composer and full-terminal `$EDITOR` fallback without implying tmux is required.

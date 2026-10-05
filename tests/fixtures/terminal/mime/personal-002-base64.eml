@@ -1,0 +1,13 @@
+From: Alex Fixture <alex@example.org>
+To: personal@example.com, teammate@example.org
+Subject: Synthetic personal thread 000
+Message-ID: <fixture-002-personal@example.org>
+Date: Sat, 7 Nov 2026 09:00:00 +0000
+MIME-Version: 1.0
+References: <fixture-001-personal@example.org>
+In-Reply-To: <fixture-001-personal@example.org>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+T2zDoSwgZml4dHVyZSB0ZWFtIPCfkYsKQ2Fmw6kgY29zdHMg4oKsMy41MC4KTGl0ZXJhbCA8Yj50
+ZXh0PC9iPiBzdGF5cyB0ZXh0LgpMaXRlcmFsID0zRCBzdGF5cyA9M0QuCg==

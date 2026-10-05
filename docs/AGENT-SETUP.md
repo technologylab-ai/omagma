@@ -24,3 +24,7 @@ ln -s /absolute/path/to/omagma/skills/omagma-setup ~/.codex/skills/omagma-setup
 Restart your agent session after installation and ask it to use `$omagma-setup`. Other agents that support `SKILL.md` can use the same instructions. The skill stays in the omagma folder and refers to the included project docs. It does not grant permission to modify unrelated desktop settings or bypass Google consent.
 
 Source and release builds use the actual tested pin declared in `build.zig.zon`. When porting to a newer Zig version, update the implementation, checks and documentation together. [Release maintenance](RELEASING.md) explains version-driven publication.
+
+## Terminal client and agents
+
+For `omagma tui`, the JSONL agent client, cached full mail, drafts and scoped write setup, read [TERMINAL.md](TERMINAL.md) and [AGENT-CLI.md](AGENT-CLI.md). Existing bar credentials remain read-only. New terminal consent uses a separate Desktop client and Secret Service namespace; do not broaden the bar grant. Fixture-backed development never authorizes production writes. Initial live write acceptance requires a dedicated test mailbox explicitly provided by the user; production mail and contact changes require their own explicit task authorization.

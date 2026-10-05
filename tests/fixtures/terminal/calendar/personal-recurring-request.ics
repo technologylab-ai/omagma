@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Omagma//Synthetic fixture//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:fixture-meeting@example.org
+DTSTAMP:20261101T080000Z
+SEQUENCE:4
+DTSTART:20261107T100000Z
+DTEND:20261107T103000Z
+ORGANIZER:mailto:organizer@example.org
+ATTENDEE;CN=Fixture account;RSVP=TRUE;PARTSTAT=NEEDS-ACTION:mailto:personal@example.com
+SUMMARY:Synthetic meeting
+DESCRIPTION:Café\, tea and fixture discussion.
+RECURRENCE-ID:20261107T100000Z
+ATTENDEE;CN=Other fixture;PARTSTAT=ACCEPTED:mailto:other@example.net
+END:VEVENT
+END:VCALENDAR

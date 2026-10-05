@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "networkRequired": false,
+  "accounts": [
+    "personal@example.com",
+    "work@example.com",
+    "optional@example.com"
+  ],
+  "messagesPerAccount": 96,
+  "pageSize": 12,
+  "pagesPerAccount": 8,
+  "sharedIdsIntentional": true,
+  "caseByMessageId": {
+    "shared-msg-001": "quoted-printable",
+    "shared-msg-002": "base64",
+    "shared-msg-003": "alternative-attachment",
+    "shared-msg-004": "html-only",
+    "shared-msg-005": "reply-all",
+    "shared-msg-006": "missing-message-id",
+    "shared-msg-007": "controls",
+    "shared-msg-008": "invitation",
+    "shared-msg-009": "recurring-invitation",
+    "shared-msg-010": "external-body",
+    "shared-msg-011": "latin1",
+    "shared-msg-012": "encoded-display-name",
+    "shared-msg-013": "cache-pressure",
+    "shared-msg-014": "cache-pressure",
+    "shared-msg-015": "cache-pressure"
+  },
+  "bodyExpected": {
+    "quoted-printable": "Olá, fixture team 👋\nCafé costs €3.50.\nLiteral <b>text</b> stays text.\nLiteral =3D stays =3D.\n",
+    "base64": "Olá, fixture team 👋\nCafé costs €3.50.\nLiteral <b>text</b> stays text.\nLiteral =3D stays =3D.\n",
+    "alternative-attachment": "Olá, fixture team 👋\nCafé costs €3.50.\nLiteral <b>text</b> stays text.\nLiteral =3D stays =3D.\n",
+    "external-body": "Olá, fixture team 👋\nCafé costs €3.50.\nLiteral <b>text</b> stays text.\nLiteral =3D stays =3D.\n",
+    "latin1": "Café and crème.\n"
+  },
+  "attachmentExpected": {
+    "filenameInput": "../../escape.txt",
+    "safeFilename": "escape.txt",
+    "size": 72,
+    "sha256": "1bd24f97a991cc5232c8b42a518a75b0a87d1df7e4bc18d0406141bf98d1ac34"
+  },
+  "displayNameExpected": {
+    "messageId": "shared-msg-012",
+    "name": "Fixture, Café",
+    "to": [
+      "alex@example.org",
+      "teammate@example.org"
+    ]
+  },
+  "replyAllExpected": {
+    "personal@example.com": {
+      "to": [
+        "replies@example.org"
+      ],
+      "cc": [
+        "teammate@example.org",
+        "colleague@example.net"
+      ],
+      "excluded": [
+        "personal@example.com",
+        "hidden@example.org"
+      ]
+    },
+    "work@example.com": {
+      "to": [
+        "replies@example.org"
+      ],
+      "cc": [
+        "teammate@example.org",
+        "colleague@example.net"
+      ],
+      "excluded": [
+        "work@example.com",
+        "hidden@example.org"
+      ]
+    },
+    "optional@example.com": {
+      "to": [
+        "replies@example.org"
+      ],
+      "cc": [
+        "teammate@example.org",
+        "colleague@example.net"
+      ],
+      "excluded": [
+        "optional@example.com",
+        "hidden@example.org"
+      ]
+    }
+  },
+  "capabilities": [
+    "mail-read",
+    "mail-modify",
+    "mail-send",
+    "contacts-read",
+    "contacts-write",
+    "calendar-rsvp"
+  ],
+  "permanentDeleteSupported": false
+}
