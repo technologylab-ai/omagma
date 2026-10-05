@@ -24,7 +24,7 @@ To have an agent install it, point the agent at this repository and say **“Ins
 
 `omagma tui` opens a Vim-oriented, account-separated mail client: complete messages and threads, search and pagination, local drafts, replies/reply-all, contacts, attachments, archive/Trash/restore, and invitation replies. The split composer keeps the mail context visible; `$EDITOR` temporarily takes over the terminal and returns afterward. **No tmux is required.** Calendar views and permanent deletion are excluded.
 
-`omagma cli` / `omagma agent` provide a JSONL interface; one-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands use the same executor. Fetch beyond the bar's 30 messages using explicit continuation cursors. The terminal cache defaults to **2,000 message metadata entries and 256 MiB of disk per account**. Terminal heap allocations are capped at 64 MiB, in addition to the existing 16 MiB fixed backend storage reservation. These bounds are separate from the measured process footprint above.
+`omagma cli` / `omagma agent` provide a JSONL interface; one-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands use the same executor. Fetch beyond the bar's 30 messages using explicit continuation cursors. The terminal cache defaults to **2,000 message metadata entries and 256 MiB of disk per account**. Terminal heap allocations are capped at 64 MiB, in addition to the existing 16 MiB fixed backend storage reservation. Native x86_64 synthetic measurements settled around **7 MB for the agent CLI and 9 MB for the TUI**, with peaks around 11 MB and 13 MB respectively, across three accounts and 1,000 cycles. These are whole terminal process measurements; see [memory measurements](docs/MEMORY.md) for workload and accounting. Allocation ceilings are separate from resident memory.
 
 Try everything without Google credentials or desktop installation:
 
@@ -63,7 +63,7 @@ The UI harness runs offscreen and closes its processes when finished. See [verif
 - [UI behavior](docs/UI.md) and [background refresh](docs/BACKGROUND-REFRESH.md)
 - [Privacy and credentials](docs/PRIVACY.md)
 - [Bounded transport](docs/TRANSPORT.md) and [IPC protocol](docs/PROTOCOL.md)
-- [Memory measurements](docs/MEMORY.md), [Zig 0.17 qualification](docs/evidence/zig-0.17.0.md) and [historical Zig 0.16 evidence](EVIDENCE.md)
+- [Memory measurements](docs/MEMORY.md), [terminal qualification](docs/evidence/terminal-0.2.0.md), [Zig 0.17 qualification](docs/evidence/zig-0.17.0.md) and [historical Zig 0.16 evidence](EVIDENCE.md)
 - [Distribution](docs/DISTRIBUTION.md) and [compiler findings for wiki review](docs/ZIG017-WIKI-FOLLOWUP.md)
 - [Building and publishing releases](docs/RELEASING.md)
 - Social images: [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)

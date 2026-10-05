@@ -36,7 +36,7 @@ Contact updates must compare the contact source etag, preserving concurrent edit
 
 ## Execution and evidence
 
-Use exact Zig 0.17.0. Correctness receipts identify the binary-reported `debug` mode; memory receipts identify `safe`. Python/Node and PTYs are development tools only. All runtime helpers remain Zig.
+Use exact Zig 0.17.0. Correctness receipts identify the binary-reported `debug` or `safe` mode; memory receipts identify `safe`. Python/Node and PTYs are development tools only. All runtime helpers remain Zig.
 
 The agent CLI contract is one structured request and reply per line. Requests include `account`, `cmd`, optional `id` and command fields; replies include `version: 1`, the same account/id, `ok` and either `data` or `error: {code, message}`. The canonical invocation is `omagma cli --fixtures --fixture-root tests/fixtures/terminal --cache-dir <isolated-directory>`, with `omagma agent` as an alias. CLI mutations that send mail or RSVP require an operation ID and report `applied`, `rejected` or `unknown`.
 
@@ -53,20 +53,48 @@ python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind cli
 python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind tui
 ```
 
-The fixture-only checker has passed 12 independent checks. A Debug build passed 28 CLI behavioral cases, including account isolation, configured cache eviction, corruption rejection, stdout backpressure, oversized-frame recovery and persisted operation deduplication. The initial failed startup receipt and subsequent passing receipts remain in ignored local results. The cache startup failure came from using an `O_PATH` directory descriptor with `fchmod`; opening that directory with `iterate = true` corrected the application.
+### Final source qualification
 
-The current Debug and Safe binaries both passed all 38 CLI cases. Checks cover strict input types, a valid decoded body at the 2 MiB limit, oversized quoted replies without orphan drafts, malformed MIME that preserves another valid cache entry, malformed reply identity, one-shot commands using the shared executor, readable sent mail across restart and cache clearing, and bounded binary draft attachments. Uncertain direct sends retain immutable recovery drafts and operation receipts through restart and cache clearing; completed drafts can be discarded. An identical uncertain payload submitted under a new operation ID returns the original receipt without another journal entry, recovery draft or provider call, including after restart. Unread/star/trash changes to sent mail agree across full reads, folder lists and threads, then survive cache clearing, restart and restoration.
+On 2026-10-05, Omagma 0.2.0 at source revision `7568a2467b5a93142259bc50057a177c3acf7150` passed the following suites with exact Zig 0.17.0. Each receipt verifies the binary's own compiler, optimization mode and SHA-256.
 
-The first twelve-case PTY run passed nine cases. External editor save and save-error failed on terminal restoration with `ProcessOrphaned`; a 66-byte readback allocation remained owned on that early error path. Corrected job-control handling and result ownership now pass both workflows, including complete terminal restoration and independently read persisted Unicode content. The mail-control case found an async search wait race in the harness, corrected to wait for the loaded mailbox before Enter. Failed receipts and escaped synthetic terminal output remain preserved.
+| Suite | Debug | Safe |
+| --- | ---: | ---: |
+| CLI behavior | 42/42 | 42/42 |
+| Isolated PTY workflows | 19/19 | 19/19 |
+| Independent loopback wire checks | 7/7 | 7/7 |
 
-The current thirteen-case PTY workflows pass in Debug and Safe. Debug ran twelve passing cases plus a targeted successful uncertainty-reopen case after correcting a harness predicate that incorrectly matched the mailbox footer's “Compose” help text; Safe passed all thirteen in one run. Gates cover editor save/error/cancellation, interruption, attachment review/persistence/detach, send review cancellation and explicit mock submission, contact creation, RSVP review cancellation, account/page navigation and active draft retention on SIGTERM. Reopening an uncertain submission retains the same durable receipt and blocks a fresh send review. The next fifteen-case suite adds long-field caret rendering and incoming attachment saving, with complete help text checked during navigation; these new checks await the next source snapshot.
+The Debug binary SHA-256 is `79d85ca3a22ccd4d80f2ffbcdf57e688876c6d32c279a831b98767ab22100e65`; the stripped Safe binary SHA-256 is `046b6bd5ee929c6a47b576c091b6266316bce591e978fd09719cc3540b341279`. Local receipts are named `terminal-queue-{cli,pty,wire}-{debug,safe}.json` under ignored `tests/results/`. The fixture checker separately passed 12 checks; six helper checks verify the bounded terminal cell model. That model checks current rendered field positions and the renderer's escape sequences, and is not a complete terminal emulator.
 
-Six independent development helper tests verify the terminal cell model, which checks current rendered composer field positions rather than retained output history. The model covers the escape sequences used by the renderer; it is not a complete terminal emulator. Receipts identify the actual backend compiler, mode and hash; syntax checks are not runtime acceptance.
+CLI checks cover three-account pagination, a decoded body at the 2 MiB limit, MIME refusal without damaging another cached message, cache identity and mock/live namespace isolation, lowered limits after restart, and machine-readable framing under oversized input and stdout backpressure. Draft, send and RSVP receipts survive restart and cache clearing. An uncertain payload submitted with a new operation ID returns the original receipt without another provider call or recovery draft; that draft cannot be changed or discarded. Sent unread/star/trash state agrees across reads, lists and threads, then survives clearing, restart and restoration.
 
-The separate Safe measurement harness performs 1,000 complete pagination/full-read cycles or 1,000 TUI account/page/navigation/reload cycles, followed by 60 seconds without commands or key input. It samples Linux RSS, PSS, private memory, thread count and process CPU, requiring warm RSS/PSS median growth no greater than 4 MiB and idle CPU below 0.5% of one core. Actual terminal heap high-water is recorded against its 64 MiB ceiling; the existing 16 MiB fixed backend/HTTP reservation is reported separately. Linux RSS/PSS cover the whole process, including touched fixed storage, stacks and library allocations. The heap meter does not account for those fixed globals. The harness sets no arbitrary absolute RSS/PSS limit and does not reuse the bar's memory evidence. Measurement execution is pending correctness qualification and the coordinated Safe build.
+File checks reject symlinks, public permissions, FIFOs and directories used as cache index/lock files. All four CLI file-input options reject FIFOs and leaf symlinks promptly. The atomic replacement check independently verifies that old and new logical file bytes count toward the quota. Its additional 1 ms directory-size samples can miss a short transient; sampling is not the sole quota oracle.
 
-Three additional CLI checks await the next snapshot: mock/live cache namespace separation for the same fictional account, finite refusal of symlink/public-mode/FIFO/directory index and lock files, and atomic replacement that includes both old and new logical file bytes in the configured quota. A sampled directory-size watcher complements the deterministic old-plus-new refusal check; its 1 ms samples can miss short transients and are reported with that limitation.
+PTY checks cover editor save, cancellation and failure; terminal restoration; explicit send review; uncertain-send reopening; contacts; account/page navigation; long RSVP identity review; and draft retention on SIGTERM. Long Unicode fields preserve the exact expected 2,349-byte draft, and eight deliberately fragmented UTF-8 inputs preserve every code point. Attachment tests compare bytes and digest, preserve outgoing attachments through save, refuse overwrites and relative incoming destinations, and reject FIFO attachment/editor readback without blocking. Every case exits cleanly with terminal settings restored; only explicit confirmation submits synthetic mail.
 
-The terminal wire harness uses a separate loopback peer and a fixed synthetic bearer. It compares the complete 128 KiB POST JSON and HTTP headers with an independent oracle, accepts a valid response above the bar's 512 KiB cap, verifies redirects are never forwarded, measures the internal 10-second deadline with stalled and trickled responses, rejects declared and streamed responses over 3 MiB, and requires an oversized outgoing request to be refused before any TCP connection. It uses no Google endpoint or user token. Runtime qualification awaits the terminal probe modes in the next build.
+The loopback peer compares the complete 131,072-byte POST JSON and headers with an independent oracle. It accepts a 614,424-byte response, rejects redirect forwarding and declared/chunked responses above 3 MiB, and observes zero TCP connections for an oversized outgoing request. Stalled and trickled responses both hit the internal 10,000 ms deadline: observed wall time was 10.01–10.02 seconds in Debug and 10.006–10.008 seconds in Safe. These checks use a fixed synthetic bearer and no Google endpoint.
+
+### Memory and quiet windows
+
+Both sequential Safe acceptance runs passed after 100 warmup cycles and 1,000 measured cycles. CLI cycles issue eight page requests and a full read, with periodic complete-thread reads; TUI cycles switch accounts, page forward/back, select a message and reload. All three fictional accounts are exercised. Each workload is followed by 60 seconds without commands or keys.
+
+| Observation | CLI | TUI |
+| --- | ---: | ---: |
+| Warm median RSS / PSS (KiB) | 7,000 / 7,000 | 8,536 / 8,528 |
+| Warm RSS / PSS / private growth (KiB) | 0 / 0 / 0 | 0 / 0 / 0 |
+| Sampled peak RSS / PSS (KiB) | 10,672 / 10,672 | 12,076 / 12,068 |
+| OS RSS high-water (KiB) | 10,768 | 12,400 |
+| Maximum observed threads | 1 | 5 |
+| Terminal heap peak (bytes) | 7,235,433 | 7,617,129 |
+| Rejected allocations | 0 | 0 |
+| Quiet duration (seconds) | 60.0009 | 60.0013 |
+| Quiet CPU, percent of one core | 0 | 0 |
+
+Warm first/last-quarter RSS and PSS medians must grow by at most 4 MiB, and quiet CPU must remain below 0.5% of one core. Both passed without changing thresholds. The TUI emitted no bytes during its quiet window. Receipts are `terminal-queue-cli-safe-measure.json` and `terminal-queue-tui-safe-measure.json`; process sampling is every 50 ms and CPU is measured in Linux process clock ticks.
+
+The 64 MiB ceiling applies to the capped terminal heap. The existing 16 MiB fixed backend/HTTP reservation is reported separately. Linux RSS/PSS sample the whole process, including resident fixed storage, stacks and libraries; the heap meter does not count those globals. These runs set no absolute RSS/PSS ceiling and do not reuse the bar's qualification.
+
+### Preserved failures
+
+Earlier failed receipts and escaped synthetic VT captures remain unchanged in ignored local results. Application fixes addressed an `O_PATH` directory passed to `fchmod`, editor job-control restoration and readback ownership, and an unnecessary immutable-body rewrite that exceeded the atomic replacement quota. The long-field test independently found one emoji dropped across a 1,024-byte input boundary; the bounded UTF-8 carry adapter now passes the unchanged exact-content oracle. Its first queue implementation then caused a startup stack-probe fault from a large initialization temporary. In-place initialization and small entries owning capped heap text corrected that fault; the final 19-case suites pass in both modes. Two harness waits were also corrected to wait for loaded search results and the actual pane instead of matching help text. None of these failures justified weakening acceptance limits.
 
 Live gates remain separate: authorization upgrades, real Gmail paging/MIME/thread behavior, People read/write conflicts, actual send outcomes and delivery of invitation replies. Fixture tests cannot establish provider deduplication or successful recipient delivery. No real mailbox, contact or invitation is changed by these tests.

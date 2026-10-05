@@ -2,7 +2,20 @@
 
 The motivation for Omagma was a single Gmail tab observed using roughly **2 GB of RAM** on its author's desktop. That is an individual observation, not a universal Gmail requirement or a controlled comparison: Omagma shows a bounded recent-mail list and snippets, and opens the full Gmail application when needed.
 
-## Current three-account measurement
+## Terminal modes, 0.2.0
+
+On 2026-10-05, native Linux x86_64 static-musl Safe builds from source `7568a2467b5a93142259bc50057a177c3acf7150` passed separate 1,000-cycle CLI and TUI measurements. Each used three fictional accounts with 96 messages each, after 100 warm-up cycles, followed by a 60-second quiet interval.
+
+| Whole terminal process | Settled RSS | Settled PSS | OS peak RSS | Warm RSS/PSS growth | Quiet CPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Agent CLI | 7,000 KiB (6.8 MiB) | 7,000 KiB | 10,768 KiB (10.5 MiB) | 0 KiB | 0 ticks |
+| TUI | 8,536 KiB (8.3 MiB) | 8,528 KiB | 12,400 KiB (12.1 MiB) | 0 KiB | 0 ticks |
+
+These numbers include the complete Omagma terminal process: touched storage, heap, stacks, runtime and executable pages. The terminal emulator, separately running bar, Chrome and an active external editor are separate processes. The CLI traversed eight pages and read a full message on every cycle; the TUI changed accounts, paged, selected messages and reloaded. Peak measurements and settled memory describe this workload, not a guarantee for every message or editor.
+
+The terminal allocator peaked at 7,235,433 bytes for CLI and 7,617,129 bytes for TUI, with no rejected allocations. Its **64 MiB heap ceiling** is separate from the **16 MiB fixed backend/HTTP reservation**. The whole-process RSS/PSS measurements include their touched pages; summing allocation ceilings does not predict resident memory. See [terminal qualification](TERMINAL-VERIFICATION.md) for reproduction and limits. Historical bar measurements below retain their original version and accounting.
+
+## Three-account bar measurement, v0.1.1
 
 On 2026-10-05, the installed **v0.1.1 / Zig 0.17.0** static-musl backend with three connected accounts and five-minute background refresh used **14,444 KiB PSS** (14,452 KiB RSS), stable across five samples. A separate full offscreen UI qualification with 90 rows attributed **15,514 KiB PSS** after 1,000 open/close cycles. Together:
 
