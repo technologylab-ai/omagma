@@ -2,6 +2,21 @@
 
 The motivation for Omagma was a single Gmail tab observed using roughly **2 GB of RAM** on its author's desktop. That is an individual observation, not a universal Gmail requirement or a controlled comparison: Omagma shows a bounded recent-mail list and snippets, and opens the full Gmail application when needed.
 
+## Terminal modes, 0.2.2
+
+Cache-first runtime source `ce410a5a29fbe94cb693e48c98a04ef49ee3b01b` was measured on 2026-10-05 with exact Zig 0.17.0, native Linux x86_64 static-musl Safe. The original three-account workloads, 100 warm-ups, 1,000 measured cycles and 60-second quiet intervals retain their acceptance thresholds.
+
+| Whole terminal process | Settled RSS / PSS | OS peak RSS | Warm RSS/PSS/private growth | Quiet CPU |
+| --- | ---: | ---: | ---: | ---: |
+| Agent CLI | 8,792 / 8,784 KiB | 12,560 KiB | 0 KiB | 0 ticks |
+| TUI | 10,036 / 10,028 KiB | 13,176 KiB | 0 KiB | 0 ticks |
+
+Rounded decimal footprints are about **9 MB for the CLI and 10–11 MB for the TUI**, with workload peaks around **13–14 MB**. Capped-heap peaks were 4,304,957 and 5,410,258 bytes, with zero allocation refusals. The TUI emitted no bytes during its quiet minute. These are whole terminal processes; the terminal emulator, external editor and separately running bar are excluded. [Cache-first qualification](evidence/terminal-0.2.2.md) records exact executable identities.
+
+A separate maximum-cache stress seeded 2,000 metadata records averaging 1,528 bytes, added 100 and deleted ten. It retained the exact newest 2,000 within **3,344,073 disk bytes**, with preserved body hashes and no orphan files. Its peak capped heap was **41,945,834 bytes** and whole-process OS peak RSS **44,720 KiB**, approximately **46 MB**. This deliberately larger workload is separate from settled small-message memory; the 64 MiB heap ceiling and 16 MiB fixed-storage reservation are allocation accounting, not resident-memory totals.
+
+The new terminal features settle roughly 2 MB above the previous local workload. Both versions use the same exact compiler, and their separate process lifetimes do not establish an isolated compiler effect. Historical tables stay attached to their original versions. The optional cache timer is a short native one-shot; it has no resident cache process between runs.
+
 ## Terminal modes, 0.2.1
 
 The incoming-header compatibility patch at source `858ce32d21625a136fbed102d265e97bb95b0a48` was measured separately on 2026-10-05, using native Linux x86_64 static-musl Safe and exact Zig 0.17.0. The original three-account fixture workload, 100 warm-up cycles, 1,000 measured cycles and 60-second quiet intervals were unchanged.

@@ -1,6 +1,6 @@
 # Terminal and agent verification
 
-The terminal expansion is verified with fictional accounts and a mock provider before live authorization. This document records test contracts and remaining gates; it does not claim that unfinished tests passed. Existing bar memory thresholds and historical evidence remain unchanged.
+The terminal expansion is verified with fictional accounts and a mock provider before live authorization. This document records test contracts and remaining gates; it does not claim that unfinished tests passed. Existing bar memory thresholds and historical evidence remain unchanged. Current cache-first qualification is recorded separately in [the 0.2.2 evidence](evidence/terminal-0.2.2.md); earlier sections below retain their original executable identities.
 
 ## Fixture corpus
 
