@@ -1,0 +1,21 @@
+{
+  "synthetic": true,
+  "networkRequired": false,
+  "threadId": "shared-thread-031",
+  "htmlMessageId": "shared-msg-096",
+  "plainPreferredMessageId": "shared-msg-095",
+  "legacyHtmlTemplate": "<h1>Legacy fictional brief</h1><p>Fictional {account}: café ∴.</p><ul><li>Legacy fictional item</li></ul>",
+  "legacyTextTemplate": "Legacy fictional brief\nFictional {account}: café ∴.\n- Legacy fictional item",
+  "plainPreferredTemplate": "Fictional plain preference for {account}: café 👋 complete.\n",
+  "plainMismatchTemplate": "Fictional independently written plain body for {account}: café complete.\n",
+  "heading": "Fictional HTML brief",
+  "styles": {"Important": "bold", "Gentle": "italic", "Guide": "underline"},
+  "unorderedItems": ["First fictional item", "Second fictional item"],
+  "orderedItems": ["Numbered alpha", "Numbered beta"],
+  "quote": "Quoted fictional note",
+  "preLines": ["alpha  beta", "  gamma ∴", "emoji 👋 end"],
+  "table": [["Item", "Qty", "Total"], ["Pears", "2", "€3.50"], ["Tea", "10", "€8.00"]],
+  "bodySourceValues": ["plain", "html", "unknown"],
+  "inputByteLimit": 2097152,
+  "expected": "HTML-only reader formats safe structural content; multipart plain and explicit provenance remain authoritative; valid old cached HTML is formatted locally without rewriting its body or fetching resources"
+}

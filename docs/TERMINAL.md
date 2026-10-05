@@ -17,6 +17,24 @@ The bar stays read-only and does not persist mail. Terminal reads do not mark ma
 
 The TUI shows available cached mail at startup while fetching updates in the background. A separate colored status line distinguishes fetching, refreshing cached mail, successful completion and cached data after a refresh failure. `NO_COLOR` retains these states as text. Cached navigation and previously downloaded full bodies remain usable during refresh, and list updates retain the selected message identity. The fixed per-account message count keeps the newest mail and evicts the oldest tail with its body files; the byte limit also guards unusually large mail. See [cache-first startup](TUI-CACHE.md) for synchronization, cache limits and partial-data behavior.
 
+## Reading HTML-only mail
+
+The reader prefers a nonempty plain-text MIME alternative. If only HTML is
+available, a native text filter preserves headings, bold and italic emphasis,
+lists, quotes, preformatted blocks and simple data tables. Colors come from the
+active Omarchy palette. Tables wrap within the pane; narrow panes use stacked
+cells. Presentation and nested newsletter tables flatten into reading order.
+
+HTML is not a browser view: scripts, stylesheets and remote images/resources
+never run or load. Image alt text can appear. Links have colored, underlined
+labels, without emitting terminal hyperlink commands. Complex HTML falls back
+to the existing complete plain-text conversion. This needs no external filter.
+
+The same view works beside or below the list, expanded, and while reading a
+cached message during refresh. Existing caches remain usable. Agent replies and
+CLI `bodyText` keep their plain-text representation; `bodySource` records
+`plain`, `html` or `unknown` for old cache entries.
+
 ## Keys
 
 | Key | Action |
@@ -79,7 +97,7 @@ Use a dedicated test Gmail account for first live writes. Development tests are 
 
 Pages contain at most 100 messages (TUI requests 32). Live thread reads reject more than 100 messages or an oversized response explicitly. Cache defaults are 2,000 metadata entries and 256 MiB per account, configurable with `--metadata-limit` / `--disk-limit-bytes`; hard ceilings are 10,000 and 1 GiB. Bodies and aggregate decoded outgoing attachments are 2 MiB, requests and live provider response storage 3 MiB, outgoing recipients 32, outgoing attachments 16, incoming attachments 32 per message, local drafts 128, cached contacts 1,024 and operation receipts 1,000. A full journal refuses new submissions instead of forgetting uncertain outcomes. Terminal heap allocations are capped at 64 MiB; the existing 16 MiB fixed backend/HTTP reservation is accounted separately. OS/std/editor memory is outside those application storage bounds.
 
-Incoming MIME parsing accepts up to 256 headers, 8 KiB per header value and 32 KiB of aggregate headers. Incoming envelopes allow up to 1,024 participants per address header and retain their separate 16 KiB address-parser budget. Addresses have a practical 254-byte cap; RFC 2047 decoded display names have a 256-byte cap. Incoming local parts may exceed 64 bytes; outgoing SMTP addresses retain the 64-byte local-part limit and outgoing recipients remain capped at 32. The ASCII address grammar is unchanged, without SMTPUTF8 or expanded obsolete forms. Reply-all removes self aliases and duplicates before enforcing the final 32-recipient cap; overflow returns an error rather than truncating recipients.
+Incoming MIME parsing accepts up to 256 headers, 8 KiB per header value and 32 KiB of aggregate headers per MIME entity/part header block. Incoming envelopes allow up to 1,024 participants per address header and retain their separate 16 KiB address-parser budget. Addresses have a practical 254-byte cap; RFC 2047 decoded display names have a 256-byte cap. Incoming local parts may exceed 64 bytes; outgoing SMTP addresses retain the 64-byte local-part limit and outgoing recipients remain capped at 32. The ASCII address grammar is unchanged, without SMTPUTF8 or expanded obsolete forms. Reply-all removes self aliases and duplicates before enforcing the final 32-recipient cap; overflow returns an error rather than truncating recipients.
 
 Disk quotas count logical file bytes, including the overlap during atomic replacement. Bodies are evictable. Direct sends also save recovery drafts before submission; unknown operations protect those drafts against changed-content edits or discard. Use `draft.discard` to explicitly remove completed local drafts. Drafts and operation receipts are retained; quota exhaustion is an explicit error. `cache.clear` removes cached mail while preserving drafts, contacts and receipts. Cache cursors are account/query/generation scoped; after mutations or clear, restart pagination instead of reusing a stale cursor. Per-account locks prevent simultaneous writers. Synthetic submitted mail has its own quota-counted outbox, capped at 128, so cache eviction/clear does not erase mock sends.
 

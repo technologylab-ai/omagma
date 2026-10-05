@@ -1,0 +1,35 @@
+{
+  "synthetic": true,
+  "document": "<!doctype html><html><head><title>HIDDEN_HEAD_MARKER</title><style>HIDDEN_STYLE_MARKER</style><link rel=\"stylesheet\" href=\"{trackerUrl}/style\"></head><body><h1>Fictional safe HTML</h1><p>Fictional {account}: safety caf\u00e9 \u2234 \ud83d\udc4b.</p><script>HIDDEN_SCRIPT_MARKER</script><script/>HIDDEN_SCRIPT_SLASH_MARKER</script><style/>HIDDEN_STYLE_SLASH_MARKER</style><!-- HIDDEN_COMMENT_MARKER --><template>HIDDEN_TEMPLATE_MARKER</template><svg><text>HIDDEN_SVG_MARKER</text></svg><iframe src=\"{trackerUrl}/frame\">HIDDEN_IFRAME_MARKER</iframe><noscript>HIDDEN_NOSCRIPT_MARKER</noscript><p hidden>HIDDEN_ATTRIBUTE_MARKER</p><p style=\"display:none\">HIDDEN_DISPLAY_MARKER</p><img src=\"{trackerUrl}/pixel\" alt=\"Fictional image\"><p>Visible label <a href=\"javascript:alert(1)\">Unsafe script label</a> <a href=\"data:text/html,fictional\">Unsafe data label</a> <a href=\"file:///fictional\">Unsafe file label</a> <a href=\"https://example.org/guide\">Safe guide</a></p><p>Control prefix \u001b]52;c;RklDVElPTkFM\u0007 control suffix. Bidi prefix \u202etext\u202c bidi suffix.</p><p>Fictional safe tail marker.</p></body></html>",
+  "visible": [
+    "Fictional safe HTML",
+    "Visible label",
+    "Unsafe script label",
+    "Unsafe data label",
+    "Unsafe file label",
+    "Safe guide",
+    "control suffix",
+    "bidi suffix",
+    "Fictional safe tail marker."
+  ],
+  "hidden": [
+    "HIDDEN_HEAD_MARKER",
+    "HIDDEN_STYLE_MARKER",
+    "HIDDEN_SCRIPT_MARKER",
+    "HIDDEN_COMMENT_MARKER",
+    "HIDDEN_TEMPLATE_MARKER",
+    "HIDDEN_SVG_MARKER",
+    "HIDDEN_IFRAME_MARKER",
+    "HIDDEN_NOSCRIPT_MARKER",
+    "HIDDEN_ATTRIBUTE_MARKER",
+    "HIDDEN_DISPLAY_MARKER",
+    "HIDDEN_SCRIPT_SLASH_MARKER",
+    "HIDDEN_STYLE_SLASH_MARKER"
+  ],
+  "unsafeTargets": [
+    "javascript:alert(1)",
+    "data:text/html,fictional",
+    "file:///fictional"
+  ],
+  "safeTarget": "https://example.org/guide"
+}

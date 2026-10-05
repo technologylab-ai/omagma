@@ -4,6 +4,11 @@ const j = @import("json.zig");
 const core = @import("core.zig");
 const files = @import("files.zig");
 const CappedAllocator = @import("capped_allocator.zig").CappedAllocator;
+const HtmlMetrics = struct {
+    htmlDocumentBuilds: u64,
+    htmlLayoutBuilds: u64,
+    htmlFallbacks: u64,
+};
 
 pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.process.Args.Iterator) !void {
     var cap: CappedAllocator = .{ .backing = init.gpa, .limit = t.Limits.runtime_bytes };
@@ -78,7 +83,13 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             var split = std.mem.splitScalar(u8, v, ',');
             while (split.next()) |part| try values.array.append(.{ .string = part });
             try req.object.put(sa, "capabilities", values);
-        } else if (eq(arg, "--fixture-root")) options.fixture_root = v else if (eq(arg, "--fixture-scenario")) options.fixture_scenario = v else if (eq(arg, "--cache-dir")) options.cache_dir = v else if (eq(arg, "--ui-file")) options.ui_file = v else if (eq(arg, "--editor-mode")) options.editor_mode = v else if ((eq(arg, "--metadata-limit") or eq(arg, "--cache-messages"))) { options.metadata_limit = try std.fmt.parseInt(usize, v, 10); options.metadata_limit_set = true; } else if ((eq(arg, "--disk-limit-bytes") or eq(arg, "--cache-bytes"))) { options.disk_limit = try std.fmt.parseInt(usize, v, 10); options.disk_limit_set = true; } else if (eq(arg, "--account")) {
+        } else if (eq(arg, "--fixture-root")) options.fixture_root = v else if (eq(arg, "--fixture-scenario")) options.fixture_scenario = v else if (eq(arg, "--cache-dir")) options.cache_dir = v else if (eq(arg, "--ui-file")) options.ui_file = v else if (eq(arg, "--editor-mode")) options.editor_mode = v else if ((eq(arg, "--metadata-limit") or eq(arg, "--cache-messages"))) {
+            options.metadata_limit = try std.fmt.parseInt(usize, v, 10);
+            options.metadata_limit_set = true;
+        } else if ((eq(arg, "--disk-limit-bytes") or eq(arg, "--cache-bytes"))) {
+            options.disk_limit = try std.fmt.parseInt(usize, v, 10);
+            options.disk_limit_set = true;
+        } else if (eq(arg, "--account")) {
             options.account = v;
             try req.object.put(sa, "account", .{ .string = v });
         } else if (eq(arg, "--limit")) try req.object.put(sa, "limit", .{ .integer = try std.fmt.parseInt(i64, v, 10) }) else if (eq(arg, "--cursor")) try req.object.put(sa, "cursor", .{ .string = v }) else if (eq(arg, "--query")) try req.object.put(sa, "query", .{ .string = v }) else if (eq(arg, "--label")) try req.object.put(sa, "label", .{ .string = v }) else if (eq(arg, "--message-id") or eq(arg, "--id")) try req.object.put(sa, "messageId", .{ .string = v }) else if (eq(arg, "--thread-id")) try req.object.put(sa, "threadId", .{ .string = v }) else if (eq(arg, "--draft-id")) try req.object.put(sa, "draftId", .{ .string = v }) else if (eq(arg, "--attachment-id")) try req.object.put(sa, "attachmentId", .{ .string = v }) else if (eq(arg, "--operation-id")) try req.object.put(sa, "operationId", .{ .string = v }) else if (eq(arg, "--status")) try req.object.put(sa, "status", .{ .string = v }) else if (eq(arg, "--to") or eq(arg, "--cc") or eq(arg, "--bcc")) {
@@ -124,9 +135,17 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     var session = try core.Session.init(io, a, init.environ_map, options);
     defer session.deinit();
     session.meter = &cap;
-    defer if (metrics_file) |path| writeMetrics(io, path, &cap) catch {};
+    var html_metrics: ?HtmlMetrics = null;
+    defer if (metrics_file) |path| writeMetrics(io, path, &cap, html_metrics) catch {};
     if (interactive) {
-        if (@import("build_options").tui) try @import("tui.zig").run(io, a, session.client(), options, init.environ_map) else return error.TuiNotBuilt;
+        if (@import("build_options").tui) {
+            const stats = try @import("tui.zig").run(io, a, session.client(), options, init.environ_map);
+            html_metrics = .{
+                .htmlDocumentBuilds = stats.htmlDocumentBuilds,
+                .htmlLayoutBuilds = stats.htmlLayoutBuilds,
+                .htmlFallbacks = stats.htmlFallbacks,
+            };
+        } else return error.TuiNotBuilt;
         return;
     }
     var output_buffer: [4096]u8 = undefined;
@@ -169,10 +188,17 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
-fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator) !void {
-    var buffer: [512]u8 = undefined;
+fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator, html_metrics: ?HtmlMetrics) !void {
+    var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try std.json.Stringify.value(cap.snapshot(), .{}, &writer);
+    const snapshot = cap.snapshot();
+    try std.json.Stringify.value(.{
+        .allocatorUsedBytes = snapshot.allocatorUsedBytes,
+        .allocatorPeakBytes = snapshot.allocatorPeakBytes,
+        .rejectedAllocations = snapshot.rejectedAllocations,
+        .allocatorLimitBytes = snapshot.allocatorLimitBytes,
+        .html = html_metrics,
+    }, .{ .emit_null_optional_fields = false }, &writer);
     var af = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .permissions = .fromMode(0o600), .replace = true });
     defer af.deinit(io);
     try af.file.writeStreamingAll(io, writer.buffered());

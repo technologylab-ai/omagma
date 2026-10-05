@@ -78,9 +78,15 @@ class Sampler:
 def allocator_receipt(path):
     require(stat.S_IMODE(path.stat().st_mode) == 0o600, "allocator receipt is not private")
     value = json.loads(path.read_text())
-    require(set(value) == {"allocatorUsedBytes", "allocatorPeakBytes", "rejectedAllocations", "allocatorLimitBytes"},
+    allocation_fields = {"allocatorUsedBytes", "allocatorPeakBytes", "rejectedAllocations", "allocatorLimitBytes"}
+    require(set(value) in (allocation_fields, allocation_fields | {"html"}),
             "allocator receipt includes unexpected or missing fields")
-    require(all(type(number) is int and number >= 0 for number in value.values()), "invalid allocator receipt")
+    require(all(type(value[key]) is int and value[key] >= 0 for key in allocation_fields), "invalid allocator receipt")
+    if "html" in value:
+        require(type(value["html"]) is dict and set(value["html"]) == {
+            "htmlDocumentBuilds", "htmlLayoutBuilds", "htmlFallbacks"}, "invalid HTML counter receipt")
+        require(all(type(number) is int and number >= 0 for number in value["html"].values()),
+                "HTML receipt contains invalid counters")
     require(value["allocatorUsedBytes"] <= value["allocatorPeakBytes"] <= value["allocatorLimitBytes"] == LIMIT,
             "terminal heap allocations exceeded64MiB")
     return value

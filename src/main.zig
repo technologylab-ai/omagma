@@ -202,6 +202,7 @@ test {
     // deliberately different TestTty. Real terminal paths use isolated PTYs.
     if (@import("build_options").tui) {
         _ = @import("terminal/tui.zig");
+        std.testing.refAllDecls(@import("terminal/html_view.zig"));
         std.testing.refAllDecls(@import("terminal/input.zig"));
     }
 }

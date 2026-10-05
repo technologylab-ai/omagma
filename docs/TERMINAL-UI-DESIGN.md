@@ -48,6 +48,26 @@ Pages contain up to 32 rows and are replaced, rather than appended. Explicit con
 
 `:save-attachment NUMBER /absolute/literal/path` retrieves a numbered attachment from the displayed message or thread. Numbering follows the displayed chronological cards. The request captures its account, message and attachment identities before starting the worker. The rest of the command is a literal destination path, including spaces; quotes, variables and shell expressions are not interpreted. Decoded base64url bytes must match both declared and displayed sizes, within 2 MiB. The worker creates a mode-0600 file exclusively, refusing existing files or leaf symlinks. It never derives an output path from the attachment's filename. Success or failure remains visible without replacing the reader or local draft.
 
+## HTML-only body layout
+
+`html_document.zig` filters semantic blocks and styled spans; `html_view.zig`
+wraps them with libvaxis grapheme widths and clips drawing to the viewport.
+Headings, emphasis, lists, quotes, code and bounded data tables use Omarchy
+colors rather than mail-authored CSS. Layout tables flatten. Remote resources,
+script execution and terminal hyperlinks are unsupported.
+
+Preparation owns a document arena per displayed message; a separate layout
+arena is reused until the pane width or terminal width method changes. Scrolling
+and color reloads reuse the document/layout. Structural and layout budgets refuse
+excess complexity with the existing complete plain conversion as fallback.
+
+MIME records which nonempty alternative supplied `bodyText`, preserving the
+plain-text converter and reply behavior. An old cache without provenance is
+eligible for styled HTML only when its stored text equals the sanitized legacy
+HTML conversion. This cannot resolve an old plain alternative identical to that
+conversion, but requires no network request or cache rewrite. Full-body hashes
+remain valid; new metadata strips body provenance with the body itself.
+
 ## Keys and text input
 
 | Keys | Browsing action |

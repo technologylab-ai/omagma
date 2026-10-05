@@ -2,6 +2,7 @@ const std = @import("std");
 test {
     std.testing.refAllDecls(@import("terminal/recipients.zig"));
     std.testing.refAllDecls(@import("terminal/mime.zig"));
+    std.testing.refAllDecls(@import("terminal/html_document.zig"));
     std.testing.refAllDecls(@import("terminal/invitation.zig"));
     std.testing.refAllDecls(@import("terminal/gmail_decode.zig"));
 }

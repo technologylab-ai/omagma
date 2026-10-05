@@ -28,6 +28,7 @@ pub const ParsedMessage = struct {
     references: []const u8 = "",
     body_text: []const u8 = "",
     body_html: []const u8 = "",
+    body_source: types.BodySource = .unknown,
     calendar: ?[]const u8 = null,
     attachments: []const Attachment = &.{},
 };
@@ -101,6 +102,7 @@ pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, exter
         .snippet = try sanitizeText(if (b.optional(value, "snippet")) |v| try b.string(v) else "", allocator),
         .bodyText = parsed.body_text,
         .bodyHtml = if (parsed.body_html.len == 0) null else parsed.body_html,
+        .bodySource = parsed.body_source,
         .messageId = parsed.message_id,
         .references = parsed.references,
         .inReplyTo = parsed.in_reply_to,
@@ -375,8 +377,13 @@ const Context = struct {
     }
     fn finish(self: *Context, result: *ParsedMessage) !void {
         result.body_html = try self.html.toOwnedSlice(self.allocator);
-        const source = if (self.plain.items.len > 0) try self.plain.toOwnedSlice(self.allocator) else try htmlToText(result.body_html, self.allocator);
-        result.body_text = try sanitizeText(source, self.allocator);
+        result.body_source = if (self.plain.items.len > 0) .plain else if (result.body_html.len > 0) .html else .unknown;
+        // htmlToText already returns owned sanitized text. A second sanitize
+        // retained another full body in arena callers without changing bytes.
+        result.body_text = if (self.plain.items.len > 0)
+            try sanitizeText(try self.plain.toOwnedSlice(self.allocator), self.allocator)
+        else
+            try htmlToText(result.body_html, self.allocator);
         result.calendar = self.calendar;
         result.attachments = try self.attachments.toOwnedSlice(self.allocator);
     }
@@ -566,6 +573,9 @@ pub fn sanitizeText(input: []const u8, allocator: std.mem.Allocator) ![]const u8
     if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
     if (input.len > max_body_bytes) return error.BodyTooLarge;
     var output: std.ArrayList(u8) = .empty;
+    // Sanitization can only remove bytes or normalize CR to a single LF.
+    // Reserve once so a valid large body does not retain every growth buffer.
+    try output.ensureTotalCapacityPrecise(allocator, input.len);
     var pos: usize = 0;
     while (pos < input.len) {
         const count = try std.unicode.utf8ByteSequenceLength(input[pos]);
@@ -623,6 +633,7 @@ pub fn htmlToText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     if (input.len > max_body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
     var output: std.ArrayList(u8) = .empty;
+    try output.ensureTotalCapacityPrecise(allocator, input.len);
     var pos: usize = 0;
     var hidden: ?[]const u8 = null;
     var link: ?[]const u8 = null;
@@ -1289,4 +1300,24 @@ test "Raw MIME and outgoing attachment bytes retain their independent rules" {
     const raw = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nYWJjZGVmZ2g=\r\n";
     try std.testing.expectEqualStrings("abcdefgh", (try parse(raw, a)).body_text);
     try std.testing.expectError(error.BodySizeMismatch, composeAttachments(&.{.{ .id = "", .filename = "fixture.txt", .size = 7, .data = "YWJjZGVmZ2g" }}, a));
+}
+
+test "body provenance preserves plain preference and the legacy HTML text fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const html = try parse("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Literal HTML</p>", a);
+    try std.testing.expectEqual(types.BodySource.html, html.body_source);
+    try std.testing.expectEqualStrings("Literal HTML", html.body_text);
+    const both = try parse("Content-Type: multipart/alternative; boundary=fixture\r\n\r\n--fixture\r\nContent-Type: text/plain\r\n\r\nLiteral plain\r\n--fixture\r\nContent-Type: text/html\r\n\r\n<p>Literal HTML</p>\r\n--fixture--\r\n", a);
+    try std.testing.expectEqual(types.BodySource.plain, both.body_source);
+    try std.testing.expectEqualStrings("Literal plain", both.body_text);
+    try std.testing.expectEqualStrings("<p>Literal HTML</p>", both.body_html);
+    const full = try GmailSizeOracle.json(a, "{\"id\":\"source-html\",\"threadId\":\"source-thread\",\"internalDate\":\"42\",\"payload\":{\"mimeType\":\"text/html\",\"body\":{\"size\":8,\"data\":\"PHA-WDwvcD4\"}}}");
+    const normalized = try normalizeGmail(full, a, null);
+    try std.testing.expectEqual(types.BodySource.html, normalized.bodySource);
+    try std.testing.expectEqualStrings("X", normalized.bodyText);
+    try std.testing.expectEqualStrings("<p>X</p>", normalized.bodyHtml.?);
+    const legacy = try std.json.parseFromSliceLeaky(types.Message, a, "{\"id\":\"legacy\",\"threadId\":\"thread\",\"bodyText\":\"Literal old body\"}", .{});
+    try std.testing.expectEqual(types.BodySource.unknown, legacy.bodySource);
 }

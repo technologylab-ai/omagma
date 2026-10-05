@@ -778,10 +778,11 @@ pub const Session = struct {
                 if (entry.bodyError.len != 0) continue;
                 if (try snapshot.read(id)) |_| continue;
             }
-            var body_request = j.object(ma);
-            try body_request.object.put(ma, "messageId", .{ .string = id });
             var body_error: []const u8 = "";
-            const body_result: ?Value = @import("gmail.zig").dispatchAuthorized(s.io, ma, address, &.{"mail-read"}, transport, "mail.read", body_request) catch |err| refused: {
+            // Keep the validated typed message through its atomic cache commit.
+            // A body with both HTML and plain fallback can be 4 MiB: serializing
+            // and reparsing an intermediate DTO retains unnecessary arena copies.
+            const body_result: ?t.Message = @import("gmail.zig").readAuthorizedMessage(ma, address, &.{"mail-read"}, transport, id) catch |err| refused: {
                 if (err == error.MessageNotFound) {
                     body_error = "MessageNotFound";
                     break :refused null;
@@ -795,8 +796,7 @@ pub const Session = struct {
             var commit = try storage.Store.open(s.io, ma, s.cache_root, address, s.options);
             defer commit.close();
             if (commit.state.generation != expected) return error.CacheChanged;
-            if (body_result) |result| {
-                const message = try j.decode(t.Message, ma, result);
+            if (body_result) |message| {
                 _ = commit.putBody(message) catch |err| refused_body: {
                     if (!messageRefusal(err)) return err;
                     if (commit.find(id)) |entry| entry.bodyError = @errorName(err);
@@ -1118,6 +1118,7 @@ pub const Session = struct {
             try store.put(m, false);
             m.bodyText = "";
             m.bodyHtml = null;
+            m.bodySource = .unknown;
             m.invitation = null;
             m.attachments = &.{};
             try messages.append(a, m);

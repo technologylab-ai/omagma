@@ -41,6 +41,7 @@ pub const Client = struct {
 };
 pub const Address = struct { address: []const u8, name: []const u8 = "" };
 pub const Attachment = struct { id: []const u8, filename: []const u8, mimeType: []const u8 = "application/octet-stream", size: usize = 0, data: []const u8 = "" };
+pub const BodySource = enum { unknown, plain, html };
 pub const Message = struct {
     id: []const u8,
     threadId: []const u8,
@@ -52,6 +53,7 @@ pub const Message = struct {
     snippet: []const u8 = "",
     bodyText: []const u8 = "",
     bodyHtml: ?[]const u8 = null,
+    bodySource: BodySource = .unknown,
     messageId: []const u8 = "",
     references: []const u8 = "",
     inReplyTo: []const u8 = "",

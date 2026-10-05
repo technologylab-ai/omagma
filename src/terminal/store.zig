@@ -327,6 +327,7 @@ pub const Store = struct {
         var metadata = message;
         metadata.bodyText = "";
         metadata.bodyHtml = null;
+        metadata.bodySource = .unknown;
         metadata.to = &.{};
         metadata.cc = &.{};
         metadata.replyTo = &.{};

@@ -249,6 +249,14 @@ fn read(a: std.mem.Allocator, transport: Transport, id: []const u8) !types.Messa
         else => return err,
     };
 }
+/// Internal typed read for bounded cache prefetch. Authorization and provider
+/// identity checks match dispatchAuthorized, while large body strings avoid a
+/// Message -> JSON Value -> Message round-trip in the caller's message arena.
+pub fn readAuthorizedMessage(a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, id: []const u8) !types.Message {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
+    return try read(a, transport, id);
+}
 fn aliases(a: std.mem.Allocator, transport: Transport) ![]const []const u8 {
     const value = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,verificationStatus)", null);
     const entries = try array(value, "sendAs");
@@ -916,4 +924,23 @@ test "automatic jobs ignore terminal registry and cannot gain write capabilities
     var session: NetworkSession = undefined;
     try std.testing.expectError(error.OAuthClientRequired, session.init(std.testing.io, a, &config, "personal@example.com", "mail.refresh", request));
     for ([_][]const u8{ "mail.send", "contacts.upsert", "mail.trash", "invitation.reply" }) |command| try std.testing.expectError(error.PermissionDenied, session.init(std.testing.io, a, &config, "personal@example.com", command, request));
+}
+
+test "typed cache prefetch refuses invalid identity and absent read permission before provider calls" {
+    const Spy = struct {
+        calls: usize = 0,
+        fn request(ctx: *anyopaque, _: std.mem.Allocator, _: std.http.Method, _: []const u8, _: ?j.Value) anyerror!j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            return error.UnexpectedProviderCall;
+        }
+    };
+    var spy: Spy = .{};
+    const transport: Transport = .{ .context = &spy, .requestFn = Spy.request };
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.PermissionDenied, readAuthorizedMessage(a, "fictional@example.test", &.{"mail-send"}, transport, "body-id"));
+    try std.testing.expectError(error.InvalidAddress, readAuthorizedMessage(a, "invalid-account", &.{"mail-read"}, transport, "body-id"));
+    try std.testing.expectError(error.InvalidAddress, readAuthorizedMessage(a, "invalid..local@example.test", &.{"mail-read"}, transport, "body-id"));
+    try std.testing.expectError(error.InvalidIdentifier, readAuthorizedMessage(a, "fictional@example.test", &.{"mail-read"}, transport, "invalid/id"));
+    try std.testing.expectEqual(@as(usize, 0), spy.calls);
 }

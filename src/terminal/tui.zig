@@ -9,6 +9,8 @@ const input_loop = @import("input.zig");
 const layout = @import("layout.zig");
 const theme = @import("theme.zig");
 const preferences = @import("preferences.zig");
+const html_view = @import("html_view.zig");
+const mime = @import("mime.zig");
 const recipients = @import("recipients.zig");
 const invitation = @import("invitation.zig");
 const Io = std.Io;
@@ -33,6 +35,7 @@ const SyncStatus = struct {
     error_len: usize = 0,
 };
 const PendingCompose = enum { none, new, reply, reply_all };
+const ReaderMarkup = struct { prepared: ?html_view.Prepared = null, fallback: bool = false, attempted: bool = false };
 const ContactsState = enum { loading, cached, current, denied, failed, busy };
 const QueryScope = enum { cache, server };
 
@@ -71,6 +74,10 @@ fn bodyRefusal(message: Value) ?[]const u8 {
 
 fn readerEnvelope(allocator: Allocator, to: []const u8, cc: []const u8, stamp: []const u8) ![]const u8 {
     return if (cc.len > 0) std.fmt.allocPrint(allocator, "To: {s}\nCc: {s}\n{s}", .{ to, cc, stamp }) else std.fmt.allocPrint(allocator, "To: {s}\n{s}", .{ to, stamp });
+}
+
+fn readerEnd(lines: usize, height: usize) usize {
+    return lines -| @max(height, 1);
 }
 const folders = [_][]const u8{ "Inbox", "Sent", "Drafts", "Archive", "Trash" };
 const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH" };
@@ -209,6 +216,10 @@ fn same(a: []const u8, b: []const u8) bool {
 fn safe(allocator: Allocator, input: []const u8, multiline: bool) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
+    // Invalid bytes/controls shrink or replace with one byte; valid UTF8 is
+    // copied unchanged. Reserve the exact input upper bound once so frame
+    // arenas do not retain a geometric chain for a large plain fallback.
+    try out.ensureTotalCapacityPrecise(allocator, input.len);
     var pos: usize = 0;
     while (pos < input.len) {
         const length = std.unicode.utf8ByteSequenceLength(input[pos]) catch {
@@ -235,6 +246,7 @@ fn safe(allocator: Allocator, input: []const u8, multiline: bool) ![]const u8 {
     while (graphemes.next()) |gr| if (gr.len > 128) {
         var limited: std.ArrayList(u8) = .empty;
         errdefer limited.deinit(allocator);
+        try limited.ensureTotalCapacityPrecise(allocator, out.items.len);
         try limited.appendSlice(allocator, out.items[0..gr.start]);
         try limited.appendSlice(allocator, "�");
         while (graphemes.next()) |next_gr| try limited.appendSlice(allocator, if (next_gr.len > 128) "�" else next_gr.bytes(out.items));
@@ -242,6 +254,11 @@ fn safe(allocator: Allocator, input: []const u8, multiline: bool) ![]const u8 {
         out = .empty;
         return limited.toOwnedSlice(allocator);
     };
+    if (out.items.len == out.capacity) {
+        const owned = out.items;
+        out = .empty;
+        return owned;
+    }
     return out.toOwnedSlice(allocator);
 }
 
@@ -462,11 +479,14 @@ const App = struct {
     account_positions: [3]usize = @splat(0),
     messages: []const Value = &.{},
     thread: []const Value = &.{},
+    markup: []ReaderMarkup = &.{},
+    html_stats: html_view.Stats = .{},
     contacts: []const Value = &.{},
     selected: usize = 0,
     top: usize = 0,
     reader_scroll: usize = 0,
     reader_lines: usize = 0,
+    reader_height: usize = 0,
     reader_account: Field = .{},
     reader_message: Field = .{},
     reader_partial: bool = false,
@@ -563,6 +583,7 @@ const App = struct {
 
     fn deinit(self: *App) void {
         self.cancelJob();
+        self.clearMarkup();
         self.clearHistory();
         self.previous_cursors.deinit(self.allocator);
         for ([_]*Field{ &self.query, &self.input, &self.cursor, &self.next_cursor, &self.previous_cursor, &self.remote_cursor, &self.reader_account, &self.reader_message, &self.contact_name, &self.contact_email, &self.contact_id, &self.contact_etag, &self.contacts_query, &self.contacts_account, &self.invitation_operation_id, &self.invitation_operation_error, &self.invitation_message_id, &self.invitation_inspected_id, &self.invitation_inspected_account, &self.invitation_account, &self.attachment_destination, &self.preferences_file }) |field| field.deinit(self.allocator);
@@ -670,9 +691,12 @@ const App = struct {
         };
     }
     fn clearReader(self: *App) void {
+        self.clearMarkup();
         self.thread = &.{};
         _ = self.read_arena.reset(.retain_capacity);
         self.reader_scroll = 0;
+        self.reader_lines = 0;
+        self.reader_height = 0;
         self.reader_partial = false;
         self.reader_is_thread = false;
         self.body_cache_miss = false;
@@ -683,6 +707,46 @@ const App = struct {
         self.reader_message.bytes.clearRetainingCapacity();
         self.reader_account.cursor = 0;
         self.reader_message.cursor = 0;
+    }
+    fn clearMarkup(self: *App) void {
+        deinitMarkup(self.markup);
+        self.markup = &.{};
+    }
+    fn deinitMarkup(markup: []ReaderMarkup) void {
+        for (markup) |*view| if (view.prepared) |*prepared| prepared.deinit();
+    }
+    fn htmlEligible(self: *App, message: Value) bool {
+        const source = text(get(message, "bodySource"));
+        const html = text(get(message, "bodyHtml"));
+        if (html.len == 0 or same(source, "plain")) return false;
+        if (same(source, "html")) return true;
+        if (source.len != 0 and !same(source, "unknown")) return false;
+        // Old cached records carry no provenance. Rich markup is enabled
+        // only when the unchanged legacy conversion exactly explains their
+        // displayed text; uncertainty preserves the plain part.
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const converted = mime.htmlToText(html, allocator) catch return false;
+        const safe_html = mime.sanitizeText(converted, allocator) catch return false;
+        return same(safe_html, text(get(message, "bodyText")));
+    }
+    fn prepareMarkup(self: *App, allocator: Allocator, messages: []const Value) ![]ReaderMarkup {
+        _ = self;
+        const views = try allocator.alloc(ReaderMarkup, messages.len);
+        for (views) |*view| view.* = .{};
+        return views;
+    }
+    fn prepareVisibleMarkup(self: *App, view: *ReaderMarkup, message: Value) void {
+        if (view.attempted) return;
+        view.attempted = true;
+        if (!self.htmlEligible(message)) return;
+        self.html_stats.htmlDocumentBuilds += 1;
+        view.prepared = html_view.Prepared.init(self.allocator, text(get(message, "bodyHtml"))) catch {
+            self.html_stats.htmlFallbacks += 1;
+            view.fallback = true;
+            return;
+        };
     }
     fn resumeMailboxReader(self: *App) !void {
         if (self.drafts_list or self.thread.len == 0) return;
@@ -739,12 +803,12 @@ const App = struct {
                 allocator.free(response);
                 return error.ResponseTooLarge;
             }
-            const parsed = std.json.parseFromSlice(Value, allocator, response, .{ .allocate = .alloc_always }) catch |err| {
+            var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+            defer scratch.deinit();
+            const envelope = std.json.parseFromSliceLeaky(Value, scratch.allocator(), response, .{ .allocate = .alloc_always }) catch |err| {
                 allocator.free(response);
                 return err;
             };
-            defer parsed.deinit();
-            const envelope = parsed.value;
             if (get(envelope, "ok") == .bool and !truth(get(envelope, "ok"))) {
                 const code = text(get(get(envelope, "error"), "code"));
                 if (same(code, "CacheBusy")) {
@@ -834,13 +898,17 @@ const App = struct {
             break :blk one;
         };
         if (messages.len > types.Limits.page) return error.ThreadTooLarge;
+        const markup = try self.prepareMarkup(replacement.allocator(), messages);
+        errdefer deinitMarkup(markup);
         const same_reader = same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId()) and self.reader_is_thread == full_thread;
         try self.reader_account.set(self.allocator, self.account());
         try self.reader_message.set(self.allocator, self.messageId());
+        self.clearMarkup();
         const previous = self.read_arena;
         self.read_arena = replacement;
         replacement = previous;
         self.thread = messages;
+        self.markup = markup;
         self.reader_partial = full_thread and cached_view and truth(get(result, "partial"));
         self.reader_is_thread = full_thread;
         self.body_cache_miss = false;
@@ -1129,6 +1197,14 @@ const App = struct {
         if (self.job.future == null or !self.job.done.load(.acquire)) return;
         self.job.future.?.await(self.io);
         self.job.future = null;
+        defer if (self.job.future == null) {
+            // Every retained DTO/string is copied into its owning view/field.
+            // Completed response parsing scratch must not coexist with lazy
+            // semantic document preparation on the following draw.
+            self.job.request = "";
+            self.job.response = null;
+            _ = self.job_arena.reset(.free_all);
+        };
         if (self.job.kind == .refresh) {
             const index = self.job.account_index;
             // A decoding/allocation error below must not leave a perpetual
@@ -1243,7 +1319,7 @@ const App = struct {
                 } else if (pending == .new) try self.composeNew(null) else {
                     // The user can move the cursor while a read is finishing.
                     // Reply to the captured identity, never the later selection.
-                    self.thread = &.{};
+                    self.clearReader();
                     try self.start(.compose, .{ .account = self.account(), .cmd = "mail.reply", .messageId = self.pending_compose_id[0..self.pending_compose_id_len], .all = pending == .reply_all });
                 }
             } else if (self.pending_read) {
@@ -1740,7 +1816,7 @@ const App = struct {
     }
     fn move(self: *App, down: bool, amount: usize) !void {
         if (self.focus == .reader) {
-            self.reader_scroll = if (down) @min(self.reader_scroll +| amount, self.reader_lines -| 1) else self.reader_scroll -| amount;
+            self.reader_scroll = if (down) @min(self.reader_scroll +| amount, readerEnd(self.reader_lines, self.reader_height)) else self.reader_scroll -| amount;
         } else if (self.focus == .navigation) {
             const total = self.accounts.len + folders.len + 1;
             self.navigation = if (down) @min(self.navigation +| amount, total - 1) else self.navigation -| amount;
@@ -2075,7 +2151,7 @@ const App = struct {
             .list => .reader,
             .reader => .navigation,
         } else if (key.matches(Key.enter, .{})) try self.enter() else if (key.matches('G', .{}) or key.matches('g', .{ .shift = true }) or key.matches(Key.end, .{})) {
-            if (self.focus == .reader) self.reader_scroll = self.reader_lines -| 1 else {
+            if (self.focus == .reader) self.reader_scroll = readerEnd(self.reader_lines, self.reader_height) else {
                 self.selected = self.messages.len -| 1;
                 self.selection_generation +%= 1;
                 try self.preview(false);
@@ -2222,6 +2298,17 @@ const App = struct {
         }
         try self.line(win, row + folders.len + 1, "Contacts", if (self.focus == .navigation and self.navigation == self.accounts.len + folders.len) .selected else .text);
     }
+    fn navigationWidth(self: *App, win: vaxis.Window) !u16 {
+        var widest: u16 = 26;
+        for (self.accounts) |account_value| {
+            const clean = try safe(self.frame.allocator(), text(get(account_value, "address")), false);
+            var columns: u16 = 6; // Selected prefix plus panel border and padding.
+            var iterator = vaxis.unicode.graphemeIterator(clean);
+            while (iterator.next()) |gr| columns +|= @max(win.gwidth(gr.bytes(clean)), 1);
+            widest = @max(widest, columns);
+        }
+        return @min(widest, 36);
+    }
     fn listDraw(self: *App, win: vaxis.Window) !void {
         const count = @max(win.height / 3, 1);
         if (self.selected < self.top) self.top = self.selected;
@@ -2288,6 +2375,8 @@ const App = struct {
         if (self.reader_partial) try self.line(outer, toolbar_rows, "Cached thread · partial", .muted);
         const header_rows = toolbar_rows + @as(u16, if (self.reader_partial) 1 else 0);
         const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows });
+        self.reader_height = win.height;
+        self.reader_scroll = @min(self.reader_scroll, readerEnd(self.reader_lines, self.reader_height));
         if (self.thread.len == 0) {
             if (self.reader_cache_busy) {
                 try self.line(win, 1, "Cache busy · local read queued", .muted);
@@ -2304,9 +2393,21 @@ const App = struct {
             } else try self.line(win, 1, if (self.sync[self.account_index].state == .fetching) "Fetching mail · cached bodies appear here" else "Select mail · Enter opens the thread", .muted);
             return;
         }
+        self.reader_lines = try self.readerBodyDraw(win);
+        const clamped = @min(self.reader_scroll, readerEnd(self.reader_lines, self.reader_height));
+        if (clamped != self.reader_scroll) {
+            // A wider layout can reduce wrapping below the old scroll
+            // position. Repaint the corrected viewport once in this frame;
+            // never wait for another key or schedule a redraw loop.
+            self.reader_scroll = clamped;
+            win.fill(.{ .style = self.style(.text) });
+            self.reader_lines = try self.readerBodyDraw(win);
+        }
+    }
+    fn readerBodyDraw(self: *App, win: vaxis.Window) !usize {
         var row: usize = 0;
         var attachment_number: usize = 0;
-        for (self.thread) |message| {
+        for (self.thread, 0..) |message, message_index| {
             const from = get(message, "from");
             const to = try Compose.mailboxes(self.frame.allocator(), get(message, "to"));
             const cc = try Compose.mailboxes(self.frame.allocator(), get(message, "cc"));
@@ -2317,7 +2418,30 @@ const App = struct {
             const envelope = try readerEnvelope(self.frame.allocator(), to, cc, try timestamp(self.frame.allocator(), get(message, "receivedAt")));
             row = try self.flowTone(win, envelope, self.reader_scroll, row, .muted);
             row += 1; // Exactly one visual blank before the unchanged body.
-            row = try self.flow(win, text(get(message, "bodyText")), self.reader_scroll, row);
+            var rich_drawn = false;
+            if (message_index < self.markup.len) {
+                const view = &self.markup[message_index];
+                self.prepareVisibleMarkup(view, message);
+                if (view.prepared) |*prepared| {
+                    const builds = prepared.layout_builds;
+                    const ready = blk: {
+                        prepared.ensure(win.width, win.screen.width_method) catch {
+                            if (prepared.layout_builds != builds) self.html_stats.htmlFallbacks += 1;
+                            view.fallback = true;
+                            break :blk false;
+                        };
+                        break :blk true;
+                    };
+                    self.html_stats.htmlLayoutBuilds += prepared.layout_builds - builds;
+                    if (ready) {
+                        view.fallback = false;
+                        row = prepared.draw(win, self.reader_scroll, row, self.palette, self.mono);
+                        rich_drawn = true;
+                    }
+                }
+                if (view.fallback) row = try self.flowTone(win, "Plain text · HTML layout unavailable", self.reader_scroll, row, .muted);
+            }
+            if (!rich_drawn) row = try self.flow(win, text(get(message, "bodyText")), self.reader_scroll, row);
             for (items(get(message, "attachments"))) |attachment| {
                 attachment_number += 1;
                 const value_in = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s}\n:save-attachment {d} /absolute/path\n", .{ attachment_number, text(get(attachment, "filename")), attachment_number });
@@ -2326,8 +2450,7 @@ const App = struct {
             if (get(message, "invitation") != .null) row = try self.flow(win, "Invitation · I Review RSVP\n", self.reader_scroll, row);
             row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
         }
-        self.reader_lines = row;
-        self.reader_scroll = @min(self.reader_scroll, row -| @as(usize, win.height));
+        return row;
     }
     fn composeDraw(self: *App, win: vaxis.Window) !void {
         if (self.mode == .review) {
@@ -2496,7 +2619,7 @@ const App = struct {
         try self.line(win, 1, try self.syncLine(), self.syncTone());
         const body = win.child(.{ .y_off = 2, .height = win.height -| 4 });
         if (self.mode == .compose or self.mode == .review or self.mode == .attachment) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or (self.mode == .search and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
-            const panes = layout.compute(body.width, body.height, self.focus, self.reader_layout, self.expanded);
+            const panes = layout.computeWithNavigation(body.width, body.height, self.focus, self.reader_layout, self.expanded, try self.navigationWidth(body));
             if (panes.navigation) |rect| try self.navigationDraw(self.pane(body, rect, " Accounts / mailboxes ", self.focus == .navigation));
             if (panes.list) |rect| try self.listDraw(self.pane(body, rect, if (self.cacheSearch()) " Mail · Cache subset " else if (self.query.value().len > 0) " Mail · Gmail search " else " Mail · [ ] Page ", self.focus == .list));
             if (panes.reader) |rect| try self.readerDraw(self.pane(body, rect, " Thread / full body ", self.focus == .reader));
@@ -2521,7 +2644,7 @@ fn signalTask(app: *App, file: Io.File) void {
     _ = app.loop.tryPostEvent(.terminate) catch {};
 }
 
-pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Options, environ: *const std.process.Environ.Map) !void {
+pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Options, environ: *const std.process.Environ.Map) !html_view.Stats {
     if (same(options.editor_mode, "embedded")) return error.EmbeddedEditorDeferred;
     if (!same(options.editor_mode, "auto") and !same(options.editor_mode, "takeover")) return error.InvalidEditorMode;
     var tty_buffer: [16 * 1024]u8 = undefined;
@@ -2613,6 +2736,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     }
     app.cancelJob();
     try app.persistDraftAtExit();
+    return app.html_stats;
 }
 
 test "terminal text removes control sequences and keeps safe Unicode" {
@@ -2627,6 +2751,13 @@ test "terminal text removes control sequences and keeps safe Unicode" {
     cluster[0] = 'a';
     for (0..100) |index| @memcpy(cluster[1 + index * 2 ..][0..2], "\u{0300}");
     try std.testing.expectEqualStrings("�", try safe(arena.allocator(), &cluster, false));
+}
+
+test "plain fallback sanitizer uses one input-sized reservation" {
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
+    const cleaned = try safe(failing.allocator(), "Plain café 👋\nwith intact lines", true);
+    defer failing.allocator().free(cleaned);
+    try std.testing.expectEqualStrings("Plain café 👋\nwith intact lines", cleaned);
 }
 
 test "allocator refusal preserves the existing edited field" {
@@ -2984,4 +3115,152 @@ test "persisted selected body refusal remains local and does not mark mailbox of
     try std.testing.expect(!app.body_cache_miss);
     try std.testing.expectEqualStrings("Local full body", text(get(app.thread[0], "bodyText")));
     try std.testing.expectEqual(SyncState.current, app.sync[0].state);
+}
+
+test "HTML reader provenance prefers plain and recognizes only exact legacy conversion" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const parse = struct {
+        fn value(a: Allocator, raw: []const u8) !Value {
+            return std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_always });
+        }
+    }.value;
+    const plain = try parse(arena.allocator(), "{\"bodySource\":\"plain\",\"bodyText\":\"Real plain part\",\"bodyHtml\":\"<b>Different HTML</b>\"}");
+    try std.testing.expect(!app.htmlEligible(plain));
+    const explicit_html = try parse(arena.allocator(), "{\"bodySource\":\"html\",\"bodyText\":\"Legacy\",\"bodyHtml\":\"<p><b>Legacy</b></p>\"}");
+    try std.testing.expect(app.htmlEligible(explicit_html));
+    const legacy = try parse(arena.allocator(), "{\"bodyText\":\"Legacy\",\"bodyHtml\":\"<p><b>Legacy</b></p>\"}");
+    try std.testing.expect(app.htmlEligible(legacy));
+    const uncertain = try parse(arena.allocator(), "{\"bodySource\":\"unknown\",\"bodyText\":\"Independently supplied plain text\",\"bodyHtml\":\"<p><b>Legacy</b></p>\"}");
+    try std.testing.expect(!app.htmlEligible(uncertain));
+    const changed_whitespace = try parse(arena.allocator(), "{\"bodySource\":\"unknown\",\"bodyText\":\"A B\",\"bodyHtml\":\"<pre>A\\tB</pre>\"}");
+    try std.testing.expect(!app.htmlEligible(changed_whitespace));
+    app.accounts = items(try parse(app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]"));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"}],\"cached\":true,\"cacheReady\":true}}");
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"a\",\"bodySource\":\"html\",\"bodyText\":\"Styled body\",\"bodyHtml\":\"<p><b>Styled body</b></p>\"}}", true);
+    try std.testing.expectEqual(@as(u64, 0), app.html_stats.htmlDocumentBuilds);
+    try std.testing.expect(!app.markup[0].attempted and app.markup[0].prepared == null);
+    app.prepareVisibleMarkup(&app.markup[0], app.thread[0]);
+    try std.testing.expectEqual(@as(u64, 1), app.html_stats.htmlDocumentBuilds);
+    try std.testing.expect(app.markup[0].attempted and app.markup[0].prepared != null);
+    app.prepareVisibleMarkup(&app.markup[0], app.thread[0]);
+    try std.testing.expectEqual(@as(u64, 1), app.html_stats.htmlDocumentBuilds);
+    app.clearReader();
+    try std.testing.expectEqual(@as(usize, 0), app.markup.len);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "reader end paints the last full viewport without a second key" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 10, .screen = &screen };
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"}]}}");
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"a\",\"subject\":\"Fixture\",\"bodyText\":\"0\\n1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\nTAIL-FIXTURE\"}}", true);
+    try app.readerDraw(win);
+    try std.testing.expectEqual(@as(usize, 9), app.reader_height); // Toolbar excluded.
+    app.focus = .reader;
+    try app.move(true, std.math.maxInt(usize));
+    try std.testing.expectEqual(readerEnd(app.reader_lines, app.reader_height), app.reader_scroll);
+    screen.clear();
+    try app.readerDraw(win);
+    var tail_seen = false;
+    for (1..screen.height) |row| {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        for (0..screen.width) |col| try line.appendSlice(allocator, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+        tail_seen = tail_seen or std.mem.indexOf(u8, line.items, "TAIL-FIXTURE") != null;
+    }
+    try std.testing.expect(tail_seen);
+    app.reader_scroll = std.math.maxInt(usize); // Old out-of-range state clamps before painting.
+    screen.clear();
+    try app.readerDraw(win);
+    try std.testing.expectEqual(readerEnd(app.reader_lines, app.reader_height), app.reader_scroll);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "wide account identity and plain reader replace prior layout cells" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(allocator, .{ .cols = 160, .rows = 36, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(allocator);
+    app.vx = &vx;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"123456789@example.com\"}]", .{}));
+    const navigation_width = try app.navigationWidth(vx.window());
+    try std.testing.expectEqual(@as(usize, 21), app.account().len);
+    try std.testing.expectEqual(@as(u16, 27), navigation_width);
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"subject\":\"Fictional subject\"}]}}");
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"a\",\"subject\":\"Fictional subject\",\"bodyText\":\"Plain fictional text without any bars.\"}}", true);
+    app.mode = .compose;
+    try app.compose.fields[4].set(allocator, "Old composer caret");
+    try app.draw();
+    app.mode = .browse;
+    app.reader_layout = .below;
+    try app.draw();
+    app.reader_layout = .right;
+    const panes = layout.computeWithNavigation(160, 32, .list, .right, false, navigation_width);
+    const rect = panes.reader.?;
+    // A synthetic old border/caret anywhere in the new reader must clear.
+    for (3..rect.height) |row| for (rect.x + 2..rect.x + rect.width - 2) |col| {
+        vx.screen.writeCell(@intCast(col), @intCast(row + 2), .{ .char = .{ .grapheme = "│", .width = 1 } });
+    };
+    try app.draw();
+    for (3..rect.height) |row| for (rect.x + 2..rect.x + rect.width - 2) |col| {
+        const grapheme = vx.screen.readCell(@intCast(col), @intCast(row + 2)).?.char.grapheme;
+        try std.testing.expect(!same(grapheme, "│") and !same(grapheme, "|") and !same(grapheme, "▏"));
+    };
+    var account_line: std.ArrayList(u8) = .empty;
+    defer account_line.deinit(allocator);
+    for (2..navigation_width - 2) |col| try account_line.appendSlice(allocator, vx.screen.readCell(@intCast(col), 4).?.char.grapheme);
+    try std.testing.expectEqualStrings("> 123456789@example.com", account_line.items);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "reader tail remains visible in the resize frame after reduced wrapping" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 80, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    var win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 10, .height = 6, .screen = &screen };
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"}]}}");
+    var body: [2020]u8 = @splat('x');
+    const tail = "TAIL-REFLOW-FIXTURE";
+    @memcpy(body[body.len - tail.len ..], tail);
+    const response = try std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = .{ .id = "a", .subject = "Fixture", .bodyText = @as([]const u8, &body) } }, .{});
+    defer allocator.free(response);
+    try app.replaceReader(false, response, true);
+    try app.readerDraw(win);
+    const original_lines = app.reader_lines;
+    app.focus = .reader;
+    try app.move(true, std.math.maxInt(usize));
+    try std.testing.expect(app.reader_scroll > 100);
+    win.width = 80;
+    win.height = 20;
+    screen.clear();
+    try app.readerDraw(win);
+    try std.testing.expect(app.reader_lines < original_lines);
+    try std.testing.expectEqual(readerEnd(app.reader_lines, app.reader_height), app.reader_scroll);
+    var tail_seen = false;
+    for (1..screen.height) |row| {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        for (0..screen.width) |col| try line.appendSlice(allocator, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+        tail_seen = tail_seen or std.mem.indexOf(u8, line.items, tail) != null;
+    }
+    try std.testing.expect(tail_seen);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }

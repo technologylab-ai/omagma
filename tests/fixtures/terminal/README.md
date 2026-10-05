@@ -8,6 +8,8 @@ Each `accounts/*.json` contains 96 Gmail `FULL` message resources, eight expecte
 
 `mime/*.eml` contains independent RFC 5322/MIME decoding oracles for the selected cases. `calendar/*.ics` supplies invitations and semantic reply examples. Reply timestamps are fixture constants; runtime replies may use their actual creation time. `contacts/*.json` uses People API contact sources and etags. `manifest.json` supplies expected decoded text, attachment digest and reply-all recipients. `failure-contract.json` describes provider faults and expected outcomes; it is a test contract, not evidence that those tests passed.
 
+`html/` contains additional HTML-only and multipart preference oracles applied only to owned temporary fixture copies. Native-reader tests use headings, emphasis, nested newsletter layouts, quotes, code, tables, Unicode and hostile inert inputs; the default corpus is unchanged.
+
 `inbound-addresses.json` supplies two additional fictional delivered-header regressions: 34 incoming To recipients and an ASCII Reply-To local part of 65 bytes. CLI tests apply these headers only to their own temporary copies of messages 094/095, preserving the default corpus and measurement workload. Reading must preserve all incoming participants across three accounts; outgoing replies retain the separate 32-recipient/64-byte local-part limits and refuse instead of truncating. The fixture checker uses Python's independent email parser to verify the header shapes.
 
 | Message suffix | Case |

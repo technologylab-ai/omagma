@@ -81,6 +81,7 @@ def main():
         notes = Path(temporary) / "notes.md"
         notes.write_text(f"Complete Quickshell plugin bundles and stripped, static musl backends for Linux x86_64 and arm64.\n\n"
                          f"Includes the account-separated bar and **experimental** Vim-oriented terminal mail client (`omagma tui`) and bounded JSONL agent CLI (`omagma cli`). Compose/reply, contacts, attachments and invitation replies are fixture-qualified; live writes require separate terminal authorization and a dedicated test mailbox. No tmux is required.\n\n"
+                         f"HTML-only mail has a native theme-colored text view with headings, emphasis, lists, quotes and readable tables. Plain-text alternatives take precedence; remote resources never load.\n\n"
                          f"Built with exact Zig {zig} in assertion-enabled safe mode.\n\n"
                          f"Download the matching `omagma-{version}-linux-ARCH.tar.gz` bundle and `SHA256SUMS`; Zig is not needed for installation. Native backend correctness, transport and memory checks passed on both architectures. ARM desktop integration requires local verification.\n\n"
                          f"[Terminal guide](https://github.com/{repo}/blob/{tag}/docs/TERMINAL.md) · [Agent CLI contract](https://github.com/{repo}/blob/{tag}/docs/AGENT-CLI.md)\n\n"
