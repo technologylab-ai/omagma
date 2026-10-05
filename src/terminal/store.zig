@@ -164,7 +164,10 @@ pub const Store = struct {
         var state: State = .{ .account = account };
         const raw = readPrivate(dir, io, a, "index.json", 16 * 1024 * 1024) catch |err| if (err == error.FileNotFound) null else return err;
         if (raw) |bytes| {
-            state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_always });
+            // readPrivate owns this immutable buffer in the same caller arena
+            // as State. Borrow unescaped strings instead of copying each field
+            // on every short refresh commit; escaped strings still allocate.
+            state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_if_needed });
             if (state.schema != 1 or !std.mem.eql(u8, state.account, account)) return error.CacheIdentityMismatch;
             if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024) return error.CacheLimitExceeded;
         }
@@ -182,7 +185,9 @@ pub const Store = struct {
         for (state.views) |view| if (view.ids.len > t.Limits.metadata_hard or view.query.len > 4096 or view.label.len > 256 or view.remoteCursor.len > 4096) return error.CacheLimitExceeded;
         if (!options.fixtures and state.fixtureProvider.len != 0) return error.CacheIdentityMismatch;
         for (state.fixtureProvider) |record| try validateFixtureRecord(record);
-        std.sort.heap(Entry, s.state.entries, {}, newestFirst);
+        // Persisted indexes already have this order. Keep the legacy fallback
+        // without heap-sorting thousands of rows on every cached/body read.
+        if (!entriesSorted(s.state.entries)) std.sort.heap(Entry, s.state.entries, {}, newestFirst);
         if (!readonly) {
             try s.enforceLimits();
             if (policy_changed) {
@@ -327,8 +332,12 @@ pub const Store = struct {
         metadata.replyTo = &.{};
         metadata.attachments = &.{};
         metadata.invitation = null;
-        var e = s.find(message.id);
-        if (e == null) {
+        var existing: ?usize = null;
+        for (s.state.entries, 0..) |entry, i| if (std.mem.eql(u8, entry.message.id, message.id)) {
+            existing = i;
+            break;
+        };
+        if (existing == null) {
             if (s.state.quotaFloor) |floor| if (!newestFirst({}, .{ .message = metadata }, .{ .message = .{ .id = floor.id, .threadId = "", .receivedAt = floor.receivedAt } })) return;
             if (s.state.entries.len == s.options.metadata_limit) {
                 const tail = s.state.entries[s.state.entries.len - 1];
@@ -343,12 +352,27 @@ pub const Store = struct {
                 s.allocator.free(s.entriesStorage);
                 s.entriesStorage = storage;
             }
-            s.entriesStorage[count] = .{ .message = metadata };
+            const entry: Entry = .{ .message = metadata };
+            const position = entryPosition(s.state.entries, entry);
+            std.mem.copyBackwards(Entry, s.entriesStorage[position + 1 .. count + 1], s.entriesStorage[position..count]);
+            s.entriesStorage[position] = entry;
             s.state.entries = s.entriesStorage[0 .. count + 1];
-            e = &s.state.entries[count];
-        } else e.?.message = metadata;
-        std.sort.heap(Entry, s.state.entries, {}, newestFirst);
-        e = s.find(message.id);
+        } else {
+            const i = existing.?;
+            if (s.state.entries[i].message.receivedAt == metadata.receivedAt) {
+                s.state.entries[i].message = metadata;
+            } else {
+                // Retain the immutable body's reference while repositioning a
+                // changed timestamp. All other rows remain in sorted order.
+                var entry = s.state.entries[i];
+                entry.message = metadata;
+                const count = s.state.entries.len;
+                std.mem.copyForwards(Entry, s.state.entries[i .. count - 1], s.state.entries[i + 1 ..]);
+                const position = entryPosition(s.state.entries[0 .. count - 1], entry);
+                std.mem.copyBackwards(Entry, s.state.entries[position + 1 .. count], s.state.entries[position .. count - 1]);
+                s.state.entries[position] = entry;
+            }
+        }
         if (full) _ = try s.putBody(message);
     }
     /// Attach immutable bytes only to retained metadata. Never resurrect an ID,
@@ -601,6 +625,20 @@ fn validateFixtureRecord(record: FixtureProviderRecord) !void {
 fn newestFirst(_: void, left: Entry, right: Entry) bool {
     return left.message.receivedAt > right.message.receivedAt or (left.message.receivedAt == right.message.receivedAt and std.mem.lessThan(u8, left.message.id, right.message.id));
 }
+fn entriesSorted(entries: []const Entry) bool {
+    if (entries.len < 2) return true;
+    for (1..entries.len) |i| if (newestFirst({}, entries[i], entries[i - 1])) return false;
+    return true;
+}
+fn entryPosition(entries: []const Entry, entry: Entry) usize {
+    var start: usize = 0;
+    var end = entries.len;
+    while (start < end) {
+        const middle = start + (end - start) / 2;
+        if (newestFirst({}, entries[middle], entry)) start = middle + 1 else end = middle;
+    }
+    return start;
+}
 
 test "mail count eviction removes received-time tail including body and ignores older paging" {
     var tmp = std.testing.tmpDir(.{});
@@ -845,4 +883,89 @@ test "persisted cache policy is shared by default readers and automatic writers 
         try std.testing.expectEqual(@as(usize, 2000), reset.options.metadata_limit);
         try std.testing.expectEqual(@as(usize, 268435456), reset.options.disk_limit);
     }
+}
+
+test "owned index strings preserve escaped metadata body references outbox and fixture state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var lifetime = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer lifetime.deinit();
+    const a = lifetime.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/borrowed-index", .{tmp.sub_path});
+    {
+        var seed = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer seed.deinit();
+        const sa = seed.allocator();
+        var store = try Store.open(std.testing.io, sa, root, "fictional@example.test", .{ .fixtures = true });
+        defer store.close();
+        const references = try sa.alloc(u8, 8192);
+        @memset(references, 'x');
+        try store.put(.{ .id = "retained-body", .threadId = "thread", .subject = "Quoted \"subject\" café\nSecond line", .references = references, .bodyText = "Literal retained body\n", .receivedAt = 10, .labels = &.{"INBOX"} }, true);
+        try store.putOutbox(.{ .id = "sent-fixture", .threadId = "sent-thread", .subject = "Literal sent subject", .bodyText = "Literal outbox body\n", .receivedAt = 20, .labels = &.{"SENT"} });
+        try store.setFixtureRecord("provider-fixture", &.{ "INBOX", "STARRED" }, "1234", false);
+        try store.save();
+    }
+    var snapshot = try Store.openCached(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer snapshot.close();
+    // The seed arena is gone and unrelated heap and stack storage change.
+    const unrelated = try a.alloc(u8, 32 * 1024);
+    @memset(unrelated, 'z');
+    var stack_noise: [8192]u8 = undefined;
+    @memset(&stack_noise, 'q');
+    std.mem.doNotOptimizeAway(&stack_noise);
+    const entry = snapshot.find("retained-body").?;
+    try std.testing.expectEqualStrings("Quoted \"subject\" café\nSecond line", entry.message.subject);
+    try std.testing.expectEqual(@as(usize, 8192), entry.message.references.len);
+    for (entry.message.references) |c| try std.testing.expectEqual(@as(u8, 'x'), c);
+    try std.testing.expectEqual(@as(usize, 64), entry.bodyHash.len);
+    try std.testing.expectEqualStrings("Literal retained body\n", (try snapshot.read("retained-body")).?.bodyText);
+    try std.testing.expectEqualStrings("Literal sent subject", snapshot.state.outbox[0].subject);
+    try std.testing.expectEqualStrings("Literal outbox body\n", (try snapshot.readOutbox("sent-fixture")).?.bodyText);
+    const record = snapshot.fixtureRecord("provider-fixture").?;
+    try std.testing.expectEqualStrings("1234", record.sourceHistoryId);
+    try std.testing.expectEqualStrings("STARRED", record.labels[1]);
+}
+
+test "sorted insertion replacement ties legacy fallback and lower count retain body references" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/ordered-index", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 3 });
+    defer store.close();
+    try store.put(.{ .id = "c", .threadId = "thread", .receivedAt = 10, .bodyText = "Body C" }, true);
+    try store.put(.{ .id = "a", .threadId = "thread", .receivedAt = 10, .bodyText = "Body A" }, true);
+    try store.put(.{ .id = "b", .threadId = "thread", .receivedAt = 20, .bodyText = "Body B" }, true);
+    for ([_][]const u8{ "b", "a", "c" }, store.state.entries) |expected, entry| try std.testing.expectEqualStrings(expected, entry.message.id);
+    const hash_c = try a.dupe(u8, store.find("c").?.bodyHash);
+    const hash_b = try a.dupe(u8, store.find("b").?.bodyHash);
+    try store.put(.{ .id = "d", .threadId = "thread", .receivedAt = 5, .bodyText = "Never retained" }, true);
+    try std.testing.expect(store.find("d") == null);
+    try store.put(.{ .id = "c", .threadId = "thread", .receivedAt = 30, .subject = "Changed metadata" }, false);
+    for ([_][]const u8{ "c", "b", "a" }, store.state.entries) |expected, entry| try std.testing.expectEqualStrings(expected, entry.message.id);
+    try std.testing.expectEqualStrings(hash_c, store.find("c").?.bodyHash);
+    try store.put(.{ .id = "c", .threadId = "thread", .receivedAt = 10 }, false);
+    try store.put(.{ .id = "a", .threadId = "thread", .receivedAt = 20 }, false);
+    for ([_][]const u8{ "a", "b", "c" }, store.state.entries) |expected, entry| try std.testing.expectEqualStrings(expected, entry.message.id);
+    try std.testing.expectEqualStrings("Body C", (try store.read("c")).?.bodyText);
+    try store.put(.{ .id = "d", .threadId = "thread", .receivedAt = 20, .bodyText = "Body D" }, true);
+    for ([_][]const u8{ "a", "b", "d" }, store.state.entries) |expected, entry| try std.testing.expectEqualStrings(expected, entry.message.id);
+    try std.testing.expect(store.find("c") == null);
+    try std.testing.expectEqualStrings(hash_b, store.find("b").?.bodyHash);
+    // An unordered legacy vector still receives the same canonical order.
+    std.mem.reverse(Entry, store.state.entries);
+    try store.save();
+    store.close();
+    var legacy = try Store.openCached(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer legacy.close();
+    for ([_][]const u8{ "a", "b", "d" }, legacy.state.entries) |expected, entry| try std.testing.expectEqualStrings(expected, entry.message.id);
+    legacy.close();
+    var lowered = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 2 });
+    defer lowered.close();
+    for ([_][]const u8{ "a", "b" }, lowered.state.entries) |expected, entry| try std.testing.expectEqualStrings(expected, entry.message.id);
+    try std.testing.expectEqualStrings(hash_b, lowered.find("b").?.bodyHash);
+    try std.testing.expectEqualStrings("Body B", (try lowered.read("b")).?.bodyText);
+    try std.testing.expectError(error.FileNotFound, lowered.dir.access(std.testing.io, try lowered.fileName("mail", "d"), .{}));
 }
