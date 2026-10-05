@@ -27,6 +27,7 @@ import time
 from build_info import build_mode, read_build_info
 from terminal_integration import Client
 from terminal_screen import Screen
+from terminal_help import scroll_help_to
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/terminal"
@@ -558,7 +559,8 @@ def exercise(terminal, action):
         terminal.until(lambda: "Ready" in terminal.text() and "Synthetic work thread 031" in terminal.text())
         require("Synthetic personal thread" not in terminal.text(), "account switch retained previous account mail")
         terminal.send(b"?")
-        terminal.until(lambda: "No editor save or paste sends mail." in terminal.text())
+        scroll_help_to(terminal, "Mouse: Click select/open")
+        scroll_help_to(terminal, "No editor save or paste sends mail.")
         require("Ctrl+C" in terminal.text() and "quit" in terminal.text(), "help clipped its interruption/quit guidance")
         terminal.send(b"q")
         terminal.gap()

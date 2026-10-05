@@ -20,6 +20,7 @@ from terminal_cache import ProviderFixture, seed, contains_body, status_color, F
 from terminal_integration import ACCOUNTS, ROOT, Client, require
 from terminal_pty import Terminal, retained_draft
 from terminal_status_screen import StatusScreen
+from terminal_help import scroll_help_to
 
 UI_FIXTURES = ROOT / "tests/fixtures/terminal/ui"
 CASES = ("layout-responsive", "preferences-private-safety", "reader-cached-next-previous", "theme-reload-no-color", "search-back-stack")
@@ -302,7 +303,8 @@ def run_case(binary, directory, name):
             terminal.until(lambda: "Contacts" in terminal.text() and contact_name in terminal.text())
             require(fixture.is_held(), "contacts opened only after refresh completed")
             terminal.send(b"?")
-            terminal.until(lambda: "No editor save or paste sends mail." in terminal.text())
+            scroll_help_to(terminal, "Mouse: Click select/open")
+            scroll_help_to(terminal, "No editor save or paste sends mail.")
             terminal.send(b"\x1b")
             terminal.gap()
             terminal.until(lambda: "Contacts" in terminal.text() and contact_name in terminal.text())
@@ -414,7 +416,8 @@ def run_case(binary, directory, name):
             terminal.until(lambda: "Mail · [ ] Page" in terminal.text() and "Mail · Cache subset" not in terminal.text())
             require(fixture.is_held() and terminal.process.poll() is None, "cache-search Back did not stay interactive")
             terminal.send(b"?")
-            terminal.until(lambda: "No editor save or paste sends mail." in terminal.text())
+            scroll_help_to(terminal, "Mouse: Click select/open")
+            scroll_help_to(terminal, "No editor save or paste sends mail.")
             terminal.send(b"q")
             terminal.until(lambda: "Mail · [ ] Page" in terminal.text() and "No editor save or paste sends mail." not in terminal.text())
             result.update(quit_key(terminal))
