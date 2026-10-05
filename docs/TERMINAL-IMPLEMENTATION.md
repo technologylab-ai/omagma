@@ -3,6 +3,9 @@
 Version 0.2.0 expands the completed 0.1.1 release. Runtime source is
 `7568a2467b5a93142259bc50057a177c3acf7150`; [qualification](evidence/terminal-0.2.0.md)
 records exact artifacts and results.
+Version 0.2.1 at `858ce32d21625a136fbed102d265e97bb95b0a48` separates incoming
+address-header bounds from the sending envelope; its [patch qualification](evidence/terminal-0.2.1.md)
+preserves the original release evidence.
 The desktop bar retains its read-only API, account separation, 30-message
 snapshots and existing memory gates. New terminal modes have separate bounded
 storage and explicit capabilities. Tests use fictional accounts; no production

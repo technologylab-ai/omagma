@@ -2,7 +2,20 @@
 
 The motivation for Omagma was a single Gmail tab observed using roughly **2 GB of RAM** on its author's desktop. That is an individual observation, not a universal Gmail requirement or a controlled comparison: Omagma shows a bounded recent-mail list and snippets, and opens the full Gmail application when needed.
 
-## Terminal modes, 0.2.0
+## Terminal modes, 0.2.1
+
+The incoming-header compatibility patch at source `858ce32d21625a136fbed102d265e97bb95b0a48` was measured separately on 2026-10-05, using native Linux x86_64 static-musl Safe and exact Zig 0.17.0. The original three-account fixture workload, 100 warm-up cycles, 1,000 measured cycles and 60-second quiet intervals were unchanged.
+
+| Whole terminal process | Settled RSS | Settled PSS | OS peak RSS | Warm RSS/PSS growth | Quiet CPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Agent CLI | 6,932 KiB (6.8 MiB) | 6,932 KiB | 10,644 KiB (10.4 MiB) | 0 KiB | 0 ticks |
+| TUI | 8,180 KiB (8.0 MiB) | 8,172 KiB | 12,032 KiB (11.8 MiB) | 0 KiB | 0 ticks |
+
+Rounded decimal footprints are approximately **7 MB for the CLI and 8–9 MB for the TUI**, with workload peaks around 11 MB and 12–13 MB. Terminal heap peaks were 6,692,585 and 7,619,937 bytes respectively, with no rejected allocations. The TUI emitted no output during its quiet minute. These are whole Omagma terminal processes; the bar, terminal emulator and external editor remain separate processes. The 64 MiB terminal heap ceiling and 16 MiB fixed backend/HTTP reservation are separate accounting bounds, already represented by their touched pages in process RSS/PSS. [Patch qualification](evidence/terminal-0.2.1.md) records exact executable identities.
+
+The observed footprints remain close to the previous release below. These are separate process lifetimes, not an isolated compiler comparison; both terminal releases use the same exact Zig 0.17.0 compiler. Existing acceptance thresholds were unchanged.
+
+## Preserved terminal modes, 0.2.0
 
 On 2026-10-05, native Linux x86_64 static-musl Safe builds from source `7568a2467b5a93142259bc50057a177c3acf7150` passed separate 1,000-cycle CLI and TUI measurements. Each used three fictional accounts with 96 messages each, after 100 warm-up cycles, followed by a 60-second quiet interval.
 

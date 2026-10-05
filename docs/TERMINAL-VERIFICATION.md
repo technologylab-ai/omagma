@@ -97,4 +97,30 @@ The 64 MiB ceiling applies to the capped terminal heap. The existing 16 MiB fixe
 
 Earlier failed receipts and escaped synthetic VT captures remain unchanged in ignored local results. Application fixes addressed an `O_PATH` directory passed to `fchmod`, editor job-control restoration and readback ownership, and an unnecessary immutable-body rewrite that exceeded the atomic replacement quota. The long-field test independently found one emoji dropped across a 1,024-byte input boundary; the bounded UTF-8 carry adapter now passes the unchanged exact-content oracle. Its first queue implementation then caused a startup stack-probe fault from a large initialization temporary. In-place initialization and small entries owning capped heap text corrected that fault; the final 19-case suites pass in both modes. Two harness waits were also corrected to wait for loaded search results and the actual pane instead of matching help text. None of these failures justified weakening acceptance limits.
 
+### 0.2.1 incoming-address patch qualification
+
+The bounded live read-only check of downloaded 0.2.0 exposed two incoming-header failures: a delivered Reply-To with a 65-byte ASCII local part and a To header with more than 32 participants. Fictional regressions independently failed before the patch. Version 0.2.1 separates incoming header storage from outgoing envelope limits: bounded incoming lists preserve up to 1,024 participants per header within the existing header byte budgets, and addresses up to 254 bytes, while outgoing envelopes retain 32 recipients and a 64-byte local-part limit. Reading an address does not permit sending to it; an oversized reply-all is refused explicitly.
+
+On 2026-10-05, source revision `858ce32d21625a136fbed102d265e97bb95b0a48` passed 45/45 CLI cases, 19/19 isolated PTY cases and 7/7 loopback wire checks in both Debug and Safe, using exact Zig 0.17.0 on Linux x86_64. The fixture checker passed 13 checks and the terminal cell model passed six. The Debug SHA-256 is `f6c6106fef5b1817ac8b572f981f7fe0f5d7a5062407f7f60a3970998be35723`; Safe is `4e936b367cdd6dd9ed5eac71ead732cb3b5f301cc047753ad8d5144b58b6e511`. Receipts are named `terminal-v021-{cli,pty,wire}-{debug,safe}.json`; all earlier receipts remain unchanged.
+
+Three added CLI cases use [fictional incoming headers](../tests/fixtures/terminal/inbound-addresses.json) in temporary copies of the existing corpus. They prove that 34 recipients and a 65-byte Reply-To local part remain intact across list/read/thread operations in three accounts. An ordinary reply selects one valid sender, oversized reply-all fails without truncation, and an invalid outgoing Reply-To fails without an orphan draft. Separate boundary checks accept 32 outgoing recipients and a 64-byte local part, then reject 33/65 before any provider call or submission journal entry. The default 96-message/account corpus and measurement workload are unchanged.
+
+Both Safe 1,000-cycle acceptance runs, with 100 warmup cycles and separate 60-second quiet windows, passed unchanged thresholds:
+
+| Observation | CLI | TUI |
+| --- | ---: | ---: |
+| Warm median RSS / PSS (KiB) | 6,932 / 6,932 | 8,180 / 8,172 |
+| Warm RSS / PSS / private growth (KiB) | 0 / 0 / 0 | 0 / 0 / 0 |
+| Sampled peak RSS / PSS (KiB) | 10,628 / 10,628 | 11,728 / 11,720 |
+| OS RSS high-water (KiB) | 10,644 | 12,032 |
+| Maximum observed threads | 1 | 5 |
+| Terminal heap peak (bytes) | 6,692,585 | 7,619,937 |
+| Rejected allocations | 0 | 0 |
+| Quiet duration (seconds) | 60.0007 | 60.0006 |
+| Quiet CPU, percent of one core | 0 | 0 |
+
+The TUI emitted no bytes during its quiet window. These observations retain the separate 64 MiB terminal heap ceiling and 16 MiB fixed reservation accounting described above; they establish no absolute RSS/PSS ceiling. Local receipts are `terminal-v021-cli-safe-measure.json` and `terminal-v021-tui-safe-measure.json`.
+
+An explicitly authorized private live read-only smoke against this Safe binary then passed for all three configured accounts: two pages totaling 40 messages each, mismatched account/query cursor refusal, one full message and its thread, and consistent unread state across reads. It used existing bar read-only credentials with an absent terminal grant registry and an isolated temporary cache. It issued no mutation or explicit attachment-download commands; decoding may fetch required external MIME body parts. All children were joined/reaped and the temporary mail cache was removed. Only anonymous counts, fixed status codes, build identity and the binary hash were retained in an owner-only private receipt. Failed 0.2.0 live receipts remain preserved privately; no mail, account identities or raw headers are published. This limited smoke does not exhaust Gmail MIME/thread variants or qualify terminal write permissions.
+
 Live gates remain separate: authorization upgrades, real Gmail paging/MIME/thread behavior, People read/write conflicts, actual send outcomes and delivery of invitation replies. Fixture tests cannot establish provider deduplication or successful recipient delivery. No real mailbox, contact or invitation is changed by these tests.
