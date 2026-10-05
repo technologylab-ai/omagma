@@ -8,7 +8,7 @@ Each account keeps its own unread count and message list. The dropdown shows rea
 
 The backend is Zig; the bar UI is Quickshell QML. Bar mail stays in a bounded memory cache of at most 30 messages per account. The bar does not persist mail. Background refresh is optional: the default is manual refresh, and `refreshIntervalSeconds: 300` enables a five-minute interval even while the dropdown is closed.
 
-Omagma started because a single Gmail tab was using roughly **2 GB of RAM** on the author's desktop. Omagma's backend and UI together measured approximately **29 MB for three connected accounts** in v0.2.1 on Linux x86_64. This includes the backend and Omagma's attributed UI share; Chrome and unrelated shell widgets are excluded. These observations are not a controlled browser benchmark. See [memory measurements](docs/MEMORY.md) for the accounting and version details.
+Omagma started because a single Gmail tab was using roughly **2 GB of RAM** on the author's desktop. Omagma's backend and UI together measured approximately **31 MB for three connected accounts** in v0.2.2 on Linux x86_64. This includes the backend and Omagma's attributed UI share; Chrome and unrelated shell widgets are excluded. These observations are not a controlled browser benchmark. See [memory measurements](docs/MEMORY.md) for the accounting and version details.
 
 ## Install
 

@@ -77,3 +77,20 @@ The initial native ARM CI job for publication revision `95b733e7ff3ed3e814fbfa34
 Source `c5d1473b996fcbec43e7405b103fb76fe104253b` avoids copies of unescaped strings from an owned immutable index buffer, checks whether rows are already sorted before sorting, and inserts/repositions one row rather than sorting the complete index for each update. Regression tests cover caller lifetime, escaped strings, timestamp/ID ties, legacy unsorted indexes, immutable-body hashes and tail eviction. Locking, generation checks, atomic commits, workload, byte/count budgets and deadlines are unchanged.
 
 The unchanged local maximum-cache run completed in 10.14 seconds in Debug and 1.47 seconds in Safe after the change. These process lifetimes are not a controlled architecture benchmark; the subsequent native ARM gate must establish its own result.
+
+## Published artifacts and deployment
+
+[Native release run 37313908584](https://github.com/technologylab-ai/omagma/actions/runs/37313908584) passed all gates on Linux x86_64 and arm64 at publication/tag revision `e91e1e86f759e18c931f2172b66ddb206ed8ff32`. Runtime source is `c5d1473b996fcbec43e7405b103fb76fe104253b`. ARM's unchanged maximum-cache workload completed in **22.73 seconds in Debug** and **3.40 seconds in Safe**, inside the existing 30-second deadline. Hosted x86_64 measured 17.07 / 3.09 seconds; these separate hosts/lifetimes do not establish an architecture cost. The earlier failed run remains preserved.
+
+| Published static-musl artifact | Safe SHA-256 |
+| --- | --- |
+| Linux x86_64 | `597009ad9dc3616c8f5473cc70f411ce280b7e640c86c50def0f6caaf02b712d` |
+| Linux arm64 | `d103b312cdc44e529ae59d7a684834dda5fb0737d90211cfc27d1d2441f5ebd9` |
+
+Both architectures passed 209 unit executions in each mode, 48 CLI / 12 held-cache / five UI / maximum-cache / six background / 19 PTY / seven wire cases in Debug and Safe, plus separate Safe CLI/TUI 1,000-cycle memory gates. All four terminal memory runs had zero warm growth, zero quiet CPU and no allocation refusals; neither TUI emitted quiet-window bytes. Native ARM backend evidence does not establish ARM desktop integration.
+
+The actual downloaded bundles passed all checksums, static ELF checks without PT_INTERP or DT_NEEDED, version/reservation agreement, normalized archive metadata and the exact 230-file public tree. The downloaded x86_64 executable is byte-identical to the locally qualified Safe artifact. It independently passed 48 CLI / 12 cache / five UI / six background / 19 PTY / seven wire cases, 13 bar integration / 13 HTTP/HTTPS cases and its typed callback probe. Identical bytes did not require another 1,000-cycle soak.
+
+The final x86_64 binary also passed fresh local bar memory and closed-background gates: peak RSS **12,992 / 12,996 KiB**, zero warm growth and quiet CPU, at most one worker/two pending flags and 90 rows. The unchanged Qt component's earlier offscreen receipt retains its own executable identity above.
+
+The downloaded x86_64 backend was installed atomically with a private backup, then a supported plugin rescan preserved the shell instance, closed popup, private account/profile settings and command/plugin links. Running executable identity and old-backend reaping were verified. The requested user timer is enabled at five minutes; its first read-only run finished successfully, all three account caches held recent history checkpoints within count/byte limits, and no cache process remained between runs. Cache updates preserve local drafts and recovery records. No production mail/contact/invitation mutation or additional consent occurred during this deployment.

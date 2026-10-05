@@ -54,6 +54,14 @@ These numbers include the complete Omagma terminal process: touched storage, hea
 
 The terminal allocator peaked at 7,235,433 bytes for CLI and 7,617,129 bytes for TUI, with no rejected allocations. Its **64 MiB heap ceiling** is separate from the **16 MiB fixed backend/HTTP reservation**. The whole-process RSS/PSS measurements include their touched pages; summing allocation ceilings does not predict resident memory. See [terminal qualification](TERMINAL-VERIFICATION.md) for reproduction and limits. Historical bar measurements below retain their original version and accounting.
 
+## Three-account bar measurement, v0.2.2
+
+On 2026-10-05, the installed downloaded **v0.2.2 / Zig 0.17.0** static-musl backend with three connected accounts used **15,380 KiB PSS** (15,392 KiB RSS), stable over five samples. The unchanged Quickshell UI's full offscreen lifecycle measurement attributed **14,433 KiB PSS** after 1,000 cycles and 200 warm-ups. Together this estimates **29,813 KiB: 29.1 MiB / 30.5 MB**, rounded to **31 MB** for Omagma's backend and attributed UI share.
+
+This is a combined estimate from separate live-backend and synthetic UI lifetimes, excluding Chrome and unrelated shell widgets. The UI receipt keeps its predecessor executable identity in [current qualification](evidence/terminal-0.2.2.md); the component bytes are unchanged. The running installed backend is the published x86_64 artifact, SHA-256 `597009ad9dc3616c8f5473cc70f411ce280b7e640c86c50def0f6caaf02b712d`. It was verified after rescan without replacing the desktop shell or account/profile settings.
+
+The five-minute terminal-cache timer returns after each update and has **no resident cache process between runs**. An open TUI or a running cache one-shot is a separate process from the bar; terminal measurements above do not include the emulator/editor. Workload, process lifetime and Qt baseline differences explain why these observations do not isolate a compiler effect. Earlier version measurements below remain unchanged.
+
 ## Three-account bar measurement, v0.2.1
 
 On 2026-10-05, the installed downloaded **v0.2.1 / Zig 0.17.0** static-musl backend with three connected accounts and five-minute background refresh used **15,472 KiB PSS** (15,480 KiB RSS), stable across five samples. A separate full offscreen UI qualification with 90 rows attributed **12,476 KiB PSS** after 1,000 open/close cycles and 200 warm-ups. Together:
