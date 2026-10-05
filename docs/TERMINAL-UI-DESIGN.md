@@ -68,6 +68,21 @@ HTML conversion. This cannot resolve an old plain alternative identical to that
 conversion, but requires no network request or cache rewrite. Full-body hashes
 remain valid; new metadata strips body provenance with the body itself.
 
+## Mouse input
+
+The renderer records a bounded map of visible hit rectangles each frame. Mouse
+reports use SGR cell coordinates, matching the layout even when the physical
+terminal is wider than the 240-column application viewport. Wrapped accounts,
+mailbox rows, two-line message cards and contact rows share their drawn bounds;
+separators, borders and empty areas have no action.
+
+Unmodified left presses use the existing cache-first keyboard actions. Wheel
+navigation follows the hovered pane. Modified/right clicks and idle motion do
+not change the view; click paths do not send, discard or apply mutations.
+Default tracking is disabled while the external editor owns the terminal and
+restored on return, then disabled on exit. `--no-mouse` disables tracking and
+ignores injected mouse reports as well.
+
 ## Keys and text input
 
 | Keys | Browsing action |

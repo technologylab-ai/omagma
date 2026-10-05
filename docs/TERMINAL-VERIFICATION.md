@@ -52,6 +52,7 @@ python3 tests/terminal_reader.py
 python3 tests/terminal_html_screen.py
 python3 tests/terminal_html_fixture_check.py
 python3 tests/terminal_repaint_screen.py
+python3 tests/terminal_mouse_screen.py
 python3 tests/terminal_cache.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_ui.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_cache_max.py --binary zig-out/bin/omagma --build-mode debug
@@ -64,6 +65,8 @@ python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind tui
 ```
 
 `tests/terminal_html.py --binary PATH --build-mode debug|safe` checks native HTML-only rendering with fictional mail, MIME alternative preference, legacy cache compatibility, responsive tables/styles, control filtering and retained parse/layout reuse. It uses owned PTYs and no installed desktop window.
+
+`tests/terminal_repaint.py` checks physical clearing and reflow with preserved terminal cells; `tests/terminal_mouse.py` checks actual SGR clicks, wheel navigation, contacts, disabled mouse and editor lifecycle. Both use owned isolated PTYs, with no desktop focus changes.
 
 Repeat correctness suites with a separately built Safe executable. Cache checks use held-provider barriers to prove that local reads and navigation finish before a delayed network reply. UI checks inspect current terminal cells, pane geometry, theme colors, search provenance and Back behavior. The maximum-cache workload seeds 2,000 metadata records and verifies exact newest-tail retention, immutable-body hashes, quota accounting and capped-heap behavior after additions and deletions. Background checks use isolated native one-shots rather than installing a user timer; they cover lease coalescing, age policy, read-only access, cancellation and unsafe lock-file rejection.
 

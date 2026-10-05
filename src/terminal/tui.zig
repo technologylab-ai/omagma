@@ -20,7 +20,7 @@ const Key = vaxis.Key;
 const max_cols = 240;
 const max_rows = 80;
 const response_limit = types.Limits.runtime_bytes / 2;
-const Event = union(enum) { key_press: Key, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, terminate };
+const Event = union(enum) { key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, terminate };
 const Loop = input_loop.Loop(Event);
 const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, attachment };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
@@ -79,6 +79,21 @@ fn readerEnvelope(allocator: Allocator, to: []const u8, cc: []const u8, stamp: [
 fn readerEnd(lines: usize, height: usize) usize {
     return lines -| @max(height, 1);
 }
+
+fn setMouseReporting(vx: *vaxis.Vaxis, writer: *Io.Writer, enabled: bool) !void {
+    // Cell coordinates remain correct even when the actual terminal is wider
+    // than our bounded screen. Pixel translation would use its capped width.
+    const pixels = vx.caps.sgr_pixels;
+    vx.caps.sgr_pixels = false;
+    defer vx.caps.sgr_pixels = pixels;
+    try vx.setMouseMode(writer, enabled);
+    vx.state.mouse = enabled;
+    vx.state.pixel_mouse = false;
+    // Clicks, wheel and button-drag reports suffice; idle pointer movement
+    // must not cause large message frames to repaint.
+    if (enabled) try writer.writeAll("\x1b[?1003l");
+    try writer.flush();
+}
 const folders = [_][]const u8{ "Inbox", "Sent", "Drafts", "Archive", "Trash" };
 const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH" };
 const help_text =
@@ -88,6 +103,7 @@ const help_text =
     "Reader: J/K Next/previous mail · j/k Scroll\n" ++
     "v Right/below reader · :layout right|below\n" ++
     "1/2/3 Account · / Cache search · \\ Gmail search\n" ++
+    "Mouse: Click select/open · wheel Scroll · --no-mouse\n" ++
     "c/r/R Compose/reply/all · a Contacts; n/e New/edit\n" ++
     "x/D/U Archive/Trash/restore · s/u Star/unread\n" ++
     "m Label · I Review RSVP · o Open in browser\n" ++
@@ -481,6 +497,7 @@ const App = struct {
     thread: []const Value = &.{},
     markup: []ReaderMarkup = &.{},
     html_stats: html_view.Stats = .{},
+    mouse_hits: layout.HitMap = .{},
     contacts: []const Value = &.{},
     selected: usize = 0,
     top: usize = 0,
@@ -1860,6 +1877,81 @@ const App = struct {
             try self.preview(true);
         }
     }
+    fn activateContact(self: *App) !void {
+        if (self.contacts_selected >= self.contacts.len or self.contacts_state == .denied) return;
+        if (!self.picker) return self.editContact(self.contacts[self.contacts_selected]);
+        const emails = items(get(self.contacts[self.contacts_selected], "emails"));
+        if (emails.len > 0) {
+            const address = text(get(emails[0], "address"));
+            try recipients.validateAddress(address);
+            const target = &self.compose.fields[if (self.compose.selected < 3) self.compose.selected else 0];
+            target.cursor = target.bytes.items.len;
+            if (target.value().len > 0) try target.insert(self.allocator, ", ", 16 * 1024);
+            try target.insert(self.allocator, address, 16 * 1024);
+        }
+        self.leaveContacts();
+    }
+    fn onMouse(self: *App, mouse: vaxis.Mouse) !void {
+        if (self.options.no_mouse or mouse.type != .press or mouse.mods.shift or mouse.mods.alt or mouse.mods.ctrl) return;
+        const wheel: ?bool = switch (mouse.button) {
+            .wheel_down => true,
+            .wheel_up => false,
+            .left => null,
+            else => return,
+        };
+        if (self.job.future != null and !readOnlyJob(self.job.kind)) return;
+        if (self.mode == .help) {
+            if (wheel) |down| self.help_scroll = if (down) @min(self.help_scroll +| 3, self.help_lines -| self.help_height) else self.help_scroll -| 3;
+            return;
+        }
+        // Confirmation overlays and input prompts keep their explicit keys.
+        // A click can never submit, discard, trash, or leave a draft.
+        if (self.mode != .browse and self.mode != .contacts and self.mode != .compose and self.mode != .contact_edit) return;
+        const hit = self.mouse_hits.at(mouse.col, mouse.row) orelse return;
+        switch (hit.kind) {
+            .account, .folder, .contacts => {
+                if (self.mode != .browse or wheel != null) return;
+                self.focus = .navigation;
+                self.navigation = switch (hit.kind) {
+                    .account => hit.index,
+                    .folder => self.accounts.len + hit.index,
+                    .contacts => self.accounts.len + folders.len,
+                    else => unreachable,
+                };
+                try self.enter();
+            },
+            .mail => {
+                if (self.mode != .browse or hit.index >= self.messages.len) return;
+                self.focus = .list;
+                if (wheel) |down| return self.move(down, 3);
+                self.selected = hit.index;
+                self.selection_generation +%= 1;
+                try self.preview(false);
+            },
+            .reader => {
+                if (self.mode == .browse) self.focus = .reader else if (self.mode != .compose) return;
+                if (wheel) |down| self.reader_scroll = if (down) @min(self.reader_scroll +| 3, readerEnd(self.reader_lines, self.reader_height)) else self.reader_scroll -| 3;
+            },
+            .contact => {
+                if (self.mode != .contacts or self.contacts_state == .denied or hit.index >= self.contacts.len) return;
+                if (wheel) |down| {
+                    self.contacts_selected = if (down) @min(self.contacts_selected +| 3, self.contacts.len -| 1) else self.contacts_selected -| 3;
+                } else {
+                    self.contacts_selected = hit.index;
+                    try self.activateContact();
+                }
+            },
+            .compose_field => {
+                if (self.mode != .compose or self.compose.unknown_outcome or wheel != null or hit.index >= self.compose.fields.len) return;
+                self.compose.selected = hit.index;
+                self.compose.insert_mode = true;
+            },
+            .contact_field => {
+                if (self.mode != .contact_edit or wheel != null or hit.index > 1) return;
+                self.contact_field = hit.index;
+            },
+        }
+    }
     fn runEditor(self: *App) !void {
         self.preemptReadOnly();
         if (self.job.future != null) return;
@@ -1887,6 +1979,7 @@ const App = struct {
         _ = try vaxis.Tty.makeRaw(self.tty.fd.handle);
         try self.vx.enterAltScreen(writer);
         try self.vx.enableDetectedFeatures(writer);
+        try setMouseReporting(self.vx, writer, !self.options.no_mouse);
         if (self.tty.getWinsize()) |size| try self.resize(size) else |_| {}
         self.vx.queueRefresh();
         try self.loop.start();
@@ -2095,20 +2188,7 @@ const App = struct {
                 self.previous_mode = .contacts;
                 self.mode = .search;
                 try self.input.set(self.allocator, "");
-            } else if (key.matches('n', .{}) and self.contacts_state != .denied) try self.editContact(null) else if (key.matches('e', .{}) and self.contacts_selected < self.contacts.len and self.contacts_state != .denied) try self.editContact(self.contacts[self.contacts_selected]) else if (key.matches(Key.enter, .{}) and self.contacts_selected < self.contacts.len) {
-                if (self.picker) {
-                    const emails = items(get(self.contacts[self.contacts_selected], "emails"));
-                    if (emails.len > 0) {
-                        const address = text(get(emails[0], "address"));
-                        try recipients.validateAddress(address);
-                        const target = &self.compose.fields[if (self.compose.selected < 3) self.compose.selected else 0];
-                        target.cursor = target.bytes.items.len;
-                        if (target.value().len > 0) try target.insert(self.allocator, ", ", 16 * 1024);
-                        try target.insert(self.allocator, address, 16 * 1024);
-                    }
-                    self.leaveContacts();
-                } else try self.editContact(self.contacts[self.contacts_selected]);
-            }
+            } else if (key.matches('n', .{}) and self.contacts_state != .denied) try self.editContact(null) else if (key.matches('e', .{}) and self.contacts_selected < self.contacts.len and self.contacts_state != .denied) try self.editContact(self.contacts[self.contacts_selected]) else if (key.matches(Key.enter, .{}) and self.contacts_selected < self.contacts.len) try self.activateContact();
             return;
         }
         if (self.mode == .browse and key.matches('v', .{})) {
@@ -2224,6 +2304,14 @@ const App = struct {
         if (color == .selected) child.fill(.{ .style = self.style(.selected) });
         _ = child.printSegment(.{ .text = try safe(self.frame.allocator(), raw, false), .style = self.style(color) }, .{ .wrap = .none });
     }
+    fn mouseArea(self: *App, win: vaxis.Window, kind: layout.HitKind, index: usize) void {
+        if (win.x_off < 0 or win.y_off < 0) return;
+        self.mouse_hits.add(.{ .x = @intCast(win.x_off), .y = @intCast(win.y_off), .width = win.width, .height = win.height }, kind, index);
+    }
+    fn mouseRows(self: *App, win: vaxis.Window, row: usize, height: u16, kind: layout.HitKind, index: usize) void {
+        if (row >= win.height) return;
+        self.mouseArea(win.child(.{ .y_off = @intCast(row), .height = height }), kind, index);
+    }
     fn editLine(self: *App, win: vaxis.Window, row: usize, name: []const u8, field: *const Field, editing: bool, color: Tone) !void {
         if (!editing) return self.line(win, row, try std.fmt.allocPrint(self.frame.allocator(), "{s}: {s}", .{ name, field.value() }), color);
         if (row >= win.height or win.width == 0) return;
@@ -2287,6 +2375,8 @@ const App = struct {
             // Use wrapped text so complete account identities remain accessible.
             const child = win.child(.{ .y_off = @intCast(@min(row, max_rows)) });
             const result = child.printSegment(.{ .text = try safe(self.frame.allocator(), value_in, false), .style = self.style(if (self.focus == .navigation and self.navigation == index) .selected else if (index == self.account_index) .accent else .text) }, .{ .wrap = .grapheme });
+            const actual_rows = @max(@as(usize, result.row) + @as(usize, if (result.col > 0) 1 else 0), 1);
+            self.mouseRows(win, row, @intCast(@min(actual_rows, win.height)), .account, index);
             row += @as(usize, result.row) + 1;
         }
         row += 1;
@@ -2295,8 +2385,10 @@ const App = struct {
         for (folders, 0..) |name, index| {
             const value_in = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (index == self.folder) "> " else "  ", name });
             try self.line(win, row + index, value_in, if (self.focus == .navigation and self.navigation == self.accounts.len + index) .selected else if (index == self.folder) .accent else .text);
+            self.mouseRows(win, row + index, 1, .folder, index);
         }
         try self.line(win, row + folders.len + 1, "Contacts", if (self.focus == .navigation and self.navigation == self.accounts.len + folders.len) .selected else .text);
+        self.mouseRows(win, row + folders.len + 1, 1, .contacts, 0);
     }
     fn navigationWidth(self: *App, win: vaxis.Window) !u16 {
         var widest: u16 = 26;
@@ -2327,6 +2419,7 @@ const App = struct {
             const sender_text = if (text(get(sender, "name")).len > 0) text(get(sender, "name")) else text(get(sender, "address"));
             const selected = index == self.selected;
             const item = win.child(.{ .y_off = @intCast(row), .height = @min(@as(u16, 2), win.height -| @as(u16, @intCast(row))) });
+            self.mouseArea(item, .mail, index);
             item.fill(.{ .style = self.style(if (selected) .selected else .text) });
             const stamp = try timestamp(self.frame.allocator(), get(value_in, "receivedAt"));
             const compact = if (stamp.len >= 16) stamp[5..16] else stamp;
@@ -2369,6 +2462,7 @@ const App = struct {
         return position.row + 1;
     }
     fn readerDraw(self: *App, outer: vaxis.Window) !void {
+        self.mouseArea(outer, .reader, 0);
         const browsing = self.mode == .browse or (self.mode == .help and self.previous_mode == .browse) or (self.mode == .command and self.previous_mode == .browse);
         const toolbar_rows: u16 = if (browsing) 1 else 0;
         if (browsing) try self.line(outer, 0, "J/K Mail · j/k Scroll · v Layout · z Expand", .accent);
@@ -2474,9 +2568,11 @@ const App = struct {
             const field = &self.compose.fields[index];
             const editing = self.compose.selected == index and self.compose.insert_mode;
             try self.editLine(left, index + 2, name, field, editing, if (self.compose.selected == index and self.mode == .compose) .selected else .text);
+            self.mouseRows(left, index + 2, 1, .compose_field, index);
         }
         try self.line(left, 7, if (self.compose.selected == 4 and self.compose.insert_mode) "Body: INSERT · Esc Normal" else "Body:", if (self.compose.selected == 4) .accent else .muted);
         const body = left.child(.{ .y_off = 8, .height = left.height -| 10 });
+        self.mouseArea(body, .compose_field, 4);
         // Measure the same sanitized graphemes and wrapping as the renderer.
         // Newline counts alone cannot keep a long single paragraph's caret in view.
         const value_in = self.compose.fields[4].value();
@@ -2509,6 +2605,8 @@ const App = struct {
         if (self.mode == .contact_edit) {
             try self.line(inner, 1, try std.fmt.allocPrint(self.frame.allocator(), "Name: {s}▏", .{self.contact_name.value()}), if (self.contact_field == 0) .selected else .text);
             try self.line(inner, 3, try std.fmt.allocPrint(self.frame.allocator(), "Email: {s}▏", .{self.contact_email.value()}), if (self.contact_field == 1) .selected else .text);
+            self.mouseRows(inner, 1, 1, .contact_field, 0);
+            self.mouseRows(inner, 3, 1, .contact_field, 1);
             try self.line(inner, 6, "Tab Field · Ctrl+S Save · Esc Cancel", .accent);
             return;
         }
@@ -2534,6 +2632,7 @@ const App = struct {
             const contact = self.contacts[index];
             try self.line(inner, 2 + (index - top) * 2, text(get(contact, "name")), if (index == self.contacts_selected) .selected else .text);
             try self.line(inner, 3 + (index - top) * 2, try Compose.mailboxes(self.frame.allocator(), get(contact, "emails")), .muted);
+            self.mouseRows(inner, 2 + (index - top) * 2, 2, .contact, index);
         }
     }
     fn contextHints(self: *const App) []const u8 {
@@ -2605,6 +2704,7 @@ const App = struct {
     }
     fn draw(self: *App) !void {
         _ = self.frame.reset(.retain_capacity);
+        self.mouse_hits.clear();
         const win = self.vx.window();
         self.invitation_confirm_ready = false;
         win.clear();
@@ -2715,6 +2815,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     // The first colored phase and available cached bodies are already on
     // screen before terminal capability negotiation or any provider fetch.
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
+    try setMouseReporting(&vx, tty.writer(), !options.no_mouse);
     try app.refreshMailbox();
     while (!app.quit and received_signal.load(.acquire) == 0) {
         app.finish() catch |err| app.say(true, "{s}", .{@errorName(err)});
@@ -2727,6 +2828,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
         };
         switch (event) {
             .key_press => |key| app.onKey(key) catch |err| app.say(true, "{s} · retained data kept", .{@errorName(err)}),
+            .mouse => |mouse| app.onMouse(mouse) catch |err| app.say(true, "{s} · retained data kept", .{@errorName(err)}),
             .winsize => |size| try app.resize(size),
             .paste_start => app.paste = true,
             .paste_end => app.paste = false,
@@ -3224,6 +3326,13 @@ test "wide account identity and plain reader replace prior layout cells" {
     defer account_line.deinit(allocator);
     for (2..navigation_width - 2) |col| try account_line.appendSlice(allocator, vx.screen.readCell(@intCast(col), 4).?.char.grapheme);
     try std.testing.expectEqualStrings("> 123456789@example.com", account_line.items);
+    try std.testing.expectEqual(layout.HitKind.account, app.mouse_hits.at(24, 4).?.kind);
+    try std.testing.expect(app.mouse_hits.at(24, 5) == null);
+    const mail_x: i16 = @intCast(panes.list.?.x + 2);
+    try std.testing.expectEqual(layout.HitKind.mail, app.mouse_hits.at(mail_x, 3).?.kind);
+    try std.testing.expectEqual(layout.HitKind.mail, app.mouse_hits.at(mail_x, 4).?.kind);
+    try std.testing.expect(app.mouse_hits.at(mail_x, 5) == null);
+    try std.testing.expectEqual(layout.HitKind.reader, app.mouse_hits.at(@intCast(rect.x + 2), 5).?.kind);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -3263,4 +3372,89 @@ test "reader tail remains visible in the resize frame after reduced wrapping" {
     }
     try std.testing.expect(tail_seen);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "mouse selects cached mail and respects disabled release and confirmation boundaries" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"},{\"id\":\"b\"}]}}");
+    app.mouse_hits.add(.{ .x = 30, .y = 6, .width = 40, .height = 2 }, .mail, 1);
+    const click: vaxis.Mouse = .{ .col = 35, .row = 7, .button = .left, .mods = .{}, .type = .press };
+    app.options.no_mouse = true;
+    try app.onMouse(click);
+    try std.testing.expectEqual(@as(usize, 0), app.selected);
+    app.options.no_mouse = false;
+    var released = click;
+    released.type = .release;
+    try app.onMouse(released);
+    try std.testing.expectEqual(@as(usize, 0), app.selected);
+    app.mode = .trash_confirm;
+    try app.onMouse(click);
+    try std.testing.expectEqual(@as(usize, 0), app.selected);
+    try std.testing.expectEqual(Mode.trash_confirm, app.mode);
+    app.mode = .browse;
+    try app.onMouse(click);
+    try std.testing.expectEqual(@as(usize, 1), app.selected);
+    try std.testing.expectEqual(Focus.list, app.focus);
+    try std.testing.expectEqualStrings("Local full body", text(get(app.thread[0], "bodyText")));
+    app.mouse_hits.add(.{ .x = 80, .y = 3, .width = 40, .height = 20 }, .reader, 0);
+    app.reader_lines = 100;
+    app.reader_height = 20;
+    try app.onMouse(.{ .col = 90, .row = 5, .button = .wheel_down, .mods = .{}, .type = .press });
+    try std.testing.expectEqual(Focus.reader, app.focus);
+    try std.testing.expectEqual(@as(usize, 3), app.reader_scroll);
+    try std.testing.expectEqual(@as(usize, 1), app.selected);
+    try std.testing.expect(app.job.future == null and !app.quit);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "mouse contact actions open local details or preserve recipient picker draft without writes" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{ .behavior = .contacts };
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.prepareContacts("");
+    app.mouse_hits.add(.{ .x = 2, .y = 5, .width = 76, .height = 2 }, .contact, 1);
+    const click: vaxis.Mouse = .{ .col = 5, .row = 6, .button = .left, .mods = .{}, .type = .press };
+    const expected_name = text(get(app.contacts[1], "name"));
+    const expected_email = text(get(items(get(app.contacts[1], "emails"))[0], "address"));
+    try app.onMouse(click);
+    try std.testing.expectEqual(Mode.contact_edit, app.mode);
+    try std.testing.expectEqualStrings(expected_name, app.contact_name.value());
+    try std.testing.expectEqualStrings(expected_email, app.contact_email.value());
+    app.mode = .contacts;
+    app.picker = true;
+    app.compose_active = true;
+    app.compose.selected = 1;
+    try app.compose.fields[4].set(allocator, "Unsent body retained");
+    try app.onMouse(click);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqualStrings(expected_email, app.compose.fields[1].value());
+    try std.testing.expectEqualStrings("Unsent body retained", app.compose.fields[4].value());
+    try std.testing.expect(app.job.future == null and !app.quit);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "mouse reporting uses cells disables idle motion and restores through suspend" {
+    const allocator = std.testing.allocator;
+    var vx: vaxis.Vaxis = undefined;
+    vx.caps = .{ .sgr_pixels = true };
+    vx.state = .{};
+    var writer: Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+    try setMouseReporting(&vx, &writer.writer, true);
+    try std.testing.expect(vx.state.mouse and !vx.state.pixel_mouse and vx.caps.sgr_pixels);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "1006h") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "1016h") == null);
+    try std.testing.expect(std.mem.endsWith(u8, writer.written(), "\x1b[?1003l"));
+    try setMouseReporting(&vx, &writer.writer, false);
+    try std.testing.expect(!vx.state.mouse and !vx.state.pixel_mouse);
+    try std.testing.expect(std.mem.endsWith(u8, writer.written(), "\x1b[?1002;1003;1004;1006;1016l"));
+    try setMouseReporting(&vx, &writer.writer, true);
+    try std.testing.expect(vx.state.mouse and !vx.state.pixel_mouse);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, writer.written(), "\x1b[?1003l"));
 }

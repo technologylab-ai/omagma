@@ -54,6 +54,34 @@ These numbers include the complete Omagma terminal process: touched storage, hea
 
 The terminal allocator peaked at 7,235,433 bytes for CLI and 7,617,129 bytes for TUI, with no rejected allocations. Its **64 MiB heap ceiling** is separate from the **16 MiB fixed backend/HTTP reservation**. The whole-process RSS/PSS measurements include their touched pages; summing allocation ceilings does not predict resident memory. See [terminal qualification](TERMINAL-VERIFICATION.md) for reproduction and limits. Historical bar measurements below retain their original version and accounting.
 
+## HTML-reader checkpoint, 0.2.3
+
+The pre-mouse source `e4f852512646ce7cb4931677d391d3a49b82faeb` passed separate
+Linux x86_64 static-musl Safe gates on 2026-10-05: 100 warmups, 1,000 measured
+cycles and 60 quiet seconds. These receipts precede the mouse implementation;
+its qualification remains separate.
+
+| Whole process workload | Settled RSS / PSS (KiB) | OS RSS high-water (KiB) | Warm growth (KiB) | Capped heap peak (bytes) |
+| --- | ---: | ---: | ---: | ---: |
+| Agent CLI, three fictional accounts | 9,016 / 9,008 | 12,868 | 0 | 4,698,191 |
+| Ordinary TUI, three fictional accounts | 11,628 / 11,620 | 14,500 | 40 | 5,273,534 |
+| TUI, exact 2 MiB HTML fallback | 27,896 / 27,888 | 38,540 | -4 | 56,049,942 |
+
+All gates had zero rejected allocations and zero quiet CPU ticks; both TUIs
+emitted no quiet bytes. The boundary HTML exceeds the rich-layout line cap, so
+this case establishes complete plain fallback and reachable tail. It does not
+claim formatted rendering of all 2 MiB. The separate 2,000-message cache stress
+had 43,464 KiB OS peak RSS and 44,214,520-byte heap peak.
+
+Rounded whole-process totals are about 9 MB CLI, 12 MB ordinary TUI and 29 MB settled
+for the boundary body, with respective high-water marks about 13/15/39 MB. These
+include touched storage, runtime and stacks, excluding the terminal emulator,
+bar, Chrome and external editor. The 64 MiB heap cap and 16 MiB fixed reservation
+are separate accounting; they must not be added to RSS/PSS. See the
+[HTML checkpoint evidence](evidence/terminal-0.2.3.md) for exact executable
+identities and preserved failures. Existing bar measurements below remain at
+their original versions.
+
 ## Three-account bar measurement, v0.2.2
 
 On 2026-10-05, the installed downloaded **v0.2.2 / Zig 0.17.0** static-musl backend with three connected accounts used **15,380 KiB PSS** (15,392 KiB RSS), stable over five samples. The unchanged Quickshell UI's full offscreen lifecycle measurement attributed **14,433 KiB PSS** after 1,000 cycles and 200 warm-ups. Together this estimates **29,813 KiB: 29.1 MiB / 30.5 MB**, rounded to **31 MB** for Omagma's backend and attributed UI share.

@@ -78,6 +78,7 @@ jobs:
           python3 tests/terminal_html_screen.py
           python3 tests/terminal_html_fixture_check.py
           python3 tests/terminal_repaint_screen.py
+          python3 tests/terminal_mouse_screen.py
           python3 tests/terminal_cache.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-cache-debug.json
           python3 tests/terminal_ui.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-ui-debug.json
           python3 tests/terminal_cache_max.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-cache-max-debug.json
@@ -87,6 +88,7 @@ jobs:
           python3 tests/terminal_pty.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-pty.json
           python3 tests/terminal_html.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-html.json
           python3 tests/terminal_repaint.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-repaint.json
+          python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
       - name: Safe correctness and standalone probes
         run: |
           zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe
@@ -143,6 +145,7 @@ jobs:
           python3 tests/terminal_pty.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-pty.json
           python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html.json --resource-cycles 1000 --idle-seconds 60
           python3 tests/terminal_repaint.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-repaint.json
+          python3 tests/terminal_mouse.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-mouse.json
           python3 tests/terminal_measure.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-cli-memory.json
           python3 tests/terminal_measure.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-tui-memory.json
       - name: Safe memory gate

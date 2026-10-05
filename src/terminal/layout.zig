@@ -5,6 +5,36 @@ pub const Focus = enum { navigation, list, reader };
 pub const Rect = struct { x: u16 = 0, y: u16 = 0, width: u16, height: u16 };
 pub const Panes = struct { navigation: ?Rect = null, list: ?Rect = null, reader: ?Rect = null };
 
+pub const HitKind = enum { account, folder, contacts, mail, reader, contact, compose_field, contact_field };
+pub const Hit = struct { rect: Rect, kind: HitKind, index: usize = 0 };
+/// Populated by drawing, rather than recomputing a second approximation of
+/// wrapped account rows, paged messages or responsive pane geometry.
+pub const HitMap = struct {
+    areas: [128]Hit = undefined,
+    count: usize = 0,
+
+    pub fn clear(self: *HitMap) void {
+        self.count = 0;
+    }
+    pub fn add(self: *HitMap, rect: Rect, kind: HitKind, index: usize) void {
+        if (rect.width == 0 or rect.height == 0 or self.count == self.areas.len) return;
+        self.areas[self.count] = .{ .rect = rect, .kind = kind, .index = index };
+        self.count += 1;
+    }
+    pub fn at(self: *const HitMap, col: i16, row: i16) ?Hit {
+        if (col < 0 or row < 0) return null;
+        var index = self.count;
+        while (index > 0) {
+            index -= 1;
+            const hit = self.areas[index];
+            const x: u16 = @intCast(col);
+            const y: u16 = @intCast(row);
+            if (x >= hit.rect.x and y >= hit.rect.y and x - hit.rect.x < hit.rect.width and y - hit.rect.y < hit.rect.height) return hit;
+        }
+        return null;
+    }
+};
+
 pub fn compute(width: u16, height: u16, focus: Focus, reader_layout: ReaderLayout, expanded: bool) Panes {
     return computeWithNavigation(width, height, focus, reader_layout, expanded, 26);
 }
@@ -80,4 +110,22 @@ test "account width grows only when needed and preserves bounded mail panes" {
     const narrow = computeWithNavigation(70, 20, .navigation, .right, false, 260);
     try std.testing.expectEqual(@as(u16, 70), narrow.navigation.?.width);
     try std.testing.expect(narrow.list == null and narrow.reader == null);
+}
+
+test "rendered mouse areas exclude borders gaps clipped rows and stale layouts" {
+    var hits: HitMap = .{};
+    hits.add(.{ .x = 2, .y = 4, .width = 23, .height = 1 }, .account, 1);
+    hits.add(.{ .x = 29, .y = 3, .width = 68, .height = 2 }, .mail, 42);
+    hits.add(.{ .x = 29, .y = 6, .width = 68, .height = 1 }, .mail, 43);
+    try std.testing.expectEqual(@as(usize, 1), hits.at(24, 4).?.index);
+    try std.testing.expect(hits.at(25, 4) == null and hits.at(24, 5) == null);
+    try std.testing.expectEqual(@as(usize, 42), hits.at(29, 4).?.index);
+    try std.testing.expect(hits.at(29, 5) == null and hits.at(29, 7) == null);
+    try std.testing.expect(hits.at(-1, 4) == null and hits.at(30, -1) == null);
+    hits.clear();
+    hits.add(.{ .x = 2, .y = 12, .width = 76, .height = 10 }, .reader, 0);
+    try std.testing.expect(hits.at(29, 4) == null);
+    try std.testing.expectEqual(HitKind.reader, hits.at(29, 20).?.kind);
+    for (0..200) |index| hits.add(.{ .width = 1, .height = 1 }, .mail, index);
+    try std.testing.expectEqual(@as(usize, 128), hits.count);
 }

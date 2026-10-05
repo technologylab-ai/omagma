@@ -343,3 +343,25 @@ test "input queue owns text and releases rejected queued and consumed events" {
     try std.testing.expectEqualStrings("xail", restarted.key_press.text.?);
     try std.testing.expect(try loop.queue.isEmpty());
 }
+
+test "mouse reports keep zero based coordinates buttons and release across fragments" {
+    var decoder: Decoder = .{};
+    const first = "\x1b[<0;30;";
+    @memcpy((try decoder.writable())[0..first.len], first);
+    decoder.added(first.len);
+    try std.testing.expect((try decoder.next()) == null);
+    const second = "7M\x1b[<0;30;7m\x1b[<65;90;8M";
+    @memcpy((try decoder.writable())[0..second.len], second);
+    decoder.added(second.len);
+    const press = (try decoder.next()).?.mouse;
+    try std.testing.expectEqual(vaxis.Mouse.Type.press, press.type);
+    try std.testing.expectEqual(vaxis.Mouse.Button.left, press.button);
+    try std.testing.expectEqual(@as(i16, 29), press.col);
+    try std.testing.expectEqual(@as(i16, 6), press.row);
+    const released = (try decoder.next()).?.mouse;
+    try std.testing.expectEqual(vaxis.Mouse.Type.release, released.type);
+    const wheel = (try decoder.next()).?.mouse;
+    try std.testing.expectEqual(vaxis.Mouse.Button.wheel_down, wheel.button);
+    try std.testing.expectEqual(@as(i16, 89), wheel.col);
+    try std.testing.expect((try decoder.next()) == null);
+}

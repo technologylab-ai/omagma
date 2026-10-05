@@ -17,6 +17,8 @@ The bar stays read-only and does not persist mail. Terminal reads do not mark ma
 
 The TUI shows available cached mail at startup while fetching updates in the background. A separate colored status line distinguishes fetching, refreshing cached mail, successful completion and cached data after a refresh failure. `NO_COLOR` retains these states as text. Cached navigation and previously downloaded full bodies remain usable during refresh, and list updates retain the selected message identity. The fixed per-account message count keeps the newest mail and evicts the oldest tail with its body files; the byte limit also guards unusually large mail. See [cache-first startup](TUI-CACHE.md) for synchronization, cache limits and partial-data behavior.
 
+Mouse support is enabled by default. Click an account, mailbox or message to select it; click Contacts to open the address book, and a contact to open its details or choose it in the recipient picker. The wheel navigates the pane under the pointer. Selection clicks do not send mail or apply mailbox/contact changes. Hold your terminal’s selection modifier to select text, or start with `--no-mouse` to keep all mouse handling in the terminal.
+
 ## Reading HTML-only mail
 
 The reader prefers a nonempty plain-text MIME alternative. If only HTML is
