@@ -54,6 +54,24 @@ These numbers include the complete Omagma terminal process: touched storage, hea
 
 The terminal allocator peaked at 7,235,433 bytes for CLI and 7,617,129 bytes for TUI, with no rejected allocations. Its **64 MiB heap ceiling** is separate from the **16 MiB fixed backend/HTTP reservation**. The whole-process RSS/PSS measurements include their touched pages; summing allocation ceilings does not predict resident memory. See [terminal qualification](TERMINAL-VERIFICATION.md) for reproduction and limits. Historical bar measurements below retain their original version and accounting.
 
+## Final mouse runtime, 0.2.3
+
+On 2026-10-05, source `a94d29d07d2370d140bb13bef21840ead90b6c65` passed the
+combined local Linux x86_64 static-musl Safe gates with mouse enabled. Each
+ordinary CLI/TUI workload used 100 warmups, 1,000 cycles and 60 quiet seconds.
+
+| Whole process | Settled RSS / PSS (KiB) | OS peak RSS (KiB) | Warm growth | Heap peak (bytes) |
+| --- | ---: | ---: | ---: | ---: |
+| Agent CLI | 9,084 / 9,076 | 12,872 | 0 KiB | 4,698,191 |
+| TUI | 11,640 / 11,632 | 14,864 | 0 KiB | 5,273,534 |
+
+Both had zero quiet CPU and refused allocations; the TUI emitted no quiet bytes.
+The exact 2 MiB HTML fallback had 37,396 KiB process high-water, 56,049,942-byte
+heap peak, no warm growth, no refused allocations and zero quiet CPU/output.
+These measurements exclude the emulator, bar, Chrome and external editor.
+[Final mouse evidence](evidence/terminal-0.2.3-mouse.md) identifies the exact
+executables and workload. The pre-mouse checkpoint below remains unchanged.
+
 ## HTML-reader checkpoint, 0.2.3
 
 The pre-mouse source `e4f852512646ce7cb4931677d391d3a49b82faeb` passed separate

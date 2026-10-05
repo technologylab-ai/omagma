@@ -69,7 +69,7 @@ The UI harness runs offscreen and closes its processes when finished. See [verif
 - [UI behavior](docs/UI.md) and [background refresh](docs/BACKGROUND-REFRESH.md)
 - [Privacy and credentials](docs/PRIVACY.md)
 - [Bounded transport](docs/TRANSPORT.md) and [IPC protocol](docs/PROTOCOL.md)
-- [Memory measurements](docs/MEMORY.md), [terminal qualification](docs/evidence/terminal-0.2.0.md), [HTML-reader checkpoint](docs/evidence/terminal-0.2.3.md), [cache-first qualification](docs/evidence/terminal-0.2.2.md), [incoming-header patch qualification](docs/evidence/terminal-0.2.1.md), [Zig 0.17 qualification](docs/evidence/zig-0.17.0.md) and [historical Zig 0.16 evidence](EVIDENCE.md)
+- [Memory measurements](docs/MEMORY.md), [terminal qualification](docs/evidence/terminal-0.2.0.md), [HTML-reader checkpoint](docs/evidence/terminal-0.2.3.md), [mouse qualification](docs/evidence/terminal-0.2.3-mouse.md), [cache-first qualification](docs/evidence/terminal-0.2.2.md), [incoming-header patch qualification](docs/evidence/terminal-0.2.1.md), [Zig 0.17 qualification](docs/evidence/zig-0.17.0.md) and [historical Zig 0.16 evidence](EVIDENCE.md)
 - [Distribution](docs/DISTRIBUTION.md) and [compiler findings for wiki review](docs/ZIG017-WIKI-FOLLOWUP.md)
 - [Building and publishing releases](docs/RELEASING.md)
 - Social images: [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)
