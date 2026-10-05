@@ -4,10 +4,10 @@ Dated 2026-10-05. Earlier releases, their assets, dated evidence and failed priv
 
 ## Source and bounded behavior
 
-Runtime source: `de3cd1c50a4f028d24df0e3b498e5de52fb9a682`. Package and manifest version: **0.2.2**. Exact compiler: **Zig 0.17.0**, source `7647adab80dd088f4de3610fd245915a912eb6ad`. Local execution: native Linux x86_64, baseline CPU, static musl.
+Runtime source: `c5d1473b996fcbec43e7405b103fb76fe104253b`. Package and manifest version: **0.2.2**. Exact compiler: **Zig 0.17.0**, source `7647adab80dd088f4de3610fd245915a912eb6ad`. Local execution: native Linux x86_64, baseline CPU, static musl.
 
-- Debug SHA-256: `68c5df71e72b4f9a50e98980ade99792ef2bad9722c79730d98896304e7704b7`.
-- Stripped Safe SHA-256: `ed5665b77fe2f572e08b6496790b444ceb31c8f21aa6177bf50cea13a20f8572`.
+- Debug SHA-256: `42e18effeb671bc8204f0a247f1aa8d53fe0756a75cc44810453471db6a83759`.
+- Stripped Safe SHA-256: `597009ad9dc3616c8f5473cc70f411ce280b7e640c86c50def0f6caaf02b712d`.
 
 Cached lists and downloaded bodies are available before a network update completes. Gmail history updates use short local commits and a separate refresh lease, with bounded resync after an expired checkpoint. A narrow folder/search projection cannot replace the whole account cache. Refresh retains immutable body hashes, advances the checkpoint only after required commits, and records message-specific body refusals separately from systemic failures.
 
@@ -19,7 +19,7 @@ The optional native five-minute user timer shares cache policy and refresh lease
 
 ## Synthetic correctness
 
-Debug and Safe each passed **205 unit executions** (103 main, 34 codec, 68 provider); all active standalone probes and full executables compiled.
+Debug and Safe each passed **209 unit executions** (105 main, 34 codec, 70 provider); all active standalone probes and full executables compiled.
 
 | Suite | Debug | Safe |
 | --- | ---: | ---: |
@@ -33,7 +33,7 @@ Debug and Safe each passed **205 unit executions** (103 main, 34 codec, 68 provi
 
 One-shot checks prove that `--cached` adds zero provider calls and `--server` reaches uncached older mail; mixed modes and a server flag on a non-search command are rejected before provider access. Held-refresh barriers independently establish cached full reads and threads, selection retention and immediate Contacts access. Back checks cover search, expanded reader, normal/insert compose, help and unsent drafts. Header fixtures accept 96 synthetic delivered headers while refusing 257 headers or aggregate byte overflow.
 
-The Safe maximum-cache case seeded 2,000 records averaging 1,528 bytes, then added 100 messages and deleted ten. It retained exactly the newest 2,000, evicted the remaining 90 from the tail, validated 102 body references with preserved hashes and found no orphan body files. Peak capped heap was **41,945,834 bytes**, with zero refused allocations. Whole-process OS peak RSS was **44,880 KiB**; disk use was **3,344,073 bytes**, separately below the 256 MiB quota. The fixture completed in 2.66 seconds. This is a deliberately larger metadata workload, not the settled-memory soak below.
+The Safe maximum-cache case seeded 2,000 records averaging 1,528 bytes, then added 100 messages and deleted ten. It retained exactly the newest 2,000, evicted the remaining 90 from the tail, validated 102 body references with preserved hashes and found no orphan body files. Peak capped heap was **43,959,024 bytes**, with zero refused allocations. Whole-process OS peak RSS was **43,176 KiB**; disk use was **3,344,073 bytes**, separately below the 256 MiB quota. The fixture completed in 1.47 seconds. This is a deliberately larger metadata workload, not the settled-memory soak below.
 
 The unchanged UI model passed 1,000 snapshot replacements. Pure fixture, terminal cell, cache-fixture, status-color and wrapped-reader helpers passed 14, six, five, three and five checks respectively.
 
@@ -51,8 +51,8 @@ The unchanged CLI and TUI gates each passed 100 warm-ups, 1,000 measured cycles 
 
 | Whole process | Settled RSS / PSS (KiB) | OS peak RSS (KiB) | Capped heap peak (bytes) |
 | --- | ---: | ---: | ---: |
-| CLI | 8,792 / 8,784 | 12,504 | 4,304,957 |
-| TUI | 11,704 / 11,696 | 14,836 | 5,410,258 |
+| CLI | 8,840 / 8,828 | 12,784 | 4,657,857 |
+| TUI | 11,744 / 11,732 | 15,016 | 5,410,258 |
 
 The unchanged limits are 4 MiB warm median growth and 0.5% of one core while quiet. These measurements include touched fixed storage, heap, runtime and stacks; terminal emulator/editor and the bar are separate. [Memory accounting](../MEMORY.md) preserves previous versions and the larger-cache workload separately.
 
@@ -60,12 +60,20 @@ The unchanged limits are 4 MiB warm median growth and 0.5% of one core while qui
 
 Both modes passed the existing 13 integration and 13 HTTPS transport checks, launch/callback/FD probes and isolated synthetic Secret Service lifecycle. The keyring probe also exercised the new non-unlocking automatic lookup on its own synthetic session bus.
 
-Safe bar memory passed 1,000 cycles and 60 quiet seconds: OS peak RSS **12,952 KiB**, zero warm growth, zero CPU ticks and no unsolicited snapshots/jobs. The accelerated closed-background test passed 1,000 added jobs with one worker, at most two pending flags and 90 retained rows; peak RSS was **12,952 KiB**, with zero warm growth.
+The predecessor runtime's Safe bar memory passed 1,000 cycles and 60 quiet seconds: OS peak RSS **12,952 KiB**, zero warm growth, zero CPU ticks and no unsolicited snapshots/jobs. The accelerated closed-background test passed 1,000 added jobs with one worker, at most two pending flags and 90 retained rows; peak RSS was **12,952 KiB**, with zero warm growth.
 
-The unchanged Qt UI passed its full offscreen lifecycle gate: 200 warm-ups, 1,000 open/close cycles and a 60-second quiet interval. Attributed closed UI PSS was **14,433 KiB** over a **75,647 KiB** baseline, with warm PSS growth (**1,332 KiB**) and zero GUI/backend quiet CPU. The existing 20 MiB attributed-PSS, 2 MiB growth and 0.5% quiet-CPU limits were unchanged. No desktop window was mapped or user input captured.
+The unchanged Qt UI passed its full offscreen lifecycle gate with predecessor runtime `de3cd1c50a4f028d24df0e3b498e5de52fb9a682` (Safe `ed5665b77fe2f572e08b6496790b444ceb31c8f21aa6177bf50cea13a20f8572`): 200 warm-ups, 1,000 open/close cycles and a 60-second quiet interval. Attributed closed UI PSS was **14,433 KiB** over a **75,647 KiB** baseline, with warm PSS growth (**1,332 KiB**) and zero GUI/backend quiet CPU. The existing 20 MiB attributed-PSS, 2 MiB growth and 0.5% quiet-CPU limits were unchanged. No desktop window was mapped or user input captured.
 
 ## Read-only live acceptance
 
 The final Safe executable passed temporary-cache checks for all three configured accounts using existing read-only bar grants. Cached full reads and partial threads were available; the second unchanged-history update added no list, metadata or body fetches. Existing retained body hashes stayed unchanged. The previously reported search/header case also returned a complete first-result body.
 
 All six size-mismatch refusals observed in the initial sample disappeared after the narrowly scoped inline-text fix. One message still exceeded an existing supported-size limit and remained explicitly refused; this qualification does not claim every sampled message has a supported body. Private receipts retain only anonymous counts, status codes and executable identity. No production message/contact/invitation mutation, new consent, keyring/config change or actual installed-cache write occurred during these checks; temporary copies and owned processes were removed.
+
+## Native ARM Debug performance gate
+
+The initial native ARM CI job for publication revision `95b733e7ff3ed3e814fbfa345f3ccf3893837033` failed the existing 30-second refresh deadline in the maximum-cache Debug workload. Earlier ARM unit, bar, held-cache and UI checks passed; x86_64 completed all gates. [The failed run](https://github.com/technologylab-ai/omagma/actions/runs/37308738326) and receipts remain preserved; publication was skipped.
+
+Source `c5d1473b996fcbec43e7405b103fb76fe104253b` avoids copies of unescaped strings from an owned immutable index buffer, checks whether rows are already sorted before sorting, and inserts/repositions one row rather than sorting the complete index for each update. Regression tests cover caller lifetime, escaped strings, timestamp/ID ties, legacy unsorted indexes, immutable-body hashes and tail eviction. Locking, generation checks, atomic commits, workload, byte/count budgets and deadlines are unchanged.
+
+The unchanged local maximum-cache run completed in 10.14 seconds in Debug and 1.47 seconds in Safe after the change. These process lifetimes are not a controlled architecture benchmark; the subsequent native ARM gate must establish its own result.

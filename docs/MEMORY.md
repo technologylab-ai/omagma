@@ -4,16 +4,16 @@ The motivation for Omagma was a single Gmail tab observed using roughly **2 GB o
 
 ## Terminal modes, 0.2.2
 
-Cache-first runtime source `de3cd1c50a4f028d24df0e3b498e5de52fb9a682` was measured on 2026-10-05 with exact Zig 0.17.0, native Linux x86_64 static-musl Safe. The original three-account workloads, 100 warm-ups, 1,000 measured cycles and 60-second quiet intervals retain their acceptance thresholds.
+Cache-first runtime source `c5d1473b996fcbec43e7405b103fb76fe104253b` was measured on 2026-10-05 with exact Zig 0.17.0, native Linux x86_64 static-musl Safe. The original three-account workloads, 100 warm-ups, 1,000 measured cycles and 60-second quiet intervals retain their acceptance thresholds.
 
 | Whole terminal process | Settled RSS / PSS | OS peak RSS | Warm RSS/PSS/private growth | Quiet CPU |
 | --- | ---: | ---: | ---: | ---: |
-| Agent CLI | 8,792 / 8,784 KiB | 12,504 KiB | 0 KiB | 0 ticks |
-| TUI | 11,704 / 11,696 KiB | 14,836 KiB | 0 KiB | 0 ticks |
+| Agent CLI | 8,840 / 8,828 KiB | 12,784 KiB | 0 KiB | 0 ticks |
+| TUI | 11,744 / 11,732 KiB | 15,016 KiB | 0 KiB | 0 ticks |
 
-Rounded decimal footprints are about **9 MB for the CLI and 12 MB for the TUI**, with workload peaks around **13–16 MB**. Capped-heap peaks were 4,304,957 and 5,410,258 bytes, with zero allocation refusals. The TUI emitted no bytes during its quiet minute. These are whole terminal processes; the terminal emulator, external editor and separately running bar are excluded. [Cache-first qualification](evidence/terminal-0.2.2.md) records exact executable identities.
+Rounded decimal footprints are about **9 MB for the CLI and 12 MB for the TUI**, with workload peaks around **13–16 MB**. Capped-heap peaks were 4,657,857 and 5,410,258 bytes, with zero allocation refusals. The TUI emitted no bytes during its quiet minute. These are whole terminal processes; the terminal emulator, external editor and separately running bar are excluded. [Cache-first qualification](evidence/terminal-0.2.2.md) records exact executable identities.
 
-A separate maximum-cache stress seeded 2,000 metadata records averaging 1,528 bytes, added 100 and deleted ten. It retained the exact newest 2,000 within **3,344,073 disk bytes**, with preserved body hashes and no orphan files. Its peak capped heap was **41,945,834 bytes** and whole-process OS peak RSS **44,880 KiB**, approximately **46 MB**. This deliberately larger workload is separate from settled small-message memory; the 64 MiB heap ceiling and 16 MiB fixed-storage reservation are allocation accounting, not resident-memory totals.
+A separate maximum-cache stress seeded 2,000 metadata records averaging 1,528 bytes, added 100 and deleted ten. It retained the exact newest 2,000 within **3,344,073 disk bytes**, with preserved body hashes and no orphan files. Its peak capped heap was **43,959,024 bytes** and whole-process OS peak RSS **43,176 KiB**, approximately **44 MB**. This deliberately larger workload is separate from settled small-message memory; the 64 MiB heap ceiling and 16 MiB fixed-storage reservation are allocation accounting, not resident-memory totals.
 
 The new terminal features settle roughly 2–4 MB above the previous local workload. Both versions use the same exact compiler, and their separate process lifetimes do not establish an isolated compiler effect. Historical tables stay attached to their original versions. The optional cache timer is a short native one-shot; it has no resident cache process between runs.
 
