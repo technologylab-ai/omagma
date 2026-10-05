@@ -1,6 +1,6 @@
 # Native HTML reader qualification, 0.2.3 pre-mouse checkpoint
 
-Dated 2026-10-05. This records the qualified **pre-mouse** runtime checkpoint. The TUI and agent CLI remain experimental. The subsequent mouse implementation is outside these receipts; native ARM CI, publication and deployment of 0.2.3 are pending. Earlier releases, evidence and failed receipts remain unchanged.
+Dated 2026-10-05. This records the qualified **pre-mouse** runtime checkpoint. The TUI and agent CLI remain experimental. The subsequent mouse implementation is outside these receipts. Native ARM CI, publication and deployment were pending at this checkpoint; their completed final results are in [mouse/release evidence](terminal-0.2.3-mouse.md). Earlier releases, evidence and failed receipts remain unchanged.
 
 ## Source and executable identity
 
@@ -67,4 +67,4 @@ The unchanged limits are 64 MiB capped terminal heap, at most 4 MiB warm median 
 
 ## Pending qualification and publication
 
-This evidence qualifies only the pre-mouse checkpoint above. Mouse behavior requires its own source identity, regression checks and final evidence. Native x86_64/ARM release CI, downloaded-asset verification, publication and deployment of 0.2.3 remain pending. The published 0.2.2 release and its historical evidence are unchanged.
+This evidence qualifies only the pre-mouse checkpoint above. Mouse behavior requires its own source identity, regression checks and final evidence. Native x86_64/ARM release CI, downloaded-asset verification, publication and deployment of 0.2.3 were pending at this checkpoint; [final release evidence](terminal-0.2.3-mouse.md) records their completion. The published 0.2.2 release and its historical evidence are unchanged.

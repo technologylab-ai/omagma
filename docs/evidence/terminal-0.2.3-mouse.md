@@ -1,6 +1,6 @@
 # Terminal mouse qualification, 0.2.3
 
-Dated 2026-10-05. This records completed combined correctness checks and compilation. All 22 local combined gates passed; native release CI, publication and deployment are **pending**. The TUI and agent CLI remain experimental. The [pre-mouse HTML evidence](terminal-0.2.3.md) retains its original source and executable identities and is not mouse qualification.
+Dated 2026-10-05. This records completed combined correctness checks and compilation. All 22 local combined gates passed. Native x86_64 and ARM release CI, publication, downloaded-artifact qualification and the installed x86_64 check are complete. The TUI and agent CLI remain experimental. The [pre-mouse HTML evidence](terminal-0.2.3.md) retains its original source and executable identities and is not mouse qualification.
 
 ## Source and executable identity
 
@@ -9,7 +9,7 @@ Runtime source: `a94d29d07d2370d140bb13bef21840ead90b6c65`. Test-only follow-up:
 - Debug SHA-256: `ff814bb2b010442e628e7320c33539897f4aa6686f4bf70d6aa6a0d951f7c0e7`.
 - Safe SHA-256: `d3e2b67b194409543dcb09e2b0ae7a13fbce22297a0e5ba4d0e08e240bd79487`.
 
-Debug and Safe each passed **240 unit executions**: 129 main, 41 codec and 70 provider. The no-TUI build passed **205 unit executions**; active main/probe entry points compiled. These are local compilation and focused-check results, not a completed release gate.
+Debug and Safe each passed **240 unit executions**: 129 main, 41 codec and 70 provider. The no-TUI build passed **205 unit executions**; active main/probe entry points compiled. The completed combined and native release gates are recorded below.
 
 ## Mouse behavior and boundaries
 
@@ -49,9 +49,7 @@ Earlier HTML, cache and memory evidence is unchanged. In particular, the pre-mou
 
 The **22-job** combined run `mouse-final-v023-2-driver.json` passed and reaped
 all owned children. Existing workloads, application deadlines, allocator caps
-and memory-growth/quiet-CPU thresholds remain unchanged. Native x86_64/ARM
-release CI, downloaded artifact verification, publication and deployment remain
-pending at this checkpoint; previous published artifacts remain immutable.
+and memory-growth/quiet-CPU thresholds remain unchanged. Native x86_64/ARM release CI and the downloaded-artifact/deployment checks below completed afterward; previous published artifacts remain immutable.
 
 ## Combined correctness and large-body gate
 
@@ -82,5 +80,54 @@ static ELF checks. Each contains 248 public tracked/bundle files, with private
 configuration, credentials, caches and raw receipts excluded. The x86_64 native
 smoke matches the qualified Safe SHA above. The cross-built arm64 SHA is
 `60a189e11692461c85b0b0a8b3464f0bfe157fbb8a2d26ae315083998b99ab75`;
-its local check reports `nativeSmokeTest:false`. Native ARM CI and publication
-remain pending; cross-compilation is not desktop or native runtime evidence.
+its local check reports `nativeSmokeTest:false`. Native ARM CI and publication completed as recorded below; cross-compilation alone is not desktop or native runtime evidence.
+
+## Native CI and published artifacts
+
+[Release CI 37359163295](https://github.com/technologylab-ai/omagma/actions/runs/37359163295)
+passed all jobs on native Ubuntu 24.04 x86_64 and arm64. Both architectures
+passed Debug/Safe correctness, HTML 7, repaint 3 and mouse 5 workflows, isolated
+keyring/transport checks, and unchanged Safe 1000-cycle/60-second CLI/TUI/HTML,
+backend and background memory gates. No production credentials were used.
+
+The [v0.2.3 release](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.3)
+is published at tag/publication commit
+`8117727e5091760c170a6d8f3ffcb82acab71cd4`; runtime remains `a94d29d`.
+Its x86_64 Safe SHA matches local qualification above; ARM Safe SHA is
+`60a189e11692461c85b0b0a8b3464f0bfe157fbb8a2d26ae315083998b99ab75`.
+Both actual downloaded bundles passed checksums, normalized/privacy-audited
+contents, manifest/backend version agreement and static ELF checks, with no
+PT_INTERP or DT_NEEDED. ARM desktop integration is still not claimed.
+
+| Native CI process | Settled RSS / PSS (KiB) | OS RSS peak (KiB) | Heap peak (bytes) |
+| --- | ---: | ---: | ---: |
+| x86_64 CLI | 9,060 / 9,052 | 13,124 | 4,698,191 |
+| x86_64 TUI | 11,624 / 11,616 | 14,792 | 5,275,468 |
+| arm64 CLI | 6,336 / 6,332 | 10,032 | 4,947,693 |
+| arm64 TUI | 8,828 / 8,824 | 11,664 | 5,485,194 |
+
+All four ordinary gates had zero warm growth, rejected allocations and quiet
+CPU. Both TUI quiet windows emitted zero bytes. The exact 2 MiB HTML gates passed
+1,000/60 on both architectures: x86_64 heap 56,049,942/HWM 38,204 KiB, arm64
+heap 49,286,766/HWM 33,480 KiB, no rejected allocations and zero quiet CPU/output.
+Warm RSS growth was -4/24 KiB respectively, below the unchanged 4 MiB threshold.
+These process lifetimes do not isolate architecture or compiler costs.
+
+## Actual x86_64 download and installation
+
+The downloaded x86_64 executable passed 48 CLI, 12 cache, 5 UI, 6 background, 19 PTY,
+7 wire, 7 HTML, 3 repaint, 5 mouse, 13 bar integration, 13 HTTP/HTTPS and callback checks.
+All owned children were reaped. The first aggregate driver incorrectly expected
+9 jobs after three suites were added; its failed summary remains preserved.
+An independent audit validated all 12 actual job receipts and executable/mode/
+compiler/count identities without relabeling that original or repeating suites.
+No repeated 1,000-cycle soak was necessary for identical qualified bytes.
+
+On 2026-10-05, those downloaded bytes were installed atomically and the plugin
+rescanned. The existing shell instance remained running and the old backend
+was reaped. The CLI and running service report 0.2.3/Safe/exact Zig 0.17.0.
+Protected account/profile configuration, shell settings, existing grant/UI files
+and user timer units remained unchanged. The five-minute cache timer stayed
+enabled/active; no new consent or production mutation was issued. The popup
+was closed after verification and no synthetic window/input was mapped to the
+desktop. Native ARM backend coverage remains separate from ARM desktop behavior.

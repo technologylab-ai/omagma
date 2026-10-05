@@ -72,6 +72,20 @@ These measurements exclude the emulator, bar, Chrome and external editor.
 [Final mouse evidence](evidence/terminal-0.2.3-mouse.md) identifies the exact
 executables and workload. The pre-mouse checkpoint below remains unchanged.
 
+### Native release CI
+
+[Release CI 37359163295](https://github.com/technologylab-ai/omagma/actions/runs/37359163295)
+passed native x86_64 and arm64 terminal gates for the published 0.2.3 artifacts.
+Ordinary CLI/TUI settled at 9,060/11,624 KiB RSS on x86_64 and 6,336/8,828 KiB
+on arm64; all four had zero warm growth and quiet CPU, with no rejected
+allocations. Whole-process high-water marks were 13,124/14,792 KiB and
+10,032/11,664 KiB respectively. The 2 MiB HTML fallback gates passed 1,000/60
+on both platforms. Differences between runner/process lifetimes do not isolate
+architecture or compiler costs. Native ARM backend evidence does not qualify
+ARM desktop integration. Actual downloaded x86_64 bytes passed their own
+synthetic checks and are now installed; [final evidence](evidence/terminal-0.2.3-mouse.md)
+records release/deployment identity and preserved failures.
+
 ## HTML-reader checkpoint, 0.2.3
 
 The pre-mouse source `e4f852512646ce7cb4931677d391d3a49b82faeb` passed separate
