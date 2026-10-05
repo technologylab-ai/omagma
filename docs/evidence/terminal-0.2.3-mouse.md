@@ -74,3 +74,13 @@ quiet CPU ticks and rejected allocations; TUI emitted no quiet bytes.
 The unchanged 2,000-message stress had 43,408 KiB OS RSS peak, 44,214,520-byte
 heap peak and 1.477-second Safe refresh. The 64 MiB terminal heap and separate
 16 MiB fixed reservation remain distinct from whole-process RSS/PSS.
+
+## Local release bundles
+
+Both architecture bundles passed normalized archive/privacy/checksum/version and
+static ELF checks. Each contains 248 public tracked/bundle files, with private
+configuration, credentials, caches and raw receipts excluded. The x86_64 native
+smoke matches the qualified Safe SHA above. The cross-built arm64 SHA is
+`60a189e11692461c85b0b0a8b3464f0bfe157fbb8a2d26ae315083998b99ab75`;
+its local check reports `nativeSmokeTest:false`. Native ARM CI and publication
+remain pending; cross-compilation is not desktop or native runtime evidence.
