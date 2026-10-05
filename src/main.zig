@@ -20,7 +20,7 @@ var config_storage: [16 * 1024]u8 = undefined;
 var probe_storage: [l.response]u8 = undefined;
 // All module-owned static storage is accounted at compile time; unassigned
 // capacity is physically reserved and touched once, with no allocator fallback.
-const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0);
+const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + @import("terminal/background.zig").reservation_bytes + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0);
 comptime {
     if (assigned_bytes > l.app_reservation) @compileError("Application reservation exceeds16MiB");
 }
@@ -45,6 +45,10 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (std.mem.eql(u8, mode, "cache-refresh")) {
+        try @import("terminal/background.zig").run(init, io, &args);
+        return;
+    }
     if (std.mem.eql(u8, mode, "--version")) {
         var buffer: [256]u8 = undefined;
         var writer = std.Io.File.stdout().writer(io, &buffer);
@@ -174,6 +178,10 @@ fn app(init: std.process.Init) !void {
 }
 test {
     std.testing.refAllDecls(@import("daemon.zig"));
+    std.testing.refAllDecls(@import("terminal/layout.zig"));
+    std.testing.refAllDecls(@import("terminal/theme.zig"));
+    std.testing.refAllDecls(@import("terminal/preferences.zig"));
+    std.testing.refAllDecls(@import("terminal/background.zig"));
     std.testing.refAllDecls(@import("platform.zig"));
     std.testing.refAllDecls(@import("bounded.zig"));
     std.testing.refAllDecls(@import("model.zig"));

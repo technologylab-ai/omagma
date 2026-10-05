@@ -1,5 +1,7 @@
 # Terminal mail
 
+**Experimental:** the TUI and CLI are under active development. Read-only live checks and synthetic write tests do not establish every Gmail, contact or invitation workflow.
+
 The same native binary runs the bar backend, TUI and agent CLI. A complete release is preferred; its `zig-out/bin/omagma` needs no compiler. For terminal-only use, the matching static `omagma-linux-ARCH` binary plus the release's `LICENSES.txt` is sufficient. Verify its entry in `SHA256SUMS`, make it executable, and put it in a user-controlled PATH directory. The terminal needs Linux and a UTF-8 terminal; live Gmail additionally needs an unlocked Secret Service keyring, `secret-tool`, CA certificates and private account configuration. Chrome is needed for consent and explicitly opening Gmail links.
 
 ## Start safely
@@ -13,6 +15,8 @@ Fixtures use three fictional accounts and a separate mock provider with mail sen
 
 The bar stays read-only and does not persist mail. Terminal reads do not mark mail read. Each command and each TUI view names one configured account; there is no combined inbox.
 
+The TUI shows available cached mail at startup while fetching updates in the background. A separate colored status line distinguishes fetching, refreshing cached mail, successful completion and cached data after a refresh failure. `NO_COLOR` retains these states as text. Cached navigation and previously downloaded full bodies remain usable during refresh, and list updates retain the selected message identity. The fixed per-account message count keeps the newest mail and evicts the oldest tail with its body files; the byte limit also guards unusually large mail. See [cache-first startup](TUI-CACHE.md) for synchronization, cache limits and partial-data behavior.
+
 ## Keys
 
 | Key | Action |
@@ -21,7 +25,7 @@ The bar stays read-only and does not persist mail. Terminal reads do not mark ma
 | h/l, Tab/Shift+Tab | Change pane |
 | Enter | Open mailbox, full thread, draft or contact |
 | [ / ] | Previous / next page |
-| / | Search this account |
+| / / \ | Search this account's cache / explicitly search Gmail |
 | 1/2/3 | Select a configured account |
 | z | Expand reader |
 | c / r / R | Compose / reply / reply-all |
@@ -32,8 +36,18 @@ The bar stays read-only and does not persist mail. Terminal reads do not mark ma
 | I | Inspect and review an invitation reply |
 | o | Open Gmail in this account's configured Chrome profile |
 | Ctrl+R / ? / q | Refresh / help / back or quit |
+| v / :layout right / :layout below | Toggle or choose the reader beside or below the list |
+| J / K in the reader | Next / previous mail; lowercase j/k scroll the body |
 
 Compose uses normal and insert modes: select a field with Tab or j/k, enter text with i/Enter, then Escape returns to normal mode. The body wraps with a visible caret. The contact picker fills the selected recipient field. A in normal compose opens a literal attachment-path prompt; `:detach NUMBER` removes an attachment. Attachment contents survive draft save and editor return. The reader numbers attachments. `:save-attachment NUMBER /absolute/path` saves one to a literal, owner-only destination and refuses overwrite; the agent interface also provides `mail.attachment`.
+
+`q` backs out one level before quitting: reader to list, search results to the same mailbox, contacts or help to their previous view, and normal compose to a locally saved draft. It remains a normal text character in insertion fields. Confirmation views cancel without sending. Pending mutations must finish before quitting so their outcome can be retained.
+
+The reader layout is saved separately in the private `omagma/ui.json` under the configuration directory. `--ui-file FILE` selects another private preferences file. The TUI reads the active Omarchy palette at startup; Ctrl+L reloads colors. Terminal fonts and desktop theme configuration are left to the user. Subject-first list rows, sender color and spacing distinguish messages without requiring a large pane.
+
+Cache search is a fast search of retained metadata and reports a cached subset, rather than claiming complete Gmail results. Gmail search uses the provider's query syntax and may need network time. Both remain account-specific. The CLI uses `omagma mail search --cached` and `omagma mail search --server`; JSONL callers select `cacheOnly:true` or `false`. [CLI contract](AGENT-CLI.md).
+
+For five-minute cache fetching while the TUI is closed, follow [background terminal cache setup](TERMINAL-BACKGROUND.md). Background jobs use existing read-only bar grants and do not broaden permissions.
 
 Press e in normal compose to edit the body with `$EDITOR` (then `$VISUAL`, then nvim/vi/nano), using direct argv without a shell. Quoted fixed arguments are supported. It takes over the terminal, then restores the TUI, including after errors or termination. The built-in composer remains split; an arbitrary editor pane is deferred pending a bounded embedded VT implementation. `--editor-mode auto|takeover` uses takeover; `embedded` reports a visible unsupported-mode error. No tmux or Ghostty is needed.
 
@@ -65,7 +79,7 @@ Use a dedicated test Gmail account for first live writes. Development tests are 
 
 Pages contain at most 100 messages (TUI requests 32). Live thread reads reject more than 100 messages or an oversized response explicitly. Cache defaults are 2,000 metadata entries and 256 MiB per account, configurable with `--metadata-limit` / `--disk-limit-bytes`; hard ceilings are 10,000 and 1 GiB. Bodies and aggregate decoded outgoing attachments are 2 MiB, requests and live provider response storage 3 MiB, outgoing recipients 32, outgoing attachments 16, incoming attachments 32 per message, local drafts 128, cached contacts 1,024 and operation receipts 1,000. A full journal refuses new submissions instead of forgetting uncertain outcomes. Terminal heap allocations are capped at 64 MiB; the existing 16 MiB fixed backend/HTTP reservation is accounted separately. OS/std/editor memory is outside those application storage bounds.
 
-Incoming envelopes allow up to 1,024 participants per address header, 16 KiB per address header and 32 KiB of aggregate headers. Addresses have a practical 254-byte cap; RFC 2047 decoded display names have a 256-byte cap. Incoming local parts may exceed 64 bytes; outgoing SMTP addresses retain the 64-byte local-part limit and outgoing recipients remain capped at 32. The ASCII address grammar is unchanged, without SMTPUTF8 or expanded obsolete forms. Reply-all removes self aliases and duplicates before enforcing the final 32-recipient cap; overflow returns an error rather than truncating recipients.
+Incoming MIME parsing accepts up to 256 headers, 8 KiB per header value and 32 KiB of aggregate headers. Incoming envelopes allow up to 1,024 participants per address header and retain their separate 16 KiB address-parser budget. Addresses have a practical 254-byte cap; RFC 2047 decoded display names have a 256-byte cap. Incoming local parts may exceed 64 bytes; outgoing SMTP addresses retain the 64-byte local-part limit and outgoing recipients remain capped at 32. The ASCII address grammar is unchanged, without SMTPUTF8 or expanded obsolete forms. Reply-all removes self aliases and duplicates before enforcing the final 32-recipient cap; overflow returns an error rather than truncating recipients.
 
 Disk quotas count logical file bytes, including the overlap during atomic replacement. Bodies are evictable. Direct sends also save recovery drafts before submission; unknown operations protect those drafts against changed-content edits or discard. Use `draft.discard` to explicitly remove completed local drafts. Drafts and operation receipts are retained; quota exhaustion is an explicit error. `cache.clear` removes cached mail while preserving drafts, contacts and receipts. Cache cursors are account/query/generation scoped; after mutations or clear, restart pagination instead of reusing a stale cursor. Per-account locks prevent simultaneous writers. Synthetic submitted mail has its own quota-counted outbox, capped at 128, so cache eviction/clear does not erase mock sends.
 

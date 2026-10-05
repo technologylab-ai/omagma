@@ -46,12 +46,21 @@ Development commands, after the appropriate build and host-lock reservation:
 
 ```sh
 python3 tests/terminal_fixture_check.py
+python3 tests/terminal_cache_fixture_check.py
+python3 tests/terminal_status_screen.py
+python3 tests/terminal_reader.py
+python3 tests/terminal_cache.py --binary zig-out/bin/omagma --build-mode debug
+python3 tests/terminal_ui.py --binary zig-out/bin/omagma --build-mode debug
+python3 tests/terminal_cache_max.py --binary zig-out/bin/omagma --build-mode debug
+python3 tests/terminal_background.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_pty.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_transport.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind cli
 python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind tui
 ```
+
+Repeat correctness suites with a separately built Safe executable. Cache checks use held-provider barriers to prove that local reads and navigation finish before a delayed network reply. UI checks inspect current terminal cells, pane geometry, theme colors, search provenance and Back behavior. The maximum-cache workload seeds 2,000 metadata records and verifies exact newest-tail retention, immutable-body hashes, quota accounting and capped-heap behavior after additions and deletions. Background checks use isolated native one-shots rather than installing a user timer; they cover lease coalescing, age policy, read-only access, cancellation and unsafe lock-file rejection.
 
 ### Final source qualification
 

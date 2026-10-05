@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -445,6 +446,60 @@ def outgoing_address_limits_unchanged(client):
                        "invalidBoundaryHasNoProviderOrJournalSideEffect": True, "accountsChecked": 3}
 
 
+def incoming_header_count_and_budget(client):
+    spec = json.loads((FIXTURES / "inbound-headers.json").read_text())
+    root = client.directory / "inbound-header-fixture"
+    (root / "accounts").mkdir(parents=True, mode=0o700)
+    sources = {}
+    for account in ACCOUNTS:
+        key = account.split("@")[0]
+        source = json.loads((FIXTURES / "accounts" / f"{key}.json").read_text())
+        target = next(m for m in source["messages"] if m["id"] == spec["validMessageId"])
+        original_headers = copy.deepcopy(target["payload"]["headers"])
+        target["payload"]["headers"] += [{"name": f"X-Fictional-{i:03}", "value": "Synthetic delivered header"}
+                                          for i in range(spec["validHeaderCount"] - len(original_headers))]
+        require(len(target["payload"]["headers"]) == 96, "valid incoming-header fixture not96 fields")
+        require(sum(len(h["name"].encode()) + len(h["value"].encode()) for h in target["payload"]["headers"]) < 32768,
+                "count fixture also exceeded byte budget")
+        sources[account] = (source, copy.deepcopy(target), original_headers)
+        (root / "accounts" / f"{key}.json").write_text(json.dumps(source, ensure_ascii=False))
+    client.extra = ("--fixture-root", str(root))
+    client.restart()
+    cached_digests = {}
+    for account in ACCOUNTS:
+        full = client.request("mail.read", account, messageId=spec["validMessageId"])
+        require(account in full["bodyText"] and "message 095" in full["bodyText"], "many-header incoming full read lost account/body")
+        page = client.request("mail.search", account, query=f"subject:Synthetic {account.split('@')[0]} thread 031", limit=12)
+        require(spec["validMessageId"] in {m["id"] for m in page["messages"]}, "many-header incoming message not searchable")
+        account_dir = client.directory / "cache/fixtures" / hashlib.sha256(account.encode()).hexdigest()
+        body_path = account_dir / ("mail-" + hashlib.sha256(spec["validMessageId"].encode()).hexdigest() + ".json")
+        cached_digests[account] = (body_path, hashlib.sha256(body_path.read_bytes()).hexdigest())
+    for vector in spec["vectors"]:
+        for account in ACCOUNTS:
+            source, template, original_headers = sources[account]
+            bad = copy.deepcopy(template)
+            bad["id"], bad["threadId"] = vector["id"], vector["id"] + "-thread"
+            bad["payload"]["headers"] = copy.deepcopy(original_headers) + [
+                {"name": f"X-Fictional-{i:03}", "value": "x" * vector["extraValueBytes"]}
+                for i in range(vector["totalHeaders"] - len(original_headers))]
+            require(len(bad["payload"]["headers"]) == vector["totalHeaders"], "header rejection fixture count wrong")
+            aggregate = sum(len(h["name"].encode()) + len(h["value"].encode()) for h in bad["payload"]["headers"])
+            require(all(len(h["value"].encode()) <= 8192 for h in bad["payload"]["headers"]), "rejection used single-field overflow")
+            require((aggregate > 32768) == (vector["expectedError"] == "HeadersTooLarge"), "header count/byte vectors overlap")
+            source["messages"].append(bad)
+            (root / "accounts" / f"{account.split('@')[0]}.json").write_text(json.dumps(source, ensure_ascii=False))
+            error = client.request("mail.read", account, messageId=vector["id"], ok=False)
+            require(error["code"] == vector["expectedError"], "incoming header bound did not reject explicitly")
+            good = client.request("mail.read", account, messageId=spec["validMessageId"], cacheOnly=True)
+            require(account in good["bodyText"], "header refusal damaged valid cached account mail")
+            path, before = cached_digests[account]
+            require(hashlib.sha256(path.read_bytes()).hexdigest() == before, "header refusal rewrote valid body")
+            require(cache_limits(client, account)["fixtureSends"] == 0, "incoming header tests submitted mail")
+    client.evidence = {"incomingHeadersReadAndSearched": 96, "incomingHeaderCountLimit": 256,
+                       "rejectedHeaderCount": 257, "aggregateByteLimit": 32768,
+                       "independentCountAndByteRejections": True, "validBodyDigestsPreserved": True, "accountsChecked": 3}
+
+
 def set_private_fixture_body(client, data):
     """Keep large boundary inputs out of the public fixture corpus and receipts."""
     source = json.loads((FIXTURES / "accounts/personal.json").read_text())
@@ -522,6 +577,79 @@ def optional_field_type_rejection(client):
     for key in ["name", "resourceName", "etag"]:
         client.request("contacts.upsert", contact={**original, key: 42}, expectedEtag=original["etag"], ok=False)
     require(client.request("contacts.list") == contacts, "invalid contact type overwrote persisted contact data")
+
+
+def one_shot_cached_server_search(client):
+    client.extra = ("--metadata-limit", "40")
+    client.restart()
+    client.request("mail.refresh", limit=40, label="INBOX")
+    account = ACCOUNTS[0]
+    common = ["--fixtures", "--fixture-root", str(FIXTURES), "--cache-dir", str(client.directory / "cache"),
+              "--metadata-limit", "40", "--account", account]
+
+    def run(family, verb, arguments, expected_error=None):
+        argv = [str(client.binary), family, verb, *common, *arguments]
+        result = subprocess.run(argv, input=b"", capture_output=True, cwd=client.directory,
+                                env=client.environment, timeout=12, preexec_fn=no_core_dump)
+        require(len(result.stdout) < MAX_FRAME and len(result.stderr) < 16384, "one-shot search output unbounded")
+        if expected_error is not None:
+            require(result.returncode != 0, "conflicting one-shot search flag accepted")
+            if result.stdout:
+                reply = json.loads(result.stdout)
+                require(reply.get("ok") is False and reply.get("error", {}).get("code") == expected_error,
+                        "one-shot flag error not explicit")
+            else:
+                require(expected_error.encode() in result.stderr, "parser flag failure omitted fixed code")
+            require(not any(address.encode() in result.stderr for address in ACCOUNTS), "flag error disclosed account")
+            return None
+        require(result.returncode == 0 and not result.stderr, "one-shot search exit/stderr failed")
+        reply = json.loads(result.stdout)
+        require(reply.get("version") == 1 and reply.get("ok") is True and reply.get("account") == account,
+                "one-shot search response lost version/account identity")
+        return reply["data"]
+
+    before = cache_limits(client, account)
+    cached_ids, cursor = [], ""
+    for _ in range(20):
+        data = run("mail", "search", ["--cached", "--query", "subject:Synthetic personal", "--limit", "12",
+                                      *( ["--cursor", cursor] if cursor else [])])
+        require(data.get("searchMode") == "cache" and data.get("searchScope") == "metadata" and data.get("matchedCachedCount") == 40,
+                "--cached did not identify retained metadata scope")
+        cached_ids += [m["id"] for m in data["messages"]]
+        cursor = data.get("nextCursor") or ""
+        if not cursor: break
+        require(cursor.startswith("K:"), "cached search used provider cursor namespace")
+    else:
+        raise AssertionError("one-shot cached pagination did not terminate")
+    require(cached_ids == [f"shared-msg-{number:03}" for number in range(96, 56, -1)], "--cached searched outside newest40 or duplicated rows")
+    after = cache_limits(client, account)
+    for key in ("fixtureCalls", "syncCalls", "syncListCalls", "syncHistoryPages", "syncMetadataGets", "syncBodyGets"):
+        require(after[key] == before[key], "--cached invoked provider")
+    older = run("mail", "search", ["--server", "--query", "subject:Synthetic personal thread 010", "--limit", "12"])
+    require({m["id"] for m in older["messages"]} == {"shared-msg-031", "shared-msg-032", "shared-msg-033"},
+            "--server failed to reach older uncached mail")
+    server_ids, cursor = [], ""
+    for _ in range(20):
+        data = run("mail", "search", ["--server", "--query", "subject:Synthetic personal", "--limit", "12",
+                                      *( ["--cursor", cursor] if cursor else [])])
+        server_ids += [m["id"] for m in data["messages"]]
+        cursor = data.get("nextCursor") or ""
+        if not cursor: break
+        require(not cursor.startswith("K:"), "--server reused retained-cache cursor")
+    else:
+        raise AssertionError("one-shot server pagination did not terminate")
+    require(server_ids == [f"shared-msg-{number:03}" for number in range(96, 0, -1)], "--server failed full distinct provider pagination")
+    provider_after = cache_limits(client, account)
+    require(provider_after["fixtureCalls"] > after["fixtureCalls"], "--server did not exercise provider boundary")
+    for modes in (("--cached", "--server"), ("--server", "--cached")):
+        run("mail", "search", [*modes, "--query", "Synthetic"], expected_error="ConflictingSearchMode")
+    run("mail", "list", ["--server"], expected_error="ServerFlagRequiresSearch")
+    final = cache_limits(client, account)
+    require(final["fixtureCalls"] == provider_after["fixtureCalls"] and final["fixtureSends"] == 0,
+            "invalid flags reached provider or submitted mail")
+    client.evidence = {"cachedMessages": 40, "cachedProviderCalls": 0, "cachedCursorNamespace": "K",
+                       "serverMessages": 96, "serverReachedUncachedOlder33": True, "serverCursorDistinct": True,
+                       "flagConflictsRejected": 2, "serverNonSearchRejected": True, "mutationRequests": 0}
 
 
 def one_shot_commands(client):
@@ -867,7 +995,8 @@ def cache_permissions(client):
 
 
 def backend_cache_isolation(client):
-    client.request("cache.stats")
+    # Explicitly materialize an empty isolated store; metrics remain read-only.
+    client.request("cache.clear")
     root = client.directory / "cache"
     account_hash = hashlib.sha256(ACCOUNTS[0].encode()).hexdigest()
     fixture_index = root / "fixtures" / account_hash / "index.json"
@@ -900,7 +1029,8 @@ def backend_cache_isolation(client):
 
 
 def cache_special_file_refusal(client):
-    client.request("cache.stats")
+    # Refusal probes need a persisted index, not a metrics side effect.
+    client.request("cache.clear")
     indexes = list((client.directory / "cache").rglob("index.json"))
     require(len(indexes) == 1, "special-file fixture did not have one account store")
     directory = indexes[0].parent
@@ -1114,11 +1244,13 @@ CASES = [("pagination-account-isolation", pagination_and_isolation, None),
          ("incoming-recipient-over32", incoming_recipient_over32, None),
          ("incoming-reply-to-local65", incoming_reply_to_local65, None),
          ("outgoing-address-limits-unchanged", outgoing_address_limits_unchanged, None),
+         ("incoming-header-count-and-budget", incoming_header_count_and_budget, None),
          ("quote-body-limit-rollback", quote_body_limit_rollback, None),
          ("decoded-body-boundary", decoded_body_boundary, None),
          ("mime-refusal-preserves-valid-cache", mime_refusal_preserves_valid_cache, None),
          ("optional-field-type-rejection", optional_field_type_rejection, None),
          ("one-shot-commands", one_shot_commands, None),
+         ("one-shot-cached-server-search", one_shot_cached_server_search, None),
          ("sent-outbox-persistence", sent_outbox_persistence, None),
          ("sent-mutations-persist", sent_mutations_persist, None),
          ("draft-attachment-bounds", draft_attachment_bounds, None),
@@ -1159,6 +1291,7 @@ def main():
               "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "fixtureManifestSha256": hashlib.sha256((FIXTURES / "manifest.json").read_bytes()).hexdigest(),
               "inboundAddressFixtureSha256": hashlib.sha256((FIXTURES / "inbound-addresses.json").read_bytes()).hexdigest(),
+              "inboundHeaderFixtureSha256": hashlib.sha256((FIXTURES / "inbound-headers.json").read_bytes()).hexdigest(),
               "synthetic": True, "liveWrites": False, "desktopUsed": False, "cases": []}
     with tempfile.TemporaryDirectory(prefix="omagma-terminal-test-") as directory:
         for name, check, scenario in CASES:

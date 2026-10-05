@@ -22,7 +22,13 @@ To have an agent install it, point the agent at this repository and say **“Ins
 
 ## Terminal and agent client
 
+**The TUI and CLI are experimental.** Use fixtures to explore write workflows, and review permissions and recovery behavior before using a live account. The existing read-only bar remains separate.
+
 `omagma tui` opens a Vim-oriented, account-separated mail client: complete messages and threads, search and pagination, local drafts, replies/reply-all, contacts, attachments, archive/Trash/restore, and invitation replies. The split composer keeps the mail context visible; `$EDITOR` temporarily takes over the terminal and returns afterward. **No tmux is required.** Calendar views and permanent deletion are excluded.
+
+Startup shows available disk-cached mail immediately, with a colored fetch status while Gmail updates in the background. Cached mail remains navigable and downloaded bodies remain readable during refresh. The cache keeps the newest messages within a fixed per-account count and byte limit, evicting the oldest tail. See [cache-first startup](docs/TUI-CACHE.md).
+
+Choose a reader beside or below the message list with `v`; Omarchy's current theme supplies the colors. `/` searches cached metadata immediately, while `\` explicitly searches Gmail. The CLI has the same choice through `--cached` and `--server`. An optional [five-minute user timer](docs/TERMINAL-BACKGROUND.md) keeps the terminal cache ready even when the TUI is closed.
 
 `omagma cli` / `omagma agent` provide a JSONL interface; one-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands use the same executor. Fetch beyond the bar's 30 messages using explicit continuation cursors. The terminal cache defaults to **2,000 message metadata entries and 256 MiB of disk per account**. Terminal heap allocations are capped at 64 MiB, in addition to the existing 16 MiB fixed backend storage reservation. Native x86_64 synthetic measurements settled around **7 MB for the agent CLI and 8–9 MB for the TUI**, with workload peaks around 11–15 MB across local and hosted runs, using three accounts and 1,000 cycles. These are whole terminal process measurements; see [memory measurements](docs/MEMORY.md) for workload and accounting. Allocation ceilings are separate from resident memory.
 

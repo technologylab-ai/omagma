@@ -6,6 +6,7 @@ const types = @import("types.zig");
 pub const max_raw_bytes = types.Limits.request_bytes;
 pub const max_body_bytes = types.Limits.body_bytes;
 pub const max_headers_bytes = 32 * 1024;
+pub const max_headers = 256;
 pub const max_parts = 128;
 pub const max_depth = 16;
 pub const max_attachments = 32;
@@ -145,7 +146,7 @@ fn splitEntity(raw: []const u8, allocator: std.mem.Allocator) !Entity {
             previous.value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ previous.value, continuation });
             continue;
         }
-        if (list.items.len == 64) return error.TooManyHeaders;
+        if (list.items.len == max_headers) return error.TooManyHeaders;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeaders;
         if (colon == 0) return error.InvalidHeaders;
         for (line[0..colon]) |c| if (c < 33 or c > 126 or c == ':') return error.InvalidHeaders;
@@ -159,7 +160,7 @@ fn splitEntity(raw: []const u8, allocator: std.mem.Allocator) !Entity {
 
 fn gmailHeaders(payload: std.json.Value, allocator: std.mem.Allocator) ![]const Header {
     const field = b.optional(payload, "headers") orelse return &.{};
-    if (field != .array or field.array.items.len > 64) return error.TooManyHeaders;
+    if (field != .array or field.array.items.len > max_headers) return error.TooManyHeaders;
     const out = try allocator.alloc(Header, field.array.items.len);
     var bytes: usize = 0;
     for (field.array.items, out) |entry, *dest| {
@@ -1096,4 +1097,40 @@ test "decoded incoming display names accept literal 256 bytes and reject 257" {
     try name.appendSlice(a, " =?UTF-8?Q?A?=");
     const refused = try std.fmt.allocPrint(a, "From: {s} <sender@example.test>\r\n\r\nBody", .{name.items});
     try std.testing.expectError(error.CapacityExceeded, parse(refused, a));
+}
+
+test "incoming raw and Gmail headers accept routing-rich mail within fixed budgets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = try a.alloc(Header, 257);
+    var raw: std.ArrayList(u8) = .empty;
+    for (values, 0..) |*value, i| {
+        value.* = .{ .name = try std.fmt.allocPrint(a, "X-Routing-{d}", .{i}), .value = "route" };
+        try raw.appendSlice(a, try std.fmt.allocPrint(a, "{s}: route\r\n", .{value.name}));
+        if (i == 64 or i == 255) {
+            const mail = try std.fmt.allocPrint(a, "{s}\r\nBody", .{raw.items});
+            try std.testing.expectEqual(i + 1, (try splitEntity(mail, a)).headers.len);
+            const encoded = try std.json.Stringify.valueAlloc(a, .{ .headers = values[0 .. i + 1] }, .{});
+            const payload = try std.json.parseFromSliceLeaky(std.json.Value, a, encoded, .{ .allocate = .alloc_always });
+            const headers = try gmailHeaders(payload, a);
+            try std.testing.expectEqual(i + 1, headers.len);
+            try std.testing.expectEqualStrings("route", headers[i].value);
+        }
+    }
+    try std.testing.expectError(error.TooManyHeaders, splitEntity(try std.fmt.allocPrint(a, "{s}\r\nBody", .{raw.items}), a));
+    const encoded = try std.json.Stringify.valueAlloc(a, .{ .headers = values }, .{});
+    const payload = try std.json.parseFromSliceLeaky(std.json.Value, a, encoded, .{ .allocate = .alloc_always });
+    try std.testing.expectError(error.TooManyHeaders, gmailHeaders(payload, a));
+
+    const long = try a.alloc(u8, 8192);
+    @memset(long, 'x');
+    const large = try std.json.Stringify.valueAlloc(a, .{ .headers = [_]Header{
+        .{ .name = "X-Route-A", .value = long },
+        .{ .name = "X-Route-B", .value = long },
+        .{ .name = "X-Route-C", .value = long },
+        .{ .name = "X-Route-D", .value = long },
+    } }, .{});
+    const oversized = try std.json.parseFromSliceLeaky(std.json.Value, a, large, .{ .allocate = .alloc_always });
+    try std.testing.expectError(error.HeadersTooLarge, gmailHeaders(oversized, a));
 }

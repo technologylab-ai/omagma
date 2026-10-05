@@ -1,0 +1,10 @@
+[Unit]
+Description=Omagma experimental read-only mail cache refresh
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omagma cache-refresh --quiet --config %h/.config/omagma/config.json --cache-dir %h/.cache/omagma/terminal --interval 300
+TimeoutStartSec=150
+TimeoutStopSec=10
+KillMode=control-group
+UMask=0077

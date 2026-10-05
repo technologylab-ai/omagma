@@ -25,6 +25,33 @@ pub fn lookup(io: std.Io, address: []const u8, out: []u8) !?[]const u8 {
     try validSecret(secret);
     return secret;
 }
+/// Background search deliberately omits --unlock. GNOME secret-tool only
+/// requests SECRET_SEARCH_UNLOCK when that option is explicitly supplied.
+/// Manual lookup retains its original interactive behavior.
+pub fn lookupAutomatic(io: std.Io, address: []const u8, out: []u8) !?[]const u8 {
+    try addressValid(address);
+    if (out.len == 0 or out.len > limits.secret) return error.InvalidSecretBuffer;
+    errdefer std.crypto.secureZero(u8, out);
+    var capture: [16 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &capture);
+    const n = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "search", "service", service, "account", address }, @as(?[]const u8, null), &capture, true });
+    return try automaticSecret(capture[0..n], out);
+}
+fn automaticSecret(capture: []const u8, out: []u8) !?[]const u8 {
+    var found: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, capture, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "secret = ")) continue;
+        if (found != null) return error.KeyringUnavailable;
+        const value = std.mem.trimEnd(u8, line["secret = ".len..], "\r");
+        try validSecret(value);
+        found = value;
+    }
+    const value = found orelse return null;
+    if (value.len > out.len) return error.SecretOutputTooLarge;
+    @memcpy(out[0..value.len], value);
+    return out[0..value.len];
+}
 pub fn store(io: std.Io, address: []const u8, secret: []const u8) !void {
     try addressValid(address);
     try validSecret(secret);
@@ -121,6 +148,9 @@ pub fn syntheticProbe(io: std.Io) !void {
     const value = (try lookup(io, account, &probe_output)) orelse return error.SyntheticItemMissing;
     try std.testing.expectEqualStrings(secret, value);
     std.crypto.secureZero(u8, &probe_output);
+    const automatic = (try lookupAutomatic(io, account, &probe_output)) orelse return error.SyntheticItemMissing;
+    try std.testing.expectEqualStrings(secret, automatic);
+    std.crypto.secureZero(u8, &probe_output);
     try clear(io, account);
     if (try lookup(io, account, &probe_output) != null) return error.SyntheticItemStillExists;
 }
@@ -130,6 +160,16 @@ test "keyring identity and token validation reject controls" {
     try addressValid("account@example.invalid");
     try std.testing.expectError(error.InvalidAccount, addressValid("account\n@example.invalid"));
     try std.testing.expectError(error.InvalidToken, validSecret("token\n"));
+}
+
+test "automatic keyring capture accepts one secret without exposing attributes" {
+    var out: [limits.secret]u8 = undefined;
+    const value = (try automaticSecret("[/synthetic/item]\nattribute.account = personal@example.com\nsecret = synthetic-refresh-only\n", &out)).?;
+    try std.testing.expectEqualStrings("synthetic-refresh-only", value);
+    try std.testing.expect(try automaticSecret("[/synthetic/locked-item]\nlabel = synthetic\n", &out) == null);
+    try std.testing.expectError(error.KeyringUnavailable, automaticSecret("secret = synthetic-one\nsecret = synthetic-two\n", &out));
+    try std.testing.expectError(error.InvalidToken, automaticSecret("secret = \n", &out));
+    try std.testing.expectError(error.SecretOutputTooLarge, automaticSecret("secret = synthetic-token\n", out[0..4]));
 }
 
 /// Failure-path subprocess probes use only installed utilities and synthetic data.

@@ -28,5 +28,31 @@ pub fn decode(comptime T: type, a: std.mem.Allocator, v: Value) !T {
     return std.json.parseFromValueLeaky(T, a, v, .{ .ignore_unknown_fields = true });
 }
 pub fn object(a: std.mem.Allocator) Value {
-    _=a;return .{ .object = .empty };
+    _ = a;
+    return .{ .object = .empty };
+}
+
+/// Clone top-level object storage before adding/removing keys. Values borrow
+/// immutable caller storage; the ordered-map capacity/layout must not be aliased.
+pub fn copyObject(a: std.mem.Allocator, input: Value) !Value {
+    if (input != .object) return error.InvalidRequest;
+    var out = object(a);
+    var it = input.object.iterator();
+    while (it.next()) |field| try out.object.put(a, field.key_ptr.*, field.value_ptr.*);
+    return out;
+}
+
+test "copied request map growth preserves original account query and label" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = try std.json.parseFromSliceLeaky(Value, a, "{\"cmd\":\"mail.refresh\",\"account\":\"fictional@example.test\",\"query\":\"subject:fictional\",\"label\":\"STARRED\"}", .{});
+    var copied = try copyObject(a, original);
+    for (0..24) |i| try copied.object.put(a, try std.fmt.allocPrint(a, "internal{d}", .{i}), .{ .integer = @intCast(i) });
+    try copied.object.put(a, "label", .{ .string = "INBOX" });
+    try std.testing.expectEqualStrings("fictional@example.test", text(original, "account"));
+    try std.testing.expectEqualStrings("subject:fictional", text(original, "query"));
+    try std.testing.expectEqualStrings("STARRED", text(original, "label"));
+    try std.testing.expectEqual(@as(usize, 4), original.object.count());
+    try std.testing.expectEqualStrings("INBOX", text(copied, "label"));
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
-pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "" };
+pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "", bodyError: []const u8 = "" };
 const BodyRecord = struct { schema: u8 = 1, account: []const u8, message: t.Message };
 fn readPrivate(dir: std.Io.Dir, io: std.Io, a: std.mem.Allocator, name: []const u8, limit: usize) ![]const u8 {
     const before = try dir.statFile(io, name, .{ .follow_symlinks = false });
@@ -27,7 +27,86 @@ fn openPrivateLock(dir: std.Io.Dir, io: std.Io) !std.Io.File {
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
     return lock;
 }
+fn openAccountDirectory(io: std.Io, root: []const u8, account: []const u8, options: t.Options, create: bool) !std.Io.Dir {
+    if (create) _ = try std.Io.Dir.cwd().createDirPathStatus(io, root, .fromMode(0o700));
+    var base = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true, .follow_symlinks = false });
+    defer base.close(io);
+    if ((try base.stat(io)).permissions.toMode() & 0o077 != 0) return error.InsecureCacheDirectory;
+    const namespace = if (options.fixtures) "fixtures" else "live";
+    if (create) _ = try base.createDirPathStatus(io, namespace, .fromMode(0o700));
+    var backend = try base.openDir(io, namespace, .{ .iterate = true, .follow_symlinks = false });
+    defer backend.close(io);
+    if ((try backend.stat(io)).permissions.toMode() & 0o077 != 0) return error.InsecureCacheDirectory;
+    const key = Store.hash(account);
+    if (create) _ = try backend.createDirPathStatus(io, &key, .fromMode(0o700));
+    const dir = try backend.openDir(io, &key, .{ .iterate = true, .follow_symlinks = false });
+    errdefer dir.close(io);
+    if ((try dir.stat(io)).permissions.toMode() & 0o077 != 0) return error.InsecureCacheDirectory;
+    return dir;
+}
+/// Nonblocking and NOFOLLOW even if a path is swapped between stat and open.
+/// Raw Linux errno decoding is required for static-musl raw syscall results.
+fn openRefreshFile(dir: std.Io.Dir, io: std.Io, create: bool) !std.Io.File {
+    const linux = std.os.linux;
+    const before = dir.statFile(io, "refresh.lock", .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound and create) null else return err;
+    if (before) |stat| if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0 or stat.size != 0) return error.InsecureRefreshLease;
+    var flags: linux.O = .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true, .NOCTTY = true };
+    flags.CREAT = create;
+    const raw = linux.openat(dir.handle, "refresh.lock", flags, 0o600);
+    switch (linux.errno(raw)) {
+        .SUCCESS => {},
+        .NOENT => return error.FileNotFound,
+        .LOOP, .ISDIR => return error.InsecureRefreshLease,
+        .ACCES, .PERM => return error.AccessDenied,
+        else => return error.RefreshLeaseOpenFailed,
+    }
+    const file: std.Io.File = .{ .handle = @intCast(raw), .flags = .{ .nonblocking = true } };
+    errdefer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0 or stat.size != 0) return error.InsecureRefreshLease;
+    return file;
+}
+pub const RefreshLease = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+    file: std.Io.File,
+    closed: bool = false,
+    pub fn acquire(io: std.Io, root: []const u8, account: []const u8, options: t.Options) !?RefreshLease {
+        const dir = try openAccountDirectory(io, root, account, options, true);
+        errdefer dir.close(io);
+        const file = try openRefreshFile(dir, io, true);
+        errdefer file.close(io);
+        if (!try file.tryLock(io, .exclusive)) {
+            file.close(io);
+            dir.close(io);
+            return null;
+        }
+        return .{ .io = io, .dir = dir, .file = file };
+    }
+    pub fn release(self: *RefreshLease) void {
+        if (self.closed) return;
+        self.closed = true;
+        self.file.unlock(self.io);
+        self.file.close(self.io);
+        self.dir.close(self.io);
+    }
+};
+pub fn refreshActive(io: std.Io, root: []const u8, account: []const u8, options: t.Options) !bool {
+    const dir = openAccountDirectory(io, root, account, options, false) catch |err| if (err == error.FileNotFound) return false else return err;
+    defer dir.close(io);
+    const file = openRefreshFile(dir, io, false) catch |err| if (err == error.FileNotFound) return false else return err;
+    defer file.close(io);
+    if (try file.tryLock(io, .shared)) {
+        file.unlock(io);
+        return false;
+    }
+    return true;
+}
+
 pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "" };
+pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
+pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
+pub const FixtureProviderRecord = struct { id: []const u8, labels: []const []const u8 = &.{}, deleted: bool = false, sourceHistoryId: []const u8 = "1" };
 pub const State = struct {
     schema: u8 = 1,
     account: []const u8,
@@ -37,9 +116,23 @@ pub const State = struct {
     drafts: []t.Draft = &.{},
     outbox: []t.Message = &.{},
     contacts: []t.Contact = &.{},
+    contactsReady: bool = false,
     operations: []Operation = &.{},
     fixtureCalls: u64 = 0,
     fixtureSends: u64 = 0,
+    fixtureProvider: []FixtureProviderRecord = &.{},
+    historyId: []const u8 = "",
+    lastSyncAt: i64 = 0,
+    quotaFloor: ?QuotaFloor = null,
+    quotaDiskLimit: usize = 0,
+    metadataPolicy: usize = 0,
+    diskPolicy: usize = 0,
+    views: []View = &.{},
+    syncCalls: u64 = 0,
+    syncMetadataGets: u64 = 0,
+    syncListCalls: u64 = 0,
+    syncHistoryPages: u64 = 0,
+    syncBodyGets: u64 = 0,
 };
 
 pub const Store = struct {
@@ -49,41 +142,91 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     state: State,
     options: t.Options,
+    lockHeld: bool = true,
+    closed: bool = false,
+    entriesStorage: []Entry = &.{},
     pub fn open(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options) !Store {
-        // Never use email addresses or provider IDs as path components.
-        _ = try std.Io.Dir.cwd().createDirPathStatus(io, root, .fromMode(0o700));
-        var base = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true, .follow_symlinks = false });
-        defer base.close(io);
-        if ((try base.stat(io)).permissions.toMode() & 0o077 != 0) return error.InsecureCacheDirectory;
-        // Mock and live stores cannot read or mutate each other's cached data,
-        // even when the caller selects the same account and cache base.
-        const namespace = if (options.fixtures) "fixtures" else "live";
-        _ = try base.createDirPathStatus(io, namespace, .fromMode(0o700));
-        var backend = try base.openDir(io, namespace, .{ .iterate = true, .follow_symlinks = false });
-        defer backend.close(io);
-        if ((try backend.stat(io)).permissions.toMode() & 0o077 != 0) return error.InsecureCacheDirectory;
-        const key = hash(account);
-        _ = try backend.createDirPathStatus(io, &key, .fromMode(0o700));
-        const dir = try backend.openDir(io, &key, .{ .iterate = true, .follow_symlinks = false });
+        return openMode(io, a, root, account, options, false);
+    }
+    pub fn openCached(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options) !Store {
+        return openMode(io, a, root, account, options, true);
+    }
+    fn openMode(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options, readonly: bool) !Store {
+        const dir = try openAccountDirectory(io, root, account, options, true);
         errdefer dir.close(io);
-        if ((try dir.stat(io)).permissions.toMode() & 0o077 != 0) return error.InsecureCacheDirectory;
         const lock = try openPrivateLock(dir, io);
         errdefer lock.close(io);
-        if (!try lock.tryLock(io, .exclusive)) return error.CacheBusy;
+        const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(if (readonly) 250 else 2000) });
+        while (!try lock.tryLock(io, if (readonly) .shared else .exclusive)) {
+            if (deadline.durationFromNow(io).raw.toNanoseconds() <= 0) return error.CacheBusy;
+            try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(io);
+        }
         var state: State = .{ .account = account };
         const raw = readPrivate(dir, io, a, "index.json", 16 * 1024 * 1024) catch |err| if (err == error.FileNotFound) null else return err;
         if (raw) |bytes| {
             state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_always });
             if (state.schema != 1 or !std.mem.eql(u8, state.account, account)) return error.CacheIdentityMismatch;
-            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000) return error.CacheLimitExceeded;
+            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024) return error.CacheLimitExceeded;
         }
-        var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = options };
-        while (s.state.entries.len > options.metadata_limit) try s.evict(0);
-        try s.save();
+        var resolved = options;
+        if (state.metadataPolicy != 0 and (state.metadataPolicy > t.Limits.metadata_hard or state.diskPolicy < 64 * 1024 or state.diskPolicy > t.Limits.disk_hard)) return error.CacheLimitExceeded;
+        if (state.metadataPolicy != 0 and (readonly or options.use_persisted_policy or (!options.metadata_limit_set and options.metadata_limit == t.Limits.metadata))) resolved.metadata_limit = state.metadataPolicy;
+        if (state.diskPolicy != 0 and (readonly or options.use_persisted_policy or (!options.disk_limit_set and options.disk_limit == t.Limits.disk_bytes))) resolved.disk_limit = state.diskPolicy;
+        const policy_changed = !readonly and (state.metadataPolicy != resolved.metadata_limit or state.diskPolicy != resolved.disk_limit);
+        if (!readonly) {
+            state.metadataPolicy = resolved.metadata_limit;
+            state.diskPolicy = resolved.disk_limit;
+        }
+        var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = resolved, .entriesStorage = state.entries };
+        if (state.views.len > 16 or state.historyId.len > 32) return error.CacheLimitExceeded;
+        for (state.views) |view| if (view.ids.len > t.Limits.metadata_hard or view.query.len > 4096 or view.label.len > 256 or view.remoteCursor.len > 4096) return error.CacheLimitExceeded;
+        if (!options.fixtures and state.fixtureProvider.len != 0) return error.CacheIdentityMismatch;
+        for (state.fixtureProvider) |record| try validateFixtureRecord(record);
+        std.sort.heap(Entry, s.state.entries, {}, newestFirst);
+        if (!readonly) {
+            try s.enforceLimits();
+            if (policy_changed) {
+                s.state.generation += 1;
+                try s.save();
+            }
+        }
         return s;
     }
+    pub fn enforceLimits(s: *Store) !void {
+        var changed = false;
+        while (s.state.entries.len > s.options.metadata_limit) {
+            try s.evict(s.state.entries.len - 1);
+            changed = true;
+        }
+        while (try s.diskBytes() > s.options.disk_limit) {
+            if (s.state.entries.len == 0) return error.DiskQuotaExceeded;
+            const tail = s.state.entries[s.state.entries.len - 1].message;
+            s.state.quotaFloor = .{ .receivedAt = tail.receivedAt, .id = tail.id };
+            s.state.quotaDiskLimit = s.options.disk_limit;
+            try s.evict(s.state.entries.len - 1);
+            changed = true;
+        }
+        if (s.state.quotaDiskLimit != 0 and s.options.disk_limit > s.state.quotaDiskLimit) {
+            s.state.quotaFloor = null;
+            for (s.state.entries) |*entry| if (std.mem.eql(u8, entry.bodyError, "DiskQuotaExceeded")) {
+                entry.bodyError = "";
+            };
+            s.state.quotaDiskLimit = s.options.disk_limit;
+            changed = true;
+        }
+        if (changed) {
+            s.state.generation += 1;
+            try s.save();
+        }
+    }
+    pub fn release(s: *Store) void {
+        if (s.lockHeld) s.lock.unlock(s.io);
+        s.lockHeld = false;
+    }
     pub fn close(s: *Store) void {
-        s.lock.unlock(s.io);
+        if (s.closed) return;
+        s.closed = true;
+        if (s.lockHeld) s.lock.unlock(s.io);
         s.lock.close(s.io);
         s.dir.close(s.io);
     }
@@ -109,9 +252,14 @@ pub const Store = struct {
     pub fn save(s: *Store) !void {
         var raw = try std.json.Stringify.valueAlloc(s.allocator, s.state, .{});
         if (raw.len >= 16 * 1024 * 1024) return error.CacheLimitExceeded;
+        const count = s.state.entries.len;
         try s.makeRoom(raw.len, "index.json");
-        // Quota eviction changes body residency; serialize the resulting state.
-        raw = try std.json.Stringify.valueAlloc(s.allocator, s.state, .{});
+        // Only eviction changes this snapshot during makeRoom. Avoid retaining
+        // two serialized copies for the common unchanged/no-pressure commit.
+        if (s.state.entries.len != count) {
+            s.allocator.free(raw);
+            raw = try std.json.Stringify.valueAlloc(s.allocator, s.state, .{});
+        }
         try s.write("index.json", raw);
     }
     pub fn diskBytes(s: *Store) !usize {
@@ -129,28 +277,36 @@ pub const Store = struct {
         return @intCast(st.size);
     }
     fn makeRoom(s: *Store, n: usize, replacing: []const u8) !void {
+        if (n > s.options.disk_limit) return error.DiskQuotaExceeded;
         var used = try s.diskBytes();
         // The old file remains while an atomic replacement is written. Include
         // that overlap rather than measuring only the final directory contents.
-        var i: usize = 0;
+        var remaining = s.state.entries.len;
         while (n > s.options.disk_limit - @min(used, s.options.disk_limit)) {
-            while (i < s.state.entries.len and s.state.entries[i].bytes == 0) : (i += 1) {}
-            if (i == s.state.entries.len) return error.DiskQuotaExceeded;
-            const entry = &s.state.entries[i];
-            const name = try s.fileName("mail", entry.message.id);
-            if (!std.mem.eql(u8, name, replacing)) {
-                const removed = try s.size(name);
-                s.dir.deleteFile(s.io, name) catch |err| if (err != error.FileNotFound) return err;
-                used -= @min(removed, used);
-                entry.bytes = 0;
-                entry.bodyHash = "";
-            }
-            i += 1;
+            if (remaining == 0) return error.DiskQuotaExceeded;
+            remaining -= 1;
+            const name = try s.fileName("mail", s.state.entries[remaining].message.id);
+            if (std.mem.eql(u8, name, replacing)) return error.DiskQuotaExceeded;
+            const removed = try s.size(name);
+            s.state.quotaFloor = .{ .receivedAt = s.state.entries[remaining].message.receivedAt, .id = s.state.entries[remaining].message.id };
+            s.state.quotaDiskLimit = s.options.disk_limit;
+            try s.evict(remaining);
+            used -= @min(removed, used);
         }
     }
+
     fn evict(s: *Store, i: usize) !void {
         const name = try s.fileName("mail", s.state.entries[i].message.id);
         s.dir.deleteFile(s.io, name) catch |err| if (err != error.FileNotFound) return err;
+        for (s.state.views) |*view| {
+            var kept: usize = 0;
+            for (view.ids) |id| if (!std.mem.eql(u8, id, s.state.entries[i].message.id)) {
+                @constCast(view.ids)[kept] = id;
+                kept += 1;
+            };
+            if (kept != view.ids.len) view.incomplete = true;
+            view.ids = view.ids[0..kept];
+        }
         std.mem.copyForwards(Entry, s.state.entries[i .. s.state.entries.len - 1], s.state.entries[i + 1 ..]);
         s.state.entries = s.state.entries[0 .. s.state.entries.len - 1];
     }
@@ -173,32 +329,72 @@ pub const Store = struct {
         metadata.invitation = null;
         var e = s.find(message.id);
         if (e == null) {
-            if (s.state.entries.len == s.options.metadata_limit) try s.evict(0);
-            var list: std.ArrayList(Entry) = .empty;
-            try list.appendSlice(s.allocator, s.state.entries);
-            try list.append(s.allocator, .{ .message = metadata });
-            s.state.entries = list.items;
-            e = &s.state.entries[s.state.entries.len - 1];
+            if (s.state.quotaFloor) |floor| if (!newestFirst({}, .{ .message = metadata }, .{ .message = .{ .id = floor.id, .threadId = "", .receivedAt = floor.receivedAt } })) return;
+            if (s.state.entries.len == s.options.metadata_limit) {
+                const tail = s.state.entries[s.state.entries.len - 1];
+                if (!newestFirst({}, .{ .message = metadata }, tail)) return;
+                try s.evict(s.state.entries.len - 1);
+            }
+            const count = s.state.entries.len;
+            if (count == s.entriesStorage.len) {
+                const capacity = @min(s.options.metadata_limit, @max(count + 1, if (count == 0) @as(usize, 16) else count + count / 2));
+                const storage = try s.allocator.alloc(Entry, capacity);
+                @memcpy(storage[0..count], s.state.entries);
+                s.allocator.free(s.entriesStorage);
+                s.entriesStorage = storage;
+            }
+            s.entriesStorage[count] = .{ .message = metadata };
+            s.state.entries = s.entriesStorage[0 .. count + 1];
+            e = &s.state.entries[count];
         } else e.?.message = metadata;
-        if (full) {
-            const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
-            if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
-            const name = try s.fileName("mail", message.id);
-            try s.makeRoom(raw.len, name);
-            try s.write(name, raw);
-            e.?.bytes = raw.len;
-            const digest = hash(raw);
-            e.?.bodyHash = try s.allocator.dupe(u8, &digest);
-        }
+        std.sort.heap(Entry, s.state.entries, {}, newestFirst);
+        e = s.find(message.id);
+        if (full) _ = try s.putBody(message);
+    }
+    /// Attach immutable bytes only to retained metadata. Never resurrect an ID,
+    /// update ordering/labels, or rewrite an already valid cached body.
+    pub fn putBody(s: *Store, message: t.Message) !bool {
+        var e = s.find(message.id) orelse return false;
+        if (message.bodyText.len > t.Limits.body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.body_bytes)) return error.BodyTooLarge;
+        if (e.bytes != 0) if (try s.read(message.id)) |_| return false;
+        e.bytes = 0;
+        e.bodyHash = "";
+        const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
+        if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
+        const name = try s.fileName("mail", message.id);
+        s.makeRoom(raw.len, name) catch |err| {
+            if (err != error.DiskQuotaExceeded) return err;
+            if (s.find(message.id)) |entry| entry.bodyError = "DiskQuotaExceeded";
+            s.state.quotaDiskLimit = s.options.disk_limit;
+            return false;
+        };
+        e = s.find(message.id) orelse return false;
+        try s.write(name, raw);
+        e.bodyError = "";
+        e.bytes = raw.len;
+        const digest = hash(raw);
+        e.bodyHash = try s.allocator.dupe(u8, &digest);
+        return true;
+    }
+    pub fn bodyAvailable(s: *Store, id: []const u8) !bool {
+        const entry = s.find(id) orelse return false;
+        if (entry.bytes == 0) return false;
+        const stat = s.dir.statFile(s.io, try s.fileName("mail", id), .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) return false else return err;
+        if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
+        return stat.size == entry.bytes;
     }
     pub fn read(s: *Store, id: []const u8) !?t.Message {
         const e = s.find(id) orelse return null;
         if (e.bytes == 0) return null;
         const raw = readPrivate(s.dir, s.io, s.allocator, try s.fileName("mail", id), 4 * t.Limits.body_bytes) catch |err| if (err == error.FileNotFound) return null else return err;
         const digest = hash(raw);
-        if (!std.mem.eql(u8, e.bodyHash, &digest)) return error.CacheIdentityMismatch;
         const record = try std.json.parseFromSliceLeaky(BodyRecord, s.allocator, raw, .{ .allocate = .alloc_always });
         if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
+        if (!std.mem.eql(u8, e.bodyHash, &digest)) {
+            e.bytes = 0;
+            e.bodyHash = "";
+            return null;
+        }
         return record.message;
     }
     pub fn putOutbox(s: *Store, message: t.Message) !void {
@@ -301,6 +497,352 @@ pub const Store = struct {
     pub fn clearMail(s: *Store) !void {
         while (s.state.entries.len > 0) try s.evict(0);
         s.state.generation += 1;
+        s.state.historyId = "";
+        s.state.quotaFloor = null;
+        s.state.quotaDiskLimit = 0;
+        s.state.lastSyncAt = 0;
+        s.state.views = &.{};
         try s.save();
     }
+    pub fn viewKey(a: std.mem.Allocator, account: []const u8, query: []const u8, label: []const u8) ![64]u8 {
+        return hash(try std.fmt.allocPrint(a, "{s}\x00{s}\x00{s}", .{ account, query, label }));
+    }
+    pub fn findView(s: *Store, key: []const u8) ?*View {
+        for (s.state.views) |*view| if (std.mem.eql(u8, view.key, key)) return view;
+        return null;
+    }
+    pub fn recordView(s: *Store, query: []const u8, label: []const u8, label_id: []const u8, messages: []const t.Message, remote_cursor: []const u8, append: bool) !void {
+        const key = try viewKey(s.allocator, s.state.account, query, label);
+        var view = s.findView(&key);
+        if (view == null) {
+            var views: std.ArrayList(View) = .empty;
+            if (s.state.views.len == 16) try views.appendSlice(s.allocator, s.state.views[1..]) else try views.appendSlice(s.allocator, s.state.views);
+            try views.append(s.allocator, .{ .key = try s.allocator.dupe(u8, &key), .query = query, .label = label });
+            s.state.views = views.items;
+            view = &s.state.views[s.state.views.len - 1];
+        }
+        var ids: std.ArrayList([]const u8) = .empty;
+        if (append) try ids.appendSlice(s.allocator, view.?.ids);
+        var incomplete = if (append) view.?.incomplete else false;
+        for (messages) |message| {
+            if (s.find(message.id) == null) {
+                incomplete = true;
+                continue;
+            }
+            var duplicate = false;
+            for (ids.items) |id| if (std.mem.eql(u8, id, message.id)) {
+                duplicate = true;
+                break;
+            };
+            if (!duplicate and ids.items.len < s.options.metadata_limit) try ids.append(s.allocator, message.id);
+        }
+        view.?.ids = ids.items;
+        view.?.remoteCursor = remote_cursor;
+        view.?.labelId = label_id;
+        view.?.stale = false;
+        view.?.incomplete = incomplete;
+    }
+    pub fn fixtureRecord(s: *Store, id: []const u8) ?*FixtureProviderRecord {
+        if (!s.options.fixtures) return null;
+        for (s.state.fixtureProvider) |*record| if (std.mem.eql(u8, record.id, id)) return record;
+        return null;
+    }
+    pub fn setFixtureRecord(s: *Store, id: []const u8, labels: []const []const u8, checkpoint: []const u8, deleted: bool) !void {
+        if (!s.options.fixtures) return error.FixtureOnly;
+        const record: FixtureProviderRecord = .{ .id = id, .labels = labels, .sourceHistoryId = checkpoint, .deleted = deleted };
+        try validateFixtureRecord(record);
+        if (s.fixtureRecord(id)) |existing| {
+            existing.* = record;
+            return;
+        }
+        if (s.state.fixtureProvider.len == 1024) return error.FixtureProviderLimitExceeded;
+        var records: std.ArrayList(FixtureProviderRecord) = .empty;
+        try records.appendSlice(s.allocator, s.state.fixtureProvider);
+        try records.append(s.allocator, record);
+        s.state.fixtureProvider = records.items;
+    }
+    pub fn clearFixtureRecord(s: *Store, id: []const u8) void {
+        for (s.state.fixtureProvider, 0..) |record, i| if (std.mem.eql(u8, record.id, id)) {
+            std.mem.copyForwards(FixtureProviderRecord, s.state.fixtureProvider[i .. s.state.fixtureProvider.len - 1], s.state.fixtureProvider[i + 1 ..]);
+            s.state.fixtureProvider = s.state.fixtureProvider[0 .. s.state.fixtureProvider.len - 1];
+            return;
+        };
+    }
+    pub fn applyFixtureRecord(s: *Store, message: *t.Message) !void {
+        if (s.fixtureRecord(message.id)) |record| {
+            if (record.deleted) return error.MessageNotFound;
+            message.labels = record.labels;
+            message.unread = false;
+            for (record.labels) |label| if (std.mem.eql(u8, label, "UNREAD")) {
+                message.unread = true;
+            };
+        }
+    }
+
+    pub fn applyLabels(s: *Store, id: []const u8, labels: []const []const u8) void {
+        const entry = s.find(id) orelse return;
+        entry.message.labels = labels;
+        entry.message.unread = false;
+        for (labels) |label| if (std.mem.eql(u8, label, "UNREAD")) {
+            entry.message.unread = true;
+        };
+    }
 };
+fn validateFixtureRecord(record: FixtureProviderRecord) !void {
+    try @import("../bounded.zig").identifier(record.id);
+    if (record.labels.len > 64 or record.sourceHistoryId.len == 0 or record.sourceHistoryId.len > 32) return error.InvalidFixtureProviderState;
+    for (record.sourceHistoryId) |c| if (!std.ascii.isDigit(c)) return error.InvalidFixtureProviderState;
+    for (record.labels) |label| {
+        if (label.len > 256) return error.InvalidLabels;
+        try @import("recipients.zig").validateHeader(label);
+    }
+}
+
+fn newestFirst(_: void, left: Entry, right: Entry) bool {
+    return left.message.receivedAt > right.message.receivedAt or (left.message.receivedAt == right.message.receivedAt and std.mem.lessThan(u8, left.message.id, right.message.id));
+}
+
+test "mail count eviction removes received-time tail including body and ignores older paging" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/private", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 2 });
+    defer store.close();
+    try store.put(.{ .id = "newest", .threadId = "thread", .receivedAt = 3000, .bodyText = "Newest body" }, true);
+    try store.put(.{ .id = "oldest", .threadId = "thread", .receivedAt = 1000, .bodyText = "Oldest body" }, true);
+    const old_name = try store.fileName("mail", "oldest");
+    try store.put(.{ .id = "middle", .threadId = "thread", .receivedAt = 2000, .bodyText = "Middle body" }, true);
+    try std.testing.expectEqual(@as(usize, 2), store.state.entries.len);
+    try std.testing.expectEqualStrings("newest", store.state.entries[0].message.id);
+    try std.testing.expectEqualStrings("middle", store.state.entries[1].message.id);
+    try std.testing.expect(store.find("oldest") == null);
+    try std.testing.expectError(error.FileNotFound, store.dir.access(std.testing.io, old_name, .{}));
+    try store.put(.{ .id = "ancient", .threadId = "thread", .receivedAt = 0, .bodyText = "Ancient body" }, true);
+    try std.testing.expect(store.find("ancient") == null);
+    try std.testing.expectEqualStrings("Newest body", (try store.read("newest")).?.bodyText);
+    try store.save();
+    store.release();
+    var first = try Store.openCached(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 2 });
+    defer first.close();
+    var second = try Store.openCached(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 2 });
+    defer second.close();
+    try std.testing.expectEqual(@as(usize, 2), second.state.entries.len);
+    try std.testing.expectError(error.CacheBusy, Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 2 }));
+    first.close();
+    second.close();
+    var lowered = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 1 });
+    defer lowered.close();
+    try std.testing.expectEqual(@as(usize, 1), lowered.state.entries.len);
+    try std.testing.expectEqualStrings("newest", lowered.state.entries[0].message.id);
+    try std.testing.expectEqualStrings("Newest body", (try lowered.read("newest")).?.bodyText);
+}
+
+test "refresh lease is exclusive across handles and does not lock cached reads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/lease", .{tmp.sub_path});
+    var lease = (try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true })).?;
+    defer lease.release();
+    try std.testing.expect(try refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+    try std.testing.expect((try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true })) == null);
+    var writer = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    try writer.put(.{ .id = "mail", .threadId = "thread", .bodyText = "Cached fictional body" }, true);
+    try writer.save();
+    writer.close();
+    var reader = try Store.openCached(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer reader.close();
+    try std.testing.expectEqualStrings("Cached fictional body", (try reader.read("mail")).?.bodyText);
+    var other = (try RefreshLease.acquire(std.testing.io, root, "other@example.test", .{ .fixtures = true })).?;
+    defer other.release();
+    var live = (try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = false })).?;
+    defer live.release();
+    // Literal Linux kernel oracles, independent of packed flag definitions.
+    const fd_flags = std.os.linux.fcntl(lease.file.handle, 1, 0);
+    try std.testing.expectEqual(@as(usize, 1), fd_flags);
+    const open_flags = std.os.linux.fcntl(lease.file.handle, 3, 0);
+    try std.testing.expect(open_flags & 2048 != 0);
+    lease.release();
+    try std.testing.expect(!try refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+}
+
+test "refresh lease rejects symlink directory fifo and public mode before blocking" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/special", .{tmp.sub_path});
+    const dir = try openAccountDirectory(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }, true);
+    defer dir.close(std.testing.io);
+    try dir.symLink(std.testing.io, "unrelated", "refresh.lock", .{});
+    try std.testing.expectError(error.InsecureRefreshLease, RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+    try dir.deleteFile(std.testing.io, "refresh.lock");
+    try dir.createDir(std.testing.io, "refresh.lock", .fromMode(0o700));
+    try std.testing.expectError(error.InsecureRefreshLease, refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+    try dir.deleteDir(std.testing.io, "refresh.lock");
+    const made = std.os.linux.mknodat(dir.handle, "refresh.lock", 0o010000 | 0o600, 0);
+    try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(made));
+    try std.testing.expectError(error.InsecureRefreshLease, RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+    try dir.deleteFile(std.testing.io, "refresh.lock");
+    const file = try dir.createFile(std.testing.io, "refresh.lock", .{ .permissions = .fromMode(0o644) });
+    file.close(std.testing.io);
+    try std.testing.expectError(error.InsecureRefreshLease, RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+}
+fn closeRawPair(pair: *[2]std.os.linux.fd_t) void {
+    for (pair) |*fd| if (fd.* >= 0) {
+        _ = std.os.linux.close(fd.*);
+        fd.* = -1;
+    };
+}
+test "refresh lease kernel ownership releases after a reaped child exits" {
+    const linux = std.os.linux;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/crash", .{tmp.sub_path});
+    var lease = (try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true })).?;
+    defer lease.release();
+    var ready: [2]linux.fd_t = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&ready, .{ .CLOEXEC = true })));
+    defer closeRawPair(&ready);
+    var done: [2]linux.fd_t = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer closeRawPair(&done);
+    const forked = linux.fork();
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(forked));
+    if (forked == 0) {
+        // Only raw kernel operations after fork: no allocation, locks or std.Io.
+        _ = linux.close(ready[0]);
+        _ = linux.close(done[1]);
+        var byte: [1]u8 = .{1};
+        _ = linux.write(ready[1], &byte, 1);
+        _ = linux.read(done[0], &byte, 1);
+        linux.exit(37);
+    }
+    var child: linux.pid_t = @intCast(forked);
+    defer if (child > 0) {
+        _ = linux.kill(child, linux.SIG.KILL);
+        var status: i32 = 0;
+        while (linux.errno(linux.wait4(child, &status, 0, null)) == .INTR) {}
+    };
+    _ = linux.close(ready[1]);
+    ready[1] = -1;
+    _ = linux.close(done[0]);
+    done[0] = -1;
+    // Parent drops its inherited open-file description WITHOUT unlocking the
+    // child's lease. Child exit must close the final descriptor and release it.
+    lease.file.close(std.testing.io);
+    lease.dir.close(std.testing.io);
+    lease.closed = true;
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), linux.read(ready[0], &byte, 1));
+    try std.testing.expect(try refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+    try std.testing.expect((try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true })) == null);
+    try std.testing.expectEqual(@as(usize, 1), linux.write(done[1], &byte, 1));
+    var status: i32 = 0;
+    var waited: usize = undefined;
+    while (true) {
+        waited = linux.wait4(child, &status, 0, null);
+        if (linux.errno(waited) != .INTR) break;
+    }
+    try std.testing.expectEqual(@as(usize, @intCast(child)), waited);
+    child = 0;
+    try std.testing.expectEqual(@as(i32, 37 << 8), status);
+    try std.testing.expect(!try refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
+    var recovered = (try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true })).?;
+    recovered.release();
+}
+
+test "body repair preserves valid immutable bytes and rejects wrong-account data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/repair", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer store.close();
+    const m: t.Message = .{ .id = "m", .threadId = "t", .bodyText = "Immutable body", .labels = &.{ "INBOX", "UNREAD" }, .unread = true };
+    try store.put(m, true);
+    try store.save();
+    const gen = store.state.generation;
+    const original = store.find("m").?.bodyHash;
+    var changed = m;
+    changed.bodyText = "Other body";
+    changed.labels = &.{"INBOX"};
+    changed.unread = false;
+    store.applyLabels("m", changed.labels);
+    try std.testing.expect(!try store.putBody(changed));
+    try std.testing.expectEqualStrings(original, store.find("m").?.bodyHash);
+    try std.testing.expectEqual(gen, store.state.generation);
+    const name = try store.fileName("mail", "m");
+    try store.dir.deleteFile(std.testing.io, name);
+    try std.testing.expect(!try store.bodyAvailable("m"));
+    try std.testing.expect((try store.read("m")) == null);
+    try std.testing.expect(try store.putBody(m));
+    const corrupt = try std.json.Stringify.valueAlloc(a, BodyRecord{ .account = store.state.account, .message = changed }, .{});
+    try store.write(name, corrupt);
+    try std.testing.expect((try store.read("m")) == null);
+    try std.testing.expect(try store.putBody(m));
+    const foreign = try std.json.Stringify.valueAlloc(a, BodyRecord{ .account = "other@example.test", .message = m }, .{});
+    try store.write(name, foreign);
+    try std.testing.expectError(error.CacheIdentityMismatch, store.read("m"));
+    try std.testing.expect(!try store.putBody(.{ .id = "absent", .threadId = "t", .bodyText = "Never insert" }));
+    try std.testing.expect(store.find("absent") == null);
+}
+test "quota refuses oversized writes and protected oldest replacement before destructive eviction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/quota", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .disk_limit = 64 * 1024 });
+    defer store.close();
+    for (0..3) |i| try store.put(.{ .id = try std.fmt.allocPrint(a, "m{d}", .{i}), .threadId = "t", .bodyText = "Body", .receivedAt = @intCast(i) }, true);
+    try store.save();
+    const before = try store.diskBytes();
+    try std.testing.expectError(error.DiskQuotaExceeded, store.makeRoom(64 * 1024 + 1, "index.json"));
+    try std.testing.expectEqual(before, try store.diskBytes());
+    try std.testing.expectEqual(@as(usize, 3), store.state.entries.len);
+    try std.testing.expectError(error.DiskQuotaExceeded, store.makeRoom(64 * 1024, try store.fileName("mail", "m0")));
+    try std.testing.expectEqual(before, try store.diskBytes());
+    try std.testing.expectEqual(@as(usize, 3), store.state.entries.len);
+}
+
+test "persisted cache policy is shared by default readers and automatic writers while explicit reset works" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/policy", .{tmp.sub_path});
+    {
+        var configured = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 40, .disk_limit = 131072, .metadata_limit_set = true, .disk_limit_set = true });
+        defer configured.close();
+        try std.testing.expectEqual(@as(usize, 40), configured.state.metadataPolicy);
+    }
+    {
+        var reader = try Store.openCached(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+        defer reader.close();
+        try std.testing.expectEqual(@as(usize, 40), reader.options.metadata_limit);
+        try std.testing.expectEqual(@as(usize, 131072), reader.options.disk_limit);
+    }
+    {
+        var automatic = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit = 2000, .metadata_limit_set = true, .use_persisted_policy = true });
+        defer automatic.close();
+        try std.testing.expectEqual(@as(usize, 40), automatic.options.metadata_limit);
+    }
+    {
+        var reset = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true, .metadata_limit_set = true, .disk_limit_set = true });
+        defer reset.close();
+        try std.testing.expectEqual(@as(usize, 2000), reset.options.metadata_limit);
+        try std.testing.expectEqual(@as(usize, 268435456), reset.options.disk_limit);
+    }
+}

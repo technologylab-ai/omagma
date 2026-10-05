@@ -39,7 +39,10 @@ const Network = struct {
         };
         if (response.status == 401 and !self.refreshed_401) {
             self.refreshed_401 = true;
-            const token = try oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes);
+            const token = oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes) catch |err| switch (err) {
+                error.InvalidGrant, error.OutOfMemory, error.Canceled, error.Timeout => return err,
+                else => return error.TokenRefreshFailed,
+            };
             self.access = token.access_token;
             response = self.client.requestTerminal(url, method, self.access, json_body, self.response) catch |err| {
                 if (mutating and !localRequestError(err)) return error.UnknownOutcome;
@@ -78,40 +81,87 @@ fn contactPrecondition(a: std.mem.Allocator, bytes: []const u8) bool {
     return false;
 }
 
+/// One bounded refresh owns one credential/client lifetime. Callers may reset
+/// independent per-message arenas after committing each response; transport and
+/// token buffers remain owned here until close joins every outstanding request.
+pub const NetworkSession = struct {
+    io: std.Io,
+    client: http.Client,
+    desktop: oauth.DesktopClient,
+    refresh: []u8,
+    access: []u8,
+    response: []u8,
+    token: []const u8,
+    refresh_token: []const u8,
+    scopes: []const []const u8,
+    capabilities: []const []const u8,
+    network: Network = undefined,
+    initialized: bool = false,
+    pub fn init(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !void {
+        const index = config.index(account) orelse return error.UnknownAccount;
+        if (!config.accounts[index].enabled) return error.AccountDisabled;
+        try b.address(account);
+        var registry: auth.Registry = .{};
+        const bar_only = try j.boolean(request, "barGrantOnly", false) or try j.boolean(request, "auto", false);
+        if (!bar_only) if (j.get(request, "grantFile")) |path| {
+            registry = try auth.load(io, a, try j.string(path));
+        };
+        const grant = auth.find(&registry, account);
+        const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
+        if (grant) |g| {
+            if (!g.permits(capability)) return error.PermissionDenied;
+        } else if (!std.mem.eql(u8, capability, "mail-read")) return error.PermissionDenied;
+        const client_file = if (grant) |g| g.clientFile else config.client_file.slice();
+        if (client_file.len == 0) return error.OAuthClientRequired;
+        self.desktop = .{};
+        errdefer self.desktop.wipe();
+        try oauth.loadDesktop(io, client_file, &self.desktop);
+        if (grant) |g| if (!std.mem.eql(u8, self.desktop.client_id.slice(), g.clientId)) return error.GrantClientMismatch;
+        const refresh = try a.alloc(u8, 4096);
+        errdefer std.crypto.secureZero(u8, refresh);
+        const access = try a.alloc(u8, 4096);
+        errdefer std.crypto.secureZero(u8, access);
+        const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (if (bar_only) try keyring.lookupAutomatic(io, account, refresh) else try keyring.lookup(io, account, refresh)) orelse return error.NotConnected;
+        self.client = try http.Client.init(io);
+        errdefer self.client.deinit();
+        const scopes: []const []const u8 = if (grant) |g| g.scopes else &.{oauth.readonly_scope};
+        const tokens = try oauth.refreshScoped(io, &self.client, &self.desktop, refresh_token, access, scopes);
+        const response = try a.alloc(u8, types.Limits.request_bytes);
+        errdefer std.crypto.secureZero(u8, response);
+        const profile_response = try self.client.requestTerminal("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, tokens.access_token, null, response);
+        try oauth.verifyProfile(profile_response.status, profile_response.body, account);
+        // The initialized HTTP client must never be copied: its inner allocator
+        // borrows the workspace in this caller-stable storage.
+        self.io = io;
+        self.refresh = refresh;
+        self.access = access;
+        self.response = response;
+        self.token = tokens.access_token;
+        self.refresh_token = refresh_token;
+        self.scopes = scopes;
+        self.capabilities = if (grant) |g| g.capabilities else &.{"mail-read"};
+        self.initialized = false;
+    }
+    pub fn transport(self: *NetworkSession) Transport {
+        if (!self.initialized) {
+            self.network = .{ .client = &self.client, .access = self.token, .access_storage = self.access, .desktop = &self.desktop, .refresh_token = self.refresh_token, .scopes = self.scopes, .response = self.response };
+            self.initialized = true;
+        }
+        return .{ .context = &self.network, .requestFn = Network.request };
+    }
+    pub fn close(self: *NetworkSession) void {
+        self.client.deinit();
+        self.desktop.wipe();
+        std.crypto.secureZero(u8, self.refresh);
+        std.crypto.secureZero(u8, self.access);
+        std.crypto.secureZero(u8, self.response);
+    }
+};
 pub fn execute(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !j.Value {
-    const index = config.index(account) orelse return error.UnknownAccount;
-    if (!config.accounts[index].enabled) return error.AccountDisabled;
-    try b.address(account);
-    var registry: auth.Registry = .{};
-    if (j.get(request, "grantFile")) |path| registry = try auth.load(io, a, try j.string(path));
-    const grant = auth.find(&registry, account);
-    const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
-    const fallback = grant == null;
-    if (grant) |g| {
-        if (!g.permits(capability)) return error.PermissionDenied;
-    } else if (!std.mem.eql(u8, capability, "mail-read")) return error.PermissionDenied;
-    const client_file = if (grant) |g| g.clientFile else config.client_file.slice();
-    if (client_file.len == 0) return error.OAuthClientRequired;
-    var desktop: oauth.DesktopClient = .{};
-    defer desktop.wipe();
-    try oauth.loadDesktop(io, client_file, &desktop);
-    if (grant) |g| if (!std.mem.eql(u8, desktop.client_id.slice(), g.clientId)) return error.GrantClientMismatch;
-    const refresh = try a.alloc(u8, 4096);
-    const access = try a.alloc(u8, 4096);
-    defer std.crypto.secureZero(u8, refresh);
-    defer std.crypto.secureZero(u8, access);
-    const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (try keyring.lookup(io, account, refresh)) orelse return error.NotConnected;
-    var client = try http.Client.init(io);
-    defer client.deinit();
-    const scopes: []const []const u8 = if (grant) |g| g.scopes else &.{oauth.readonly_scope};
-    const tokens = try oauth.refreshScoped(io, &client, &desktop, refresh_token, access, scopes);
-    const response = try a.alloc(u8, types.Limits.request_bytes);
-    defer std.crypto.secureZero(u8, response);
-    var network: Network = .{ .client = &client, .access = tokens.access_token, .access_storage = access, .desktop = &desktop, .refresh_token = refresh_token, .scopes = scopes, .response = response };
-    const transport: Transport = .{ .context = &network, .requestFn = Network.request };
-    const profile = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", null);
-    if (!std.ascii.eqlIgnoreCase(try j.required(profile, "emailAddress"), account)) return error.WrongAccount;
-    return try dispatchAuthorized(io, a, account, if (fallback) &.{"mail-read"} else grant.?.capabilities, transport, cmd, request);
+    var session: NetworkSession = undefined;
+    try session.init(io, a, config, account, cmd, request);
+    defer session.close();
+    return try dispatchAuthorized(io, a, account, session.capabilities, session.transport(), cmd, request);
 }
 
 fn requiredCapability(cmd: []const u8) ?[]const u8 {
@@ -120,7 +170,7 @@ fn requiredCapability(cmd: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, cmd, "contacts.upsert")) return "contacts-write";
     if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search")) return "contacts-read";
     if (std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) return "mail-modify";
-    if (std.mem.eql(u8, cmd, "mail.read") or std.mem.eql(u8, cmd, "mail.thread") or std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync") or std.mem.eql(u8, cmd, "mail.attachment") or std.mem.eql(u8, cmd, "accounts.aliases")) return "mail-read";
+    if (std.mem.eql(u8, cmd, "mail.refresh") or std.mem.eql(u8, cmd, "mail.read") or std.mem.eql(u8, cmd, "mail.thread") or std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync") or std.mem.eql(u8, cmd, "mail.attachment") or std.mem.eql(u8, cmd, "accounts.aliases")) return "mail-read";
     return null;
 }
 fn permits(capabilities: []const []const u8, name: []const u8) bool {
@@ -193,7 +243,11 @@ fn read(a: std.mem.Allocator, transport: Transport, id: []const u8) !types.Messa
     var map: std.json.ObjectMap = .empty;
     var parts: usize = 0;
     try externalBodies(a, transport, id, j.get(value, "payload") orelse return error.InvalidProviderResponse, &map, 0, &parts);
-    return try @import("gmail_decode.zig").normalize(value, a, .{ .object = map });
+    return @import("gmail_decode.zig").normalize(value, a, .{ .object = map }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.MissingField, error.InvalidEncoding, error.UnsupportedEncoding, error.InvalidIdentifier => return error.MalformedMessage,
+        else => return err,
+    };
 }
 fn aliases(a: std.mem.Allocator, transport: Transport) ![]const []const u8 {
     const value = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,verificationStatus)", null);
@@ -267,10 +321,200 @@ fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transp
     return j.value(a, .{ .outcome = "applied", .messageId = id, .threadId = j.text(value, "threadId"), .rfcMessageId = rfc_id }) catch return error.UnknownOutcome;
 }
 
+pub const RefreshPlan = struct {
+    historyId: []const u8,
+    messages: []const types.Message = &.{},
+    labels: []const LabelUpdate = &.{},
+    deleted: []const []const u8 = &.{},
+    resync: bool = false,
+    nextCursor: []const u8 = "",
+    labelId: []const u8 = "",
+    metadataGets: usize = 0,
+    listCalls: usize = 0,
+    historyPages: usize = 0,
+    viewFetched: bool = false,
+    viewIds: []const []const u8 = &.{},
+    /// Only authoritatively projected IDs may survive a missing/expired history
+    /// checkpoint. Requested query membership is separate from account retention.
+    retentionIds: []const []const u8 = &.{},
+};
+pub const LabelUpdate = struct { id: []const u8, labels: []const []const u8 };
+fn historyId(value: []const u8) !void {
+    if (value.len == 0 or value.len > 32) return error.InvalidHistoryId;
+    for (value) |c| if (!std.ascii.isDigit(c)) return error.InvalidHistoryId;
+}
+fn containsId(list: []const []const u8, id: []const u8) bool {
+    for (list) |candidate| if (std.mem.eql(u8, candidate, id)) return true;
+    return false;
+}
+fn fetchMetadata(a: std.mem.Allocator, transport: Transport, id: []const u8) !types.Message {
+    const got = try transport.request(a, .GET, try messageUrl(a, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null);
+    if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
+    return @import("gmail_decode.zig").normalize(got, a, null);
+}
+fn messageIds(a: std.mem.Allocator, messages: []const types.Message) ![]const []const u8 {
+    const ids = try a.alloc([]const u8, messages.len);
+    for (messages, ids) |message, *id| id.* = message.id;
+    return ids;
+}
+fn fetchView(a: std.mem.Allocator, transport: Transport, request: j.Value) !j.Value {
+    const limit = try j.integer(request, "limit", 32);
+    if (limit < 1 or limit > 100) return error.InvalidPageLimit;
+    const query = j.text(request, "query");
+    var resolver: LabelResolver = .{ .a = a, .transport = transport };
+    const input = j.text(request, "label");
+    const label = if (input.len > 0) try resolver.resolve(input) else "";
+    const include = std.ascii.eqlIgnoreCase(label, "TRASH") or std.ascii.eqlIgnoreCase(label, "SPAM") or std.mem.indexOf(u8, query, "in:trash") != null or std.mem.indexOf(u8, query, "in:spam") != null or std.mem.indexOf(u8, query, "in:anywhere") != null;
+    var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={d}&includeSpamTrash={s}&fields=messages(id),nextPageToken", .{ limit, if (include) @as([]const u8, "true") else "false" });
+    if (query.len > 0) url = try std.fmt.allocPrint(a, "{s}&q={s}", .{ url, try escaped(a, query) });
+    if (label.len > 0) url = try std.fmt.allocPrint(a, "{s}&labelIds={s}", .{ url, try escaped(a, label) });
+    const result = try transport.request(a, .GET, url, null);
+    const entries = try array(result, "messages");
+    if (entries.len > limit) return error.InvalidPage;
+    const ids = try a.alloc([]const u8, entries.len);
+    for (entries, ids) |entry, *id| {
+        id.* = try j.required(entry, "id");
+        try b.identifier(id.*);
+    }
+    return j.value(a, .{ .ids = ids, .nextCursor = j.text(result, "nextPageToken"), .labelId = label });
+}
+fn bootstrap(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value, resync: bool) !j.Value {
+    const profile = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=historyId", null);
+    const checkpoint = try j.required(profile, "historyId");
+    try historyId(checkpoint);
+    // Capture before BOTH global retention and scoped enumeration. A narrow
+    // search/folder can never define the replacement for the whole account.
+    var global_req = try j.copyObject(a, request);
+    _ = global_req.object.swapRemove("cursor");
+    try global_req.object.put(a, "query", .{ .string = "" });
+    try global_req.object.put(a, "label", .{ .string = "" });
+    try global_req.object.put(a, "includeSpamTrash", .{ .bool = true });
+    const global = try dispatchAuthorized(io, a, account, capabilities, transport, "mail.list", global_req);
+    const recent = try j.decode([]const types.Message, a, j.get(global, "messages") orelse return error.InvalidProviderResponse);
+    var messages: std.ArrayList(types.Message) = .empty;
+    try messages.appendSlice(a, recent);
+    var view_ids = try messageIds(a, recent);
+    var next = j.text(global, "nextCursor");
+    var label_id: []const u8 = "";
+    var list_calls: usize = 1;
+    if (j.text(request, "query").len != 0 or j.text(request, "label").len != 0) {
+        const view = try fetchView(a, transport, request);
+        list_calls += 1;
+        view_ids = try j.decode([]const []const u8, a, j.get(view, "ids") orelse return error.InvalidProviderResponse);
+        next = j.text(view, "nextCursor");
+        label_id = j.text(view, "labelId");
+        for (view_ids) |id| {
+            var projected = false;
+            for (messages.items) |message| projected = projected or std.mem.eql(u8, id, message.id);
+            // Keep the TOTAL metadata budget at 100. Scoped IDs outside this
+            // authoritative union remain explicitly uncached/incomplete, rather
+            // than retaining their old labels under an advanced checkpoint.
+            if (!projected and messages.items.len < 100) try messages.append(a, try fetchMetadata(a, transport, id));
+        }
+    }
+    return j.value(a, RefreshPlan{ .historyId = checkpoint, .messages = messages.items, .resync = resync, .nextCursor = next, .labelId = label_id, .metadataGets = messages.items.len, .listCalls = list_calls, .viewFetched = true, .viewIds = view_ids, .retentionIds = try messageIds(a, messages.items) });
+}
+
+fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value) !j.Value {
+    const start = j.text(request, "historyId");
+    if (start.len == 0) return bootstrap(io, a, account, capabilities, transport, request, true);
+    try historyId(start);
+    const known = if (j.get(request, "knownIds")) |v| try j.decode([]const []const u8, a, v) else &.{};
+    if (known.len > types.Limits.metadata_hard) return error.SyncLimitExceeded;
+    var changed: std.ArrayList([]const u8) = .empty;
+    var added: std.ArrayList([]const u8) = .empty;
+    var deleted: std.ArrayList([]const u8) = .empty;
+    var cursor: []const u8 = "";
+    var checkpoint: []const u8 = start;
+    var events: usize = 0;
+    var pages: usize = 0;
+    while (true) {
+        if (pages == 8) return bootstrap(io, a, account, capabilities, transport, request, true);
+        pages += 1;
+        var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId={s}&maxResults=100&fields=history(id,messagesAdded(message(id)),messagesDeleted(message(id)),labelsAdded(message(id)),labelsRemoved(message(id))),nextPageToken,historyId", .{start});
+        if (cursor.len > 0) url = try std.fmt.allocPrint(a, "{s}&pageToken={s}", .{ url, try escaped(a, cursor) });
+        const page = transport.request(a, .GET, url, null) catch |err| {
+            if (err == error.MessageNotFound) return bootstrap(io, a, account, capabilities, transport, request, true);
+            return err;
+        };
+        checkpoint = try j.required(page, "historyId");
+        try historyId(checkpoint);
+        for (try array(page, "history")) |record| {
+            for ([_][]const u8{ "messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved" }) |kind| for (try array(record, kind)) |event| {
+                events += 1;
+                if (events > 256) return bootstrap(io, a, account, capabilities, transport, request, true);
+                const id = try j.required(j.get(event, "message") orelse return error.InvalidProviderResponse, "id");
+                try b.identifier(id);
+                if (std.mem.eql(u8, kind, "messagesDeleted")) {
+                    if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                } else {
+                    if (!containsId(changed.items, id)) try changed.append(a, id);
+                    if (std.mem.eql(u8, kind, "messagesAdded") and !containsId(added.items, id)) try added.append(a, id);
+                }
+            };
+        }
+        cursor = j.text(page, "nextPageToken");
+        if (cursor.len > 4096) return error.InvalidCursor;
+        if (cursor.len == 0) break;
+    }
+    if (changed.items.len > 100) return bootstrap(io, a, account, capabilities, transport, request, true);
+    var messages: std.ArrayList(types.Message) = .empty;
+    var labels: std.ArrayList(LabelUpdate) = .empty;
+    for (changed.items) |id| {
+        if (containsId(deleted.items, id)) continue;
+        if (containsId(known, id) and !containsId(added.items, id)) {
+            const minimal = transport.request(a, .GET, try messageUrl(a, id, "?format=minimal&fields=id,labelIds"), null) catch |err| {
+                if (err == error.MessageNotFound) {
+                    if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                    continue;
+                }
+                return err;
+            };
+            if (!std.mem.eql(u8, j.text(minimal, "id"), id)) return error.MessageIdentityMismatch;
+            const label_ids = if (j.get(minimal, "labelIds")) |value| try j.decode([]const []const u8, a, value) else &.{};
+            if (label_ids.len > 64) return error.InvalidLabels;
+            for (label_ids) |label| {
+                try recipients.validateHeader(label);
+                if (label.len > 256) return error.InvalidLabels;
+            }
+            try labels.append(a, .{ .id = id, .labels = label_ids });
+        } else {
+            const got = fetchMetadata(a, transport, id) catch |err| {
+                if (err == error.MessageNotFound) {
+                    if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                    continue;
+                }
+                return err;
+            };
+            try messages.append(a, got);
+        }
+    }
+    var plan: RefreshPlan = .{ .historyId = checkpoint, .messages = messages.items, .labels = labels.items, .deleted = deleted.items, .metadataGets = messages.items.len, .historyPages = pages };
+    if (try j.boolean(request, "forceView", false) or (events != 0 and j.text(request, "query").len != 0)) {
+        const view = try fetchView(a, transport, request);
+        plan.viewIds = try j.decode([]const []const u8, a, j.get(view, "ids") orelse return error.InvalidProviderResponse);
+        plan.viewFetched = true;
+        plan.listCalls = 1;
+        plan.nextCursor = j.text(view, "nextCursor");
+        plan.labelId = j.text(view, "labelId");
+        for (plan.viewIds) |id| {
+            var found = containsId(known, id);
+            for (messages.items) |message| found = found or std.mem.eql(u8, id, message.id);
+            if (!found and plan.metadataGets < 100) {
+                try messages.append(a, try fetchMetadata(a, transport, id));
+                plan.metadataGets += 1;
+            }
+        }
+        plan.messages = messages.items;
+    }
+    return j.value(a, plan);
+}
+
 pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {
     try recipients.validateAddress(account);
     const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
     if (!permits(capabilities, capability)) return error.PermissionDenied;
+    if (std.mem.eql(u8, cmd, "mail.refresh")) return refreshPlan(io, a, account, capabilities, transport, request);
     if (std.mem.eql(u8, cmd, "mail.read")) return j.value(a, try read(a, transport, try j.required(request, "messageId")));
     if (std.mem.eql(u8, cmd, "accounts.aliases")) return j.value(a, .{ .aliases = try aliases(a, transport) });
     if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) {
@@ -280,7 +524,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         var resolver: LabelResolver = .{ .a = a, .transport = transport };
         const label_input = j.text(request, "label");
         const label = if (label_input.len > 0) try resolver.resolve(label_input) else "";
-        const include_spam_trash = std.ascii.eqlIgnoreCase(label, "TRASH") or std.ascii.eqlIgnoreCase(label, "SPAM") or std.mem.indexOf(u8, query, "in:trash") != null or std.mem.indexOf(u8, query, "in:spam") != null or std.mem.indexOf(u8, query, "in:anywhere") != null;
+        const include_spam_trash = try j.boolean(request, "includeSpamTrash", false) or std.ascii.eqlIgnoreCase(label, "TRASH") or std.ascii.eqlIgnoreCase(label, "SPAM") or std.mem.indexOf(u8, query, "in:trash") != null or std.mem.indexOf(u8, query, "in:spam") != null or std.mem.indexOf(u8, query, "in:anywhere") != null;
         var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={d}&includeSpamTrash={s}&fields=messages(id,threadId),nextPageToken", .{ limit, if (include_spam_trash) @as([]const u8, "true") else "false" });
         for ([_][]const u8{ "query", "label", "cursor" }, [_][]const u8{ "q", "labelIds", "pageToken" }) |key, parameter| {
             const value = if (std.mem.eql(u8, key, "label")) label else j.text(request, key);
@@ -296,7 +540,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
             if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
             dest.* = try @import("gmail_decode.zig").normalize(got, a, null);
         }
-        return j.value(a, .{ .messages = messages, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null) });
+        return j.value(a, .{ .messages = messages, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null), .labelId = label });
     }
     if (std.mem.eql(u8, cmd, "mail.thread")) {
         const id = try j.required(request, "threadId");
@@ -491,4 +735,185 @@ test "user label names resolve exact provider IDs once and system IDs need no re
     try std.testing.expectEqualStrings("Label_42", try resolver.resolve("Label_42"));
     try std.testing.expectError(error.LabelNotFound, resolver.resolve("Unknown synthetic label"));
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
+test "network session HTTP allocator borrows its caller-stable owner" {
+    var session: NetworkSession = undefined;
+    session.client = try http.Client.init(std.testing.io);
+    defer session.client.deinit();
+    var out: [16]u8 = undefined;
+    const result: ?http.Response = session.client.requestLoopback("http://127.0.0.1:0/", &out) catch null;
+    try std.testing.expect(result == null);
+    const owner: *anyopaque = &session.client.workspace;
+    try std.testing.expect(session.client.inner != null);
+    try std.testing.expectEqual(owner, session.client.inner.?.allocator.ptr);
+}
+const HistoryOracle = struct {
+    mode: enum { unchanged, delta, expired, overflowing },
+    history_calls: usize = 0,
+    metadata_calls: usize = 0,
+    minimal_calls: usize = 0,
+    list_calls: usize = 0,
+    omit_labels: bool = false,
+    fn transport(self: *HistoryOracle) Transport {
+        return .{ .context = self, .requestFn = request };
+    }
+    fn literal(a: std.mem.Allocator, raw: []const u8) !j.Value {
+        return std.json.parseFromSliceLeaky(j.Value, a, raw, .{ .allocate = .alloc_always });
+    }
+    fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+        _ = body;
+        try std.testing.expectEqual(std.http.Method.GET, method);
+        const self: *HistoryOracle = @ptrCast(@alignCast(ctx));
+        if (std.mem.indexOf(u8, url, "/history?") != null) {
+            self.history_calls += 1;
+            try std.testing.expect(std.mem.indexOf(u8, url, "startHistoryId=41") != null);
+            if (self.mode == .expired) return error.MessageNotFound;
+            if (self.mode == .unchanged) return literal(a, "{\"historyId\":\"73\",\"history\":[]}");
+            if (self.mode == .overflowing) return literal(a, "{\"historyId\":\"73\",\"history\":[],\"nextPageToken\":\"endless\"}");
+            if (self.history_calls == 1) return literal(a, "{\"historyId\":\"73\",\"nextPageToken\":\"page-two\",\"history\":[{\"id\":\"57\",\"messagesAdded\":[{\"message\":{\"id\":\"new\"}}],\"messagesDeleted\":[{\"message\":{\"id\":\"gone\"}}],\"labelsAdded\":[{\"message\":{\"id\":\"cached\"}}]}]}");
+            try std.testing.expect(std.mem.indexOf(u8, url, "pageToken=page-two") != null);
+            return literal(a, "{\"historyId\":\"73\",\"history\":[{\"id\":\"73\",\"messagesAdded\":[{\"message\":{\"id\":\"new\"}}],\"labelsRemoved\":[{\"message\":{\"id\":\"cached\"}}]}]}");
+        }
+        if (std.mem.indexOf(u8, url, "format=minimal") != null) {
+            self.minimal_calls += 1;
+            if (self.omit_labels) return literal(a, "{\"id\":\"cached\"}");
+            return literal(a, "{\"id\":\"cached\",\"labelIds\":[\"INBOX\",\"STARRED\"]}");
+        }
+        if (std.mem.indexOf(u8, url, "format=metadata") != null) {
+            self.metadata_calls += 1;
+            return literal(a, "{\"id\":\"new\",\"threadId\":\"thread\",\"internalDate\":\"42\",\"labelIds\":[\"INBOX\"],\"payload\":{\"headers\":[{\"name\":\"From\",\"value\":\"sender@example.test\"}]}}");
+        }
+        if (std.mem.indexOf(u8, url, "/profile?") != null) return literal(a, "{\"historyId\":\"89\"}");
+        if (std.mem.indexOf(u8, url, "/messages?") != null) {
+            self.list_calls += 1;
+            return literal(a, "{\"messages\":[]}");
+        }
+        return error.UnexpectedMockRequest;
+    }
+};
+test "history no-change neither relists nor refetches metadata or bodies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: HistoryOracle = .{ .mode = .unchanged };
+    const request = try HistoryOracle.literal(a, "{\"historyId\":\"41\",\"knownIds\":[\"cached\"],\"limit\":32}");
+    const plan = try j.decode(RefreshPlan, a, try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, oracle.transport(), "mail.refresh", request));
+    try std.testing.expectEqualStrings("73", plan.historyId);
+    try std.testing.expectEqual(@as(usize, 1), oracle.history_calls);
+    try std.testing.expectEqual(@as(usize, 0), oracle.metadata_calls + oracle.minimal_calls + oracle.list_calls);
+    try std.testing.expectEqual(@as(usize, 0), plan.messages.len + plan.labels.len + plan.deleted.len);
+}
+test "history pages deduplicate added IDs retain deletions and only get minimal labels for known mail" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: HistoryOracle = .{ .mode = .delta };
+    const request = try HistoryOracle.literal(a, "{\"historyId\":\"41\",\"knownIds\":[\"cached\",\"gone\"],\"limit\":32}");
+    const plan = try j.decode(RefreshPlan, a, try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, oracle.transport(), "mail.refresh", request));
+    try std.testing.expectEqualStrings("73", plan.historyId);
+    try std.testing.expectEqual(@as(usize, 2), oracle.history_calls);
+    try std.testing.expectEqual(@as(usize, 1), oracle.metadata_calls);
+    try std.testing.expectEqual(@as(usize, 1), oracle.minimal_calls);
+    try std.testing.expectEqual(@as(usize, 0), oracle.list_calls);
+    try std.testing.expectEqualStrings("new", plan.messages[0].id);
+    try std.testing.expectEqualStrings("gone", plan.deleted[0]);
+    try std.testing.expectEqualStrings("cached", plan.labels[0].id);
+    try std.testing.expectEqualStrings("STARRED", plan.labels[0].labels[1]);
+    // An authoritative MINIMAL response may omit an empty repeated label field.
+    var no_labels: HistoryOracle = .{ .mode = .delta, .omit_labels = true };
+    const empty = try j.decode(RefreshPlan, a, try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, no_labels.transport(), "mail.refresh", request));
+    try std.testing.expectEqual(@as(usize, 0), empty.labels[0].labels.len);
+}
+test "expired and over-budget histories use bounded recent resync" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const request = try HistoryOracle.literal(a, "{\"historyId\":\"41\",\"knownIds\":[],\"limit\":32}");
+    var expired: HistoryOracle = .{ .mode = .expired };
+    const plan = try j.decode(RefreshPlan, a, try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, expired.transport(), "mail.refresh", request));
+    try std.testing.expect(plan.resync);
+    try std.testing.expectEqualStrings("89", plan.historyId);
+    try std.testing.expectEqual(@as(usize, 1), expired.list_calls);
+    var overflow: HistoryOracle = .{ .mode = .overflowing };
+    const bounded = try j.decode(RefreshPlan, a, try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, overflow.transport(), "mail.refresh", request));
+    try std.testing.expect(bounded.resync);
+    try std.testing.expectEqualStrings("89", bounded.historyId);
+    try std.testing.expectEqual(@as(usize, 8), overflow.history_calls);
+    try std.testing.expectEqual(@as(usize, 1), overflow.list_calls);
+}
+
+const ScopedResyncOracle = struct {
+    expired: bool,
+    global_lists: usize = 0,
+    scoped_lists: usize = 0,
+    metadata_gets: usize = 0,
+    fn transport(self: *ScopedResyncOracle) Transport {
+        return .{ .context = self, .requestFn = request };
+    }
+    fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+        _ = body;
+        try std.testing.expectEqual(std.http.Method.GET, method);
+        const self: *ScopedResyncOracle = @ptrCast(@alignCast(ctx));
+        if (std.mem.indexOf(u8, url, "/history?") != null) {
+            try std.testing.expect(self.expired);
+            return error.MessageNotFound;
+        }
+        if (std.mem.indexOf(u8, url, "/profile?") != null) return HistoryOracle.literal(a, "{\"historyId\":\"99\"}");
+        if (std.mem.indexOf(u8, url, "/messages?") != null) {
+            if (std.mem.indexOf(u8, url, "labelIds=STARRED") != null) {
+                self.scoped_lists += 1;
+                try std.testing.expect(std.mem.indexOf(u8, url, "q=subject%3Aneedle") != null);
+                return HistoryOracle.literal(a, "{\"messages\":[{\"id\":\"older-starred\"}]}");
+            }
+            self.global_lists += 1;
+            try std.testing.expect(std.mem.indexOf(u8, url, "includeSpamTrash=true") != null);
+            try std.testing.expect(std.mem.indexOf(u8, url, "labelIds=") == null);
+            try std.testing.expect(std.mem.indexOf(u8, url, "&q=") == null);
+            return HistoryOracle.literal(a, "{\"messages\":[{\"id\":\"recent-inbox\"},{\"id\":\"recent-sent\"}]}");
+        }
+        if (std.mem.indexOf(u8, url, "format=metadata") != null) {
+            self.metadata_gets += 1;
+            const pos = std.mem.indexOf(u8, url, "/messages/").? + "/messages/".len;
+            const end = std.mem.indexOfScalarPos(u8, url, pos, '?').?;
+            const id = url[pos..end];
+            const time: []const u8 = if (std.mem.eql(u8, id, "recent-inbox")) "100" else if (std.mem.eql(u8, id, "recent-sent")) "90" else "10";
+            return j.value(a, .{ .id = id, .threadId = "fictional-thread", .internalDate = time, .labelIds = [_][]const u8{if (std.mem.eql(u8, id, "older-starred")) "STARRED" else "INBOX"}, .payload = .{ .headers = [_]struct { name: []const u8, value: []const u8 }{.{ .name = "From", .value = "sender@example.test" }} } });
+        }
+        return error.UnexpectedMockRequest;
+    }
+};
+test "expired and missing checkpoint narrow resync keeps account retention separate from query membership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ true, false }) |expired| {
+        var oracle: ScopedResyncOracle = .{ .expired = expired };
+        const request = try j.value(a, .{ .historyId = if (expired) @as([]const u8, "41") else "", .query = "subject:needle", .label = "STARRED", .limit = @as(u8, 2) });
+        const plan = try j.decode(RefreshPlan, a, try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, oracle.transport(), "mail.refresh", request));
+        try std.testing.expect(plan.resync);
+        try std.testing.expectEqualStrings("99", plan.historyId);
+        try std.testing.expectEqual(@as(usize, 1), oracle.global_lists);
+        try std.testing.expectEqual(@as(usize, 1), oracle.scoped_lists);
+        try std.testing.expectEqual(@as(usize, 3), oracle.metadata_gets);
+        try std.testing.expectEqual(@as(usize, 1), plan.viewIds.len);
+        try std.testing.expectEqualStrings("older-starred", plan.viewIds[0]);
+        try std.testing.expectEqual(@as(usize, 3), plan.retentionIds.len);
+        try std.testing.expect(containsId(plan.retentionIds, "recent-inbox"));
+        try std.testing.expect(containsId(plan.retentionIds, "recent-sent"));
+        try std.testing.expectEqualStrings("subject:needle", j.text(request, "query"));
+        try std.testing.expectEqualStrings("STARRED", j.text(request, "label"));
+    }
+}
+
+test "automatic jobs ignore terminal registry and cannot gain write capabilities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var config: Config = undefined;
+    try config.defaults("/tmp");
+    const request = try HistoryOracle.literal(a, "{\"auto\":true,\"barGrantOnly\":false,\"grantFile\":\"/nonexistent/fictional-terminal-grants.json\"}");
+    var session: NetworkSession = undefined;
+    try std.testing.expectError(error.OAuthClientRequired, session.init(std.testing.io, a, &config, "personal@example.com", "mail.refresh", request));
+    for ([_][]const u8{ "mail.send", "contacts.upsert", "mail.trash", "invitation.reply" }) |command| try std.testing.expectError(error.PermissionDenied, session.init(std.testing.io, a, &config, "personal@example.com", command, request));
 }

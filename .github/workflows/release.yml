@@ -72,6 +72,13 @@ jobs:
           node tests/ui_model.mjs
           python3 tests/terminal_fixture_check.py
           python3 tests/terminal_screen.py
+          python3 tests/terminal_cache_fixture_check.py
+          python3 tests/terminal_status_screen.py
+          python3 tests/terminal_reader.py
+          python3 tests/terminal_cache.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-cache-debug.json
+          python3 tests/terminal_ui.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-ui-debug.json
+          python3 tests/terminal_cache_max.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-cache-max-debug.json
+          python3 tests/terminal_background.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-background-debug.json
           python3 tests/terminal_integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-integration.json
           python3 tests/terminal_transport.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-transport.json
           python3 tests/terminal_pty.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-pty.json
@@ -122,6 +129,10 @@ jobs:
           '
       - name: Safe terminal workflows and memory
         run: |
+          python3 tests/terminal_cache.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-cache-safe.json
+          python3 tests/terminal_ui.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-ui-safe.json
+          python3 tests/terminal_cache_max.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-cache-max-safe.json
+          python3 tests/terminal_background.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-background-safe.json
           python3 tests/terminal_integration.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-integration.json
           python3 tests/terminal_transport.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-transport.json
           python3 tests/terminal_pty.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-pty.json

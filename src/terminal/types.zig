@@ -17,9 +17,13 @@ pub const Options = struct {
     cache_dir: ?[]const u8 = null,
     config_file: ?[]const u8 = null,
     grant_file: ?[]const u8 = null,
+    ui_file: ?[]const u8 = null,
     account: ?[]const u8 = null,
     metadata_limit: usize = Limits.metadata,
     disk_limit: usize = Limits.disk_bytes,
+    metadata_limit_set: bool = false,
+    disk_limit_set: bool = false,
+    use_persisted_policy: bool = false,
     editor_mode: []const u8 = "auto",
     no_mouse: bool = false,
 };
@@ -27,6 +31,10 @@ pub const Options = struct {
 pub const Client = struct {
     ctx: *anyopaque,
     callFn: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]const u8,
+    cachedFn: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]const u8 = null,
+    pub fn callCached(self: Client, allocator: std.mem.Allocator, request: []const u8) ![]const u8 {
+        return (self.cachedFn orelse return error.CacheUnsupported)(self.ctx, allocator, request);
+    }
     pub fn call(self: Client, allocator: std.mem.Allocator, request: []const u8) ![]const u8 {
         return self.callFn(self.ctx, allocator, request);
     }
@@ -50,6 +58,8 @@ pub const Message = struct {
     labels: []const []const u8 = &.{},
     receivedAt: i64 = 0,
     unread: bool = false,
+    bodyCached: bool = false,
+    bodyCacheError: []const u8 = "",
     attachments: []const Attachment = &.{},
     invitation: ?[]const u8 = null,
 };

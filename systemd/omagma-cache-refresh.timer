@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the Omagma terminal mail cache every five minutes
+
+[Timer]
+OnStartupSec=30s
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=omagma-cache-refresh.service
+
+[Install]
+WantedBy=timers.target

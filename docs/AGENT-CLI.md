@@ -1,5 +1,7 @@
 # Omagma agent CLI
 
+**Experimental:** verify account capabilities and operation receipts before live tasks. API behavior and commands may change as the terminal client develops.
+
 Use the verified release binary (`--version`, `build-info`). No compiler is needed for release use. For setup, read [AGENTS.md](../AGENTS.md) and [the setup workflow](../skills/omagma-setup/SKILL.md). For terminal permissions read [TERMINAL.md](TERMINAL.md). Never widen permissions or send mail merely because an agent has read access. Development uses `--fixtures`; initial live write acceptance requires an explicitly provided dedicated test mailbox. Production writes need separate explicit user intent and suitable account authorization.
 
 Fixture accounts expose mock send, mailbox-change, contact and RSVP capabilities without OAuth or Google access. Inspect `accounts.list` when selecting capabilities for an actual account.
@@ -33,7 +35,8 @@ Send lines such as:
 | cmd | Additional fields / result |
 | --- | --- |
 | accounts.list | accounts with address, enabled, capabilities |
-| mail.list / search / sync | limit 1..100, query, label, cursor; returns messages and nextCursor |
+| mail.list / search / sync | limit 1..100, query, label, cursor; returns messages and nextCursor; search selects local cache with cacheOnly:true or Gmail with false/default |
+| mail.refresh | optional limit/query/label; applies a bounded history update or recent resync to the account cache |
 | mail.read | messageId; decoded full text, envelope/threading fields, labels, attachments, invitation |
 | mail.thread | threadId; chronological messages |
 | mail.attachment | messageId, attachmentId; filename,mimeType,size,data(base64url without padding) |
@@ -53,6 +56,15 @@ Send lines such as:
 | auth.status / authorize / revoke | terminal grant; prefer one-shot terminal-auth for consent |
 
 List/sync **one bounded page at a time** and pass nextCursor verbatim with the same account/query/label. Null means complete. Pages replace, not append into the client. Persist only what your task needs; Omagma automatically bounds its own cache. Gmail's query syntax is available live; fixtures implement only simple subject:/from:/is:unread/in:trash and substring searches.
+
+For a local-only lookup, set `cacheOnly:true` on `mail.list`, `mail.read`, `mail.thread` or `cache.stats`. One-shot commands use `--cached`. This path does not contact Gmail and remains available while a separate client refreshes the account. Missing full bodies return `CacheMiss`; cached threads can be partial. Cached list results report cache readiness, age and partial state, and have their own account/query/generation-scoped cursors. The end of cached pagination means the end of that bounded cache view, not proof that Gmail has no more results. Provider and cache cursors are distinct; pass each only to the matching operation. Arbitrary Gmail searches require a recorded provider result rather than an invented local approximation. See [cache-first behavior](TUI-CACHE.md).
+
+`mail.search` with `cacheOnly:true` explicitly evaluates the local cache's metadata search, without a previously recorded Gmail query or server request. Results are a partial cached subset. One-shot search uses `--cached` for local search or `--server` for Gmail. Local search uses ASCII case-insensitive substrings across subject, snippet, sender and labels; `from:`, `subject:`, `is:unread` and single `in:`/`-in:` filters are supported. It does not implement arbitrary Gmail query syntax or search uncached bodies. Local search cursors (`K`) are distinct from cached provider-view cursors (`C`) and Gmail continuations (`L`); never exchange them. A local match does not prove that uncached mailbox content lacks the query.
+
+```json
+{"cmd":"mail.list","account":"personal@example.com","label":"INBOX","limit":32,"cacheOnly":true}
+{"cmd":"mail.refresh","account":"personal@example.com","label":"INBOX","limit":32}
+```
 
 Reads do not mark read. Use mail.mark explicitly if requested. There is no permanent delete. Draft bodies are plaintext UTF-8. To/Cc/Bcc accept RFC address-list strings or arrays of address objects `{address,name}`. Reply planning honors Reply-To, verified self aliases, original recipients and References; it never promotes Bcc into reply-all. Missing/invalid Message-ID returns an explicit error instead of claiming valid threading.
 
@@ -75,6 +87,8 @@ Contact updates use CONTACT-source etags and reject conflicts. Live writes inval
 
 ```sh
 omagma mail list --account personal@example.com --label INBOX --limit 100
+omagma mail search --account personal@example.com --query launch --cached
+omagma mail search --account personal@example.com --query 'from:alex@example.org' --server
 omagma mail read --account personal@example.com --message-id PROVIDER_ID
 omagma mail reply --account personal@example.com --message-id PROVIDER_ID --all
 omagma draft send --account personal@example.com --draft-id LOCAL_ID --operation-id TASK_ID

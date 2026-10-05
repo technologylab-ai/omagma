@@ -1,0 +1,15 @@
+# Terminal layout and theme fixtures
+
+The two palettes are fictional development data. Tests copy them only under an owned temporary `XDG_STATE_HOME/omarchy/current/theme/colors.toml` or the owned HOME fallback `.local/state/omarchy/current/theme/colors.toml`. They never edit an installed theme or account configuration. `tests/terminal_ui.py` runs five focused cases against a binary reporting the expected compiler/mode, with a new receipt path and optional case selection.
+
+| Case | Independent observable result |
+| --- | --- |
+| Responsive layout | Current-cell pane coordinates distinguish right and below readers at wide, medium and narrow sizes; right allocates approximately 55% of available content width to the list; subject precedes the sender/snippet row and the blank separator; resize and layout changes preserve the selected cached message |
+| Private preference persistence | `v` and `:layout right\|below` save only the explicit private `--ui-file`; restarting restores the layout; malformed, public, symlink, FIFO and directory preferences warn/fall back promptly without changing their bytes or targets; account configuration stays byte-identical |
+| Cached next/previous mail | With remote refresh explicitly held, reader `J`/`K` select distinct cached messages in order while `j`/`k` scroll the same body; expanded-reader navigation behaves the same and page keys keep page behavior; 96-header incoming mail remains previewable; cached Contacts opens immediately with usable help/Escape, while missing contact permission still opens an explicit denied pane; `q` clears an active search before quitting the default inbox; no writes occur and the hold remains present until all assertions finish |
+| Theme and no-color | Actual current-cell foregrounds match literal RGB values from the synthetic palette; a reload reads the second palette; missing or malformed theme data uses the documented fallback; `NO_COLOR` keeps status text and readable selection without palette foregrounds |
+| Search and Back | `/` identifies retained-cache search and pages without provider calls during a held refresh; `\` identifies Gmail search and reaches older uncached mail/pages; reader/expanded/query/help/composer `q` performs one context-appropriate Back action before default inbox `q` quits; insertion `q` remains literal draft text and never sends |
+
+Preferences contain only `schema: 1` and `readerLayout: "right"|"below"`. Refused startup files retain the `UI prefs fallback` warning, and refused saves leave the original file or special node unchanged. The synthetic theme uses the named `cyan` role for fetching/sender text, `green` for current status and `yellow` for offline status; numeric palette entries are harmless additional fixture data.
+
+All resize signals and input belong to the harness's PTY. Body/thread fixtures and account identities remain synthetic. The test does not invoke an editor, browser, keyring, live provider or desktop input. These are proposed checks, not completed results; runtime execution awaits the final UI contract and cooperative host reservation.

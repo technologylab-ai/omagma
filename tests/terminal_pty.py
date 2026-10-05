@@ -47,17 +47,18 @@ def child_session():
 
 
 class Terminal:
-    def __init__(self, binary, directory, extra=(), history_limit=None):
+    def __init__(self, binary, directory, extra=(), history_limit=None, environment=None, screen_type=Screen, columns=100, rows=24):
         self.binary = binary
         self.directory = Path(directory)
-        self.directory.mkdir(parents=True)
+        self.directory.mkdir(parents=True, exist_ok=True)
         self.master, self.slave = os.openpty()
-        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 480, 1000))
+        self.columns, self.rows = columns, rows
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, rows * 20, columns * 10))
         self.settings = termios.tcgetattr(self.slave)
         self.output = bytearray()
         self.output_total = 0
         self.history_limit = history_limit
-        self.screen = Screen(100, 24)
+        self.screen = screen_type(columns, rows)
         self.scan_offset = 0
         self.query_replies = 0
         self.editor_log = self.directory / "editor.json"
@@ -69,8 +70,14 @@ class Terminal:
                    EDITOR=shlex.join(editor), OMAGMA_EDITOR_TEST_LOG=str(self.editor_log))
         for name in ["CONFIG", "CACHE", "DATA", "STATE"]:
             env[f"XDG_{name}_HOME"] = str(self.directory / name.lower())
+        if environment:
+            for name, value in environment.items():
+                if value is None:
+                    env.pop(name, None)
+                else:
+                    env[name] = value
         runtime = self.directory / "runtime"
-        runtime.mkdir(mode=0o700)
+        runtime.mkdir(mode=0o700, exist_ok=True)
         env["XDG_RUNTIME_DIR"] = str(runtime)
         for name in ["DISPLAY", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS"]:
             env.pop(name, None)
@@ -100,7 +107,10 @@ class Terminal:
             if self.history_limit is None:
                 require(len(self.output) <= 8 * 1024**2, "TUI output exceeded diagnostic cap")
             recent = bytes(self.output[max(0, old_length - 32):])
-            for query, reply in QUERIES.items():
+            replies = dict(QUERIES)
+            replies[b"\x1b[14t"] = f"\x1b[4;{self.rows * 20};{self.columns * 10}t".encode()
+            replies[b"\x1b[18t"] = f"\x1b[8;{self.rows};{self.columns}t".encode()
+            for query, reply in replies.items():
                 start = max(0, old_length - 32)
                 for match in re.finditer(re.escape(query), recent):
                     if start + match.end() > old_length:
@@ -118,6 +128,14 @@ class Terminal:
 
     def text(self):
         return self.screen.text()
+
+    def resize(self, columns, rows):
+        # Resize only this harness's PTY. The foreground child receives SIGWINCH
+        # from the kernel; a fresh cell model waits for the resulting redraw.
+        require(20 <= columns <= 300 and 10 <= rows <= 100, "isolated PTY size is out of test bounds")
+        self.columns, self.rows = columns, rows
+        self.screen = type(self.screen)(columns, rows)
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, rows * 20, columns * 10))
 
     def gap(self, seconds=.25):
         deadline = time.monotonic() + seconds
@@ -147,15 +165,24 @@ class Terminal:
         os.close(self.master)
         os.close(self.slave)
 
-    def finish(self, signal_mode=False, expected_sends=0):
-        if signal_mode:
+    def finish(self, signal_mode=False, expected_sends=0, already_exited=False):
+        if already_exited:
+            require(self.process.poll() is not None, "exit oracle used before child actually exited")
+        elif signal_mode:
             self.process.send_signal(signal.SIGINT if signal_mode is True else signal_mode)
-        else:
-            self.send(b"\x1b")
-            self.gap()
-            self.send(b"q")
         deadline = time.monotonic() + 5
+        next_back = 0
+        backs = 0
         while self.process.poll() is None and time.monotonic() < deadline:
+            if not already_exited and not signal_mode and time.monotonic() >= next_back and backs < 5:
+                # q now backs through reader/query/modal contexts. Esc first
+                # leaves insert/text forms so cleanup never types literal q.
+                self.send(b"\x1b")
+                self.gap()
+                if self.process.poll() is None:
+                    self.send(b"q")
+                backs += 1
+                next_back = time.monotonic() + .4
             self.pump()
         require(self.process.poll() is not None, "TUI did not exit within5s")
         require(self.process.returncode == 0, "TUI did not exit cleanly after the owned workflow")
@@ -174,6 +201,15 @@ class Terminal:
 def open_composer(terminal):
     terminal.send(b"c")
     terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
+
+
+def gmail_search(terminal, query):
+    # These legacy workflows intentionally fetch older provider mail, so use
+    # the explicit Gmail search key rather than the new retained-cache slash.
+    terminal.send(b"\\")
+    terminal.until(lambda: "Gmail \\ " in terminal.text())
+    terminal.send(query.encode() + b"\r")
+    terminal.until(lambda: "Mail · Gmail search" in terminal.text())
 
 
 def compose_fixture(terminal):
@@ -350,9 +386,9 @@ def exercise(terminal, action):
         return result
     if action == "save-incoming-attachment":
         terminal.until(lambda: "Ready" in terminal.text())
-        terminal.send(b"/Synthetic personal message 003\r")
+        gmail_search(terminal, "Synthetic personal message 003")
         terminal.until(lambda: "Synthetic personal message 003" in terminal.text() and "Ready" in terminal.text()
-                       and "/Synthetic personal message 003" not in terminal.text())
+                       and "Gmail \\ Synthetic personal message 003" not in terminal.text())
         terminal.until(lambda: "Attachment 1:" in terminal.text() and "Ready" in terminal.text())
         destination = terminal.directory / "received fixture binary.bin"
         command = b":save-attachment 1 " + str(destination).encode() + b"\r"
@@ -474,7 +510,7 @@ def exercise(terminal, action):
         return result
     if action == "rsvp-cancel":
         terminal.until(lambda: "Ready" in terminal.text())
-        terminal.send(b"/subject:Synthetic personal thread 002\r")
+        gmail_search(terminal, "subject:Synthetic personal thread 002")
         terminal.until(lambda: "Invitation" in terminal.text() and "Ready" in terminal.text())
         terminal.send(b"I")
         terminal.until(lambda: "Review RSVP" in terminal.text() and "UID:" in terminal.text())
@@ -488,7 +524,7 @@ def exercise(terminal, action):
         return result
     if action == "long-rsvp-review":
         terminal.until(lambda: "Ready" in terminal.text())
-        terminal.send(b"/subject:Synthetic personal thread 002\r")
+        gmail_search(terminal, "subject:Synthetic personal thread 002")
         terminal.until(lambda: "Invitation" in terminal.text() and "Ready" in terminal.text())
         terminal.send(b"I")
         terminal.until(lambda: "Review RSVP" in terminal.text() and "Attendee:" in terminal.text())
@@ -531,9 +567,9 @@ def exercise(terminal, action):
         result["completeHelpVisible"] = True
         return result
     if action == "mail-controls":
-        terminal.send(b"/subject:Synthetic personal thread 002\r")
+        gmail_search(terminal, "subject:Synthetic personal thread 002")
         terminal.until(lambda: "Synthetic personal thread 002" in terminal.text() and "Ready" in terminal.text()
-                       and "/subject:Synthetic personal thread 002" not in terminal.text())
+                       and "Gmail \\ subject:Synthetic personal thread 002" not in terminal.text())
         terminal.send(b"\r")
         terminal.until(lambda: "Literal terminal controls" in terminal.text())
         require(b"\x1b]52;c;ZmFrZQ==" not in terminal.output, "mail emitted clipboard OSC sequence")

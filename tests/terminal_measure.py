@@ -17,6 +17,7 @@ import time
 from build_info import read_build_info
 from terminal_integration import ACCOUNTS, Client, FIXTURES, cache_limits, list_all, require
 from terminal_pty import Terminal
+from terminal_reader import reader_contains
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 64 * 1024**2
@@ -110,8 +111,8 @@ def tui_cycle(terminal, index):
                lambda: f"Synthetic {key} thread 031" in terminal.text())
     tui_action(terminal, b"]", lambda: f"Synthetic {key} thread 021" in terminal.text())
     tui_action(terminal, b"[", lambda: f"Synthetic {key} thread 031" in terminal.text())
-    tui_action(terminal, b"j", lambda: f"Synthetic {key}@example.com message 095." in terminal.text())
-    tui_action(terminal, b"\x12", lambda: f"Synthetic {key}@example.com message 095." in terminal.text())
+    tui_action(terminal, b"j", lambda: reader_contains(terminal.screen, f"Synthetic {key}@example.com message 095."))
+    tui_action(terminal, b"\x12", lambda: reader_contains(terminal.screen, f"Synthetic {key}@example.com message 095."))
 
 
 def quiet(process, seconds, pump):

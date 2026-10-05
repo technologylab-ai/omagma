@@ -41,6 +41,18 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             options.no_mouse = true;
             continue;
         }
+        if (eq(arg, "--cached")) {
+            if (interactive or jsonl) return error.CachedFlagRequiresOneShotCommand;
+            if (j.get(req, "cacheOnly")) |prior| if (prior == .bool and !prior.bool) return error.ConflictingSearchMode;
+            try req.object.put(sa, "cacheOnly", .{ .bool = true });
+            continue;
+        }
+        if (eq(arg, "--server")) {
+            if (interactive or jsonl or !eq(j.text(req, "cmd"), "mail.search")) return error.ServerFlagRequiresSearch;
+            if (j.get(req, "cacheOnly")) |prior| if (prior == .bool and prior.bool) return error.ConflictingSearchMode;
+            try req.object.put(sa, "cacheOnly", .{ .bool = false });
+            continue;
+        }
         if (eq(arg, "--json")) continue;
         if (eq(arg, "--all") or eq(arg, "--reply-all")) {
             try req.object.put(sa, "all", .{ .bool = true });
@@ -66,7 +78,7 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             var split = std.mem.splitScalar(u8, v, ',');
             while (split.next()) |part| try values.array.append(.{ .string = part });
             try req.object.put(sa, "capabilities", values);
-        } else if (eq(arg, "--fixture-root")) options.fixture_root = v else if (eq(arg, "--fixture-scenario")) options.fixture_scenario = v else if (eq(arg, "--cache-dir")) options.cache_dir = v else if (eq(arg, "--editor-mode")) options.editor_mode = v else if ((eq(arg, "--metadata-limit") or eq(arg, "--cache-messages"))) options.metadata_limit = try std.fmt.parseInt(usize, v, 10) else if ((eq(arg, "--disk-limit-bytes") or eq(arg, "--cache-bytes"))) options.disk_limit = try std.fmt.parseInt(usize, v, 10) else if (eq(arg, "--account")) {
+        } else if (eq(arg, "--fixture-root")) options.fixture_root = v else if (eq(arg, "--fixture-scenario")) options.fixture_scenario = v else if (eq(arg, "--cache-dir")) options.cache_dir = v else if (eq(arg, "--ui-file")) options.ui_file = v else if (eq(arg, "--editor-mode")) options.editor_mode = v else if ((eq(arg, "--metadata-limit") or eq(arg, "--cache-messages"))) { options.metadata_limit = try std.fmt.parseInt(usize, v, 10); options.metadata_limit_set = true; } else if ((eq(arg, "--disk-limit-bytes") or eq(arg, "--cache-bytes"))) { options.disk_limit = try std.fmt.parseInt(usize, v, 10); options.disk_limit_set = true; } else if (eq(arg, "--account")) {
             options.account = v;
             try req.object.put(sa, "account", .{ .string = v });
         } else if (eq(arg, "--limit")) try req.object.put(sa, "limit", .{ .integer = try std.fmt.parseInt(i64, v, 10) }) else if (eq(arg, "--cursor")) try req.object.put(sa, "cursor", .{ .string = v }) else if (eq(arg, "--query")) try req.object.put(sa, "query", .{ .string = v }) else if (eq(arg, "--label")) try req.object.put(sa, "label", .{ .string = v }) else if (eq(arg, "--message-id") or eq(arg, "--id")) try req.object.put(sa, "messageId", .{ .string = v }) else if (eq(arg, "--thread-id")) try req.object.put(sa, "threadId", .{ .string = v }) else if (eq(arg, "--draft-id")) try req.object.put(sa, "draftId", .{ .string = v }) else if (eq(arg, "--attachment-id")) try req.object.put(sa, "attachmentId", .{ .string = v }) else if (eq(arg, "--operation-id")) try req.object.put(sa, "operationId", .{ .string = v }) else if (eq(arg, "--status")) try req.object.put(sa, "status", .{ .string = v }) else if (eq(arg, "--to") or eq(arg, "--cc") or eq(arg, "--bcc")) {
@@ -174,6 +186,6 @@ fn readStdin(io: std.Io, a: std.mem.Allocator, limit: usize) ![]const u8 {
 pub fn help(io: std.Io) !void {
     var buf: [2048]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
-    try w.interface.writeAll("Terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|compose|reply|send|archive|trash|restore|mark --account ADDRESS ...\n  omagma draft list|read|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
+    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|refresh|compose|reply|send|archive|trash|restore|mark --account ADDRESS ...\n  omagma draft list|read|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
     try w.interface.flush();
 }
