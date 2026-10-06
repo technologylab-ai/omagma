@@ -101,7 +101,7 @@ fn replaceHandler(signal: std.posix.SIG, old: *std.posix.Sigaction) void {
 }
 
 fn waitChild(io: Io, child: *std.process.Child) !std.process.Child.Term {
-    return child.wait(io);
+    return @import("../platform.zig").waitOwned(io, child);
 }
 fn waitCancellation(io: Io, cancellation: *Io.Event) !void {
     try cancellation.wait(io);
@@ -208,7 +208,7 @@ pub fn edit(io: Io, allocator: Allocator, environ: *const std.process.Environ.Ma
     // first, SIGTTIN stopped it; give it the foreground and resume it now.
     defer {
         std.posix.kill(-process_group, .KILL) catch {};
-        if (child.id != null) child.kill(io);
+        if (child.id != null) @import("../platform.zig").killOwned(io, &child);
         setForegroundGroup(tty_fd, foreground) catch {};
     }
     try setForegroundGroup(tty_fd, process_group);

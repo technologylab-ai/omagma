@@ -151,7 +151,7 @@ pub fn runNativeWorker(io: std.Io, args: []const []const u8) !void {
 }
 pub fn upgradeProbe(io: std.Io, phase: []const u8, directory: []const u8) !void {
     if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
-    const operation = if (std.mem.eql(u8, phase, "create")) "upgrade-create" else if (std.mem.eql(u8, phase, "check")) "upgrade-check" else if (std.mem.eql(u8, phase, "verify")) "upgrade-verify" else if (std.mem.eql(u8, phase, "write")) "upgrade-write" else if (std.mem.eql(u8, phase, "delete")) "upgrade-delete" else return error.InvalidKeychainWorker;
+    const operation = if (std.mem.eql(u8, phase, "create")) "upgrade-create" else if (std.mem.eql(u8, phase, "check")) "upgrade-check" else if (std.mem.eql(u8, phase, "verify")) "upgrade-verify" else if (std.mem.eql(u8, phase, "clear")) "upgrade-clear" else if (std.mem.eql(u8, phase, "absent")) "upgrade-absent" else if (std.mem.eql(u8, phase, "write")) "upgrade-write" else if (std.mem.eql(u8, phase, "delete")) "upgrade-delete" else return error.InvalidKeychainWorker;
     var output: [1]u8 = undefined;
     _ = try nativeCall(io, operation, false, "synthetic-probe-do-not-use@example.invalid", "", "", directory, &output);
 }
@@ -161,7 +161,7 @@ fn run(io: std.Io, argv: []const []const u8, input: ?[]const u8, out: []u8, allo
         platform.closePipes(&child, io);
         if (child.id) |pid| {
             if (builtin.os.tag == .macos) std.posix.kill(-pid, .KILL) catch {};
-            child.kill(io);
+            platform.killOwned(io, &child);
         }
     }
     if (input) |secret| {
@@ -196,7 +196,7 @@ fn run(io: std.Io, argv: []const []const u8, input: ?[]const u8, out: []u8, allo
         }
     }
     platform.closePipes(&child, io);
-    const term = try child.wait(io);
+    const term = try platform.waitOwned(io, &child);
     @atomicStore(usize, &last_child_peak_rss, child.resource_usage_statistics.getMaxRss() orelse 0, .release);
     switch (term) {
         .exited => |code| if (code == 0) return n else if (code == 1 and n == 0 and allow_absent) return 0 else return error.KeyringUnavailable,
@@ -250,6 +250,7 @@ test "automatic keyring capture accepts one secret without exposing attributes" 
 
 /// Failure-path subprocess probes use only installed utilities and synthetic data.
 pub fn failureProbe(io: std.Io) !void {
+    try platform.waitCancellationProbe(io);
     var bounded_output: [16]u8 = undefined;
     try std.testing.expectError(error.SecretOutputTooLarge, platform.deadline(io, platform.seconds(2), run, .{ io, &.{ "/usr/bin/head", "-c", "8192", "/dev/zero" }, @as(?[]const u8, null), bounded_output[0..], false }));
     const short: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromMilliseconds(200) };

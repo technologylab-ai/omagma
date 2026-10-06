@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -79,8 +80,9 @@ def main():
     args = parser.parse_args()
     require(sys.platform == 'darwin', 'native Keychain qualification requires macOS')
     binary, upgraded = args.binary.resolve(), args.upgrade_binary.resolve()
-    require(binary != upgraded, 'upgrade witness needs distinct binary images')
+    require(hashlib.sha256(binary.read_bytes()).digest() != hashlib.sha256(upgraded.read_bytes()).digest(), 'upgrade witness needs distinct binary images')
     before = security_windows()
+    before_search = subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5)
     with tempfile.TemporaryDirectory(prefix='omagma-keychain-upgrade-', dir='/tmp') as temporary:
         directory = Path(temporary); directory.chmod(0o700)
         created = False
@@ -88,6 +90,8 @@ def main():
             run(binary, 'probe-keyring-upgrade', 'create', str(directory)); created = True
             run(upgraded, 'probe-keyring-upgrade', 'check', str(directory))
             run(binary, 'probe-keyring-upgrade', 'verify', str(directory))
+            run(upgraded, 'probe-keyring-upgrade', 'clear', str(directory))
+            run(binary, 'probe-keyring-upgrade', 'absent', str(directory))
             # A missing private keychain must surface worker failure, not exit0.
             run(upgraded, 'probe-keyring-upgrade', 'check', str(directory / 'absent'), success=False)
         finally:
@@ -102,8 +106,9 @@ def main():
                                 input=b'OMAGMA-KEYCHAIN1\n', capture_output=True, timeout=5)
         require(result.returncode != 0 and not result.stdout and b'PrivateKeychainParentRequired' in result.stderr,
                 'direct worker bypassed parent/private-pipe guard')
+    require(subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5) == before_search, 'synthetic probe changed user keychain search list')
     require(not (security_windows() - before), 'Keychain operation mapped a security/unlock dialog')
-    print('PASS macOS Keychain:positive ACK, isolated account/client/grant,8192-byte boundary, Debug→Safe upgrade/update, locked refusal/no new dialog, parent guard, cleanup')
+    print('PASS macOS Keychain:positive ACK, isolated account/client/grant,4096-byte boundary, Debug→Safe upgrade/update, locked refusal/no new dialog, parent guard, cleanup')
 
 
 if __name__ == '__main__':

@@ -42,6 +42,26 @@ pub fn closePipes(child: *std.process.Child, io: std.Io) void {
     }
 }
 
+/// Threaded child.wait clears the POSIX ownership handle even on Canceled.
+/// Canceled is returned before any successful reap; retain that exact still-
+/// owned child so the caller's cleanup can terminate and reap it uncancelably.
+pub fn waitOwned(io: std.Io, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
+    const owned = child.id;
+    return child.wait(io) catch |err| {
+        if (err == error.Canceled and (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos)) child.id = owned;
+        return err;
+    };
+}
+
+/// Force termination before the uncancelable reap; TERM alone can be ignored.
+/// child.id is held only while this process still owns the unreaped child.
+pub fn killOwned(io: std.Io, child: *std.process.Child) void {
+    if (child.id) |pid| {
+        if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) std.posix.kill(pid, .KILL) catch {};
+        child.kill(io);
+    }
+}
+
 pub fn checkedExit(term: std.process.Child.Term) !void {
     switch (term) {
         .exited => |code| if (code != 0) return error.ChildFailed,
@@ -116,7 +136,7 @@ pub fn launchDetached(io: std.Io, argv: []const []const u8) !void {
     const pipe: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
     defer pipe.close(io);
     var child: std.process.Child = .{ .id = @intCast(fork_result), .thread_handle = {}, .stdin = null, .stdout = null, .stderr = null, .request_resource_usage_statistics = false };
-    defer if (child.id != null) child.kill(io);
+    defer if (child.id != null) killOwned(io, &child);
     var launched_pid: ?i32 = null;
     var success = false;
     defer if (!success) {
@@ -148,7 +168,7 @@ fn launchDarwin(io: std.Io, argv: []const []const u8) !void {
     var child = try std.process.spawn(io, .{ .argv = command[0 .. argv.len + 2], .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
     defer {
         closePipes(&child, io);
-        if (child.id != null) child.kill(io);
+        if (child.id != null) killOwned(io, &child);
     }
     try deadline(io, seconds(3), launchDarwinHandshake, .{ io, &child });
 }
@@ -227,7 +247,7 @@ fn launchDarwinHandshake(io: std.Io, child: *std.process.Child) !void {
         else => return err,
     };
     if (count != 0) return error.ExecFailed;
-    try checkedExit(try child.wait(io));
+    try checkedExit(try waitOwned(io, child));
 }
 fn launchFailure(fd: i32) noreturn {
     const byte: [1]u8 = .{1};
@@ -251,7 +271,7 @@ fn launchHandshake(io: std.Io, pipe: std.Io.File, child: *std.process.Child, pid
         error.EndOfStream => 0,
         else => return err,
     };
-    const term = try child.wait(io);
+    const term = try waitOwned(io, child);
     // A known failed exec has already exited; never signal its reusable PID.
     if (count != 0) {
         pid_out.* = null;
@@ -319,7 +339,7 @@ fn closeRangeProbeInner(io: std.Io) anyerror!void {
     });
     defer {
         closePipes(&child, io);
-        if (child.id != null) child.kill(io);
+        if (child.id != null) killOwned(io, &child);
     }
     var diagnostic: [512]u8 = undefined;
     var diagnostic_len: usize = 0;
@@ -332,7 +352,7 @@ fn closeRangeProbeInner(io: std.Io) anyerror!void {
         diagnostic_len += count;
     }
     if (diagnostic_len == diagnostic.len) return error.ProbeDiagnosticTooLarge;
-    const term = try child.wait(io);
+    const term = try waitOwned(io, &child);
     checkedExit(term) catch |err| {
         std.debug.print("FD inheritance child failed: {s}\n", .{diagnostic[0..diagnostic_len]});
         return err;
@@ -378,3 +398,67 @@ test "raw Linux syscall errors retain kernel errno when libc is linked" {
 }
 
 pub const reservation_bytes = @sizeOf(@TypeOf(launch_strings)) + @sizeOf(@TypeOf(launch_environment)) + @sizeOf(@TypeOf(launch_active)) + 64;
+
+/// Synthetic exec-self child closes stdout, then remains live beyond the
+/// owner's deadline. This forces cancellation inside child.wait, after EOF.
+pub fn waitCancellationChild(io: std.Io) !void {
+    // A hostile/held child may ignore TERM; cleanup must force KILL then reap.
+    var action: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(.TERM, &action, null);
+    const pid: i32 = if (@import("builtin").os.tag == .linux) @intCast(std.os.linux.getpid()) else std.c.getpid();
+    try std.Io.File.stdout().writeStreamingAll(io, std.mem.asBytes(&pid));
+    std.Io.File.stdout().close(io);
+    try seconds(20).sleep(io);
+}
+pub fn waitCancellationProbe(io: std.Io) !void {
+    // Independent control demonstrates the std ownership loss, then compares
+    // the adapter while both actual children are still alive after stdout EOF.
+    try waitCancellationCase(io, false);
+    try waitCancellationCase(io, true);
+}
+fn waitStandard(io: std.Io, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
+    return child.wait(io);
+}
+fn waitCancellationCase(io: std.Io, comptime preserving: bool) !void {
+    var executable: [4096]u8 = undefined;
+    const length = try std.process.executablePath(io, &executable);
+    var child = try std.process.spawn(io, .{ .argv = &.{ executable[0..length], "__wait-probe-child" }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    defer {
+        closePipes(&child, io);
+        if (child.id != null) killOwned(io, &child);
+    }
+    var wire: [4]u8 = undefined;
+    var used: usize = 0;
+    while (used < wire.len) used += try child.stdout.?.readStreaming(io, &.{wire[used..]});
+    const pid = try decodeLaunchPid(&wire);
+    try std.testing.expectEqual(pid, child.id.?);
+    var extra: [1]u8 = undefined;
+    const count = child.stdout.?.readStreaming(io, &.{&extra}) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), count);
+    closePipes(&child, io);
+    const short: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) };
+    try std.testing.expectError(error.Timeout, deadline(io, short, if (preserving) waitOwned else waitStandard, .{ io, &child }));
+    if (preserving) try std.testing.expectEqual(pid, child.id.?) else {
+        try std.testing.expect(child.id == null);
+        child.id = pid; // Control cleanup retains the separately captured PID.
+    }
+    // WNOHANG==0 proves this exact direct child is still live, not reaped/reused.
+    if (@import("builtin").link_libc) {
+        try std.testing.expectEqual(@as(std.c.pid_t, 0), std.c.waitpid(pid, null, @intCast(std.posix.W.NOHANG)));
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), std.os.linux.wait4(pid, null, std.os.linux.W.NOHANG, null));
+    }
+    killOwned(io, &child);
+    try std.testing.expect(child.id == null);
+    // An independent OS wait must now report ECHILD, proving no zombie remains.
+    if (@import("builtin").link_libc) {
+        try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(pid, null, @intCast(std.posix.W.NOHANG)));
+        try std.testing.expectEqual(std.posix.E.CHILD, std.posix.errno(-1));
+    } else {
+        const result = std.os.linux.wait4(pid, null, std.os.linux.W.NOHANG, null);
+        try std.testing.expectEqual(std.os.linux.E.CHILD, std.os.linux.errno(result));
+    }
+}
