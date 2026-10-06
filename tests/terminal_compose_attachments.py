@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Focused multiple-file composer/reply PTY checks; fixtures only."""
-import argparse, base64, tempfile
+import argparse, base64, hashlib, tempfile
 from pathlib import Path
 from terminal_integration import Client, require
 from terminal_mouse import MouseTerminal, click, point
@@ -26,7 +26,10 @@ def run(binary, directory, key):
             else: click(terminal, *point(terminal, '[Add A]'))
             terminal.until(lambda: 'Attach file path:' in terminal.text())
             terminal.send(str(path).encode() + b'\r')
-            terminal.until(lambda: f'Attachments {index + 1}' in terminal.text() and f'Attached {name}' in terminal.text())
+            terminal.until(lambda: f'Attachments {index + 1}' in terminal.text() and terminal.screen.locate(name) is not None)
+            attached_at = terminal.screen.locate(name)
+            require(f'{len(contents)} B' in ''.join(terminal.screen.cells[attached_at['row']]),
+                    'visible attachment row has the wrong source byte size')
         terminal.gap(.1)
         # Remove only the first file with its explicitly rendered local control.
         at = terminal.screen.locate('first.txt')
@@ -34,7 +37,7 @@ def run(binary, directory, key):
         row = ''.join(terminal.screen.cells[at['row']])
         remove_column = row.index('[x]')
         click(terminal, remove_column + 1, at['row'])
-        terminal.until(lambda: 'Attachments 2' in terminal.text() and 'Attachment removed' in terminal.text())
+        terminal.until(lambda: 'Attachments 2' in terminal.text() and terminal.screen.locate('first.txt') is None)
         require('first.txt' not in ''.join(terminal.screen.cells[at['row']]), 'removed file remains in composer list')
         terminal.send(b'\x13')
         terminal.until(lambda: 'Sending account:' in terminal.text() and 'Attachment 2: third.pdf' in terminal.text())
@@ -45,7 +48,10 @@ def run(binary, directory, key):
             require([f['filename'] for f in draft['attachments']] == ['second.bin', 'third.pdf'], 'multiple files not retained after review/save')
             for attachment in draft['attachments']:
                 raw = attachment['data']
-                require(base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)) == payloads[attachment['filename']], 'attachment bytes changed')
+                decoded = base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4))
+                expected = payloads[attachment['filename']]
+                require(decoded == expected and attachment['size'] == len(expected), 'attachment bytes or stored size changed')
+                require(hashlib.sha256(decoded).digest() == hashlib.sha256(expected).digest(), 'stored attachment hash differs from source payload')
             if key != b'c':
                 require(draft['subject'].startswith('Re:') and draft['threadId'], 'reply attachment edit lost threading')
             require(client.request('cache.stats')['fixtureSends'] == 0, 'attachment edit sent mail')
