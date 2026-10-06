@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import os
 import statistics
 import sys
 import tempfile
@@ -27,18 +28,31 @@ class Rusage(ctypes.Structure):
 library = None
 
 
+class Timebase(ctypes.Structure):
+    _fields_ = [('numerator', ctypes.c_uint32), ('denominator', ctypes.c_uint32)]
+
+
+timebase = None
+
+
 def sample(pid):
-    global library
+    global library, timebase
     if library is None:
         library = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
         library.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
         library.proc_pid_rusage.restype = ctypes.c_int
+        system = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        system.mach_timebase_info.argtypes = [ctypes.POINTER(Timebase)]
+        system.mach_timebase_info.restype = ctypes.c_int
+        timebase = Timebase()
+        require(system.mach_timebase_info(ctypes.byref(timebase)) == 0 and timebase.denominator > 0,
+                'native CPU timebase unavailable')
     value = Rusage()
     require(library.proc_pid_rusage(pid, 0, ctypes.byref(value)) == 0,
             'native owned-process resource sample failed')
     return {'monotonic': time.monotonic(), 'rssKiB': value.residentBytes / 1024,
             'footprintKiB': value.footprintBytes / 1024,
-            'cpuNanoseconds': value.userTime + value.systemTime}
+            'cpuNanoseconds': (value.userTime + value.systemTime) * timebase.numerator // timebase.denominator}
 
 
 class Sampler:
@@ -148,13 +162,23 @@ def main():
     args = parser.parse_args()
     require(sys.platform == 'darwin', 'native process qualification requires macOS')
     require(1 <= args.cycles <= 10000 and 0 <= args.warmup <= 1000 and 0 < args.idle_seconds <= 3600, 'invalid bounded soak')
+    # Independent Python process_time control rejects a mistaken raw-tick unit.
+    before_control = sample(os.getpid())
+    control_start = time.process_time()
+    while time.process_time() - control_start < .05:
+        pass
+    python_cpu = time.process_time() - control_start
+    native_cpu = (sample(os.getpid())['cpuNanoseconds'] - before_control['cpuNanoseconds']) / 1e9
+    require(abs(native_cpu - python_cpu) < .02, 'native CPU unit/control mismatch')
     args.binary = args.binary.resolve()
     identity = read_build_info(args.binary, 'safe')
     report = {'platform': platform.platform(), 'architecture': platform.machine(), **identity,
               'binarySha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               'synthetic': True, 'liveWrites': False, 'desktopUsed': False,
               'kind': args.kind, 'cycles': args.cycles, 'warmup': args.warmup,
-              'metricSource': 'Darwin proc_pid_rusage(RUSAGE_INFO_V0); RSS and physical footprint; no PSS or OS HWM'}
+              'cpuTimebase': {'numerator': timebase.numerator, 'denominator': timebase.denominator,
+                              'positiveControlNativeSeconds': native_cpu, 'positiveControlPythonSeconds': python_cpu},
+              'metricSource': 'Darwin proc_pid_rusage(RUSAGE_INFO_V0); mach_absolute CPU ticks converted by mach_timebase_info; RSS and physical footprint; no PSS or OS HWM'}
     try:
         with tempfile.TemporaryDirectory(prefix='omagma-macos-measure-') as temporary:
             measure(args, Path(temporary), report)
