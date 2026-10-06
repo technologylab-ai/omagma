@@ -58,6 +58,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared Zig compiler
         run: python3 .github/install_zig.py
+      - name: Release format and architecture oracles
+        run: python3 tests/release_binary.py
       - name: Ensure the timezone fixture database is available
         run: |
           sudo apt-get update
@@ -101,6 +103,7 @@ jobs:
           .verification-debug/bin/omagma build-info
           sha256sum .verification-debug/bin/omagma
           python3 tests/publication_gif.py
+          python3 tests/homebrew_formula.py
           for suite in \
             terminal_wishlist_backend terminal_cache_windows \
             terminal_composer_workflow terminal_compose_attachments \
@@ -192,7 +195,7 @@ jobs:
         run: python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-background.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-${{ matrix.arch }}
+          name: release-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -200,13 +203,128 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verification-${{ matrix.arch }}
+          name: verification-linux-${{ matrix.arch }}
+          path: tests/results/*.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  macos-build:
+    needs: version
+    if: needs.version.outputs.needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native architecture labels, rather than a moving macos-latest.
+          # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+          - arch: arm64
+            runner: macos-15
+            machine: arm64
+            target: aarch64-macos.13.0
+          - arch: x86_64
+            runner: macos-15-intel
+            machine: x86_64
+            target: x86_64-macos.13.0
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the declared native Zig compiler
+        run: python3 .github/install_zig.py
+      - name: Release format and architecture oracles
+        run: python3 tests/release_binary.py
+      - name: Verify native host, SDK and timezone fixtures
+        run: |
+          test "$(uname -m)" = '${{ matrix.machine }}'
+          task_sdk=$(/usr/bin/xcrun --show-sdk-path)
+          test -d "$task_sdk/System/Library/Frameworks/Security.framework"
+          test -d "$task_sdk/System/Library/Frameworks/CoreFoundation.framework"
+          echo "SDKROOT=$task_sdk" >> "$GITHUB_ENV"
+          test -f /etc/localtime
+          test -f /usr/share/zoneinfo/Europe/Vienna
+          test -f /usr/share/zoneinfo/Asia/Kathmandu
+      - name: Debug native correctness and synthetic fixtures
+        run: |
+          zig version
+          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug
+          zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-macos-debug
+          .verification-macos-debug/bin/omagma build-info
+          shasum -a 256 .verification-macos-debug/bin/omagma
+          python3 tests/terminal_fixture_check.py
+          python3 tests/terminal_cache_fixture_check.py
+          python3 tests/terminal_screen.py
+          python3 tests/terminal_status_screen.py
+          python3 tests/terminal_reader.py
+          python3 tests/terminal_html_screen.py
+          python3 tests/terminal_html_fixture_check.py
+          python3 tests/terminal_repaint_screen.py
+          python3 tests/terminal_mouse_screen.py
+          python3 tests/publication_gif.py
+          python3 tests/homebrew_formula.py
+          python3 tests/terminal_integration.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-cli.json
+          python3 tests/terminal_wishlist_backend.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_cache_windows.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
+      - name: Debug native terminal, Keychain and detached lifecycle
+        run: |
+          # This guardian keeps the owned Darwin PTY alive for termios checks.
+          # Linux /proc resource and stock session-leader PTY harnesses stay in
+          # the Linux job; these checks do not establish a macOS memory baseline.
+          python3 tests/terminal_macos.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/launch_macos.py --binary .verification-macos-debug/bin/omagma
+          .verification-macos-debug/bin/omagma probe-keyring
+          .verification-macos-debug/bin/auth_probe keyring
+          .verification-macos-debug/bin/auth_probe launch
+          .verification-macos-debug/bin/auth_probe callback
+          .verification-macos-debug/bin/callback_budget
+      - name: Safe native correctness and standalone probes
+        run: |
+          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe
+          .verification-macos-safe/bin/auth_probe keyring
+          .verification-macos-safe/bin/auth_probe launch
+          .verification-macos-safe/bin/auth_probe callback
+          .verification-macos-safe/bin/callback_budget
+      - name: Build stripped native macOS release bundle
+        run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
+      - name: Validate macOS archive and native executable
+        run: |
+          python3 tests/release_check.py --os macos --arch ${{ matrix.arch }}
+          file dist/omagma-macos-${{ matrix.arch }}
+          /usr/bin/otool -L dist/omagma-macos-${{ matrix.arch }}
+          /usr/bin/xcrun vtool -show-build dist/omagma-macos-${{ matrix.arch }}
+          dist/omagma-macos-${{ matrix.arch }} build-info
+      - name: Safe packaged CLI, transport and native lifecycle
+        run: |
+          python3 tests/terminal_integration.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-cli.json
+          python3 tests/terminal_wishlist_backend.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_cache_windows.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_transport.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-transport.json
+          python3 tests/terminal_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
+          dist/omagma-macos-${{ matrix.arch }} probe-keyring
+      - name: Native Keychain survives the packaged binary upgrade
+        run: python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}
+      - name: Native macOS memory and quiet CPU gates
+        run: |
+          python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind cli --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-cli-memory.json
+          python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind tui --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-tui-memory.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve synthetic macOS verification receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-macos-${{ matrix.arch }}
           path: tests/results/*.json
           if-no-files-found: warn
           retention-days: 30
 
   publish:
-    needs: [version, build]
+    needs: [version, build, macos-build]
     if: github.ref == 'refs/heads/main' && needs.version.outputs.needed == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -221,7 +339,7 @@ jobs:
       - name: Combine and verify checksums
         working-directory: dist
         run: |
-          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 > SHA256SUMS
+          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 SHA256SUMS-macos-x86_64 SHA256SUMS-macos-arm64 > SHA256SUMS
           sha256sum LICENSES.txt >> SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Publish new version
@@ -229,3 +347,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: python3 scripts/publish_release.py
+
+  homebrew:
+    needs: [version, publish]
+    if: github.ref == 'refs/heads/main' && needs.version.outputs.needed == 'true'
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets:
+      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}

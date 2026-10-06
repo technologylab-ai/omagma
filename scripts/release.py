@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and package a stripped, static musl backend with the Quickshell plugin."""
+"""Package static Linux-musl or native macOS terminal executables and audited sources."""
 from __future__ import annotations
 
 import argparse
@@ -18,6 +18,32 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {"x86_64": ("x86_64-linux-musl", 62), "arm64": ("aarch64-linux-musl", 183)}
+MACOS_MINIMUM = (13, 0, 0)
+MACOS_TARGETS = {"x86_64": ("x86_64-macos.13.0", 0x01000007, 3),
+                 "arm64": ("aarch64-macos.13.0", 0x0100000C, 0)}
+SYSTEM_DYLIBS = frozenset({
+    "/usr/lib/libSystem.B.dylib", "/usr/lib/libobjc.A.dylib",
+    "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+    "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+})
+
+
+def is_native(arch, os_name="linux"):
+    system = "Darwin" if os_name == "macos" else "Linux"
+    machines = {"x86_64", "AMD64"} if arch == "x86_64" else {"aarch64", "arm64"}
+    return platform.system() == system and platform.machine() in machines
+
+
+def artifact_names(version, arch, os_name="linux"):
+    return (f"omagma-{os_name}-{arch}", f"omagma-{version}-{os_name}-{arch}.tar.gz",
+            f"SHA256SUMS-{arch}" if os_name == "linux" else f"SHA256SUMS-{os_name}-{arch}")
+
+
+def reject_private_paths(data):
+    # A literal owned runtime template (e.g. keychain-probe-{s}) is not a
+    # private build path. Reject concrete workspace/source paths instead.
+    if re.search(rb"/(?:home|Users)/[^/\x00\s]+/|/(?:private/)?tmp/codex-[A-Za-z0-9_-]+|/(?:private/)?tmp/omagma-[A-Za-z0-9_-]+/|/private/var/folders/", data):
+        raise ValueError("Release binary embeds a private build path")
 
 
 def package_versions():
@@ -40,8 +66,12 @@ def distribution_licenses():
 
 
 
-def verify_binary(path, arch):
+def verify_binary(path, arch, os_name="linux"):
     """Reject the wrong architecture, dynamic dependencies and debug information."""
+    if os_name == "macos":
+        return verify_macho(path, arch)
+    if os_name != "linux" or arch not in TARGETS:
+        raise ValueError("Unsupported release platform")
     data = Path(path).read_bytes()
     if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
         raise ValueError("Expected a little-endian ELF64 binary")
@@ -77,10 +107,115 @@ def verify_binary(path, arch):
             name = strings[name_offset:].split(b"\0", 1)[0]
             if name.startswith((b".debug", b".zdebug")) or name == b".symtab":
                 raise ValueError("Release binary still contains debug symbols")
-    if re.search(rb"/home/[A-Za-z0-9_-]+/|/tmp/codex-[A-Za-z0-9_-]+", data):
-        raise ValueError("Release binary embeds a private build path")
+    reject_private_paths(data)
     return {"arch": arch, "static": True, "stripped": True, "bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def version_tuple(packed):
+    return packed >> 16, (packed >> 8) & 255, packed & 255
+
+
+def verify_macho(path, arch):
+    """Read the thin Mach-O ABI directly; never rely on a host otool summary."""
+    if arch not in MACOS_TARGETS:
+        raise ValueError("Unsupported release architecture")
+    data = Path(path).read_bytes()
+    if len(data) < 32 or data[:4] != b"\xcf\xfa\xed\xfe":
+        raise ValueError("Expected a thin little-endian Mach-O64 executable")
+    cpu, subtype, kind, count, command_bytes, flags, reserved = struct.unpack_from("<7I", data, 4)
+    if cpu != MACOS_TARGETS[arch][1] or subtype != MACOS_TARGETS[arch][2] or kind != 2:
+        raise ValueError("Wrong Mach-O architecture, baseline CPU or executable type")
+    if not flags & 0x200000 or reserved or not count or count > 4096 or command_bytes > len(data) - 32:
+        raise ValueError("Invalid Mach-O executable header or missing PIE")
+    end = 32 + command_bytes
+    offset = 32
+    minimum = sdk = None
+    libraries = set()
+    loader = entry = False
+    def command_string(start, size, field):
+        string_offset = struct.unpack_from("<I", data, start + field)[0]
+        if string_offset < field + 4 or string_offset >= size:
+            raise ValueError("Invalid Mach-O load-command string")
+        value = data[start + string_offset:start + size]
+        if b"\0" not in value:
+            raise ValueError("Unterminated Mach-O load-command string")
+        return value.split(b"\0", 1)[0].decode("ascii")
+    for _ in range(count):
+        if offset + 8 > end:
+            raise ValueError("Truncated Mach-O load command")
+        command, size = struct.unpack_from("<II", data, offset)
+        if size < 8 or size % 8 or offset + size > end:
+            raise ValueError("Invalid Mach-O load command size")
+        if command in {0x8000001C, 0x27}:  # LC_RPATH / LC_DYLD_ENVIRONMENT
+            raise ValueError("Release Mach-O contains loader search paths or environment")
+        if command in {0xC, 0x80000018, 0x8000001F, 0x80000023, 0x20}:
+            if size < 24:
+                raise ValueError("Truncated Mach-O dylib command")
+            name = command_string(offset, size, 8)
+            if name not in SYSTEM_DYLIBS:
+                raise ValueError("Release Mach-O requires a non-system dependency")
+            libraries.add(name)
+        elif command in {0xD, 0xF}:
+            raise ValueError("Release Mach-O declares a dylib or loader identity")
+        elif command == 0xE:  # LC_LOAD_DYLINKER
+            if size < 16 or loader or command_string(offset, size, 8) != "/usr/lib/dyld":
+                raise ValueError("Invalid Mach-O system loader")
+            loader = True
+        elif command in {0x32, 0x24}:  # LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX
+            if minimum is not None:
+                raise ValueError("Duplicate Mach-O deployment version")
+            if command == 0x32:
+                if size < 24:
+                    raise ValueError("Truncated Mach-O build version")
+                platform_id, minos, sdkos, tools = struct.unpack_from("<4I", data, offset + 8)
+                if platform_id != 1 or size != 24 + tools * 8:
+                    raise ValueError("Wrong Mach-O platform or build version size")
+            else:
+                if size != 16:
+                    raise ValueError("Invalid Mach-O minimum-version command")
+                minos, sdkos = struct.unpack_from("<II", data, offset + 8)
+            minimum, sdk = version_tuple(minos), version_tuple(sdkos)
+        elif command == 0x80000028:  # LC_MAIN
+            if size != 24 or entry:
+                raise ValueError("Invalid Mach-O entry point")
+            entry_offset = struct.unpack_from("<Q", data, offset + 8)[0]
+            if not 0 < entry_offset < len(data):
+                raise ValueError("Mach-O entry point is outside the executable")
+            entry = True
+        elif command == 0x19:  # LC_SEGMENT_64
+            if size < 72:
+                raise ValueError("Truncated Mach-O segment")
+            segment = data[offset + 8:offset + 24].split(b"\0", 1)[0]
+            file_offset, file_size = struct.unpack_from("<QQ", data, offset + 40)
+            sections = struct.unpack_from("<I", data, offset + 64)[0]
+            if size != 72 + sections * 80 or file_offset + file_size > len(data):
+                raise ValueError("Invalid Mach-O segment bounds")
+            if segment == b"__DWARF":
+                raise ValueError("Release Mach-O still contains debug information")
+            for index in range(sections):
+                name = data[offset + 72 + index * 80:offset + 88 + index * 80].split(b"\0", 1)[0]
+                if name.startswith((b"__debug", b"__zdebug")):
+                    raise ValueError("Release Mach-O still contains debug information")
+        elif command == 0x2:  # LC_SYMTAB: undefined imports are valid; STABS are not.
+            if size != 24:
+                raise ValueError("Invalid Mach-O symbol table")
+            symbols, number, strings, string_size = struct.unpack_from("<4I", data, offset + 8)
+            if symbols + number * 16 > len(data) or strings + string_size > len(data):
+                raise ValueError("Invalid Mach-O symbol/string bounds")
+            for index in range(number):
+                if data[symbols + index * 16 + 4] & 0xE0:
+                    raise ValueError("Release Mach-O still contains debug symbols")
+        offset += size
+    if offset != end or not entry or not loader or "/usr/lib/libSystem.B.dylib" not in libraries:
+        raise ValueError("Incomplete Mach-O executable load commands")
+    if minimum != MACOS_MINIMUM or sdk is None or sdk < minimum:
+        raise ValueError("Release Mach-O deployment minimum or SDK differs from the contract")
+    reject_private_paths(data)
+    return {"arch": arch, "os": "macos", "format": "Mach-O64", "static": False,
+            "stripped": True, "cpuBaseline": True, "minimumOS": ".".join(map(str, minimum)),
+            "sdkVersion": ".".join(map(str, sdk)), "systemLibraries": sorted(libraries),
+            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
 def tracked_files():
@@ -126,6 +261,7 @@ def make_bundle(path, binary, files, version):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", choices=TARGETS)
+    parser.add_argument("--os", dest="os_name", choices=("linux", "macos"), default="linux")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--print-version", action="store_true")
     parser.add_argument("--print-zig-version", action="store_true")
@@ -138,18 +274,21 @@ def main():
     if not args.arch:
         parser.error("--arch is required")
     if args.check_binary:
-        print(json.dumps(verify_binary(args.check_binary, args.arch)))
+        print(json.dumps(verify_binary(args.check_binary, args.arch, args.os_name)))
         return
+    if args.os_name == "macos" and not is_native(args.arch, "macos"):
+        raise ValueError("Build macOS release assets on a matching native Mac with Xcode Command Line Tools")
     files = tracked_files()
     actual_zig = subprocess.check_output(["zig", "version"], text=True).strip()
     if actual_zig != zig_version:
         raise ValueError(f"Use Zig {zig_version}; found {actual_zig}")
-    prefix = ROOT / (".verification-release-" + args.arch)
-    subprocess.run(["zig", "build", "-Dtarget=" + TARGETS[args.arch][0], "-Dcpu=baseline",
+    prefix = ROOT / (".verification-release-" + ("macos-" if args.os_name == "macos" else "") + args.arch)
+    targets = MACOS_TARGETS if args.os_name == "macos" else TARGETS
+    subprocess.run(["zig", "build", "-Dtarget=" + targets[args.arch][0], "-Dcpu=baseline",
                     "-Doptimize=safe", "-Dstrip=true", "--prefix", str(prefix)], cwd=ROOT, check=True)
     binary = prefix / "bin/omagma"
-    report = verify_binary(binary, args.arch)
-    if platform.machine() in ({"x86_64", "AMD64"} if args.arch == "x86_64" else {"aarch64", "arm64"}):
+    report = verify_binary(binary, args.arch, args.os_name)
+    if is_native(args.arch, args.os_name):
         actual_version = subprocess.check_output([str(binary), "--version"], text=True, timeout=5).strip()
         if actual_version != "omagma " + version:
             raise ValueError("Binary version differs from build.zig.zon")
@@ -159,15 +298,16 @@ def main():
         report["buildInfo"] = info
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    raw = output / ("omagma-linux-" + args.arch)
+    raw_name, bundle_name, checksum_name = artifact_names(version, args.arch, args.os_name)
+    raw = output / raw_name
     shutil.copyfile(binary, raw)
     raw.chmod(0o755)
-    bundle = output / f"omagma-{version}-linux-{args.arch}.tar.gz"
+    bundle = output / bundle_name
     make_bundle(bundle, binary, files, version)
     (output / "LICENSES.txt").write_bytes(distribution_licenses())
     checksums = "".join(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n" for path in (raw, bundle))
-    (output / ("SHA256SUMS-" + args.arch)).write_text(checksums)
-    print(json.dumps({"version": version, "zig": zig_version, "bundle": bundle.name, "binary": report}, indent=2))
+    (output / checksum_name).write_text(checksums)
+    print(json.dumps({"version": version, "zig": zig_version, "os": args.os_name, "bundle": bundle.name, "binary": report}, indent=2))
 
 
 if __name__ == "__main__":

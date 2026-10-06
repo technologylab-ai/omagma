@@ -1,0 +1,100 @@
+name: Update Homebrew tap
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    secrets:
+      TAP_DEPLOY_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Already published stable version, for example 0.2.4
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omagma-homebrew-tap
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Formula generator oracles
+        run: python3 tests/homebrew_formula.py
+      - name: Verify published assets and update only the Omagma formula
+        env:
+          TAP_VERSION: ${{ inputs.version }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo '::error::TAP_DEPLOY_KEY is missing; the published release remains intact. Retry this workflow after configuring the tap key.'
+            exit 1
+          fi
+          task_tap_root=$(mktemp -d "$RUNNER_TEMP/omagma-tap.XXXXXX")
+          trap 'rm -rf "$task_tap_root"' EXIT
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$task_tap_root/key"
+          chmod 600 "$task_tap_root/key"
+          unset TAP_DEPLOY_KEY
+          export OMAGMA_TAP_KNOWN_HOSTS="$task_tap_root/known_hosts"
+          python3 - <<'PY'
+          import base64, json, os, re, urllib.request
+          from pathlib import Path
+          request = urllib.request.Request('https://api.github.com/meta', headers={'User-Agent': 'omagma-tap-update'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              raw = response.read(1024 * 1024 + 1)
+          if len(raw) > 1024 * 1024:
+              raise SystemExit('GitHub SSH metadata exceeds its bound')
+          keys = json.loads(raw).get('ssh_keys', [])
+          if not keys or len(keys) > 16:
+              raise SystemExit('Expected official GitHub SSH host keys')
+          for key in keys:
+              if not isinstance(key, str) or not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,2}', key):
+                  raise SystemExit('Invalid official GitHub SSH key metadata')
+              base64.b64decode(key.split()[1], validate=True)
+          path = Path(os.environ['OMAGMA_TAP_KNOWN_HOSTS'])
+          path.write_text(''.join('github.com ' + key + '\n' for key in keys))
+          path.chmod(0o600)
+          PY
+          export GIT_SSH_COMMAND="ssh -i \"$task_tap_root/key\" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$task_tap_root/known_hosts\" -o GlobalKnownHostsFile=/dev/null"
+          git clone --branch main --single-branch git@github.com:renerocksai/homebrew-tap.git "$task_tap_root/tap"
+          export OMAGMA_TAP_FORMULA="$task_tap_root/tap/Formula/omagma.rb"
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          version = os.environ['TAP_VERSION']
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+              raise SystemExit('A published stable version is required')
+          path = Path(os.environ['OMAGMA_TAP_FORMULA'])
+          if path.is_symlink():
+              raise SystemExit('Refusing a symlink formula')
+          if path.exists():
+              match = re.search(r'^  version "([0-9]+\.[0-9]+\.[0-9]+)"$', path.read_text(), re.M)
+              if not match or tuple(map(int, match[1].split('.'))) > tuple(map(int, version.split('.'))):
+                  raise SystemExit('Refusing an unknown formula version or a tap downgrade')
+          PY
+          # The generator downloads published checksums and verifies all four
+          # full bundles, including backend/manifest identity, before writing.
+          python3 scripts/homebrew_formula.py --version "$TAP_VERSION" --output "$OMAGMA_TAP_FORMULA"
+          ruby -c "$OMAGMA_TAP_FORMULA"
+          git -C "$task_tap_root/tap" config user.name 'github-actions[bot]'
+          git -C "$task_tap_root/tap" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$task_tap_root/tap" add -- Formula/omagma.rb
+          if git -C "$task_tap_root/tap" diff --cached --quiet; then
+            echo 'Omagma formula already matches the verified published release.'
+            exit 0
+          fi
+          test "$(git -C "$task_tap_root/tap" diff --cached --name-only)" = Formula/omagma.rb
+          git -C "$task_tap_root/tap" commit -m "omagma $TAP_VERSION"
+          git -C "$task_tap_root/tap" push origin HEAD:main
