@@ -1,5 +1,10 @@
 # Background terminal cache
 
+The supplied timer is **Linux-only**. Mac installation does not create a
+background service or install these systemd units; [Mac installation](MACOS.md)
+explains the explicit cache-refresh option. This optional background path is
+separate from ordinary interactive terminal setup.
+
 A user systemd timer can refresh the terminal cache every five minutes, even while the TUI is closed. It runs the native `omagma cache-refresh` command, processes enabled accounts sequentially and exits afterward. It reuses each account's existing **read-only bar grant**; sending, mailbox changes and contacts are not part of this job.
 
 The timer and TUI share the same disk cache and account refresh coordination. A simultaneous refresh is coalesced while cached reading remains available. The popup retains its independent 30-message memory snapshot and refresh setting. Enabling this timer does not reload the desktop or change terminal write permissions.

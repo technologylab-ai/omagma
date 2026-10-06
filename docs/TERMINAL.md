@@ -2,7 +2,7 @@
 
 **Experimental:** Omagma's TUI and agent CLI are under active development. This guide describes the current application. See the tiered [feature catalogue](FEATURES.md) and [installation](INSTALL.md).
 
-The same Linux binary runs the bar backend, TUI and CLI. The terminal needs a UTF-8 terminal, an unlocked Secret Service keyring, `secret-tool`, CA certificates and your private account configuration. Chrome is used for Google consent and explicitly opening Gmail links. A release binary needs no Zig compiler.
+The TUI and CLI run natively on Linux and macOS; only the Linux Omarchy bar needs Quickshell. The terminal needs a UTF-8 terminal, Chrome and your private account configuration. Linux uses unlocked Secret Service with `secret-tool`; Mac uses the unlocked default user Keychain. A release binary needs no Zig compiler. [Mac installation](MACOS.md) covers Homebrew and native bundles.
 
 ## Start
 
@@ -39,7 +39,7 @@ Mouse support is enabled by default. Click accounts, mailboxes, messages and con
 
 ## Reading HTML-only mail
 
-The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors follow the Omarchy palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
+The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use the Omarchy palette when available, with a built-in fallback elsewhere. Narrow tables stack their cells; complex presentation tables flatten into reading order.
 
 Scripts, remote images and other resources never run or load. Image alt text may appear. Links have styled labels and open only when explicitly chosen. The CLI receives decoded plaintext and optional HTML data rather than this styled screen.
 
@@ -124,7 +124,7 @@ Reader layout, split proportions, key remaps and per-account mailbox/selected-ma
 
 ## Live permissions
 
-Follow [full TUI/CLI permissions](SETUP.md#full-tuicli-permissions) for the Google project, People API, separate terminal Google OAuth registration and per-account consent. The TUI and CLI share that terminal grant; the bar retains its original read-only Google OAuth registration and credentials.
+Follow [full TUI/CLI permissions](SETUP.md#full-tuicli-permissions) for the Google project, People API and per-account consent. Fresh terminal-only setup uses one registration; alongside an existing read-only registration, use a different one for broader terminal access. The TUI and CLI share the terminal grant; an existing bar retains its read-only registration and credentials.
 
 For all implemented live features, authorize the complete local capability set:
 `mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.

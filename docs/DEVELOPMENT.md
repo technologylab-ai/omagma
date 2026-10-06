@@ -40,6 +40,24 @@ zig build -Doptimize=safe -Dtarget=x86_64-linux-musl --prefix .verification-loca
 Use `aarch64-linux-musl` for an ARM64 target. Cross-compilation alone does not
 establish native runtime or desktop behavior.
 
+### Native Mac builds
+
+Mac source builds need Xcode Command Line Tools (`xcode-select -p`) and the
+same exact Zig 0.17.0 selection above. Download the matching official Mac archive;
+do not substitute Omarchy's Linux compiler. Explicit baseline release targets
+use the native SDK found by `xcrun`:
+
+```sh
+zig build -Doptimize=safe -Dtarget=aarch64-macos.13.0 -Dcpu=baseline
+zig-out/bin/omagma --version
+```
+
+Use `x86_64-macos.13.0` on an Intel Mac. If automatic SDK discovery is unavailable,
+pass `-Dmacos-sdk=/absolute/path/to/MacOSX.sdk`; this is a build option, not an
+installed user's configuration setting. Mac executables use system libraries
+and frameworks rather than static musl. Cross builds and deployment metadata do
+not establish runtime behavior on a different architecture or oldest OS.
+
 ## Local changes
 
 Use a separate development prefix and focused checks for the changed
@@ -95,7 +113,7 @@ the existing memory/quiet-CPU gates. [Verification](VERIFICATION.md) and
 Actual RSS/PSS and application-owned limits are separate quantities.
 
 [Release maintenance](RELEASING.md) describes version bumps, compiler archive
-checksums, x86_64/arm64 static-musl bundles, privacy checks, CI and downloaded
+checksums, Linux static-musl and native macOS x86_64/arm64 bundles, privacy checks, CI and downloaded
 artifact validation. Published assets and dated failed/passed evidence are
 immutable. A local interface update is not a new release or fresh resource
 qualification.
@@ -104,6 +122,30 @@ Architecture and evidence references are listed in the
 [documentation index](README.md#development-and-reference). Current compiler
 findings belong in [the wiki follow-up](ZIG017-WIKI-FOLLOWUP.md), distinguishing
 confirmed compiler behavior from application and harness defects.
+
+## Native macOS checks
+
+Native Mac checks use owned PTYs, fictional mail and a temporary synthetic
+keychain; they are maintainer tasks rather than installation steps. Reserve the
+host and preserve source/binary/SDK identity as for the other native platforms.
+
+```sh
+zig build test probes -Doptimize=debug -j2
+zig build -Doptimize=debug -j2
+zig-out/bin/omagma probe-keyring
+python3 tests/terminal_macos.py --binary zig-out/bin/omagma
+python3 tests/launch_macos.py --binary zig-out/bin/omagma
+python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode debug
+```
+
+Run the corresponding Safe checks and packaging gates for release qualification.
+The macOS 13.0 binary deployment target is distinct from actual native test
+hosts: CI uses newer macOS hosts and local Apple Silicon qualification uses
+macOS 26.6.2/SDK 27.0. Keep each architecture/OS result separate, and require
+native Intel evidence rather than calling an ARM cross-build an Intel test.
+Mac memory/CPU gates have platform-specific evidence; do not copy the dated
+Linux bar estimate onto Mac or TUI workloads. Synthetic checks are not live
+Google delivery/consent or Omarchy bar qualification.
 
 ## Documentation website
 

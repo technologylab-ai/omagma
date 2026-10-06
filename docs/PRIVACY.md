@@ -12,13 +12,15 @@ Gmail links open in the account’s configured Chrome profile. Reading a message
 
 ## Credentials and consent
 
-Refresh tokens are stored in Secret Service, using Omagma’s service name and the verified account address. They are passed to the keyring helper through stdin rather than command-line arguments. Access tokens remain in backend memory. Neither token type is sent to the bar UI or terminal client’s response frames.
+Refresh tokens are stored in Secret Service on Linux or the current default user Keychain on macOS, using Omagma’s service namespace and verified account identity. Token contents never go in command-line arguments. Access tokens remain in backend memory. Neither token type is sent to the bar UI or terminal client’s response frames.
+
+Mac entries trust Omagma and Apple’s signed `/usr/bin/security` helper, allowing reads after an unsigned binary upgrade. Native checks target the exact default keychain and account/grant, suppress their own UI, and refuse a known locked keychain before starting the read helper. If the lock state changes during handoff or an item’s ACL was edited, the operating system may still request permission. A blocked read is canceled at Omagma’s finite deadline. Unlock the keychain explicitly and retry if Omagma reports `KeyringUnavailable`. This is per-user credential storage, consistent with Linux Secret Service, rather than isolation from programs with equivalent user access.
 
 Consent opens your configured Chrome profile and returns through a temporary local IPv4 callback listener. Omagma verifies the random state, PKCE exchange and returned Gmail identity before accepting the grant. The consent command has a 180-second deadline. Keep the downloaded Google OAuth registration JSON and account configuration private, outside Git. Google treats installed applications as unable to keep registration secrets confidential; refresh tokens still need protection. [Google’s installed-app model](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 ## Terminal client
 
-The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate Secret Service namespace and a different Google OAuth registration, preserving the bar’s read-only authorization. Installation or read access alone does not authorize an agent to send mail or change contacts.
+The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate namespace on either platform. If you use a bar/read-only registration, broader terminal access uses a different Google OAuth registration so the read-only authorization remains intact. Terminal-only setup needs just one registration. Installation or read access alone does not authorize an agent to send mail or change contacts.
 
 Terminal modes save cached mail, local drafts, contacts and operation receipts in owner-only directories and files. The defaults are `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; directories use mode 0700 and files use 0600. Live and fixture data have separate namespaces, and account/message filename components are hashes. **Mail and drafts are plaintext on disk, not encrypted at rest.** Filesystem permissions restrict access; a backup or administrator with file access can still read them.
 
@@ -36,6 +38,6 @@ Fixture providers make no Gmail API or keyring requests. You can try fictional m
 
 ## Disconnect or remove
 
-Removing the widget stops its bar integration but leaves your private configuration and keyring credentials available for later use. The bar protocol’s `disconnect` command removes its local account token and clears its memory cache. `omagma terminal-auth revoke --account ACCOUNT` removes the terminal token and registry entry; use your usual `--config` and `--grant-file` options when you selected non-default paths.
+Removing the Linux widget, uninstalling Homebrew’s `omagma` formula, or removing a manually installed executable leaves your private configuration, cache and keyring credentials available for later use. The bar protocol’s `disconnect` command removes its local account token and clears its memory cache. `omagma terminal-auth revoke --account ACCOUNT` removes the terminal token and registry entry; use your usual `--config` and `--grant-file` options when you selected non-default paths.
 
 These local removals do not revoke Google’s grant or erase terminal cache files. To invalidate Google-side access, revoke Omagma in your Google Account. To delete local mail, review the private cache directory and any files you explicitly saved. Keep real mail, addresses, message IDs, OAuth downloads and callback URLs out of public issues, screenshots and shared logs.

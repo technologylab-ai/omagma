@@ -23,7 +23,7 @@ const slug = value => text(value).toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, ''
 // documentation must never silently become a deployment artifact.
 const sourceFiles = [
   'README.md', 'AGENTS.md', 'EVIDENCE.md', 'LICENSES/README.md', 'skills/omagma-setup/SKILL.md',
-  ...['AGENT-CLI', 'AGENT-SETUP', 'BACKGROUND-REFRESH', 'DEVELOPMENT', 'DISTRIBUTION', 'FEATURES', 'INSTALL', 'MEMORY', 'PRIVACY', 'PROTOCOL', 'README', 'RELEASING', 'SETUP', 'TERMINAL-BACKGROUND', 'TERMINAL-IMPLEMENTATION', 'TERMINAL-PROVIDER-DESIGN', 'TERMINAL-UI-DESIGN', 'TERMINAL-VERIFICATION', 'TERMINAL', 'TRANSPORT', 'TUI-CACHE', 'UI', 'VERIFICATION', 'ZIG017-WIKI-FOLLOWUP'].map(name => `docs/${name}.md`),
+  ...['AGENT-CLI', 'AGENT-SETUP', 'BACKGROUND-REFRESH', 'DEVELOPMENT', 'DISTRIBUTION', 'FEATURES', 'INSTALL', 'MACOS', 'MEMORY', 'PRIVACY', 'PROTOCOL', 'README', 'RELEASING', 'SETUP', 'TERMINAL-BACKGROUND', 'TERMINAL-IMPLEMENTATION', 'TERMINAL-PROVIDER-DESIGN', 'TERMINAL-UI-DESIGN', 'TERMINAL-VERIFICATION', 'TERMINAL', 'TRANSPORT', 'TUI-CACHE', 'UI', 'VERIFICATION', 'ZIG017-WIKI-FOLLOWUP'].map(name => `docs/${name}.md`),
   ...['terminal-0.2.0', 'terminal-0.2.1', 'terminal-0.2.2', 'terminal-0.2.3-mouse', 'terminal-0.2.3', 'zig-0.17.0'].map(name => `docs/evidence/${name}.md`),
 ];
 sourceFiles.sort();
@@ -39,7 +39,7 @@ const routeFor = source => {
 const routes = new Map(sourceFiles.map(source => [source, routeFor(source)]));
 if (new Set(routes.values()).size !== routes.size) throw new Error('Duplicate documentation route');
 const navGroups = [
-  ['Get started', [['docs/README.md', 'Overview'], ['docs/FEATURES.md', 'Features'], ['docs/AGENT-SETUP.md', 'Agent-guided setup'], ['docs/INSTALL.md', 'Install'], ['docs/SETUP.md', 'Google & accounts']]],
+  ['Get started', [['docs/README.md', 'Overview'], ['docs/FEATURES.md', 'Features'], ['docs/AGENT-SETUP.md', 'Agent-guided setup'], ['docs/INSTALL.md', 'Linux install'], ['docs/MACOS.md', 'Mac install'], ['docs/SETUP.md', 'Google & accounts']]],
   ['Use Omagma', [['docs/UI.md', 'Bar'], ['docs/TERMINAL.md', 'Terminal'], ['docs/AGENT-CLI.md', 'Agent CLI'], ['docs/TUI-CACHE.md', 'Mail cache'], ['docs/BACKGROUND-REFRESH.md', 'Bar refresh'], ['docs/TERMINAL-BACKGROUND.md', 'Background cache']]],
   ['About', [['docs/PRIVACY.md', 'Privacy'], ['docs/MEMORY.md', 'Memory'], ['docs/DISTRIBUTION.md', 'Distribution'], ['LICENSES/README.md', 'Licenses']]],
   ['Developers', [['docs/DEVELOPMENT.md', 'Development'], ['docs/TRANSPORT.md', 'Transport'], ['docs/PROTOCOL.md', 'Bar protocol'], ['docs/TERMINAL-IMPLEMENTATION.md', 'Terminal architecture'], ['docs/TERMINAL-UI-DESIGN.md', 'Terminal UI'], ['docs/TERMINAL-PROVIDER-DESIGN.md', 'Provider design'], ['docs/VERIFICATION.md', 'Bar verification'], ['docs/TERMINAL-VERIFICATION.md', 'Terminal verification'], ['docs/RELEASING.md', 'Releases'], ['docs/ZIG017-WIKI-FOLLOWUP.md', 'Zig findings']]],
@@ -145,7 +145,7 @@ for (const [source, target] of imageRoutes) {
   await fs.copyFile(path.join(repo, source), path.join(dist, target));
 }
 for (const name of ['site.css', 'site.js']) await fs.copyFile(path.join(here, name), path.join(dist, 'assets', name));
-const common = { base, version: escape(packageVersion), section: 'Omagma', title: 'Omagma — mail without the weight', description: 'Separate Gmail accounts in a compact Omarchy bar, experimental terminal client and agent CLI.', body: '', sidebar: '', toc: '', source_url: `${github}/blob/main/README.md` };
+const common = { base, version: escape(packageVersion), section: 'Omagma', title: 'Omagma — mail without the weight', description: 'Separate Gmail accounts in the Linux Omarchy bar, experimental Linux/Mac terminal client and agent CLI.', body: '', sidebar: '', toc: '', source_url: `${github}/blob/main/README.md` };
 const decorate = (html, route) => {
   const canonical = new URL(route, siteUrl).href;
   const social = new URL('assets/omagma-social-preview.png', siteUrl).href;

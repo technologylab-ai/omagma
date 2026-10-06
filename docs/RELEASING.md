@@ -1,7 +1,7 @@
 # Build and publish releases
 
 End users should [install a verified release bundle](INSTALL.md). This page is for
-maintainers building the Linux backend and publishing matching plugin assets.
+maintainers building Linux/macOS backends and publishing their matching bundles.
 [Development](DEVELOPMENT.md) covers faster local iteration: it keeps the package
 version unchanged and does not publish a release or rerun resource qualification
 for every interface edit. Existing release assets remain immutable; each new
@@ -20,16 +20,21 @@ From a source checkout with the declared Zig compiler and Python 3, stage or com
 ```sh
 python3 scripts/release.py --arch x86_64
 python3 scripts/release.py --arch arm64
+# On a matching native Mac, choose its architecture:
+python3 scripts/release.py --os macos --arch arm64
+python3 tests/release_check.py --os macos --arch arm64
 ```
 
-The packager builds stripped `safe` backends (`-Doptimize=safe`) targeting baseline Linux musl and verifies static ELF output. Output goes to `dist/` by default; `--output-dir` chooses another directory. Each local run writes `SHA256SUMS-x86_64` or `SHA256SUMS-arm64`; publication combines them into `SHA256SUMS`. `--print-version` and `--print-zig-version` report the values read from `build.zig.zon`. These are build-time tools, not installed runtime helpers. Packaging does not edit an installed desktop configuration or private credentials.
+The packager builds stripped `safe` backends (`-Doptimize=safe`) with baseline CPUs. Linux defaults remain static musl and require static ELF output. `--os macos` requires a matching native Mac, targets macOS 13.0 explicitly and validates thin Mach-O CPU subtype, minimum OS/platform, system-only dependencies, loader/search-path bounds and stripped/private-path constraints. The observed direct libraries are libSystem, libobjc, Security and CoreFoundation; no Homebrew dylibs are bundled. Output goes to `dist/` by default; `--output-dir` chooses another directory. Linux writes `SHA256SUMS-x86_64` or `SHA256SUMS-arm64`; Mac writes `SHA256SUMS-macos-x86_64` or `SHA256SUMS-macos-arm64`. Publication combines all platform fragments and the license notice into `SHA256SUMS`. `--print-version` and `--print-zig-version` report the values read from `build.zig.zon`. These are build-time tools, not installed runtime helpers. Packaging does not edit an installed desktop configuration or private credentials.
 
-Each architecture produces a raw binary and a complete plugin bundle:
+Each OS/architecture produces a raw binary and complete audited-source bundle:
 
 | Asset | Contents |
 | --- | --- |
 | `omagma-linux-x86_64` / `omagma-linux-arm64` | Static backend executable |
-| `omagma-VERSION-linux-x86_64.tar.gz` / `omagma-VERSION-linux-arm64.tar.gz` | Complete plugin under one top-level `omagma/` directory |
+| `omagma-VERSION-linux-x86_64.tar.gz` / `omagma-VERSION-linux-arm64.tar.gz` | Complete Linux plugin under one top-level `omagma/` directory |
+| `omagma-macos-x86_64` / `omagma-macos-arm64` | Native Mac terminal executable using system libraries |
+| `omagma-VERSION-macos-x86_64.tar.gz` / `omagma-VERSION-macos-arm64.tar.gz` | Complete audited source/docs and native executable under `omagma/` |
 | `SHA256SUMS` | Checksums for the published binary and bundle assets, using basenames |
 | `LICENSES.txt` | Project, Zig, musl, libvaxis, zigimg and uucode notices, also included in the bundles |
 
@@ -50,14 +55,23 @@ port. Keep archive metadata, package pin, source guard, scripts and CI in sync.
 
 ## Continuous release checks
 
-The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. Current-feature acceptance also covers account-scoped bulk/undo, cached-window navigation/search, forwarding/files, composer recovery/completion, reader context, actual loading/progress, mouse/wheel routing, compact layouts and local timezone displays. The fixture timezone database is installed and checked before either native suite. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After both architectures succeed, the `main` publication step collects the bundles, raw binaries and combined `SHA256SUMS` for the package version.
+The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. Current-feature acceptance also covers account-scoped bulk/undo, cached-window navigation/search, forwarding/files, composer recovery/completion, reader context, actual loading/progress, mouse/wheel routing, compact layouts and local timezone displays. The fixture timezone database is installed and checked before either native suite. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After all required native platform jobs succeed, the `main` publication step collects the bundles, raw binaries and combined `SHA256SUMS` for the package version.
 
-The GitHub CLI uploads all six assets through an internal draft before publishing; it cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The workflow refuses to replace an existing release, draft or tag. It does not expose an incomplete release as latest.
+The GitHub CLI uploads all ten assets through an internal draft before publishing; it cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The workflow refuses to replace an existing release, draft or tag. It does not expose an incomplete release as latest.
 
-Before publishing, verify executable versions and checksums, static linkage,
+Mac jobs run natively on Apple Silicon and Intel hosts and verify the actual
+packaged executable, native Keychain/upgrade/lifecycle behavior and the
+platform-specific terminal gates. Run `python3 tests/release_binary.py` for the
+independent literal ELF/Mach-O format oracles; these lightweight tests do not
+replace native qualification. All four platform jobs must succeed before
+publishing. Homebrew installation is preferred on Mac; its formula must use the
+selected immutable release archive and verified architecture-specific SHA256.
+
+Before publishing, verify executable versions and checksums, platform linkage,
 archive paths, license notices and public setup instructions. Check actual
 downloaded native release bytes separately: checksum, `--version`/`build-info`,
-no ELF interpreter or DT_NEEDED, and synthetic integration/transport. Source-built
+no ELF interpreter or DT_NEEDED on Linux, validated Mach-O/system dependencies
+on Mac, and the corresponding synthetic integration/transport checks. Source-built
 checks alone do not establish the published artifact. The included backend still
 relies on system CA certificates and external Chrome/keyring programs; the QML UI
 requires a compatible Omarchy/Quickshell host. Fixture and release checks remain

@@ -4,6 +4,9 @@ Choose the interface that fits your work: a compact read-only bar, an
 experimental terminal client, or an experimental agent CLI. All three keep
 configured accounts separate and open Gmail in each account's Chrome profile.
 
+The bar runs on Linux Omarchy. The TUI and CLI run natively on Linux and macOS;
+[Homebrew is preferred on Mac](MACOS.md).
+
 This catalogue describes Omagma’s current features. Detailed controls and
 examples live in the linked guides.
 
@@ -42,10 +45,10 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Full messages and chronological threads, with plaintext-first rendering and
   a native formatted view for HTML-only mail.
 - Reader beside or below the list, expanded reading, Vim-oriented keys and
-  mouse navigation using the active Omarchy palette.
+  mouse navigation using the Omarchy palette when available and a built-in palette otherwise.
 - Cache-first startup and usable cached mail during refresh; bounded message
   count/byte retention evicts the oldest mail tail.
-- An optional read-only five-minute cache timer keeps mail ready while the
+- An optional Linux read-only five-minute cache timer keeps mail ready while the
   TUI is closed.
 - Separate cache search and explicit Gmail search; explicit page navigation
   fetches beyond the bar's recent-mail limit.
@@ -195,11 +198,12 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 ## Permissions, storage and current limits
 
 Full TUI/CLI use requests six local capabilities that map to two Google scopes:
-`gmail.modify` and `contacts`. It uses a separate Google OAuth registration and grant;
-the bar continues using its single `gmail.readonly` permission.
+`gmail.modify` and `contacts`. A terminal-only installation uses one terminal Google OAuth registration and grant.
+Alongside the bar, use a different registration; the bar continues using its
+single `gmail.readonly` permission.
 [Account setup](SETUP.md) is the canonical permission guide.
 
-Tokens stay in Secret Service; private terminal cache, drafts, contacts and
+Tokens stay in Secret Service on Linux or the default user Keychain on macOS; private terminal cache, drafts, contacts and
 receipts are plaintext protected by filesystem permissions. The bar's mail
 cache is memory-only. Accounts, credentials, message IDs and profile routing
 remain separate. [Privacy details](PRIVACY.md).

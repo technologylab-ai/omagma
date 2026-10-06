@@ -1,16 +1,17 @@
 # Omagma documentation
 
 Start with installation and account setup, then choose the bar, terminal or
-agent guide. The bar is read-only; the experimental TUI and CLI can use a
-separate account grant for sending and mailbox/contact changes.
+agent guide. The bar is read-only; the experimental TUI and CLI can use an
+account grant for sending and mailbox/contact changes. The bar runs on Linux
+Omarchy; the TUI and CLI run on Linux and macOS.
 
 These guides describe Omagma’s current features. Dated evidence reports retain
 the versions and revisions that were measured.
 
 ## Get started
 
-1. [Install Omagma](INSTALL.md): choose a Linux bundle, verify it, install the
-   requested interface, and upgrade or remove it.
+1. [Install on Linux](INSTALL.md) or [macOS](MACOS.md): choose Homebrew on Mac
+   or a matching verified bundle, then install the requested interface.
 2. [Connect accounts and permissions](SETUP.md): Chrome profiles, read-only bar
    access, full TUI/CLI access, Google Console steps and per-account consent.
 3. [Ask an agent to install it](AGENT-SETUP.md): a ready-to-use request and the
@@ -23,6 +24,7 @@ smaller reading, composition, organization and agent workflow details.
 
 | Guide | What you will find |
 | --- | --- |
+| [macOS installation](MACOS.md) | Homebrew, native release bundles, Keychain and Chrome defaults |
 | [Bar dropdown](UI.md) | Account switching, mail links and refresh status |
 | [Terminal mail](TERMINAL.md) | Reading, search, compose/reply, contacts, attachments, labels and keyboard/mouse controls |
 | [Agent CLI](AGENT-CLI.md) | Structured commands, account selection, cache/server search, drafts, receipts and CLI/TUI coverage |
@@ -54,7 +56,7 @@ installation and account onboarding.
 | [Terminal provider](TERMINAL-PROVIDER-DESIGN.md) | Gmail/People operations and capability/credential design |
 | [Terminal UI](TERMINAL-UI-DESIGN.md) | Rendering, input, composition and lifecycle design |
 | [Bar verification](VERIFICATION.md) / [terminal verification](TERMINAL-VERIFICATION.md) | Developer correctness and resource checks |
-| [Release maintenance](RELEASING.md) | Version-driven static Linux bundles and publication |
+| [Release maintenance](RELEASING.md) | Version-driven Linux/macOS bundles and publication |
 | [Zig wiki follow-up](ZIG017-WIKI-FOLLOWUP.md) | Curator notes distinguishing compiler findings from application bugs |
 
 ## Historical evidence

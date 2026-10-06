@@ -42,13 +42,13 @@
     <section class="hero" aria-labelledby="hero-title">
       <div class="wrap hero__copy">
         <div class="hero__headline">
-          <p class="eyebrow">Gmail for Omarchy</p>
+          <p class="eyebrow">Gmail for Omarchy and macOS</p>
           <h1 id="hero-title" class="hero__title">Gmail, one account at a time.</h1>
         </div>
         <div class="hero__intro">
-          <p class="hero__lede">Check Gmail from your Omarchy bar, read and reply in the experimental TUI, or use the structured agent CLI. Up to three accounts keep separate mail, permissions and Chrome profiles.</p>
+          <p class="hero__lede">Check Gmail from your Linux Omarchy bar, read and reply in the experimental Linux/Mac TUI, or use the structured agent CLI. Up to three accounts keep separate mail, permissions and Chrome profiles.</p>
           <div class="hero__proof">
-            <p><a href="{{base}}docs/memory/#three-account-bar-measurement-v022"><strong>≈31 MB RAM</strong> three-account bar baseline</a></p>
+            <p><a href="{{base}}docs/memory/#three-account-bar-measurement-v022"><strong>≈31 MB RAM</strong> Linux three-account bar baseline</a></p>
             <p>Cached mail is ready while Gmail updates in the background.</p>
             <p class="hero__proof-note">Bar v0.2.2 · 2026-10-05. Inspired by the author’s ~2 GB Gmail tab.</p>
           </div>
@@ -58,7 +58,7 @@
           </div>
           <ul class="meta-list hero__meta">
             <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Release bundles</a></li>
-            <li>Static Linux bundles</li>
+            <li>Linux + macOS downloads</li>
             <li>No Zig needed to install</li>
             <li>MIT licensed</li>
           </ul>
@@ -86,7 +86,7 @@
         <header class="section-head">
           <p class="eyebrow">Three interfaces</p>
           <h2 id="interfaces-title">Read-only by default. Write access only where you grant it.</h2>
-          <p class="section-head__intro">The bar, terminal client and agent CLI share the same one to three accounts and keep them apart: separate lists, unread counts, credentials and Chrome profiles, with no combined Inbox. Sending and changing mail need a second, separate grant that you approve per account.</p>
+          <p class="section-head__intro">The bar, terminal client and agent CLI share the same one to three accounts and keep them apart: separate lists, unread counts, credentials and Chrome profiles, with no combined Inbox. Terminal writes need a grant you approve per account. Alongside the Linux bar, use a different Google OAuth registration so its read-only grant stays intact.</p>
         </header>
 
         <ul class="ifaces">
@@ -124,7 +124,7 @@
 
           <li class="iface">
             <div class="iface__head">
-              <h3 class="iface__name">Terminal client</h3>
+              <h3 class="iface__name">Terminal client · Linux and Mac</h3>
               <p class="iface__cmd"><code>omagma tui</code></p>
               <span class="tag tag--experimental">Experimental</span>
             </div>
@@ -135,9 +135,9 @@
             </div>
             <dl class="iface__access">
               <dt>To read</dt>
-              <dd>The bar’s <code>gmail.readonly</code> grant</dd>
+              <dd>A <code>gmail.readonly</code> grant</dd>
               <dt>Full access</dt>
-              <dd><code>gmail.modify</code> + <code>contacts</code>, separate Google OAuth registration</dd>
+              <dd><code>gmail.modify</code> + <code>contacts</code>; a different registration if you also use the bar</dd>
               <dt>Mail kept</dt>
               <dd>Private plaintext disk cache</dd>
             </dl>
@@ -194,7 +194,7 @@
         <div class="split__text">
           <p class="eyebrow">Terminal cache</p>
           <h2 id="cache-title">Cached mail first. Gmail catches up.</h2>
-          <p>The terminal client opens with the mail it already has and keeps it readable while Gmail refreshes in the background; a refresh requests only the changes since its last update. By default each account keeps its newest 2,000 messages within 256&nbsp;MiB and evicts the oldest tail. An optional five-minute timer keeps the cache ready even while the TUI is closed.</p>
+          <p>The terminal client opens with the mail it already has and keeps it readable while Gmail refreshes in the background; a refresh requests only the changes since its last update. By default each account keeps its newest 2,000 messages within 256&nbsp;MiB and evicts the oldest tail. An optional Linux five-minute timer keeps the cache ready even while the TUI is closed. Mac installation does not add a background service.</p>
           <p>Placeholder rows turn into messages as metadata and bodies arrive. A <code>metadata 1/32</code> or <code>bodies 1/32</code> counter reports the batch in progress, and scrolling past either end of the 32-row list moves continuously through adjacent cached mail.</p>
           <p>Cached mail is private plaintext with owner-only permissions, kept apart from the bar’s memory-only snapshot.</p>
           <p class="links">
@@ -227,7 +227,7 @@
         <header class="section-head">
           <p class="eyebrow">Get started</p>
           <h2 id="start-title">Let your coding agent walk you through setup.</h2>
-          <p class="section-head__intro">Give your coding agent <a href="https://technologylab-ai.github.io/omagma/">this website</a> or the <a href="https://github.com/technologylab-ai/omagma">GitHub URL</a> and the prompt below. The agent fetches the instructions and prepares its own local files. It downloads and verifies the release, installs the bar plugin and prepares private configuration, then guides you through Google Cloud Console one small step at a time, waiting for your feedback. You make the Google clicks and approve access in your own browser.</p>
+          <p class="section-head__intro">Give your coding agent <a href="https://technologylab-ai.github.io/omagma/">this website</a> or the <a href="https://github.com/technologylab-ai/omagma">GitHub URL</a> and the prompt below. The agent fetches the instructions and prepares its own local files. It installs with Homebrew on Mac or downloads and verifies the matching Linux bundle, prepares private configuration, then guides you through Google Cloud Console one small step at a time, waiting for your feedback. You make the Google clicks and approve access in your own browser.</p>
         </header>
 
         <div class="start__grid">
@@ -236,7 +236,7 @@
             <div class="code-block">
 <button class="copy-code" type="button" data-copy="setup-prompt" aria-label="Copy setup prompt">Copy</button><pre><code id="setup-prompt">Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.</code></pre>
             </div>
-            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and whether you want five-minute background refresh. If you already downloaded the Google registration JSON, give its local path — never paste its contents or any tokens. For sending and mailbox changes in the terminal, use the <a href="{{base}}docs/agent-setup/#terminal-client-and-agents">full-access prompt</a>.</p>
+            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and whether you want five-minute background refresh. If you already downloaded the Google registration JSON, give its local path — never paste its contents or any tokens. For Mac or terminal-only setup, and for sending or mailbox changes, use the <a href="{{base}}docs/agent-setup/#terminal-client-and-agents">full-access prompt</a>.</p>
           </div>
 
           <div class="google">
@@ -244,8 +244,8 @@
             <ol class="numbered">
               <li><strong>Your own Google project.</strong> Create a Google Cloud project, enable the Gmail API and configure the consent screen. Register Omagma with Google and keep its downloaded registration files private.</li>
               <li><strong>One OAuth registration for the bar.</strong> A Google OAuth registration with <code>gmail.readonly</code> covers the bar and read-only terminal browsing.</li>
-              <li><strong>A second registration for writing.</strong> Full TUI and CLI access uses a separate Google OAuth registration in the same project, with <code>gmail.modify</code> and <code>contacts</code> (People API). The bar keeps its read-only grant.</li>
-              <li><strong>Consent per account, in its own profile.</strong> Each account maps to an existing Chrome profile. Consent opens there, and Omagma checks the returned address before storing the token in your Secret Service keyring.</li>
+              <li><strong>Terminal-only, or alongside the bar.</strong> Full TUI/CLI access uses <code>gmail.modify</code> and <code>contacts</code> (People API). A fresh terminal-only installation needs one registration; alongside the bar, use a different registration in the same project and preserve its read-only grant.</li>
+              <li><strong>Consent per account, in its own profile.</strong> Each account maps to an existing Chrome profile. Consent opens there, and Omagma checks the returned address before storing the token in Secret Service on Linux or your user Keychain on Mac.</li>
             </ol>
             <p class="fine">While a Google app is in Testing, these grants expire after seven days; reconnecting is one command per account.</p>
           </div>
@@ -254,11 +254,11 @@
         <div class="manual">
           <h3>Prefer to set it up by hand?</h3>
           <ol class="numbered numbered--row">
-            <li><strong>Download.</strong> Get the complete Linux x86_64 or arm64 bundle and its <code>SHA256SUMS</code> from the <a href="https://github.com/technologylab-ai/omagma/releases/latest">latest release</a>.</li>
-            <li><strong>Install.</strong> Verify the checksum, extract, and add the widget to your bar. <a href="{{base}}docs/install/">Installation guide</a></li>
+            <li><strong>Choose your platform.</strong> On Mac, use <code>brew install renerocksai/tap/omagma</code> and the <a href="{{base}}docs/macos/">Mac guide</a>. On Linux, get the complete x86_64 or arm64 bundle and its <code>SHA256SUMS</code> from the <a href="https://github.com/technologylab-ai/omagma/releases/latest">latest release</a>.</li>
+            <li><strong>Install.</strong> Verify the Linux or manual Mac bundle. Add the widget only for a Linux bar installation. <a href="{{base}}docs/install/">Installation guide</a></li>
             <li><strong>Connect accounts.</strong> Create your Google OAuth registration, map each account to its Chrome profile and approve access. <a href="{{base}}docs/setup/">Account setup</a></li>
           </ol>
-          <p class="fine">Needs Omarchy’s Quickshell plugin host for the bar, Chrome, an unlocked Secret Service keyring with <code>secret-tool</code>, and system CA certificates; the TUI needs a UTF-8 terminal. Release bundles are static, so no Zig compiler is needed. arm64 backend builds are tested separately; ARM desktop integration has not been qualified.</p>
+          <p class="fine">Only the Linux bar needs Omarchy’s Quickshell plugin host. Live mail uses Chrome and the unlocked platform keyring; the TUI needs a UTF-8 terminal. Linux binaries are static musl, and Mac binaries use system libraries; no Zig compiler is needed to install either. arm64 backend builds are tested separately; ARM desktop integration has not been qualified.</p>
           <p class="fine">Optional preview: <code>omagma tui --fixtures</code> shows fictional mail without contacting Google. It isn’t part of installation.</p>
         </div>
       </div>

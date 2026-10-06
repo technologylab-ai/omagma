@@ -1,6 +1,6 @@
 ---
 name: omagma-setup
-description: Install the omagma Omarchy plugin or terminal client, connect separate Gmail accounts and Chrome profiles, and enable TUI/CLI permissions or reconnect accounts. Use for user installation and onboarding, not development or general Gmail administration.
+description: Install the omagma Linux Omarchy plugin or Linux/macOS terminal client, connect separate Gmail accounts and Chrome profiles, and enable TUI/CLI permissions or reconnect accounts. Use for user installation and onboarding, not development or general Gmail administration.
 ---
 
 # Set up omagma
@@ -13,13 +13,14 @@ Resolve relative guide links against the public repository or documentation URL.
 Download and verify the selected release yourself, then use its extracted
 `omagma/` folder as the local root. The user does not need to clone the repository
 or prepare a folder before starting. If the user already supplied a local
-bundle or checkout, resolve the skill's real directory and use that root. Use `docs/INSTALL.md` for the bar, `docs/SETUP.md` for accounts,
+bundle or checkout, resolve the skill's real directory and use that root. Use `docs/INSTALL.md` for the Linux bar, `docs/MACOS.md` for Homebrew/native Mac installation, `docs/SETUP.md` for accounts,
 and `docs/SETUP.md#full-tuicli-permissions` for TUI/CLI permissions. Development and
 release qualification have their own instructions in `AGENTS.md`.
 
 ## Install
 
-- Prefer the matching Linux x86_64 or arm64 bundle from
+- On macOS, prefer `brew install renerocksai/tap/omagma` when Homebrew is available. Check `omagma --version` before consent; inspect an existing installation before upgrading it. If Homebrew is unavailable, download and verify the matching native Mac bundle using `docs/MACOS.md`. Prepare files yourself from the public URL; the user does not need a checkout.
+- On Linux, prefer the matching x86_64 or arm64 bundle from
   `https://github.com/technologylab-ai/omagma/releases/latest`. Verify its entry
   in the same release's `SHA256SUMS`, extract into a persistent versioned
   directory, and check the included `zig-out/bin/omagma --version`. A complete
@@ -27,7 +28,7 @@ release qualification have their own instructions in `AGENTS.md`.
   terminal-only use with its accompanying license notices.
 - Release installation needs no Zig compiler. Check the requested interface's
   dependencies: Omarchy/Quickshell for the bar; a UTF-8 terminal for the TUI;
-  Secret Service/`secret-tool`, CA certificates and Chrome for live Gmail.
+  Secret Service/`secret-tool` on Linux, the default unlocked user Keychain on Mac, and Chrome for live Gmail. Only the Linux bar requires Omarchy/Quickshell; do not install it for a Mac terminal request.
 - If a matching release is unavailable, use the source-build instructions in
   [DEVELOPMENT.md](../../docs/DEVELOPMENT.md#build-from-source) and the exact
   compiler pin in `build.zig.zon`. Select that
@@ -38,7 +39,7 @@ release qualification have their own instructions in `AGENTS.md`.
   desktop configuration, and use the included plugin directory. Follow local
   desktop instructions; never edit package-owned Omarchy files.
 - For terminal-only setup, put the verified backend on the user's PATH using
-  `docs/INSTALL.md#optional-terminal-command`. Inspect an existing `omagma`
+  the platform’s installation guide. Inspect an existing `omagma`
   command before changing it.
 
 ## Configure accounts
@@ -56,13 +57,17 @@ release qualification have their own instructions in `AGENTS.md`.
 - For the bar, set its `configPath` to the selected config file. Its
   `refreshIntervalSeconds` is 0 or 60..86400; 300 enables five-minute refresh
   while closed. For optional terminal-cache fetching while the TUI is closed,
-  use `docs/TERMINAL-BACKGROUND.md` when requested.
+  use `docs/TERMINAL-BACKGROUND.md` when requested on Linux. Mac installation does not add a background service or use the Linux systemd units.
 
 ## Connect the requested permissions
 
 `docs/SETUP.md` has both permission sets and Console steps. The bar uses
-`gmail.readonly`. Full TUI/CLI features use a **different Google OAuth registration
-in the same project**, with Gmail API and People API enabled.
+`gmail.readonly`. Full TUI/CLI features use a terminal Google OAuth registration
+with Gmail API and People API enabled. Fresh terminal-only setup uses one
+registration: omit/leave empty the config’s `oauthClientFile` and pass the
+terminal JSON through `--client-file`. Do not create a bar setup for this case.
+If a read-only registration is already configured, broader terminal access uses
+a **different registration in the same project**, preserving its existing grant.
 
 Recommend agent-guided Google setup. Give one small Console step at a time,
 wait for the user's feedback, then adapt the next step to their screen. Reuse
@@ -73,10 +78,10 @@ Keep the detailed Console procedure in `docs/SETUP.md`.
 For all currently implemented terminal features, request
 `mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.
 The backend maps these six local capabilities to only `gmail.modify` and
-`contacts`. Keep the original bar registration/config entry. Create a new
-Google OAuth registration for terminal permissions; copying or renaming an
-existing registration JSON does not create another registration. TUI and CLI
-share the terminal grant.
+`contacts`. Alongside an existing bar, keep the original registration/config
+entry and create a different registration for terminal permissions; copying or
+renaming its JSON does not create another registration. TUI and CLI share the
+terminal grant. Use the guide’s fresh-terminal-only or existing-bar route as appropriate.
 
 Preserve the existing Google audience/publishing choice. For External Testing,
 ensure each requested account is a test user. Use current primary Google docs

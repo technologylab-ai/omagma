@@ -1,6 +1,6 @@
 # omagma
 
-Gmail in the Omarchy bar, your terminal, and agent workflows. Keep up to three accounts separate, check recent mail without a browser tab, and open Gmail in each account’s configured Chrome profile.
+Gmail in the Omarchy bar, your Linux or Mac terminal, and agent workflows. Keep up to three accounts separate, check recent mail without a browser tab, and open Gmail in each account’s configured Chrome profile.
 
 [Explore the website and user documentation](https://technologylab-ai.github.io/omagma/).
 
@@ -14,18 +14,20 @@ Omagma started because one Gmail tab was using roughly **2 GB of RAM** on the au
 
 **Recommended: agent-guided setup.** Give your coding agent the [website URL](https://technologylab-ai.github.io/omagma/)
 or [GitHub URL](https://github.com/technologylab-ai/omagma) and ask it to install Omagma and walk you through Google Console and OAuth one
-step at a time. Tell it whether you want the read-only bar or full TUI/CLI
-access. It can prepare private configuration and open consent in each account's
+step at a time. Tell it your platform and whether you want the Linux read-only bar or full TUI/CLI
+access. On macOS, Homebrew is preferred: `brew install renerocksai/tap/omagma`. It can prepare private configuration and open consent in each account's
 Chrome profile while you complete the Google steps.
 [Copy a setup prompt](docs/AGENT-SETUP.md).
 
-For manual setup:
+For macOS, [install with Homebrew](docs/MACOS.md), then follow the terminal-only Google setup. Native Apple Silicon and Intel binaries are also available as verified release bundles. The bar remains a Linux Omarchy integration.
+
+For manual Linux setup:
 
 1. [Download the latest release](https://github.com/technologylab-ai/omagma/releases/latest), choosing the complete Linux **x86_64** or **arm64** bundle and its `SHA256SUMS`.
 2. Follow [installation](docs/INSTALL.md) to verify the download and add the widget to your bar.
 3. Follow [account setup](docs/SETUP.md) to create your Google OAuth registration, map each account to its Chrome profile, and approve access.
 
-**No Zig compiler is needed for a release.** The bundle includes the Quickshell UI and a static musl backend. Live mail needs Chrome, an unlocked Secret Service keyring with `secret-tool`, and system CA certificates. The bar needs Omarchy’s Quickshell plugin host; the TUI needs a UTF-8 terminal. ARM backend builds are tested separately; ARM desktop integration has not been qualified.
+**No Zig compiler is needed for a release.** Linux bundles include a static musl backend and the Quickshell UI. Mac binaries use system libraries and Keychain. Live mail needs Chrome and an unlocked platform keyring; the TUI needs a UTF-8 terminal. Only the Linux bar needs Omarchy/Quickshell. ARM backend builds are tested separately; ARM desktop integration has not been qualified. [Mac installation](docs/MACOS.md) · [Linux installation](docs/INSTALL.md).
 
 [AGENTS.md](AGENTS.md) directs agents to the included [setup workflow](skills/omagma-setup/SKILL.md). They can read it directly; installing it as a global skill is optional.
 
@@ -39,11 +41,11 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 **The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides account-separated mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, drafts, replies/reply-all, forwarding, contacts, attachments, mailbox changes and invitation replies. `$EDITOR` can compose in a full-screen editor and then return to the TUI; tmux is not required. Calendar views, permanent mail deletion, contact deletion and label creation/renaming/deletion are outside the current scope. See [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) for supported actions and interface differences.
 
-Available cached mail appears immediately while Gmail refreshes in the background. The default disk cache keeps the newest **2,000 messages within 256 MiB per account**, evicting the oldest tail. The cache is private plaintext storage, separate from the bar’s memory-only cache. `/` searches the cache, and `\` explicitly searches Gmail. An optional [five-minute timer](docs/TERMINAL-BACKGROUND.md) keeps the terminal cache ready while the TUI is closed.
+Available cached mail appears immediately while Gmail refreshes in the background. The default disk cache keeps the newest **2,000 messages within 256 MiB per account**, evicting the oldest tail. The cache is private plaintext storage, separate from the bar’s memory-only cache. `/` searches the cache, and `\` explicitly searches Gmail. An optional [five-minute Linux timer](docs/TERMINAL-BACKGROUND.md) keeps the terminal cache ready while the TUI is closed; Mac installation does not add a background service.
 
 `omagma cli` and `omagma agent` provide a JSONL interface. One-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands share that interface’s account-scoped executor. Explicit pagination can fetch more than the bar’s 30 messages. See [terminal workflows and keys](docs/TERMINAL.md) and [the agent CLI contract](docs/AGENT-CLI.md).
 
-Existing bar credentials allow read-only mail access. Sending, mailbox changes and contacts need [separate terminal authorization](docs/SETUP.md#full-tuicli-permissions); the bar keeps its read-only grant. Choose the permissions you want to use and authorize each account separately.
+Existing bar credentials allow read-only mail access. Sending, mailbox changes and contacts need [terminal authorization](docs/SETUP.md#full-tuicli-permissions). A terminal-only installation can start with one Google OAuth registration; if you already use the bar, keep its read-only registration and use a different one for the terminal. Choose your permissions and authorize each account separately.
 
 Forward files, choose verified sending identities, recover drafts automatically, and search downloaded bodies. Folded threads, link and attachment pickers, bulk changes with undo, continuous cached-mail navigation, and saved working context keep daily mail work compact. See [the feature catalogue](docs/FEATURES.md) for the complete overview.
 
@@ -60,7 +62,7 @@ Fixture mode never contacts Google. It is optional and is not part of normal ins
 ## Documentation
 
 - [Documentation index](docs/README.md) and [feature catalogue](docs/FEATURES.md)
-- [Install](docs/INSTALL.md), [connect accounts](docs/SETUP.md), and [agent-assisted setup](docs/AGENT-SETUP.md)
+- [Install on Linux](docs/INSTALL.md) or [macOS](docs/MACOS.md), [connect accounts](docs/SETUP.md), and [agent-assisted setup](docs/AGENT-SETUP.md)
 - [Bar behavior](docs/UI.md), [terminal guide](docs/TERMINAL.md), and [agent CLI](docs/AGENT-CLI.md)
 - [Terminal cache](docs/TUI-CACHE.md) and [background terminal fetching](docs/TERMINAL-BACKGROUND.md)
 - [Privacy and credentials](docs/PRIVACY.md) and [memory measurements](docs/MEMORY.md)
@@ -71,4 +73,4 @@ Fixture mode never contacts Google. It is optional and is not part of normal ins
 
 Omarchy may still ship Zig 0.16.x. Source builds require **Zig 0.17.0 exactly**: download the archive matching your OS/CPU from [the official 0.17.0 directory](https://ziglang.org/download/0.17.0/), select its extracted directory on `PATH`, and confirm `zig version` prints `0.17.0`. Keep the system compiler unchanged. Build commands and developer checks are in [development](docs/DEVELOPMENT.md#build-from-source).
 
-MIT licensed. Copyright technologylab.ai. Static distributions include [third-party notices](LICENSES), including Zig, musl, libvaxis, zigimg and uucode.
+MIT licensed. Copyright technologylab.ai. Release distributions include [third-party notices](LICENSES), including Zig, musl, libvaxis, zigimg and uucode.

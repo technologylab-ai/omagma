@@ -1,4 +1,10 @@
-# Install the bar widget
+# Install Omagma
+
+On **macOS**, use [Homebrew and native terminal installation](MACOS.md).
+The TUI and CLI need no Omarchy or Quickshell on a Mac. The bar widget described
+below is a Linux Omarchy integration.
+
+## Install the bar widget
 
 omagma needs an Omarchy shell with user-plugin support, Chrome, an unlocked Secret Service keyring with `secret-tool`, and system CA certificates. The release backend is statically linked with musl; the desktop UI and these services remain external dependencies. You do not need Zig to install a release.
 

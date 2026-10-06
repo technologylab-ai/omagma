@@ -1,11 +1,25 @@
 {
   "oauthClientFile": "",
-  "chrome": "/usr/bin/google-chrome-stable",
   "chromeUserData": "",
   "refreshIntervalSeconds": 0,
   "accounts": [
-    {"address":"personal@example.com","profile":"Profile 3","enabled":true,"required":true},
-    {"address":"work@example.com","profile":"Profile 1","enabled":true,"required":true},
-    {"address":"optional@example.com","profile":"Profile 2","enabled":false,"required":false}
+    {
+      "address": "personal@example.com",
+      "profile": "Profile 3",
+      "enabled": true,
+      "required": true
+    },
+    {
+      "address": "work@example.com",
+      "profile": "Profile 1",
+      "enabled": true,
+      "required": true
+    },
+    {
+      "address": "optional@example.com",
+      "profile": "Profile 2",
+      "enabled": false,
+      "required": false
+    }
   ]
 }

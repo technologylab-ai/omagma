@@ -1,6 +1,6 @@
 # Account setup
 
-[Download and verify the matching plugin bundle](INSTALL.md) first. Run these commands from its extracted `omagma/` directory; the included backend lives at `zig-out/bin/omagma`. Zig is not required for release installation. A source build uses the same relative binary path.
+[Install on Linux](INSTALL.md) or [macOS](MACOS.md) first. Use `omagma` when the verified executable is on PATH. Bundle commands below use `zig-out/bin/omagma` relative to its extracted `omagma/` directory; Homebrew users replace that prefix with `omagma`. Zig is not required for release installation.
 
 **Recommended: ask an agent to guide you.** Point your coding agent at this
 repository and use a [setup prompt](AGENT-SETUP.md). It can walk you through
@@ -14,10 +14,11 @@ Choose the access you want before connecting an account:
 
 | Interface | Google permissions | Google OAuth registration |
 | --- | --- | --- |
-| Bar dropdown, or TUI/CLI mail reading only | `gmail.readonly` | The bar's Google OAuth registration |
-| All currently implemented TUI/CLI mail and contact features | `gmail.modify` and `contacts` | A separate Google OAuth registration in the same Google project |
+| Linux bar, or read-only terminal browsing | `gmail.readonly` | One read-only Google OAuth registration |
+| Terminal-only TUI/CLI with full mail/contact features | `gmail.modify` and `contacts` | One terminal Google OAuth registration; no bar setup needed |
+| Full TUI/CLI alongside an existing bar | `gmail.modify` and `contacts` | A different registration in the same project; keep the bar read-only |
 
-The full scope URLs and Console steps are in [full TUI/CLI permissions](#full-tuicli-permissions). The bar keeps its read-only grant even after you authorize the terminal. TUI and CLI share the terminal grant; each configured account authorizes separately.
+The full scope URLs and Console steps are in [full TUI/CLI permissions](#full-tuicli-permissions). For a fresh terminal-only installation, start with that section and one registration. If you already use a bar/read-only registration in `oauthClientFile`, keep it and use a different registration for broader terminal permissions. TUI and CLI share the terminal grant; each configured account authorizes separately.
 
 If a private config already exists, edit it instead of copying the example over it. For a new configuration:
 
@@ -50,7 +51,6 @@ External applications in **Testing** receive refresh tokens that expire after se
 ```json
 {
   "oauthClientFile": "/absolute/private/path/google-registration.json",
-  "chrome": "/usr/bin/google-chrome-stable",
   "chromeUserData": "",
   "refreshIntervalSeconds": 0,
   "accounts": [
@@ -61,9 +61,13 @@ External applications in **Testing** receive refresh tokens that expire after se
 }
 ```
 
+For a terminal-only configuration, omit `oauthClientFile` (or leave it empty) and pass the terminal registration JSON with `--client-file` when authorizing. Do not set it to your terminal file while retaining a read-only bar grant.
+
 Replace the fictional addresses and profile directories. One to three accounts are supported; addresses and profiles must be distinct. For a first-account setup, configure only that one account or disable the other slots. `required` controls the initial selection among enabled accounts. Disabled accounts remain visible as unavailable if included in the configuration.
 
 Open `chrome://version` in each intended Chrome profile and use the final directory name from **Profile Path**, such as `Profile 1`. This is the directory name, not Chrome’s displayed profile label. The `Default` profile is rejected to avoid ambiguous routing. `chromeUserData` may be an absolute existing Chrome data directory; an empty value uses the standard Google Chrome directory. omagma validates this directory and never launches a second data directory with `--user-data-dir`.
+
+Omitting `chrome` uses `/usr/bin/google-chrome-stable` on Linux and `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` on macOS. The default Chrome data directory is `$HOME/.config/google-chrome` on Linux or `$HOME/Library/Application Support/Google/Chrome` on Mac. Override these only when your existing installation differs.
 
 JSON paths must be absolute, expanded paths; `~` and `$HOME` are not expanded inside JSON. `refreshIntervalSeconds` must be a JSON integer: `0` disables background refresh, and `60..86400` enables it. Use `300` for five minutes. [Refresh behavior](BACKGROUND-REFRESH.md).
 
@@ -78,7 +82,7 @@ other ASCII controls are rejected.
 zig-out/bin/omagma auth --account personal@example.com --config "${XDG_CONFIG_HOME:-$HOME/.config}/omagma/config.json"
 ```
 
-Complete Google consent in the opened Chrome profile within **180 seconds**. omagma checks the returned Gmail identity against the configured address before storing a refresh token in Secret Service. Repeat the command for each other enabled address. The keyring must be available and unlocked.
+Complete Google consent in the opened Chrome profile within **180 seconds**. omagma checks the returned Gmail identity against the configured address before storing a refresh token in the platform keyring: Secret Service on Linux or the current default user Keychain on macOS. Repeat the command for each other enabled address. The keyring must be available and unlocked.
 
 For the bar, use the live entry in [installation](INSTALL.md) and refresh the account after connecting. If you previously chose its optional demo mode, set `fixtures` to `false`. If consent expires or access is revoked, run `auth` again for that account. There is currently no in-dropdown Connect action. Verify that **Open inbox** and message links reach the intended account in the intended profile.
 
@@ -106,7 +110,22 @@ scope. [Create labels](https://developers.google.com/workspace/gmail/api/referen
 [edit labels](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.labels/update),
 [delete labels](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.labels/delete).
 
-For an existing working bar installation:
+### Fresh terminal-only installation
+
+On Mac, and on Linux without the bar, one Google OAuth registration is enough:
+
+1. Create or reuse a Google Cloud project and enable **Gmail API** and **People API**.
+2. Configure the Google Auth consent screen. Use **External** for accounts from different Workspace organizations and add intended accounts as test users while in **Testing**.
+3. In **Data access**, add the two full scope URLs above.
+4. In **Clients → Create client**, select **Application type → Desktop app**, name it `Omagma Terminal`, create it and download the JSON to a private local file with mode `0600`.
+5. Configure your requested accounts and existing Chrome profiles. Omit `oauthClientFile` or leave it empty; there is no read-only bar registration to preserve.
+6. Run the six-capability authorization command below with `--client-file`, then check status and real mail/contacts with reads. Homebrew users invoke `omagma` instead of `zig-out/bin/omagma`.
+
+Do not create or authorize a bar registration solely to use the TUI or CLI. If you later add a Linux bar, give it its own read-only registration.
+
+### Existing working bar installation
+
+Preserve the bar’s current registration, grant and private configuration:
 
 1. Select the same project in Google Cloud Console. In **APIs & services →
    Library**, enable **People API**. After enabling it, the API/service details
@@ -161,7 +180,7 @@ completion before opening the next account's consent; credentials remain
 separate per account. An agent can confirm the recorded capabilities and read
 mail/contacts to check access; setup does not require sending a test message or
 changing your data.
-Tokens live in Secret Service. The private grant registry defaults to
+Tokens live in Secret Service on Linux and the current default user Keychain on macOS. The private grant registry defaults to
 `${XDG_CONFIG_HOME:-$HOME/.config}/omagma/terminal-grants.json`; if you choose a
 custom `--grant-file`, use it consistently for consent, status, TUI and CLI.
 
@@ -178,7 +197,7 @@ and [Google OAuth registration instructions](https://developers.google.com/works
 `mail-read` is required for a terminal grant. Choose the other local
 capabilities for the features you intend to use:
 
-Any set beyond `mail-read` alone uses the separate terminal Google OAuth registration.
+For terminal-only setup, use its one terminal Google OAuth registration. Alongside an existing bar/read-only registration, any set beyond `mail-read` alone uses a different terminal registration.
 For read-only browsing, the existing bar grant is sufficient; if authorizing
 an explicit `mail-read` terminal grant, `--client-file` may be omitted to use
 the configured `oauthClientFile`.
@@ -203,12 +222,14 @@ changing Google settings is not part of the current terminal interface.
 
 ### Background cache with a terminal-only installation
 
-The optional [terminal cache timer](TERMINAL-BACKGROUND.md) deliberately uses
+The optional [Linux terminal cache timer](TERMINAL-BACKGROUND.md) deliberately uses
 the read-only bar grant. To enable that timer, configure the bar's read-only
 registration and run `auth` for each requested account even if you never install the
 bar widget. The full terminal grant alone does not authorize automatic cache
 fetching. Both credentials can coexist in the same private account config and
-separate keyring namespaces.
+separate keyring namespaces. This optional background setup is not a prerequisite
+for interactive terminal use. Mac installation does not install the supplied
+Linux systemd units or create a Mac background service.
 
 ## Reconnect or change permissions
 
