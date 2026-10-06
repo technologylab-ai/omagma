@@ -135,3 +135,26 @@ Published [v0.2.2](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.
 The local interface work reconfirmed the guide's existing array-repetition lesson: a standalone `[_]u8{42} ** 3` test passes with exact 0.16.0 and is rejected by exact 0.17.0. A typed `@splat` preserves repeated-element meaning. This is already documented in the wiki migration guide; it is corroboration, not a new upstream candidate. Compiler/source identity remains `7647adab80dd088f4de3610fd245915a912eb6ad`.
 
 The status-buffer bound, shared wrapping/caret layout, whitespace lookahead and compact-list capacity fixes belong to Omagma. Incremental loading uses request-scoped copies and cancellation-aware finite animation waits. None of these establishes a Zig/compiler/libc defect. This local iteration does not replace historical release evidence or claim new release, memory, ARM or desktop-platform qualification.
+
+## Native macOS / owned-child cancellation follow-up, 2026-10-06
+
+The native port's base checkpoint is `86392435bf6052ed4bab0397d4da98744e8cfe32`. Follow-up runtime qualification is recorded separately from that checkpoint's passed native resource receipts; no older receipt is relabelled.
+
+### General POSIX lesson, present in both exact 0.16 and 0.17
+
+Exact Zig 0.17.0 source revision remains `7647adab80dd088f4de3610fd245915a912eb6ad`. `std/Io/Threaded.zig` has `childWaitPosix` at15665, an unconditional deferred `childCleanupPosix` at15666, and cleanup at15788–15801 that closes pipes and clears `child.id`. `Canceled` can return when starting the blocking syscall or checking cancellation after `EINTR`; a successful `wait4` finishes and returns the status. Consequently a canceled wait can lose the application's cleanup handle while its direct child is still live or unreaped.
+
+Exact installed 0.16.0 source has the same contract at `std/Io/Threaded.zig:15241–15242` and15364–15377. This is **not an established Zig 0.17 migration regression**. Installed source-file SHA256 identities are:
+
+- `0.16.0` `std/Io/Threaded.zig`: `eb7bbb4ddf590ec3d0d2a1ee5c3845ef4984d9e440965a3e7c920cd0c906df94`.
+- `0.17.0` `std/Io/Threaded.zig`: `1a770001e309f24c8c58a9fdb3c095994c454cbfa9dba9d4f1dede2f134eeac7`.
+
+Omagma's `platform.waitOwned` captures the still-owned PID and restores it only on `Canceled`, while retaining normal successful-wait behavior. `platform.killOwned` sends `SIGKILL` before std's uncancelable reap so a child that ignores `SIGTERM` cannot defeat the owner's finite deadline. Shared launch handshakes, keyring helpers, the native system reader and terminal editor use the adapter. No application allocation, lock or std.Io operation was introduced after fork.
+
+The independent executable probe first receives a native PID and stdout EOF from a child that deliberately stays alive and ignores TERM. A100ms deadline cancels the actual std wait. The control loses `child.id` while an independent `WNOHANG == 0` proves the direct child still lives; the adapter retains ownership. Both paths are force-killed and independently require `ECHILD` after reap. This witnesses the OS lifetime contract rather than mirroring a mock's implementation. Native Debug/Safe and Linux qualification results belong to the eventual final port evidence.
+
+### Application port findings, not compiler gotchas
+
+The first native Keychain adapter incorrectly interpreted exit1 as absence, hiding store/probe failures. Exact positive acknowledgements and an independent failure-refutation witness correct that application error. The secret limit remains4096bytes;8192bytes is only the oversize-generator input, not a changed allowance.
+
+Ad-hoc binary upgrades change the legacy Keychain creator identity. Omagma uses scoped native Security APIs for writes and trusts the creator plus Apple's signed `/usr/bin/security` for stable private-pipe reads. This is a macOS distribution/API lesson within the same per-user boundary as Linux Secret Service, not a Zig compiler defect. Known locked keychains fail before the system reader; a lock change during handoff can still produce an OS prompt, so user documentation does not promise a universal no-dialog guarantee. Native upgrade/read/update/item-clear/absence/isolation tests and source review establish this port's behavior; they do not qualify an Omarchy bar on macOS.

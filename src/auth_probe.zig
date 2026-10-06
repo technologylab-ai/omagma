@@ -7,6 +7,7 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse return error.ModeRequired;
+    if (std.mem.eql(u8, mode, "__wait-probe-child")) return platform.waitCancellationChild(init.io);
     if (std.mem.eql(u8, mode, "keychain-worker")) {
         var command: [5][]const u8 = undefined;
         var count: usize = 0;

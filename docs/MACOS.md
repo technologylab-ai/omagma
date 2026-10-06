@@ -106,9 +106,13 @@ to avoid ambiguous routing. Never put unexpanded `$HOME` or `~` inside JSON.
 
 Refresh tokens use the current default user Keychain, normally your login
 keychain. Terminal identity includes the account, Google registration and grant.
-A binary upgrade retains those identities. Keychain access does not open unlock
-or permission dialogs: unlock the relevant keychain explicitly if Omagma
-reports `KeyringUnavailable`, then retry. See [privacy and credential handling](PRIVACY.md).
+A binary upgrade retains those identities. Omagma refuses an already locked
+keychain; unlock it explicitly and retry `KeyringUnavailable`. Native calls
+suppress dialogs. The signed system reader can still show an OS prompt if the
+keychain locks during the short handoff, or if its item's trusted applications
+were edited. Cancel that prompt to refuse the read. Items trust the creating
+build and Apple's `/usr/bin/security`, within the same per-user boundary as
+Linux Secret Service; tokens stay on private pipes. See [privacy and credential handling](PRIVACY.md).
 
 Follow [account setup](SETUP.md) for Google Console, per-account consent and
 reconnection. An agent can verify status and real mail/contact reads after

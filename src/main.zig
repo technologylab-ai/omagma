@@ -45,6 +45,7 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (std.mem.eql(u8, mode, "__wait-probe-child")) return @import("platform.zig").waitCancellationChild(io);
     if (std.mem.eql(u8, mode, "probe-keyring-upgrade")) {
         const phase = args.next() orelse return error.Args;
         const directory = args.next() orelse return error.Args;

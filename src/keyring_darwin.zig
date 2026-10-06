@@ -153,26 +153,6 @@ fn validSecret(raw: []const u8) !void {
     if (raw.len == 0 or raw.len > limits.secret) return error.InvalidToken;
     for (raw) |c| if (c <= 32 or c >= 127) return error.InvalidToken;
 }
-fn lookup(identity: Identity, keychain: ?CF, out: []u8) !usize {
-    const request = try query(identity, keychain, false, false);
-    defer request.deinit();
-    request.set(kSecReturnData, kCFBooleanTrue);
-    request.set(kSecMatchLimit, kSecMatchLimitOne);
-    var result: ?CF = null;
-    const status = SecItemCopyMatching(request.value, &result);
-    defer if (result) |value| CFRelease(value);
-    if (status == not_found) return 0;
-    if (status != 0 or result == null) return error.KeyringUnavailable;
-    const value = result.?;
-    if (CFGetTypeID(value) != CFDataGetTypeID()) return error.KeyringUnavailable;
-    const length = CFDataGetLength(value);
-    if (length <= 0 or length > limits.secret or length > out.len) return error.SecretOutputTooLarge;
-    const bytes = CFDataGetBytePtr(value) orelse return error.KeyringUnavailable;
-    const raw = bytes[0..@intCast(length)];
-    try validSecret(raw);
-    @memcpy(out[0..raw.len], raw);
-    return raw.len;
-}
 fn store(identity: Identity, keychain: ?CF, secret: []const u8) !void {
     try validSecret(secret);
     const request = try query(identity, keychain, false, false);
@@ -228,17 +208,21 @@ fn lookupStable(io: std.Io, identity: Identity, keychain: CF, out: []u8) !usize 
     var attributes: ?CF = null;
     const result = SecItemCopyMatching(request.value, &attributes);
     defer if (attributes) |value| CFRelease(value);
-    if (result == not_found) return 0;
+    if (result == not_found) {
+        try unlocked(keychain);
+        return 0;
+    }
     if (result != 0 or attributes == null) return error.KeyringUnavailable;
     var path: [4096]u8 = undefined;
     var path_length: u32 = path.len;
     if (SecKeychainGetPath(keychain, &path_length, &path) != 0 or path_length == 0 or path_length >= path.len) return error.KeyringUnavailable;
     var service_buffer: [192]u8 = undefined;
     const service = try identity.service(&service_buffer);
-    var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/security", "find-generic-password", "-s", service, "-a", identity.account, "-w", std.mem.sliceTo(&path, 0) }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    try unlocked(keychain);
+    var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/security", "find-generic-password", "-s", service, "-a", identity.account, "-w", path[0..path_length] }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
     defer {
         @import("platform.zig").closePipes(&child, io);
-        if (child.id != null) child.kill(io);
+        if (child.id != null) @import("platform.zig").killOwned(io, &child);
     }
     var captured: [limits.secret + 2]u8 = undefined;
     defer std.crypto.secureZero(u8, &captured);
@@ -253,7 +237,7 @@ fn lookupStable(io: std.Io, identity: Identity, keychain: CF, out: []u8) !usize 
     }
     if (length == captured.len) return error.SecretOutputTooLarge;
     @import("platform.zig").closePipes(&child, io);
-    try @import("platform.zig").checkedExit(try child.wait(io));
+    try @import("platform.zig").checkedExit(try @import("platform.zig").waitOwned(io, &child));
     try unlocked(keychain);
     const value = std.mem.trimEnd(u8, captured[0..length], "\r\n");
     try validSecret(value);
@@ -262,6 +246,7 @@ fn lookupStable(io: std.Io, identity: Identity, keychain: CF, out: []u8) !usize 
     return value.len;
 }
 fn clear(identity: Identity, keychain: ?CF) !void {
+    if (keychain) |ref| try unlocked(ref);
     const request = try query(identity, keychain, false, true);
     defer request.deinit();
     if (identity.terminal) {
@@ -272,7 +257,10 @@ fn clear(identity: Identity, keychain: ?CF) !void {
         var returned: ?CF = null;
         const status = SecItemCopyMatching(request.value, &returned);
         defer if (returned) |value| CFRelease(value);
-        if (status == not_found) return;
+        if (status == not_found) {
+            if (keychain) |ref| try unlocked(ref);
+            return;
+        }
         if (status != 0 or returned == null or CFGetTypeID(returned.?) != CFArrayGetTypeID()) return error.KeyringUnavailable;
         const count = CFArrayGetCount(returned.?);
         if (count < 0 or count > 128) return error.KeyringUnavailable;
@@ -295,10 +283,12 @@ fn clear(identity: Identity, keychain: ?CF) !void {
             const deleted = SecItemDelete(deleting.value);
             if (deleted != 0 and deleted != not_found) return error.KeyringUnavailable;
         }
+        if (keychain) |ref| try unlocked(ref);
         return;
     }
     const status = SecItemDelete(request.value);
     if (status != 0 and status != not_found) return error.KeyringUnavailable;
+    if (keychain) |ref| try unlocked(ref);
 }
 
 fn terminalService(raw: []const u8) bool {
@@ -400,7 +390,12 @@ fn upgradeProbe(io: std.Io, operation: []const u8, directory: []const u8) !void 
     if (status != 0 or ref == null) return error.SyntheticKeychainUnavailable;
     defer CFRelease(ref.?);
     const identity: Identity = .{ .terminal = false, .account = "synthetic-upgrade@example.invalid" };
+    const terminal: Identity = .{ .terminal = true, .account = identity.account, .client = "synthetic-upgrade-client", .grant = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
+    var other = terminal;
+    other.account = "synthetic-upgrade-other@example.invalid";
     if (creating) {
+        try store(terminal, ref, "synthetic-upgrade-terminal");
+        try store(other, ref, "synthetic-upgrade-other");
         try store(identity, ref, "synthetic-cross-build-token");
     } else if (std.mem.eql(u8, operation, "upgrade-check")) {
         if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
@@ -420,6 +415,17 @@ fn upgradeProbe(io: std.Io, operation: []const u8, directory: []const u8) !void 
         if (SecKeychainLock(ref.?) != 0) return error.SyntheticKeychainUnavailable;
         try std.testing.expectError(error.KeyringUnavailable, lookupStable(io, identity, ref.?, &output));
         if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+    } else if (std.mem.eql(u8, operation, "upgrade-clear")) {
+        if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+        try clear(identity, ref);
+        try clear(.{ .terminal = true, .account = identity.account }, ref);
+    } else if (std.mem.eql(u8, operation, "upgrade-absent")) {
+        if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+        var output: [limits.secret]u8 = undefined;
+        defer std.crypto.secureZero(u8, &output);
+        if (try lookupStable(io, identity, ref.?, &output) != 0 or try lookupStable(io, terminal, ref.?, &output) != 0) return error.SyntheticItemStillExists;
+        const n = try lookupStable(io, other, ref.?, &output);
+        if (!std.mem.eql(u8, output[0..n], "synthetic-upgrade-other")) return error.SyntheticNamespaceCrossed;
     } else if (std.mem.eql(u8, operation, "upgrade-write")) {
         if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
         try store(identity, ref, "synthetic-cross-build-updated");
@@ -477,6 +483,7 @@ fn synthetic(io: std.Io, directory: []const u8) !void {
     try std.testing.expectError(error.KeyringUnavailable, lookupStable(io, term_a, keychain, &output));
     try std.testing.expectError(error.KeyringUnavailable, store(term_a, keychain, "synthetic-locked-write"));
     try std.testing.expectError(error.KeyringUnavailable, unlocked(keychain));
+    try std.testing.expectError(error.KeyringUnavailable, clear(.{ .terminal = true, .account = account_a }, keychain));
     if (SecKeychainUnlock(keychain, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
     // Boundaries use the actual signed-tool read path, not cast/inverse mocks.
     var maximum: [limits.secret]u8 = @splat('x');
