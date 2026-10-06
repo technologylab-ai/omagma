@@ -2,8 +2,8 @@
 
 
 def scroll_help_to(terminal, literal):
-    terminal.until(lambda: "Keys · j/k Scroll · Esc Back" in terminal.text())
-    for _ in range(64):
+    terminal.until(lambda: "Keyboard & mouse" in terminal.text())
+    for _ in range(160):
         if literal in terminal.text(): return
         terminal.send(b"j")
         terminal.gap(.02)

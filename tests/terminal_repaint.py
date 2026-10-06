@@ -41,7 +41,8 @@ class RepaintTerminal(Terminal):
 
 class BuiltinTerminal(RepaintTerminal):
     """Same owned terminal transport, with literal argv omitting fixture-root."""
-    def __init__(self, binary, directory, config, columns=160, rows=40):
+    def __init__(self, binary, directory, config, columns=160, rows=40,
+                 account=LONG_ACCOUNT, screen_type=PreservedScreen):
         self.binary, self.directory = binary, Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.master, self.slave = os.openpty()
@@ -49,7 +50,7 @@ class BuiltinTerminal(RepaintTerminal):
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, rows*20, columns*10))
         self.settings = termios.tcgetattr(self.slave)
         self.output, self.output_total, self.history_limit = bytearray(), 0, None
-        self.screen = PreservedScreen(columns, rows)
+        self.screen = screen_type(columns, rows)
         self.scan_offset = self.query_replies = 0
         self.editor_log = self.directory / "editor.json"
         self.injection_sentinel = self.directory / "must-not-exist"
@@ -62,7 +63,7 @@ class BuiltinTerminal(RepaintTerminal):
         env["XDG_RUNTIME_DIR"] = str(runtime)
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR"):
             env.pop(key, None)
-        argv = [str(binary), "tui", "--fixtures", "--config", str(config), "--account", LONG_ACCOUNT,
+        argv = [str(binary), "tui", "--fixtures", "--config", str(config), "--account", account,
                 "--cache-dir", str(self.directory / "cache")]
         self.process = subprocess.Popen(argv,stdin=self.slave,stdout=self.slave,stderr=self.slave,
                                         cwd=self.directory,env=env,preexec_fn=child_session)
@@ -191,7 +192,7 @@ def long_account(binary,directory):
         terminal.until(lambda:reader_contains(terminal.screen,f"Hello from {LONG_ACCOUNT}!"))
         title=terminal.screen.locate("Accounts / mailboxes")
         require(title is not None,"wide navigation pane absent")
-        mail=terminal.screen.locate("Mail · [ ] Page")
+        mail=terminal.screen.locate("Mail ·")
         require(mail is not None and mail['column']==30,"21-character account did not get27-column navigation")
         nav_rows=["".join(row[1:26]) for row in terminal.screen.cells[title['row']+1:terminal.rows-3]]
         require(sum(('> '+LONG_ACCOUNT) in row for row in nav_rows)==1,"selected complete21-character account is clipped/wrapped in navigation")

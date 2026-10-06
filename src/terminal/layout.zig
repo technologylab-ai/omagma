@@ -5,7 +5,7 @@ pub const Focus = enum { navigation, list, reader };
 pub const Rect = struct { x: u16 = 0, y: u16 = 0, width: u16, height: u16 };
 pub const Panes = struct { navigation: ?Rect = null, list: ?Rect = null, reader: ?Rect = null };
 
-pub const HitKind = enum { account, folder, contacts, mail, reader, contact, compose_field, contact_field };
+pub const HitKind = enum { label_choice, label_add, label_remove, custom_label, account, folder, contacts, mail_scroll, mail, reader, reader_thread, reader_link, reader_attachment, reader_picker, reader_picker_save, reader_picker_open, contact, compose_field, compose_from, compose_completion, compose_attachment_add, compose_attachment_remove, compose_attachment_scroll, contact_field };
 pub const Hit = struct { rect: Rect, kind: HitKind, index: usize = 0 };
 /// Populated by drawing, rather than recomputing a second approximation of
 /// wrapped account rows, paged messages or responsive pane geometry.
@@ -40,6 +40,9 @@ pub fn compute(width: u16, height: u16, focus: Focus, reader_layout: ReaderLayou
 }
 
 pub fn computeWithNavigation(width: u16, height: u16, focus: Focus, reader_layout: ReaderLayout, expanded: bool, requested_navigation_width: u16) Panes {
+    return computeWithRatios(width, height, focus, reader_layout, expanded, requested_navigation_width, 55, 40);
+}
+pub fn computeWithRatios(width: u16, height: u16, focus: Focus, reader_layout: ReaderLayout, expanded: bool, requested_navigation_width: u16, list_width_percent: u8, list_height_percent: u8) Panes {
     if (width == 0 or height == 0) return .{};
     if (expanded) return .{ .reader = .{ .width = width, .height = height } };
     if (focus == .navigation and width < 120) return .{ .navigation = .{ .width = width, .height = height } };
@@ -48,11 +51,11 @@ pub fn computeWithNavigation(width: u16, height: u16, focus: Focus, reader_layou
     if (nav_width > 0) panes.navigation = .{ .width = nav_width, .height = height };
     const available = width - nav_width;
     if (reader_layout == .below and available >= 48 and height >= 16) {
-        const list_height: u16 = @max(@as(u16, 7), @as(u16, @intCast(@as(u32, height) * 2 / 5)));
+        const list_height: u16 = @min(height - 7, @max(@as(u16, 7), @as(u16, @intCast(@as(u32, height) * std.math.clamp(list_height_percent, 25, 75) / 100))));
         panes.list = .{ .x = nav_width, .width = available, .height = list_height };
         panes.reader = .{ .x = nav_width, .y = list_height, .width = available, .height = height - list_height };
     } else if (reader_layout == .right and available >= 80) {
-        const list_width = @min(@as(u16, @intCast(@as(u32, available) * 55 / 100)), available - 34);
+        const list_width = @max(@as(u16, 34), @min(@as(u16, @intCast(@as(u32, available) * std.math.clamp(list_width_percent, 25, 75) / 100)), available - 34));
         panes.list = .{ .x = nav_width, .width = list_width, .height = height };
         panes.reader = .{ .x = nav_width + list_width, .width = available - list_width, .height = height };
     } else if (focus == .reader) panes.reader = .{ .x = nav_width, .width = available, .height = height } else panes.list = .{ .x = nav_width, .width = available, .height = height };
@@ -128,4 +131,14 @@ test "rendered mouse areas exclude borders gaps clipped rows and stale layouts" 
     try std.testing.expectEqual(HitKind.reader, hits.at(29, 20).?.kind);
     for (0..200) |index| hits.add(.{ .width = 1, .height = 1 }, .mail, index);
     try std.testing.expectEqual(@as(usize, 128), hits.count);
+}
+
+test "local reader: configured split ratios preserve usable bounded panes" {
+    const right = computeWithRatios(200, 40, .reader, .right, false, 26, 60, 40);
+    try std.testing.expectEqual(@as(u16, 104), right.list.?.width);
+    const below = computeWithRatios(100, 40, .reader, .below, false, 26, 55, 60);
+    try std.testing.expectEqual(@as(u16, 24), below.list.?.height);
+    try std.testing.expectEqual(@as(u16, 16), below.reader.?.height);
+    const compact = computeWithRatios(80, 16, .reader, .below, false, 26, 75, 75);
+    try std.testing.expect(compact.list.?.height >= 7 and compact.reader.?.height >= 7);
 }

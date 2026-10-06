@@ -60,6 +60,7 @@ pub const Config = struct {
                 const prof = try b.string(try b.field(a, "profile"));
                 try b.profile(prof);
                 try self.accounts[i].profile.set(prof);
+                try composerSettings(&self.accounts[i], a);
                 if (b.optional(a, "enabled")) |x| {
                     if (x != .bool) return error.InvalidConfig;
                     self.accounts[i].enabled = x.bool;
@@ -82,6 +83,34 @@ pub const Config = struct {
         return 0;
     }
 };
+
+fn composerSettings(account: *model.Account, value: std.json.Value) !void {
+    if (b.optional(value, "senderName")) |field| {
+        const name = try b.string(field);
+        for (name) |byte| if (byte < 32 or byte == 127) return error.InvalidSenderName;
+        try account.sender_name.set(name);
+    }
+    if (b.optional(value, "signature")) |field| {
+        const signature = try b.string(field);
+        for (signature) |byte| if ((byte < 32 and byte != '\n' and byte != '\t') or byte == 127) return error.InvalidSignature;
+        try account.signature.set(signature);
+    }
+}
+
+test "composer configuration keeps account settings bounded and rejects header controls" {
+    var account: model.Account = .{};
+    const parsed = try b.parse(std.testing.allocator, "{\"senderName\":\"Alex Example\",\"signature\":\"Alex\\nExample company\"}");
+    defer parsed.deinit();
+    try composerSettings(&account, parsed.value);
+    try std.testing.expectEqualStrings("Alex Example", account.sender_name.slice());
+    try std.testing.expectEqualStrings("Alex\nExample company", account.signature.slice());
+    const bad_name = try b.parse(std.testing.allocator, "{\"senderName\":\"Alex\\nBcc: other@example.com\"}");
+    defer bad_name.deinit();
+    try std.testing.expectError(error.InvalidSenderName, composerSettings(&account, bad_name.value));
+    const bad_signature = try b.parse(std.testing.allocator, "{\"signature\":\"\\u001b[0m\"}");
+    defer bad_signature.deinit();
+    try std.testing.expectError(error.InvalidSignature, composerSettings(&account, bad_signature.value));
+}
 test "configuration refuses same profile across distinct accounts" {
     var c: Config = undefined;
     try c.defaults("/tmp");

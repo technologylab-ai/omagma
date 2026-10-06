@@ -2,7 +2,7 @@
 
 
 def reader_rectangle(screen):
-    title = screen.locate("Thread / full body")
+    title = screen.locate("Thread / full body") or screen.locate("Message ·")
     if title is None:
         return None
     y, column = title["row"], title["column"]

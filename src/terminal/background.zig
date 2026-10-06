@@ -42,8 +42,13 @@ fn refresh(session: *core.Session, slot: usize, address: []const u8, settings: S
     defer arena.deinit();
     const a = arena.allocator();
     const request = std.json.Stringify.valueAlloc(a, .{
-        .cmd = "mail.refresh", .account = address, .label = "INBOX", .limit = @as(usize, 32),
-        .auto = !settings.force, .intervalSeconds = settings.interval, .barGrantOnly = true,
+        .cmd = "mail.refresh",
+        .account = address,
+        .label = "INBOX",
+        .limit = @as(usize, 32),
+        .auto = !settings.force,
+        .intervalSeconds = settings.interval,
+        .barGrantOnly = true,
     }, .{}) catch return .{ .slot = slot, .outcome = .local_failure };
     const raw = session.execute(a, request) catch |err| return .{ .slot = slot, .outcome = classify(@errorName(err)) };
     const response = std.json.parseFromSliceLeaky(j.Value, a, raw, .{ .allocate = .alloc_always }) catch return .{ .slot = slot, .outcome = .local_failure };
@@ -64,18 +69,30 @@ pub fn run(init: std.process.Init, io: Io, args: *std.process.Args.Iterator) !vo
             try out.interface.flush();
             return;
         }
-        if (std.mem.eql(u8, arg, "--quiet")) { settings.quiet = true; continue; }
-        if (std.mem.eql(u8, arg, "--force")) { settings.force = true; continue; }
-        if (std.mem.eql(u8, arg, "--fixtures")) { settings.options.fixtures = true; continue; }
+        if (std.mem.eql(u8, arg, "--quiet")) {
+            settings.quiet = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--force")) {
+            settings.force = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--fixtures")) {
+            settings.options.fixtures = true;
+            continue;
+        }
         const value = args.next() orelse return error.ValueRequired;
-        if (std.mem.eql(u8, arg, "--config")) settings.options.config_file = value
-        else if (std.mem.eql(u8, arg, "--cache-dir")) settings.options.cache_dir = value
-        else if (std.mem.eql(u8, arg, "--fixture-root")) settings.options.fixture_root = value
-        else if (std.mem.eql(u8, arg, "--fixture-scenario")) settings.options.fixture_scenario = value
-        else if (std.mem.eql(u8, arg, "--interval")) settings.interval = try std.fmt.parseInt(u32, value, 10)
-        else if (std.mem.eql(u8, arg, "--metadata-limit")) { settings.options.metadata_limit = try std.fmt.parseInt(usize, value, 10); settings.options.metadata_limit_set = true; }
-        else if (std.mem.eql(u8, arg, "--disk-limit-bytes")) { settings.options.disk_limit = try std.fmt.parseInt(usize, value, 10); settings.options.disk_limit_set = true; }
-        else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--config")) settings.options.config_file = value else if (std.mem.eql(u8, arg, "--cache-dir")) settings.options.cache_dir = value else if (std.mem.eql(u8, arg, "--fixture-root")) settings.options.fixture_root = value else if (std.mem.eql(u8, arg, "--fixture-scenario")) settings.options.fixture_scenario = value else if (std.mem.eql(u8, arg, "--interval")) settings.interval = try std.fmt.parseInt(u32, value, 10) else if (std.mem.eql(u8, arg, "--prefetch-bodies")) {
+            settings.options.body_prefetch_limit = try std.fmt.parseInt(usize, value, 10);
+            settings.options.body_prefetch_limit_set = true;
+            if (settings.options.body_prefetch_limit > 64) return error.InvalidPrefetchLimit;
+        } else if (std.mem.eql(u8, arg, "--metadata-limit")) {
+            settings.options.metadata_limit = try std.fmt.parseInt(usize, value, 10);
+            settings.options.metadata_limit_set = true;
+        } else if (std.mem.eql(u8, arg, "--disk-limit-bytes")) {
+            settings.options.disk_limit = try std.fmt.parseInt(usize, value, 10);
+            settings.options.disk_limit_set = true;
+        } else return error.UnknownOption;
     }
     if (settings.interval < 60 or settings.interval > 86400) return error.InvalidRefreshInterval;
     var session = try core.Session.init(io, a, init.environ_map, settings.options);
@@ -114,10 +131,14 @@ pub fn run(init: std.process.Init, io: Io, args: *std.process.Args.Iterator) !vo
         try selection.concurrent(.stop, waitStop, .{ io, &cancel });
         switch (try selection.await()) {
             .result => |result| {
-                slots[count] = result; count += 1;
+                slots[count] = result;
+                count += 1;
                 failed = failed or result.outcome == .local_failure;
             },
-            .stop => |result| { try result; break; },
+            .stop => |result| {
+                try result;
+                break;
+            },
         }
     }
     if (!settings.quiet) {
@@ -125,7 +146,9 @@ pub fn run(init: std.process.Init, io: Io, args: *std.process.Args.Iterator) !vo
         defer a.free(result);
         var buffer: [4096]u8 = undefined;
         var out = Io.File.stdout().writer(io, &buffer);
-        try out.interface.writeAll(result); try out.interface.writeByte('\n'); try out.interface.flush();
+        try out.interface.writeAll(result);
+        try out.interface.writeByte('\n');
+        try out.interface.flush();
     }
     if (failed) return error.BackgroundCacheFailed;
 }

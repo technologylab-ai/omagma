@@ -26,8 +26,13 @@ UI_FIXTURES = ROOT / "tests/fixtures/terminal/ui"
 CASES = ("layout-responsive", "preferences-private-safety", "reader-cached-next-previous", "theme-reload-no-color", "search-back-stack")
 
 
+def mailbox_visible(terminal):
+    header = terminal.text().splitlines()[0]
+    return terminal.screen.locate("Mail ·") is not None and "Cache search" not in header and "Gmail search" not in header
+
+
 def pane_coordinates(terminal):
-    return terminal.screen.locate("Mail · [ ] Page"), terminal.screen.locate("Thread / full body")
+    return terminal.screen.locate("Mail ·"), (terminal.screen.locate("Thread / full body") or terminal.screen.locate("Message ·"))
 
 
 def layout(terminal, expected):
@@ -124,7 +129,7 @@ def quit_key(terminal):
 
 
 def search(terminal, source, query):
-    key, prompt, title = (b"/", "Cache / ", "Mail · Cache subset") if source == "cache" else (b"\\", "Gmail \\ ", "Mail · Gmail search")
+    key, prompt, title = (b"/", "Cache / ", "Cache search") if source == "cache" else (b"\\", "Gmail \\ ", "Gmail search")
     terminal.send(key)
     terminal.until(lambda: prompt in terminal.text())
     terminal.send(query.encode() + b"\r")
@@ -303,7 +308,7 @@ def run_case(binary, directory, name):
             terminal.until(lambda: "Contacts" in terminal.text() and contact_name in terminal.text())
             require(fixture.is_held(), "contacts opened only after refresh completed")
             terminal.send(b"?")
-            scroll_help_to(terminal, "Mouse: Click select/open")
+            scroll_help_to(terminal, "Click · wheel")
             scroll_help_to(terminal, "No editor save or paste sends mail.")
             terminal.send(b"\x1b")
             terminal.gap()
@@ -393,7 +398,7 @@ def run_case(binary, directory, name):
             terminal.send(b"l")
             terminal.until(lambda: title_bold(terminal, "Thread / full body"))
             terminal.send(b"q")
-            terminal.until(lambda: title_bold(terminal, "Mail · [ ] Page"))
+            terminal.until(lambda: title_bold(terminal, "Mail ·"))
             require(terminal.process.poll() is None and fixture.is_held(), "reader Back quit or awaited remote")
             terminal.send(b"l")
             terminal.gap()
@@ -413,13 +418,13 @@ def run_case(binary, directory, name):
             for key in ("fixtureCalls", "syncCalls", "syncListCalls", "syncMetadataGets", "syncBodyGets"):
                 require(after[key] == before[key], "cache search/page invoked provider while remote held")
             terminal.send(b"q")
-            terminal.until(lambda: "Mail · [ ] Page" in terminal.text() and "Mail · Cache subset" not in terminal.text())
+            terminal.until(lambda: mailbox_visible(terminal) and "Cache search" not in terminal.screen.lines()[0])
             require(fixture.is_held() and terminal.process.poll() is None, "cache-search Back did not stay interactive")
             terminal.send(b"?")
-            scroll_help_to(terminal, "Mouse: Click select/open")
+            scroll_help_to(terminal, "Click · wheel")
             scroll_help_to(terminal, "No editor save or paste sends mail.")
             terminal.send(b"q")
-            terminal.until(lambda: "Mail · [ ] Page" in terminal.text() and "No editor save or paste sends mail." not in terminal.text())
+            terminal.until(lambda: mailbox_visible(terminal) and "No editor save or paste sends mail." not in terminal.text())
             result.update(quit_key(terminal))
             terminal.close()
             terminal = None
@@ -431,7 +436,7 @@ def run_case(binary, directory, name):
             search(terminal, "server", "subject:Synthetic personal thread 010")
             terminal.until(lambda: contains_body(terminal, 33))
             terminal.send(b"q")
-            terminal.until(lambda: "Mail · [ ] Page" in terminal.text() and contains_body(terminal, 96))
+            terminal.until(lambda: mailbox_visible(terminal) and contains_body(terminal, 96))
             search(terminal, "server", "subject:Synthetic personal")
             terminal.until(lambda: contains_body(terminal, 96) and "Ready" in terminal.text())
             terminal.gap(.2)  # Separate observed render/input boundaries.
@@ -440,14 +445,14 @@ def run_case(binary, directory, name):
             terminal.send(b"]")
             terminal.until(lambda: contains_body(terminal, 32))
             terminal.send(b"q")
-            terminal.until(lambda: "Mail · [ ] Page" in terminal.text() and contains_body(terminal, 96))
+            terminal.until(lambda: mailbox_visible(terminal) and contains_body(terminal, 96))
             terminal.send(b"c")
             terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
             terminal.send(b"\t\t\t\tiq")
             terminal.send(b"\x1b")
             terminal.gap()
             terminal.send(b"q")
-            terminal.until(lambda: "Mail · [ ] Page" in terminal.text())
+            terminal.until(lambda: mailbox_visible(terminal))
             require(terminal.process.poll() is None, "normal composer q quit rather than saving/back")
             result.update(retained_draft(terminal, "q"))
             result.update(quit_key(terminal), readerQReturnedToList=True, expandedQShrank=True,

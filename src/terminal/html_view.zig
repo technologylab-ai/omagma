@@ -169,6 +169,80 @@ pub const Prepared = struct {
         }
         return base_row + self.cached.lines.len;
     }
+    pub fn drawFolded(self: *const Prepared, win: vaxis.Window, offset: usize, base_row: usize, palette: theme.Palette, mono: bool, hide_quotes: bool, hide_signature: bool) usize {
+        return self.drawHighlightedFolded(win, offset, base_row, palette, mono, hide_quotes, hide_signature, "");
+    }
+    pub fn drawHighlightedFolded(self: *const Prepared, win: vaxis.Window, offset: usize, base_row: usize, palette: theme.Palette, mono: bool, hide_quotes: bool, hide_signature: bool, highlight: []const u8) usize {
+        if (!hide_quotes and !hide_signature and highlight.len == 0) return self.draw(win, offset, base_row, palette, mono);
+        const first = if (!hide_quotes and !hide_signature) offset -| base_row else 0;
+        const last = if (!hide_quotes and !hide_signature) @min(self.cached.lines.len, first +| @as(usize, win.height)) else self.cached.lines.len;
+        var row = base_row + first;
+        var in_quote = false;
+        var in_signature = false;
+        // At most240 sanitized graphemes of at most128 bytes occupy a line.
+        // Match across adjacent style runs without allocating another view.
+        var text_buffer: [32 * 1024]u8 = undefined;
+        for (self.cached.lines[@min(first, self.cached.lines.len)..last]) |line| {
+            const runs = self.cached.runs[line.first .. line.first + line.count];
+            var quoted = false;
+            var signature = false;
+            for (runs) |run| {
+                quoted = quoted or run.role == .quote;
+                const marker = std.mem.trim(u8, run.text, "\r\n");
+                // HTML collapses a signature delimiter's trailing space.
+                signature = signature or std.mem.eql(u8, marker, "-- ") or (runs.len == 1 and run.role == .text and std.mem.eql(u8, marker, "--"));
+            }
+            if ((hide_quotes and quoted) or (hide_signature and (signature or in_signature))) {
+                const label = if (hide_signature and (signature or in_signature)) "[Signature folded · S shows it]" else "[Quoted history folded · Q shows it]";
+                const first_hidden = if (hide_signature and (signature or in_signature)) !in_signature else !in_quote;
+                if (first_hidden) {
+                    if (row >= offset and row - offset < win.height) _ = win.printSegment(.{ .text = label, .style = style(palette, mono, .{}, .quote) }, .{ .row_offset = @intCast(row - offset), .wrap = .none });
+                    row += 1;
+                }
+                if (hide_signature and (signature or in_signature)) in_signature = true else in_quote = true;
+                continue;
+            }
+            in_quote = false;
+            const absolute = row;
+            row += 1;
+            if (absolute < offset or absolute - offset >= win.height) continue;
+            var column: u16 = 0;
+            var text_length: usize = 0;
+            for (runs) |run| {
+                if (run.text.len > text_buffer.len - text_length) break;
+                @memcpy(text_buffer[text_length..][0..run.text.len], run.text);
+                text_length += run.text.len;
+            }
+            const line_text = text_buffer[0..text_length];
+            var match = if (highlight.len > 0) std.ascii.findIgnoreCase(line_text, highlight) else null;
+            var run_offset: usize = 0;
+            for (runs) |run| {
+                var iterator = vaxis.unicode.graphemeIterator(run.text);
+                while (iterator.next()) |gr| {
+                    const glyph = gr.bytes(run.text);
+                    const columns = @max(vaxis.gwidth.gwidth(glyph, self.method), 1);
+                    const byte_offset = run_offset + gr.start;
+                    while (match) |start| {
+                        if (byte_offset < start + highlight.len) break;
+                        const next = start + highlight.len;
+                        match = if (std.ascii.findIgnoreCase(line_text[next..], highlight)) |relative| next + relative else null;
+                    }
+                    var appearance = style(palette, mono, run.flags, run.role);
+                    if (match) |start| if (byte_offset >= start and byte_offset < start + highlight.len) {
+                        appearance.bold = true;
+                        if (mono) appearance.reverse = true else {
+                            appearance.fg = .{ .rgb = palette.background };
+                            appearance.bg = .{ .rgb = palette.yellow };
+                        }
+                    };
+                    if (column +| columns <= win.width) win.writeCell(column, @intCast(absolute - offset), .{ .char = .{ .grapheme = glyph, .width = @intCast(@min(columns, 255)) }, .style = appearance });
+                    column +|= columns;
+                }
+                run_offset += run.text.len;
+            }
+        }
+        return if (!hide_quotes and !hide_signature) base_row + self.cached.lines.len else row;
+    }
 };
 
 const Builder = struct {
@@ -511,4 +585,39 @@ test "semantic sanitizer reserves one exact buffer and rejects tab expansion bef
     @memset(tabs, '\t');
     var no_allocations: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.HtmlLayoutUnavailable, safeText(no_allocations.allocator(), tabs, true));
+}
+
+test "local reader: folding native quoted HTML keeps authored styles and text" {
+    const allocator = std.testing.allocator;
+    var prepared = try Prepared.init(allocator, "<p><b>AUTHORED-TEXT</b></p><blockquote><p>QUOTED-SECRET</p></blockquote><p>FRESH-TAIL</p>");
+    defer prepared.deinit();
+    try prepared.ensure(60, .unicode);
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 60, .rows = 15, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 60, .height = 15, .screen = &screen };
+    const rows = prepared.drawFolded(win, 0, 0, .{}, false, true, false);
+    try std.testing.expect(rows <= prepared.cached.lines.len);
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(allocator);
+    for (0..win.height) |row| for (0..win.width) |column| try rendered.appendSlice(allocator, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "AUTHORED-TEXT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "FRESH-TAIL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "QUOTED-SECRET") == null);
+    try std.testing.expect(screen.readCell(0, 0).?.style.bold);
+}
+
+test "local reader: native search highlighting spans style runs without altering literal text" {
+    const allocator = std.testing.allocator;
+    var prepared = try Prepared.init(allocator, "<p>A <b>cross</b><i>run</i> match.</p>");
+    defer prepared.deinit();
+    try prepared.ensure(60, .unicode);
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 60, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 60, .height = 10, .screen = &screen };
+    const palette: theme.Palette = .{};
+    _ = prepared.drawHighlightedFolded(win, 0, 0, palette, false, false, false, "CROSSRUN");
+    for (2..10) |column| try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.yellow }, screen.readCell(@intCast(column), 0).?.style.bg));
+    try std.testing.expect(!vaxis.Color.eql(.{ .rgb = palette.yellow }, screen.readCell(0, 0).?.style.bg));
+    try std.testing.expectEqualStrings("A", screen.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("c", screen.readCell(2, 0).?.char.grapheme);
 }

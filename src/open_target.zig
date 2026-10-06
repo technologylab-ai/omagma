@@ -56,6 +56,57 @@ pub fn launch(io: std.Io, config: *const Config, account: *const model.Account, 
     try checkProfile(io, config, account);
     try platform.launchDetached(io, &.{ config.chrome.slice(), target.profile_arg.slice(), target.url.slice() });
 }
+
+/// Explicit links from the terminal reader use the same account Chrome
+/// profile as Gmail. Only complete HTTP(S) URLs can become a launch argument.
+pub fn makeUrl(account: *const model.Account, raw: []const u8) !Target {
+    try b.address(account.address.slice());
+    try b.profile(account.profile.slice());
+    if (raw.len == 0 or raw.len > 4096 or !std.unicode.utf8ValidateSlice(raw)) return error.InvalidTarget;
+    for (raw) |byte| if (byte <= 32 or byte == 127 or byte == '\\') return error.InvalidTarget;
+    const uri = std.Uri.parse(raw) catch return error.InvalidTarget;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "https") and !std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidTarget;
+    if (uri.user != null or uri.password != null) return error.InvalidTarget;
+    const host = uri.host orelse return error.InvalidTarget;
+    var host_buffer: [1024]u8 = undefined;
+    const decoded_host = host.toRaw(&host_buffer) catch return error.InvalidTarget;
+    if (decoded_host.len == 0) return error.InvalidTarget;
+    for (decoded_host) |byte| if (byte <= 32 or byte == 127 or std.mem.indexOfScalar(u8, "@/\\?#<>\"", byte) != null) return error.InvalidTarget;
+    var target: Target = .{};
+    try target.url.set(raw);
+    const profile_argument = try std.fmt.bufPrint(&target.profile_arg.bytes, "--profile-directory={s}", .{account.profile.slice()});
+    target.profile_arg.len = @intCast(profile_argument.len);
+    return target;
+}
+
+/// The caller chose this saved file explicitly. Do not delegate executable or
+/// active-document types to desktop associations from the mail reader.
+pub fn openSavedAttachment(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidFilePath;
+    const extension = std.fs.path.extension(path);
+    var allowed = false;
+    for ([_][]const u8{ ".pdf", ".txt", ".md", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".webp" }) |candidate| {
+        if (std.ascii.eqlIgnoreCase(extension, candidate)) allowed = true;
+    }
+    if (!allowed) return error.AttachmentOpenUnsupported;
+    const file = try @import("terminal/files.zig").openRegular(io, allocator, .cwd(), path);
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.permissions.toMode() & 0o077 != 0) return error.InsecureAttachmentFile;
+    try platform.launchDetached(io, &.{ "/usr/bin/xdg-open", path });
+}
+
+test "reader links retain account profile and reject active schemes credentials and controls" {
+    var account: model.Account = .{};
+    try account.address.set("work@example.com");
+    try account.profile.set("Profile 2");
+    const target = try makeUrl(&account, "https://example.org/document?id=42#section");
+    try std.testing.expectEqualStrings("--profile-directory=Profile 2", target.profile_arg.slice());
+    try std.testing.expectEqualStrings("https://example.org/document?id=42#section", target.url.slice());
+    for ([_][]const u8{ "javascript:alert(1)", "file:///tmp/file", "https://user:password@example.org/", "https:///empty-host", "https://example.org/\n", "https://example.org\\evil", "https://example%40other.org/" }) |url| {
+        try std.testing.expectError(error.InvalidTarget, makeUrl(&account, url));
+    }
+}
 test "account-specific Chrome argv and Message-ID fallback" {
     var a: model.Account = .{};
     try a.address.set("work@example.com");

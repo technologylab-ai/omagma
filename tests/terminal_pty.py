@@ -210,7 +210,7 @@ def gmail_search(terminal, query):
     terminal.send(b"\\")
     terminal.until(lambda: "Gmail \\ " in terminal.text())
     terminal.send(query.encode() + b"\r")
-    terminal.until(lambda: "Mail · Gmail search" in terminal.text())
+    terminal.until(lambda: "Gmail search" in terminal.screen.lines()[0])
 
 
 def compose_fixture(terminal):
@@ -473,7 +473,7 @@ def exercise(terminal, action):
             operations = client.request("operation.list")["operations"]
             require(len(operations) == 1 and operations[0]["outcome"] == "unknown", "uncertain TUI submission lacks one durable receipt")
         terminal.send(b"q")
-        terminal.until(lambda: "Mail · [ ] Page" in terminal.text().splitlines()[2])
+        terminal.until(lambda: "Mail ·" in terminal.text().splitlines()[2])
         terminal.send(b"h")
         terminal.until(lambda: "Accounts / mailboxes" in terminal.text())
         terminal.send(b"jjjjj")
@@ -559,7 +559,7 @@ def exercise(terminal, action):
         terminal.until(lambda: "Ready" in terminal.text() and "Synthetic work thread 031" in terminal.text())
         require("Synthetic personal thread" not in terminal.text(), "account switch retained previous account mail")
         terminal.send(b"?")
-        scroll_help_to(terminal, "Mouse: Click select/open")
+        scroll_help_to(terminal, "Click · wheel")
         scroll_help_to(terminal, "No editor save or paste sends mail.")
         require("Ctrl+C" in terminal.text() and "quit" in terminal.text(), "help clipped its interruption/quit guidance")
         terminal.send(b"q")

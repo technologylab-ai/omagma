@@ -4,8 +4,91 @@ const j = @import("json.zig");
 const recipients = @import("recipients.zig");
 const invitation = @import("invitation.zig");
 const storage = @import("store.zig");
+const cache_query = @import("cache_query.zig");
+const triage = @import("triage.zig");
+const batch = @import("batch.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
+const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
+fn canonicalLabel(text: []const u8, definitions: []const storage.Label) []const u8 {
+    for (system_labels) |system| if (std.ascii.eqlIgnoreCase(text, system)) return system;
+    for (definitions) |definition| if (std.mem.eql(u8, text, definition.id) or std.mem.eql(u8, text, definition.name)) return definition.id;
+    return text;
+}
+fn fixtureLabel(source: Value, text: []const u8) ![]const u8 {
+    try recipients.validateHeader(text);
+    for (system_labels) |system| if (std.ascii.eqlIgnoreCase(text, system)) return system;
+    if (j.get(source, "labels")) |value| {
+        for (try valueArray(value)) |item| if (std.mem.eql(u8, text, j.text(item, "id")) or std.mem.eql(u8, text, j.text(item, "name"))) return j.required(item, "id");
+    } else if (std.mem.eql(u8, text, "Projects")) return "Label_demo";
+    return text;
+}
+fn fixtureLabelDefinitions(a: std.mem.Allocator, source: Value) !Value {
+    if (j.get(source, "labels")) |value| return value;
+    var list: std.ArrayList(storage.Label) = .empty;
+    for (system_labels) |name| try list.append(a, .{ .id = name, .name = name, .type = "system" });
+    try list.append(a, .{ .id = "Label_demo", .name = "Projects", .type = "user" });
+    return j.value(a, list.items);
+}
+fn cachedLabel(store: *storage.Store, text: []const u8) []const u8 {
+    const resolved = canonicalLabel(text, store.state.labels);
+    if (!std.mem.eql(u8, resolved, text)) return resolved;
+    for (store.state.views) |view| if (std.mem.eql(u8, text, view.label) and view.labelId.len != 0) return view.labelId;
+    if (store.options.fixtures and std.mem.eql(u8, text, "Projects")) return "Label_demo";
+    return resolved;
+}
+
+fn requestedPrefetch(options: t.Options, request: Value) !i64 {
+    const page = try j.integer(request, "limit", 32);
+    if (page < 1 or page > 100) return error.InvalidPageLimit;
+    const fallback: i64 = if (options.body_prefetch_limit_set or options.body_prefetch_limit != 32) @intCast(options.body_prefetch_limit) else @min(page, 32);
+    const limit = try j.integer(request, "prefetchLimit", fallback);
+    if (limit < 0 or limit > 64) return error.InvalidPrefetchLimit;
+    return limit;
+}
+fn operationPayload(a: std.mem.Allocator, draft: t.Draft, account: []const u8, calendar: ?[]const u8) ![]const u8 {
+    var canonical = draft;
+    canonical.id = "";
+    if (canonical.from) |sender| if (sender.name.len == 0 and std.ascii.eqlIgnoreCase(sender.address, account)) {
+        canonical.from = null;
+    };
+    // Preserve legacy outer calendar:null; omit only the newly optional draft
+    // fields so an unchanged old uncertain operation keeps its fingerprint.
+    const bytes = try std.json.Stringify.valueAlloc(a, canonical, .{ .emit_null_optional_fields = false });
+    const value = try std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_if_needed });
+    return std.json.Stringify.valueAlloc(a, .{ .draft = value, .calendar = if (calendar) |ics| try calendarIdentity(a, ics) else null }, .{});
+}
+const CacheWindow = struct { start: usize, end: usize, direction: []const u8 = "head", fallback: bool = false };
+fn adjacentCacheWindow(store: *storage.Store, candidates: []const t.Message, request: Value, limit: usize, offset: usize) !CacheWindow {
+    const before = j.text(request, "beforeMessageId");
+    const after = j.text(request, "afterMessageId");
+    if (before.len == 0 and after.len == 0) return .{ .start = offset, .end = @min(candidates.len, offset + limit), .direction = if (offset != 0) "cursor" else "head" };
+    if ((before.len != 0 and after.len != 0) or j.text(request, "cursor").len != 0 or j.text(request, "anchorMessageId").len != 0) return error.ConflictingWindowSelectors;
+    const id = if (before.len != 0) before else after;
+    try @import("../bounded.zig").identifier(id);
+    var rank: usize = 0;
+    var exact = false;
+    for (candidates, 0..) |candidate, index| if (std.mem.eql(u8, candidate.id, id)) {
+        rank = index;
+        exact = true;
+        break;
+    };
+    if (!exact) {
+        const stamp = if (store.find(id)) |entry| entry.message.receivedAt else fallback: {
+            const field = j.get(request, "boundaryReceivedAt") orelse return error.CacheBoundaryGone;
+            if (field != .integer or field.integer < 0) return error.InvalidWindowBoundary;
+            break :fallback field.integer;
+        };
+        // The supplied visible timestamp is used only to rank this account's
+        // current retained candidates, never to fetch or import another ID.
+        for (candidates) |candidate| {
+            if (candidate.receivedAt > stamp or (candidate.receivedAt == stamp and std.mem.lessThan(u8, candidate.id, id))) rank += 1 else break;
+        }
+    }
+    if (before.len != 0) return .{ .start = rank -| limit, .end = rank, .direction = "before", .fallback = !exact };
+    const start = rank + @intFromBool(exact);
+    return .{ .start = start, .end = @min(candidates.len, start + limit), .direction = "after", .fallback = !exact };
+}
 
 pub const Session = struct {
     io: std.Io,
@@ -15,6 +98,7 @@ pub const Session = struct {
     cache_root: []const u8,
     env: *const std.process.Environ.Map,
     meter: ?*@import("capped_allocator.zig").CappedAllocator = null,
+    progress_sink: ?t.ProgressSink = null,
     pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, options: t.Options) !Session {
         var s: Session = .{ .io = io, .allocator = a, .options = options, .config = undefined, .cache_root = undefined, .env = env };
         const home = env.get("HOME") orelse return error.HomeRequired;
@@ -32,6 +116,7 @@ pub const Session = struct {
         }
         s.cache_root = try a.dupe(u8, options.cache_dir orelse try std.fmt.allocPrint(pa, "{s}/omagma/terminal", .{env.get("XDG_CACHE_HOME") orelse try std.fmt.allocPrint(pa, "{s}/.cache", .{home})}));
         if (options.metadata_limit == 0 or options.metadata_limit > t.Limits.metadata_hard or options.disk_limit < 64 * 1024 or options.disk_limit > t.Limits.disk_hard) return error.InvalidCacheLimit;
+        if (options.body_prefetch_limit > 64) return error.InvalidPrefetchLimit;
         if (!std.mem.eql(u8, options.fixture_scenario, "normal") and !options.fixtures) return error.FixtureOptionRequiresFixtures;
         if (options.fixture_root != null and !options.fixtures) return error.FixtureOptionRequiresFixtures;
         if (options.fixtures and std.mem.indexOfScalar(u8, options.fixture_scenario, '/') != null) return error.InvalidFixtureScenario;
@@ -41,7 +126,7 @@ pub const Session = struct {
         s.allocator.free(s.cache_root);
     }
     pub fn client(s: *Session) t.Client {
-        return .{ .ctx = s, .callFn = call, .cachedFn = callCached };
+        return .{ .ctx = s, .callFn = call, .cachedFn = callCached, .callProgressFn = callProgress };
     }
     fn call(ctx: *anyopaque, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         const s: *Session = @ptrCast(@alignCast(ctx));
@@ -50,6 +135,26 @@ pub const Session = struct {
     fn callCached(ctx: *anyopaque, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         const s: *Session = @ptrCast(@alignCast(ctx));
         return s.executeMode(out_allocator, raw, true);
+    }
+    fn callProgress(ctx: *anyopaque, out_allocator: std.mem.Allocator, raw: []const u8, sink: t.ProgressSink) ![]const u8 {
+        const s: *Session = @ptrCast(@alignCast(ctx));
+        return s.executeWithProgress(out_allocator, raw, sink);
+    }
+    pub fn executeWithProgress(s: *Session, out_allocator: std.mem.Allocator, raw: []const u8, sink: t.ProgressSink) ![]const u8 {
+        // The Session includes its large inline Config. Copy directly to a
+        // tracked heap wrapper, never through a temporary stack Session.
+        const worker = try s.allocator.create(Session);
+        defer s.allocator.destroy(worker);
+        worker.* = s.*;
+        worker.progress_sink = sink;
+        // cache_root/env are borrowed; deinit would free the original root.
+        return worker.executeMode(out_allocator, raw, false);
+    }
+    fn reportProgress(s: *const Session, phase: t.FetchPhase, completed: usize, total: usize) void {
+        if (s.progress_sink) |sink| sink.report(.{ .phase = phase, .completed = completed, .total = total });
+    }
+    fn reportRow(s: *const Session, update: t.FetchRow) void {
+        if (s.progress_sink) |sink| sink.row(update);
     }
     pub fn execute(s: *Session, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         return s.executeMode(out_allocator, raw, false);
@@ -63,14 +168,15 @@ pub const Session = struct {
         var req = request.?;
         if (cached_only) {
             const command = j.text(req, "cmd");
-            if (!std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
+            if (!std.mem.eql(u8, command, "labels.list") and !std.mem.eql(u8, command, "accounts.identities") and !std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
             try req.object.put(a, "cacheOnly", .{ .bool = true });
         }
         const account = j.text(req, "account");
         const id = j.get(req, "id") orelse .null;
-        for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId" }) |key| if (j.get(req, key)) |field| {
+        for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId", "beforeMessageId", "afterMessageId", "action", "undoToken", "url", "path" }) |key| if (j.get(req, key)) |field| {
             if (field != .string) return failure(out_allocator, id, account, "InvalidRequest", "Expected string command fields");
         };
+        if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
         if (!s.options.fixtures and j.get(req, "grantFile") == null) try req.object.put(a, "grantFile", .{ .string = s.options.grant_file orelse try std.fmt.allocPrint(a, "{s}/omagma/terminal-grants.json", .{s.env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{s.env.get("HOME") orelse return error.HomeRequired})}) });
         if ((id != .null and id != .string and id != .integer) or (id == .string and id.string.len > 256)) return failure(out_allocator, .null, account, "InvalidRequest", "id must be a bounded string or integer");
         const data = s.dispatch(a, req) catch |err| return failureForError(out_allocator, id, account, err);
@@ -89,7 +195,7 @@ pub const Session = struct {
     }
     fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, fixtures: bool, data: Value) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
-            if (!fixtures) for ([_][]const u8{ "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "invitation.reply" }) |mutation| {
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "invitation.reply" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -108,12 +214,12 @@ pub const Session = struct {
     fn dispatch(s: *Session, a: std.mem.Allocator, req: Value) !Value {
         const cmd = try j.required(req, "cmd");
         if (std.mem.eql(u8, cmd, "accounts.list")) {
-            const Account = struct { address: []const u8, enabled: bool, capabilities: []const []const u8 };
+            const Account = struct { address: []const u8, enabled: bool, capabilities: []const []const u8, senderName: []const u8 = "", signature: []const u8 = "" };
             var list: std.ArrayList(Account) = .empty;
             const registry = if (!s.options.fixtures) try @import("auth.zig").load(s.io, a, try j.required(req, "grantFile")) else @import("auth.zig").Registry{};
             for (s.config.accounts[0..s.config.count]) |*account| {
                 const grant = @import("auth.zig").find(&registry, account.address.slice());
-                try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .capabilities = if (s.options.fixtures and !s.scenario("readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp" } else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
+                try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .senderName = account.sender_name.slice(), .signature = account.signature.slice(), .capabilities = if (s.options.fixtures and !s.scenario("readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp" } else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
             }
             return j.value(a, .{ .accounts = list.items });
         }
@@ -121,6 +227,7 @@ pub const Session = struct {
         const index = s.config.index(address) orelse return error.UnknownAccount;
         if (!s.config.accounts[index].enabled) return error.AccountDisabled;
         try recipients.validateAddress(address);
+        if ((j.text(req, "beforeMessageId").len != 0 or j.text(req, "afterMessageId").len != 0) and !try j.boolean(req, "cacheOnly", false)) return error.CacheWindowRequiresCached;
         if (std.mem.startsWith(u8, cmd, "auth.")) {
             if (s.options.fixtures) {
                 if (!std.mem.eql(u8, cmd, "auth.status")) return error.FixtureOnly;
@@ -129,10 +236,34 @@ pub const Session = struct {
             return @import("auth.zig").run(s.io, a, &s.config, s.env, req);
         }
         if (std.mem.eql(u8, cmd, "cache.refresh-status")) return j.value(a, .{ .refreshInProgress = try storage.refreshActive(s.io, s.cache_root, address, s.options) });
+        if (std.mem.eql(u8, cmd, "browser.open")) {
+            const target = try @import("../open_target.zig").makeUrl(&s.config.accounts[index], try j.required(req, "url"));
+            if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, &s.config.accounts[index], &target);
+            return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .url = target.url.slice(), .profile = target.profile_arg.slice() });
+        }
+        if (std.mem.eql(u8, cmd, "attachment.open")) {
+            const path = try j.required(req, "path");
+            if (path.len == 0 or path.len > 4096) return error.InvalidAttachmentPath;
+            try recipients.validateHeader(path);
+            if (!s.options.fixtures) try @import("../open_target.zig").openSavedAttachment(s.io, a, path);
+            return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures });
+        }
         if (try j.boolean(req, "cacheOnly", false)) return s.cachedDispatch(a, address, req);
+        if (std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.undo")) return s.batchMail(a, address, req);
+        if (std.mem.eql(u8, cmd, "mail.prefetch")) {
+            var request = try j.copyObject(a, req);
+            const limit = try j.integer(req, "limit", @intCast(s.options.body_prefetch_limit));
+            if (limit < 0 or limit > 64) return error.InvalidPrefetchLimit;
+            try request.object.put(a, "cmd", .{ .string = "mail.refresh" });
+            try request.object.put(a, "prefetchLimit", .{ .integer = limit });
+            try request.object.put(a, "limit", .{ .integer = @max(1, limit) });
+            return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, request });
+        }
         if (std.mem.eql(u8, cmd, "mail.refresh")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, req });
         var store = try storage.Store.open(s.io, a, s.cache_root, address, s.options);
         defer store.close();
+        if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, false);
+        if (std.mem.eql(u8, cmd, "accounts.identities")) return s.identities(a, &store, req, false);
         if (std.mem.eql(u8, cmd, "cache.stats")) return s.cacheStats(a, &store);
         if (std.mem.eql(u8, cmd, "cache.clear")) {
             try store.clearMail();
@@ -146,6 +277,26 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "draft.list")) return j.value(a, .{ .drafts = store.state.drafts });
         if (std.mem.eql(u8, cmd, "draft.read")) return j.value(a, try store.draft(try j.required(req, "draftId")));
+        if (std.mem.eql(u8, cmd, "draft.recovery-save")) {
+            const input = j.get(req, "draft") orelse return error.MissingField;
+            const fields = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.MissingField);
+            if (fields.len != 5) return error.InvalidRecovery;
+            for (fields, 0..) |field, i| if (field.len > (if (i == 4) t.Limits.body_bytes else @as(usize, 16 * 1024)) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
+            var clean = try j.copyObject(a, input);
+            _ = clean.object.swapRemove("to");
+            _ = clean.object.swapRemove("cc");
+            _ = clean.object.swapRemove("bcc");
+            _ = clean.object.swapRemove("recoveryFields");
+            try clean.object.put(a, "subject", .{ .string = fields[3] });
+            try clean.object.put(a, "bodyText", .{ .string = fields[4] });
+            var draft = try decodeDraft(a, clean);
+            try validateDraft(draft, false);
+            draft.recoveryFields = fields;
+            // The recovery body lives in the raw fields once, while the index
+            // retains only its subject. Normal drafts keep bodyText as before.
+            draft.bodyText = "";
+            return j.value(a, try store.putDraft(draft, if (j.text(req, "draftId").len != 0) j.text(req, "draftId") else null));
+        }
         if (std.mem.eql(u8, cmd, "draft.discard")) {
             try store.discardDraft(try j.required(req, "draftId"));
             return j.value(a, .{ .discarded = true });
@@ -168,6 +319,28 @@ pub const Session = struct {
             const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = try quote(a, message.bodyText), .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references };
             try validateDraft(d, false);
             return j.value(a, try store.putDraft(d, null));
+        }
+        if (std.mem.eql(u8, cmd, "mail.forward")) {
+            const message = try s.read(a, &store, try j.required(req, "messageId"), req);
+            if (message.attachments.len > 16) return error.TooManyAttachments;
+            var total: usize = 0;
+            for (message.attachments) |attachment| total = std.math.add(usize, total, attachment.size) catch return error.AttachmentsTooLarge;
+            if (total > t.Limits.body_bytes) return error.AttachmentsTooLarge;
+            const attachments = try a.dupe(t.Attachment, message.attachments);
+            for (attachments) |*attachment| if (attachment.data.len == 0 and attachment.size != 0) {
+                if (s.options.fixtures) return error.AttachmentNotFound;
+                var request = try j.copyObject(a, req);
+                try request.object.put(a, "attachmentId", .{ .string = attachment.id });
+                store.release();
+                const value = try s.remote(a, address, "mail.attachment", request);
+                try s.reopenBody(a, &store);
+                attachment.* = try j.decode(t.Attachment, a, value);
+            };
+            // A forward is a new conversation, not a reply to the old thread.
+            const body = try std.fmt.allocPrint(a, "\n\n---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, message.bodyText });
+            const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}), .bodyText = body, .attachments = attachments };
+            try validateDraft(draft, false);
+            return j.value(a, try store.putDraft(draft, null));
         }
         if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) return s.listMail(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.read")) return j.value(a, try s.read(a, &store, try j.required(req, "messageId"), req));
@@ -201,6 +374,14 @@ pub const Session = struct {
             const thread = try j.required(req, "threadId");
             const source = try s.fixtureProviderSource(a, &store);
             var messages: std.ArrayList(t.Message) = .empty;
+            var thread_total: usize = 0;
+            for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "threadId"), thread)) {
+                thread_total += 1;
+            };
+            for (store.state.outbox) |entry| if (std.mem.eql(u8, entry.threadId, thread)) {
+                thread_total += 1;
+            };
+            if (thread_total != 0) s.reportProgress(.bodies, 0, thread_total);
             for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "threadId"), thread)) {
                 var m = try s.normalize(a, source, v);
                 if (store.find(m.id)) |existing| {
@@ -209,9 +390,11 @@ pub const Session = struct {
                 }
                 try store.put(m, true);
                 try messages.append(a, m);
+                s.reportProgress(.bodies, messages.items.len, thread_total);
             };
             for (store.state.outbox) |entry| if (std.mem.eql(u8, entry.threadId, thread)) {
                 if (try store.readOutbox(entry.id)) |sent| try messages.append(a, sent);
+                s.reportProgress(.bodies, messages.items.len, thread_total);
             };
             if (messages.items.len == 0) return error.MessageNotFound;
             std.mem.sort(t.Message, messages.items, {}, olderFirst);
@@ -269,9 +452,9 @@ pub const Session = struct {
             if (j.get(req, "addLabels")) |v| for (try valueArray(v)) |label| {
                 const text = try j.string(label);
                 try recipients.validateHeader(text);
-                try addLabel(a, &labels, text);
+                try addLabel(a, &labels, try fixtureLabel(provider_source, text));
             };
-            if (j.get(req, "removeLabels")) |v| for (try valueArray(v)) |label| removeLabel(&labels, try j.string(label));
+            if (j.get(req, "removeLabels")) |v| for (try valueArray(v)) |label| removeLabel(&labels, try fixtureLabel(provider_source, try j.string(label)));
             m.labels = labels.items;
             m.unread = hasLabel(m, "UNREAD");
             store.state.fixtureCalls += 1;
@@ -303,6 +486,148 @@ pub const Session = struct {
         }
         return error.UnsupportedCommand;
     }
+    fn loadLabels(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, cached: bool) !Value {
+        try s.capability(a, store.state.account, req, "mail-read");
+        if (!cached) {
+            if (!s.options.fixtures) {
+                store.release();
+                const response = try s.remote(a, store.state.account, "labels.list", req);
+                try s.reopenBody(a, store);
+                store.state.labels = try j.decode([]storage.Label, a, j.get(response, "labels") orelse return error.InvalidProviderResponse);
+            } else {
+                const source = try s.fixture(a, store.state.account);
+                store.state.labels = try j.decode([]storage.Label, a, try fixtureLabelDefinitions(a, source));
+            }
+            if (store.state.labels.len > 512) return error.TooManyLabels;
+            for (store.state.labels) |label| {
+                try @import("../bounded.zig").identifier(label.id);
+                if (label.name.len > 512) return error.InvalidLabel;
+                try recipients.validateHeader(label.name);
+            }
+            try store.save();
+        }
+        return j.value(a, .{ .labels = store.state.labels, .cached = cached });
+    }
+    fn identities(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, cached: bool) !Value {
+        try s.capability(a, store.state.account, req, "mail-read");
+        const configured = s.config.accounts[s.config.index(store.state.account) orelse return error.UnknownAccount];
+        const primary: storage.Identity = .{ .address = configured.address.slice(), .name = configured.sender_name.slice(), .signature = configured.signature.slice(), .isDefault = true };
+        if (!cached) {
+            if (!s.options.fixtures) {
+                store.release();
+                const response = try s.remote(a, store.state.account, "accounts.identities", req);
+                try s.reopenBody(a, store);
+                store.state.identities = try j.decode([]storage.Identity, a, j.get(response, "identities") orelse return error.InvalidProviderResponse);
+            } else {
+                const source = try s.fixture(a, store.state.account);
+                store.state.identities = if (j.get(source, "identities")) |value| try j.decode([]storage.Identity, a, value) else try a.dupe(storage.Identity, &.{primary});
+            }
+            if (store.state.identities.len > 32) return error.TooManyAliases;
+            for (store.state.identities) |*identity| {
+                try recipients.validateAddress(identity.address);
+                try recipients.validateHeader(identity.name);
+                if (identity.name.len > 256 or identity.signature.len > 8192) return error.IdentityTooLarge;
+                identity.signature = try @import("mime.zig").sanitizeText(identity.signature, a);
+                if (std.ascii.eqlIgnoreCase(identity.address, primary.address)) {
+                    if (primary.name.len != 0) identity.name = primary.name;
+                    if (primary.signature.len != 0) identity.signature = primary.signature;
+                }
+            }
+            try store.save();
+        }
+        var output: std.ArrayList(storage.Identity) = .empty;
+        try output.appendSlice(a, store.state.identities);
+        var present = false;
+        for (output.items) |identity| present = present or std.ascii.eqlIgnoreCase(identity.address, primary.address);
+        if (!present) try output.append(a, primary);
+        return j.value(a, .{ .identities = output.items, .cached = cached });
+    }
+    const BatchRemote = struct {
+        session: *Session,
+        source: Value = .null,
+        transport: ?@import("gmail.zig").Transport = null,
+        fn labelsFn(ctx: *anyopaque, a: std.mem.Allocator, store: *storage.Store, id: []const u8) ![]const []const u8 {
+            const self: *BatchRemote = @ptrCast(@alignCast(ctx));
+            if (self.transport) |transport| {
+                const value = try @import("gmail.zig").dispatchAuthorized(self.session.io, a, store.state.account, &.{"mail-read"}, transport, "mail.labels", try j.value(a, .{ .messageId = id }));
+                return j.decode([]const []const u8, a, j.get(value, "labels") orelse return error.InvalidProviderResponse);
+            }
+            if (store.fixtureRecord(id)) |record| {
+                if (record.deleted) return error.MessageNotFound;
+                return record.labels;
+            }
+            for (store.state.outbox) |message| if (std.mem.eql(u8, id, message.id)) return message.labels;
+            for (try array(self.source, "messages")) |raw| if (std.mem.eql(u8, id, j.text(raw, "id"))) return fixtureLabels(a, raw);
+            return error.MessageNotFound;
+        }
+        fn modifyFn(ctx: *anyopaque, a: std.mem.Allocator, id: []const u8, before: []const []const u8, delta: triage.Delta) ![]const []const u8 {
+            const self: *BatchRemote = @ptrCast(@alignCast(ctx));
+            if (self.transport) |transport| {
+                const value = try @import("gmail.zig").dispatchAuthorized(self.session.io, a, j.text(self.source, "account"), &.{"mail-modify"}, transport, "mail.modify-labels", try j.value(a, .{ .messageId = id, .addLabels = delta.add, .removeLabels = delta.remove }));
+                return j.decode([]const []const u8, a, j.get(value, "labels") orelse return error.InvalidProviderResponse);
+            }
+            if (self.session.scenario("rejected-mutation")) return error.ProviderRejected;
+            if (self.session.scenario("unknown-batch")) return error.UnknownOutcome;
+            return triage.apply(a, before, delta);
+        }
+    };
+    fn batchMail(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
+        try s.capability(a, address, req, "mail-modify");
+        const undoing = std.mem.eql(u8, j.text(req, "cmd"), "mail.undo");
+        var delta: triage.Delta = .{ .add = &.{}, .remove = &.{} };
+        if (undoing) {
+            const token = try j.required(req, "undoToken");
+            if (token.len > 256) return error.InvalidUndoToken;
+        } else {
+            const ids = j.get(req, "messageIds") orelse return error.MissingField;
+            if (ids != .array or ids.array.items.len == 0 or ids.array.items.len > 100) return error.InvalidBatchSize;
+            for (ids.array.items, 0..) |value, i| {
+                const id = try j.string(value);
+                try @import("../bounded.zig").identifier(id);
+                for (ids.array.items[0..i]) |previous| if (std.mem.eql(u8, id, try j.string(previous))) return error.DuplicateMessage;
+            }
+            delta = try triage.plan(a, req);
+        }
+        var batch_remote: BatchRemote = .{ .session = s, .source = try j.value(a, .{ .account = address }) };
+        if (s.options.fixtures) {
+            var store = try storage.Store.open(s.io, a, s.cache_root, address, s.options);
+            defer store.close();
+            batch_remote.source = try s.fixtureProviderSource(a, &store);
+        }
+        var network: @import("gmail.zig").NetworkSession = undefined;
+        if (!s.options.fixtures) {
+            try network.init(s.io, a, &s.config, address, "mail.modify-labels", req);
+            batch_remote.transport = network.transport();
+        }
+        defer if (!s.options.fixtures) network.close();
+        const context: batch.Context = .{ .io = s.io, .allocator = s.allocator, .root = s.cache_root, .account = address, .options = s.options, .provider = .{ .context = &batch_remote, .labelsFn = BatchRemote.labelsFn, .modifyFn = BatchRemote.modifyFn, .fixtureCheckpoint = if (s.options.fixtures) fixtureCheckpoint(batch_remote.source) else null } };
+        if (undoing) return batch.undo(context, a, req);
+        // Resolve names before recording the inverse: receipts must contain
+        // provider IDs, so renamed labels do not change what undo restores.
+        const available = if (s.options.fixtures) j.get(batch_remote.source, "labels") else j.get(try @import("gmail.zig").dispatchAuthorized(s.io, a, address, &.{"mail-read"}, batch_remote.transport.?, "labels.list", req), "labels");
+        for ([_][]const []const u8{ delta.add, delta.remove }, 0..) |values, list_index| {
+            const resolved = try a.alloc([]const u8, values.len);
+            for (values, resolved) |label, *id| {
+                id.* = label;
+                for ([_][]const u8{ "INBOX", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT" }) |system| if (std.ascii.eqlIgnoreCase(label, system)) {
+                    id.* = system;
+                    break;
+                };
+                if (available) |labels_value| {
+                    for (try valueArray(labels_value)) |item| {
+                        if (std.mem.eql(u8, label, j.text(item, "name")) or std.mem.eql(u8, label, j.text(item, "id"))) id.* = try j.required(item, "id");
+                    }
+                } else if (std.mem.eql(u8, label, "Projects")) {
+                    id.* = "Label_demo";
+                }
+                if (id.len == 0 or id.len > 256) return error.InvalidLabel;
+                try recipients.validateHeader(id.*);
+            }
+            if (list_index == 0) delta.add = resolved else delta.remove = resolved;
+        }
+        for (delta.add) |added| for (delta.remove) |removed| if (std.mem.eql(u8, added, removed)) return error.ConflictingLabels;
+        return batch.run(context, a, req, delta);
+    }
     fn reopen(s: *Session, a: std.mem.Allocator, store: *storage.Store, expected: u64) !void {
         const account = store.state.account;
         store.close();
@@ -325,7 +650,9 @@ pub const Session = struct {
         defer store.close();
         const cmd = j.text(req, "cmd");
         if (std.mem.eql(u8, cmd, "mail.list")) return cachedList(a, &store, req);
-        if (std.mem.eql(u8, cmd, "mail.search")) return cacheSearch(a, &store, req);
+        if (std.mem.eql(u8, cmd, "mail.search")) return cacheSearch(a, &store, req, s.allocator);
+        if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, true);
+        if (std.mem.eql(u8, cmd, "accounts.identities")) return s.identities(a, &store, req, true);
         if (std.mem.eql(u8, cmd, "cache.stats")) return s.cacheStats(a, &store);
         if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search")) {
             try s.capability(a, address, req, "contacts-read");
@@ -367,20 +694,80 @@ pub const Session = struct {
         }
         return error.CacheUnsupported;
     }
-    fn cacheSearch(a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+    fn cacheSearch(a: std.mem.Allocator, store: *storage.Store, req: Value, body_allocator: std.mem.Allocator) !Value {
         const limit = try j.integer(req, "limit", 32);
         if (limit < 1 or limit > 100) return error.InvalidPageLimit;
         const query = j.text(req, "query");
         const label = j.text(req, "label");
         if (query.len > 4096 or label.len > 256) return error.InvalidQuery;
-        const key = storage.Store.hash(try std.fmt.allocPrint(a, "cache-search\x00{s}\x00{s}\x00{s}", .{ store.state.account, query, label }));
+        try cache_query.validate(query);
+        const label_id = cachedLabel(store, label);
+        var key = storage.Store.hash(try std.fmt.allocPrint(a, "cache-search\x00{s}\x00{s}\x00{s}", .{ store.state.account, query, label }));
+        if (cache_query.needsBody(query)) {
+            // Body residency changes hit sets independently of metadata
+            // generation. Bind pagination to that exact retained snapshot.
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(&key);
+            for (store.state.entries) |entry| {
+                hasher.update(entry.message.id);
+                hasher.update("\x00");
+                hasher.update(entry.bodyHash);
+                hasher.update("\x00");
+                hasher.update(entry.bodyError);
+                hasher.update("\x00");
+            }
+            var digest: [32]u8 = undefined;
+            hasher.final(&digest);
+            key = std.fmt.bytesToHex(digest, .lower);
+        }
         var candidates: std.ArrayList(t.Message) = .empty;
+        const SearchMatch = struct { messageId: []const u8, field: []const u8, offset: usize, length: usize, excerpt: []const u8 };
+        var highlights: std.ArrayList(SearchMatch) = .empty;
+        const term = cache_query.highlightTerm(query);
         for (store.state.entries) |entry| {
-            if (label.len != 0 and !hasLabel(entry.message, label)) continue;
-            if (!cacheMatches(entry.message, query)) continue;
+            try store.io.checkCancel();
+            if (label_id.len != 0 and !hasLabel(entry.message, label_id)) continue;
+            var body_arena = std.heap.ArenaAllocator.init(body_allocator);
+            defer body_arena.deinit();
+            // Each complete body is reclaimed before the next row. The result
+            // holds metadata and a small literal excerpt, never whole bodies.
+            var full = if (cache_query.needsBody(query)) (try store.readWithAllocator(body_arena.allocator(), entry.message.id)) orelse entry.message else entry.message;
+            if (entry.message.labels.len > 64) return error.InvalidLabels;
+            var names: [128][]const u8 = undefined;
+            var names_count: usize = 0;
+            for (entry.message.labels) |id| {
+                names[names_count] = id;
+                names_count += 1;
+                for (store.state.labels) |definition| if (std.mem.eql(u8, definition.id, id)) {
+                    if (!std.mem.eql(u8, definition.name, id)) {
+                        names[names_count] = definition.name;
+                        names_count += 1;
+                    }
+                    break;
+                };
+            }
+            full.labels = names[0..names_count];
+            full.unread = entry.message.unread;
+            if (!cacheMatches(full, query)) continue;
             var message = entry.message;
             message.bodyCacheError = entry.bodyError;
             try candidates.append(a, message);
+            var field: []const u8 = "metadata";
+            var source: []const u8 = message.subject;
+            if (cache_query.find(full.bodyText, term) != null) {
+                field = "body";
+                source = full.bodyText;
+            } else if (cache_query.find(message.subject, term) == null) {
+                source = message.snippet;
+                if (cache_query.find(source, term) == null) source = if (cache_query.find(message.from.name, term) != null) message.from.name else message.from.address;
+            }
+            const offset = cache_query.find(source, term) orelse 0;
+            // A bounded UTF-8 excerpt starts at a codepoint boundary and never
+            // exposes raw HTML/base64 or a second copy of the complete body.
+            var start = offset -| 48;
+            while (start < source.len and !std.unicode.utf8ValidateSlice(source[start..])) start += 1;
+            const excerpt = utf8Prefix(source[start..], 192);
+            try highlights.append(a, .{ .messageId = message.id, .field = field, .offset = offset - start, .length = if (cache_query.find(source, term) != null) @min(term.len, excerpt.len -| (offset - start)) else 0, .excerpt = try a.dupe(u8, excerpt) });
         }
         var offset: usize = 0;
         const cursor = j.text(req, "cursor");
@@ -397,9 +784,11 @@ pub const Session = struct {
             break;
         };
         if (offset > candidates.items.len) return error.InvalidCursor;
-        const end = @min(candidates.items.len, offset + @as(usize, @intCast(limit)));
+        const window = try adjacentCacheWindow(store, candidates.items, req, @intCast(limit), offset);
+        offset = window.start;
+        const end = window.end;
         for (candidates.items[offset..end]) |*message| message.bodyCached = try store.bodyAvailable(message.id);
-        return j.value(a, .{ .messages = candidates.items[offset..end], .cursor = if (offset != 0) try std.fmt.allocPrint(a, "K:{d}:{d}:{s}", .{ store.state.generation, offset, key }) else @as(?[]const u8, null), .previousCursor = if (offset != 0) try std.fmt.allocPrint(a, "K:{d}:{d}:{s}", .{ store.state.generation, offset - @min(offset, @as(usize, @intCast(limit))), key }) else @as(?[]const u8, null), .nextCursor = if (end < candidates.items.len) try std.fmt.allocPrint(a, "K:{d}:{d}:{s}", .{ store.state.generation, end, key }) else @as(?[]const u8, null), .matchedCachedCount = candidates.items.len, .cached = true, .cacheReady = store.state.entries.len != 0 or store.state.historyId.len != 0, .partial = true, .searchMode = "cache", .searchScope = "metadata", .generation = store.state.generation });
+        return j.value(a, .{ .cacheWindow = window.direction, .boundaryFallback = window.fallback, .hasMoreCachedBefore = offset != 0, .hasMoreCachedAfter = end < candidates.items.len, .messages = candidates.items[offset..end], .searchMatches = highlights.items[offset..end], .highlightTerm = term, .cursor = if (offset != 0) try std.fmt.allocPrint(a, "K:{d}:{d}:{s}", .{ store.state.generation, offset, key }) else @as(?[]const u8, null), .previousCursor = if (offset != 0) try std.fmt.allocPrint(a, "K:{d}:{d}:{s}", .{ store.state.generation, offset - @min(offset, @as(usize, @intCast(limit))), key }) else @as(?[]const u8, null), .nextCursor = if (end < candidates.items.len) try std.fmt.allocPrint(a, "K:{d}:{d}:{s}", .{ store.state.generation, end, key }) else @as(?[]const u8, null), .matchedCachedCount = candidates.items.len, .cached = true, .cacheReady = store.state.entries.len != 0 or store.state.historyId.len != 0, .partial = true, .searchMode = "cache", .searchScope = "metadata-and-cached-bodies", .generation = store.state.generation });
     }
 
     fn cachedList(a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
@@ -410,7 +799,7 @@ pub const Session = struct {
         if (query.len > 4096 or label.len > 256) return error.InvalidQuery;
         const key = try storage.Store.viewKey(a, store.state.account, query, label);
         const view = store.findView(&key);
-        const label_id = if (view) |v| v.labelId else label;
+        const label_id = if (view) |v| v.labelId else cachedLabel(store, label);
         var candidates: std.ArrayList(t.Message) = .empty;
         // Gmail search semantics are never guessed locally. Only an exact saved
         // query view contributes members, and stale membership is advertised.
@@ -443,17 +832,20 @@ pub const Session = struct {
             break;
         };
         if (offset > candidates.items.len) return error.InvalidCursor;
-        const end = @min(candidates.items.len, offset + @as(usize, @intCast(limit)));
+        const window = try adjacentCacheWindow(store, candidates.items, req, @intCast(limit), offset);
+        offset = window.start;
+        const end = window.end;
         for (candidates.items[offset..end]) |*message| message.bodyCached = try store.bodyAvailable(message.id);
         const remote_cursor = if (view) |v| if (!v.stale) v.remoteCursor else "" else "";
         const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(remote_cursor.len));
         _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, remote_cursor);
-        return j.value(a, .{ .messages = candidates.items[offset..end], .cursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset, key }) else @as(?[]const u8, null), .nextCursor = if (end < candidates.items.len) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, end, key }) else @as(?[]const u8, null), .remoteCursor = if (remote_cursor.len != 0) try std.fmt.allocPrint(a, "L:{d}:{s}:{s}", .{ store.state.generation, key, encoded }) else @as(?[]const u8, null), .hasMoreRemote = remote_cursor.len != 0, .cached = true, .cacheReady = ready, .partial = true, .stale = if (view) |v| v.stale else false, .viewIncomplete = if (view) |v| v.incomplete else false, .lastSyncAt = if (view) |v| v.lastSyncAt else @as(i64, 0), .generation = store.state.generation, .previousCursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset - @min(offset, @as(usize, @intCast(limit))), key }) else @as(?[]const u8, null) });
+        return j.value(a, .{ .cacheWindow = window.direction, .boundaryFallback = window.fallback, .hasMoreCachedBefore = offset != 0, .hasMoreCachedAfter = end < candidates.items.len, .messages = candidates.items[offset..end], .cursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset, key }) else @as(?[]const u8, null), .nextCursor = if (end < candidates.items.len) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, end, key }) else @as(?[]const u8, null), .remoteCursor = if (remote_cursor.len != 0) try std.fmt.allocPrint(a, "L:{d}:{s}:{s}", .{ store.state.generation, key, encoded }) else @as(?[]const u8, null), .hasMoreRemote = remote_cursor.len != 0, .cached = true, .cacheReady = ready, .partial = true, .stale = if (view) |v| v.stale else false, .viewIncomplete = if (view) |v| v.incomplete else false, .lastSyncAt = if (view) |v| v.lastSyncAt else @as(i64, 0), .generation = store.state.generation, .previousCursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset - @min(offset, @as(usize, @intCast(limit))), key }) else @as(?[]const u8, null) });
     }
 
     const FixtureRemote = struct {
         session: *Session,
         source: Value,
+        metadata_requests: usize = 0,
         fn transport(self: *FixtureRemote) @import("gmail.zig").Transport {
             return .{ .context = self, .requestFn = request };
         }
@@ -461,8 +853,15 @@ pub const Session = struct {
             _ = body;
             if (method != .GET) return error.FixtureOnly;
             const self: *FixtureRemote = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, url, "?format=metadata") != null or std.mem.indexOf(u8, url, "?format=minimal") != null) {
+                // The preceding request has completed and its progress was
+                // reported before this next provider step can be held.
+                try self.session.fixtureProgressGate(a, self.source, .metadata, self.metadata_requests);
+                self.metadata_requests += 1;
+            }
             const sync = j.get(self.source, "sync") orelse j.object(a);
             const checkpoint = if (j.text(sync, "historyId").len != 0) j.text(sync, "historyId") else "1";
+            if (std.mem.indexOf(u8, url, "/labels?") != null) return j.value(a, .{ .labels = try fixtureLabelDefinitions(a, self.source) });
             if (std.mem.indexOf(u8, url, "/profile?") != null) return j.value(a, .{ .historyId = checkpoint, .emailAddress = j.text(self.source, "account") });
             if (std.mem.indexOf(u8, url, "/history?") != null) {
                 const start = try parameter(a, url, "startHistoryId");
@@ -582,8 +981,41 @@ pub const Session = struct {
         if (delay != 0) try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(delay) }).sleep(s.io);
         if (s.scenario("offline-refresh")) return error.TransientFailure;
     }
+    fn fixtureProgressGate(s: *Session, a: std.mem.Allocator, source: Value, phase: t.FetchPhase, completed: usize) !void {
+        if (!s.options.fixtures) return;
+        const sync = j.get(source, "sync") orelse return;
+        const control = j.get(sync, "fixtureProgress") orelse return;
+        const selected = std.meta.stringToEnum(t.FetchPhase, j.text(control, "phase")) orelse return error.InvalidFixtureControl;
+        const count = try j.integer(control, "completed", 1);
+        if (count < 0 or count > 100) return error.InvalidFixtureControl;
+        if (phase != selected or completed != @as(usize, @intCast(count))) return;
+        const root = s.options.fixture_root orelse return error.InvalidFixtureControl;
+        const hold = j.text(control, "fixtureHold");
+        const entered = j.text(control, "fixtureEntered");
+        for ([_][]const u8{ hold, entered }) |name| {
+            if (name.len == 0 or name.len > 64 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidFixtureControl;
+            for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_') return error.InvalidFixtureControl;
+        }
+        const entered_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, entered });
+        // Never truncate an existing fixture/reference file.
+        const marker = std.Io.Dir.cwd().createFile(s.io, entered_path, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch |err| if (err == error.PathAlreadyExists) null else return err;
+        if (marker) |file| file.close(s.io);
+        const hold_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, hold });
+        const deadline: std.Io.Clock.Timestamp = .fromNow(s.io, .{ .clock = .awake, .raw = .fromSeconds(15) });
+        while (true) {
+            try s.io.checkCancel();
+            std.Io.Dir.cwd().access(s.io, hold_path, .{}) catch |err| {
+                if (err == error.FileNotFound) break;
+                return err;
+            };
+            if (deadline.durationFromNow(s.io).raw.toNanoseconds() <= 0) return error.Timeout;
+            try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(20) }).sleep(s.io);
+        }
+    }
     fn refreshJob(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
         var request = try j.copyObject(a, req);
+        const prefetch = try requestedPrefetch(s.options, request);
+        try request.object.put(a, "prefetchLimit", .{ .integer = prefetch });
         const automatic = try j.boolean(request, "auto", false);
         const interval = try j.integer(request, "intervalSeconds", 300);
         if (interval < 60 or interval > 86400) return error.InvalidRefreshInterval;
@@ -621,7 +1053,9 @@ pub const Session = struct {
                 return result;
             }
         }
-        var worker = s.*;
+        const worker = try s.allocator.create(Session);
+        defer s.allocator.destroy(worker);
+        worker.* = s.*;
         if (automatic) worker.options.use_persisted_policy = true;
         var result = try worker.refreshOwned(a, address, request);
         try result.object.put(a, "coalesced", .{ .bool = false });
@@ -634,8 +1068,11 @@ pub const Session = struct {
         const key = try storage.Store.viewKey(a, store.state.account, "", "INBOX");
         const view = store.findView(&key) orelse return false;
         if (view.stale or view.lastSyncStartedAt <= 0 or now_ms < view.lastSyncStartedAt or now_ms - view.lastSyncStartedAt >= @divTrunc(interval, 2) * 1000 or !std.mem.eql(u8, view.labelId, "INBOX")) return false;
-        const limit = try j.integer(request, "limit", 32);
-        if (limit < 1 or limit > 100) return false;
+        const page = try j.integer(request, "limit", 32);
+        if (page < 1 or page > 100) return false;
+        const limit = try j.integer(request, "prefetchLimit", @min(page, 32));
+        if (limit < 0 or limit > 64) return false;
+        if (limit == 0) return true;
         var found: usize = 0;
         for (store.state.entries) |entry| {
             if (!hasLabel(entry.message, "INBOX")) continue;
@@ -654,6 +1091,8 @@ pub const Session = struct {
         const started_at = std.Io.Timestamp.now(s.io, .real).toMilliseconds();
         try s.capability(a, address, req, "mail-read");
         var request = try j.copyObject(a, req);
+        const prefetch = try requestedPrefetch(s.options, req);
+        try request.object.put(a, "limit", .{ .integer = @max(try j.integer(req, "limit", 32), @max(1, prefetch)) });
         var expected: u64 = undefined;
         {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
@@ -677,7 +1116,7 @@ pub const Session = struct {
         }
         var fixture_remote: FixtureRemote = undefined;
         var live: @import("gmail.zig").NetworkSession = undefined;
-        const transport = if (s.options.fixtures) fixture_transport: {
+        var transport = if (s.options.fixtures) fixture_transport: {
             const raw_source = try s.fixture(a, address);
             try s.fixtureGate(a, raw_source, req);
             var phase = std.heap.ArenaAllocator.init(s.allocator);
@@ -699,6 +1138,7 @@ pub const Session = struct {
             try live.init(s.io, a, &s.config, address, "mail.refresh", req);
             break :live_transport live.transport();
         };
+        transport.progress_sink = s.progress_sink;
         defer if (!s.options.fixtures) live.close();
         const plan_value = try @import("gmail.zig").dispatchAuthorized(s.io, a, address, &.{"mail-read"}, transport, "mail.refresh", request);
         const plan = try j.decode(@import("gmail.zig").RefreshPlan, a, plan_value);
@@ -759,10 +1199,35 @@ pub const Session = struct {
             const sa = phase.allocator();
             var snapshot = try storage.Store.openCached(s.io, sa, s.cache_root, address, s.options);
             defer snapshot.close();
-            const head = try cachedList(sa, &snapshot, req);
-            for (try array(head, "messages")) |message| if (j.text(message, "bodyCacheError").len == 0) try ids.append(a, try a.dupe(u8, try j.required(message, "id")));
+            // The authoritative scoped metadata is committed before body
+            // prefetch. Publish only this view, never the global retention
+            // enumeration used to establish the account checkpoint.
+            if (s.progress_sink) |sink| if (sink.rowFn != null) {
+                var view_request = try j.copyObject(sa, req);
+                try view_request.object.put(sa, "limit", .{ .integer = 32 });
+                const view = try cachedList(sa, &snapshot, view_request);
+                const rows = try array(view, "messages");
+                for (rows, 0..) |row, index| sink.row(.{ .kind = .view, .index = index, .total = rows.len, .message = try j.decode(t.Message, sa, row) });
+            };
+            if (prefetch != 0) {
+                var body_request = try j.copyObject(sa, req);
+                try body_request.object.put(sa, "limit", .{ .integer = prefetch });
+                const head = try cachedList(sa, &snapshot, body_request);
+                for (try array(head, "messages")) |message| if (j.text(message, "bodyCacheError").len == 0) {
+                    try s.io.checkCancel();
+                    const id = try j.required(message, "id");
+                    var verify = std.heap.ArenaAllocator.init(s.allocator);
+                    defer verify.deinit();
+                    if (try snapshot.readWithAllocator(verify.allocator(), id)) |_| continue;
+                    try ids.append(a, try a.dupe(u8, id));
+                };
+            }
         }
+        var body_total = ids.items.len;
+        var body_completed: usize = 0;
+        if (body_total != 0) s.reportProgress(.bodies, 0, body_total);
         for (ids.items) |id| {
+            try s.io.checkCancel();
             var message_arena = std.heap.ArenaAllocator.init(s.allocator);
             defer message_arena.deinit();
             const ma = message_arena.allocator();
@@ -772,11 +1237,18 @@ pub const Session = struct {
                 var snapshot = try storage.Store.openCached(s.io, check_phase.allocator(), s.cache_root, address, s.options);
                 defer snapshot.close();
                 if (snapshot.state.generation != expected) return error.CacheChanged;
-                const entry = snapshot.find(id) orelse continue;
+                const entry = snapshot.find(id) orelse {
+                    body_total -= 1;
+                    s.reportProgress(.bodies, body_completed, body_total);
+                    continue;
+                };
                 // Byte pressure may have removed queued old-tail IDs; another
                 // reader may already have cached a body. Never refetch either.
-                if (entry.bodyError.len != 0) continue;
-                if (try snapshot.read(id)) |_| continue;
+                if (entry.bodyError.len != 0 or (try snapshot.read(id)) != null) {
+                    body_total -= 1;
+                    s.reportProgress(.bodies, body_completed, body_total);
+                    continue;
+                }
             }
             var body_error: []const u8 = "";
             // Keep the validated typed message through its atomic cache commit.
@@ -809,6 +1281,11 @@ pub const Session = struct {
             commit.state.syncBodyGets += 1;
             try commit.save();
             expected = commit.state.generation;
+            commit.release();
+            body_completed += 1;
+            if (body_result) |message| s.reportRow(.{ .kind = .body, .message = message }) else s.reportRow(.{ .kind = .body, .failed = true, .message = .{ .id = id, .threadId = "" } });
+            s.reportProgress(.bodies, body_completed, body_total);
+            if (s.options.fixtures) try s.fixtureProgressGate(ma, fixture_remote.source, .bodies, body_completed);
         }
         var final_phase = std.heap.ArenaAllocator.init(s.allocator);
         defer final_phase.deinit();
@@ -857,7 +1334,7 @@ pub const Session = struct {
         } else if (!std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
     }
     fn remote(s: *Session, a: std.mem.Allocator, address: []const u8, cmd: []const u8, req: Value) !Value {
-        return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").execute, .{ s.io, a, &s.config, address, cmd, req });
+        return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeProgress, .{ s.io, a, &s.config, address, cmd, req, s.progress_sink });
     }
     fn fixture(s: *Session, a: std.mem.Allocator, address: []const u8) !Value {
         if (!s.options.fixtures) return error.LiveProviderNotReady;
@@ -1046,6 +1523,8 @@ pub const Session = struct {
         }
         const source = try s.fixtureProviderSource(a, store);
         for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "id"), id)) {
+            s.reportProgress(.bodies, 0, 1);
+            try s.fixtureProgressGate(a, source, .bodies, 0);
             var m = try s.normalize(a, source, v);
             if (store.find(id)) |existing| {
                 m.labels = existing.message.labels;
@@ -1054,6 +1533,8 @@ pub const Session = struct {
             store.state.fixtureCalls += 1;
             try store.put(m, true);
             try store.save();
+            s.reportRow(.{ .kind = .body, .message = m });
+            s.reportProgress(.bodies, 1, 1);
             return m;
         };
         return error.MessageNotFound;
@@ -1090,6 +1571,7 @@ pub const Session = struct {
             } else return error.InvalidCursor;
         }
         const source = try s.fixtureProviderSource(a, store);
+        const label_id = try fixtureLabel(source, label);
         var messages: std.ArrayList(t.Message) = .empty;
         var matched: usize = 0;
         var next: bool = false;
@@ -1104,9 +1586,18 @@ pub const Session = struct {
         }
         try candidates.appendSlice(a, store.state.outbox);
         std.mem.sort(t.Message, candidates.items, {}, newerFirst);
+        var eligible: usize = 0;
+        for (candidates.items) |message| {
+            if (label_id.len > 0 and !hasLabel(message, label_id)) continue;
+            if (label.len == 0 and query.len == 0 and hasLabel(message, "TRASH")) continue;
+            if (query.len > 0 and !matches(message, query)) continue;
+            eligible += 1;
+        }
+        const page_total = @min(eligible -| offset, @as(usize, @intCast(limit)));
+        if (page_total != 0) s.reportProgress(.metadata, 0, page_total);
         for (candidates.items) |message| {
             var m = message;
-            if (label.len > 0 and !hasLabel(m, label)) continue;
+            if (label_id.len > 0 and !hasLabel(m, label_id)) continue;
             if (label.len == 0 and query.len == 0 and hasLabel(m, "TRASH")) continue;
             if (query.len > 0 and !matches(m, query)) continue;
             matched += 1;
@@ -1122,11 +1613,14 @@ pub const Session = struct {
             m.invitation = null;
             m.attachments = &.{};
             try messages.append(a, m);
+            s.reportRow(.{ .kind = .page, .index = messages.items.len - 1, .total = page_total, .message = m });
+            s.reportProgress(.metadata, messages.items.len, page_total);
+            try s.fixtureProgressGate(a, source, .metadata, messages.items.len);
         }
         if (offset > matched) return error.InvalidCursor;
         store.state.fixtureCalls += 1;
         const saved_cursor = if (next) try std.fmt.allocPrint(a, "{d}", .{offset + messages.items.len}) else "";
-        try store.recordView(query, label, label, messages.items, saved_cursor, cursor.len != 0);
+        try store.recordView(query, label, label_id, messages.items, saved_cursor, cursor.len != 0);
         try store.save();
         return j.value(a, .{ .messages = messages.items, .nextCursor = if (next) try std.fmt.allocPrint(a, "1:{d}:{d}:{s}", .{ store.state.generation, offset + messages.items.len, key }) else @as(?[]const u8, null) });
     }
@@ -1255,9 +1749,7 @@ pub const Session = struct {
         const operation_id = try j.required(req, "operationId");
         if (operation_id.len > 256) return error.InvalidOperationId;
         try recipients.validateHeader(operation_id);
-        var canonical = draft;
-        canonical.id = "";
-        const payload = try std.json.Stringify.valueAlloc(a, .{ .draft = canonical, .calendar = if (calendar) |ics| try calendarIdentity(a, ics) else null }, .{});
+        const payload = try operationPayload(a, draft, store.state.account, calendar);
         const digest = storage.Store.hash(payload);
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
             if (!std.mem.eql(u8, operation.hash, &digest)) return error.OperationConflict;
@@ -1272,7 +1764,17 @@ pub const Session = struct {
         const wire_hash = storage.Store.hash(wire_identity);
         if (s.options.fixtures) {
             var from: recipients.Mailbox = .{};
-            try from.address.set(store.state.account);
+            const sender = draft.from orelse t.Address{ .address = store.state.account };
+            if (!std.ascii.eqlIgnoreCase(sender.address, store.state.account)) {
+                const source = try s.fixture(a, store.state.account);
+                var verified = false;
+                if (j.get(source, "identities")) |identities_value| for (try valueArray(identities_value)) |identity| {
+                    verified = verified or std.ascii.eqlIgnoreCase(j.text(identity, "address"), sender.address);
+                };
+                if (!verified) return error.UnverifiedSender;
+            }
+            try from.address.set(sender.address);
+            try from.name.set(sender.name);
             var envelope: recipients.Envelope = .{};
             const lists = [_][]const t.Address{ draft.to, draft.cc, draft.bcc };
             const targets = [_]*recipients.List{ &envelope.to, &envelope.cc, &envelope.bcc };
@@ -1299,7 +1801,7 @@ pub const Session = struct {
             const result = s.remote(a, store.state.account, if (calendar != null) "invitation.reply" else "mail.send", request) catch |err| {
                 operation.errorCode = @errorName(err);
                 operation.outcome = switch (err) {
-                    error.FormTooLarge, error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.OAuthClientRequired, error.WrongAccount, error.InvalidGrant, error.UnexpectedScope, error.GrantClientMismatch, error.MessageNotFound, error.ContactConflict, error.RateLimited => "rejected",
+                    error.UnverifiedSender, error.FormTooLarge, error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.OAuthClientRequired, error.WrongAccount, error.InvalidGrant, error.UnexpectedScope, error.GrantClientMismatch, error.MessageNotFound, error.ContactConflict, error.RateLimited => "rejected",
                     else => "unknown",
                 };
                 store.save() catch {
@@ -1321,7 +1823,7 @@ pub const Session = struct {
             store.state.fixtureSends += 1;
             operation.messageId = try store.nextId("sent");
             operation.outcome = if (s.scenario("applied-lost")) "unknown" else "applied";
-            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = .{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(draft.bodyText, 240), .bodyText = draft.bodyText, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = draft.attachments, .invitation = calendar };
+            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(draft.bodyText, 240), .bodyText = draft.bodyText, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = draft.attachments, .invitation = calendar };
             // Copy the receipt first: put() can grow the entries slice, never operations.
             store.putOutbox(sent) catch {
                 operation.outcome = "unknown";
@@ -1375,11 +1877,28 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
     draft.to = if (j.get(v, "to")) |x| try decodeAddresses(a, x) else &.{};
     draft.cc = if (j.get(v, "cc")) |x| try decodeAddresses(a, x) else &.{};
     draft.bcc = if (j.get(v, "bcc")) |x| try decodeAddresses(a, x) else &.{};
+    if (j.get(v, "from")) |sender| if (sender != .null) {
+        if (sender == .string) {
+            const addresses = try decodeAddresses(a, sender);
+            if (addresses.len != 1) return error.InvalidSender;
+            draft.from = addresses[0];
+        } else draft.from = try j.decode(t.Address, a, sender);
+    };
+    if (j.get(v, "recoveryFields")) |fields| if (fields != .null) {
+        draft.recoveryFields = try j.decode([]const []const u8, a, fields);
+        if (draft.recoveryFields.?.len != 5) return error.InvalidRecovery;
+    };
     draft.attachments = if (j.get(v, "attachments")) |x| try j.decode([]const t.Attachment, a, x) else &.{};
     _ = try @import("mime.zig").composeAttachments(draft.attachments, a);
     return draft;
 }
 pub fn validateDraft(d: t.Draft, send: bool) !void {
+    if (send and d.recoveryFields != null) return error.UnfinishedDraft;
+    if (d.from) |sender| {
+        try recipients.validateAddress(sender.address);
+        try recipients.validateHeader(sender.name);
+        if (sender.name.len > 256) return error.InvalidSender;
+    }
     if (d.to.len + d.cc.len + d.bcc.len > t.Limits.recipients) return error.TooManyRecipients;
     if (send and d.to.len + d.cc.len + d.bcc.len == 0) return error.MissingRecipient;
     if (d.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
@@ -1453,22 +1972,9 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 fn cacheMatches(m: t.Message, q: []const u8) bool {
-    if (std.mem.startsWith(u8, q, "from:")) return containsIgnoreCase(m.from.address, q[5..]) or containsIgnoreCase(m.from.name, q[5..]);
-    if (std.mem.startsWith(u8, q, "subject:")) return containsIgnoreCase(m.subject, q[8..]);
-    if (std.mem.eql(u8, q, "is:unread")) return m.unread;
-    if (std.mem.startsWith(u8, q, "in:")) {
-        for (m.labels) |label| if (std.ascii.eqlIgnoreCase(label, q[3..])) return true;
-        return false;
-    }
-    if (std.mem.eql(u8, q, "-in:inbox -in:trash")) return !hasLabel(m, "INBOX") and !hasLabel(m, "TRASH");
-    if (std.mem.startsWith(u8, q, "-in:")) {
-        for (m.labels) |label| if (std.ascii.eqlIgnoreCase(label, q[4..])) return false;
-        return true;
-    }
-    if (std.mem.eql(u8, q, "-in:inbox -in:trash")) return !hasLabel(m, "INBOX") and !hasLabel(m, "TRASH");
-    for (m.labels) |label| if (containsIgnoreCase(label, q)) return true;
-    return containsIgnoreCase(m.subject, q) or containsIgnoreCase(m.snippet, q) or containsIgnoreCase(m.from.address, q) or containsIgnoreCase(m.from.name, q);
+    return cache_query.matches(m, q);
 }
+
 fn matches(m: t.Message, q: []const u8) bool {
     if (std.mem.eql(u8, q, "-in:inbox -in:trash")) return !hasLabel(m, "INBOX") and !hasLabel(m, "TRASH");
     if (std.mem.startsWith(u8, q, "from:")) return containsIgnoreCase(m.from.address, q[5..]);
@@ -1639,16 +2145,16 @@ test "cache search has K account query mode cursors and metadata-only predicates
     defer store.close();
     for (0..3) |i| try store.put(.{ .id = try std.fmt.allocPrint(a, "m{d}", .{i}), .threadId = "t", .subject = "Café synthetic", .from = .{ .address = "sender@example.test", .name = "Alex Fixture" }, .labels = &.{"INBOX"}, .receivedAt = @intCast(i) }, false);
     var request = try j.value(a, .{ .query = "Café", .limit = @as(u8, 1) });
-    const result = try Session.cacheSearch(a, &store, request);
+    const result = try Session.cacheSearch(a, &store, request, std.testing.allocator);
     try std.testing.expectEqualStrings("cache", j.text(result, "searchMode"));
     try std.testing.expectEqual(@as(i64, 3), try j.integer(result, "matchedCachedCount", 0));
     const cursor = try j.required(result, "nextCursor");
     try std.testing.expect(std.mem.startsWith(u8, cursor, "K:"));
     try request.object.put(a, "cursor", .{ .string = cursor });
-    _ = try Session.cacheSearch(a, &store, request);
+    _ = try Session.cacheSearch(a, &store, request, std.testing.allocator);
     try std.testing.expectError(error.InvalidCursor, Session.cachedList(a, &store, request));
     try request.object.put(a, "query", .{ .string = "from:Alex" });
-    try std.testing.expectError(error.InvalidCursor, Session.cacheSearch(a, &store, request));
+    try std.testing.expectError(error.InvalidCursor, Session.cacheSearch(a, &store, request, std.testing.allocator));
     try std.testing.expect(cacheMatches(store.state.entries[0].message, "from:Alex"));
     try std.testing.expect(cacheMatches(store.state.entries[0].message, "in:inbox"));
     try std.testing.expect(!cacheMatches(store.state.entries[0].message, "-in:inbox -in:trash"));
@@ -1688,4 +2194,115 @@ test "cached contacts distinguish absent empty and loaded data without granting 
     try std.testing.expectEqual(@as(usize, 1), (try array(try session.cachedDispatch(a, "fictional@example.test", search), "contacts")).len);
     session.options.fixture_scenario = "readonly";
     try std.testing.expectError(error.PermissionDenied, session.cachedDispatch(a, "fictional@example.test", req));
+}
+
+test "wishlist: old primary draft operation wire keeps optional nulls absent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const literal = "{\"draft\":{\"id\":\"\",\"to\":[{\"address\":\"peer@example.test\",\"name\":\"\"}],\"cc\":[],\"bcc\":[],\"subject\":\"Hi\",\"bodyText\":\"Body\",\"threadId\":\"\",\"inReplyTo\":\"\",\"references\":\"\",\"attachments\":[]},\"calendar\":null}";
+    var draft: t.Draft = .{ .id = "local-id", .to = &.{.{ .address = "peer@example.test" }}, .subject = "Hi", .bodyText = "Body" };
+    try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
+    draft.from = .{ .address = "SELF@example.test" };
+    try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
+}
+
+test "wishlist: body search pagination binds changing body residency" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/body-search", .{tmp.sub_path});
+    var store = try storage.Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    for (0..3) |i| try store.put(.{ .id = try std.fmt.allocPrint(a, "m{d}", .{i}), .threadId = "t", .subject = "needle", .bodyText = if (i < 2) "A unique needle" else "", .receivedAt = @intCast(i) }, i < 2);
+    var body_request = try j.value(a, .{ .query = "body:needle", .limit = @as(u8, 1) });
+    var metadata_request = try j.value(a, .{ .query = "subject:needle", .limit = @as(u8, 1) });
+    const body = try Session.cacheSearch(a, &store, body_request, std.testing.allocator);
+    const metadata = try Session.cacheSearch(a, &store, metadata_request, std.testing.allocator);
+    try body_request.object.put(a, "cursor", .{ .string = try j.required(body, "nextCursor") });
+    try metadata_request.object.put(a, "cursor", .{ .string = try j.required(metadata, "nextCursor") });
+    const generation = store.state.generation;
+    try store.put(.{ .id = "m2", .threadId = "t", .subject = "needle", .bodyText = "Newly cached needle", .receivedAt = 2 }, true);
+    try std.testing.expectEqual(generation, store.state.generation);
+    try std.testing.expectError(error.InvalidCursor, Session.cacheSearch(a, &store, body_request, std.testing.allocator));
+    _ = try Session.cacheSearch(a, &store, metadata_request, std.testing.allocator);
+}
+
+test "fetch progress: fixture metadata bodies then cache hits and wrapper ownership" {
+    const Recorder = struct {
+        values: [16]t.FetchProgress = undefined,
+        count: usize = 0,
+        fn report(ctx: *anyopaque, value: t.FetchProgress) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.count < self.values.len) {
+                self.values[self.count] = value;
+                self.count += 1;
+            }
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/progress", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    var recorder: Recorder = .{};
+    const sink: t.ProgressSink = .{ .ctx = &recorder, .reportFn = Recorder.report };
+    const request = "{\"cmd\":\"mail.refresh\",\"account\":\"personal@example.com\",\"label\":\"INBOX\",\"limit\":2}";
+    const raw = try session.client().callWithProgress(a, request, sink);
+    const reply = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+    try std.testing.expect(try j.boolean(reply, "ok", false));
+    try std.testing.expectEqual(@as(usize, 6), recorder.count);
+    for (recorder.values[0..6], [_]usize{ 0, 1, 2, 0, 1, 2 }, 0..) |value, completed, index| {
+        try std.testing.expectEqual(if (index < 3) t.FetchPhase.metadata else t.FetchPhase.bodies, value.phase);
+        try std.testing.expectEqual(completed, value.completed);
+        try std.testing.expectEqual(@as(usize, 2), value.total);
+    }
+    try std.testing.expect(session.progress_sink == null);
+    const original_root = session.cache_root;
+    recorder.count = 0;
+    _ = try session.client().callWithProgress(a, request, sink);
+    try std.testing.expectEqual(@as(usize, 0), recorder.count);
+    try std.testing.expectEqualStrings(root, session.cache_root);
+    try std.testing.expectEqual(original_root.ptr, session.cache_root.ptr);
+    _ = try session.client().callCached(a, "{\"cmd\":\"mail.list\",\"account\":\"personal@example.com\",\"label\":\"INBOX\",\"limit\":2}");
+    try std.testing.expectEqual(@as(usize, 0), recorder.count);
+}
+
+test "cache windows: adjacent IDs survive generation changes and bounded eviction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/windows", .{tmp.sub_path});
+    var store = try storage.Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true, .metadata_limit = 5 });
+    defer store.close();
+    for (0..5) |i| try store.put(.{ .id = try std.fmt.allocPrint(a, "m{d}", .{i}), .threadId = "t", .subject = "needle", .receivedAt = @intCast(i) }, false);
+    const before = try j.value(a, .{ .beforeMessageId = "m2", .limit = @as(u8, 2) });
+    var result = try Session.cachedList(a, &store, before);
+    try std.testing.expectEqualStrings("m4", j.text((try array(result, "messages"))[0], "id"));
+    try std.testing.expectEqualStrings("m3", j.text((try array(result, "messages"))[1], "id"));
+    try store.put(.{ .id = "m5", .threadId = "t", .subject = "needle", .receivedAt = 5 }, false);
+    store.state.generation += 1;
+    result = try Session.cachedList(a, &store, before);
+    try std.testing.expectEqualStrings("m3", j.text((try array(result, "messages"))[1], "id"));
+    const evicted = try j.value(a, .{ .beforeMessageId = "m0", .boundaryReceivedAt = @as(i64, 0), .limit = @as(u8, 2) });
+    result = try Session.cachedList(a, &store, evicted);
+    try std.testing.expect(try j.boolean(result, "boundaryFallback", false));
+    try std.testing.expectEqualStrings("m1", j.text((try array(result, "messages"))[1], "id"));
+    try std.testing.expectError(error.CacheBoundaryGone, Session.cachedList(a, &store, try j.value(a, .{ .beforeMessageId = "m0" })));
+    const after = try j.value(a, .{ .afterMessageId = "m3", .limit = @as(u8, 2) });
+    result = try Session.cacheSearch(a, &store, after, std.testing.allocator);
+    try std.testing.expectEqualStrings("m2", j.text((try array(result, "messages"))[0], "id"));
+    try std.testing.expectEqualStrings("m1", j.text((try array(result, "messages"))[1], "id"));
 }

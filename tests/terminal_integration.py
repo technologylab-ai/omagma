@@ -744,8 +744,8 @@ def one_shot_cached_server_search(client):
     for _ in range(20):
         data = run("mail", "search", ["--cached", "--query", "subject:Synthetic personal", "--limit", "12",
                                       *( ["--cursor", cursor] if cursor else [])])
-        require(data.get("searchMode") == "cache" and data.get("searchScope") == "metadata" and data.get("matchedCachedCount") == 40,
-                "--cached did not identify retained metadata scope")
+        require(data.get("searchMode") == "cache" and data.get("searchScope") == "metadata-and-cached-bodies" and data.get("matchedCachedCount") == 40,
+                "--cached did not identify retained local metadata/body scope")
         cached_ids += [m["id"] for m in data["messages"]]
         cursor = data.get("nextCursor") or ""
         if not cursor: break

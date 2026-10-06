@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, builtin.zig_version_string, "0.17.0")) @panic("Use exact Zig 0.17.0");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_filter = b.option([]const u8, "test-filter", "Run only correctness tests containing this text");
+    const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
     const tui_enabled = b.option(bool, "tui", "Include the libvaxis terminal client") orelse true;
     const vaxis = if (tui_enabled) b.lazyDependency("vaxis", .{ .target = target, .optimize = optimize }) else null;
     const m = b.createModule(.{
@@ -23,11 +25,11 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
     b.step("run", "Run omagma").dependOn(&run.step);
-    const t = b.addTest(.{ .root_module = m, .use_llvm = if (vaxis != null) true else null });
+    const t = b.addTest(.{ .root_module = m, .filters = test_filters, .use_llvm = if (vaxis != null) true else null });
     const correctness = b.step("test", "Run correctness tests");
     correctness.dependOn(&b.addRunArtifact(t).step);
     for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig" }) |path| {
-        const terminal_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl }) });
+        const terminal_test = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl }) });
         correctness.dependOn(&b.addRunArtifact(terminal_test).step);
     }
 

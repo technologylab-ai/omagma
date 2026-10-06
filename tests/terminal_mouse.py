@@ -57,7 +57,7 @@ def click(terminal, x, y):
 
 
 def list_point(terminal, index=0, sender=False, separator=False):
-    title = terminal.screen.locate("Mail · [ ] Page")
+    title = terminal.screen.locate("Mail ·")
     require(title is not None, "mail target pane not rendered")
     row = title["row"] + 1 + index*3 + (2 if separator else 1 if sender else 0)
     return title["column"] + 3, row
@@ -156,7 +156,7 @@ def run_case(binary,directory,name):
             for columns,rows,layout in ((160,40,'right'),(100,30,'below'),(70,30,'below'),(251,40,'right')):
                 if terminal.columns!=columns or terminal.rows!=rows:terminal.resize(columns,rows)
                 terminal.send(b':layout '+layout.encode()+b'\r');terminal.gap(.15)
-                terminal.until(lambda:terminal.screen.locate('Mail · [ ] Page') is not None)
+                terminal.until(lambda:terminal.screen.locate('Mail ·') is not None)
                 terminal.mouse_stage=f'{columns}x{rows}-reset-home'
                 click(terminal,*list_point(terminal,0))
                 terminal.until(lambda:'j/k Mail' in terminal.text())
@@ -227,7 +227,7 @@ def run_case(binary,directory,name):
             click(terminal,*point(terminal,'Subject:'))
             terminal.send(b'Mouse field edit');terminal.gap(.1);terminal.send(b'\x1b');terminal.gap()
             require('Mouse field edit' in terminal.text(),'post-editor click reporting was not restored')
-            terminal.send(b'q');terminal.until(lambda:terminal.screen.locate('Mail · [ ] Page') is not None)
+            terminal.send(b'q');terminal.until(lambda:terminal.screen.locate('Mail ·') is not None)
             click(terminal,*list_point(terminal,1));terminal.until(lambda:contains(terminal,ACCOUNTS[0],95))
             result.update(editorCookedTerminal=True,trackingOffDuringEditor=True,trackingRestoredAfterEditor=True,postEditorClickWorks=True)
         result.update(screen_capture(terminal))

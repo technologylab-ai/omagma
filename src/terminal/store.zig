@@ -107,6 +107,12 @@ pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []cons
 pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
 pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
 pub const FixtureProviderRecord = struct { id: []const u8, labels: []const []const u8 = &.{}, deleted: bool = false, sourceHistoryId: []const u8 = "1" };
+pub const Label = struct { id: []const u8, name: []const u8, type: []const u8 = "user" };
+pub const Identity = struct { address: []const u8, name: []const u8 = "", signature: []const u8 = "", isDefault: bool = false };
+/// Undo records only labels changed by this action. Other concurrent labels
+/// survive undo. An unconfirmed mutation is never replayed automatically.
+pub const UndoItem = struct { messageId: []const u8, addLabels: []const []const u8 = &.{}, removeLabels: []const []const u8 = &.{}, outcome: []const u8 = "pending", errorCode: []const u8 = "", restored: bool = false };
+pub const Undo = struct { token: []const u8, items: []UndoItem = &.{} };
 pub const State = struct {
     schema: u8 = 1,
     account: []const u8,
@@ -117,6 +123,9 @@ pub const State = struct {
     outbox: []t.Message = &.{},
     contacts: []t.Contact = &.{},
     contactsReady: bool = false,
+    labels: []Label = &.{},
+    identities: []Identity = &.{},
+    undo: []Undo = &.{},
     operations: []Operation = &.{},
     fixtureCalls: u64 = 0,
     fixtureSends: u64 = 0,
@@ -169,7 +178,17 @@ pub const Store = struct {
             // on every short refresh commit; escaped strings still allocate.
             state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_if_needed });
             if (state.schema != 1 or !std.mem.eql(u8, state.account, account)) return error.CacheIdentityMismatch;
-            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024) return error.CacheLimitExceeded;
+            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024 or state.labels.len > 512 or state.identities.len > 32 or state.undo.len > 16) return error.CacheLimitExceeded;
+            for (state.labels) |label| if (label.id.len > 256 or label.name.len > 512) return error.CacheLimitExceeded;
+            for (state.identities) |identity| if (identity.address.len > 320 or identity.name.len > 256 or identity.signature.len > 8192) return error.CacheLimitExceeded;
+            for (state.undo) |receipt| {
+                if (receipt.token.len > 256 or receipt.items.len > 100) return error.CacheLimitExceeded;
+                for (receipt.items) |item| {
+                    if (item.messageId.len > 256 or item.addLabels.len + item.removeLabels.len > 64 or item.errorCode.len > 64 or item.outcome.len > 16) return error.CacheLimitExceeded;
+                    for (item.addLabels) |label| if (label.len > 256) return error.CacheLimitExceeded;
+                    for (item.removeLabels) |label| if (label.len > 256) return error.CacheLimitExceeded;
+                }
+            }
         }
         var resolved = options;
         if (state.metadataPolicy != 0 and (state.metadataPolicy > t.Limits.metadata_hard or state.diskPolicy < 64 * 1024 or state.diskPolicy > t.Limits.disk_hard)) return error.CacheLimitExceeded;
@@ -409,11 +428,15 @@ pub const Store = struct {
         return stat.size == entry.bytes;
     }
     pub fn read(s: *Store, id: []const u8) !?t.Message {
+        return s.readWithAllocator(s.allocator, id);
+    }
+    pub fn readWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
         const e = s.find(id) orelse return null;
         if (e.bytes == 0) return null;
-        const raw = readPrivate(s.dir, s.io, s.allocator, try s.fileName("mail", id), 4 * t.Limits.body_bytes) catch |err| if (err == error.FileNotFound) return null else return err;
+        const key = hash(id);
+        const raw = readPrivate(s.dir, s.io, allocator, try std.fmt.allocPrint(allocator, "mail-{s}.json", .{key}), 4 * t.Limits.body_bytes) catch |err| if (err == error.FileNotFound) return null else return err;
         const digest = hash(raw);
-        const record = try std.json.parseFromSliceLeaky(BodyRecord, s.allocator, raw, .{ .allocate = .alloc_always });
+        const record = try std.json.parseFromSliceLeaky(BodyRecord, allocator, raw, .{ .allocate = .alloc_if_needed });
         if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
         if (!std.mem.eql(u8, e.bodyHash, &digest)) {
             e.bytes = 0;
@@ -477,6 +500,9 @@ pub const Store = struct {
         if (input.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
         if (!std.unicode.utf8ValidateSlice(input.bodyText)) return error.InvalidUtf8;
         var d = input;
+        if (d.from) |sender| if (sender.name.len == 0 and std.ascii.eqlIgnoreCase(sender.address, s.state.account)) {
+            d.from = null;
+        };
         d.id = if (id) |x| x else try s.nextId("draft");
         var index: ?usize = null;
         for (s.state.drafts, 0..) |old, i| if (std.mem.eql(u8, old.id, d.id)) {
@@ -485,7 +511,7 @@ pub const Store = struct {
         };
         if (id != null and index == null) return error.DraftNotFound;
         if (index == null and s.state.drafts.len == 128) return error.DraftLimitExceeded;
-        const raw = try std.json.Stringify.valueAlloc(s.allocator, d, .{});
+        const raw = try std.json.Stringify.valueAlloc(s.allocator, d, .{ .emit_null_optional_fields = false });
         const name = try s.fileName("draft", d.id);
         const previous = if (index != null) try readPrivate(s.dir, s.io, s.allocator, name, 4 * t.Limits.body_bytes) else null;
         if (previous) |old| for (s.state.operations) |operation| {
@@ -499,6 +525,7 @@ pub const Store = struct {
         var preview = d;
         preview.bodyText = "";
         preview.attachments = &.{};
+        preview.recoveryFields = null;
         if (index) |i| s.state.drafts[i] = preview else {
             var list: std.ArrayList(t.Draft) = .empty;
             try list.appendSlice(s.allocator, s.state.drafts);
@@ -969,4 +996,27 @@ test "sorted insertion replacement ties legacy fallback and lower count retain b
     try std.testing.expectEqualStrings(hash_b, lowered.find("b").?.bodyHash);
     try std.testing.expectEqualStrings("Body B", (try lowered.read("b")).?.bodyText);
     try std.testing.expectError(error.FileNotFound, lowered.dir.access(std.testing.io, try lowered.fileName("mail", "d"), .{}));
+}
+
+test "wishlist: legacy protected draft retains literal bytes with primary sender" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/legacy-draft", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    const old = "{\"id\":\"legacy-draft\",\"to\":[{\"address\":\"peer@example.test\",\"name\":\"\"}],\"cc\":[],\"bcc\":[],\"subject\":\"Hi\",\"bodyText\":\"Body\",\"threadId\":\"\",\"inReplyTo\":\"\",\"references\":\"\",\"attachments\":[]}";
+    var draft = try std.json.parseFromSliceLeaky(t.Draft, a, old, .{});
+    store.state.drafts = try a.dupe(t.Draft, &.{draft});
+    store.state.operations = try a.dupe(Operation, &.{.{ .id = "old-operation", .hash = "old-fingerprint", .draftId = draft.id, .outcome = "unknown" }});
+    const name = try store.fileName("draft", draft.id);
+    try store.write(name, old);
+    try store.save();
+    draft.from = .{ .address = "self@example.test" };
+    _ = try store.putDraft(draft, draft.id);
+    try std.testing.expectEqualStrings(old, try readPrivate(store.dir, store.io, a, name, t.Limits.body_bytes));
+    draft.from = .{ .address = "different@example.test" };
+    try std.testing.expectError(error.UnknownOutcome, store.putDraft(draft, draft.id));
 }

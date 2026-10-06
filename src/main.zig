@@ -180,6 +180,7 @@ test {
     std.testing.refAllDecls(@import("daemon.zig"));
     std.testing.refAllDecls(@import("terminal/layout.zig"));
     std.testing.refAllDecls(@import("terminal/theme.zig"));
+    std.testing.refAllDecls(@import("terminal/timezone.zig"));
     std.testing.refAllDecls(@import("terminal/preferences.zig"));
     std.testing.refAllDecls(@import("terminal/background.zig"));
     std.testing.refAllDecls(@import("platform.zig"));

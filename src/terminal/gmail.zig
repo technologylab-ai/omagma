@@ -16,8 +16,15 @@ const invitation = @import("invitation.zig");
 pub const Transport = struct {
     context: *anyopaque,
     requestFn: *const fn (*anyopaque, std.mem.Allocator, std.http.Method, []const u8, ?j.Value) anyerror!j.Value,
+    progress_sink: ?types.ProgressSink = null,
     fn request(self: Transport, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         return try self.requestFn(self.context, a, method, url, body);
+    }
+    fn progress(self: Transport, phase: types.FetchPhase, completed: usize, total: usize) void {
+        if (self.progress_sink) |sink| sink.report(.{ .phase = phase, .completed = completed, .total = total });
+    }
+    fn row(self: Transport, update: types.FetchRow) void {
+        if (self.progress_sink) |sink| sink.row(update);
     }
 };
 const Network = struct {
@@ -158,10 +165,15 @@ pub const NetworkSession = struct {
     }
 };
 pub fn execute(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !j.Value {
+    return executeProgress(io, a, config, account, cmd, request, null);
+}
+pub fn executeProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) !j.Value {
     var session: NetworkSession = undefined;
     try session.init(io, a, config, account, cmd, request);
     defer session.close();
-    return try dispatchAuthorized(io, a, account, session.capabilities, session.transport(), cmd, request);
+    var transport = session.transport();
+    transport.progress_sink = progress_sink;
+    return try dispatchAuthorized(io, a, account, session.capabilities, transport, cmd, request);
 }
 
 fn requiredCapability(cmd: []const u8) ?[]const u8 {
@@ -169,7 +181,8 @@ fn requiredCapability(cmd: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, cmd, "invitation.reply")) return "calendar-rsvp";
     if (std.mem.eql(u8, cmd, "contacts.upsert")) return "contacts-write";
     if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search")) return "contacts-read";
-    if (std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) return "mail-modify";
+    if (std.mem.eql(u8, cmd, "mail.modify-labels") or std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) return "mail-modify";
+    if (std.mem.eql(u8, cmd, "labels.list") or std.mem.eql(u8, cmd, "mail.labels") or std.mem.eql(u8, cmd, "accounts.identities")) return "mail-read";
     if (std.mem.eql(u8, cmd, "mail.refresh") or std.mem.eql(u8, cmd, "mail.read") or std.mem.eql(u8, cmd, "mail.thread") or std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync") or std.mem.eql(u8, cmd, "mail.attachment") or std.mem.eql(u8, cmd, "accounts.aliases")) return "mail-read";
     return null;
 }
@@ -258,14 +271,25 @@ pub fn readAuthorizedMessage(a: std.mem.Allocator, account: []const u8, capabili
     return try read(a, transport, id);
 }
 fn aliases(a: std.mem.Allocator, transport: Transport) ![]const []const u8 {
-    const value = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,verificationStatus)", null);
+    const entries = try identities(a, transport);
+    const out = try a.alloc([]const u8, entries.len);
+    for (entries, out) |identity, *address| address.* = identity.address;
+    return out;
+}
+fn identities(a: std.mem.Allocator, transport: Transport) ![]const @import("store.zig").Identity {
+    // users.settings.sendAs.list accepts the existing readonly/modify scope.
+    // Its HTML signature is converted to bounded literal plaintext.
+    const value = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,displayName,signature,isPrimary,isDefault,verificationStatus)", null);
     const entries = try array(value, "sendAs");
     if (entries.len > 32) return error.TooManyAliases;
-    var out: std.ArrayList([]const u8) = .empty;
+    var out: std.ArrayList(@import("store.zig").Identity) = .empty;
     for (entries) |entry| {
         const address = try j.required(entry, "sendAsEmail");
         try recipients.validateAddress(address);
-        if (std.mem.eql(u8, j.text(entry, "verificationStatus"), "accepted")) try out.append(a, address);
+        const name = j.text(entry, "displayName");
+        const signature = j.text(entry, "signature");
+        if (name.len > 256 or signature.len > 8192) return error.IdentityTooLarge;
+        if (std.mem.eql(u8, j.text(entry, "verificationStatus"), "accepted") or try j.boolean(entry, "isPrimary", false)) try out.append(a, .{ .address = address, .name = try mime.sanitizeText(name, a), .signature = try mime.htmlToText(signature, a), .isDefault = try j.boolean(entry, "isDefault", false) });
     }
     return try out.toOwnedSlice(a);
 }
@@ -308,7 +332,18 @@ fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transp
     try appendAddresses(&envelope.cc, draft.cc);
     try appendAddresses(&envelope.bcc, draft.bcc);
     var from: recipients.Mailbox = .{};
-    try from.address.set(sender orelse account);
+    const chosen = if (draft.from) |identity| identity.address else account;
+    if (draft.from) |identity| {
+        try recipients.validateAddress(identity.address);
+        try recipients.validateHeader(identity.name);
+        if (!std.ascii.eqlIgnoreCase(chosen, account)) {
+            var verified = false;
+            for (try aliases(a, transport)) |alias| verified = verified or std.ascii.eqlIgnoreCase(chosen, alias);
+            if (!verified) return error.UnverifiedSender;
+        }
+        try from.name.set(identity.name);
+    }
+    try from.address.set(sender orelse chosen);
     if (draft.threadId.len > 0) {
         try b.identifier(draft.threadId);
         if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
@@ -411,13 +446,20 @@ fn bootstrap(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities
         view_ids = try j.decode([]const []const u8, a, j.get(view, "ids") orelse return error.InvalidProviderResponse);
         next = j.text(view, "nextCursor");
         label_id = j.text(view, "labelId");
+        var extra: std.ArrayList([]const u8) = .empty;
         for (view_ids) |id| {
             var projected = false;
             for (messages.items) |message| projected = projected or std.mem.eql(u8, id, message.id);
             // Keep the TOTAL metadata budget at 100. Scoped IDs outside this
             // authoritative union remain explicitly uncached/incomplete, rather
             // than retaining their old labels under an advanced checkpoint.
-            if (!projected and messages.items.len < 100) try messages.append(a, try fetchMetadata(a, transport, id));
+            if (!projected and !containsId(extra.items, id) and recent.len + extra.items.len < 100) try extra.append(a, id);
+        }
+        if (extra.items.len != 0) transport.progress(.metadata, recent.len, recent.len + extra.items.len);
+        for (extra.items) |id| {
+            try io.checkCancel();
+            try messages.append(a, try fetchMetadata(a, transport, id));
+            transport.progress(.metadata, messages.items.len, recent.len + extra.items.len);
         }
     }
     return j.value(a, RefreshPlan{ .historyId = checkpoint, .messages = messages.items, .resync = resync, .nextCursor = next, .labelId = label_id, .metadataGets = messages.items.len, .listCalls = list_calls, .viewFetched = true, .viewIds = view_ids, .retentionIds = try messageIds(a, messages.items) });
@@ -468,12 +510,21 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
     if (changed.items.len > 100) return bootstrap(io, a, account, capabilities, transport, request, true);
     var messages: std.ArrayList(types.Message) = .empty;
     var labels: std.ArrayList(LabelUpdate) = .empty;
+    var total: usize = 0;
+    for (changed.items) |id| if (!containsId(deleted.items, id)) {
+        total += 1;
+    };
+    var completed: usize = 0;
+    if (total != 0) transport.progress(.metadata, 0, total);
     for (changed.items) |id| {
         if (containsId(deleted.items, id)) continue;
+        try io.checkCancel();
         if (containsId(known, id) and !containsId(added.items, id)) {
             const minimal = transport.request(a, .GET, try messageUrl(a, id, "?format=minimal&fields=id,labelIds"), null) catch |err| {
                 if (err == error.MessageNotFound) {
                     if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                    completed += 1;
+                    transport.progress(.metadata, completed, total);
                     continue;
                 }
                 return err;
@@ -490,12 +541,16 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
             const got = fetchMetadata(a, transport, id) catch |err| {
                 if (err == error.MessageNotFound) {
                     if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                    completed += 1;
+                    transport.progress(.metadata, completed, total);
                     continue;
                 }
                 return err;
             };
             try messages.append(a, got);
         }
+        completed += 1;
+        transport.progress(.metadata, completed, total);
     }
     var plan: RefreshPlan = .{ .historyId = checkpoint, .messages = messages.items, .labels = labels.items, .deleted = deleted.items, .metadataGets = messages.items.len, .historyPages = pages };
     if (try j.boolean(request, "forceView", false) or (events != 0 and j.text(request, "query").len != 0)) {
@@ -505,13 +560,20 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
         plan.listCalls = 1;
         plan.nextCursor = j.text(view, "nextCursor");
         plan.labelId = j.text(view, "labelId");
+        var extra: std.ArrayList([]const u8) = .empty;
         for (plan.viewIds) |id| {
             var found = containsId(known, id);
             for (messages.items) |message| found = found or std.mem.eql(u8, id, message.id);
-            if (!found and plan.metadataGets < 100) {
-                try messages.append(a, try fetchMetadata(a, transport, id));
-                plan.metadataGets += 1;
-            }
+            if (!found and !containsId(extra.items, id) and plan.metadataGets + extra.items.len < 100) try extra.append(a, id);
+        }
+        if (extra.items.len != 0) transport.progress(.metadata, completed, completed + extra.items.len);
+        const expanded_total = completed + extra.items.len;
+        for (extra.items) |id| {
+            try io.checkCancel();
+            try messages.append(a, try fetchMetadata(a, transport, id));
+            plan.metadataGets += 1;
+            completed += 1;
+            transport.progress(.metadata, completed, expanded_total);
         }
         plan.messages = messages.items;
     }
@@ -523,8 +585,50 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
     if (!permits(capabilities, capability)) return error.PermissionDenied;
     if (std.mem.eql(u8, cmd, "mail.refresh")) return refreshPlan(io, a, account, capabilities, transport, request);
-    if (std.mem.eql(u8, cmd, "mail.read")) return j.value(a, try read(a, transport, try j.required(request, "messageId")));
+    if (std.mem.eql(u8, cmd, "mail.read")) {
+        transport.progress(.bodies, 0, 1);
+        const message = try read(a, transport, try j.required(request, "messageId"));
+        transport.row(.{ .kind = .body, .message = message });
+        transport.progress(.bodies, 1, 1);
+        return j.value(a, message);
+    }
     if (std.mem.eql(u8, cmd, "accounts.aliases")) return j.value(a, .{ .aliases = try aliases(a, transport) });
+    if (std.mem.eql(u8, cmd, "accounts.identities")) return j.value(a, .{ .identities = try identities(a, transport) });
+    if (std.mem.eql(u8, cmd, "labels.list")) {
+        const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", null);
+        const entries = try array(response, "labels");
+        if (entries.len > 512) return error.TooManyLabels;
+        const labels = try a.alloc(@import("store.zig").Label, entries.len);
+        for (entries, labels) |entry, *label| {
+            const id = try j.required(entry, "id");
+            const name = try j.required(entry, "name");
+            try b.identifier(id);
+            if (name.len > 512) return error.InvalidLabel;
+            label.* = .{ .id = id, .name = try mime.sanitizeText(name, a), .type = j.text(entry, "type") };
+        }
+        return j.value(a, .{ .labels = labels });
+    }
+    if (std.mem.eql(u8, cmd, "mail.labels") or std.mem.eql(u8, cmd, "mail.modify-labels")) {
+        const id = try j.required(request, "messageId");
+        const modifying = std.mem.eql(u8, cmd, "mail.modify-labels");
+        var body: ?j.Value = null;
+        if (modifying) {
+            var resolver: LabelResolver = .{ .a = a, .transport = transport };
+            var add: std.ArrayList([]const u8) = .empty;
+            var remove: std.ArrayList([]const u8) = .empty;
+            for ([_][]const u8{ "addLabels", "removeLabels" }, [_]*std.ArrayList([]const u8){ &add, &remove }) |key, list| {
+                for (try array(request, key)) |value| try list.append(a, try resolver.resolve(try j.string(value)));
+            }
+            if (add.items.len + remove.items.len > 64) return error.TooManyLabels;
+            body = try j.value(a, .{ .addLabelIds = add.items, .removeLabelIds = remove.items });
+        }
+        const value = try transport.request(a, if (modifying) .POST else .GET, try messageUrl(a, id, if (modifying) "/modify?fields=id,labelIds" else "?format=minimal&fields=id,labelIds"), body);
+        if (!std.mem.eql(u8, j.text(value, "id"), id)) return if (modifying) error.UnknownOutcome else error.MessageIdentityMismatch;
+        const labels = j.decode([]const []const u8, a, j.get(value, "labelIds") orelse return if (modifying) error.UnknownOutcome else error.InvalidProviderResponse) catch return if (modifying) error.UnknownOutcome else error.InvalidProviderResponse;
+        if (labels.len > 64) return if (modifying) error.UnknownOutcome else error.TooManyLabels;
+        for (labels) |label| if (label.len > 256) return if (modifying) error.UnknownOutcome else error.InvalidLabel;
+        return j.value(a, .{ .messageId = id, .labels = labels });
+    }
     if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) {
         const limit = try j.integer(request, "limit", 30);
         if (limit < 1 or limit > types.Limits.page) return error.InvalidPageLimit;
@@ -542,11 +646,15 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         const entries = try array(listed, "messages");
         if (entries.len > limit) return error.InvalidPage;
         const messages = try a.alloc(types.Message, entries.len);
-        for (entries, messages) |entry, *dest| {
+        transport.progress(.metadata, 0, entries.len);
+        for (entries, messages, 0..) |entry, *dest, index| {
+            try io.checkCancel();
             const id = try j.required(entry, "id");
             const got = try transport.request(a, .GET, try messageUrl(a, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null);
             if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
             dest.* = try @import("gmail_decode.zig").normalize(got, a, null);
+            transport.row(.{ .kind = .page, .index = index, .total = entries.len, .message = dest.* });
+            transport.progress(.metadata, index + 1, entries.len);
         }
         return j.value(a, .{ .messages = messages, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null), .labelId = label });
     }
@@ -557,12 +665,15 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         const entries = try array(value, "messages");
         if (entries.len > 100) return error.ThreadTooLarge;
         const messages = try a.alloc(types.Message, entries.len);
-        for (entries, messages) |entry, *dest| {
+        transport.progress(.bodies, 0, entries.len);
+        for (entries, messages, 0..) |entry, *dest, index| {
+            try io.checkCancel();
             if (!std.mem.eql(u8, j.text(entry, "threadId"), id)) return error.MessageIdentityMismatch;
             var map: std.json.ObjectMap = .empty;
             var parts: usize = 0;
             try externalBodies(a, transport, j.text(entry, "id"), j.get(entry, "payload") orelse return error.InvalidProviderResponse, &map, 0, &parts);
             dest.* = try @import("gmail_decode.zig").normalize(entry, a, .{ .object = map });
+            transport.progress(.bodies, index + 1, entries.len);
         }
         std.sort.heap(types.Message, messages, {}, struct {
             fn lessThan(_: void, left: types.Message, right: types.Message) bool {
@@ -943,4 +1054,134 @@ test "typed cache prefetch refuses invalid identity and absent read permission b
     try std.testing.expectError(error.InvalidAddress, readAuthorizedMessage(a, "invalid..local@example.test", &.{"mail-read"}, transport, "body-id"));
     try std.testing.expectError(error.InvalidIdentifier, readAuthorizedMessage(a, "fictional@example.test", &.{"mail-read"}, transport, "invalid/id"));
     try std.testing.expectEqual(@as(usize, 0), spy.calls);
+}
+
+test "wishlist: send-as verified identities signatures and sender wire" {
+    const Oracle = struct {
+        settings: usize = 0,
+        sends: usize = 0,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,displayName,signature,isPrimary,isDefault,verificationStatus)")) {
+                self.settings += 1;
+                try std.testing.expectEqual(std.http.Method.GET, method);
+                try std.testing.expect(body == null);
+                return std.json.parseFromSliceLeaky(j.Value, a, "{\"sendAs\":[{\"sendAsEmail\":\"self@example.test\",\"displayName\":\"Self\",\"signature\":\"<b>Self</b><br>Example\",\"isPrimary\":true,\"isDefault\":true},{\"sendAsEmail\":\"alias@example.test\",\"displayName\":\"Alias\",\"verificationStatus\":\"accepted\",\"signature\":\"<script>unsafe</script><p>Alias</p>\"},{\"sendAsEmail\":\"pending@example.test\",\"verificationStatus\":\"pending\"}]}", .{});
+            }
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", url);
+            try std.testing.expectEqual(std.http.Method.POST, method);
+            self.sends += 1;
+            const encoded = try j.required(body orelse return error.MissingField, "raw");
+            const raw = try a.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded));
+            try std.base64.url_safe_no_pad.Decoder.decode(raw, encoded);
+            // Literal independent RFC expectation, not encoder/inverse pairing.
+            try std.testing.expect(std.mem.startsWith(u8, raw, "From: \"Alias\" <alias@example.test>\r\n"));
+            try std.testing.expect(std.mem.indexOf(u8, raw, "Subject: hi\r\n") != null);
+            return std.json.parseFromSliceLeaky(j.Value, a, "{\"id\":\"sent-1\",\"threadId\":\"sent-thread\"}", .{});
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+    const listed = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "accounts.identities", j.object(a));
+    const rows = try array(listed, "identities");
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqualStrings("Self\nExample", j.text(rows[0], "signature"));
+    try std.testing.expectEqualStrings("Alias", j.text(rows[1], "signature"));
+    var draft: types.Draft = .{ .from = .{ .address = "pending@example.test", .name = "Pending" }, .to = &.{.{ .address = "peer@example.test" }}, .subject = "hi", .bodyText = "Hello" };
+    var request = try j.value(a, .{ .operationId = "alias-check", .draft = draft });
+    try std.testing.expectError(error.UnverifiedSender, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, "mail.send", request));
+    try std.testing.expectEqual(@as(usize, 0), oracle.sends);
+    draft.from = .{ .address = "alias@example.test", .name = "Alias" };
+    request = try j.value(a, .{ .operationId = "verified-alias", .draft = draft });
+    _ = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, "mail.send", request);
+    try std.testing.expectEqual(@as(usize, 1), oracle.sends);
+    try std.testing.expectEqual(@as(usize, 3), oracle.settings);
+}
+
+test "wishlist: labels minimal snapshot and exact modify wire" {
+    const Oracle = struct {
+        calls: usize = 0,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)")) {
+                try std.testing.expectEqual(std.http.Method.GET, method);
+                try std.testing.expect(body == null);
+                return std.json.parseFromSliceLeaky(j.Value, a, "{\"labels\":[{\"id\":\"Label_42\",\"name\":\"Project\",\"type\":\"user\"}]}", .{});
+            }
+            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/m1?format=minimal&fields=id,labelIds")) {
+                try std.testing.expectEqual(std.http.Method.GET, method);
+                try std.testing.expect(body == null);
+                return std.json.parseFromSliceLeaky(j.Value, a, "{\"id\":\"m1\",\"labelIds\":[\"INBOX\",\"UNREAD\",\"Label_old\"]}", .{});
+            }
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/m1/modify?fields=id,labelIds", url);
+            try std.testing.expectEqual(std.http.Method.POST, method);
+            const wire = try std.json.Stringify.valueAlloc(a, body orelse return error.MissingField, .{});
+            try std.testing.expectEqualStrings("{\"addLabelIds\":[\"TRASH\"],\"removeLabelIds\":[\"INBOX\"]}", wire);
+            return std.json.parseFromSliceLeaky(j.Value, a, "{\"id\":\"m1\",\"labelIds\":[\"UNREAD\",\"TRASH\",\"Label_old\"]}", .{});
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+    const labels = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "labels.list", j.object(a));
+    try std.testing.expectEqualStrings("Project", j.text((try array(labels, "labels"))[0], "name"));
+    const before = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "mail.labels", try j.value(a, .{ .messageId = "m1" }));
+    try std.testing.expectEqualStrings("INBOX", try j.string((try array(before, "labels"))[0]));
+    const request = try j.value(a, .{ .messageId = "m1", .addLabels = [_][]const u8{"TRASH"}, .removeLabels = [_][]const u8{"INBOX"} });
+    try std.testing.expectError(error.PermissionDenied, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "mail.modify-labels", request));
+    try std.testing.expectEqual(@as(usize, 2), oracle.calls);
+    const changed = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "mail.modify-labels", request);
+    try std.testing.expectEqualStrings("TRASH", try j.string((try array(changed, "labels"))[1]));
+    try std.testing.expectEqual(@as(usize, 3), oracle.calls);
+}
+
+test "fetch progress: metadata fraction uses actual provider IDs not requested maximum" {
+    const Recorder = struct {
+        values: [8]types.FetchProgress = undefined,
+        count: usize = 0,
+        rows: [2]types.FetchRow = undefined,
+        row_count: usize = 0,
+        incremental: bool = true,
+        fn report(ctx: *anyopaque, value: types.FetchProgress) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.count < self.values.len) {
+                self.values[self.count] = value;
+                self.count += 1;
+            }
+        }
+        fn row(ctx: *anyopaque, value: types.FetchRow) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.incremental = self.incremental and self.count == self.row_count + 1 and value.index == self.row_count and value.total == 2 and value.kind == .page;
+            if (self.row_count < self.rows.len) {
+                self.rows[self.row_count] = value;
+                self.row_count += 1;
+            }
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: ScopedResyncOracle = .{ .expired = false };
+    var recorder: Recorder = .{};
+    var transport = oracle.transport();
+    transport.progress_sink = .{ .ctx = &recorder, .reportFn = Recorder.report, .rowFn = Recorder.row };
+    _ = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "mail.list", try j.value(a, .{ .limit = @as(u8, 100), .includeSpamTrash = true }));
+    try std.testing.expectEqual(@as(usize, 3), recorder.count);
+    for (recorder.values[0..3], [_]usize{ 0, 1, 2 }) |value, completed| {
+        try std.testing.expectEqual(types.FetchPhase.metadata, value.phase);
+        try std.testing.expectEqual(completed, value.completed);
+        try std.testing.expectEqual(@as(usize, 2), value.total);
+    }
+    try std.testing.expectEqual(@as(usize, 2), oracle.metadata_gets);
+    try std.testing.expectEqual(@as(usize, 2), recorder.row_count);
+    try std.testing.expect(recorder.incremental);
+    try std.testing.expectEqualStrings("recent-inbox", recorder.rows[0].message.id);
+    try std.testing.expectEqualStrings("recent-sent", recorder.rows[1].message.id);
+    try std.testing.expectEqual(@as(usize, 0), recorder.rows[0].message.bodyText.len);
 }
