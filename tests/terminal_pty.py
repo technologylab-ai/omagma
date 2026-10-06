@@ -428,7 +428,10 @@ def exercise(terminal, action):
         terminal.send(b"A")
         terminal.until(lambda: "Attach file path:" in terminal.text())
         terminal.send(str(path).encode() + b"\r")
-        terminal.until(lambda: "Attached fixture attachment.bin" in terminal.text())
+        # Autosave may replace the attachment-success notice. The durable row
+        # and its source byte size are the user-visible result of attaching.
+        terminal.until(lambda: "Attachments 1" in terminal.text() and any(
+            path.name in line and f"{len(data)} B" in line for line in terminal.text().splitlines()))
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text() and "Attachment 1: fixture attachment.bin" in terminal.text())
         with Client(terminal.binary, terminal.directory) as client:
@@ -439,11 +442,12 @@ def exercise(terminal, action):
                     "attachment review/save lost file metadata")
             encoded = attachments[0]["data"]
             decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
-            require(hashlib.sha256(decoded).digest() == hashlib.sha256(data).digest(), "attachment review/save changed binary bytes")
+            require(decoded == data and hashlib.sha256(decoded).digest() == hashlib.sha256(data).digest(),
+                    "attachment review/save changed binary bytes")
         terminal.send(b"n")
         terminal.until(lambda: "Compose" in terminal.text())
         terminal.send(b":detach 1\r")
-        terminal.until(lambda: "Attachment removed" in terminal.text())
+        terminal.until(lambda: "Attachments 0" in terminal.text() and path.name not in terminal.text())
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text())
         require("fixture attachment.bin" not in terminal.text(), "detached attachment remained in send review")
