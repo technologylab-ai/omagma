@@ -401,7 +401,7 @@ def exercise(terminal, action):
                 "incoming attachment save changed decoded binary bytes or selected the wrong thread attachment")
         require(stat.S_IMODE(destination.stat().st_mode) == 0o600, "saved incoming attachment is not private")
         terminal.send(command)
-        terminal.until(lambda: "PathAlreadyExists" in terminal.text())
+        terminal.until(lambda: "File already exists" in terminal.text())
         require(destination.read_bytes() == contents, "duplicate attachment destination was overwritten")
         terminal.send(b":save-attachment 1 relative.bin\r")
         terminal.until(lambda: "AttachmentSaveSyntax" in terminal.text())

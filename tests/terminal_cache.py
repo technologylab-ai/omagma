@@ -408,7 +408,16 @@ def tui_case(binary, directory, fixture, name):
             require("No matching messages" not in terminal.text() and "Fetching mail…" not in terminal.text(), "cached list reset empty while refreshing")
         require(name == "tui-offline-cache" or fixture.is_held(), "remote completed before cached navigation/full read")
         terminal.send(b"\r")
-        terminal.until(lambda: contains_body(terminal, 91))
+        # Enter preserves the selected delivered message in the card reader.
+        # Visit the two earlier cards explicitly rather than assuming a thread
+        # always opens at its oldest message.
+        terminal.until(lambda: contains_body(terminal, 93) and "3/3 mails" in terminal.text())
+        for card, number in ((2, 92), (1, 91)):
+            terminal.send(b"{")
+            terminal.until(lambda card=card: f"▸ {card}/3" in terminal.text())
+            terminal.send(b"t")  # Earlier cards intentionally start folded.
+            terminal.until(lambda number=number: contains_body(terminal, number))
+            require(name == "tui-offline-cache" or fixture.is_held(), "remote completed before earlier cached card reading")
         require(name == "tui-offline-cache" or fixture.is_held(), "remote completed before cached thread reading")
         if name == "tui-no-color-owner-exit":
             started = time.monotonic()

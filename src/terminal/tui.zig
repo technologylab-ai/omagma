@@ -2001,17 +2001,22 @@ const App = struct {
         errdefer deinitMarkup(markup);
         const same_reader = same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId()) and self.reader_is_thread == full_thread;
         var cards: [types.Limits.page]bool = @splat(!full_thread);
-        var focused: usize = 0;
+        var default_focus: usize = 0;
+        var preserved_focus: ?usize = null;
         for (messages, 0..) |message, index| {
             const id = text(get(message, "id"));
-            if (same(id, self.messageId())) focused = index;
+            if (same(id, self.messageId())) default_focus = index;
             if (same_reader) for (self.thread, 0..) |previous_message, previous_index| {
                 if (!same(id, text(get(previous_message, "id")))) continue;
                 cards[index] = self.reader_cards[previous_index];
-                if (previous_index == self.reader_card) focused = index;
+                if (previous_index == self.reader_card) preserved_focus = index;
                 break;
             };
         }
+        // A cached/full replacement can finish after the user chose another
+        // thread card. Preserve that card by identity even when the mailbox's
+        // originally selected message occurs later in the replacement.
+        const focused = preserved_focus orelse default_focus;
         if (!same_reader and messages.len > 0) cards[focused] = true;
         try self.reader_account.set(self.allocator, self.account());
         try self.reader_message.set(self.allocator, self.messageId());
@@ -6190,6 +6195,52 @@ test "local reader: collapsed thread navigation keeps focused reply identity wit
     try std.testing.expectEqualStrings("b", app.readerReplyId());
     try std.testing.expect(try app.onReaderKey(.{ .codepoint = 't' }));
     try std.testing.expect(app.reader_cards[1]);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local reader: same thread replacement preserves focused identity folds and scroll across ordering" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"m093\"}]}}");
+    const initial = "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"m091\",\"bodyText\":\"First\"},{\"id\":\"m092\",\"bodyText\":\"Second\"},{\"id\":\"m093\",\"bodyText\":\"Selected\"}]}}";
+    try app.replaceReader(true, initial, true);
+    app.focus = .reader;
+    app.reader_card = 1;
+    app.reader_cards[0] = true;
+    app.reader_cards[1] = false;
+    app.reader_cards[2] = true;
+    app.reader_scroll = 17;
+    app.reader_anchor_card = false;
+    app.reader_card_pinned = true;
+    // The originally selected m093 comes after focused m092. A later row
+    // must never overwrite the user's focused card while refreshing it.
+    try app.replaceReader(true, initial, false);
+    try std.testing.expectEqualStrings("m092", app.readerReplyId());
+    try std.testing.expectEqual(@as(usize, 1), app.reader_card);
+    try std.testing.expect(app.reader_cards[0] and !app.reader_cards[1] and app.reader_cards[2]);
+    try std.testing.expectEqual(@as(usize, 17), app.reader_scroll);
+    try std.testing.expect(!app.reader_anchor_card and app.reader_card_pinned);
+    try std.testing.expect(try app.onReaderKey(.{ .codepoint = 't' }));
+    try std.testing.expect(app.reader_cards[1]);
+    app.reader_cards[0] = false;
+    app.reader_scroll = 23;
+    app.reader_anchor_card = false;
+    // Match folds/focus by identity rather than carrying an old array index.
+    try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"m092\"},{\"id\":\"m093\"},{\"id\":\"m091\"}]}}", true);
+    try std.testing.expectEqualStrings("m092", app.readerReplyId());
+    try std.testing.expectEqual(@as(usize, 0), app.reader_card);
+    try std.testing.expect(app.reader_cards[0] and app.reader_cards[1] and !app.reader_cards[2]);
+    try std.testing.expectEqual(@as(usize, 23), app.reader_scroll);
+    // If the focused ID disappeared, the original selected message remains
+    // the fallback; preserving by ID does not pin a stale numeric index.
+    try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"m091\"},{\"id\":\"m093\"}]}}", false);
+    try std.testing.expectEqualStrings("m093", app.readerReplyId());
+    try std.testing.expectEqual(@as(usize, 1), app.reader_card);
+    try std.testing.expect(!app.reader_cards[0] and app.reader_cards[1]);
+    try std.testing.expectEqual(@as(usize, 23), app.reader_scroll);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
