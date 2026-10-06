@@ -12,10 +12,12 @@ on:
       - README.md
       - AGENTS.md
       - EVIDENCE.md
+      - build.zig.zon
       - LICENSE
       - tests/publication_check.py
       - tests/publication_gif.py
       - .github/workflows/pages.yml
+      - .github/pages_release_ready.py
   pull_request:
     paths:
       - website/**
@@ -26,10 +28,12 @@ on:
       - README.md
       - AGENTS.md
       - EVIDENCE.md
+      - build.zig.zon
       - LICENSE
       - tests/publication_check.py
       - tests/publication_gif.py
       - .github/workflows/pages.yml
+      - .github/pages_release_ready.py
   workflow_dispatch:
   workflow_run:
     workflows: [Release]
