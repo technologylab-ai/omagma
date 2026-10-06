@@ -16,7 +16,10 @@ def run(binary, directory, key):
             terminal.send(b'j')
             terminal.until(lambda: 'From: Alex Fixture <alex@example.org>' in terminal.text() and 'Ready' in terminal.text())
         terminal.send(key)
-        terminal.until(lambda: 'Subject:' in terminal.text() and 'Attachments 0' in terminal.text())
+        # A PTY read can end after the composer pane but before its footer.
+        # Await all required current-frame affordances within the same deadline.
+        terminal.until(lambda: 'Subject:' in terminal.text() and 'Attachments 0' in terminal.text()
+                       and 'A Attach' in terminal.text() and '[Add A]' in terminal.text())
         require('A Attach' in terminal.text() and '[Add A]' in terminal.text(), 'attachment shortcut hidden in composer')
         payloads = {name: value for name, value in [('first.txt', b'One\n'), ('second.bin', bytes(range(128))), ('third.pdf', b'%PDF-synthetic\n')]}
         for index, (name, contents) in enumerate(payloads.items()):
