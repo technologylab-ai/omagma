@@ -1,15 +1,16 @@
 # Agent-assisted setup
 
-**Recommended for Google/OAuth setup:** point your coding agent at
-[this repository](https://github.com/technologylab-ai/omagma) or its complete
-[release bundle](https://github.com/technologylab-ai/omagma/releases/latest).
-The agent can prepare installation and private configuration while walking you
-through Google Console and consent one step at a time. You provide feedback
-after each Google step and approve access in your browser.
+**Give your agent a public URL:** [this website](https://technologylab-ai.github.io/omagma/)
+or [the GitHub repository](https://github.com/technologylab-ai/omagma).
+The agent fetches the setup instructions, downloads and verifies the matching
+release, and prepares local files while guiding you through Google Console and
+consent one step at a time. You provide feedback after each Google step and
+approve access in your browser. No checkout or folder preparation is needed
+before asking the agent to install Omagma.
 
 The root `AGENTS.md` directs installation/onboarding requests to `skills/omagma-setup/SKILL.md`. The agent can follow that workflow directly; installing it as a global skill is optional.
 
-> Read AGENTS.md and follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.
+> Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.
 
 Add your account addresses, existing Chrome profile directories, and whether you want five-minute background refresh. Provide a downloaded Google OAuth registration JSON's local path when available; do not paste its contents or account tokens into chat. The agent can prepare and validate local configuration while you approve Google consent in Chrome.
 
@@ -19,7 +20,7 @@ If no compatible release asset exists, use a source checkout with exact Zig **0.
 
 ## Optional setup skill
 
-The repository and complete bundle include [omagma-setup](../skills/omagma-setup/SKILL.md). An agent can read it directly. To make it discoverable in Codex, link it into your skills directory from the extracted folder or checkout:
+The repository and complete bundle include [omagma-setup](../skills/omagma-setup/SKILL.md). An agent can read it directly. To make it discoverable in Codex, ask your agent to link it into your skills directory after installing the release bundle:
 
 ```sh
 mkdir -p ~/.codex/skills
@@ -36,4 +37,4 @@ For `omagma tui`, the JSONL agent client, cached full mail, drafts and scoped wr
 
 If the bar already works and you want to enable full terminal access, use:
 
-> Read AGENTS.md and follow skills/omagma-setup/SKILL.md and the full TUI/CLI permissions section of docs/SETUP.md. Enable full terminal access for my configured accounts using a separate Google OAuth registration in my existing Google project. Walk me through People API, Data access scopes and creating/downloading the terminal registration one step at a time, waiting for my feedback. Prepare the private registration JSON and open each account's consent sequentially in its configured Chrome profile. Confirm the grants and mail/contact reads, then tell me how to restart the TUI and reconnect later.
+> Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Follow skills/omagma-setup/SKILL.md and the full TUI/CLI permissions section of docs/SETUP.md. Enable full terminal access for my configured accounts using a separate Google OAuth registration in my existing Google project. Walk me through People API, Data access scopes and creating/downloading the terminal registration one step at a time, waiting for my feedback. Prepare the private registration JSON and open each account's consent sequentially in its configured Chrome profile. Confirm the grants and mail/contact reads, then tell me how to restart the TUI and reconnect later.

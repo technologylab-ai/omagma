@@ -5,9 +5,15 @@ description: Install the omagma Omarchy plugin or terminal client, connect separ
 
 # Set up omagma
 
-Resolve the skill's real directory and locate the omagma root (`../..`), or use
-the user's supplied folder. Read the installation section of `AGENTS.md` and
-`README.md`. Use `docs/INSTALL.md` for the bar, `docs/SETUP.md` for accounts,
+Start from the user's website or GitHub URL. Fetch the installation section of
+[AGENTS.md](https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md),
+[README.md](https://github.com/technologylab-ai/omagma/blob/main/README.md)
+and this setup workflow through their public URLs when local files are absent.
+Resolve relative guide links against the public repository or documentation URL.
+Download and verify the selected release yourself, then use its extracted
+`omagma/` folder as the local root. The user does not need to clone the repository
+or prepare a folder before starting. If the user already supplied a local
+bundle or checkout, resolve the skill's real directory and use that root. Use `docs/INSTALL.md` for the bar, `docs/SETUP.md` for accounts,
 and `docs/SETUP.md#full-tuicli-permissions` for TUI/CLI permissions. Development and
 release qualification have their own instructions in `AGENTS.md`.
 

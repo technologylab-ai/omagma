@@ -2,6 +2,8 @@
 
 ## Installing or configuring omagma
 
+A website or repository URL is sufficient to start. Fetch these instructions and the linked setup workflow through their public URLs, then download and verify the appropriate release yourself. Prepare the local folder and private files as part of setup; do not require the user to clone the source or obtain a bundle first. If a local installation already exists, inspect and reuse it.
+
 When the user asks to install omagma on their Omarchy desktop, connect Gmail accounts or fix setup, read and follow [the setup workflow](skills/omagma-setup/SKILL.md). This is the installation entry point; it does not require installing the skill into an agent's global skills directory. Prefer a complete matching bundle from [the latest release](https://github.com/technologylab-ai/omagma/releases/latest), verify its `SHA256SUMS` entry and probe the included backend with `--version` before consent. End users do not need Zig. Build from source only if a compatible asset is unavailable, using the declared compiler pin.
 
 Use [agent setup](docs/AGENT-SETUP.md) for the handoff and [account setup](docs/SETUP.md) / [bar installation](docs/INSTALL.md) for details. Prepare installation and private configuration while the user completes Google registration or consent, and tell them exactly when a browser click is needed. Verify the installed binary, authorization status, mail access and profile links for setup. Fixture tests, automated GUI checks and resource/release qualification belong to development tasks. Static backend bundles still need the installed desktop host, Chrome, keyring and system CA certificates.

@@ -12,8 +12,8 @@ Omagma started because one Gmail tab was using roughly **2 GB of RAM** on the au
 
 ## Install
 
-**Recommended: agent-guided setup.** Point your coding agent at this repository
-and ask it to install Omagma and walk you through Google Console and OAuth one
+**Recommended: agent-guided setup.** Give your coding agent the [website URL](https://technologylab-ai.github.io/omagma/)
+or [GitHub URL](https://github.com/technologylab-ai/omagma) and ask it to install Omagma and walk you through Google Console and OAuth one
 step at a time. Tell it whether you want the read-only bar or full TUI/CLI
 access. It can prepare private configuration and open consent in each account's
 Chrome profile while you complete the Google steps.
