@@ -255,24 +255,14 @@ fn deleteOwned(io: std.Io, request: Dictionary, service: []const u8, account: []
         var length: u32 = path.len;
         if (SecKeychainGetPath(keychain, &length, &path) != 0 or length == 0 or length >= path.len) return error.KeyringUnavailable;
         try unlocked(keychain);
-        var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/security", "delete-generic-password", "-s", service, "-a", account, path[0..length] }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+        var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/security", "delete-generic-password", "-s", service, "-a", account, path[0..length] }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
         defer {
             @import("platform.zig").closePipes(&child, io);
             @import("platform.zig").killOwned(io, &child);
         }
-        // The stock tool emits a human confirmation_bytes on stdout. Drain it
-        // under a fixed bound; only native absence verification establishes ACK.
-        var confirmation_bytes: [256]u8 = undefined;
-        var used: usize = 0;
-        while (used < confirmation_bytes.len) {
-            const count = child.stdout.?.readStreaming(io, &.{confirmation_bytes[used..]}) catch |err| switch (err) {
-                error.EndOfStream => 0,
-                else => return err,
-            };
-            if (count == 0) break;
-            used += count;
-        }
-        if (used == confirmation_bytes.len) return error.KeyringUnavailable;
+        // Human metadata output is not our acknowledgement protocol. Discard
+        // it without accumulating it; the exact native absence check below
+        // establishes success, after the finite owned child wait completes.
         try @import("platform.zig").checkedExit(try @import("platform.zig").waitOwned(io, &child));
     }
     // Do not acknowledge a deletion just because a subprocess exited0.

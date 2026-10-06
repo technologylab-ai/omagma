@@ -6,7 +6,6 @@ with a fictional account; only the stable Apple security executable reads data.
 """
 from __future__ import annotations
 import argparse
-import atexit
 import ctypes
 import json
 import hashlib
@@ -14,6 +13,7 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
+import platform
 import sys
 import tempfile
 import time
@@ -75,24 +75,9 @@ def run(binary, *arguments, success=True):
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--binary', required=True, type=Path)
-    parser.add_argument('--upgrade-binary', required=True, type=Path)
-    parser.add_argument('--homebrew-resign', action='store_true', help='verify the exact Homebrew ad-hoc re-sign command on a private copy')
-    args = parser.parse_args()
-    require(sys.platform == 'darwin', 'native Keychain qualification requires macOS')
-    binary, upgraded = args.binary.resolve(), args.upgrade_binary.resolve()
-    if args.homebrew_resign:
-        signed_directory = Path(tempfile.mkdtemp(prefix='omagma-keychain-resign-', dir='/tmp'))
-        atexit.register(shutil.rmtree, signed_directory, ignore_errors=True)
-        copied = signed_directory / 'omagma'
-        shutil.copy2(upgraded, copied)
-        subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(copied)], check=True, capture_output=True, timeout=10)
-        upgraded = copied
-    require(hashlib.sha256(binary.read_bytes()).digest() != hashlib.sha256(upgraded.read_bytes()).digest(), 'upgrade witness needs distinct binary images')
-    before = security_windows()
-    before_search = subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5)
+def upgrade_case(binary, upgraded):
+    require(hashlib.sha256(binary.read_bytes()).digest() != hashlib.sha256(upgraded.read_bytes()).digest(),
+            'upgrade witness needs distinct creator/upgraded binary images')
     with tempfile.TemporaryDirectory(prefix='omagma-keychain-upgrade-', dir='/tmp') as temporary:
         directory = Path(temporary); directory.chmod(0o700)
         created = False
@@ -102,11 +87,41 @@ def main():
             run(binary, 'probe-keyring-upgrade', 'verify', str(directory))
             run(upgraded, 'probe-keyring-upgrade', 'clear', str(directory))
             run(binary, 'probe-keyring-upgrade', 'absent', str(directory))
-            # A missing private keychain must surface worker failure, not exit0.
+            # A missing private keychain must surface failure, not exit0 absence.
             run(upgraded, 'probe-keyring-upgrade', 'check', str(directory / 'absent'), success=False)
         finally:
             if created:
                 run(upgraded, 'probe-keyring-upgrade', 'delete', str(directory))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', required=True, type=Path)
+    parser.add_argument('--upgrade-binary', required=True, type=Path)
+    parser.add_argument('--homebrew-resign', action='store_true', help='verify exact Homebrew re-signing while preserving each executable name')
+    args = parser.parse_args()
+    require(sys.platform == 'darwin', 'native Keychain qualification requires macOS')
+    binary, upgraded = args.binary.resolve(), args.upgrade_binary.resolve()
+    before = security_windows()
+    before_search = subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5)
+    raw_name = 'omagma-macos-' + {'arm64': 'arm64', 'x86_64': 'x86_64'}[platform.machine()]
+    with tempfile.TemporaryDirectory(prefix='omagma-keychain-alias-', dir='/tmp') as temporary:
+        aliases = Path(temporary)
+        raw_alias = aliases / raw_name
+        shutil.copy2(upgraded, raw_alias)
+        require(raw_alias.read_bytes() == upgraded.read_bytes(), 'public raw alias changed binary bytes')
+        # Exercise the caller's actual artifact and a byte-identical public raw
+        # filename. A successful bin/omagma check cannot qualify a renamed raw.
+        for index, candidate in enumerate((upgraded, raw_alias)):
+            if args.homebrew_resign:
+                signed_directory = aliases / f'signed-{index}'
+                signed_directory.mkdir(mode=0o700)
+                copied = signed_directory / candidate.name
+                shutil.copy2(candidate, copied)
+                subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(copied)],
+                               check=True, capture_output=True, timeout=10)
+                candidate = copied
+            upgrade_case(binary, candidate)
     run(binary, 'probe-keyring')
     run(upgraded, 'probe-keyring')
     for executable in (binary, upgraded):
@@ -118,9 +133,7 @@ def main():
                 'direct worker bypassed parent/private-pipe guard')
     require(subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5) == before_search, 'synthetic probe changed user keychain search list')
     require(not (security_windows() - before), 'Keychain operation mapped a security/unlock dialog')
-    if args.homebrew_resign:
-        shutil.rmtree(signed_directory)
-    print('PASS macOS Keychain:positive ACK, isolated account/client/grant,4096-byte boundary, Debug→Safe upgrade/update, locked refusal/no new dialog, parent guard, cleanup')
+    print('PASS macOS Keychain:positive ACK, isolated account/client/grant,4096-byte boundary, Debug→Safe/public-raw alias upgrade/update/clear, locked refusal/no new dialog, parent guard, cleanup')
 
 
 if __name__ == '__main__':
