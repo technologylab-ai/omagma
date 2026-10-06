@@ -61,6 +61,7 @@ jobs:
       - name: Native credential upgrade boundary
         run: |
           python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary .verification-macos-safe/bin/omagma
+          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary .verification-macos-safe/bin/omagma --homebrew-resign
       - name: Ephemeral CI production default-Keychain dispatch
         run: |
           set -e

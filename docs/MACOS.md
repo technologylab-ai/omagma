@@ -108,10 +108,11 @@ Refresh tokens use the current default user Keychain, normally your login
 keychain. Terminal identity includes the account, Google registration and grant.
 A binary upgrade retains those identities. Omagma refuses an already locked
 keychain; unlock it explicitly and retry `KeyringUnavailable`. Native calls
-suppress dialogs. The signed system reader can still show an OS prompt if the
+suppress dialogs. The signed system reader/deletion helper can still show an OS prompt if the
 keychain locks during the short handoff, or if its item's trusted applications
 were edited. Cancel that prompt to refuse the read. Items trust the creating
-build and Apple's `/usr/bin/security`, within the same per-user boundary as
+build and Apple's `/usr/bin/security` for stable reads and deletion across
+re-signed upgrades, within the same per-user boundary as
 Linux Secret Service; tokens stay on private pipes. See [privacy and credential handling](PRIVACY.md).
 
 Follow [account setup](SETUP.md) for Google Console, per-account consent and
