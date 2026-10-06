@@ -1,0 +1,69 @@
+name: Native macOS CLI and TUI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omagma-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install exact Linux compiler
+        run: python3 .github/install_zig.py
+      - name: Preserve the Linux static-musl CLI and TUI
+        run: |
+          set -e
+          for mode in debug safe; do
+            zig build test -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all
+            zig build -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --prefix ".verification-linux-$mode"
+            python3 tests/terminal_integration.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode"
+          done
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub-hosted runner labels identify the actual native architecture.
+        # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install exact compiler from checked native archive metadata
+        run: python3 .github/install_zig.py
+      - name: Native correctness and probes
+        run: |
+          set -e
+          zig version
+          uname -m
+          for mode in debug safe; do
+            zig build test probes -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode" --summary all
+            zig build -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode"
+            binary=".verification-macos-$mode/bin/omagma"
+            "$binary" build-info
+            "$binary" probe-keyring
+            python3 tests/terminal_integration.py --binary "$binary" --build-mode "$mode"
+            python3 tests/terminal_macos.py --binary "$binary"
+            python3 tests/terminal_transport.py --binary "$binary" --build-mode "$mode"
+            python3 tests/launch_macos.py --binary "$binary"
+            ".verification-macos-$mode/bin/auth_probe" launch
+            ".verification-macos-$mode/bin/auth_probe" callback
+          done
+      - name: Native credential upgrade boundary
+        run: |
+          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary .verification-macos-safe/bin/omagma
+      - name: Native Safe lifecycle and quiet gates
+        run: |
+          set -e
+          for kind in cli tui; do
+            python3 tests/terminal_measure_macos.py --binary .verification-macos-safe/bin/omagma --kind "$kind" --cycles 1000 --warmup 100 --idle-seconds 60 --output "$RUNNER_TEMP/macos-$kind-safe.json"
+          done

@@ -17,8 +17,7 @@ fn onSignal(_: std.posix.SIG) callconv(.c) void {
     stopped.store(true, .release);
     const fd = wake_fd.load(.acquire);
     if (fd >= 0) {
-        const one: u64 = 1;
-        _ = std.os.linux.write(fd, std.mem.asBytes(&one).ptr, 8);
+        @import("../signal_wake.zig").notify(fd);
     }
 }
 fn signalTask(io: Io, file: Io.File, cancel: *Io.Event) void {
@@ -98,13 +97,12 @@ pub fn run(init: std.process.Init, io: Io, args: *std.process.Args.Iterator) !vo
     var session = try core.Session.init(io, a, init.environ_map, settings.options);
     defer session.deinit();
     session.meter = &cap;
-    const raw_fd = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC);
-    if (std.os.linux.errno(raw_fd) != .SUCCESS) return error.EventFdFailed;
-    const file: Io.File = .{ .handle = @intCast(raw_fd), .flags = .{ .nonblocking = false } };
-    defer file.close(io);
+    const wake = try @import("../signal_wake.zig").Wake.init(io);
+    defer wake.close(io);
+    const file = wake.read;
     var cancel: Io.Event = .unset;
     stopped.store(false, .release);
-    wake_fd.store(file.handle, .release);
+    wake_fd.store(wake.write_fd, .release);
     const signals = [_]std.posix.SIG{ .TERM, .INT, .HUP, .QUIT };
     var old: [signals.len]std.posix.Sigaction = undefined;
     for (signals, 0..) |signal, i| {

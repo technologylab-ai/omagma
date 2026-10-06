@@ -278,8 +278,7 @@ fn onSignal(signal: std.posix.SIG) callconv(.c) void {
     received_signal.store(@intCast(@backingInt(signal)), .release);
     const fd = signal_fd.load(.acquire);
     if (fd >= 0) {
-        const one: u64 = 1;
-        _ = std.os.linux.write(fd, std.mem.asBytes(&one).ptr, 8);
+        @import("../signal_wake.zig").notify(fd);
     }
 }
 
@@ -5132,14 +5131,13 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     app.loadPreferences();
     try app.restoreInitialContext();
     try app.prepareLabels();
-    const raw_fd = std.os.linux.eventfd(0, 0x80000); // EFD_CLOEXEC, no nonblocking spin.
-    if (std.os.linux.errno(raw_fd) != .SUCCESS) return error.SignalWakeFailed;
-    const wake_file: Io.File = .{ .handle = @intCast(raw_fd), .flags = .{ .nonblocking = false } };
-    defer wake_file.close(io);
+    const wake = try @import("../signal_wake.zig").Wake.init(io);
+    defer wake.close(io);
+    const wake_file = wake.read;
     var old_handlers: [4]std.posix.Sigaction = undefined;
     const signals = [_]std.posix.SIG{ .TERM, .HUP, .INT, .QUIT };
     received_signal.store(0, .release);
-    signal_fd.store(wake_file.handle, .release);
+    signal_fd.store(wake.write_fd, .release);
     for (signals, 0..) |signal, index| {
         var action: std.posix.Sigaction = .{ .handler = .{ .handler = onSignal }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(signal, &action, &old_handlers[index]);

@@ -59,6 +59,7 @@ const inherited_descriptor_flags: std.os.linux.CLOSE_RANGE = .{ .UNSHARE = false
 /// Linux double fork. The short intermediary is reaped; its child reports exec
 /// failure on a CLOEXEC pipe. No allocation, locks or std.Io run after fork.
 pub fn launchDetached(io: std.Io, argv: []const []const u8) !void {
+    if (@import("builtin").os.tag == .macos) return launchDarwin(io, argv);
     if (argv.len == 0 or argv.len > 16 or !std.mem.startsWith(u8, argv[0], "/")) return error.InvalidArgv;
     if (launch_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return error.LaunchBusy;
     defer launch_active.store(false, .release);
@@ -124,6 +125,110 @@ pub fn launchDetached(io: std.Io, argv: []const []const u8) !void {
     try deadline(io, seconds(3), launchHandshake, .{ io, pipe, &child, &launched_pid });
     success = true;
 }
+
+/// A short exec-self owner performs native spawn, then exits so the actual
+/// desktop process is adopted by launchd. No application fork-child code runs.
+fn launchDarwin(io: std.Io, argv: []const []const u8) !void {
+    if (@import("builtin").os.tag != .macos) return error.UnsupportedPlatform;
+    if (argv.len == 0 or argv.len > 16 or !std.fs.path.isAbsolute(argv[0])) return error.InvalidArgv;
+    if (launch_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return error.LaunchBusy;
+    defer launch_active.store(false, .release);
+    var total: usize = 0;
+    for (argv) |arg| {
+        if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.InvalidArgv;
+        total += arg.len + 1;
+        if (total > launch_strings.len) return error.ArgvTooLarge;
+    }
+    var executable: [4096]u8 = undefined;
+    const n = try std.process.executablePath(io, &executable);
+    var command: [18][]const u8 = undefined;
+    command[0] = executable[0..n];
+    command[1] = "__launch-worker";
+    @memcpy(command[2..][0..argv.len], argv);
+    var child = try std.process.spawn(io, .{ .argv = command[0 .. argv.len + 2], .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
+    defer {
+        closePipes(&child, io);
+        if (child.id != null) child.kill(io);
+    }
+    try deadline(io, seconds(3), launchDarwinHandshake, .{ io, &child });
+}
+
+const Darwin = struct {
+    extern "c" fn posix_spawnattr_setsigdefault(attr: *std.c.posix_spawnattr_t, mask: *const std.posix.sigset_t) c_int;
+    extern "c" fn posix_spawnattr_setsigmask(attr: *std.c.posix_spawnattr_t, mask: *const std.posix.sigset_t) c_int;
+};
+/// Internal worker. The parent captures only a native PID, not user/mail data.
+pub fn launchDarwinWorker(io: std.Io, argv: []const []const u8) !void {
+    if (@import("builtin").os.tag != .macos) return error.UnsupportedPlatform;
+    if (argv.len == 0 or argv.len > 16 or !std.fs.path.isAbsolute(argv[0])) return error.InvalidArgv;
+    var used: usize = 0;
+    var terminated: [17:null]?[*:0]const u8 = @splat(null);
+    for (argv, 0..) |arg, index| {
+        if (std.mem.indexOfScalar(u8, arg, 0) != null or arg.len + 1 > launch_strings.len - used) return error.ArgvTooLarge;
+        @memcpy(launch_strings[used..][0..arg.len], arg);
+        launch_strings[used + arg.len] = 0;
+        terminated[index] = @ptrCast(launch_strings[used..].ptr);
+        used += arg.len + 1;
+    }
+    defer std.crypto.secureZero(u8, launch_strings[0..used]);
+    var attr: std.c.posix_spawnattr_t = undefined;
+    if (std.c.posix_spawnattr_init(&attr) != 0) return error.LaunchSpawnFailed;
+    defer _ = std.c.posix_spawnattr_destroy(&attr);
+    if (std.c.posix_spawnattr_setflags(&attr, .{ .SETSID = true, .CLOEXEC_DEFAULT = true, .SETSIGMASK = true, .SETSIGDEF = true }) != 0) return error.LaunchSpawnFailed;
+    const mask = std.posix.sigemptyset();
+    if (Darwin.posix_spawnattr_setsigmask(&attr, &mask) != 0) return error.LaunchSpawnFailed;
+    const defaults = std.posix.sigfillset();
+    if (Darwin.posix_spawnattr_setsigdefault(&attr, &defaults) != 0) return error.LaunchSpawnFailed;
+    var actions: std.c.posix_spawn_file_actions_t = undefined;
+    if (std.c.posix_spawn_file_actions_init(&actions) != 0) return error.LaunchSpawnFailed;
+    defer _ = std.c.posix_spawn_file_actions_destroy(&actions);
+    for (0..3) |fd| if (std.c.posix_spawn_file_actions_addopen(&actions, @intCast(fd), "/dev/null", 2, 0) != 0) return error.LaunchSpawnFailed;
+    var pid: std.c.pid_t = undefined;
+    if (std.c.posix_spawn(&pid, terminated[0].?, &actions, &attr, @ptrCast(&terminated), @ptrCast(std.c.environ)) != 0) return error.ExecFailed;
+    var acknowledged = false;
+    // This worker remains the direct parent until ACK, pinning even an exited
+    // child PID. Failure cleanup can never signal a recycled desktop PID.
+    defer if (!acknowledged) {
+        _ = std.c.kill(pid, .KILL);
+        while (std.c.waitpid(pid, null, 0) < 0) {
+            if (std.posix.errno(-1) != .INTR) break;
+        }
+    };
+    try std.Io.File.stdout().writeStreamingAll(io, std.mem.asBytes(&pid));
+    try deadline(io, seconds(3), launchDarwinAck, .{io});
+    acknowledged = true;
+}
+fn launchDarwinAck(io: std.Io) !void {
+    var acknowledgement: [1]u8 = undefined;
+    const count = std.Io.File.stdin().readStreaming(io, &.{&acknowledgement}) catch |err| switch (err) {
+        error.EndOfStream => return error.InvalidLaunchAcknowledgement,
+        else => return err,
+    };
+    if (count != 1 or acknowledgement[0] != 1) return error.InvalidLaunchAcknowledgement;
+}
+fn launchDarwinHandshake(io: std.Io, child: *std.process.Child) !void {
+    var pid_bytes: [4]u8 = undefined;
+    var used: usize = 0;
+    while (used < pid_bytes.len) {
+        const count = child.stdout.?.readStreaming(io, &.{pid_bytes[used..]}) catch |err| switch (err) {
+            error.EndOfStream => return error.ExecFailed,
+            else => return err,
+        };
+        if (count == 0) return error.ExecFailed;
+        used += count;
+    }
+    _ = try decodeLaunchPid(&pid_bytes);
+    try child.stdin.?.writeStreamingAll(io, &.{1});
+    child.stdin.?.close(io);
+    child.stdin = null;
+    var extra: [1]u8 = undefined;
+    const count = child.stdout.?.readStreaming(io, &.{&extra}) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => return err,
+    };
+    if (count != 0) return error.ExecFailed;
+    try checkedExit(try child.wait(io));
+}
 fn launchFailure(fd: i32) noreturn {
     const byte: [1]u8 = .{1};
     _ = std.os.linux.write(fd, &byte, 1);
@@ -146,8 +251,13 @@ fn launchHandshake(io: std.Io, pipe: std.Io.File, child: *std.process.Child, pid
         error.EndOfStream => 0,
         else => return err,
     };
-    try checkedExit(try child.wait(io));
-    if (count != 0) return error.ExecFailed;
+    const term = try child.wait(io);
+    // A known failed exec has already exited; never signal its reusable PID.
+    if (count != 0) {
+        pid_out.* = null;
+        return error.ExecFailed;
+    }
+    try checkedExit(term);
 }
 
 fn decodeLaunchPid(bytes: *const [4]u8) !i32 {
@@ -161,6 +271,7 @@ fn decodeLaunchPid(bytes: *const [4]u8) !i32 {
 /// Kernel and exec regression probe. auth_probe supplies the child mode below;
 /// production launch code still performs only raw syscalls after its fork.
 pub fn closeRangeProbe(io: std.Io) !void {
+    if (@import("builtin").os.tag != .linux) return error.UnsupportedPlatform;
     try deadline(io, seconds(3), closeRangeProbeInner, .{io});
 }
 
@@ -230,6 +341,7 @@ fn closeRangeProbeInner(io: std.Io) anyerror!void {
 
 /// Called only by auth_probe after exec; the unflagged FD is a positive control.
 pub fn verifyFdInheritanceProbe(closed_fd: i32, open_fd: i32) !void {
+    if (@import("builtin").os.tag != .linux) return error.UnsupportedPlatform;
     if (closed_fd < 3 or open_fd < 3 or closed_fd == open_fd) return error.InvalidProbeFd;
     const linux = std.os.linux;
     if (linux.errno(linux.fcntl(closed_fd, linux.F.GETFD, 0)) != .BADF) return error.ProbeFdInherited;
@@ -256,6 +368,7 @@ test "Linux inherited-descriptor flags match literal kernel CLOEXEC values" {
 }
 
 test "raw Linux syscall errors retain kernel errno when libc is linked" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     // Literal kernel errno encodings, independent of libc's thread-local errno.
     try std.testing.expectEqual(linux.E.BADF, linux.errno(@as(usize, 0) -% 9));

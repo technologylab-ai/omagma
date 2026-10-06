@@ -357,19 +357,10 @@ fn loadFile(io: Io, allocator: Allocator, path: []const u8) !Zone {
     defer allocator.free(name);
     // /etc/localtime and IANA aliases are normally symlinks. Follow them, but
     // open nonblocking and validate that same descriptor before reading.
-    const linux = std.os.linux;
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true, .NOCTTY = true };
-    const fd: std.posix.fd_t = while (true) {
-        const raw = linux.openat(Io.Dir.cwd().handle, name, flags, 0);
-        switch (linux.errno(raw)) {
-            .SUCCESS => break @intCast(raw),
-            .INTR => try io.checkCancel(),
-            .NOENT => return error.FileNotFound,
-            .NOTDIR => return error.NotDir,
-            else => return error.TimezoneOpenFailed,
-        }
+    const file = @import("../native_file.zig").openAt(io, .cwd(), name, .{ .follow_symlinks = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.Canceled => return err,
+        else => return error.TimezoneOpenFailed,
     };
-    const file: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer file.close(io);
     const stat = try file.stat(io);
     if (stat.kind != .file) return error.NotRegularTimezoneFile;

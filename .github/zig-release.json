@@ -9,10 +9,20 @@
       "shasum": "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
       "size": "57332648",
       "tarball": "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz"
+    },
+    "aarch64-macos": {
+      "shasum": "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a",
+      "size": "53985220",
+      "tarball": "https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz"
+    },
+    "x86_64-macos": {
+      "shasum": "4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6",
+      "size": "59317572",
+      "tarball": "https://ziglang.org/download/0.17.0/zig-x86_64-macos-0.17.0.tar.xz"
     }
   },
-  "signature_verification": "Ed25519 prehashed minisign archive and trusted-comment signatures verified against the official download-page public key",
+  "signature_verification": "Linux archive/trusted-comment minisign signatures verified against the official public key; macOS tuples verified by official index URLs, exact sizes and SHA256 (no new Mac minisign witness claimed)",
   "signing_key": "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U",
   "version": "0.17.0",
-  "provenance": "Official release archives; metadata/signature verification preserved from renerocksai/omajot c7c1ffd082f77f47640990e7c01ed2d3ec6748b4"
+  "provenance": "Linux metadata/signature receipt preserved from renerocksai/omajot c7c1ffd082f77f47640990e7c01ed2d3ec6748b4; Mac tuples independently matched official download/index.json on 2026-10-06"
 }

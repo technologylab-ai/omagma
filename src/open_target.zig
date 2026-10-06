@@ -93,7 +93,7 @@ pub fn openSavedAttachment(io: std.Io, allocator: std.mem.Allocator, path: []con
     defer file.close(io);
     const stat = try file.stat(io);
     if (stat.permissions.toMode() & 0o077 != 0) return error.InsecureAttachmentFile;
-    try platform.launchDetached(io, &.{ "/usr/bin/xdg-open", path });
+    try platform.launchDetached(io, &.{ if (@import("builtin").os.tag == .macos) "/usr/bin/open" else "/usr/bin/xdg-open", path });
 }
 
 test "reader links retain account profile and reject active schemes credentials and controls" {

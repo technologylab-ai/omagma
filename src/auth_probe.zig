@@ -7,15 +7,36 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse return error.ModeRequired;
-    if (std.mem.eql(u8, mode, "keyring")) {
+    if (std.mem.eql(u8, mode, "keychain-worker")) {
+        var command: [5][]const u8 = undefined;
+        var count: usize = 0;
+        while (args.next()) |arg| {
+            if (count == command.len) return error.Args;
+            command[count] = arg;
+            count += 1;
+        }
+        if (count != command.len) return error.Args;
+        return keyring.runNativeWorker(init.io, &command);
+    } else if (std.mem.eql(u8, mode, "__launch-worker")) {
+        var command: [16][]const u8 = undefined;
+        var count: usize = 0;
+        while (args.next()) |arg| {
+            if (count == command.len) return error.Args;
+            command[count] = arg;
+            count += 1;
+        }
+        return platform.launchDarwinWorker(init.io, command[0..count]);
+    } else if (std.mem.eql(u8, mode, "keyring")) {
         try keyring.syntheticProbe(init.io);
         try keyring.failureProbe(init.io);
         std.debug.print("synthetic keyring store/lookup/clear passed; child maxrss={d}\n", .{keyring.last_child_peak_rss});
     } else if (std.mem.eql(u8, mode, "launch")) {
         try platform.launchDetached(init.io, &.{"/usr/bin/true"});
         try std.testing.expectError(error.ExecFailed, platform.launchDetached(init.io, &.{"/nonexistent/omagma-test"}));
-        try platform.closeRangeProbe(init.io);
-        std.debug.print("detached success, exec-failure and kernel FD inheritance checks passed\n", .{});
+        if (@import("builtin").os.tag == .linux) {
+            try platform.closeRangeProbe(init.io);
+            std.debug.print("detached success, exec-failure and kernel FD inheritance checks passed\n", .{});
+        } else std.debug.print("native detached success and exec-failure passed; FD/session checks use tests/launch_macos.py\n", .{});
     } else if (std.mem.eql(u8, mode, "fd-inheritance-probe")) {
         const closed_fd = try std.fmt.parseInt(i32, args.next() orelse return error.Args, 10);
         const open_fd = try std.fmt.parseInt(i32, args.next() orelse return error.Args, 10);
