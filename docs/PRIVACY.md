@@ -1,19 +1,41 @@
 # Privacy and credentials
 
-The bar reads Gmail through the Gmail API after separate consent for each configured account. Its scope is `gmail.readonly`, a restricted scope that grants broader reading access than the bounded Inbox metadata the implementation actually requests. [Google’s scope definition](https://developers.google.com/workspace/gmail/api/auth/scopes).
+Omagma connects directly to Google’s APIs. Every configured account authorizes separately, and mail, unread counts and browser profiles remain account-specific. Public examples and screenshots use fictional accounts.
 
-The bar backend requests one Inbox page of at most 30 messages, then selected metadata and snippets. It does not request message bodies or attachments, write labels, mark messages read or send mail. Cache contents live in bounded process memory and disappear when the daemon exits. There is no local mail database, mail history or application mail log.
+## Bar access
 
-Refresh tokens are stored through Secret Service under `io.github.technologylab_ai.omagma` and the verified account address. They are passed to `secret-tool` through stdin, never through command-line arguments. Access tokens remain in bounded backend memory. Neither token type crosses the UI protocol. Keep your OAuth client download and account configuration private even though a Desktop OAuth client cannot keep its client secret confidential. [Google’s installed-app model](https://developers.google.com/identity/protocols/oauth2/native-app).
+The bar requests `gmail.readonly`. Google classifies this as a restricted scope that permits broader mailbox reading than the bar actually uses. [Google’s scope definitions](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
-Consent opens Chrome in the configured profile and returns through an ephemeral IPv4 loopback listener. The backend checks PKCE, random state, callback syntax and the returned account identity, with a 180-second deadline. Normal Gmail links are validated HTTPS destinations passed as browser arguments. Credentials and mail are discarded from UI diagnostics.
+The bar fetches an Inbox page of at most 30 messages per account, with selected metadata and snippets. It does not download full bodies or attachments, change labels or read status, or send mail. Its cache lives in bounded process memory and disappears when the backend exits. The bar does not save mail history or mail logs to disk.
 
-The protocol’s `disconnect` command removes the local keyring token and clears the account cache. It does not revoke the Google-side grant. Revoke access in your Google Account if you want Google to invalidate the authorization. Removing the bar widget alone does not erase credentials.
+Gmail links open in the account’s configured Chrome profile. Reading a message in Gmail is then handled by Gmail itself.
 
-Fixture tests do not contact Gmail or the keyring. Public screenshots contain fictional accounts and messages. Reports shared publicly must exclude credentials, OAuth callback URLs, real mail, addresses, identifiers and local installation paths.
+## Credentials and consent
+
+Refresh tokens are stored in Secret Service, using Omagma’s service name and the verified account address. They are passed to the keyring helper through stdin rather than command-line arguments. Access tokens remain in backend memory. Neither token type is sent to the bar UI or terminal client’s response frames.
+
+Consent opens your configured Chrome profile and returns through a temporary local IPv4 callback listener. Omagma verifies the random state, PKCE exchange and returned Gmail identity before accepting the grant. The consent command has a 180-second deadline. Keep the downloaded OAuth client JSON and account configuration private, outside Git. Desktop apps cannot keep a client secret confidential; refresh tokens still need protection. [Google’s installed-app model](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 ## Terminal client
 
-Terminal modes are a separate account-scoped interface. They may fetch full text and attachments, cache mail and local drafts under explicit memory/disk quotas, and perform writes only under an explicitly authorized capability. Cached content is plaintext in owner-only directories/files, not encrypted at rest. The bar's no-persistence and read-only guarantees remain specific to the bar.
+The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate Secret Service namespace and a different Desktop OAuth client, preserving the bar’s read-only authorization. Installation or read access alone does not authorize an agent to send mail or change contacts.
 
-Terminal refresh tokens use a separate Secret Service namespace and a second Desktop OAuth client; wider permissions do not alter the bar token. See [terminal authorization](TERMINAL.md#live-permissions) and [the provider scope map](TERMINAL-PROVIDER-DESIGN.md). Terminal protocol frames carry requested mail/contacts to their caller, so treat stdout and caller logs as private. No credentials enter those frames. Mail controls are filtered before rendering, HTML becomes text, and remote resources never load. Local send/RSVP receipts retain stable identities and uncertainty; they are private too.
+Terminal modes save cached mail, local drafts, contacts and operation receipts in owner-only directories and files. The defaults are `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; directories use mode 0700 and files use 0600. Live and fixture data have separate namespaces, and account/message filename components are hashes. **Mail and drafts are plaintext on disk, not encrypted at rest.** Filesystem permissions restrict access; a backup or administrator with file access can still read them.
+
+The cache keeps the newest mail within message-count and byte quotas. Old-tail eviction removes mail and its cached bodies while preserving drafts and uncertain-operation receipts. Clearing the mail cache also preserves drafts, contacts and receipts. See [cache behavior](TUI-CACHE.md). Current source builds additionally save account addresses, mailbox/selected-message context and key/layout preferences in the private `omagma/ui.json` configuration file.
+
+The CLI returns requested mail and contacts to its caller. Treat its stdout, redirected files and agent logs as private. Local send and invitation receipts contain account/message identities and submission state; they are private too. An uncertain send is retained for review rather than automatically resubmitted.
+
+## Message rendering and attachments
+
+Display text is sanitized to remove terminal controls and directional formatting. A supplied plain-text body takes precedence. HTML-only mail becomes bounded formatted text; scripts, stylesheets, remote images and other remote resources never run or load.
+
+The current source reader’s link chooser opens only an explicitly selected HTTP(S) URL in the account’s Chrome profile. Received attachments are saved only after you choose a destination; existing files are not overwritten. Its Open action delegates a saved, private file of a supported document/image type to the desktop viewer. Reading mail does not automatically launch a link or attachment.
+
+Fixture providers make no Gmail API or keyring requests. You can try fictional mail with `omagma tui --fixtures`; this is optional and does not grant live permissions.
+
+## Disconnect or remove
+
+Removing the widget stops its bar integration but leaves your private configuration and keyring credentials available for later use. The bar protocol’s `disconnect` command removes its local account token and clears its memory cache. `omagma terminal-auth revoke --account ACCOUNT` removes the terminal token and registry entry; use your usual `--config` and `--grant-file` options when you selected non-default paths.
+
+These local removals do not revoke Google’s grant or erase terminal cache files. To invalidate Google-side access, revoke Omagma in your Google Account. To delete local mail, review the private cache directory and any files you explicitly saved. Keep real mail, addresses, message IDs, OAuth downloads and callback URLs out of public issues, screenshots and shared logs.

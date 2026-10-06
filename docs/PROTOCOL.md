@@ -1,4 +1,11 @@
-# JSON-lines protocol, version 1
+# Bar JSON-lines protocol, version 1
+
+Developer reference for `omagma daemon` and its Quickshell client. This protocol
+uses integer request IDs and `re` replies; it is distinct from the terminal
+agent API's `account`/`cmd` request and `data`/structured-error response described
+in [the agent CLI guide](AGENT-CLI.md). Both use version 1 in their own envelope;
+their frames are not interchangeable. Start with [development](DEVELOPMENT.md)
+for implementation checks, or [setup](SETUP.md) for normal use.
 
 One Zig child reads requests from stdin and writes replies/events to stdout. Each frame is one JSON value followed by a newline. Credentials never cross this interface.
 
@@ -36,8 +43,8 @@ Input frames are capped at 16 KiB and output frames at 512 KiB. Oversized or inv
 
 Discard pending request metadata and resynchronize with `hello` on this event. The UI itself limits outstanding requests to 64 and holds no view callbacks.
 
-## Test modes
+## Developer test modes
 
 `omagma daemon [--config FILE] [--fixtures] [--dry-run-open]` starts the child. `--fixtures` uses synthetic mail without Gmail/keyring access. `--dry-run-open` returns browser argv in the reply without launching Chrome.
 
-Fixture-only options are `--fixture-delay-ms`, `--fixture-fail-account`, `--fixture-empty-account`, `--fixture-fail-after`, `--fixture-rows` (0..30, default 8) and `--fixture-auto-refresh-ms` (1..60000). They support timing, failure and accelerated background tests without real accounts.
+Fixture-only options are `--fixture-delay-ms`, `--fixture-fail-account`, `--fixture-empty-account`, `--fixture-fail-after`, `--fixture-rows` (0..30, default 8) and `--fixture-auto-refresh-ms` (1..60000). They support timing, failure and accelerated background tests without real accounts. Fixtures are a test-harness choice, not an installation or live authorization step.

@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{title}}</title>
+  <meta name="description" content="{{description}}">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0e121b">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Omagma">
+  <meta property="og:title" content="{{title}}">
+  <meta property="og:description" content="{{description}}">
+  <link rel="icon" type="image/png" href="{{base}}assets/omagma-logo.png">
+  <link rel="stylesheet" href="{{base}}assets/site.css">
+  <script src="{{base}}assets/site.js" defer></script>
+</head>
+<body class="page-landing">
+  <a class="skip-link" href="#content">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap site-header__inner">
+      <a class="brand" href="{{base}}">
+        <img class="brand__mark" src="{{base}}assets/omagma-logo.png" alt="" width="28" height="28">
+        <span class="brand__name">omagma</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <ul>
+          <li><a href="{{base}}docs/">Docs</a></li>
+          <li class="site-nav__opt"><a href="{{base}}docs/features/">Features</a></li>
+          <li class="site-nav__opt"><a href="{{base}}docs/privacy/">Privacy</a></li>
+          <li><a href="https://github.com/technologylab-ai/omagma">GitHub</a></li>
+          <li><a class="button button--quiet button--small" href="#get-started">Get started</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="content" tabindex="-1">
+
+    <!-- Hero: copy, then the real terminal capture -->
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="wrap hero__copy">
+        <div class="hero__headline">
+          <p class="eyebrow">Gmail for Omarchy</p>
+          <h1 id="hero-title" class="hero__title">Gmail, one account at a time.</h1>
+        </div>
+        <div class="hero__intro">
+          <p class="hero__lede">Check Gmail from your Omarchy bar, read and reply in the experimental TUI, or use the structured agent CLI. Up to three accounts keep separate mail, permissions and Chrome profiles.</p>
+          <div class="hero__proof">
+            <p><a href="{{base}}docs/memory/#three-account-bar-measurement-v022"><strong>≈31 MB RAM</strong> three-account bar baseline</a></p>
+            <p>Cached mail is ready while Gmail updates in the background.</p>
+            <p class="hero__proof-note">Bar v0.2.2 · 2026-10-05. Inspired by the author’s ~2 GB Gmail tab.</p>
+          </div>
+          <div class="hero__actions">
+            <a class="button button--primary" href="{{base}}docs/agent-setup/">Set up with your agent <span class="button__arrow" aria-hidden="true">→</span></a>
+            <a class="button button--quiet" href="{{base}}docs/install/">Install manually</a>
+          </div>
+          <ul class="meta-list hero__meta">
+            <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Release bundles</a></li>
+            <li>Static Linux bundles</li>
+            <li>No Zig needed to install</li>
+            <li>MIT licensed</li>
+          </ul>
+        </div>
+      </div>
+
+      <figure class="shot shot--hero wrap wrap--wide">
+        <div class="shot__frame">
+          <img src="{{base}}assets/omagma-tui.png" width="1584" height="864" fetchpriority="high" decoding="async"
+               alt="The experimental Omagma terminal client showing fictional demo mail: accounts and mailboxes, a message list, and a reader pane.">
+        </div>
+        <figcaption class="shot__caption">
+          <span class="shot__caption-text">
+            <span class="tag tag--experimental">Experimental</span>
+            <span>Current source <code>omagma tui</code> with fictional mail — a real terminal capture.</span>
+          </span>
+          <a class="shot__link" href="{{base}}assets/omagma-tui.png">Full-size capture</a>
+        </figcaption>
+      </figure>
+    </section>
+
+    <!-- Interfaces: Bar / TUI / CLI with permission scopes -->
+    <section class="section" id="interfaces" aria-labelledby="interfaces-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Three interfaces</p>
+          <h2 id="interfaces-title">Read-only by default. Write access only where you grant it.</h2>
+          <p class="section-head__intro">The bar, terminal client and agent CLI share the same one to three accounts and keep them apart: separate lists, unread counts, credentials and Chrome profiles, with no combined Inbox. Sending and changing mail need a second, separate grant that you approve per account.</p>
+        </header>
+
+        <ul class="ifaces">
+          <li class="iface">
+            <div class="iface__head">
+              <h3 class="iface__name">Omarchy bar</h3>
+              <span class="tag tag--readonly">Read-only</span>
+            </div>
+            <div class="iface__body">
+              <p>Click the magma icon to see each account’s unread count and up to 30 recent Inbox messages with sender, subject, time and snippet. Activating a message or <strong>Open inbox</strong> opens Gmail in that account’s own Chrome profile.</p>
+              <p>Refresh on demand, or turn on five-minute background refresh. The bar never sends mail, changes labels or read status, or saves mail to disk.</p>
+              <p><a class="more" href="{{base}}docs/ui/">Bar dropdown guide <span aria-hidden="true">→</span></a></p>
+            </div>
+            <dl class="iface__access">
+              <dt>Permission</dt>
+              <dd><code>gmail.readonly</code></dd>
+              <dt>OAuth client</dt>
+              <dd>One Desktop client</dd>
+              <dt>Mail kept</dt>
+              <dd>In memory only</dd>
+            </dl>
+            <figure class="shot iface__figure">
+              <div class="shot__frame">
+                <img src="{{base}}assets/omagma.png" width="1480" height="880" loading="lazy" decoding="async"
+                     alt="The bar dropdown: three fictional accounts in a sidebar, each marked Current with its own unread count, beside the selected account’s recent Inbox messages showing sender, subject, snippet and time.">
+              </div>
+              <figcaption class="shot__caption">
+                <span class="shot__caption-text">
+                  <span class="tag tag--readonly">Read-only</span>
+                  <span>The bar dropdown with fictional accounts.</span>
+                </span>
+              </figcaption>
+            </figure>
+          </li>
+
+          <li class="iface">
+            <div class="iface__head">
+              <h3 class="iface__name">Terminal client</h3>
+              <p class="iface__cmd"><code>omagma tui</code></p>
+              <span class="tag tag--experimental">Experimental</span>
+            </div>
+            <div class="iface__body">
+              <p>Full messages and threads, with the reader beside or below the list, Vim keys, mouse navigation and a native text view of HTML-only mail. Scripts and remote images never load.</p>
+              <p>Search the cache with <kbd>/</kbd> or Gmail with <kbd>\</kbd>. Write drafts, replies and reply-all with attachments; create and edit contacts; archive, Trash, star and apply existing labels; answer invitations with an RSVP email. <code>$EDITOR</code> takes over the terminal to compose, then hands it back.</p>
+              <p><a class="more" href="{{base}}docs/terminal/">Terminal guide <span aria-hidden="true">→</span></a></p>
+            </div>
+            <dl class="iface__access">
+              <dt>To read</dt>
+              <dd>The bar’s <code>gmail.readonly</code> grant</dd>
+              <dt>Full access</dt>
+              <dd><code>gmail.modify</code> + <code>contacts</code>, separate Desktop client</dd>
+              <dt>Mail kept</dt>
+              <dd>Private plaintext disk cache</dd>
+            </dl>
+          </li>
+
+          <li class="iface">
+            <div class="iface__head">
+              <h3 class="iface__name">Agent CLI</h3>
+              <p class="iface__cmd"><code>omagma cli</code></p>
+              <span class="tag tag--experimental">Experimental</span>
+            </div>
+            <div class="iface__body">
+              <p>One-shot commands and a JSONL client on the same account-scoped executor as the TUI. Every request names its account, pages return up to 100 messages with explicit cursors, and cached and Gmail search stay distinct.</p>
+              <p>Sends and RSVPs record durable operation receipts. An unknown outcome is never retried automatically.</p>
+              <p><a class="more" href="{{base}}docs/agent-cli/">CLI contract <span aria-hidden="true">→</span></a></p>
+            </div>
+            <dl class="iface__access">
+              <dt>Permission</dt>
+              <dd>The TUI’s terminal grant</dd>
+              <dt>Output</dt>
+              <dd>JSON and JSONL on stdout</dd>
+              <dt>Agent writes</dt>
+              <dd>Only with your task authorization</dd>
+            </dl>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Memory motivation: dated, scoped, anchored to the measurement page -->
+    <section class="memory" id="memory" aria-labelledby="memory-title">
+      <div class="wrap memory__inner">
+        <div class="memory__story">
+          <h2 class="eyebrow" id="memory-title">Why it exists</h2>
+          <p class="memory__lead">Omagma started because one Gmail tab was using roughly <strong>2&nbsp;GB of RAM</strong> on the author’s desktop.</p>
+          <p class="memory__note">An individual observation, not a universal Gmail requirement.</p>
+        </div>
+        <div class="memory__figure">
+          <p class="memory__value"><span class="memory__approx" aria-hidden="true">≈</span><span class="sr-only">Approximately </span>31&nbsp;MB</p>
+          <p class="memory__label">The read-only bar with three connected accounts: backend plus its attributed share of the bar UI.</p>
+          <ul class="meta-list">
+            <li>v0.2.2</li>
+            <li>Measured 2026-10-05</li>
+            <li>Linux x86_64</li>
+          </ul>
+        </div>
+        <p class="memory__fine">Chrome and unrelated shell widgets are excluded. Both figures are approximate observations, not a controlled benchmark, and the 31&nbsp;MB estimate covers the bar only — not the terminal client or newer source builds. <a href="{{base}}docs/memory/">Memory measurements <span aria-hidden="true">→</span></a></p>
+      </div>
+    </section>
+
+    <!-- Cache-first terminal behavior, with source-only progress clearly marked -->
+    <section class="section" id="cache" aria-labelledby="cache-title">
+      <div class="wrap split">
+        <div class="split__text">
+          <p class="eyebrow">Terminal cache</p>
+          <h2 id="cache-title">Cached mail first. Gmail catches up.</h2>
+          <p>The terminal client opens with the mail it already has and keeps it readable while Gmail refreshes in the background; a refresh requests only the changes since its last update. By default each account keeps its newest 2,000 messages within 256&nbsp;MiB and evicts the oldest tail. An optional five-minute timer keeps the cache ready even while the TUI is closed.</p>
+          <p class="source-note"><span class="tag tag--source">Source only</span> Placeholder rows turn into messages as metadata and bodies arrive, a <code>metadata 1/32</code> or <code>bodies 1/32</code> counter reports the batch in progress — not your Inbox size — and scrolling past either end of the 32-row list moves continuously through adjacent cached mail. v0.2.3 uses explicit <kbd>[</kbd> and <kbd>]</kbd> pages instead.</p>
+          <p>Cached mail is private plaintext with owner-only permissions, kept apart from the bar’s memory-only snapshot.</p>
+          <p class="links">
+            <a class="more" href="{{base}}docs/tui-cache/">Cache behavior <span aria-hidden="true">→</span></a>
+            <a class="more" href="{{base}}docs/privacy/">Privacy and credentials <span aria-hidden="true">→</span></a>
+          </p>
+        </div>
+        <figure class="shot split__media">
+          <div class="shot__frame">
+            <picture>
+              <source srcset="{{base}}assets/omagma-fetch.png" media="(prefers-reduced-motion: reduce)">
+              <img src="{{base}}assets/omagma-fetch.gif" width="1584" height="864" loading="lazy" decoding="async"
+                   alt="Terminal capture of fictional mail loading: placeholder rows fill in with messages while a batch counter advances.">
+            </picture>
+          </div>
+          <figcaption class="shot__caption">
+            <span class="shot__caption-text">
+              <span class="tag tag--source">Source only</span>
+              <span>Fictional mail loading in a current source build.</span>
+            </span>
+            <button class="shot__link motion-toggle" type="button" data-animation-toggle data-animated="{{base}}assets/omagma-fetch.gif" data-still="{{base}}assets/omagma-fetch.png" aria-pressed="true">Pause animation</button>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- Release vs source: what is published and what is not -->
+    <section class="section" id="releases" aria-labelledby="releases-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Release and source</p>
+          <h2 id="releases-title">What’s released, and what’s only in source.</h2>
+          <p class="section-head__intro">The published v0.2.3 binaries are unchanged. Terminal and CLI work added since then lives in the source checkout and hasn’t been released yet; the guides mark it <strong>Source only</strong>.</p>
+        </header>
+
+        <div class="ledger">
+          <section class="ledger__col" aria-labelledby="ledger-release">
+            <h3 class="ledger__title" id="ledger-release"><span class="tag tag--release">Release</span> v0.2.3 bundles</h3>
+            <p class="ledger__sub">Published · static musl backend · no compiler needed</p>
+            <ul class="ticks">
+              <li>Read-only bar for up to three accounts, with optional background refresh</li>
+              <li>Cache-first terminal startup</li>
+              <li>Mouse navigation</li>
+              <li>Native display of HTML-only mail</li>
+              <li>Replies, local drafts, attachments, contacts, single-message actions and RSVP</li>
+              <li>Metadata cache search and explicit Gmail search</li>
+              <li>Agent CLI: one-shot commands and JSONL</li>
+            </ul>
+            <p class="ledger__foot"><a href="https://github.com/technologylab-ai/omagma/releases/latest">Download the latest release</a> for Linux x86_64 or arm64, with <code>SHA256SUMS</code>.</p>
+          </section>
+
+          <section class="ledger__col ledger__col--source" aria-labelledby="ledger-source">
+            <h3 class="ledger__title" id="ledger-source"><span class="tag tag--source">Source only</span> Current checkout</h3>
+            <p class="ledger__sub">Unreleased · build with Zig 0.17.0 exactly</p>
+            <ul class="ticks">
+              <li>Forwarding with original files</li>
+              <li>Recipient autocomplete, sending identities and signatures</li>
+              <li>Draft autosave and recovery</li>
+              <li>Bulk actions with undo</li>
+              <li>Custom-label, Spam, All Mail and Unread views</li>
+              <li>Folded threads, quoted history and signatures</li>
+              <li>Link and received-file pickers</li>
+              <li>Search inside downloaded message bodies</li>
+              <li>Loading placeholders, <code>n/m</code> batch counters and continuous cache windows</li>
+              <li>Saved working context, key mappings and pane proportions</li>
+            </ul>
+            <p class="ledger__foot">Omarchy may still ship Zig 0.16.x; use the official 0.17.0 build without replacing your system compiler. <a href="{{base}}docs/development/#build-from-source">Build from source</a></p>
+          </section>
+        </div>
+
+        <dl class="scope-notes">
+          <div>
+            <dt><span class="tag tag--planned">Planned</span></dt>
+            <dd>Creating, renaming and deleting arbitrary labels in the TUI and CLI. Assigning and removing existing labels already works.</dd>
+          </div>
+          <div>
+            <dt>Not included</dt>
+            <dd>A combined Inbox, calendar views, permanent mail deletion, contact deletion, synchronized Gmail drafts, and an embedded editor pane — <code>$EDITOR</code> takes over the terminal instead.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <!-- Get started: agent-guided first, manual second -->
+    <section class="section start" id="get-started" aria-labelledby="start-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Get started</p>
+          <h2 id="start-title">Let your coding agent walk you through setup.</h2>
+          <p class="section-head__intro">Point your coding agent at the <a href="https://github.com/technologylab-ai/omagma">repository</a> or the complete <a href="https://github.com/technologylab-ai/omagma/releases/latest">release bundle</a> and give it the prompt below. It downloads and verifies the release, installs the bar plugin and prepares private configuration, then guides you through Google Cloud Console one small step at a time, waiting for your feedback. You make the Google clicks and approve access in your own browser.</p>
+        </header>
+
+        <div class="start__grid">
+          <div class="prompt">
+            <p class="prompt__label"><span>Setup prompt</span><span>Read-only bar</span></p>
+            <div class="code-block">
+<button class="copy-code" type="button" data-copy="setup-prompt" aria-label="Copy setup prompt">Copy</button><pre><code id="setup-prompt">Read AGENTS.md and follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.</code></pre>
+            </div>
+            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and whether you want five-minute background refresh. If you already downloaded an OAuth client file, give its local path — never paste its contents or any tokens. For sending and mailbox changes in the terminal, use the <a href="{{base}}docs/agent-setup/#terminal-client-and-agents">full-access prompt</a>.</p>
+          </div>
+
+          <div class="google">
+            <h3>What the Google part involves</h3>
+            <ol class="numbered">
+              <li><strong>Your own Google project.</strong> Create a Google Cloud project, enable the Gmail API and configure the consent screen. Omagma uses Desktop OAuth clients that you create and keep private.</li>
+              <li><strong>One client for the bar.</strong> A Desktop client with <code>gmail.readonly</code> covers the bar and read-only terminal browsing.</li>
+              <li><strong>A second client for writing.</strong> Full TUI and CLI access uses a separate Desktop client in the same project, with <code>gmail.modify</code> and <code>contacts</code> (People API). The bar keeps its read-only grant.</li>
+              <li><strong>Consent per account, in its own profile.</strong> Each account maps to an existing Chrome profile. Consent opens there, and Omagma checks the returned address before storing the token in your Secret Service keyring.</li>
+            </ol>
+            <p class="fine">While a Google app is in Testing, these grants expire after seven days; reconnecting is one command per account.</p>
+          </div>
+        </div>
+
+        <div class="manual">
+          <h3>Prefer to set it up by hand?</h3>
+          <ol class="numbered numbered--row">
+            <li><strong>Download.</strong> Get the complete Linux x86_64 or arm64 bundle and its <code>SHA256SUMS</code> from the <a href="https://github.com/technologylab-ai/omagma/releases/latest">latest release</a>.</li>
+            <li><strong>Install.</strong> Verify the checksum, extract, and add the widget to your bar. <a href="{{base}}docs/install/">Installation guide</a></li>
+            <li><strong>Connect accounts.</strong> Create your OAuth client, map each account to its Chrome profile and approve access. <a href="{{base}}docs/setup/">Account setup</a></li>
+          </ol>
+          <p class="fine">Needs Omarchy’s Quickshell plugin host for the bar, Chrome, an unlocked Secret Service keyring with <code>secret-tool</code>, and system CA certificates; the TUI needs a UTF-8 terminal. Release bundles are static, so no Zig compiler is needed. arm64 backend builds are tested separately; ARM desktop integration has not been qualified.</p>
+          <p class="fine">Optional preview: <code>omagma tui --fixtures</code> shows fictional mail without contacting Google. It isn’t part of installation.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap site-footer__inner">
+      <div>
+        <a class="brand brand--small" href="{{base}}">
+          <img class="brand__mark" src="{{base}}assets/omagma-logo.png" alt="" width="22" height="22">
+          <span class="brand__name">omagma</span>
+        </a>
+        <p class="site-footer__tagline">Gmail, one account at a time.</p>
+      </div>
+      <nav aria-label="Footer">
+        <ul>
+          <li><a href="{{base}}docs/">Documentation</a></li>
+          <li><a href="{{base}}docs/features/">Features</a></li>
+          <li><a href="{{base}}docs/memory/">Memory</a></li>
+          <li><a href="{{base}}docs/privacy/">Privacy</a></li>
+          <li><a href="https://github.com/technologylab-ai/omagma">GitHub</a></li>
+          <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Releases</a></li>
+        </ul>
+      </nav>
+      <p class="site-footer__legal">MIT licensed · © technologylab.ai · Screenshots show fictional accounts and mail.</p>
+    </div>
+  </footer>
+</body>
+</html>

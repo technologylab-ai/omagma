@@ -1,16 +1,21 @@
 # Agent-assisted setup
 
-Ask a coding agent to use this repository or its complete [release bundle](https://github.com/technologylab-ai/omagma/releases/latest):
+**Recommended for Google/OAuth setup:** point your coding agent at
+[this repository](https://github.com/technologylab-ai/omagma) or its complete
+[release bundle](https://github.com/technologylab-ai/omagma/releases/latest).
+The agent can prepare installation and private configuration while walking you
+through Google Console and consent one step at a time. You provide feedback
+after each Google step and approve access in your browser.
 
 The root `AGENTS.md` directs installation/onboarding requests to `skills/omagma-setup/SKILL.md`. The agent can follow that workflow directly; installing it as a global skill is optional.
 
-> Read AGENTS.md and follow skills/omagma-setup/SKILL.md. Download the latest complete omagma bundle for my Linux architecture, verify SHA256SUMS and run the included backend’s --version, then install its user-owned Omarchy bar plugin. Help me map each Gmail account to its existing Chrome profile and configure private OAuth credentials. Use fixtures while I complete Google setup. Tell me when I need to click something, and keep automated UI tests offscreen. Preserve unrelated desktop settings and give me the final launch and reconnect instructions.
+> Read AGENTS.md and follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.
 
 Add your account addresses, existing Chrome profile directories, and whether you want five-minute background refresh. Provide a downloaded OAuth client JSON's local path when available; do not paste its contents or account tokens into chat. The agent can prepare and validate local configuration while you approve Google consent in Chrome.
 
 The preferred installation needs no Zig compiler. Static musl backends are published for Linux x86_64 and arm64; use the complete bundle so the UI and instructions are included. Omarchy/Quickshell, Chrome, the keyring and system CA certificates must already be available. ARM backend build/test checks do not establish ARM desktop integration.
 
-If no compatible release asset exists, use a source checkout with exact Zig **0.17.0**. Omarchy may still ship 0.16.x: download the verified 0.17.0 archive matching the host OS/CPU from [the versioned release directory](https://ziglang.org/download/0.17.0/), extract it, prepend its directory to the task's `PATH`, and confirm `zig version` before invoking any build or nested Python tool. Keep the system compiler unchanged. Use `-Doptimize=debug` and `-Doptimize=safe` for the appropriate checks, under the [shared-host reservation protocol](VERIFICATION.md#cooperative-host-measurement-lock).
+If no compatible release asset exists, use a source checkout with exact Zig **0.17.0**. Omarchy may still ship 0.16.x: download the verified 0.17.0 archive matching the host OS/CPU from [the versioned release directory](https://ziglang.org/download/0.17.0/), extract it, prepend its directory to the task's `PATH`, and confirm `zig version`. Keep the system compiler unchanged, follow [the source-build instructions](DEVELOPMENT.md#build-from-source) using `safe`, and verify the resulting binary's version.
 
 ## Optional setup skill
 
@@ -23,8 +28,12 @@ ln -s /absolute/path/to/omagma/skills/omagma-setup ~/.codex/skills/omagma-setup
 
 Restart your agent session after installation and ask it to use `$omagma-setup`. Other agents that support `SKILL.md` can use the same instructions. The skill stays in the omagma folder and refers to the included project docs. It does not grant permission to modify unrelated desktop settings or bypass Google consent.
 
-Source and release builds use the actual tested pin declared in `build.zig.zon`. When porting to a newer Zig version, update the implementation, checks and documentation together. [Release maintenance](RELEASING.md) explains version-driven publication.
+Source builds use the compiler pin declared in `build.zig.zon`; complete release bundles need no compiler.
 
 ## Terminal client and agents
 
-For `omagma tui`, the JSONL agent client, cached full mail, drafts and scoped write setup, read [TERMINAL.md](TERMINAL.md) and [AGENT-CLI.md](AGENT-CLI.md). Existing bar credentials remain read-only. New terminal consent uses a separate Desktop client and Secret Service namespace; do not broaden the bar grant. Fixture-backed development never authorizes production writes. Initial live write acceptance requires a dedicated test mailbox explicitly provided by the user; production mail and contact changes require their own explicit task authorization.
+For `omagma tui`, the JSONL agent client, cached full mail, drafts and scoped write setup, read [account permissions](SETUP.md#full-tuicli-permissions), [TERMINAL.md](TERMINAL.md) and [AGENT-CLI.md](AGENT-CLI.md). Full access uses `gmail.modify` and `contacts` with a separate Desktop client and per-account terminal consent. Existing bar credentials remain read-only. Install and authorize the requested interfaces; sending mail or changing contacts requires the user's separate request or explicit interaction.
+
+If the bar already works and you want to enable full terminal access, use:
+
+> Read AGENTS.md and follow skills/omagma-setup/SKILL.md and the full TUI/CLI permissions section of docs/SETUP.md. Enable full terminal access for my configured accounts using a separate Desktop client in my existing Google project. Walk me through People API, Data access scopes and creating/downloading the terminal client one step at a time, waiting for my feedback. Prepare the private client file and open each account's consent sequentially in its configured Chrome profile. Confirm the grants and mail/contact reads, then tell me how to restart the TUI and reconnect later.

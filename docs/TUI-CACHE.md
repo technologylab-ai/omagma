@@ -1,17 +1,54 @@
 # Cache-first terminal startup
 
-The TUI uses the private, account-separated terminal cache. It displays available cached mail before refreshing Gmail in the background. A cold account shows a fetching status instead of an apparently idle empty list. A warm account shows cached mail while checking for changes. Fetch status has its own colored status line; action messages and navigation do not hide it. `NO_COLOR` retains explicit text states.
+This guide describes the current development checkout. The public v0.2.3 release remains unchanged; newer window, search and progress behavior requires the current source build. [Installation](INSTALL.md), [terminal guide](TERMINAL.md).
 
-The default cache retains at most **2,000 messages per account**, keeping the newest by received time and evicting the oldest tail with its body files. The existing **256 MiB per-account byte limit** also guards large messages. `--metadata-limit` and `--disk-limit-bytes` can lower these limits. Drafts and uncertain-operation receipts have separate bounded retention and are preserved during mail-cache eviction.
+## Startup and refresh
 
-Files remain owner-only in the existing terminal cache under `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`. Fixture and live namespaces are separate, and account/message path components are hashes. Cached mail is plaintext protected by filesystem permissions, not encrypted at rest. The bar's memory-only recent-mail cache remains separate.
+Available cached mail appears immediately while Omagma checks Gmail in the background. A cold account shows **Fetching mail**; a warm account keeps usable rows and downloaded bodies visible during refresh. Fetch state has its own colored line, separate from action messages. `NO_COLOR` keeps explicit text states.
 
-Local cache reads do not hold a network operation open. Cached navigation and available full bodies remain usable during background refresh. A body that has not been downloaded or exceeds the supported body limit is identified explicitly; its snippet is not presented as a complete message. Partial cached threads are identified too. Background list updates preserve the selected message identity and displayed reader while that message remains in the view. If it disappears, the reader follows the replacement selection. An open composer keeps its original message context.
+**Source-only progress:** once a fetch knows its actual bounded batch, `metadata 1/32` or `bodies 1/32` shows completed work. This is not the Inbox size or unread count. Already cached bodies do not count as downloads. Before the batch is known, the line simply says fetching. The fixed **Synced** time uses the computer's local timezone and the date's DST offset; it is also source-only polish. An explicit `TZ` setting overrides the system timezone, including `TZ=UTC0` for UTC. Unsupported settings visibly show `UTC (TZ unavailable)`. Stored mail and synchronization timestamps remain UTC.
 
-Gmail synchronization uses an account-specific history checkpoint to request changes after the previous completed update. Unchanged messages need no repeated body download. Label changes preserve immutable cached message content; additions and deletions update the local cache. If Gmail no longer retains the checkpoint, Omagma rebuilds a bounded recent snapshot. The checkpoint advances only after the required changes are committed. Cancellation or failure leaves existing cached mail available and reports the refresh state. [Google's synchronization guide](https://developers.google.com/workspace/gmail/api/guides/sync), [history API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list).
+**Source-only placeholders** become real, interactive rows after a window commits. In both versions, a missing/unsupported body is identified clearly, partial cached threads are marked, and a snippet is not presented as a full message. New results preserve selection where possible; an open composer keeps its original context.
 
-Use `/` for immediate cached-metadata search and `\` for an explicit Gmail search. The one-shot CLI uses `--cached` / `--server`, and JSONL uses `cacheOnly:true` / `false`. Local search matches subject, snippet, sender and labels rather than full uncached bodies. Search results and continuation cursors remain account/query scoped. A local cache is a bounded subset of the mailbox; it cannot prove that arbitrary Gmail search results or a thread are complete. Cached membership and provider pagination are kept separate.
+Refresh requests changes since the last completed update. Unchanged mail does not need another body download. If that history is no longer available, Omagma rebuilds a bounded recent snapshot. Interrupted or failed refreshes leave previously cached mail and drafts usable.
 
-An expired or missing history checkpoint refreshes a global recent projection separately from the selected folder or search. A narrow result cannot replace the account's whole cache. Resync reuses metadata for overlapping IDs and fetches at most 100 distinct metadata records in total; rows outside the retained projection remain explicitly incomplete. A single refresh keeps its 30-second deadline. Partial progress preserves the previous checkpoint for replay.
+## Retention and body downloads
 
-No additional OAuth permission is needed for this read-only behavior. Cache refresh does not mark mail read, send mail or change the mailbox. Write capabilities and fixture/live boundaries remain as described in [the terminal guide](TERMINAL.md).
+Defaults keep at most **2,000 messages and 256 MiB per account**, ordered by received time. The oldest tail and its body files are evicted under count or byte pressure. Drafts, contacts and operation receipts are preserved separately.
+
+For example, keep a smaller recent cache and fill up to 32 bodies:
+
+```sh
+omagma tui --metadata-limit 1000 --disk-limit-bytes 268435456
+```
+
+**Source-only configurable prefetch:** add `--prefetch-bodies N` for 0–64. The normal head is the smaller of the requested page and 32; a larger value fills more retained bodies without changing the displayed window, while zero disables automatic body filling. The explicit flag is absent from v0.2.3. Selecting a missing body in ordinary mailbox/Gmail results can still fetch it read-only; local cache search does not.
+
+Use the same cache and policy choices for the CLI or [background timer](TERMINAL-BACKGROUND.md). The cache is shared across callers, so an explicitly changed policy affects what stays available to other views.
+
+## Windows and search
+
+**Source-only adjacent windows:** the TUI displays at most 32 rows, and scrolling past an edge moves to adjacent cached mail. Moving older can request one Gmail page after the cache tail; moving newer uses cached metadata, including after a middle-position restart. It does not download the whole mailbox. v0.2.3 uses explicit `[`/`]` page controls. A selected full body can still need a read-only fetch if absent.
+
+`/` searches retained mail without fetching missing bodies or uncached older results. **Source only:** downloaded-plaintext matching, quoted phrases, compound/negative terms and the extended filters. v0.2.3 local search is metadata-only with simpler predicates. `\` explicitly searches Gmail in either version. CLI callers choose `--cached` / `--server`; JSONL uses `cacheOnly:true` / `false`.
+
+Local search is a subset, not proof that the rest of Gmail lacks a match. For CLI pagination, keep the returned cursor with its account/query/label. Restart after `InvalidCursor`, for example when newly downloaded bodies change body-search results. [CLI contract](AGENT-CLI.md).
+
+## Private storage and permissions
+
+To clear one account's retained mail explicitly:
+
+```sh
+omagma cache clear --account personal@example.com
+```
+
+This removes local mail metadata and bodies, preserving local drafts, contacts
+and operation receipts. Source builds also preserve undo receipts, downloaded
+label and sender-identity lists; the fixture provider keeps its synthetic sent
+outbox. It does not delete anything from Gmail. The next
+refresh fills a bounded recent cache again. Use the same `--cache-dir` option
+if you configured a nondefault cache location.
+
+The terminal stores plaintext mail and drafts under `$XDG_CACHE_HOME/omagma/terminal`, or `$HOME/.cache/omagma/terminal`, with owner-only directories and files. Account directories are separated. Keep the cache outside Git; filesystem permissions do not encrypt it at rest.
+
+The bar's small memory-only snapshot is separate. Terminal refresh uses existing read-only Gmail access and does not mark mail read, send messages, change labels or edit contacts. Full write features have their own [terminal grant setup](SETUP.md#full-tuicli-permissions). Developer synchronization, parser and resource contracts are in [developer references](DEVELOPMENT.md).

@@ -1,6 +1,6 @@
 # Distribution notices
 
-Omagma distributions include the unmodified license notices for Zig, musl and these exact pinned terminal dependencies:
+Omagma distributions preserve the license terms and attributions for Zig, musl and these exact pinned terminal dependencies. References to additional notices point to their packaged copies:
 
 * libvaxis `6fd944a27fb3d6f596e981076381a3131f2448b4` — MIT.
 * zigimg `c701c9f99779d7ddf594dcc6da8f858fd277d61f` — MIT.

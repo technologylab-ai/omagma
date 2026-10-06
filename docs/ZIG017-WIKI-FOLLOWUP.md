@@ -2,6 +2,13 @@
 
 Durable curator handoff, 2026-10-05. Keep this file in the repository across agent compaction. It records candidate lessons; the referenced wiki and other projects were treated as read-only. Do not infer that a candidate has already been incorporated upstream.
 
+Audience: wiki curators and developers, not installers. [Development](DEVELOPMENT.md)
+and [the documentation index](README.md#development-and-reference) provide the
+current workflow. The dated identities, measurements, failures and classifications
+below are historical records; later local UI work does not relabel them or
+establish new release/resource qualification. In particular, the errno mistake
+remains an Omagma bug, and a candidate is not proof of a compiler regression.
+
 ## Exact identities
 
 - Omagma source port: `b9dfde6acd84dc32f74490890f45764067c64659`, application 0.1.1. Runtime sources remain identical in subsequent documentation/media revisions.
@@ -122,3 +129,9 @@ The native ARM Debug maximum-cache gate at publication `95b733e7ff3ed3e814fbfa34
 This is an application performance finding with architecture-specific evidence, not a compiler regression. The failed native run remains preserved; local Debug/Safe timing is separate from subsequent native ARM qualification. [Cache-first evidence](evidence/terminal-0.2.2.md) records exact source revisions and results.
 
 Published [v0.2.2](https://github.com/technologylab-ai/omagma/releases/tag/v0.2.2), runtime `c5d1473b996fcbec43e7405b103fb76fe104253b` / tag `e91e1e86f759e18c931f2172b66ddb206ed8ff32`, passed [native x86_64 and arm64 CI](https://github.com/technologylab-ai/omagma/actions/runs/37313908584). ARM's unchanged Debug large-cache gate completed in 22.73 seconds within the 30-second deadline after the application optimization; the earlier timeout remains preserved. Actual downloaded x86_64 bytes were verified and tested separately before installation, with existing credentials/profile settings preserved. The optional native read-only user timer is enabled without a resident cache daemon. These add application/platform evidence and no new established Zig/compiler/musl regression. [Current qualification](evidence/terminal-0.2.2.md) separates source identities, hosted ARM backend tests and x86_64 desktop deployment.
+
+## Local TUI polish follow-up, 2026-10-06
+
+The local interface work reconfirmed the guide's existing array-repetition lesson: a standalone `[_]u8{42} ** 3` test passes with exact 0.16.0 and is rejected by exact 0.17.0. A typed `@splat` preserves repeated-element meaning. This is already documented in the wiki migration guide; it is corroboration, not a new upstream candidate. Compiler/source identity remains `7647adab80dd088f4de3610fd245915a912eb6ad`.
+
+The status-buffer bound, shared wrapping/caret layout, whitespace lookahead and compact-list capacity fixes belong to Omagma. Incremental loading uses request-scoped copies and cancellation-aware finite animation waits. None of these establishes a Zig/compiler/libc defect. This local iteration does not replace historical release evidence or claim new release, memory, ARM or desktop-platform qualification.

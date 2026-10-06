@@ -1,10 +1,18 @@
 # Background terminal cache
 
-The experimental TUI cache can refresh every five minutes while the TUI is closed. A user systemd timer runs the native `omagma cache-refresh` one-shot. It processes configured enabled accounts sequentially, uses existing read-only bar credentials and returns afterward; no cache daemon stays resident between runs. It performs no send, contact or mailbox mutation.
+A user systemd timer can refresh the terminal cache every five minutes, even while the TUI is closed. It runs the native `omagma cache-refresh` command, processes enabled accounts sequentially and exits afterward. It reuses each account's existing **read-only bar grant**; sending, mailbox changes and contacts are not part of this job.
 
-The popup keeps its existing bounded 30-message memory cache and refresh worker. Terminal background work uses the disk cache's Gmail history path: unchanged messages need no repeated metadata or body download. The timer and TUI use account-specific refresh leases to coalesce duplicate cache work while leaving cached reads available. Manual refresh bypasses age checks, while respecting the lease. Cache count and byte policy are shared across callers.
+The timer and TUI share the same disk cache and account refresh coordination. A simultaneous refresh is coalesced while cached reading remains available. The popup retains its independent 30-message memory snapshot and refresh setting. Enabling this timer does not reload the desktop or change terminal write permissions.
 
-Release bundles include the user service and timer in `systemd/`. Verify and install the same release binary used by the TUI into `~/.local/bin/omagma` before enabling them. The sample service names the standard private config and cache locations explicitly. If using `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` or a custom path, adjust those two arguments to the actual absolute private paths; no addresses or credentials belong in the unit. Preserve any existing unit before replacing it.
+A terminal-only installation still needs the read-only bar client and `omagma auth` for each account when using this timer. The full terminal grant is not used for automatic fetching. You do not need to install the bar widget; follow [read-only account setup](SETUP.md#read-only-google-oauth-client).
+
+## Enable the timer
+
+Use the service/timer files that match your installed binary. Release v0.2.3 bundles include them in `systemd/`; current source additions such as configurable larger body prefetch require a current source build. Installing a release binary needs no Zig compiler. [Installation](INSTALL.md).
+
+Put the intended binary at `~/.local/bin/omagma`. Check the sample service's `--config` and `--cache-dir` arguments: they name the default private paths under your home directory. If you use custom XDG locations or another configuration/cache, change those arguments to the actual absolute paths. Preserve an existing service/timer before replacing it. No account addresses or credentials belong in the unit.
+
+From the matching release bundle or checkout:
 
 ```sh
 omagma_unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -15,12 +23,24 @@ systemctl --user enable --now omagma-cache-refresh.timer
 systemctl --user list-timers omagma-cache-refresh.timer
 ```
 
-To check once without changing Gmail:
+Only the explicit `enable --now` step starts scheduled work. These instructions do not require a shell/plugin reload.
+
+## Check or change it
+
+Run a read-only check once:
 
 ```sh
 omagma cache-refresh
 ```
 
-The result contains anonymous account-slot outcomes, never mail, addresses, message IDs or tokens. `--quiet` suppresses that output. Automatic keyring access uses a non-unlocking Secret Service search; a locked or unavailable keyring leaves cached mail intact. Local configuration, cache identity and permissions errors remain explicit. Runs have finite per-account deadlines; service stop cancels owned work and systemd reaps its process group.
+Normal output reports anonymous account-slot outcomes, not addresses, message contents or tokens. `--quiet` suppresses that output. `--force` bypasses the freshness age check while still respecting an active refresh. A locked/unavailable keyring keeps cached mail intact rather than displaying a surprise unlock prompt.
 
-Disable scheduled fetching with `systemctl --user disable --now omagma-cache-refresh.timer`. This preserves mail cache files, drafts, credentials and the popup's independent refresh setting. The terminal cache remains plaintext under owner-only filesystem permissions. [Cache behavior](TUI-CACHE.md), [terminal setup](TERMINAL.md).
+In a current source build, `--prefetch-bodies N` chooses 0–64 recent bodies; the default head is 32 and zero disables automatic body filling. Add the option to the service's command if changing that policy, and use the same value in your TUI/CLI sessions. `--metadata-limit` and `--disk-limit-bytes` also apply. All retention limits and oldest-tail eviction remain in effect. See [cache behavior](TUI-CACHE.md).
+
+Inspect the last run with `systemctl --user status omagma-cache-refresh.service`. To stop scheduled fetching:
+
+```sh
+systemctl --user disable --now omagma-cache-refresh.timer
+```
+
+Stopping the timer preserves the cache, local drafts, credentials and the popup's separate refresh setting. [Account setup](SETUP.md) covers the read-only connection; [full TUI/CLI permissions](SETUP.md#full-tuicli-permissions) is optional when you also want interactive write/contact features.

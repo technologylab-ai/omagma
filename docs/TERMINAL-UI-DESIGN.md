@@ -1,6 +1,6 @@
 # Terminal UI design
 
-The terminal client uses the same account-scoped operations as the JSON CLI. This document describes its implementation and qualification boundaries; test results belong in [terminal verification](TERMINAL-VERIFICATION.md). Development uses fictional mail and isolated PTYs. The desktop bar retains its separate read-only behavior.
+Developer reference for the current terminal layout, rendering and ownership contracts. Start with [development](DEVELOPMENT.md); user controls and setup belong in [the terminal guide](TERMINAL.md) and [account permissions](SETUP.md#full-tuicli-permissions). The TUI and CLI remain experimental. Local changes after published v0.2.3 keep the package version unchanged; dated [verification](TERMINAL-VERIFICATION.md) qualifies only its named artifacts. Development uses fictional mail and isolated PTYs, while the bar retains its separate read-only behavior.
 
 ## Terminal backend
 
@@ -20,33 +20,77 @@ The libvaxis package hash is `vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mec
 
 ## Layout
 
-At 120 columns and above, navigation, the loaded mail page and a reader appear together. At 80–119 columns the list and reader share the screen, with navigation available when focused. Narrower terminals show the focused pane. `z` expands the reader. Below 30 columns or 10 rows, a resize message replaces the layout while quit remains available. Rendering is bounded to 240 columns by 80 rows.
+At 120 columns and above, navigation can remain alongside mail/reader panes. Horizontal splitting requires at least 80 available columns; below layout uses stacked panes when there are at least 48 columns and 16 content rows. Otherwise the focused pane uses the available space, and narrow navigation takes over when focused. `v` chooses right/below, `:split` sets bounded ratios, and `z` expands the reader. Below 30 columns or 10 rows, a resize message replaces the layout while quit remains available. Rendering is bounded to 240 columns by 80 rows.
 
-The palette uses deep navy, warm orange selection and muted metadata. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
+The palette follows the current Omarchy theme, with semantic accent/selection, sender and muted metadata roles. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
 
 Illustrative layout, not a runtime capture:
 
 ```text
- omagma   work@example.com   |   Inbox   ·   Mock provider
-┌ Accounts / mailboxes ┐┌ Mail · [ ] Page ─────────┐┌ Thread / full body ──────────┐
-│ personal@example.com ││ > Morgan · unread        ││ A quieter launch            │
-│ work@example.com     ││   A quieter launch       ││ From: Morgan                │
-│ optional@example.com ││   Review tomorrow…       ││ To: work@example.com        │
-│                      ││                          ││ 2026-01-05 10:42 UTC        │
-│ Inbox                ││   Avery                  ││                             │
-│ Sent                 ││   Workshop notes         ││ Let's keep the launch small.│
-│ Drafts               ││                          ││                             │
-│ Archive              ││   Casey                  ││ Attachments: launch.txt     │
-│ Trash                ││   Lunch next week?       ││                             │
-│ Contacts             ││                          ││ Earlier chronological cards │
-└──────────────────────┘└──────────────────────────┘└─────────────────────────────┘
- j/k Move  h/l Pane  / Search  c Compose  r Reply  R All  a Contacts  ? Help
+ omagma   work@example.com   |   Inbox   |   Reader right   ·   Mock
+ Up to date · Synced 2026-01-05 10:42 CET
+┌ Accounts / mailboxes ┐┌ Mail · 1/32 ↓ ───────────┐┌ Message · 50% · 1–8/16 ───────────┐
+│ personal@example.com ││ ● A quieter launch      ││ A quieter launch            │
+│ work@example.com     ││ Morgan — Review tomorrow││ From: Morgan                │
+│ optional@example.com ││                         ││ To: work@example.com        │
+│                      ││   Workshop notes        ││ 2026-01-05 10:42 CET        │
+│ Inbox                ││ Avery — Updated notes   ││                             │
+│ Sent                 ││                         ││ Let's keep the launch small.│
+│ Drafts               ││ ● Lunch next week?      ││                             │
+│ Archive              ││ Casey — Tuesday works   ││                             │
+│ Trash · Spam         ││                         ││                             │
+│ All Mail · Unread    ││                         ││                             │
+│ Contacts · Labels    ││                         ││                             │
+└──────────────────────┘└─────────────────────────┘└─────────────────────────────┘
+ j/k Mail  h/l Pane  / Cache  \ Gmail  c Compose  v Layout  ? Help  q Quit
  Ready
 ```
 
-Pages contain up to 32 rows and are replaced, rather than appended. Explicit continuation cursors reach larger mailboxes. Refresh preserves the selected ID where possible. The reader first loads the selected message, then Enter opens its chronological thread. It displays decoded full text, From/To/Cc, UTC time, numbered attachments and invitation cues. Reading does not implicitly mark mail read. Remote images do not load.
+Mail windows contain up to 32 rows and are replaced rather than appended. Two content rows per card use one separating row only between cards, so 5/8-row interiors fit 2/3 complete cards. The title reports selected/current-window count and only known newer/older arrows, never a Gmail total. Reaching a boundary scrolls through adjacent cached windows before requesting a missing older provider page. Explicit continuation controls remain available. Refresh preserves the selected ID where possible. The reader first loads the selected message, then Enter opens its chronological thread. It displays decoded full text, From/To/Cc, local time, numbered attachments and invitation cues. Reading does not implicitly mark mail read. Remote images do not load.
 
 `:save-attachment NUMBER /absolute/literal/path` retrieves a numbered attachment from the displayed message or thread. Numbering follows the displayed chronological cards. The request captures its account, message and attachment identities before starting the worker. The rest of the command is a literal destination path, including spaces; quotes, variables and shell expressions are not interpreted. Decoded base64url bytes must match both declared and displayed sizes, within 2 MiB. The worker creates a mode-0600 file exclusively, refusing existing files or leaf symlinks. It never derives an output path from the attachment's filename. Success or failure remains visible without replacing the reader or local draft.
+
+## Loading, status and view identity
+
+The global frame uses four rows: mode/account header, colored sync state, one
+context-sensitive shortcut line, and action/error status. Compact fitting drops
+brand/Experimental/layout decoration before account or Mock identity. Synced
+time is a fixed local timestamp rather than a frozen relative age. The Linux
+timezone snapshot is loaded once at startup from `TZ`/`TZDIR` or
+`/etc/localtime`; bounded native TZif transitions and POSIX footer rules apply
+the offset at each displayed instant, independent of linked libc. Unavailable
+local rules produce an explicitly labeled UTC fallback. Backend/cache/CLI
+epochs and scheduling clocks remain unchanged. Unknown
+send/RSVP outcomes and completed action notices remain protected; obsolete
+view-local hints/errors clear when their owner mode/account/selection changes.
+Known errors use plain labels, with stable diagnostic codes available in Help.
+Status storage is UTF-8-safe and bounded to 256 bytes.
+
+Cached mail remains navigable during refresh. An uncached incoming window keeps
+the old focused card and reader while showing provisional metadata beneath it.
+`loading.zig` owns 32 immutable row slots with bounded copied subject/sender/
+snippet/date fields and 512-byte body excerpts. Missing metadata animates until
+actual callbacks publish it; body-ready publications replace pending excerpts.
+Counters report real completed/known batch units rather than estimated mailbox
+size. Provisional IDs never receive mouse hits before the authoritative window
+commits. Account/query/selection generations and worker joining protect every
+mailbox replacement. The read-only network worker never blocks the main input
+handler or account-scoped contact/cache navigation.
+
+### Display timezone bounds
+
+The source-only display helper accepts IANA names, absolute TZif paths and
+explicit POSIX rules in `TZ`; an explicitly empty `TZ` means UTC. Sync and
+single-message metadata use full stamps with an abbreviation (CET/CEST, for
+example). Lists and compact thread-card headings use `MM-DD HH:MM`, with the
+same conversion. Fractional offsets and local date rollover apply consistently.
+Snapshot files
+are capped at 128 KiB, 4,096 transitions and 256 local types. Lookup performs no
+per-frame file reads or TZif parsing, and does not mutate libc timezone globals.
+Unsupported/malformed zones, leap-clock TZif data and unspecified tail ranges
+visibly use `UTC (TZ unavailable)`. Changing the system zone while the TUI is
+running requires restarting it. Cache/JSON epochs, deadlines and RFC/iTIP wire
+dates retain their existing UTC meaning.
 
 ## HTML-only body layout
 
@@ -78,9 +122,14 @@ separators, borders and empty areas have no action.
 
 Unmodified left presses use the existing cache-first keyboard actions. Wheel
 navigation follows the hovered pane. Modified/right clicks and idle motion do
-not change the view; click paths do not send, discard or apply mutations.
-Default tracking is disabled while the external editor owns the terminal and
-restored on return, then disabled on exit. `--no-mouse` disables tracking and
+not change the view. Ordinary selection clicks do not send or mutate mail;
+the label picker's explicit Add/Remove buttons invoke its capability-checked
+label operation, just like Enter/`-`. Attachment controls change only the local
+draft or open an explicit save prompt.
+Tracking uses 1002 button-motion plus 1006 cell coordinates, with focus reports.
+After disabling 1003 any-motion, Omagma reasserts 1002 for multiplexers whose
+single tracking mode is cleared by 1003l. Tracking is disabled while the external
+editor owns the terminal, restored on return, then disabled on exit. `--no-mouse` disables tracking and
 ignores injected mouse reports as well.
 
 ## Keys and text input
@@ -92,38 +141,46 @@ ignores injected mouse reports as well.
 | `gg` / `G`, Home / End | First/last loaded item or reader position |
 | Ctrl+D / Ctrl+U, PageDown / PageUp | Move by half a page |
 | Enter | Open mailbox, thread, draft or contact |
-| `[` / `]` | Previous/next page |
-| `/` | Search the selected account |
+| `[` / `]` | Explicit previous/next window; automatic boundary scrolling also uses cached neighbors |
+| `/`, `\` | Search retained cache / search Gmail on the server |
 | `1` / `2` / `3` | Select an existing configured account |
+| `J` / `K` in reader | Next/previous mail, including cached-window boundaries |
+| `{` / `}`, `t`, `Q` / `S` | Thread card navigation/fold, quote/signature fold |
+| `L` / `B` | Links / received-file picker |
+| Space / Ctrl+A, Ctrl+Z | Select one/window, selective undo |
 | `z` | Expand/restore reader |
-| `c`, `r`, `R` | Compose, reply, reply-all |
+| `c`, `r`, `R`, `F` | Compose, reply, reply-all, forward with bounded attachments |
 | `a` | Contacts; `n` creates and `e` edits |
 | `s`, `u` | Toggle star or unread |
 | `x`, `D`, `U` | Archive, confirm Trash, restore |
-| `m` | Add a label; prefix its name with `-` to remove it |
+| `m` | Pick an existing label; `/` filters, Enter adds and `-` removes |
 | `I` | Review an invitation reply |
 | `o` | Open selected mail in its configured browser profile |
 | Ctrl+R, Ctrl+L | Refresh, redraw |
 | `?`, Escape / `q` | Help, back; quit from the mailbox screen |
 | Ctrl+C | Cancel active work; quit when idle |
 
-The provider checks capabilities and returns visible rejection errors. Legacy and enhanced keyboard input accept shifted `R`, `G`, `D`, `U` and `I`. `gg` clears on an unrelated key or after 750 ms. Help fits the usual terminal height and scrolls with `j`/`k`, arrows, PageUp/PageDown or Ctrl+U/Ctrl+D when narrower; Home/End reach its ends. Mouse interaction is not required or currently implemented.
+The provider checks capabilities and returns visible rejection errors. Legacy and enhanced keyboard input accept shifted `R`, `G`, `D`, `U` and `I`. `gg` clears on an unrelated key or after 750 ms. Help uses grouped key/action rows, fits the usual terminal height and scrolls with `j`/`k`, arrows, PageUp/PageDown or Ctrl+U/Ctrl+D when narrower; Home/End reach its ends. Mouse interaction is supported: click accounts, mailboxes, messages and contacts, and scroll the pane under the pointer with the wheel. Incoming provisional loading rows stay noninteractive until committed. Selection clicks never send mail or apply mailbox/contact changes; `--no-mouse` keeps mouse handling in the terminal.
 
-Compose starts in normal mode. Tab or `j`/`k` selects To/Cc/Bcc/Subject/body; `i` or Enter enters text insertion and Escape returns to normal mode. Arrow movement and deletion operate on grapheme boundaries. The body wraps and follows the caret using visual rows, including a paragraph with no newline. Recipient and subject fields scroll horizontally while editing, preserving their labels and visible caret. At 90 columns or more, the form shares the screen with its original thread or draft preview. From is fixed to the selected account. The contact picker adds one address to the selected recipient field, using To when opened from subject/body.
+Compose starts in normal mode. Tab or `j`/`k` selects To/Cc/Bcc/Subject/body; `i` or Enter enters text insertion and Escape returns to normal mode. Arrow movement and deletion operate on grapheme boundaries. The body wraps and follows the caret using visual rows, including a paragraph with no newline. Recipient and subject fields scroll horizontally while editing, preserving their labels and visible caret. At 90 columns or more, the form shares the screen with its original thread or draft preview. From initially uses the selected account; verified send-as aliases remain within that account and can be chosen explicitly. The contact picker adds one address to the selected recipient field, using To when opened from subject/body.
 
 Normal compose `A` opens a literal file-path prompt. Only regular files qualify; there are up to 16 attachments, at most 2 MiB of combined attachment bytes and a 3 MiB serialized request cap. A shared file helper opens with Linux `O_NONBLOCK|O_NOFOLLOW` and validates the same descriptor before reading, rejecting FIFOs, devices and leaf symlinks. The CLI's attachment/body/draft/contact file options use the same helper; explicit stdin remains a stream. Paths are not shell commands or expanded variables. Attachments use their basename and `application/octet-stream`; review lists names and sizes. Existing attachments survive draft editing and `$EDITOR` return. `:detach NUMBER` removes a one-based attachment before saving or submission.
+
+Native path completion scans at most 4096 directory entries and retains at most 64 matching regular files/directories. Hidden entries appear only for a dotted prefix; symlinks and special files are excluded. Tab extends a common prefix or cycles a chosen path, Shift+Tab cycles backward, and Ctrl+U clears the prompt. Directory names retain a trailing slash; no input variable or shell syntax is expanded. Received-save defaults use XDG user-dirs Downloads or literal HOME/Downloads and a sanitized, fresh collision name. Default directories are created owner-only only after explicit Save. Parent directory descriptors are opened one component at a time without following symlinks; mode 0600 exclusive file creation and cleanup use that checked descriptor.
+
+Composer normal-mode preview scrolling and L/B pickers preserve its mode, account, body and outgoing files. Insert mode leaves those letters as text. A preview action that interrupts an in-flight local autosave queues a new local save rather than dropping the dirty revision. Body caret measurement and painting share the same complete-text word-wrap walker, including the virtual caret's width.
 
 Bracketed paste inserts data into the active field and cannot invoke navigation, commands or submission. Mail and locally edited text pass through a renderer filter for C0/C1, Escape and bidi controls. Only the renderer emits terminal control sequences. An individual displayed grapheme is bounded to 128 bytes. Draft bodies are bounded to 2 MiB; headers, recipients and requests use the shared operation limits.
 
 ## Drafts, contacts and explicit submission
 
-The shared recipient/threading planner creates replies and reply-all drafts. The UI edits To/Cc/Bcc, subject and body without duplicating its address or self-alias rules. Escape or `q` from normal compose saves the local draft and returns to the mailbox.
+The shared recipient/threading planner creates replies and reply-all drafts. The UI edits To/Cc/Bcc, subject and body without duplicating its address or self-alias rules. Escape or `q` from normal compose saves the local draft and returns to the mailbox. After a 1.5-second idle debounce (or 10 seconds of continuous edits), autosave writes a local recovery revision without blocking input or sending mail. It retains incomplete recipient text, restores it on reopen, and requires validated fields before review/submission. Autosave completion updates only identity/revision state and cannot overwrite newer input.
 
-Ctrl+S or `:send` saves a draft and opens **Review send**. Review exposes account, From, recipients, subject, thread context and body; its explicit `y` submits. Editor save, ordinary Enter, paste and navigation never send. Paste while a draft save owns the form is rejected visibly, keeping review consistent with the serialized draft. Fixture submission says **Saved by mock provider**. Successful submission does not assert recipient delivery.
+Ctrl+S or `:send` saves a draft and opens **Review send**. Review exposes account, From, recipients, subject, thread context and body; its explicit `y` submits. Editor save, ordinary Enter, paste and navigation never send. Explicit save/review owns a fixed validated revision; mutations to that pending review are rejected. Debounced autosave instead permits continued editing and queues newer local revisions. Fixture submission says **Saved by mock provider**. Successful submission does not assert recipient delivery.
 
 An unknown or interrupted submission retains its operation identity and original recovery draft. The form is protected from edits or retry, and `q` returns to mail without rewriting it. Reopening a saved draft checks the operation journal before enabling review; `:receipt` checks again. Stable error codes explain rejection or uncertainty without exposing raw provider responses. RSVP submission also blocks duplicate status keys while busy, retains the inspected message identity and protects an interrupted result. The backend journal remains authoritative across process restarts.
 
-Contacts are account-scoped. Search matches names and addresses. The two-field Name/Email form creates or edits a contact and sends its expected etag. A rejected or conflicting write preserves the attempted form. There is no cross-account fallback.
+Contacts are account-scoped. Search matches names and addresses; create/update is supported, deletion is not. The current count names available cached entries, and both rows of the selected name/address card share a highlight. The two-field Name/Email form creates or edits a contact and sends its expected etag. A rejected or conflicting write preserves the attempted form. There is no cross-account fallback.
 
 Invitation review keeps its captured account, attendee and organizer in a fixed header. Event, start, UID and recurrence details scroll with `j`/`k`, arrows, PageUp/PageDown or Ctrl+D/Ctrl+U; Home/End reach the ends. The response controls remain visible. If the terminal cannot fit the identity header and controls, confirmation is blocked until it is resized. The shared `invitation.inspect` operation validates the account and its verified aliases, so preview and submission use the same invitation rules. Submission uses the retained inspected account/message, sends an RSVP email and makes no claim to update Google Calendar.
 
@@ -155,7 +212,7 @@ The entry point is:
 ```zig
 pub fn run(io: std.Io, allocator: std.mem.Allocator,
     client: types.Client, options: types.Options,
-    environ: *const std.process.Environ.Map) !void
+    environ: *const std.process.Environ.Map) !html_view.Stats
 ```
 
 `Client.call` accepts canonical JSON and returns a caller-owned response. The UI owns focus, loaded views, editing buffers and terminal lifecycle. The common layer owns identities, MIME, cache, pagination, recipients, drafts, contacts and provider side effects. [Operation contract](TERMINAL-VERIFICATION.md).
@@ -164,7 +221,7 @@ One owned worker calls the client. There is one coalesced pending list/read requ
 
 Separate arenas own account, list, selected reader, contact, job and frame data. Replacing a view resets its arena; the frame arena resets every render. Persistent text never points into render or input scratch. Dynamic terminal allocation uses the supplied 64 MiB bounded allocator. The existing 16 MiB fixed backend/HTTP reservation is accounted separately; all top-level mutable UI globals are declared through `reservation_bytes`. The bar's memory results do not qualify this new terminal client.
 
-The outer UI blocks while idle and redraws on input, resize or worker completion. It installs/uninstalls the pinned resize handler explicitly. Normal exit, error, input EOF, termination and editor return restore original termios and terminal features. Panic recovery uses the root's compatible Zig 0.17 `FullPanic` wrapper. No detached tasks outlive the application and no `Io.Timeout.none.sleep` is used.
+The outer UI blocks while idle and redraws on input, resize or worker completion. During active read-only loading, one owned finite timer wakes at 180 ms for placeholders; it stops and joins on completion, cancellation, view replacement or shutdown. Autosave has a separate finite debounce wait while a dirty draft is active. It installs/uninstalls the pinned resize handler explicitly. Normal exit, error, input EOF, termination and editor return restore original termios and terminal features. Panic recovery uses the application's compatible Zig 0.17 `FullPanic` wrapper. No detached tasks outlive the application and no `Io.Timeout.none.sleep` is used.
 
 ## Verification
 

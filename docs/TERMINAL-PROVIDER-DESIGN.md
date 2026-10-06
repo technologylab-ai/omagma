@@ -1,41 +1,43 @@
 # Terminal mail provider design
 
-Research date: 2026-10-05. This document separates API facts from proposed implementation choices. The first implementation uses synthetic fixtures and a separate terminal cache. It does not authorize real Gmail sending, contact changes, calendar changes, new consent, or changes to installed accounts. The bar keeps its existing read-only grant, 30-row snapshots and allocation contract.
+Developer reference for the implemented provider, MIME, credential and cache contracts. Start with [development](DEVELOPMENT.md); normal account connection belongs in [setup](SETUP.md#full-tuicli-permissions). Initial API research: 2026-10-05; current source contracts and cited Google OAuth/scope policy reviewed 2026-10-06. Later local changes keep package version 0.2.3 unchanged and are not automatically part of its published assets. Historical targeted results retain their own dates and artifacts.
+
+Developer qualification uses synthetic fixtures and isolated cache/credentials. These tests do not authorize production sending, contacts changes or new consent. The bar retains its separate read-only grant, 30-row snapshots and allocation contract. A dedicated mailbox is a developer live-write qualification requirement, not a normal-user setup prerequisite.
 
 ## HEY reference
 
 The referenced product is the official [basecamp/hey-cli](https://github.com/basecamp/hey-cli), linked from HEY's own [agent guide](https://help.hey.com/article/1189-using-ai-agents-with-hey) and [CLI/TUI page](https://www.hey.com/agents/). It provides the same mail operations to terminal users and agents. The useful precedent here is shared operations for listing, searching, reading threads, composing, replying, drafts and contacts; calendar browsing, todos and journal features are outside this task.
 
-HEY's [CLI reference](https://github.com/basecamp/hey-cli/blob/main/docs/cli.md) describes explicit account selection, structured output, stable errors, recipient previews, body input through an editor or stdin, and human/agent access to the same readable body. Omagma should use the same provider functions behind its TUI and JSON CLI. A preview must show the exact account, sender, recipients, subject and threading before a mutation. Omagma keeps tokens out of argv and output, uses no browser-cookie authentication, and makes each account explicit rather than choosing an all-account default. These are Omagma choices, not HEY compatibility promises.
+HEY's [CLI reference](https://github.com/basecamp/hey-cli/blob/main/docs/cli.md) informed the initial design research: explicit accounts, structured output, recipient previews and shared human/agent mail operations. Omagma uses the same executor behind its TUI and JSON CLI. A send preview exposes account, sender, recipients, subject and threading. Tokens stay out of argv/output, authentication does not scrape browser cookies, and operations choose one account rather than an all-account default. These are implemented Omagma choices; the HEY links are design references, not feature-parity promises or a statement about its current feature set.
 
-## Existing implementation audit
+## Retained bar boundary
 
 * `src/providers/gmail.zig` verifies the Gmail profile against the selected account for every job, reads at most 30 inbox envelopes, retries one authentication failure, and leaves the unread count unknown when only the count request fails. It does not fetch body MIME parts or retain mail on disk.
-* `src/oauth.zig` requests exactly `gmail.readonly` and rejects a returned scope outside that set. PKCE, state, the bounded loopback callback and joined deadlines can be reused, but terminal scope handling must be a distinct policy. The existing bar validator must remain strict.
-* `src/keyring.zig` isolates tokens with the service and account attributes. Terminal grants need a distinct credential namespace and grant attributes; they must not replace the bar's token. Secrets continue through bounded stdin/stdout pipes, never command-line arguments, logs, cache or JSON output.
-* `src/http_client.zig` restricts HTTPS destinations to Gmail and OAuth, rejects redirects and compression, bounds headers/body/storage, and joins request cancellation. Its request body is currently form-only and 32 KiB; its response cap is 512 KiB. JSON sends, People requests and larger message bodies need an explicit terminal request policy, not a relaxation of the bar wrapper.
-* `src/config.zig` owns three bar accounts and their browser profiles. Terminal account/cache/capability settings belong in a separate schema. A message or contact ID is always paired with an account identity; identical IDs in two accounts must remain distinct.
+* `src/oauth.zig`'s bar entry point requests exactly `gmail.readonly` and rejects a returned scope outside that set. The terminal authorization policy reuses PKCE/state/loopback/deadline machinery through its separate complete capability set; the bar validator stays strict.
+* `src/keyring.zig` isolates bar tokens with service and account attributes. Terminal grants use a distinct namespace and account/client/scope identity; they never replace the bar token. Secrets use bounded pipes, never command-line arguments, logs, cache or JSON output.
+* `src/http_client.zig`'s bar entry point restricts HTTPS destinations to Gmail/OAuth and retains its 32 KiB form/512 KiB response policy. The implemented terminal JSON path has separate bounds and adds People, without widening the bar wrapper. Both reject redirects/compression and join cancellation.
+* `src/config.zig` supplies up to three configured accounts and browser profiles to both clients, plus optional sender name/signature. Terminal cache/UI options and grant registry remain separate. Message/contact IDs are always paired with account identity; identical IDs in two accounts stay distinct.
 
 ## Capability grants and credentials
 
-Use the following least-permission sets when live terminal access is explicitly enabled later. Google classifies `gmail.readonly` as restricted and `gmail.send` as sensitive. Reading, including body and send-as alias discovery, does not require `gmail.modify`. Sending does not require deleting or changing mailbox labels. [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes), [send-as aliases](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.settings.sendAs/list).
+Use the following least-permission sets for explicitly authorized terminal capabilities. Google classifies `gmail.readonly` as restricted and `gmail.send` as sensitive. Reading, including body and send-as alias discovery, does not require `gmail.modify`. Sending does not require deleting or changing mailbox labels. [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes), [send-as aliases](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.settings.sendAs/list).
 
 | Capability | Google permission |
 | --- | --- |
 | Mail read/search/body/cache | `https://www.googleapis.com/auth/gmail.readonly` |
 | Compose/reply/send and invitation reply by mail | Above plus `https://www.googleapis.com/auth/gmail.send` |
-| Archive, reversible trash, restore and labels | `https://www.googleapis.com/auth/gmail.modify` instead of readonly/send |
+| Archive, reversible trash, restore and applying/removing existing labels | `https://www.googleapis.com/auth/gmail.modify` instead of readonly/send |
 | Google address book read | Add `https://www.googleapis.com/auth/contacts.readonly` |
 | Google address book create/update | Add `https://www.googleapis.com/auth/contacts` in place of contacts.readonly |
 | Local draft/address book changes in fixture mode | No Google permission |
 
 Google explicitly says installed applications do **not** support incremental authorization. A later capability change needs a complete requested scope set and a separate consent flow; it must not rely on incremental web-app behavior. Preserve granted scopes with the terminal credential identity, require the operation's capability locally, and treat API permission denial as authoritative. Continue checking the Gmail profile identity before persisting a new token. [Desktop OAuth guide](https://developers.google.com/identity/protocols/oauth2/native-app).
 
-The implemented terminal Secret Service namespace is `io.github.technologylab_ai.omagma.terminal`, with exact account, OAuth client ID and a SHA-256 identity of the canonical requested scope set. `terminal-grants.json` stores public capability/client metadata; refresh tokens remain in Secret Service. Broader terminal access requires a distinct Desktop OAuth client from the configured bar client: a different keyring label alone does not isolate Google's grant for the same account/client. Creating another Desktop client in the same Google project does not itself grant scopes; the project's existing testing/verification requirements still apply to later consent. Never look up a write token as fallback for the bar. `auth.status` reports metadata without printing secrets. `auth.revoke` clears the selected account's terminal credential and local grant metadata; it does not claim to revoke Google's entire OAuth grant. No new real consent was performed.
+The implemented terminal Secret Service namespace is `io.github.technologylab_ai.omagma.terminal`, with exact account, OAuth client ID and a SHA-256 identity of the canonical requested scope set. `terminal-grants.json` stores non-secret capability/client metadata; refresh tokens remain in Secret Service. The registry is private user configuration, not a public artifact. Broader terminal access requires a distinct Desktop OAuth client from the configured bar client: a different keyring label alone does not isolate Google's grant for the same account/client. Creating another Desktop client in the same Google project does not itself grant scopes; the project's existing testing/verification requirements still apply to consent. Never look up a write token as fallback for the bar. `auth.status` reports metadata without printing secrets. `auth.revoke` clears the selected account's terminal credential and local grant metadata; it does not claim to revoke Google's entire OAuth grant. Synthetic qualification performs no real consent.
 
 ## Shared operation boundary
 
-Root owns the shared types, terminal cache/core, CLI and TUI. Pure mail modules own bounded recipients, MIME/header conversion and invitation processing. The provider returns caller-owned bounded data, never borrowed scratch storage that survives a job.
+The shared types, terminal cache/core and provider serve both CLI and TUI. Pure mail modules own bounded recipients, MIME/header conversion and invitation processing. The provider returns caller-owned bounded data, never borrowed scratch storage that survives a job. Optional progress callbacks borrow only during the synchronous worker call; the TUI copies bounded immutable previews rather than retaining those slices. CLI JSON-lines output remains one response frame per request, with no unsolicited progress text.
 
 The common operations are `list(account, query, cursor, limit)`, `read(account, message_id)`, `thread(account, thread_id)`, `replyPlan(account, message_id, reply_all)`, `send(account, draft)`, contacts list/search/create/update, and `rsvp(account, message_id, status)`. Each list response includes an explicit continuation cursor and complete/partial state. Each mutation response says which backend acted; a synthetic send is never described as delivered to Google. TUI state, cached state and credentials cannot change an operation's account implicitly.
 
@@ -43,11 +45,11 @@ Implemented mail types separate heap-owned incoming participants from the outgoi
 
 ## Gmail retrieval and MIME
 
-`messages.list` returns IDs and thread IDs; body/envelope details need `messages.get`. Google allows at most 500 IDs per page, but Omagma should fetch 100 or fewer and stop at a configured cache/job budget. Carry `nextPageToken` explicitly and percent-encode it. A read uses `format=full`, walks the MIME `payload.parts` tree, and reads base64url data; a part whose body has `attachmentId` needs the attachment endpoint. [Message listing](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list), [message resource](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages), [part bodies](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments).
+`messages.list` returns IDs and thread IDs; body/envelope details need `messages.get`. Google's documented maximum is 500 IDs per page; Omagma caps its own request at 100 and stops at the cache/job budget. Provider `nextPageToken` is carried explicitly and percent-encoded. A read uses `format=full`, walks the MIME `payload.parts` tree, and reads base64url data; a part whose body has `attachmentId` needs the attachment endpoint. [Message listing](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list), [message resource](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages), [part bodies](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments).
 
 A snippet is never the full body. Prefer a non-attachment `text/plain` body; use a bounded HTML-to-text conversion for HTML-only mail, preserving paragraph breaks and link destinations. Decode UTF-8 and common ASCII/Latin-1/Windows-1252 content explicitly; unsupported encodings are visible errors. Preserve MIME attachment metadata without automatically downloading arbitrary attachments. Limit nesting, parts, headers, decoded bytes and response bytes independently. Strip terminal escape/control sequences from displayed bodies, including bidi controls, while preserving safe text and newlines. HTML is data and never executes or loads remote resources.
 
-Threads are bounded collections of actual messages, ordered chronologically. A large thread must expose continuation or partial state; it cannot claim to be complete after reaching its message or byte cap. [Thread retrieval](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.threads/get).
+Threads contain actual messages ordered chronologically. Cached threads advertise `partial:true` when only retained bodies are available. A provider thread above the 100-message cap is refused with `ThreadTooLarge`; remote thread continuation is not implemented. Transport/body byte caps remain independent, and reaching a bound never produces a falsely complete thread. [Thread retrieval](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.threads/get).
 
 ## Reply recipients, threading and sending
 
@@ -61,7 +63,7 @@ Application choice: never automatically retry a non-idempotent send after a time
 
 ## Cache beyond 30 messages
 
-The terminal cache is separate from bar snapshots. Proposed limits: at most 10,000 envelope records and 256 MiB of message/contact/draft data per account, a fixed page size, one active bounded job and on-demand body reads. The fixture gate uses at least 96 messages per account and persists more than 30 across process restarts. These are application limits, not Google API limits.
+The terminal cache is separate from bar snapshots. Implemented defaults are the newest 2,000 envelope records and 256 MiB of cache data per account; configurable hard limits are 10,000 records and 1 GiB. API pages are at most 100 and TUI windows 32, with one active bounded network job. Missing recent bodies are filled up to a default head of 32, explicitly configurable from 0 to 64; reads remain on demand beyond it. The fixture gate uses at least 96 messages per account and persists more than 30 across process restarts. These are application limits, not Google API limits.
 
 Use owner-only directories/files, an account partition based on a validated local identity rather than mail-derived path text, versioned records, capped individual files, atomic replacement and explicit ownership/symlink checks. Store the account identity in records and verify it on every read. Evict old cache bodies by a bounded policy; do not evict unsent drafts or ambiguous submissions as ordinary cache. Validate paths and lengths before reading, count disk bytes and files, and reject oversized/corrupt entries. Cache clearing applies to one selected account and never clears unrelated credentials. Mail cache is private local user data and must never enter repository fixtures or public diagnostics. Encryption at rest is a separate product decision; file permissions alone do not provide it.
 
@@ -69,7 +71,7 @@ Use owner-only directories/files, an account partition based on a validated loca
 
 People API connections provides personal contacts with names, emailAddresses and metadata. Both contacts.readonly and contacts grant reading. Page/sync tokens must keep the original query parameters; sync tokens expire after seven days and deletion is reported in metadata. A successful write's returned contact is the immediate authoritative result; incremental sync does not provide immediate read-after-write. [Connections API](https://developers.google.com/people/api/rest/v1/people.connections/list).
 
-Create requires contacts; update replaces the explicitly selected fields and requires the CONTACT source metadata/etag. Serialize mutations per account. On failedPrecondition, fetch the current contact and ask for a merge instead of overwriting an unseen update. Keep resourceName, CONTACT source ID/etag and provider account together. Do not edit profile/directory records as personal contacts. [Create contact](https://developers.google.com/people/api/rest/v1/people/createContact), [update contact](https://developers.google.com/people/api/rest/v1/people/updateContact).
+Create requires contacts; update replaces the explicitly selected fields and requires the CONTACT source metadata/etag. Omagma serializes mutations per account, reads the current CONTACT source before PATCH and refuses stale versions. A failedPrecondition returns a conflict while preserving the attempted form; automatic conflict merging is not implemented. Keep resourceName, CONTACT source ID/etag and provider account together. Only contact read/search/create/update is supported, not deletion or directory/profile editing. [Create contact](https://developers.google.com/people/api/rest/v1/people/createContact), [update contact](https://developers.google.com/people/api/rest/v1/people/updateContact).
 
 Local completion should search the selected account's cache; selecting a contact copies a validated mailbox into the draft. Google search needs an empty-query warmup and a read mask; it is optional when the local cache already has the address book. [Contact search](https://developers.google.com/people/api/rest/v1/people/searchContacts). The fixture implementation tests create/update and stale etag behavior without contacting Google.
 
@@ -81,9 +83,9 @@ Send it as an iMIP MIME message to the organizer with `text/calendar; method=REP
 
 Direct Calendar API response changes would be a separate capability, require event lookup/identity and Calendar authorization, and must preserve other attendee entries because arrays in a patch replace the entire array. There is no narrow RSVP-only scope in the documented patch endpoint; calendar.events is broader. This task chooses invitation reply mail and requests no Calendar scope. [Event patch](https://developers.google.com/workspace/calendar/api/v3/reference/events/patch).
 
-## Fixture gates before live enablement
+## Developer fixture gates and live qualification
 
-Exercise account-scoped pagination/cache restart, complete body retrieval, HTML-only text, common charsets, nested MIME and external body references; recipient parsing, self-alias exclusion, duplicate handling and header injection; compose/reply/reply-all preview and generated MIME; contacts create/update/conflict; accepted/tentative/declined and recurring invitation replies; oversized/corrupt cache, revoked capabilities, interrupted/ambiguous send and account mismatch. Assertions use independent literal RFC messages and invitation fields. Real scopes, real writes and live consent remain untested until separately requested.
+Exercise account-scoped pagination/cache restart, complete body retrieval, HTML-only text, common charsets, nested MIME and external body references; recipient parsing, self-alias exclusion, duplicate handling and header injection; compose/reply/reply-all preview and generated MIME; contacts create/update/conflict; accepted/tentative/declined and recurring invitation replies; oversized/corrupt cache, revoked capabilities, interrupted/ambiguous send and account mismatch. Assertions use independent literal RFC messages and invitation fields. Live-write qualification needs a separately authorized disposable mailbox; production accounts are not development fixtures. Dated evidence identifies which live-read checks ran. Ordinary users authorize their own requested capabilities through setup rather than running these gates.
 
 ## Implemented interfaces and bounded policy
 
@@ -103,29 +105,59 @@ Registry writes use atomic 0600 replacement. Reads reject final symlinks, nonreg
 
 Google HTTP JSON request/response storage is caller-owned and capped at 3 MiB. Decoded normalized message DTOs can be larger because they contain both HTML and its plain fallback; those CLI/TUI results are separate from the Google wire response and remain within the 64 MiB terminal heap budget. The TUI accepts response frames up to 32 MiB. The bar's 32 KiB form/512 KiB response policy remains intact. Decoded MIME bodies are capped at 2 MiB, complete RFC messages at 3 MiB, MIME nesting at 16, parts at 128, incoming attachments at 32, outgoing attachments at 16 with a combined 2 MiB decoded cap, outgoing recipients at 32, and calendar data at 128 KiB. Compose attachment DTOs contain base64url bytes, explicit sizes and validated basename/MIME fields; `mime.composeAttachments` converts them to raw MIME parts. The encoder preserves binary octets and emits RFC 2231 UTF-8 filename continuations. Request JSON expansion can make a large outgoing draft exceed the 3 MiB transport cap; that is an explicit pre-submission failure. The fixed HTTP workspace remains 8 MiB and no terminal buffer is added to the bar's static reservation.
 
-Incoming address lists use caller-owned heap slices capped at 1,024 participants per header, with no fixed stack array added. Address-header parsing is bounded at 16 KiB; MIME headers remain 32 KiB per entity/part header block and individual header values 8 KiB each. Mailbox addresses remain bounded at 254 bytes and decoded display names at 256 bytes. Encoded display names are parsed structurally before RFC 2047 decoding, so raw encoded words may exceed the decoded-name limit without failing prematurely. Overflow is explicit; no list or identity is silently truncated. The parser supports its existing quoted phrases, comments, groups and empty groups; SMTPUTF8 addresses and unsupported charsets remain explicit errors, and complete obsolete RFC 5322 grammar is not claimed.
+Incoming address lists use caller-owned heap slices capped at 1,024 participants per header, with no fixed stack array added. Address-header parsing is bounded at 16 KiB; MIME headers allow at most 256 fields within 32 KiB per entity/part header block, and individual header values are at most 8 KiB. Mailbox addresses remain bounded at 254 bytes and decoded display names at 256 bytes. Encoded display names are parsed structurally before RFC 2047 decoding, so raw encoded words may exceed the decoded-name limit without failing prematurely. Overflow is explicit; no list or identity is silently truncated. The parser supports its existing quoted phrases, comments, groups and empty groups; SMTPUTF8 addresses and unsupported charsets remain explicit errors, and complete obsolete RFC 5322 grammar is not claimed.
 
 Incoming header syntax permits a local part longer than 64 bytes within the address/header bounds. [RFC 5322 section 3.4.1](https://www.rfc-editor.org/rfc/rfc5322#section-3.4.1) defines header local-part syntax; the 64-octet transport limit comes from [RFC 5321 section 4.5.3.1.1](https://www.rfc-editor.org/rfc/rfc5321#section-4.5.3.1.1). Outgoing validation retains that limit and the total 32-recipient envelope cap. An ordinary reply can select a valid sender from mail addressed to more than 32 people. Reply-all applies self/alias removal and deduplication before the outgoing cap, then refuses excess recipients. A selected Reply-To address outside the outgoing limits fails before a draft or provider submission; reading the message grants no sending exception.
 
-User label names resolve through the read-only labels.list projection to Google's opaque IDs before label mutation or filtering. Known system labels use canonical IDs directly. Unknown or ambiguous names fail before a mutation; this implementation does not create labels implicitly. Cached mail/contact state is invalidated before live mutation so a lost response cannot leave an authoritative old local state.
+User label names resolve through the read-only labels.list projection to Google's opaque IDs before label mutation or filtering. Known system labels use canonical IDs directly. Unknown or ambiguous names fail before a mutation. Applying/removing labels on messages is implemented; creating, renaming and deleting label definitions is not. Cached mail/contact state is invalidated before live mutation so a lost response cannot leave an authoritative old local state.
 
-## Future live setup commands
+### Local-development operation additions
 
-These commands document the implemented interface; they were not run against a real account during development. Keep the existing bar config and its Desktop client unchanged. For broader terminal permission, create a second Desktop OAuth client in the existing Google project and keep its downloaded `installed` JSON outside the repository. Enable People API in that project only if contacts are wanted. Configure the chosen address, enabled state and Chrome profile in the existing Omagma config. Later authorization opens that profile and checks the returned Gmail identity before saving a terminal credential.
+The current source adds bounded `mail.batch`/`mail.undo`, `mail.prefetch`,
+`mail.forward`, `accounts.identities`, and `draft.recovery-save` to the same
+account-scoped executor. The [agent CLI guide](AGENT-CLI.md) records request
+fields and one-shot syntax. These additions after published v0.2.3 are source-tree
+behavior, not a claim about that immutable binary.
+
+Batch triage accepts at most 100 unique IDs and returns one outcome per ID.
+At most 16 private undo receipts are retained per account. Before each mutation,
+the journal records the actual prior label delta; undo changes only touched
+labels, preserving unrelated subsequent state. Unknown outcomes are not retried
+automatically, and batching never includes sending mail.
+
+Forwarding creates a local quoted draft and copies existing attachments under
+the outgoing 16-file/2 MiB cap. A refused or failed attachment aborts explicitly
+rather than silently dropping files. Send-as discovery reads Gmail's configured
+identities; only the primary or verified aliases from that same account are
+accepted, with live alias verification repeated at actual submission. Provider
+HTML signatures convert to bounded plaintext (8 KiB); configured primary
+signatures (4 KiB) and sender names (256 bytes) override the primary defaults.
+This does not create or modify Google aliases.
+
+Recovery drafts store exactly five raw composer fields, with empty typed
+recipient arrays, under existing private draft quotas. Index previews strip
+raw fields/body/attachment bytes. Submission refuses recovery fields until a
+normal validated draft update clears them. Newly optional From/recovery fields
+are omitted when null from stored canonical draft JSON, preserving legacy
+uncertain-send payload identities.
+
+## Authorization interface reference
+
+Normal users should follow [full TUI/CLI permissions](SETUP.md#full-tuicli-permissions). These commands document the developer/API interface, not a required verification workflow. Keep the existing bar config and its Desktop client unchanged. For broader terminal permission, create a second Desktop OAuth client in the existing Google project and keep its downloaded `installed` JSON outside the repository. Enable People API in that project only if contacts are wanted. Configure the chosen address, enabled state and Chrome profile in the existing Omagma config. Later authorization opens that profile and checks the returned Gmail identity before saving a terminal credential.
 
 ```
 omagma terminal-auth status --account ACCOUNT --config CONFIG
 omagma terminal-auth authorize --account ACCOUNT --config CONFIG \
   --client-file TERMINAL_DESKTOP_JSON \
-  --capabilities mail-read,mail-send,contacts-read,contacts-write,calendar-rsvp
+  --capabilities mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp
 omagma terminal-auth revoke --account ACCOUNT --config CONFIG
 ```
 
 Use `--grant-file FILE` to choose a separate registry, and pass the same option to later `cli`, `agent`, `mail`, `contacts`, `invitations` or `tui` sessions. JSONL requests can explicitly carry `grantFile`; auth authorization additionally carries `clientFile` and a string array `capabilities`. The default grant path is the config directory stated above. Read-only terminal use can fall back to the existing bar credential when no terminal grant exists. `status` shows configured grant metadata rather than proving current connectivity; `revoke` clears local terminal access and leaves the bar credential alone. `--fixtures` permits only synthetic auth status, with no consent or credential mutation.
 
-Live acceptance remains to be performed with a separately authorized test account: real page tokens and metadata; body/attachment/charset boundaries; thread subject/header association; verified aliases; People creation and concurrent edit rejection; explicit successful/uncertain send reconciliation; external-organizer RSVP delivery. Fixture success does not establish Google grant policy, actual recipient delivery, Calendar state or successful provider-side idempotency.
+Developer live-write acceptance uses a separately authorized test account: People creation/concurrent-edit rejection, verified sending identities, successful/uncertain send reconciliation and external-organizer RSVP delivery. Wider page/MIME/thread compatibility remains an ongoing live-read qualification boundary; recorded release smoke checks do not exhaust those variants. Fixture success does not establish Google grant policy, actual recipient delivery, Calendar state or successful provider-side idempotency.
 
-Executed targeted gates used exact Zig 0.17.0, static musl and baseline x86_64 under the parent's host reservation:
+Historical initial targeted gates (2026-10-05) used exact Zig 0.17.0, static musl and baseline x86_64 under a coordinated host reservation:
 
 ```
 zig test src/terminal_codec_tests.zig -Odebug -target x86_64-linux-musl -mcpu baseline -lc -static
@@ -134,14 +166,14 @@ zig test src/terminal_provider_tests.zig -Odebug -target x86_64-linux-musl -mcpu
 zig test src/terminal_provider_tests.zig -Osafe -target x86_64-linux-musl -mcpu baseline -lc -static
 ```
 
-At the recorded targeted gate, codec tests passed 13/13 (including 288 synthetic FULL messages and malformed-limit inputs); provider/auth tests passed 34/34 in both modes. Subsequent parent-coordinated full builds exercise the additional parser, timezone, attachment, date and provider tests; their final receipts are recorded with the overall terminal verification. These targeted runs measured correctness, not process memory or real Google interoperability. No browser consent, Secret Service mutation, live send, contact update, label change or Calendar write was performed by these tests.
+At the recorded targeted gate, codec tests passed 13/13 (including 288 synthetic FULL messages and malformed-limit inputs); provider/auth tests passed 34/34 in both modes. Subsequent full builds exercised additional parser, timezone, attachment, date and provider tests; final receipts remain in the versioned terminal verification records. These targeted runs measured correctness, not process memory or real Google interoperability. No browser consent, Secret Service mutation, live send, contact update, label change or Calendar write was performed by these tests.
 
-Terminal wire qualification uses a test-only loopback POST method with a fixed synthetic bearer, the same JSON request path and 3 MiB terminal limits. `probe-terminal-http` sends a deterministic 128 KiB JSON payload; `probe-terminal-http-oversize` supplies more than 3 MiB and must fail before any TCP connection. The independent [wire harness](../tests/terminal_transport.py) passed all seven cases in the parent's final Debug and Safe runs with Zig 0.17.0 on Linux x86_64/static musl: exact POST/header/body bytes, a response larger than the bar cap, redirect refusal, declared and chunked response caps, joined 10-second cancellation for absent headers and continuously arriving body bytes, and zero accepted TCP connections for an oversized outgoing request. Those checks used no real credentials or provider endpoints and establish wire behavior separately from semantic mocks. Production destination policy remains HTTPS Gmail/OAuth, adding People only through the terminal method.
+Terminal wire qualification uses a test-only loopback POST method with a fixed synthetic bearer, the same JSON request path and 3 MiB terminal limits. `probe-terminal-http` sends a deterministic 128 KiB JSON payload; `probe-terminal-http-oversize` supplies more than 3 MiB and must fail before any TCP connection. The independent [wire harness](../tests/terminal_transport.py) passed all seven cases in the recorded initial terminal Debug and Safe runs with Zig 0.17.0 on Linux x86_64/static musl: exact POST/header/body bytes, a response larger than the bar cap, redirect refusal, declared and chunked response caps, joined 10-second cancellation for absent headers and continuously arriving body bytes, and zero accepted TCP connections for an oversized outgoing request. Those checks used no real credentials or provider endpoints and establish wire behavior separately from semantic mocks. Production destination policy remains HTTPS Gmail/OAuth, adding People only through the terminal method.
 
 
 ## Cache-first reads and incremental refresh
 
-`Client.callCached` and agent requests with `cacheOnly:true` support `mail.list`, `mail.read`, `mail.thread` and `cache.stats` without OAuth or provider requests. They use short shared cache locks and caller-owned result JSON. Missing full bodies return `CacheMiss`; cached threads explicitly return `partial:true`. Default Inbox listing can reuse schema-1 cached envelopes immediately, even before a history checkpoint exists. Arbitrary Gmail searches require saved account/query/label provenance. Lists report `cached`, `cacheReady`, `partial`, `stale`, `viewIncomplete`, per-view `lastSyncAt` in epoch milliseconds, `bodyCached` and any stable `bodyCacheError`. Cursors bind account, query, label and generation; cache cursors use `C`, remote continuation cursors use `L`. An anchor ID can locate the selected message's cached page after new mail shifts the ordering. A saved view whose IDs were evicted advertises incompleteness; an online provider page remains usable even when those older messages are outside the retained newest set.
+`Client.callCached` and agent requests with `cacheOnly:true` support mail list/search/read/thread, cache stats/refresh status, cached labels/identities and cached contacts without OAuth or provider requests. The complete accepted command list is enforced in core.zig; missing read capability still rejects cached contacts. They use short shared cache locks and caller-owned result JSON. Missing full bodies return `CacheMiss`; cached threads explicitly return `partial:true`. Default Inbox listing can reuse schema-1 cached envelopes immediately, even before a history checkpoint exists. Cached `mail.list` with an arbitrary Gmail query requires saved account/query/label provenance; local `mail.search` instead evaluates its own bounded cache-query grammar. Lists report `cached`, `cacheReady`, `partial`, `stale`, `viewIncomplete`, per-view `lastSyncAt` in epoch milliseconds, `bodyCached` and any stable `bodyCacheError`. Cursors bind account, query, label and generation; cache cursors use `C`, remote continuation cursors use `L`. An anchor ID can locate the selected message's cached page after new mail shifts the ordering. A saved view whose IDs were evicted advertises incompleteness; an online provider page remains usable even when those older messages are outside the retained newest set.
 
 `mail.refresh` holds no cache lock over provider work. One in-place network session owns tokens, the HTTP allocator and joined cancellation for the bounded 30-second job. Bootstrap projects a global recent metadata head independently of the requested folder/search (TUI 32; API at most 100), then caches full visible messages one at a time using separate arenas and short commits. Existing full bodies are reused. Warm refresh uses saved Gmail history: no-change history performs no mailbox list, metadata or body fetch; known label-only changes fetch MINIMAL data and preserve immutable body files and hashes. Added/unknown IDs fetch metadata and eligible uncached visible bodies. Deletions remove metadata and body files. Searches may need a bounded new ID projection to preserve Google's query semantics; simple saved folders derive their cached membership from authoritative labels. [Google synchronization guide](https://developers.google.com/workspace/gmail/api/guides/sync), [history.list contract](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.history/list).
 
@@ -155,6 +187,35 @@ Synthetic fixture refresh supports `sync.historyId`, API-shaped `sync.historyPag
 Fixture provider label mutations live in protected account-specific provider records, separate from evictable mail entries. Up to 1,024 IDs are retained, each with at most 64 labels of 256 bytes and a bounded source history checkpoint; the existing private index size and disk quota apply. Cache clear, old-tail eviction and restart preserve this synthetic remote state, just as they preserve the fixture sent outbox. All fixture read/list/thread/refresh source projections apply it; fixture files remain read-only. Newer typed history for the same ID replaces a local override, deletion tombstones prevent stale-source resurrection, and unrelated history leaves other mock mutations intact. An explicit newer expired/full snapshot reconciles records authoritatively when bounded typed history is unavailable. These records are restricted to the fixture namespace and can never affect live Gmail or credential lookup.
 
 
+## Progress and cached-window ownership
+
+`Client.callWithProgress` wraps one owned executor call with an optional
+`ProgressSink`; ordinary CLI frames remain unchanged. Metadata progress counts
+actual returned IDs and completed gets, and body progress counts missing eligible
+bodies, not the Gmail Inbox estimate or requested maximum. Each `FetchRow` is
+borrowed only during its callback. The TUI copies at most 32 immutable previews
+and bounded excerpts into the active job mailbox, checks account/request
+identity, and never exposes provisional IDs as interactive committed rows.
+The callback stores atomics and may wake the existing event queue; it does not
+allocate or perform network/storage work. Owner shutdown cancels and joins
+workers before releasing this storage.
+
+Cached lists and cache searches accept mutually exclusive `beforeMessageId` or
+`afterMessageId` selectors with `cacheOnly:true`. They exclude that boundary and
+return up to the requested limit of immediate filtered predecessors/successors.
+The optional millisecond `boundaryReceivedAt` permits a missing/evicted boundary
+to choose the nearest retained timestamp/ID-ordered window, explicitly marked
+`boundaryFallback:true`. Missing boundaries without a usable identity/time fail
+with `CacheBoundaryGone`; windows never silently fetch an old server page.
+Responses expose `hasMoreCachedBefore`/`hasMoreCachedAfter`, and this navigation
+works after restart without a UI cursor stack. Opaque cursor modes remain
+account/query/label scoped; body-aware search cursors additionally bind hashes.
+
+Fixture-only `sync.fixtureProgress` can hold an actual completed metadata/body
+checkpoint under the fictional fixture root. Its validated hold/entered leaf
+names use a finite, cancellation-aware wait. Independent PTYs inspect actual
+fractions and copied arrivals; these controls never apply to live credentials.
+
 ## Background foundation and large-cache bounds
 
 Automatic `mail.refresh` requests set `auto:true` and `intervalSeconds:300`, default to Inbox/32, force the bar's Desktop client and Secret Service namespace with `barGrantOnly:true`, and use non-unlocking automatic lookup. They never load a wider terminal grant. Manual refresh bypasses age coalescing, while every request shares the same private per-account `refresh.lock` lease. The lease is a zero-byte 0600 regular file, opened nonblocking with NOFOLLOW/CLOEXEC/NOCTTY, and held independently of the short index locks. Kernel descriptor lifetime releases a crashed owner. `cache.refresh-status` returns only `refreshInProgress` without parsing the index. Refresh responses expose `coalesced`, `refreshed` and `refreshInProgress`. Cached reads and contacts remain available while another owner refreshes.
@@ -165,7 +226,13 @@ Each refresh store phase and each body validation/download/commit owns a separat
 
 Gmail inline plain/HTML leaves tolerate understated `body.size` metadata after complete base64url decoding: actual bytes may exceed the declared count, including a zero count. This is a narrow compatibility policy; Google's documented field still describes an exact byte count. It applies only with no external attachment, no filename or attachment disposition, and no child parts (an empty array counts as a leaf). Bodies shorter than their declaration, empty data with a positive declaration, invalid data, negative/oversized declarations and all existing actual-byte limits remain refused. External, attached, calendar and container bodies keep exact size checks; raw MIME and outgoing attachments retain their rules. Actual decoded bytes govern the unchanged 2 MiB leaf and plain/HTML limits and 3 MiB combined decoded limit, with account identity and cached SHA checks preserved. [Google MessagePartBody contract](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments).
 
-Cache search is separate from saved Gmail view provenance: `mail.search` with `cacheOnly:true` searches retained subject, sender, snippet and labels with simple documented literal/from:/subject:/is:unread/in: predicates. It returns K-mode account/query/label/generation cursors, `searchMode:"cache"`, `searchScope:"metadata"`, `matchedCachedCount`, and `partial:true`. Default server search remains Google's query language. Cached contacts require `contacts-read`, use local name/email matching, and expose `cacheReady` so downloaded-empty differs from not loaded; neither cached API requests OAuth nor starts a second network worker.
+Cache search is separate from saved Gmail view provenance: `mail.search` with `cacheOnly:true` searches retained metadata and already downloaded plaintext with bounded AND/quoted/negative terms and metadata/body predicates. It returns K-mode account/query/label/generation cursors, `searchMode:"cache"`, `searchScope:"metadata-and-cached-bodies"`, bounded `searchMatches`, `highlightTerm`, `matchedCachedCount`, and `partial:true`. Body-reading cursors additionally bind retained body hashes, since prefetch residency can change matches without changing metadata generation. Each body is reclaimed before inspecting the next entry, and each iteration checks cancellation; no missing body is downloaded for search. Default server search remains Google's query language. Cached contacts require `contacts-read`, use local name/email matching, and expose `cacheReady` so downloaded-empty differs from not loaded; neither cached API requests OAuth nor starts a second network worker.
+
+### Historical 0.2.2 diagnostics
+
+The observations below retain their original targeted artifacts and acceptance
+classifications. They explain cache/MIME implementation decisions; they are not
+measurements of the later local TUI changes.
 
 The independent maximum-cache Debug receipt is `tests/results/tui-cache-max-bounds-debug-2.json`: 2,000 metadata records averaging 1,528 bytes plus 100 added and 10 deleted messages completed in 13.2716 seconds. It retained exactly 2,000 newest IDs, fetched 100 new metadata/full bodies without relisting, validated 102 body references and retained hashes, and found no orphan files. Capped heap peak was 41,953,544 bytes with zero rejected allocations. Whole-process observed HWM was 47,956 KiB, a separate measurement from the 64 MiB application heap and 16 MiB fixed reservation. This targeted Debug result precedes final merged Debug/Safe release qualification.
 

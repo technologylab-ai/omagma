@@ -1,106 +1,164 @@
 # Terminal mail
 
-**Experimental:** the TUI and CLI are under active development. Read-only live checks and synthetic write tests do not establish every Gmail, contact or invitation workflow.
+**Experimental:** Omagma's TUI and agent CLI are under active development. This guide describes the current development checkout, including additions made after the public **v0.2.3** release. The released binaries remain unchanged; use a current source build when you need these newer features. See the tiered [feature catalogue](FEATURES.md) and [installation](INSTALL.md).
 
-The same native binary runs the bar backend, TUI and agent CLI. A complete release is preferred; its `zig-out/bin/omagma` needs no compiler. For terminal-only use, the matching static `omagma-linux-ARCH` binary plus the release's `LICENSES.txt` is sufficient. Verify its entry in `SHA256SUMS`, make it executable, and put it in a user-controlled PATH directory. The terminal needs Linux and a UTF-8 terminal; live Gmail additionally needs an unlocked Secret Service keyring, `secret-tool`, CA certificates and private account configuration. Chrome is needed for consent and explicitly opening Gmail links.
+The same Linux binary runs the bar backend, TUI and CLI. The terminal needs a UTF-8 terminal, an unlocked Secret Service keyring, `secret-tool`, CA certificates and your private account configuration. Chrome is used for Google consent and explicitly opening Gmail links. A release binary needs no Zig compiler.
 
-## Start safely
+| Feature set | Availability |
+| --- | --- |
+| Read/cache mail and threads, metadata-only cache search, styled HTML, mouse navigation, reply/reply-all, local drafts, literal outgoing attachments, `$EDITOR`, contacts, single-message actions and RSVP | Public v0.2.3 |
+| Automatic bidirectional windows, reader cross-window navigation, body-cache search, saved working context, remaps and compact reader polish | **Source only** |
+| Forwarding, explicit sending identities/signatures, autocomplete and incomplete-draft autosave recovery | **Source only** |
+| Bulk actions/undo, custom-label/Spam/All Mail/Unread views and the interactive label chooser | **Source only** |
+| Link/received-file pickers, thread/quote/signature folding, preview keyboard controls, native path completion and Downloads defaults | **Source only** |
+
+## Start
+
+Connect accounts through [account setup](SETUP.md), then run:
 
 ```sh
-omagma tui --fixtures
-omagma tui --account personal@example.com --config /absolute/private/config.json
+omagma tui
+omagma tui --account personal@example.com
 ```
 
-Fixtures use three fictional accounts and a separate mock provider with mail sends, mailbox changes, contacts and RSVP enabled. They require no OAuth grant and never contact Google. Defaults use the private terminal cache under `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; use a separate `--cache-dir` for experiments. Existing cache directories must be owner-only (0700). Files are created 0600. The cache base separates `fixtures/` and `live/` namespaces even for the same account. Account directories and message filenames are hashes, never addresses. The terminal cache contains plaintext mail and drafts protected by filesystem permissions; it is not encrypted at rest.
+Use `--config /absolute/private/config.json` when your configuration is elsewhere. `--grant-file FILE` selects a custom terminal grant registry; use the same path during authorization and later sessions.
 
-The bar stays read-only and does not persist mail. Terminal reads do not mark mail read. Each command and each TUI view names one configured account; there is no combined inbox.
+For a preview without connecting Google, `omagma tui --fixtures` uses fictional mail and contacts. Fixtures are optional. You can use your own configured accounts directly after granting the permissions needed for your work.
 
-The TUI shows available cached mail at startup while fetching updates in the background. A separate colored status line distinguishes fetching, refreshing cached mail, successful completion and cached data after a refresh failure. `NO_COLOR` retains these states as text. Cached navigation and previously downloaded full bodies remain usable during refresh, and list updates retain the selected message identity. The fixed per-account message count keeps the newest mail and evicts the oldest tail with its body files; the byte limit also guards unusually large mail. See [cache-first startup](TUI-CACHE.md) for synchronization, cache limits and partial-data behavior.
+Accounts remain separate. Select one with `1`, `2`, `3` or a click. Reading does not mark messages read. The bar stays read-only and keeps its own memory-only recent-mail snapshot.
 
-Mouse support is enabled by default. Click an account, mailbox or message to select it; click Contacts to open the address book, and a contact to open its details or choose it in the recipient picker. The wheel navigates the pane under the pointer. Selection clicks do not send mail or apply mailbox/contact changes. Hold your terminal’s selection modifier to select text, or start with `--no-mouse` to keep all mouse handling in the terminal.
+## Read and navigate
+
+Cached mail appears immediately while Omagma checks for changes. The colored sync line shows fetching, refreshing, completion or offline cached mail. **Source-only progress:** when a bounded fetch has a known batch, `metadata 1/32` or `bodies 1/32` reports that work; it is not your Inbox total. `NO_COLOR` keeps the same information as text.
+
+**Source-only local time:** mail dates and the fixed **Synced** time use the
+computer's timezone, including the DST offset for each date. An explicit `TZ`
+environment setting overrides the system timezone. Restart the TUI after
+changing it; if local rules cannot be loaded, the display labels its UTC
+fallback. Cache and CLI epoch timestamps stay unchanged.
+
+**Source-only window navigation:** the list holds at most 32 messages at a time. Move past its last row with `j`, Down, the wheel or PageDown to load the next window and select the adjacent older message. Move above its first row with `k`, Up, the wheel or PageUp to return to adjacent newer cached mail. Existing mail remains readable while another window loads. Repeated boundary input requests one window. In v0.2.3, use explicit `[`/`]` pages instead.
+
+After the cached tail, ordinary forward movement can fetch one older Gmail page. Backward movement uses cached metadata; a selected body that is missing can still be fetched read-only. `/` cache searches never fetch missing bodies or older provider results. `[` and `]` remain explicit page controls; `[` selects the previous window's first row.
+
+Enter opens the full thread. `h`/`l` or Tab changes pane, `v` moves the reader beside or below the list, and `z` expands it. With the reader focused, `J`/`K` moves to adjacent mail while lowercase `j`/`k` scrolls the body. **Source only:** reader movement crosses windows; `{`/`}` chooses a thread message, `t` or a click folds its body, and `Q`/`S` folds quoted history/a standard signature. Short-pane header and position polish also requires current source. These controls do not change stored mail.
+
+Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Use your terminal's selection modifier for text selection, or `--no-mouse` to retain ordinary terminal mouse behavior.
 
 ## Reading HTML-only mail
 
-The reader prefers a nonempty plain-text MIME alternative. If only HTML is
-available, a native text filter preserves headings, bold and italic emphasis,
-lists, quotes, preformatted blocks and simple data tables. Colors come from the
-active Omarchy palette. Tables wrap within the pane; narrow panes use stacked
-cells. Presentation and nested newsletter tables flatten into reading order.
+The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors follow the Omarchy palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
 
-HTML is not a browser view: scripts, stylesheets and remote images/resources
-never run or load. Image alt text can appear. Links have colored, underlined
-labels, without emitting terminal hyperlink commands. Complex HTML falls back
-to the existing complete plain-text conversion. This needs no external filter.
+Scripts, remote images and other resources never run or load. Image alt text may appear. Links have styled labels and open only when explicitly chosen. The CLI receives decoded plaintext and optional HTML data rather than this styled screen.
 
-The same view works beside or below the list, expanded, and while reading a
-cached message during refresh. Existing caches remain usable. Agent replies and
-CLI `bodyText` keep their plain-text representation; `bodySource` records
-`plain`, `html` or `unknown` for old cache entries.
+**Source-only plaintext polish:** paragraphs wrap at word boundaries. Hard newlines and indented/preformatted lines remain intact; long URLs or words split within the pane. The composer uses the same layout for its caret and text.
+
+## Search
+
+`/` searches this account's retained mail without downloading missing bodies. **Source only:** matching downloaded plaintext, quoted phrases, AND terms, negative terms, and the extended `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `is:unread|read|starred` and `has:attachment` predicates.
+
+**Source only:** downloaded-body search, compound predicates and restoring the pre-search working position. The public v0.2.3 cache search covers metadata with simpler predicates; `\` already supports explicit Gmail search there.
+
+`\` explicitly searches Gmail using Google's query syntax. That can reach mail outside the cache and may take network time. `q` leaves search results. **Source only:** returning restores the original mailbox, selected message and reader position where still cached.
+
+The CLI exposes both modes through `omagma mail search --cached` / `--server`, or JSONL `cacheOnly:true` / `false`. See [the CLI guide](AGENT-CLI.md) and [cache behavior](TUI-CACHE.md).
+
+## Compose, reply and forward
+
+Use `c` for a new message, `r` for reply and `R` for reply-all. **Source only:** `f`/`F` forwards, and a reply from the reader targets its focused thread card. Forwarding creates an unaddressed draft with the original attachments; choose recipients before sending.
+
+Compose starts in normal mode. Tab or `j`/`k` selects To, Cc, Bcc, Subject or Body. `i` or Enter begins insertion; Escape returns to normal mode. Letters such as `q`, `L` and `B` remain text while inserting. The selected field has a row highlight, and the body follows its caret.
+
+**Source-only composer polish:** Body receives a full selection row, From has a separate explicit alias action, and one footer replaces repeated in-pane hints.
+
+`a` opens the contact picker. **Source only:** recipient insertion offers Ctrl+N/P and Enter for account-local cached suggestions; normal compose `f` or the alias action selects a verified identity; account `senderName` and plaintext `signature` settings override primary defaults. Alias selection does not change the sending account's grant.
+
+**Source-only autosave:** changes save locally after a pause, including unfinished addresses. An unfinished recovery draft must be corrected before review and sending. Drafts appear under **Drafts** and survive restart; they are local Omagma drafts, not Gmail's web draft folder. In v0.2.3, explicitly save/review or leave compose to retain edits.
+
+At 90 columns or more, the composer shows its original thread or a draft preview. **Source-only preview controls:** normal Ctrl+D/U or PageDown/PageUp scrolls it, and `L`/`B` opens its links or received files. These actions preserve the outgoing draft, account, recipients and attachments.
+
+`e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
+
+Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review; only explicit `y` sends. Review shows the account, recipients, subject, body, threading and attachments (plus the selected From alias in current source). If the provider result is uncertain, keep the draft, use `:receipt` to inspect its journal and check Sent mail before attempting another send.
+
+## Attachments and links
+
+`A` attaches another outgoing file and `:detach NUMBER` removes one. **Source-only controls:** **Add A**, always-visible filenames/sizes, individual **[x]** and attachment-list wheel scrolling. You can attach up to 16 regular files, within the limits below; files remain attached through saving and editor return.
+
+Attachment paths are literal and direct paths with spaces need no quoting. **Source-only completion:** Tab completes files/directories, Tab/Shift+Tab cycles bounded matches and Ctrl+U clears the prompt. Completion excludes symlinks and special files. Shell expressions or variables are not expanded.
+
+**Source-only received-file picker:** `B`, `:attachments` or a file click opens the thread's attachment list. `s` or Enter chooses Save; `o` chooses Save & open. The prompt suggests a sanitized, fresh name in XDG Downloads or `HOME/Downloads`; Ctrl+U replaces it and Tab completes paths. Saving creates a new private file and refuses overwrite or symlink traversal. In v0.2.3, use `:save-attachment NUMBER /absolute/path` instead.
+
+Numeric `:save-attachment NUMBER /absolute/path` also remains available in current source. Paths with spaces are literal. If a completion list is visible, Escape hides it first; Escape again leaves the path prompt. Saving/opening a received file reports the explicit result while retaining its originating reader or draft.
+
+**Source-only link chooser:** `L` opens literal HTTP(S) destinations; Enter opens the selection in this account's Chrome profile. `o` in the mailbox opens selected mail in Gmail and is already available in v0.2.3. Rendering mail never launches anything automatically.
+
+## Labels, bulk actions and contacts
+
+The released sidebar includes Inbox, Sent, local Drafts, Archive and Trash. **Source only:** Spam, All Mail, Unread and cached custom labels, plus the `m` chooser with `/` filtering, Enter/**Add** and `-`/**Remove**. In v0.2.3, `m` accepts a literal existing label. Omagma does not create, rename or delete definitions.
+
+**Source-only bulk/undo:** Space selects mail, Ctrl+A selects the window, and actions apply to that set or the focused message. Escape/`q` clears a selection first; Ctrl+Z or `:undo` reverses the last completed account action. Scope changes clear selection. Bulk actions can have partial outcomes; uncertain items are not replayed. Single-message archive/star/unread/labels and `D` Trash review with explicit `y` already exist in v0.2.3.
+
+The source-only CLI/API batch interface also supports `spam` and `unspam`
+actions; `unspam` removes Spam and restores Inbox membership. See
+[batch commands](AGENT-CLI.md#commands).
+
+`a` opens this account's address book. Search with `/`, create with `n`, edit with `e`, and save a contact with Ctrl+S. Contacts require People API permissions. Version conflicts are reported so you can refresh before editing again. Contact deletion is not implemented.
+
+`I` inspects a calendar invitation and offers accepted, tentative or declined replies. This sends an RSVP email; there is no Calendar API permission, calendar view or calendar editing.
 
 ## Keys
 
-| Key | Action |
-| --- | --- |
-| j/k, gg/G, Ctrl+D/U | Move or scroll |
-| h/l, Tab/Shift+Tab | Change pane |
-| Enter | Open mailbox, full thread, draft or contact |
-| [ / ] | Previous / next page |
-| / / \ | Search this account's cache / explicitly search Gmail |
-| 1/2/3 | Select a configured account |
-| z | Expand reader |
-| c / r / R | Compose / reply / reply-all |
-| a | Contacts; n creates, e edits |
-| s / u | Toggle star / unread |
-| x / D / U | Archive / confirm Trash / restore |
-| m | Add a label; prefix with - to remove |
-| I | Inspect and review an invitation reply |
-| o | Open Gmail in this account's configured Chrome profile |
-| Ctrl+R / ? / q | Refresh / help / back or quit |
-| v / :layout right / :layout below | Toggle or choose the reader beside or below the list |
-| J / K in the reader | Next / previous mail; lowercase j/k scroll the body |
+| Key | Action | Availability |
+| --- | --- | --- |
+| j/k, arrows, gg/G, Ctrl+D/U | Move or scroll focused pane | v0.2.3; automatic boundary windows source only |
+| h/l, Tab/Shift+Tab, Enter | Change pane or open selected item | v0.2.3 |
+| 1/2/3 | Switch account | v0.2.3 |
+| / / \ | Search cache / Gmail | v0.2.3; body search source only |
+| v / z | Reader layout / expand | v0.2.3 |
+| J/K | Reader: adjacent mail | v0.2.3; crossing windows source only |
+| {/}, t, Q/S | Reader: thread card, fold body, quotes/signature | **Source only** |
+| c / r / R | Compose / reply / reply-all | v0.2.3 |
+| f / F in mailbox | Forward | **Source only** |
+| A in normal compose | Add outgoing attachment | v0.2.3; visible Add/[x]/completion source only |
+| L / B | Links / received-file picker | **Source only** |
+| o | Open selected mail in Gmail | v0.2.3 |
+| Space / Ctrl+A / Ctrl+Z | Select / select window / undo | **Source only** |
+| x / D / U / s / u / m | Archive / Trash review / restore / star / unread / labels | v0.2.3; interactive label chooser source only |
+| a / I | Contacts / invitation reply | v0.2.3 |
+| Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit | v0.2.3; original search-position restoration source only |
 
-Compose uses normal and insert modes: select a field with Tab or j/k, enter text with i/Enter, then Escape returns to normal mode. The body wraps with a visible caret. The contact picker fills the selected recipient field. A in normal compose opens a literal attachment-path prompt; `:detach NUMBER` removes an attachment. Attachment contents survive draft save and editor return. The reader numbers attachments. `:save-attachment NUMBER /absolute/path` saves one to a literal, owner-only destination and refuses overwrite; the agent interface also provides `mail.attachment`.
+`q` backs out of readers, search, contacts, help and draft review before quitting the mailbox. It remains text in insertion and path fields. `?` shows the full, scrollable help for the current interface.
 
-`q` backs out one level before quitting: reader to list, search results to the same mailbox, contacts or help to their previous view, and normal compose to a locally saved draft. It remains a normal text character in insertion fields. Confirmation views cancel without sending. Pending mutations must finish before quitting so their outcome can be retained.
-
-The reader layout is saved separately in the private `omagma/ui.json` under the configuration directory. `--ui-file FILE` selects another private preferences file. The TUI reads the active Omarchy palette at startup; Ctrl+L reloads colors. Terminal fonts and desktop theme configuration are left to the user. Subject-first list rows, sender color and spacing distinguish messages without requiring a large pane.
-
-Cache search is a fast search of retained metadata and reports a cached subset, rather than claiming complete Gmail results. Gmail search uses the provider's query syntax and may need network time. Both remain account-specific. The CLI uses `omagma mail search --cached` and `omagma mail search --server`; JSONL callers select `cacheOnly:true` or `false`. [CLI contract](AGENT-CLI.md).
-
-For five-minute cache fetching while the TUI is closed, follow [background terminal cache setup](TERMINAL-BACKGROUND.md). Background jobs use existing read-only bar grants and do not broaden permissions.
-
-Press e in normal compose to edit the body with `$EDITOR` (then `$VISUAL`, then nvim/vi/nano), using direct argv without a shell. Quoted fixed arguments are supported. It takes over the terminal, then restores the TUI, including after errors or termination. The built-in composer remains split; an arbitrary editor pane is deferred pending a bounded embedded VT implementation. `--editor-mode auto|takeover` uses takeover; `embedded` reports a visible unsupported-mode error. No tmux or Ghostty is needed.
-
-Escape/q saves a draft before leaving compose. Ctrl+S or `:send` opens review, and only explicit y submits. Ordinary Enter, editor save and pasted text never send. Review includes the account, recipients, subject, threading, body and attachments. An unknown outcome preserves the draft and operation identity; inspect the receipt and provider before deciding whether any new send is appropriate. Applied means provider acceptance, not recipient delivery.
-
-Invitation review shows the validated attendee, organizer, UID and event. Accepted/tentative/declined sends a standards-based iTIP REPLY email. It does not update or display Google Calendar. Contacts are read and written through People, with an etag precondition for edits. A successful live contact write returns the provider contact directly; its invalidated cache refreshes on the next contacts read.
+Basic reader layout and `--ui-file FILE` are in v0.2.3. **Source-only preferences:** split proportions, key remaps and per-account mailbox/selected-mail/reader position live in private `omagma/ui.json`. `:split right 60` or `:split below 40` chooses a 25–75% split; `:bind n down`, `:bind p up` and `:unbind n` remap mailbox keys without intercepting text entry or confirmation. Ctrl+L reloads the Omarchy palette; desktop fonts/theme configuration stay with the terminal.
 
 ## Live permissions
 
-Existing bar configuration and credentials support terminal read-only mail. To enable writes, create a **second Desktop OAuth client in the same Google project**, download its private JSON, and authorize a separate terminal grant. This protects the bar's strict read-only token response checks and Secret Service namespace. Keep the client JSON and grant registry outside Git and owner-only. No new consent is initiated by opening the TUI.
+Follow [full TUI/CLI permissions](SETUP.md#full-tuicli-permissions) for the Google project, People API, separate terminal Desktop client and per-account consent. The TUI and CLI share that terminal grant; the bar retains its original read-only client and credentials.
 
-Enable People API in that project for contacts. Add only the needed Gmail/People scopes in Google Auth Platform, preserve the existing audience/test-user restrictions, then run:
+For all implemented live features, authorize the complete local capability set:
+`mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.
+The setup guide explains the corresponding two Google scopes and the browser steps. A Console scope change alone does not replace an account's existing token. Restart an open TUI after authorizing its updated grant.
 
-```sh
-omagma terminal-auth authorize --account personal@example.com \
-  --config /absolute/private/config.json \
-  --client-file /absolute/private/terminal-client.json \
-  --capabilities mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp
-omagma terminal-auth status --account personal@example.com --config /absolute/private/config.json
-```
-
-The browser opens in the configured account's Chrome profile. Select that exact account and approve the displayed permissions. The command verifies Gmail identity and the actual granted scopes before storing a token. The browser callback alone does not prove success. If policy blocks a scope, report the error and keep working with fixtures. There is no shared hosted OAuth client, account scraping or reuse of another application's tokens.
-
-Capabilities are local gates as well as OAuth scopes. `mail-read` is required; choose only what is needed. `calendar-rsvp` grants the ability to send the prepared reply; it does not grant ordinary send unless `mail-send` is also present. `mail-modify` uses Gmail modify scope, but local command capabilities remain separate. Desktop clients do not support incremental consent here: request the complete desired capability set when replacing a terminal grant. `terminal-auth revoke` removes the local terminal token/registry entry without altering the bar; it is not a remote Google revocation request. The default registry is `$XDG_CONFIG_HOME/omagma/terminal-grants.json` or `$HOME/.config/omagma/terminal-grants.json`; use the same `--grant-file FILE` for authorization and later terminal/agent sessions when selecting another registry.
-
-Use a dedicated test Gmail account for first live writes. Development tests are synthetic and do not prove live delivery, Workspace policy approval or contact mutation. [Provider design](TERMINAL-PROVIDER-DESIGN.md) lists exact scopes and source references.
+You can use your own accounts after consent, including sending a first message to yourself. Agent actions still need your task authorization. A dedicated test mailbox is a development qualification tool, not an installation requirement.
 
 ## Bounds and recovery
 
-Pages contain at most 100 messages (TUI requests 32). Live thread reads reject more than 100 messages or an oversized response explicitly. Cache defaults are 2,000 metadata entries and 256 MiB per account, configurable with `--metadata-limit` / `--disk-limit-bytes`; hard ceilings are 10,000 and 1 GiB. Bodies and aggregate decoded outgoing attachments are 2 MiB, requests and live provider response storage 3 MiB, outgoing recipients 32, outgoing attachments 16, incoming attachments 32 per message, local drafts 128, cached contacts 1,024 and operation receipts 1,000. A full journal refuses new submissions instead of forgetting uncertain outcomes. Terminal heap allocations are capped at 64 MiB; the existing 16 MiB fixed backend/HTTP reservation is accounted separately. OS/std/editor memory is outside those application storage bounds.
+| Limit | Default or supported maximum |
+| --- | --- |
+| Retained mail per account | Default 2,000 entries / 256 MiB; configurable up to 10,000 / 1 GiB |
+| Display/result window | 32 in the TUI; up to 100 per CLI page |
+| Loaded thread | 100 messages |
+| Message body | 2 MiB |
+| Outgoing attachments | 16 files, 2 MiB combined decoded bytes |
+| Incoming attachments | 32 per message |
+| Outgoing recipients | 32 across To/Cc/Bcc |
+| Local drafts / undo receipts | 128 / 16 per account |
+| Cached contacts / operation journal | 1,024 / 1,000 per account |
+| Serialized request | 3 MiB, including encoded attachment data |
 
-Incoming MIME parsing accepts up to 256 headers, 8 KiB per header value and 32 KiB of aggregate headers per MIME entity/part header block. Incoming envelopes allow up to 1,024 participants per address header and retain their separate 16 KiB address-parser budget. Addresses have a practical 254-byte cap; RFC 2047 decoded display names have a 256-byte cap. Incoming local parts may exceed 64 bytes; outgoing SMTP addresses retain the 64-byte local-part limit and outgoing recipients remain capped at 32. The ASCII address grammar is unchanged, without SMTPUTF8 or expanded obsolete forms. Reply-all removes self aliases and duplicates before enforcing the final 32-recipient cap; overflow returns an error rather than truncating recipients.
+Encoded bodies and attachments must also fit the request limit; an oversized or unavailable file fails explicitly instead of being silently omitted. Old mail is evicted under cache pressure; local drafts and operation receipts are preserved. `cache.clear` removes cached mail without removing drafts, contacts or receipts.
 
-Disk quotas count logical file bytes, including the overlap during atomic replacement. Bodies are evictable. Direct sends also save recovery drafts before submission; unknown operations protect those drafts against changed-content edits or discard. Use `draft.discard` to explicitly remove completed local drafts. Drafts and operation receipts are retained; quota exhaustion is an explicit error. `cache.clear` removes cached mail while preserving drafts, contacts and receipts. Cache cursors are account/query/generation scoped; after mutations or clear, restart pagination instead of reusing a stale cursor. Per-account locks prevent simultaneous writers. Synthetic submitted mail has its own quota-counted outbox, capped at 128, so cache eviction/clear does not erase mock sends.
+Every send or RSVP has an operation identity and a recorded outcome: applied, rejected or unknown. Applied means provider acceptance, not delivery. An unknown receipt protects its recovery draft; inspect the provider before deciding what to do next. Local duplicate guards do not guarantee server-side idempotency.
 
-Mail is rendered as text: terminal controls and bidi formatting are filtered, graphemes bounded, and remote HTML content never loads. [Agent contract](AGENT-CLI.md), [UI implementation](TERMINAL-UI-DESIGN.md), [verification](TERMINAL-VERIFICATION.md).
+Cache files and drafts contain plaintext protected by owner-only filesystem permissions, not encryption at rest. Keep private configuration, credentials, cache files and real-mail captures outside Git. See [cache behavior](TUI-CACHE.md), [agent CLI](AGENT-CLI.md) and [developer references](DEVELOPMENT.md) for the deeper contracts.

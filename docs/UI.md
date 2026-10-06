@@ -1,15 +1,36 @@
 # Dropdown behavior
 
-The sidebar shows the configured account addresses in order, each with its own unread count. There is no combined inbox or combined unread total. The first enabled required account is selected initially; subsequent openings preserve the selected account while it remains configured.
+Click the magma icon to open the compact bar dropdown. The sidebar lists your configured accounts in order, with a separate unread count for each. Choose an account to see up to 30 recent Inbox messages, including read and unread mail. The initial selection is the first enabled account marked `required`; later openings keep the selected account while it remains configured.
 
-Each account shows up to 30 recent Inbox messages, including read and unread messages. Rows show sender, subject and time; selecting a row reveals its plain-text snippet. **Refresh** requests that account’s mail. **Open inbox** and message activation launch Gmail in its configured Chrome profile. The UI does not download full bodies or attachments or change read status.
+Rows show sender, subject and time. Select a row to see its plain-text snippet. **Refresh** updates the selected account. **Open inbox** and message activation open Gmail in that account’s configured Chrome profile. The bar fetches snippets and metadata; reading full messages and attachments happens in Gmail or the [terminal client](TERMINAL.md). The bar does not change read status or send mail.
 
-Loading, current, cached, disconnected, unavailable and never-checked states have distinct labels. A successful, current result with zero rows can say **Inbox is empty**. Missing access or a failed fetch never masquerades as an empty Inbox. Older successful data says **Cached**, keeps its last-checked time and remains neutral unless an actual account error is present.
+## Status labels
 
-Keyboard controls are Escape to close, Ctrl+R to refresh, Alt+1/2/3 for configured accounts, arrows to select a message and Enter to open it. Slots beyond the configured account count have no action.
+| Label | Meaning |
+| --- | --- |
+| Never checked | This account has no completed check yet. Select Refresh. |
+| Loading… | A mail check is running. |
+| Current | The last successful check is recent. |
+| Cached | Showing an older successful result, with its last-checked time. |
+| Disconnected | Connect or reconnect this account using [account setup](SETUP.md). |
+| Unavailable | This account is disabled or mail access is unavailable. Its Inbox can still be opened in Chrome. |
 
-All mail and account strings use Qt plain text. The model validates bounded snapshots and opaque identifiers, strips controls and directional overrides from display text, and rejects unknown account identities or older generations. Each successful snapshot replaces that account’s rows.
+**Cached** is a neutral age label, not a failed-fetch warning. An actual error appears separately, and the previous successful mail remains available. **Inbox is empty** appears only after a successful current check returns no messages; failed access is never presented as an empty Inbox. **Partial page** identifies a result that could not include all requested rows.
 
-Closing destroys the popup content Loader. The service retains one bounded snapshot per account and a bounded ledger of request metadata, with no retained view callbacks. No UI timer fetches mail. Optional closed-popup polling belongs to the Zig backend; [background refresh](BACKGROUND-REFRESH.md) explains its cancellation and scheduling behavior.
+## Keyboard controls
 
-The standalone lifecycle harness uses the offscreen Qt platform and synthetic mail. It exercises content creation/destruction without interacting with the desktop. Its memory baseline and platform limitations are described in [verification](VERIFICATION.md).
+| Key | Action |
+| --- | --- |
+| Escape | Close the dropdown |
+| Ctrl+R | Refresh the selected account |
+| Alt+1 / Alt+2 / Alt+3 | Choose a configured account |
+| Up / Down | Select a message |
+| Enter | Open the selected message in Gmail |
+
+Shortcuts for account slots you have not configured do nothing.
+
+## When closed
+
+Closing releases the popup view while keeping one bounded memory snapshot per account. With scheduled refresh disabled, closing cancels an unfinished check without showing a cancellation error. Optional [background refresh](BACKGROUND-REFRESH.md) keeps checking connected accounts while the dropdown is closed. Reopening shows the available snapshot and its last-checked time. Mail disappears from the bar cache when its backend exits; the [terminal disk cache](TUI-CACHE.md) is separate.
+
+The bar uses plain text for mail and account names. HTML, terminal controls and directional overrides are not rendered as active content. See [privacy](PRIVACY.md) for data and credential handling; [development](DEVELOPMENT.md) covers implementation and verification.

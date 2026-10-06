@@ -11,3 +11,7 @@ client_secret*.json
 oauth-client*.json
 config.local.json
 *.secret.json
+
+# Static documentation dependencies and generated output stay local.
+website/node_modules/
+website/dist/

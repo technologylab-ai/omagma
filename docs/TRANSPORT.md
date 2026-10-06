@@ -1,6 +1,13 @@
 # Bounded backend transport
 
-The backend targets exact Zig 0.17.0 standard-library HTTP/TLS with certificate and hostname validation. There are no external Zig dependencies. One worker performs network work, with one active account job and at most one pending job flag per account. Release/memory checks use `-Doptimize=safe`; correctness also runs with `-Doptimize=debug`.
+Developer reference for transport/storage ownership. Start with [development](DEVELOPMENT.md);
+installation and account permission choices belong in [setup](SETUP.md).
+The HTTP/TLS paths use exact Zig 0.17.0 std with certificate and hostname
+validation and no external HTTP library. The combined executable's terminal UI
+has pinned libvaxis dependencies described in [UI design](TERMINAL-UI-DESIGN.md).
+The bounds below describe the bar; terminal policy is separate. One bar worker
+handles one active account job and at most one pending flag per account.
+Release/memory checks use `-Doptimize=safe`; correctness also uses `debug`.
 
 | Storage or deadline | Bound |
 | --- | --- |
@@ -26,4 +33,20 @@ The 16 MiB reservation covers application-owned storage, not the entire process.
 
 ## Terminal transport
 
-The terminal interface retains the bar's authorization-header workaround, host/redirect restrictions and finite cancellation/join behavior. Its separate JSON transport permits only Gmail, OAuth and People endpoints, with a3MiB response/request ceiling and a30-second whole operation deadline. Wider HTTP methods are exposed only through capability-checked mail/contact operations. Read-only bar transport remains unchanged. [Provider implementation](TERMINAL-PROVIDER-DESIGN.md) and [terminal verification](TERMINAL-VERIFICATION.md) qualify this path separately.
+The terminal interface retains the authorization-header workaround, strict
+Google-host allowlist, rejected redirects/compression, certificate validation and
+finite cancellation/join behavior. Its separate JSON transport permits only
+Gmail, OAuth and People endpoints, with 3 MiB Google request/response storage,
+10-second HTTP request deadlines and a 30-second whole refresh deadline. Decoded
+MIME text/HTML leaves are at most 2 MiB, aggregate decoded MIME at most 3 MiB;
+normalized CLI/TUI DTOs can exceed wire size and stay under the separate 64 MiB
+terminal heap cap. The TUI response limit is 32 MiB, not the bar's 512 KiB frame.
+Wider methods are exposed only through capability-checked operations; read-only
+bar policy remains unchanged. Automatic cache refresh specifically uses bar
+read-only grants and never selects a wider terminal token.
+
+`ProgressSink` reports actual batch units and borrowed rows synchronously to the
+owned worker's observer. The TUI copies bounded previews; those callbacks do not
+change allowed hosts, deadlines, cancellation ownership or CLI JSON-lines frames.
+[Provider implementation](TERMINAL-PROVIDER-DESIGN.md) and
+[terminal verification](TERMINAL-VERIFICATION.md) qualify this path separately.

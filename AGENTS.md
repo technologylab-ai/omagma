@@ -4,11 +4,15 @@
 
 When the user asks to install omagma on their Omarchy desktop, connect Gmail accounts or fix setup, read and follow [the setup workflow](skills/omagma-setup/SKILL.md). This is the installation entry point; it does not require installing the skill into an agent's global skills directory. Prefer a complete matching bundle from [the latest release](https://github.com/technologylab-ai/omagma/releases/latest), verify its `SHA256SUMS` entry and probe the included backend with `--version` before consent. End users do not need Zig. Build from source only if a compatible asset is unavailable, using the declared compiler pin.
 
-Use [agent setup](docs/AGENT-SETUP.md) for the handoff and [account setup](docs/SETUP.md) / [bar installation](docs/INSTALL.md) for details. Continue fixture-backed preparation while the user completes Google registration or consent, and tell them exactly when a browser click is needed. Static backend bundles still need the installed desktop host, Chrome, keyring and system CA certificates.
+Use [agent setup](docs/AGENT-SETUP.md) for the handoff and [account setup](docs/SETUP.md) / [bar installation](docs/INSTALL.md) for details. Prepare installation and private configuration while the user completes Google registration or consent, and tell them exactly when a browser click is needed. Verify the installed binary, authorization status, mail access and profile links for setup. Fixture tests, automated GUI checks and resource/release qualification belong to development tasks. Static backend bundles still need the installed desktop host, Chrome, keyring and system CA certificates.
 
 ## Developing omagma
 
 Use Zig **0.17.0 exactly**, the pin in `build.zig.zon`. An Omarchy system compiler may still be 0.16.x: use the official archive matching the task's OS/CPU, prepend its extracted directory to the task's `PATH`, and check `zig version`. Keep the global compiler unchanged so nested tools inherit the correct task-local compiler. Use `-Doptimize=debug` for correctness and `-Doptimize=safe` for release/memory checks.
+
+For local interface iterations, build into a separate development prefix, run focused checks for the changed behavior, and atomically replace the installed executable when the user requests a local update. Keep the application version unchanged. Do not run memory soaks, collect release evidence, or publish a release unless the task calls for qualification or publication. Release qualification remains a separate workflow.
+
+Use `zig build test -Doptimize=debug -Dtest-filter="local UI:"` for the account/help regressions, and `python3 tests/terminal_local_ui.py --binary /path/to/development/omagma` for the corresponding owned-PTY interactions. Omit the filter for full correctness qualification.
 
 All project-authored runtime helpers outside QML/JavaScript must be Zig. Python and Node.js support tests and release packaging, not runtime helpers. Keep the bar's read-only Gmail behavior. Terminal modes may use pinned libvaxis, bounded private persistence and explicitly scoped write capabilities; follow [the terminal implementation](docs/TERMINAL-IMPLEMENTATION.md). [Release instructions](docs/RELEASING.md) describe version-driven Linux musl packaging; changing the package version drives a new release without replacing an existing one.
 

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{title}}</title>
+  <meta name="description" content="{{description}}">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0e121b">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Omagma">
+  <meta property="og:title" content="{{title}}">
+  <meta property="og:description" content="{{description}}">
+  <link rel="icon" type="image/png" href="{{base}}assets/omagma-logo.png">
+  <link rel="stylesheet" href="{{base}}assets/site.css">
+  <script src="{{base}}assets/site.js" defer></script>
+  <noscript>
+    <style>
+      .nav-toggle, .docs-search { display: none !important; }
+      #docs-nav { display: block !important; }
+    </style>
+  </noscript>
+</head>
+<body class="page-docs">
+  <a class="skip-link" href="#content">Skip to content</a>
+
+  <header class="site-header site-header--docs">
+    <div class="site-header__inner">
+      <button class="nav-toggle" type="button" data-nav-toggle aria-controls="docs-nav" aria-expanded="false">
+        <span class="nav-toggle__icon" aria-hidden="true"></span>
+        <span class="nav-toggle__label">Menu</span>
+      </button>
+      <a class="brand" href="{{base}}">
+        <img class="brand__mark" src="{{base}}assets/omagma-logo.png" alt="" width="28" height="28">
+        <span class="brand__name">omagma</span>
+      </a>
+      <a class="docs-home" href="{{base}}docs/">docs</a>
+      <nav class="site-nav" aria-label="Primary">
+        <ul>
+          <li class="site-nav__opt"><a href="{{base}}docs/agent-setup/">Get started</a></li>
+          <li class="site-nav__opt"><a href="{{base}}docs/features/">Features</a></li>
+          <li><a href="https://github.com/technologylab-ai/omagma">GitHub</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <div id="docs-nav" class="docs-sidebar">
+      <div class="docs-search" role="search">
+        <label class="sr-only" for="doc-search">Find a guide or heading</label>
+        <input id="doc-search" type="search" placeholder="Find a guide" autocomplete="off" spellcheck="false" aria-controls="search-results">
+        <div id="search-results" aria-live="polite"></div>
+      </div>
+
+      <nav class="docs-nav" aria-label="Documentation">
+        {{sidebar}}
+      </nav>
+
+      <div class="docs-release">
+        <p><span class="tag tag--release">Release</span> <a href="https://github.com/technologylab-ai/omagma/releases/latest">v0.2.3</a></p>
+        <p>Guides mark newer behavior <strong>Source only</strong>. It needs a current source build and isn’t in the published bundles.</p>
+      </div>
+    </div>
+
+    <main id="content" class="docs-main" tabindex="-1">
+      <header class="docs-main__head">
+        <p class="eyebrow doc-eyebrow">{{section}}</p>
+      </header>
+
+      <details class="doc-toc" open>
+        <summary>On this page</summary>
+        <nav aria-label="On this page">
+          {{toc}}
+        </nav>
+      </details>
+
+      <article class="prose">
+        {{body}}
+      </article>
+
+      <footer class="doc-footer">
+        <a href="{{source_url}}">Page source on GitHub</a>
+        <a href="{{base}}docs/">All documentation</a>
+      </footer>
+    </main>
+  </div>
+
+  <footer class="site-footer site-footer--docs">
+    <div class="site-footer__inner">
+      <div>
+        <a class="brand brand--small" href="{{base}}">
+          <img class="brand__mark" src="{{base}}assets/omagma-logo.png" alt="" width="22" height="22">
+          <span class="brand__name">omagma</span>
+        </a>
+        <p class="site-footer__tagline">Gmail, one account at a time.</p>
+      </div>
+      <nav aria-label="Footer">
+        <ul>
+          <li><a href="{{base}}">Home</a></li>
+          <li><a href="{{base}}docs/privacy/">Privacy</a></li>
+          <li><a href="{{base}}docs/memory/">Memory</a></li>
+          <li><a href="https://github.com/technologylab-ai/omagma">GitHub</a></li>
+          <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Releases</a></li>
+        </ul>
+      </nav>
+      <p class="site-footer__legal">MIT licensed · © technologylab.ai · Examples use fictional accounts.</p>
+    </div>
+  </footer>
+</body>
+</html>

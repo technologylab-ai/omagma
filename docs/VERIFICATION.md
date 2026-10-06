@@ -1,4 +1,10 @@
-# Reproduce the checks
+# Developer verification
+
+Maintainer/test-harness reference. Normal installation uses a verified release
+bundle and [account setup](SETUP.md); end users do not need Zig, fixtures, Python,
+Node, PTYs or offscreen GUI checks. [Development](DEVELOPMENT.md) describes the
+short local iteration loop. Select checks appropriate to the change; full
+qualification and memory soaks belong to release/resource work.
 
 Use Zig **0.17.0 exactly**. `debug` checks correctness; `safe` also establishes release allocator/runtime evidence. Omarchy may still ship a 0.16.x compiler. Download and verify the [exact 0.17.0 archive](https://ziglang.org/download/0.17.0/) for the execution host's OS/CPU, extract it into a task-owned directory, and select it for this shell:
 
@@ -22,7 +28,7 @@ Before a heavy build, benchmark or runtime suite on a shared host, reserve the h
 
 This is cooperative exclusion, not CPU isolation or proof of a quiet host. Recheck the host and acquire a fresh reservation for later work. If a coordinator owns the reservation, run only work it delegates and leave release to that owner. Keep local ownership metadata private.
 
-## Correctness and memory checks
+## Release correctness inventory
 
 The following commands use synthetic accounts and never authorize Gmail or edit installed desktop configuration:
 
@@ -46,9 +52,6 @@ zig-out/bin/transport_probe
 python3 tests/integration.py --binary zig-out/bin/omagma --build-mode safe
 python3 tests/probes/transport_check.py --binary zig-out/bin/omagma --build-mode safe --https
 node tests/ui_model.mjs
-python3 tests/measure.py --binary zig-out/bin/omagma
-python3 tests/ui_gui.py --binary zig-out/bin/omagma
-python3 tests/background_measure.py --fixtures --binary zig-out/bin/omagma --config tests/fixtures/all-accounts.json --jobs 1000 --output /tmp/omagma-background.json
 ```
 
 Python 3 and Node.js are needed for the harnesses; UI checks also need Quickshell. The UI harness forces `QT_QPA_PLATFORM=offscreen`, removes graphical-session routing variables and uses `--fixtures --dry-run-open`. It starts an isolated shell, never installs the plugin and cleans up its owned processes.
@@ -58,6 +61,17 @@ Python 3 and Node.js are needed for the harnesses; UI checks also need Quickshel
 Give cold compilation, each probe and the complete suite adequate outer watchdog budgets. Release CI allows 60 minutes for a build/test job. That outer limit is separate from the application's 10-second request deadline, 30-second refresh deadline and 180-second consent deadline. Leave time for expected timeout cases, 1,000-cycle workloads, the 60-second quiet interval and child cleanup; preserve receipts from an interrupted gate. Terminal workflows have separate [correctness and memory checks](TERMINAL-VERIFICATION.md); their allocation ceiling and measurements do not replace the bar gates below.
 
 Backend integration covers bounded configuration, account isolation, empty and failed fetches, cancellation, background scheduling, owner exit and stdout backpressure. Model checks cover arbitrary configured domains, one-account handshakes, unknown identities, duplicate accounts, invalid frames, plain-text bounds, stale generations and 1,000 replacements. The UI harness exercises service restart, state changes, selection persistence, 1,000 Loader lifetimes and a quiet interval.
+
+## Release resource qualification
+
+Run these Safe workloads when qualifying a release or investigating a resource
+regression, under the same reservation through child cleanup:
+
+```sh
+python3 tests/measure.py --binary zig-out/bin/omagma
+python3 tests/ui_gui.py --binary zig-out/bin/omagma
+python3 tests/background_measure.py --fixtures --binary zig-out/bin/omagma --config tests/fixtures/all-accounts.json --jobs 1000 --output /tmp/omagma-background.json
+```
 
 | Acceptance gate | Threshold |
 | --- | --- |
@@ -71,7 +85,7 @@ The default backend and UI soaks run 1,000 cycles and a 60-second quiet interval
 
 UI memory uses a separate baseline with the same shell/runtime and reads Linux `smaps_rollup`. PSS accounts for shared mappings proportionally; private memory and warm trends reveal retained memory. RSS, PSS and the backend’s application-owned allocation budget are different quantities. A passing offscreen test cannot establish compositor placement, desktop dismissal or browser routing on every installation.
 
-Real authorization/fetch/timer tests are explicit opt-in checks with private configuration. Verify the returned identity, per-account isolation and browser profile routing without publishing mail, identifiers, token material or personal paths. Preserve failed local receipts, but keep raw test output out of public releases. Published summaries are in [current Zig 0.17 evidence](evidence/zig-0.17.0.md), [memory accounting](MEMORY.md) and [historical Zig 0.16 evidence](../EVIDENCE.md).
+Real developer authorization/fetch/timer tests need explicit direction and private configuration. Live-write qualification uses a separately authorized disposable mailbox; this is not an installation requirement for ordinary users. Verify returned identity, account separation and profile routing without publishing mail, identifiers, token material or personal paths. Preserve failed receipts privately. Published summaries retain their named compiler/source/artifact identities in [Zig 0.17 migration evidence](evidence/zig-0.17.0.md), [memory accounting](MEMORY.md), [published terminal/mouse evidence](evidence/terminal-0.2.3-mouse.md) and [historical Zig 0.16 evidence](../EVIDENCE.md). Later local source changes do not inherit those measurements.
 
 ## Static release checks
 

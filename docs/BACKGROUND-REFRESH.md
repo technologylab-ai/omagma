@@ -1,13 +1,22 @@
 # Background refresh
 
-`refreshIntervalSeconds` is optional and defaults to `0`. It accepts a JSON integer of `0` or `60..86400` seconds. Set it to `300` for five-minute automatic refresh.
+The bar can check mail every five minutes even while its dropdown is closed. In your existing private account configuration, set `refreshIntervalSeconds` to `300`, preserving the other configuration fields. The setting takes effect when the backend restarts; see [bar installation](INSTALL.md) for reload options.
 
-With `0`, opening or selecting an account can refresh never-checked or aged data; explicit refresh requires an open dropdown. Closing cancels outstanding work and restores the previous state without creating a cancellation error. An untouched account returns to never-checked if its first refresh was canceled.
+The value must be a JSON integer: `0` disables scheduled refresh, and `60..86400` sets an interval in seconds. The default is `0`.
 
-With a positive interval, the daemon schedules enabled, connected accounts once at startup and then at each interval, including while the dropdown is closed. Disabled and disconnected accounts are skipped, and retry backoff is respected. Closing lets active work finish and does not schedule an extra refresh. Explicit refresh still requires an open dropdown.
+## What changes
 
-One worker serializes network jobs, with one pending flag per account. A monotonic deadline schedules each interval; missed deadlines do not accumulate catch-up jobs. Background results replace the bounded account cache. Closed popups receive no snapshot events; reopening obtains the current cached results. The owner closing its IPC pipe cancels and joins the worker in either mode.
+| Setting | Behavior |
+| --- | --- |
+| `0` | Opening the dropdown or selecting an account checks never-checked or aged data. Refresh updates the selected account. Closing cancels an unfinished check and keeps its previous successful result. |
+| `300` | Enabled, connected accounts are checked at startup and approximately every five minutes, including while the dropdown is closed. Closing lets an active check finish. Refresh still updates the selected account immediately when the dropdown is open. |
 
-Changing the configuration takes effect when the backend restarts. Background access requires a valid refresh token and usable keyring. It can fail independently for each account. Cached data and the last-checked time remain visible after a failed refresh.
+Disconnected and disabled accounts are skipped. An account waiting after a failed request follows its retry delay. Mail checks run one at a time; a delayed interval does not create a queue of catch-up checks. Each successful result replaces that account’s bounded memory snapshot.
 
-A synthetic 1,000-job closed-popup soak and a real 300-second interval check passed. The live check observed no work or CPU ticks in a separate 60-second quiet interval between refreshes. This does not mean an enabled timer will remain idle across its refresh deadline. See [measured evidence](../EVIDENCE.md).
+If a refresh fails, cached mail and its last-checked time remain available. Background access uses the existing read-only grant and needs an unlocked keyring. Accounts can succeed or fail independently. Ending the backend stops its refresh schedule.
+
+## Terminal mail cache
+
+The bar setting updates the bar’s recent-mail snapshot. To keep full-message terminal cache data ready while the TUI is closed, enable the optional [terminal cache timer](TERMINAL-BACKGROUND.md). That timer runs a short cache-update command and exits between updates; it does not send mail or change contacts or mailbox state. Both options preserve separate accounts and use read-only access for fetching.
+
+[Account configuration](SETUP.md) · [Dropdown states](UI.md) · [Developer scheduling checks](DEVELOPMENT.md)

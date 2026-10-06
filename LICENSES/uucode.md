@@ -24,7 +24,9 @@ SOFTWARE.
 
 ## Other licenses
 
-See [./licenses](./licenses) for licenses of code being used in the repo:
+The upstream project's additional notices are included in this distribution's
+[license directory](.). The license terms above are unchanged; the links below
+point to the packaged copies:
 
-* [LICENSE_Bjoern_Hoehrmann](./licenses/LICENSE_Bjoern_Hoehrmann)
-* [LICENSE_unicode](./licenses/LICENSE_unicode)
+* [LICENSE_Bjoern_Hoehrmann](uucode-LICENSE_Bjoern_Hoehrmann.txt)
+* [LICENSE_unicode](uucode-LICENSE_unicode.txt)

@@ -1,50 +1,112 @@
 ---
 name: omagma-setup
-description: Install the omagma Omarchy bar plugin, configure separate Gmail accounts and Chrome profiles, and guide browser OAuth consent or reconnection. Use for omagma setup and onboarding, not general Gmail administration.
+description: Install the omagma Omarchy plugin or terminal client, connect separate Gmail accounts and Chrome profiles, and enable TUI/CLI permissions or reconnect accounts. Use for user installation and onboarding, not development or general Gmail administration.
 ---
 
 # Set up omagma
 
-Work from an extracted complete omagma release or source checkout. Resolve this skill directory's real path before locating the omagma root (`../..`), or use the user's supplied folder. Read `AGENTS.md`, `README.md`, `docs/SETUP.md`, `docs/INSTALL.md` and `docs/PRIVACY.md`. The app folder, private account config and downloaded Google client JSON are separate resources.
+Resolve the skill's real directory and locate the omagma root (`../..`), or use
+the user's supplied folder. Read the installation section of `AGENTS.md` and
+`README.md`. Use `docs/INSTALL.md` for the bar, `docs/SETUP.md` for accounts,
+and `docs/SETUP.md#full-tuicli-permissions` for TUI/CLI permissions. Development and
+release qualification have their own instructions in `AGENTS.md`.
 
-For a terminal-only request, use the optional terminal workflow below and its linked guides. Do not install or change the bar merely to enable the TUI or CLI.
+## Install
 
-## Prepare the installation
+- Prefer the matching Linux x86_64 or arm64 bundle from
+  `https://github.com/technologylab-ai/omagma/releases/latest`. Verify its entry
+  in the same release's `SHA256SUMS`, extract into a persistent versioned
+  directory, and check the included `zig-out/bin/omagma --version`. A complete
+  bundle includes the bar UI, assets and docs; a raw backend suffices for
+  terminal-only use with its accompanying license notices.
+- Release installation needs no Zig compiler. Check the requested interface's
+  dependencies: Omarchy/Quickshell for the bar; a UTF-8 terminal for the TUI;
+  Secret Service/`secret-tool`, CA certificates and Chrome for live Gmail.
+- If a matching release is unavailable, use the source-build instructions in
+  [DEVELOPMENT.md](../../docs/DEVELOPMENT.md#build-from-source) and the exact
+  compiler pin in `build.zig.zon`. Select that
+  compiler through task-local `PATH`, keep the system compiler unchanged,
+  build `safe`, and check the resulting executable's version.
+- For a requested bar installation, inspect the existing user plugin and bar
+  entry before updating them. Back up affected settings, preserve unrelated
+  desktop configuration, and use the included plugin directory. Follow local
+  desktop instructions; never edit package-owned Omarchy files.
+- For terminal-only setup, put the verified backend on the user's PATH using
+  `docs/INSTALL.md#optional-terminal-command`. Inspect an existing `omagma`
+  command before changing it.
 
-- Prefer a complete bundle from `https://github.com/technologylab-ai/omagma/releases/latest`. Map Linux `uname -m` values `x86_64` to the x86_64 bundle and `aarch64`/`arm64` to arm64. Download `omagma-VERSION-linux-ARCH.tar.gz` and `SHA256SUMS` from the same release. Verify the selected bundle's checksum before extraction. Raw `omagma-linux-ARCH` assets contain only the backend and are insufficient for a new bar installation.
-- Extract into a new persistent versioned directory and locate its top-level `omagma/`. Run its `zig-out/bin/omagma --version` and check the reported `omagma VERSION` before consent or desktop activation. Link the absolute `omagma/` folder as the user plugin. Inspect an existing plugin path before updating it; prepare the new folder before changing an installed symlink, and preserve private configuration and credentials.
-- End users do not need Zig. Static musl linking applies to the backend; check that the Omarchy/Quickshell host, Chrome, Secret Service/`secret-tool` and system CA certificates are available. ARM backend build/test checks do not establish ARM desktop integration.
-- If a compatible asset is unavailable, obtain a source checkout and read `.minimum_zig_version` in `build.zig.zon`, currently exactly **0.17.0**. Omarchy may still ship 0.16.x. Download and verify the 0.17.0 archive matching the host OS/CPU from `https://ziglang.org/download/0.17.0/`, extract it into a task-owned directory, prepend that directory to the task's `PATH`, and confirm `zig version`. Nested Python/build commands must inherit this `PATH`; leave the global compiler unchanged and do not substitute master or another release. Follow `docs/VERIFICATION.md` for cooperative host reservation before heavy builds/runtime suites. Verify `debug` correctness and build `safe` (`-Doptimize=safe`) for this fallback.
-- Use fixtures and `--dry-run-open` until consent is available. Continue independent preparation while the user handles Google setup. Available source-checkout UI harnesses run offscreen; release installation does not require a compiler or development test tools.
-- Inspect the existing Omarchy/Quickshell installation and user configuration. For a requested installation, add only omagma's user plugin and bar entry, backing up the affected config and preserving unrelated settings. Never edit package-owned Omarchy files. Prefer installed Omarchy commands; follow any applicable local desktop instructions.
-- Request only missing account addresses, enabled/optional choices, Chrome profile directories, OAuth client file location and background-refresh preference. Use the user's existing answers. Named profile directories such as `Profile 1` are distinct from Chrome display names; this build rejects `Default`, so use an existing named profile or help the user create one if necessary. Inspect existing profile metadata locally if needed; do not publish it or create a separate browser data directory.
-- Resolve the private config location from `XDG_CONFIG_HOME` when set, otherwise `$HOME/.config`, or use the user's existing explicit config location. Create its `omagma/config.json` from the example with real addresses and existing profile directories, mode 0600 in a mode-0700 directory. Set the bar entry's `configPath` to this tested absolute filename so onboarding and the service read the same file. Keep the downloaded client JSON private and outside Git. Configure `refreshIntervalSeconds` as integer `0` (disabled) or `60..86400`; `300` enables five-minute refresh while closed.
-- Enable only the accounts the user requested. For a first-account setup, configure that one slot or leave every other slot disabled; do not activate the example's second account implicitly.
+## Configure accounts
 
-## Connect accounts
+- Reuse the user's existing choices and private config. Ask only for missing
+  account addresses, Chrome profile directories, client-file paths and
+  background-refresh preference. Configure only requested accounts.
+- Store config under `${XDG_CONFIG_HOME:-$HOME/.config}/omagma/config.json`
+  unless an explicit existing path is used. Keep the directory 0700 and the
+  file 0600. Keep downloaded OAuth JSON outside Git with file mode 0600.
+- Map each account to its existing Chrome profile directory, such as
+  `Profile 1`, rather than its display name. `chrome://version` shows the
+  profile path. The current build requires distinct named profiles and
+  rejects `Default`. Preserve browser data and existing profile settings.
+- For the bar, set its `configPath` to the selected config file. Its
+  `refreshIntervalSeconds` is 0 or 60..86400; 300 enables five-minute refresh
+  while closed. For optional terminal-cache fetching while the TUI is closed,
+  use `docs/TERMINAL-BACKGROUND.md` when requested.
 
-The bar has a CLI entry point for consent and does not bundle a shared OAuth client. One Google Desktop-app client can cover multiple organizations with an External audience, while every account has a separate grant. Bar authorization requests only Gmail read-only scope and checks the actual Gmail identity before storing the refresh token. Terminal write capabilities use the separate setup described below; never broaden the bar grant.
+## Connect the requested permissions
 
-If no suitable client exists, guide the user through Google Cloud project/Gmail API, consent configuration and Desktop client download using `docs/SETUP.md`. Do not claim a service-account key or another application's tokens replace this flow. Consult current primary Google documentation before making policy promises. External Testing Gmail grants expire after seven days; publishing status, public verification and Workspace policy are separate issues. Report actual console/policy errors without widening scope.
+`docs/SETUP.md` has both permission sets and Console steps. The bar uses
+`gmail.readonly`. Full TUI/CLI features use a **different Desktop OAuth client
+in the same project**, with Gmail API and People API enabled.
 
-Use the verified included binary's absolute path; extraction does not put `omagma` on PATH. A source fallback uses its tested `safe` binary. Resolve the config filename prepared above. For each enabled account, run:
+Recommend agent-guided Google setup. Give one small Console step at a time,
+wait for the user's feedback, then adapt the next step to their screen. Reuse
+an existing project, audience and branding when available. Prepare independent
+local work while the user completes Google steps; the user approves consent.
+Keep the detailed Console procedure in `docs/SETUP.md`.
+
+For all currently implemented terminal features, request
+`mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.
+The backend maps these six local capabilities to only `gmail.modify` and
+`contacts`. Keep the original bar client/config entry. A copied or renamed
+client JSON is not a separate client ID. TUI and CLI share the terminal grant.
+
+Preserve the existing Google audience/publishing choice. For External Testing,
+ensure each requested account is a test user. Use current primary Google docs
+for policy questions and report actual Workspace/consent errors. A project can
+serve multiple organizations, but every account authorizes independently.
+
+Use the verified executable and the existing config path:
 
 ```sh
-"/absolute/path/to/omagma/zig-out/bin/omagma" auth --account ACCOUNT_ADDRESS --config "/absolute/private/path/config.json"
+/absolute/path/to/omagma auth --account ACCOUNT --config /private/config.json
+/absolute/path/to/omagma terminal-auth authorize --account ACCOUNT \
+  --config /private/config.json --client-file /private/terminal-client.json \
+  --capabilities mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp
+/absolute/path/to/omagma terminal-auth status --account ACCOUNT --config /private/config.json
 ```
 
-Explain which configured Chrome profile opens and which exact account to select. Tell the user to approve read-only Gmail access. After the page says authorization was received, tell them they can close that tab; also verify the CLI finishes successfully. Do not claim a callback page alone proves identity verification or token storage. Authorize accounts sequentially so the user knows which tab needs attention. Close agent-owned setup/test tabs when no longer needed; never close unrelated browsing tabs.
-
-A successful consent does not refresh an already disconnected daemon automatically. Manually refresh that account while the popup is open, or restart the omagma service after onboarding/config changes. The installed binary path must point to the verified release backend or tested source fallback.
+Choose the bar or terminal authorization command for the user's requested
+interface. Run accounts sequentially. Explain which Chrome profile opens,
+which Google account to select, and which permissions to approve. For full
+access, approve both Gmail and contacts, using Select all if offered; the
+consent command has a three-minute deadline. After the
+callback page reports success, the user can close it; wait for successful CLI
+identity/token verification before declaring the account connected. Close
+agent-owned consent tabs when finished, preserving unrelated browser tabs.
 
 ## Verify and hand off
 
-- Use offscreen fixtures for automated GUI tests. Never run rapid visible open/close tests or steal typing focus. Explain any necessary user click and keep intentional visible checks brief.
-- Confirm real recent mail retrieval independently per account, then have the user check a message/Inbox destination in its configured Chrome profile. Dry-run argv cannot prove Chrome selected the expected Google session.
-- Check bounded storage, one refresh worker and no work for disabled/disconnected accounts. Automatic refresh is opt-in: a positive interval continues while closed; zero cancels on close. Do not describe zero-idle results from timer-disabled fixtures as proof of enabled background behavior.
-- Keep live receipts, mailbox text, local paths and screenshots with real accounts in ignored local notes. Read-only snapshot stdout contains mail display text and must not be recorded publicly. Credentials never belong in command arguments, chat, Git or reports.
-- Finish with the bar launch action, configured refresh behavior, account-specific reconnection command, any remaining Google setup gate and where private configuration/backups live. Stop and report an actual blocked account while continuing independent accounts; do not repeat a rejected consent indefinitely.
+Check authorization status and show the user real mail for each requested
+account. Check requested contacts access with a read, too. Use reads for setup
+verification; a test send or contact/mail mutation needs its own user request.
+Have them open a message/Inbox link to confirm its Chrome profile.
+Explain any browser click in advance and keep the verification brief. Restart
+an already open TUI after its grant changes; refresh or restart a disconnected
+bar service after onboarding.
 
-## Optional terminal workflows
-
-If the user requests TUI or agent mail operations, read `docs/TERMINAL.md` and `docs/AGENT-CLI.md`. The verified backend also provides experimental `omagma tui`, `omagma cli` and one-shot command families. Cached search (`/` or `--cached`) and Gmail search (`\` or `--server`) have separate cursor provenance. For requested fetching while the TUI is closed, follow `docs/TERMINAL-BACKGROUND.md`; inspect existing user units and explicit private config/cache paths before installing the optional timer. Use its absolute path or follow `docs/INSTALL.md` to link it into an existing user PATH directory after inspecting any existing command; verify `--version` before use. Fixtures need no consent. Existing bar credentials support mail-read; contacts, sends, modifications and RSVP need a separate terminal Desktop-client grant. Keep both namespaces isolated. Prepare and test using fictional fixtures before any additional Google consent, and never use development authorization to send production mail. Initial live write acceptance uses a dedicated test mailbox explicitly provided by the user; production mail and contact changes require their own explicit task authorization. Explain the built-in split composer and full-terminal `$EDITOR` fallback without implying tmux is required.
+Summarize the launch command/bar action, account/profile mapping, permissions,
+background behavior and reconnection command. Keep credentials and real mail
+out of public artifacts. Installation does not imply permission to send mail
+or edit contacts; those actions require the user's own request or explicit
+interaction. UI conveniences and CLI coverage are in
+`docs/AGENT-CLI.md#cli-and-tui-coverage`.

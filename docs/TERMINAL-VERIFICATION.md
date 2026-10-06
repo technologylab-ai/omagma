@@ -1,6 +1,6 @@
 # Terminal and agent verification
 
-The terminal expansion is verified with fictional accounts and a mock provider before live authorization. This document records test contracts and remaining gates; it does not claim that unfinished tests passed. Existing bar memory thresholds and historical evidence remain unchanged. Current cache-first qualification is recorded separately in [the 0.2.2 evidence](evidence/terminal-0.2.2.md); earlier sections below retain their original executable identities.
+Developer qualification reference, not an installation checklist. Start with [development](DEVELOPMENT.md) for focused local checks; users connect their own accounts through [setup](SETUP.md#full-tuicli-permissions). Fixtures, Python/Node, isolated PTYs and offscreen GUI tests are development tools only. The TUI/CLI remain experimental. Local source changes after published v0.2.3 keep the package version unchanged and require their own targeted correctness checks; they do not inherit earlier release/memory results. [cache-first 0.2.2](evidence/terminal-0.2.2.md), [HTML 0.2.3](evidence/terminal-0.2.3.md) and [mouse/release 0.2.3](evidence/terminal-0.2.3-mouse.md) retain exact checkpoint identities. Existing bar thresholds and all dated evidence remain unchanged.
 
 ## Fixture corpus
 
@@ -23,8 +23,8 @@ Provider fixtures follow the documented Gmail distinction between ID-only list r
 | Replies | Reply-To takes precedence; reply-all removes self and duplicates and never promotes Bcc; valid thread headers are retained |
 | Drafts and editor | Create/update/read remain account-specific; editor argv is parsed safely, child failure preserves the draft, and editor content never becomes a shell command |
 | Send | Explicit operation identity; replay is deduplicated, content conflicts are rejected, and unknown outcomes never trigger automatic resend |
-| Labels and trash | Remote rejection restores the original state; trash can be restored; permanent deletion remains unsupported |
-| Contacts | Search and writes stay account-specific; stale versions fail without overwriting a newer contact |
+| Labels and trash | Per-message outcomes expose rejection/uncertainty; selective undo restores only touched labels; trash is reversible; permanent deletion and label-definition CRUD remain unsupported |
+| Contacts | Read/search/create/update stay account-specific; stale versions fail without overwriting a newer contact; deletion is unsupported |
 | Invitations | Reply status is accepted/tentative/declined; UID, organizer, sequence and recurring instance survive; only the selected attendee replies |
 | Permissions | Missing read/write/send/contacts/RSVP capability rejects the operation before its provider side effect |
 | CLI framing | JSON-lines output stays machine-readable, bounded and credential-free under malformed input and backpressure |
@@ -42,7 +42,7 @@ The agent CLI contract is one structured request and reply per line. Requests in
 
 Fixtures and temporary cache/editor directories are isolated from the user's HOME, XDG configuration, session bus and graphical display. PTY tests spawn their own terminal session and never send input to a user's terminal or desktop. Heavy builds, runtime tests and measurements require the [cooperative host lock](VERIFICATION.md#cooperative-host-measurement-lock), held until all owned children are reaped. Keep receipts under ignored `tests/results/` and preserve failures.
 
-Development commands, after the appropriate build and host-lock reservation:
+The following is the broader correctness qualification inventory. For a reversible local UI change, select the focused suites that exercise it and stop when those checks pass; [development](DEVELOPMENT.md) covers that shorter loop. Reserve heavy workloads before running them:
 
 ```sh
 python3 tests/terminal_fixture_check.py
@@ -60,8 +60,6 @@ python3 tests/terminal_background.py --binary zig-out/bin/omagma --build-mode de
 python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_pty.py --binary zig-out/bin/omagma --build-mode debug
 python3 tests/terminal_transport.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind cli
-python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind tui
 ```
 
 `tests/terminal_html.py --binary PATH --build-mode debug|safe` checks native HTML-only rendering with fictional mail, MIME alternative preference, legacy cache compatibility, responsive tables/styles, control filtering and retained parse/layout reuse. It uses owned PTYs and no installed desktop window.
@@ -69,6 +67,54 @@ python3 tests/terminal_measure.py --binary zig-out/bin/omagma --kind tui
 `tests/terminal_repaint.py` checks physical clearing and reflow with preserved terminal cells; `tests/terminal_mouse.py` checks actual SGR clicks, wheel navigation, contacts, disabled mouse and editor lifecycle. Both use owned isolated PTYs, with no desktop focus changes.
 
 Repeat correctness suites with a separately built Safe executable. Cache checks use held-provider barriers to prove that local reads and navigation finish before a delayed network reply. UI checks inspect current terminal cells, pane geometry, theme colors, search provenance and Back behavior. The maximum-cache workload seeds 2,000 metadata records and verifies exact newest-tail retention, immutable-body hashes, quota accounting and capped-heap behavior after additions and deletions. Background checks use isolated native one-shots rather than installing a user timer; they cover lease coalescing, age policy, read-only access, cancellation and unsafe lock-file rejection.
+
+## Focused local-source regressions
+
+These owned-PTY/backend checks cover the post-release source features. Select
+only the cases relevant to a change and use the explicitly built local binary:
+
+```sh
+python3 tests/terminal_wishlist_backend.py --binary /path/to/local/omagma
+python3 tests/terminal_cache_windows.py --binary /path/to/local/omagma
+python3 tests/terminal_scroll_progress.py --binary /path/to/local/omagma
+python3 tests/terminal_loading.py --binary /path/to/local/omagma
+python3 tests/terminal_local_ui.py --binary /path/to/local/omagma
+python3 tests/terminal_polish_status.py --binary /path/to/local/omagma
+python3 tests/terminal_polish_reader.py --binary /path/to/local/omagma
+python3 tests/terminal_polish_compose.py --binary /path/to/local/omagma
+```
+
+Held fixture checkpoints prove cached navigation/contact access while real
+synthetic metadata/body batches remain incomplete. Current-cell reconstruction
+checks provisional-row ownership, actual fractions, bounded animation, compact
+row capacity, word wrapping/caret placement, Back/search restoration and
+attachment path completion. A passing Linux PTY does not establish a physical
+Mac touchpad gesture, compositor placement or remote terminal integration.
+Source-only documentation changes need link/privacy/syntax checks, not these
+runtime suites.
+
+## Release resource qualification
+
+Run memory/quiet gates when qualifying a release or investigating a resource
+regression, not after every local visual edit. Use a separately identified Safe
+artifact and hold the cooperative reservation through all cleanup:
+
+```sh
+python3 tests/terminal_measure.py --binary /path/to/safe/omagma --kind cli
+python3 tests/terminal_measure.py --binary /path/to/safe/omagma --kind tui
+```
+
+Developer live-write qualification uses a dedicated disposable test mailbox,
+separate explicit authorization and private receipts. Normal users need neither
+a test mailbox nor fixture qualification to authorize/use their own accounts.
+Fixture success cannot establish recipient delivery, Google grant policy,
+Calendar state or provider-side idempotency.
+
+## Historical qualification records
+
+The sections below preserve their recorded release checkpoints. Later source
+changes, deployment and tests do not retroactively change these results or the
+pending-state statements that were true at each checkpoint.
 
 ### Final source qualification
 

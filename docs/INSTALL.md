@@ -11,7 +11,7 @@ Open [the latest release](https://github.com/technologylab-ai/omagma/releases/la
 | `x86_64` | `omagma-VERSION-linux-x86_64.tar.gz` |
 | `aarch64` or `arm64` | `omagma-VERSION-linux-arm64.tar.gz` |
 
-`VERSION` is the release’s version number without the leading `v`. The raw `omagma-linux-x86_64` and `omagma-linux-arm64` binaries are also available with their accompanying `LICENSES.txt`, but the complete bundle is preferred for bar installation because it includes the UI, assets, examples, docs, setup skill and license notices.
+`VERSION` is the release’s version number without the leading `v`. The raw `omagma-linux-x86_64` and `omagma-linux-arm64` binaries are also available with their accompanying `LICENSES.txt`, but the complete bundle is preferred for bar installation because it includes the UI, assets, examples, docs, setup skill, optional `systemd/` cache-timer units and license notices.
 
 In the download directory, verify the available assets:
 
@@ -44,6 +44,8 @@ ln -s "$omagma_release_dir/omagma" "$HOME/.config/omarchy/plugins/io.github.tech
 
 If that plugin path already exists, inspect it before changing it. For an upgrade, prepare and verify a new versioned directory first, then point the existing plugin symlink at it. Preserve private account configuration and keyring credentials. Keep the linked folder available while the plugin is enabled.
 
+Complete [account setup](SETUP.md) using the extracted executable, starting with one account. Keep its private configuration outside the release directory so upgrades preserve it. You can add the widget before authorizing an account; it will show **Disconnected** until access is approved.
+
 Add one object to the desired existing bar section in `~/.config/omarchy/shell.json`, preserving the other entries and settings. For example, append this to `bar.layout.center`:
 
 ```json
@@ -51,13 +53,13 @@ Add one object to the desired existing bar section in `~/.config/omarchy/shell.j
   "id": "io.github.technologylab_ai.omagma",
   "daemonPath": "",
   "configPath": "",
-  "fixtures": true
+  "fixtures": false
 }
 ```
 
 The fields belong directly on the bar entry. An empty `daemonPath` uses the included `zig-out/bin/omagma` inside the plugin folder. An empty `configPath` uses the backend’s standard configuration location. Set an explicit absolute path if your configuration lives elsewhere.
 
-With `fixtures: true`, the dropdown displays synthetic mail without contacting Gmail or the keyring. Complete [account setup](SETUP.md), then change this setting to `false` for live mail. Click the magma icon to open the dropdown; no keybinding is needed.
+`fixtures: false` uses your configured Gmail accounts. Click the magma icon to open the dropdown; no keybinding is needed. Choose the connected account and open a message to check that Gmail uses its configured Chrome profile. The widget remains read-only.
 
 User plugin/configuration changes normally hot reload. If discovery needs refreshing, run `omarchy-shell shell rescanPlugins`. If imported QML remains cached, `omarchy restart shell` reloads the shell. A restart affects the whole bar, so do it at a convenient time. Do not edit package-owned files under `/usr/share/omarchy/`.
 
@@ -74,7 +76,7 @@ do not overwrite an unrelated executable. For a first link:
 mkdir -p "$HOME/.local/bin"
 ln -s "$HOME/.config/omarchy/plugins/io.github.technologylab_ai.omagma/zig-out/bin/omagma" "$HOME/.local/bin/omagma"
 omagma --version
-omagma tui --fixtures
+omagma tui
 ```
 
 Confirm `$HOME/.local/bin` is already on PATH, or invoke the executable by its
@@ -82,18 +84,23 @@ absolute path. Linking through the plugin path follows future verified plugin
 upgrades. Terminal-only installations can use the raw release binary and its
 `LICENSES.txt` without installing the bar.
 
+Read-only terminal mail can use your bar authorization. For replies, sending,
+mailbox changes or contacts, follow [terminal permissions](SETUP.md#full-tuicli-permissions).
+The TUI and CLI are experimental; [the terminal guide](TERMINAL.md) explains
+their workflows and which features currently require a source build.
+
+## Optional demo
+
+To look around before connecting Gmail, run `omagma tui --fixtures`, or set
+`fixtures: true` on the bar entry. This displays fictional mail without using
+Google credentials. Set it back to `false` when you want your configured Gmail
+accounts. Demo mode is optional; it is not an installation check or prerequisite.
+
 ## Source fallback
 
-If there is no compatible release asset, build a source checkout with **Zig 0.17.0 exactly**. Omarchy may still provide 0.16.x. Download and verify the [0.17.0 archive](https://ziglang.org/download/0.17.0/) matching your OS/CPU, extract it into a task-owned directory, and select it only for this shell. Before a shared-host build or runtime check, acquire the [verification reservation](VERIFICATION.md#cooperative-host-measurement-lock).
-
-```sh
-omagma_zig_dir=/absolute/path/to/extracted-zig-0.17.0
-export PATH="$omagma_zig_dir:$PATH"
-zig version
-zig build -Doptimize=safe
-zig-out/bin/omagma --version
-```
-
-Confirm the compiler reports exactly `0.17.0` before building. The task's `PATH` also selects the compiler for nested Python/release tools; do not replace the system compiler.
-
-Link the absolute checkout directory as the user plugin folder, then use the same bar entry and account setup. Development checks are described in [verification](VERIFICATION.md).
+If a compatible release is unavailable, or you want features that have not yet
+been released, follow [source builds](DEVELOPMENT.md#build-from-source). They
+require **Zig 0.17.0 exactly**; Omarchy may still provide 0.16.x. Select the
+matching official compiler for that shell without replacing the system compiler.
+Then link the absolute checkout directory as the user plugin folder and use the
+same account setup and live bar entry above.

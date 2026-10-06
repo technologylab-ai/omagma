@@ -1,6 +1,11 @@
 # Build and publish releases
 
-End users should [install a verified release bundle](INSTALL.md). This page is for maintainers building the Linux backend and publishing matching plugin assets.
+End users should [install a verified release bundle](INSTALL.md). This page is for
+maintainers building the Linux backend and publishing matching plugin assets.
+[Development](DEVELOPMENT.md) covers faster local iteration: it keeps the package
+version unchanged and does not publish a release or rerun resource qualification
+for every interface edit. Source-tree features after v0.2.3 are not automatically
+present in that immutable release's bundles.
 
 ## Version and compiler
 
@@ -28,7 +33,20 @@ Each architecture produces a raw binary and a complete plugin bundle:
 | `SHA256SUMS` | Checksums for the published binary and bundle assets, using basenames |
 | `LICENSES.txt` | Project, Zig, musl, libvaxis, zigimg and uucode notices, also included in the bundles |
 
-The bundle includes tracked public project contents: the runtime QML/JavaScript, manifest, assets, examples, docs and setup skill. Its added backend is `omagma/zig-out/bin/omagma`, preserving the plugin's default binary lookup. Packaging stamps the bundle manifest with the version from `build.zig.zon`. Private config, OAuth downloads, local notes and raw live-test output must remain excluded. `--version` reports `omagma VERSION`.
+The bundle includes tracked public project contents: runtime QML/JavaScript,
+manifest, assets, examples, docs, setup skill and optional user service/timer
+files under `systemd/`. The v0.2.3 tracked release tree also contains both
+`systemd/omagma-cache-refresh.service` and `.timer`; packaging does not enable
+them. Its added backend is `omagma/zig-out/bin/omagma`, preserving the plugin's
+default lookup. Packaging stamps the bundle manifest with the package version.
+Private config, OAuth downloads, local notes and raw live-test output stay
+excluded. `--version` reports `omagma VERSION`.
+
+The compiler installer uses checked official per-platform archive metadata in
+`.github/zig-release.json`, verifies the downloaded size/hash and exact version,
+and exposes that compiler to subsequent job steps. Changing only a version
+string or depending on `download/index.json` is insufficient for a compiler
+port. Keep archive metadata, package pin, source guard, scripts and CI in sync.
 
 ## Continuous release checks
 
@@ -36,6 +54,13 @@ The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests a
 
 The GitHub CLI uploads all six assets through an internal draft before publishing; it cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The workflow refuses to replace an existing release, draft or tag. It does not expose an incomplete release as latest.
 
-Before publishing, verify executable versions and checksums, static linkage, archive paths and the included public setup instructions. The included backend still relies on system CA certificates and external Chrome/keyring programs. The QML UI still requires a compatible Omarchy/Quickshell host.
+Before publishing, verify executable versions and checksums, static linkage,
+archive paths, license notices and public setup instructions. Check actual
+downloaded native release bytes separately: checksum, `--version`/`build-info`,
+no ELF interpreter or DT_NEEDED, and synthetic integration/transport. Source-built
+checks alone do not establish the published artifact. The included backend still
+relies on system CA certificates and external Chrome/keyring programs; the QML UI
+requires a compatible Omarchy/Quickshell host. Fixture and release checks remain
+developer responsibilities, not tasks required of an ordinary installer.
 
 Native ARM backend tests and cross-compilation do not prove ARM desktop integration. Browser consent and live account routing remain explicit local checks; release CI uses synthetic fixtures and does not access Gmail credentials. Existing [memory gates](VERIFICATION.md) continue to apply to their measured workloads.

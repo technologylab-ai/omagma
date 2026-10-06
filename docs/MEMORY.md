@@ -1,6 +1,18 @@
 # Memory footprint
 
-The motivation for Omagma was a single Gmail tab observed using roughly **2 GB of RAM** on its author's desktop. That is an individual observation, not a universal Gmail requirement or a controlled comparison: Omagma shows a bounded recent-mail list and snippets, and opens the full Gmail application when needed.
+The motivation for Omagma was a single Gmail tab observed using roughly **2 GB of RAM** on its author's desktop. That is an individual observation, not a universal Gmail requirement or a controlled comparison: the bar shows a bounded recent-mail list and snippets, and opens Gmail when needed. The terminal client can read full mail separately.
+
+## At a glance
+
+These are dated Linux x86_64 observations, not measurements of every later source change. The historical results and executable identities below remain attached to their original versions.
+
+| Mode | Approximate footprint | Observation |
+| --- | ---: | --- |
+| Bar, three connected accounts | **31 MB** | v0.2.2, 2026-10-05; backend PSS plus separately attributed UI share |
+| Agent CLI, three fictional accounts | **9 MB** settled | v0.2.3 local mouse-runtime workload; whole-process RSS |
+| TUI, three fictional accounts | **12 MB** settled | v0.2.3 local mouse-runtime workload; whole-process RSS |
+
+Bar totals exclude Chrome and unrelated shell widgets. Terminal totals exclude the emulator, external editor and separately running bar. Large bodies and a full cache have separate workloads below. Allocation limits describe reserved or capped storage; they are not a prediction of resident RAM. Installing Omagma does not require running these measurement procedures.
 
 ## Terminal modes, 0.2.2
 
@@ -83,7 +95,7 @@ allocations. Whole-process high-water marks were 13,124/14,792 KiB and
 on both platforms. Differences between runner/process lifetimes do not isolate
 architecture or compiler costs. Native ARM backend evidence does not qualify
 ARM desktop integration. Actual downloaded x86_64 bytes passed their own
-synthetic checks and are now installed; [final evidence](evidence/terminal-0.2.3-mouse.md)
+synthetic checks and were installed for that qualification; [final evidence](evidence/terminal-0.2.3-mouse.md)
 records release/deployment identity and preserved failures.
 
 ## HTML-reader checkpoint, 0.2.3
@@ -118,7 +130,7 @@ their original versions.
 
 On 2026-10-05, the installed downloaded **v0.2.2 / Zig 0.17.0** static-musl backend with three connected accounts used **15,380 KiB PSS** (15,392 KiB RSS), stable over five samples. The unchanged Quickshell UI's full offscreen lifecycle measurement attributed **14,433 KiB PSS** after 1,000 cycles and 200 warm-ups. Together this estimates **29,813 KiB: 29.1 MiB / 30.5 MB**, rounded to **31 MB** for Omagma's backend and attributed UI share.
 
-This is a combined estimate from separate live-backend and synthetic UI lifetimes, excluding Chrome and unrelated shell widgets. The UI receipt keeps its predecessor executable identity in [current qualification](evidence/terminal-0.2.2.md); the component bytes are unchanged. The running installed backend is the published x86_64 artifact, SHA-256 `597009ad9dc3616c8f5473cc70f411ce280b7e640c86c50def0f6caaf02b712d`. It was verified after rescan without replacing the desktop shell or account/profile settings.
+This is a combined estimate from separate live-backend and synthetic UI lifetimes, excluding Chrome and unrelated shell widgets. The UI receipt keeps its predecessor executable identity in [v0.2.2 qualification](evidence/terminal-0.2.2.md); the component bytes are unchanged. The then-installed backend was the published x86_64 artifact, SHA-256 `597009ad9dc3616c8f5473cc70f411ce280b7e640c86c50def0f6caaf02b712d`. It was verified after rescan without replacing the desktop shell or account/profile settings.
 
 The five-minute terminal-cache timer returns after each update and has **no resident cache process between runs**. An open TUI or a running cache one-shot is a separate process from the bar; terminal measurements above do not include the emulator/editor. Workload, process lifetime and Qt baseline differences explain why these observations do not isolate a compiler effect. Earlier version measurements below remain unchanged.
 
@@ -132,7 +144,7 @@ On 2026-10-05, the installed downloaded **v0.2.1 / Zig 0.17.0** static-musl back
 | Warm, closed Omagma UI over Quickshell baseline | 12,476 KiB |
 | Approximate Omagma total | **27,948 KiB: 27.3 MiB / 28.6 MB** |
 
-The README rounds this estimate to **29 MB**. It includes the complete backend and Omagma's attributed UI share, excluding Chrome and unrelated shell widgets. Combining a live backend sample with a separate synthetic UI baseline is an estimate, not a direct isolated desktop-process total. The actual installed executable SHA-256 is `4e936b367cdd6dd9ed5eac71ead732cb3b5f301cc047753ad8d5144b58b6e511`. A separate downloaded-artifact live read-only test fetched 30 messages per account and passed a 60-second quiet interval with zero CPU ticks, added jobs or events; its backend PSS was 15,232 KiB. The plugin reload preserved the shell PID, private account/profile settings and closed popup.
+The README at that release rounded this estimate to **29 MB**. It includes the complete backend and Omagma's attributed UI share, excluding Chrome and unrelated shell widgets. Combining a live backend sample with a separate synthetic UI baseline is an estimate, not a direct isolated desktop-process total. The actual installed executable SHA-256 is `4e936b367cdd6dd9ed5eac71ead732cb3b5f301cc047753ad8d5144b58b6e511`. A separate downloaded-artifact live read-only test fetched 30 messages per account and passed a 60-second quiet interval with zero CPU ticks, added jobs or events; its backend PSS was 15,232 KiB. The plugin reload preserved the shell PID, private account/profile settings and closed popup.
 
 The changed totals across versions include process-lifetime and UI-baseline variation. They do not isolate a compiler effect, and allocation ceilings still do not predict resident memory. Historical measurements remain attached to their actual versions.
 
@@ -162,4 +174,4 @@ The historical release remains at `851ee30c5953a28fe0535fea03737ce85ec745fd`. Pr
 
 The compiler port has separate [dated evidence](evidence/zig-0.17.0.md). Its native x86_64 Safe synthetic backend peak RSS was 11,624 KiB with 90 rows; the actual downloaded release's soak reached 11,636 KiB, the same peak as the historical 0.16 static release soak. Matched old/new UI diagnostics showed no compiler-linked increase. An earlier UI attribution gate failed and is preserved in the evidence: baseline initialization varies, so individual measurements are not guarantees.
 
-The roughly 29 MB v0.1.0, 31 MB v0.1.1 and 29 MB v0.2.1 estimates come from different process lifetimes and UI baseline runs. They do not isolate the compiler's effect. Historical measurements remain attached to their actual version.
+The roughly 29 MB v0.1.0, 31 MB v0.1.1, 29 MB v0.2.1 and 31 MB v0.2.2 estimates come from different process lifetimes and UI baseline runs. They do not isolate the compiler's effect. Historical measurements remain attached to their actual version.
