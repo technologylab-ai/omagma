@@ -15,6 +15,7 @@ from terminal_integration import ACCOUNTS, Client, require
 
 COUNT = 2000
 NEW = 100
+PREFETCH = 64
 DELETED = set(range(1000, 1010))
 BODY_SAMPLES = (50, 1005, 1500, 1999)
 BODY_LIMIT = 2 * 1024**2
@@ -127,7 +128,8 @@ def run(binary, directory):
         require(before["metadataEntries"] == COUNT and before["historyId"] == "1000", "preseed schema/checkpoint not loaded")
         started = time.monotonic()
         client.next_id += 1
-        request = {"id": f"test-{client.next_id}", "account": ACCOUNTS[0], "cmd": "mail.refresh", "limit": NEW}
+        request = {"id": f"test-{client.next_id}", "account": ACCOUNTS[0], "cmd": "mail.refresh",
+                   "limit": NEW, "prefetchLimit": PREFETCH}
         client.raw(json.dumps(request).encode() + b"\n")
         reply = client.receive(timeout=40)
         require(reply.get("id") == request["id"] and reply.get("account") == ACCOUNTS[0], "stress response routing changed")
@@ -135,9 +137,22 @@ def run(binary, directory):
         elapsed = round(time.monotonic() - started, 4)
         after = metric(client)
         require(after["historyId"] == "1001" and after["metadataEntries"] == COUNT, "stress lost newest count/checkpoint")
-        require(after["syncMetadataGets"] - before["syncMetadataGets"] == NEW and after["syncBodyGets"] - before["syncBodyGets"] == NEW,
-                "stress delta did not fetch exactly100 new metadata/full bodies")
+        require(after["syncMetadataGets"] - before["syncMetadataGets"] == NEW and after["syncBodyGets"] - before["syncBodyGets"] == PREFETCH,
+                "stress delta did not fetch100 new metadata and the configured64-body head")
         require(after["syncListCalls"] == before["syncListCalls"], "stress delta relisted entire2000-row mailbox")
+        # Keep the original100-new-full-body workload under the new per-refresh
+        # prefetch64 cap, fetching the remaining36 literal older IDs explicitly.
+        manual_started = time.monotonic()
+        for number in range(COUNT, COUNT + NEW - PREFETCH):
+            message = client.request("mail.read", messageId=identifier(number))
+            require(message["id"] == identifier(number)
+                    and message["bodyText"] == f"Synthetic private-cache fixture body {number:04}.\nCafé 👋.\n",
+                    "explicit stress body lost its independent ID/content oracle")
+        manual_seconds = round(time.monotonic() - manual_started, 4)
+        complete = metric(client)
+        require(complete["fixtureCalls"] - after["fixtureCalls"] == NEW - PREFETCH,
+                "explicit remaining36-body reads duplicated or skipped provider calls")
+        require(complete["syncBodyGets"] == after["syncBodyGets"], "explicit reads were miscounted as delta prefetch")
         actual, cursor = [], ""
         for _ in range(21):
             page = client.request("mail.list", limit=100, cursor=cursor, cacheOnly=True)
@@ -160,12 +175,17 @@ def run(binary, directory):
                 referenced[name] = entry
         files = {path.name: path for path in fixture["accountDirectory"].glob("mail-*.json")}
         require(set(files) == set(referenced), "stress leaves orphan or missing referenced body files")
+        require(len(files) == 102, "stress did not preserve all100 new bodies plus the two retained old bodies")
         for name, path in files.items():
             raw = path.read_bytes()
             record = json.loads(raw)
             entry = referenced[name]
             require(len(raw) == entry["bytes"] and hashlib.sha256(raw).hexdigest() == entry["bodyHash"], "stress body bytes/hash reference mismatch")
             require(record["account"] == ACCOUNTS[0] and record["message"]["id"] == entry["message"]["id"], "stress body/account identity mismatch")
+            number = int(record["message"]["id"].removeprefix("max-cache-"))
+            if COUNT <= number < COUNT + NEW:
+                require(record["message"]["bodyText"] == f"Synthetic private-cache fixture body {number:04}.\nCafé 👋.\n",
+                        "new stored body differs from its independent literal content")
         final = metric(client)
         status = (Path("/proc") / str(client.process.pid) / "status").read_text()
         os_peak = next(int(line.split()[1]) for line in status.splitlines() if line.startswith("VmHWM:"))
@@ -174,7 +194,9 @@ def run(binary, directory):
             "retainedNewestCount": len(actual), "bodyReferencesValidated": len(files), "retainedBodyDigestsPreserved": True,
             "metadataAverageBytes": fixture["metadataAverageBytes"], "initialIndexBytes": fixture["initialIndexBytes"],
             "providerFixtureBytes": fixture["providerFixtureBytes"], "providerFixtureLimitBytes": FIXTURE_LIMIT,
-            "refreshSeconds": elapsed, "allocatorPeakBytes": final["allocatorPeakBytes"], "terminalHeapLimitBytes": HEAP_LIMIT,
+            "refreshSeconds": elapsed, "prefetchedNewBodies": PREFETCH, "explicitNewBodyReads": NEW - PREFETCH,
+            "explicitNewBodyReadSeconds": manual_seconds, "totalNewFullBodies": NEW,
+            "allocatorPeakBytes": final["allocatorPeakBytes"], "terminalHeapLimitBytes": HEAP_LIMIT,
             "rejectedAllocations": final["rejectedAllocations"], "fixedBackendReservationBytes": final["fixedBackendReservationBytes"],
             "diskBytes": final["diskBytes"], "diskLimitBytes": DISK_LIMIT, "osPeakRssKiB": os_peak,
             "wholeProcessRssIsSeparateFromHeap": True, "absoluteRssLimit": None, "childrenReaped": True}

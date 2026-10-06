@@ -110,7 +110,8 @@ jobs:
             terminal_triage_ui terminal_reader_context \
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
             terminal_local_ui terminal_polish_reader terminal_polish_compose \
-            terminal_polish_status terminal_timezone terminal_recipient_preview
+            terminal_polish_status terminal_timezone terminal_recipient_preview \
+            terminal_editor_notice
           do
             python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
           done
@@ -171,7 +172,8 @@ jobs:
             terminal_triage_ui terminal_reader_context \
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
             terminal_local_ui terminal_polish_reader terminal_polish_compose \
-            terminal_polish_status terminal_timezone terminal_recipient_preview
+            terminal_polish_status terminal_timezone terminal_recipient_preview \
+            terminal_editor_notice
           do
             python3 "tests/$suite.py" --binary "dist/omagma-linux-$RELEASE_ARCH"
           done
@@ -277,6 +279,7 @@ jobs:
           .verification-macos-debug/bin/auth_probe launch
           .verification-macos-debug/bin/auth_probe callback
           .verification-macos-debug/bin/callback_budget
+          python3 tests/keyring_default_macos.py --ephemeral-default --build-mode debug
       - name: Safe native correctness and standalone probes
         run: |
           zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe
@@ -284,6 +287,7 @@ jobs:
           .verification-macos-safe/bin/auth_probe launch
           .verification-macos-safe/bin/auth_probe callback
           .verification-macos-safe/bin/callback_budget
+          python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
       - name: Validate macOS archive and native executable

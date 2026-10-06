@@ -1152,6 +1152,22 @@ const App = struct {
         self.status_kind = .action;
         self.action_notice = true;
     }
+    fn editorNoticeProtected(self: *const App) bool {
+        return self.status_kind == .unknown and (self.compose.unknown_outcome or self.invitation_unknown);
+    }
+    fn sayEditorResult(self: *App, exit_code: u8) void {
+        if (self.editorNoticeProtected()) return;
+        // The local editor result is an action outcome, not a view hint.
+        // Unrelated label/recipient refreshes must not replace it with Ready.
+        self.action_notice = false;
+        if (exit_code == 0) self.sayAction(false, "Editor returned · draft retained · Ctrl+S Review send", .{}) else self.sayAction(true, "Editor exited {d} · changed text retained · Ctrl+S Review send", .{exit_code});
+    }
+    fn sayEditorFailure(self: *App, err: anyerror) void {
+        if (self.editorNoticeProtected()) return;
+        self.action_notice = false;
+        self.sayAction(true, "Editor: {s} · draft retained", .{@errorName(err)});
+        self.diagnostic(@errorName(err));
+    }
     fn reloadTheme(self: *App) void {
         self.palette = theme.load(self.io, self.allocator, self.environ) catch |err| {
             self.palette = .{};
@@ -2765,7 +2781,7 @@ const App = struct {
                 if (kind == .save and self.editor_exit != null) {
                     const exit_code = self.editor_exit.?;
                     self.editor_exit = null;
-                    if (exit_code == 0) self.say(false, "Editor returned · draft retained · Ctrl+S Review send", .{}) else self.say(true, "Editor exited {d} · changed text retained · Ctrl+S Review send", .{exit_code});
+                    self.sayEditorResult(exit_code);
                 } else self.say(false, "{s}", .{if (kind == .save_review) "Review send · y Send · Esc Return to draft" else "Draft saved locally"});
                 if (kind == .save_review) self.reader_scroll = 0;
                 if (kind == .save_back and self.folder == 2) self.pending_list = true;
@@ -3909,6 +3925,7 @@ const App = struct {
         self.cancelAutosaveTimer();
         self.preemptReadOnly();
         if (self.job.future != null) return;
+        self.editor_exit = null;
         self.loop.stop();
         const writer = self.tty.writer();
         try self.vx.resetState(writer);
@@ -3939,10 +3956,10 @@ const App = struct {
         self.vx.queueRefresh();
         try self.loop.start();
         const value_in = result catch |err| {
-            self.say(true, "Editor: {s} · draft retained", .{@errorName(err)});
+            self.sayEditorFailure(err);
             return;
         };
-        if (value_in.exit_code == 0) self.say(false, "Editor returned · draft retained · Ctrl+S Review send", .{}) else self.say(true, "Editor exited {d} · changed text retained · Ctrl+S Review send", .{value_in.exit_code});
+        self.sayEditorResult(value_in.exit_code);
         try self.saveDraft(.save);
         if (received_signal.load(.acquire) != 0 and self.job.future != null) {
             // A termination during the editor still saves the local draft.
@@ -6811,6 +6828,56 @@ test "status polish: view changes clear obsolete hints but preserve action and u
     app.say(false, "Ready", .{});
     try std.testing.expectEqual(StatusKind.unknown, app.status_kind);
     try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Outcome unknown") != null);
+}
+
+test "editor notice: saved canceled and failed results survive background work without losing draft or unknown outcome" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+    app.mode = .compose;
+    app.compose_active = true;
+    try app.compose.fields[4].set(allocator, "Retained editor body 🌋");
+    for ([_]u8{ 0, 1 }) |exit_code| {
+        app.editor_exit = exit_code;
+        try app.apply(.save, "{\"ok\":true,\"data\":{\"id\":\"local-draft\"}}");
+        try std.testing.expect(app.editor_exit == null);
+        try std.testing.expectEqual(StatusKind.action, app.status_kind);
+        try std.testing.expect(app.action_notice);
+        try std.testing.expectEqual(exit_code != 0, app.warning);
+        try std.testing.expectEqual(@as(usize, 0), app.status_owner.account);
+        app.say(false, "Working…", .{});
+        app.selection_generation +%= 1;
+        app.clearObsoleteStatus();
+        try app.apply(.recipient_cache, "{\"ok\":true,\"data\":{\"recipients\":[]}}");
+        app.say(false, "Ready", .{});
+        try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], if (exit_code == 0) "Editor returned" else "Editor exited 1"));
+        try std.testing.expectEqualStrings("Retained editor body 🌋", app.compose.fields[4].value());
+        try std.testing.expectEqualStrings("local-draft", app.compose.id.value());
+    }
+    app.sayEditorFailure(error.NotRegularFile);
+    app.say(false, "Ready", .{});
+    app.clearObsoleteStatus();
+    try std.testing.expectEqual(StatusKind.action, app.status_kind);
+    try std.testing.expectEqualStrings("Editor: NotRegularFile · draft retained", app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("NotRegularFile", app.status_error_code[0..app.status_error_len]);
+    // A subsequent explicit interaction releases the notice using the existing
+    // action lifetime. Its account owner is never relabeled as another account.
+    app.action_notice = false;
+    app.account_index = 1;
+    app.say(false, "Ready", .{});
+    try std.testing.expectEqual(@as(usize, 1), app.status_owner.account);
+    try std.testing.expectEqualStrings("Ready", app.status[0..app.status_len]);
+    app.markUnknown(.send);
+    const unknown = try allocator.dupe(u8, app.status[0..app.status_len]);
+    defer allocator.free(unknown);
+    app.sayEditorResult(0);
+    app.sayEditorFailure(error.NotRegularFile);
+    try std.testing.expectEqual(StatusKind.unknown, app.status_kind);
+    try std.testing.expectEqualStrings(unknown, app.status[0..app.status_len]);
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
 test "status polish: header context and list counts do not invent mailbox totals" {

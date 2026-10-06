@@ -96,8 +96,34 @@ def preference(path, expected):
     data = json.loads(path.read_text())
     require(isinstance(data, dict) and data.get("readerLayout") == expected and data.get("schema") == 1,
             "saved reader layout disagrees with rendered layout/schema")
-    require(set(data) == {"schema", "readerLayout"}, "UI preferences contain fields beyond layout/schema")
-    require(not any(account in path.read_text() for account in ACCOUNTS), "UI preferences exposed account identities")
+    # Private working-context persistence now deliberately remembers account
+    # and message IDs. It must remain bounded UI state, not mail or credentials.
+    require(set(data) == {"schema", "readerLayout", "listWidthPercent", "listHeightPercent",
+                          "lastAccount", "contexts", "bindings"}, "UI preferences contain undocumented fields")
+    for field in ("listWidthPercent", "listHeightPercent"):
+        require(type(data[field]) is int and 25 <= data[field] <= 75, "pane ratio exceeded its public bound")
+    require(data["lastAccount"] in ("", *ACCOUNTS), "preferences retained an unconfigured account")
+    contexts = data["contexts"]
+    require(isinstance(contexts, list) and len(contexts) <= 3, "working contexts exceeded three accounts")
+    seen = set()
+    for context in contexts:
+        require(set(context) == {"account", "folder", "label", "message", "selected", "readerScroll"},
+                "working context contains mail/credential fields")
+        require(context["account"] in ACCOUNTS and context["account"] not in seen,
+                "working context crossed configured accounts or duplicated one")
+        seen.add(context["account"])
+        require(type(context["folder"]) is int and 0 <= context["folder"] < 8, "context folder is invalid")
+        require(type(context["selected"]) is int and 0 <= context["selected"] < 10000, "context selection exceeded its bound")
+        require(type(context["readerScroll"]) is int and 0 <= context["readerScroll"] <= 10000000, "context scroll exceeded its bound")
+        for field in ("label", "message"):
+            require(isinstance(context[field], str) and len(context[field].encode()) <= 256,
+                    "working context text exceeded its bound")
+    bindings = data["bindings"]
+    require(isinstance(bindings, list) and len(bindings) <= 24, "key bindings exceeded their bound")
+    for binding in bindings:
+        require(set(binding) == {"key", "action"} and isinstance(binding["key"], str)
+                and len(binding["key"].encode()) <= 24 and isinstance(binding["action"], str),
+                "key binding contains undocumented/private fields")
     return data
 
 
@@ -120,6 +146,13 @@ def title_bold(terminal, text):
 
 
 def quit_key(terminal):
+    terminal.until(lambda: mailbox_visible(terminal) and any(
+        hint in terminal.text().splitlines()[-2] for hint in ("q Quit", "Esc/q List")))
+    if "Esc/q List" in terminal.text().splitlines()[-2]:
+        terminal.send(b"q")
+        terminal.until(lambda: "q Quit" in terminal.text().splitlines()[-2])
+        require(terminal.process.poll() is None, "reader q skipped the restored list")
+    require("q Quit" in terminal.text().splitlines()[-2], "quit oracle is not in default list focus")
     terminal.send(b"q")
     deadline = time.monotonic() + 5
     while terminal.process.poll() is None and time.monotonic() < deadline:
@@ -134,7 +167,21 @@ def search(terminal, source, query):
     terminal.until(lambda: prompt in terminal.text())
     terminal.send(query.encode() + b"\r")
     terminal.until(lambda: title in terminal.text())
+    # The header changes immediately while the previous cached body remains
+    # readable. Drain that render boundary, then wait for this query's worker
+    # to commit before testing navigation of its result window.
+    terminal.gap(.08)
+    terminal.until(lambda: title in terminal.screen.lines()[0] and terminal.screen.lines()[-1].strip() == "Ready")
     return title
+
+
+def search_back(terminal):
+    if "Esc/q List" in terminal.text().splitlines()[-2]:
+        terminal.send(b"q")
+        terminal.until(lambda: "q Clear" in terminal.text().splitlines()[-2])
+        require(terminal.process.poll() is None, "reader Back exited instead of returning to the search list")
+    require("q Clear" in terminal.text().splitlines()[-2], "query Back oracle is not in its search list")
+    terminal.send(b"q")
 
 
 def run_case(binary, directory, name):
@@ -264,7 +311,7 @@ def run_case(binary, directory, name):
                 require("UI prefs fallback" in terminal.text(), "invalid preferences did not retain startup fallback warning")
                 require(time.monotonic() - began < 3, "preference refusal blocked cache-first startup")
                 terminal.send(b"v")
-                terminal.until(lambda: "preference not saved:" in terminal.text())
+                terminal.until(lambda: "preference not saved" in terminal.text())
                 require(signature(bad) == before, "invalid preferences were blindly overwritten")
                 if target_before is not None:
                     require(signature(target) == target_before, "preferences followed/modified symlink target")
@@ -322,9 +369,14 @@ def run_case(binary, directory, name):
             terminal.until(lambda: "Synthetic personal thread 030" in terminal.text())
             require(terminal.process.poll() is None, "q quit rather than returning from active search")
             require(fixture.is_held(), "cached next/previous/page test completed after remote")
+            terminal.until(lambda: "Esc/q List" in terminal.text() and contains_body(terminal, 96))
+            terminal.send(b"q")
+            terminal.until(lambda: "q Quit" in terminal.text())
+            require(terminal.process.poll() is None, "q from restored reader skipped the list")
             result.update(nextPreviousBodiesBeforeRemote=True, lowercaseScrollPreservedMessage=True,
                           expandedNextPrevious=True, existingPageKeysPreserved=True, deliveredHeadersPreviewed=96,
-                          contactsOpenedBeforeRemote=True, contactsHelpAndEscapeUsable=True, queryQReturnedToInbox=True)
+                          contactsOpenedBeforeRemote=True, contactsHelpAndEscapeUsable=True, queryQReturnedToInbox=True,
+                          searchRestoredReaderFocus=True, readerQReturnedToList=True)
             result.update(quit_key(terminal), defaultInboxQQuit=True)
             terminal.close()
             terminal = None
@@ -395,8 +447,9 @@ def run_case(binary, directory, name):
             terminal = start(binary, directory, fixture)
             fixture.wait_entered(terminal.process, pump=terminal.pump)
             terminal.until(lambda: contains_body(terminal, 96))
+            terminal.ui_stage = "reader-focus"
             terminal.send(b"l")
-            terminal.until(lambda: title_bold(terminal, "Thread / full body"))
+            terminal.until(lambda: title_bold(terminal, "Thread / full body") or title_bold(terminal, "Message ·"))
             terminal.send(b"q")
             terminal.until(lambda: title_bold(terminal, "Mail ·"))
             require(terminal.process.poll() is None and fixture.is_held(), "reader Back quit or awaited remote")
@@ -407,24 +460,30 @@ def run_case(binary, directory, name):
             terminal.send(b"q")
             layout(terminal, "right")
             require(terminal.process.poll() is None, "expanded reader Back quit")
+            terminal.ui_stage = "cache-search"
             search(terminal, "cache", "subject:Synthetic personal")
             terminal.until(lambda: contains_body(terminal, 96))
+            terminal.ui_stage = "next-window"
             terminal.send(b"]")
             terminal.until(lambda: contains_body(terminal, 64))
+            terminal.ui_stage = "previous-window"
             terminal.send(b"[")
             terminal.until(lambda: contains_body(terminal, 96))
             with Client(binary, directory, extra=fixture.options()) as client:
                 after = metrics(client)
             for key in ("fixtureCalls", "syncCalls", "syncListCalls", "syncMetadataGets", "syncBodyGets"):
                 require(after[key] == before[key], "cache search/page invoked provider while remote held")
-            terminal.send(b"q")
+            terminal.ui_stage = "query-back"
+            search_back(terminal)
             terminal.until(lambda: mailbox_visible(terminal) and "Cache search" not in terminal.screen.lines()[0])
             require(fixture.is_held() and terminal.process.poll() is None, "cache-search Back did not stay interactive")
+            terminal.ui_stage = "help"
             terminal.send(b"?")
             scroll_help_to(terminal, "Click · wheel")
             scroll_help_to(terminal, "No editor save or paste sends mail.")
             terminal.send(b"q")
             terminal.until(lambda: mailbox_visible(terminal) and "No editor save or paste sends mail." not in terminal.text())
+            terminal.ui_stage = "default-quit"
             result.update(quit_key(terminal))
             terminal.close()
             terminal = None
@@ -433,19 +492,25 @@ def run_case(binary, directory, name):
             terminal.until(lambda: "Up to date" in terminal.text() and contains_body(terminal, 96))
             # Mail33 is outside the retained newest40; it cannot appear by
             # merely relabeling a cache-only result as a Gmail search.
+            terminal.ui_stage = "server-old-mail"
             search(terminal, "server", "subject:Synthetic personal thread 010")
             terminal.until(lambda: contains_body(terminal, 33))
-            terminal.send(b"q")
+            terminal.ui_stage = "query-back"
+            search_back(terminal)
             terminal.until(lambda: mailbox_visible(terminal) and contains_body(terminal, 96))
+            terminal.ui_stage = "server-paging"
             search(terminal, "server", "subject:Synthetic personal")
             terminal.until(lambda: contains_body(terminal, 96) and "Ready" in terminal.text())
             terminal.gap(.2)  # Separate observed render/input boundaries.
+            terminal.ui_stage = "next-window"
             terminal.send(b"]")
             terminal.until(lambda: contains_body(terminal, 64))
             terminal.send(b"]")
             terminal.until(lambda: contains_body(terminal, 32))
-            terminal.send(b"q")
+            terminal.ui_stage = "query-back"
+            search_back(terminal)
             terminal.until(lambda: mailbox_visible(terminal) and contains_body(terminal, 96))
+            terminal.ui_stage = "compose-back"
             terminal.send(b"c")
             terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
             terminal.send(b"\t\t\t\tiq")
@@ -463,7 +528,7 @@ def run_case(binary, directory, name):
             raise AssertionError("unknown UI case")
     except Exception as error:
         if terminal is not None:
-            error.ui_diagnostic = {"currentCells": terminal.text().splitlines(), "outputBytes": terminal.output_total,
+            error.ui_diagnostic = {"stage": getattr(terminal, "ui_stage", name), "currentCells": terminal.text().splitlines(), "outputBytes": terminal.output_total,
                                    "exitCode": terminal.process.poll(),
                                    "escapedSyntheticOutputTail": bytes(terminal.output[-262144:]).decode("utf-8", errors="replace")}
         raise
