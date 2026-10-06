@@ -55,6 +55,9 @@ extern fn SecItemDelete(CF) i32;
 extern fn SecKeychainSetUserInteractionAllowed(u8) i32;
 extern fn SecKeychainCreate([*:0]const u8, u32, [*]const u8, u8, ?CF, *?CF) i32;
 extern fn SecKeychainDelete(CF) i32;
+extern fn SecKeychainLock(CF) i32;
+extern fn SecKeychainUnlock(CF, u32, [*]const u8, u8) i32;
+extern "c" fn proc_pidpath(c_int, [*]u8, u32) c_int;
 const not_found = -25300;
 const duplicate = -25299;
 
@@ -114,7 +117,7 @@ fn query(identity: Identity, keychain: ?CF, adding: bool, clearing: bool) !Dicti
     var result = try Dictionary.init();
     errdefer result.deinit();
     result.set(kSecClass, kSecClassGenericPassword);
-    try result.string(kSecAttrLabel, identity.namespace());
+    if (adding) try result.string(kSecAttrLabel, identity.namespace());
     try result.string(kSecAttrAccount, identity.account);
     result.set(kSecAttrSynchronizable, kCFBooleanFalse);
     result.set(kSecUseAuthenticationUI, kSecUseAuthenticationUIFail);
@@ -201,9 +204,9 @@ fn clear(identity: Identity, keychain: ?CF) !void {
         // Finish validating the bounded response before making any changes.
         for (0..@intCast(count)) |index| {
             const item = CFArrayGetValueAtIndex(returned.?, @intCast(index));
-            if (CFGetTypeID(item) != CFDictionaryGetTypeID()) return error.KeyringUnavailable;
-            const value = CFDictionaryGetValue(item, kSecAttrService) orelse return error.KeyringUnavailable;
-            if (CFGetTypeID(value) != CFStringGetTypeID() or CFStringGetCString(value, &services[index], services[index].len, 0x08000100) == 0) return error.KeyringUnavailable;
+            if (CFGetTypeID(item) != CFDictionaryGetTypeID()) continue;
+            const value = CFDictionaryGetValue(item, kSecAttrService) orelse continue;
+            if (CFGetTypeID(value) != CFStringGetTypeID() or CFStringGetCString(value, &services[index], services[index].len, 0x08000100) == 0) continue;
             const text = std.mem.sliceTo(&services[index], 0);
             if (terminalService(text)) lengths[index] = text.len;
         }
@@ -230,6 +233,10 @@ fn terminalService(raw: []const u8) bool {
 
 pub fn worker(io: std.Io, args: []const []const u8) !void {
     if (args.len != 5) return error.InvalidKeychainWorker;
+    try checkParent(io);
+    var alarm_action: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(.ALRM, &alarm_action, null);
+    _ = std.c.alarm(@intCast(limits.keyring_seconds + 2));
     if ((try std.Io.File.stdin().stat(io)).kind != .named_pipe or (try std.Io.File.stdout().stat(io)).kind != .named_pipe) return error.PrivateKeychainPipesRequired;
     const terminal = if (std.mem.eql(u8, args[1], "bar")) false else if (std.mem.eql(u8, args[1], "terminal")) true else return error.InvalidKeychainNamespace;
     const identity: Identity = .{ .terminal = terminal, .account = args[2], .client = args[3], .grant = args[4] };
@@ -239,6 +246,7 @@ pub fn worker(io: std.Io, args: []const []const u8) !void {
     var input: [marker.len + limits.secret + 1]u8 = undefined;
     defer std.crypto.secureZero(u8, &input);
     var scratch: [256]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
     var reader = std.Io.File.stdin().readerStreaming(io, &scratch);
     var length: usize = 0;
     while (length < input.len) {
@@ -252,11 +260,18 @@ pub fn worker(io: std.Io, args: []const []const u8) !void {
     if (SecKeychainSetUserInteractionAllowed(0) != 0) return error.KeyringUnavailable;
     if (probing) {
         if (terminal or !std.mem.eql(u8, identity.account, "synthetic-probe-do-not-use@example.invalid") or secret.len != 0) return error.InvalidKeychainWorker;
-        return synthetic(io);
+        try synthetic(io);
+        return acknowledgement(io);
     }
-    if (std.mem.eql(u8, args[0], "store")) return store(identity, null, secret);
+    if (std.mem.eql(u8, args[0], "store")) {
+        try store(identity, null, secret);
+        return acknowledgement(io);
+    }
     if (secret.len != 0) return error.InvalidKeychainWorker;
-    if (clearing) return clear(identity, null);
+    if (clearing) {
+        try clear(identity, null);
+        return acknowledgement(io);
+    }
     if (!std.mem.eql(u8, args[0], "lookup") and !std.mem.eql(u8, args[0], "lookup-auto")) return error.InvalidKeychainWorker;
     var output: [limits.secret]u8 = undefined;
     defer std.crypto.secureZero(u8, &output);
@@ -264,6 +279,25 @@ pub fn worker(io: std.Io, args: []const []const u8) !void {
     var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll(output[0..n]);
     try writer.interface.flush();
+}
+
+fn checkParent(io: std.Io) !void {
+    const pid = std.c.getppid();
+    if (pid <= 1) return error.PrivateKeychainParentRequired;
+    var parent_path: [4096]u8 = undefined;
+    const found = proc_pidpath(pid, &parent_path, parent_path.len);
+    if (found <= 0 or found >= parent_path.len) return error.PrivateKeychainParentRequired;
+    var own_path: [4096]u8 = undefined;
+    const own_length = try std.process.executablePath(io, &own_path);
+    var canonical_parent: [4096]u8 = undefined;
+    var canonical_self: [4096]u8 = undefined;
+    const parent_length = std.Io.Dir.realPathFileAbsolute(io, std.mem.sliceTo(&parent_path, 0), &canonical_parent) catch return error.PrivateKeychainParentRequired;
+    const self_length = try std.Io.Dir.realPathFileAbsolute(io, own_path[0..own_length], &canonical_self);
+    if (!std.mem.eql(u8, canonical_parent[0..parent_length], canonical_self[0..self_length])) return error.PrivateKeychainParentRequired;
+}
+
+fn acknowledgement(io: std.Io) !void {
+    try std.Io.File.stdout().writeStreamingAll(io, "OK\n");
 }
 
 fn synthetic(io: std.Io) !void {
@@ -305,6 +339,18 @@ fn synthetic(io: std.Io) !void {
     if (!std.mem.eql(u8, output[0..n], "synthetic-bar-a")) return error.SyntheticIdentityMismatch;
     const m = try lookup(term_a, keychain, &output);
     if (!std.mem.eql(u8, output[0..m], "synthetic-terminal-a")) return error.SyntheticIdentityMismatch;
+    // A display-name edit must not change the service/account primary key.
+    const relabel_query = try query(term_a, keychain, false, false);
+    defer relabel_query.deinit();
+    const relabel = try Dictionary.init();
+    defer relabel.deinit();
+    try relabel.string(kSecAttrLabel, "Renamed fictional credential");
+    if (SecItemUpdate(relabel_query.value, relabel.value) != 0) return error.SyntheticKeychainUnavailable;
+    if (try lookup(term_a, keychain, &output) == 0) return error.SyntheticIdentityMismatch;
+    if (SecKeychainLock(keychain) != 0) return error.SyntheticKeychainUnavailable;
+    try std.testing.expectError(error.KeyringUnavailable, lookup(term_a, keychain, &output));
+    try std.testing.expectError(error.KeyringUnavailable, store(term_a, keychain, "synthetic-locked-write"));
+    if (SecKeychainUnlock(keychain, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
     try store(term_a, keychain, "synthetic-terminal-updated");
     const k = try lookup(term_a, keychain, &output);
     if (!std.mem.eql(u8, output[0..k], "synthetic-terminal-updated")) return error.SyntheticIdentityMismatch;

@@ -134,7 +134,14 @@ fn nativeCall(io: std.Io, operation: []const u8, terminal: bool, address: []cons
     if (payload.len > limits.secret) return error.InvalidToken;
     @memcpy(input[native.marker.len..][0..payload.len], payload);
     const argv = [_][]const u8{ executable[0..length], "keychain-worker", operation, if (terminal) "terminal" else "bar", address, client, grant };
-    return platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &argv, @as(?[]const u8, input[0 .. native.marker.len + payload.len]), out, true });
+    if (std.mem.eql(u8, operation, "lookup") or std.mem.eql(u8, operation, "lookup-auto")) {
+        // Native absence is successful empty output; worker exit1 is failure.
+        return platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &argv, @as(?[]const u8, input[0 .. native.marker.len + payload.len]), out, false });
+    }
+    var acknowledgement: [3]u8 = undefined;
+    const n = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &argv, @as(?[]const u8, input[0 .. native.marker.len + payload.len]), &acknowledgement, false });
+    if (n != acknowledgement.len or !std.mem.eql(u8, &acknowledgement, "OK\n")) return error.KeyringUnavailable;
+    return 0;
 }
 /// Hidden exec-worker entry, with pipe-only output; never a JSON/UI token API.
 pub fn runNativeWorker(io: std.Io, args: []const []const u8) !void {

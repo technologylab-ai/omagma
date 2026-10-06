@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
 }
 
 fn linkNativeKeychain(module: *std.Build.Module) void {
+    module.linkSystemLibrary("proc", .{});
     module.linkFramework("Security", .{});
     module.linkFramework("CoreFoundation", .{});
 }
