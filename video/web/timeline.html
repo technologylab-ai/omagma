@@ -1,0 +1,72 @@
+<!doctype html>
+<!-- The Omagma film as one page. render(t) draws the frame at t seconds and is
+     pure: the same t always gives the same frame. video/render.mjs serves this
+     page, waits for window.READY, then captures every frame at i / fps.
+     ?cut=tracks/<name>.json selects the cut map; ?t=12.5 previews one moment;
+     ?scrub=1 adds a scrubber for review in an ordinary browser. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>omagma film</title>
+<link rel="stylesheet" href="timeline.css">
+</head>
+<body>
+<div id="stage">
+  <div id="bg"><div class="heat"></div><div class="floor"></div></div>
+
+  <section class="layer" id="ember">
+    <canvas class="logo" width="520" height="520"></canvas>
+    <div class="word">omagma</div>
+    <div class="tagline">Gmail, one account at a time.</div>
+  </section>
+
+  <section class="layer" id="bar">
+    <div class="strip">
+      <div class="workspaces"><b>1</b><i>2</i><i>3</i><i>4</i><i>5</i></div>
+      <div class="clock">Tue 10:00</div>
+      <div class="tray"><canvas class="icon" width="520" height="520"></canvas></div>
+    </div>
+    <div class="popup"><div class="frames"></div></div>
+  </section>
+
+  <section class="layer" id="prompt">
+    <div class="line"><span class="ps">❯</span> <span class="cmd"></span><span class="caret"></span></div>
+  </section>
+
+  <section class="layer" id="term">
+    <div class="window"><div class="surface"></div><svg class="pulses"></svg><div class="pointer"><svg viewBox="0 0 24 24"><path d="M4 2 L4 19 L8.6 14.9 L11.6 21.4 L14.4 20.1 L11.5 13.8 L17.8 13.4 Z"/></svg><i class="ring"></i></div></div>
+  </section>
+
+  <section class="layer" id="cli">
+    <div class="panel"><div class="body"></div></div>
+  </section>
+
+  <section class="layer" id="outro">
+    <canvas class="logo" width="520" height="520"></canvas>
+    <div class="word">omagma</div>
+    <div class="tagline">Gmail, one account at a time.</div>
+    <div class="platforms">Omarchy bar <span>·</span> Linux &amp; macOS terminal <span>·</span> Agent CLI</div>
+    <div class="url">technologylab-ai.github.io/omagma</div>
+    <div class="fine">The TUI and CLI are experimental. Demo accounts and mail are fictional.</div>
+  </section>
+
+  <section class="layer" id="poster">
+    <canvas class="logo" width="520" height="520"></canvas>
+    <div class="word">omagma</div>
+    <div class="headline">A tiny volcano<br>that sends mail.</div>
+    <div class="seam"></div>
+    <div class="url">technologylab-ai.github.io/omagma</div>
+  </section>
+
+  <canvas id="fx" width="1920" height="1080"></canvas>
+  <div id="captions"></div>
+  <div id="tag"></div>
+  <div id="keys"></div>
+  <div id="grain"></div>
+  <div id="vignette"></div>
+  <div id="fade"></div>
+</div>
+<div id="scrub" hidden><input type="range" min="0" step="0.0333"><output></output></div>
+<script type="module" src="timeline.js"></script>
+</body>
+</html>
