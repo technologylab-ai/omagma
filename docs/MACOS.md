@@ -107,9 +107,11 @@ to avoid ambiguous routing. Never put unexpanded `$HOME` or `~` inside JSON.
 Refresh tokens use the current default user Keychain, normally your login
 keychain. Terminal identity includes the account, Google registration and grant.
 A binary upgrade retains those identities. Native checks suppress their own UI
-and refuse a known locked keychain. A lock-state change during handoff or an
-edited item ACL can still produce an operating-system permission request;
-blocked reads are canceled at a finite deadline. Unlock the relevant keychain
+and refuse a known locked keychain. Apple's signed Keychain tool provides stable
+reads and a deletion fallback across re-signed upgrades; tokens stay on private
+pipes. A lock-state change during handoff or an edited item ACL can still produce
+an operating-system permission request. Cancel it to refuse the operation;
+blocked helpers are canceled at a finite deadline. Unlock the relevant keychain
 explicitly if Omagma reports `KeyringUnavailable`, then retry. See
 [privacy and credential handling](PRIVACY.md).
 

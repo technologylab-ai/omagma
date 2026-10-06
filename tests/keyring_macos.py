@@ -6,10 +6,12 @@ with a fictional account; only the stable Apple security executable reads data.
 """
 from __future__ import annotations
 import argparse
+import atexit
 import ctypes
 import json
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -77,9 +79,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--upgrade-binary', required=True, type=Path)
+    parser.add_argument('--homebrew-resign', action='store_true', help='verify the exact Homebrew ad-hoc re-sign command on a private copy')
     args = parser.parse_args()
     require(sys.platform == 'darwin', 'native Keychain qualification requires macOS')
     binary, upgraded = args.binary.resolve(), args.upgrade_binary.resolve()
+    if args.homebrew_resign:
+        signed_directory = Path(tempfile.mkdtemp(prefix='omagma-keychain-resign-', dir='/tmp'))
+        atexit.register(shutil.rmtree, signed_directory, ignore_errors=True)
+        copied = signed_directory / 'omagma'
+        shutil.copy2(upgraded, copied)
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(copied)], check=True, capture_output=True, timeout=10)
+        upgraded = copied
     require(hashlib.sha256(binary.read_bytes()).digest() != hashlib.sha256(upgraded.read_bytes()).digest(), 'upgrade witness needs distinct binary images')
     before = security_windows()
     before_search = subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5)
@@ -108,6 +118,8 @@ def main():
                 'direct worker bypassed parent/private-pipe guard')
     require(subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5) == before_search, 'synthetic probe changed user keychain search list')
     require(not (security_windows() - before), 'Keychain operation mapped a security/unlock dialog')
+    if args.homebrew_resign:
+        shutil.rmtree(signed_directory)
     print('PASS macOS Keychain:positive ACK, isolated account/client/grant,4096-byte boundary, Debug→Safe upgrade/update, locked refusal/no new dialog, parent guard, cleanup')
 
 

@@ -245,7 +245,48 @@ fn lookupStable(io: std.Io, identity: Identity, keychain: CF, out: []u8) !usize 
     @memcpy(out[0..value.len], value);
     return value.len;
 }
-fn clear(identity: Identity, keychain: ?CF) !void {
+fn deleteOwned(io: std.Io, request: Dictionary, service: []const u8, account: []const u8, keychain: CF) !void {
+    try unlocked(keychain);
+    const native_status = SecItemDelete(request.value);
+    if (native_status != 0 and native_status != not_found) {
+        // Re-signing a Homebrew binary can invalidate native item-delete trust.
+        // The already trusted Apple-signed tool survives that identity change.
+        var path: [4096]u8 = undefined;
+        var length: u32 = path.len;
+        if (SecKeychainGetPath(keychain, &length, &path) != 0 or length == 0 or length >= path.len) return error.KeyringUnavailable;
+        try unlocked(keychain);
+        var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/security", "delete-generic-password", "-s", service, "-a", account, path[0..length] }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+        defer {
+            @import("platform.zig").closePipes(&child, io);
+            @import("platform.zig").killOwned(io, &child);
+        }
+        // The stock tool emits a human confirmation_bytes on stdout. Drain it
+        // under a fixed bound; only native absence verification establishes ACK.
+        var confirmation_bytes: [256]u8 = undefined;
+        var used: usize = 0;
+        while (used < confirmation_bytes.len) {
+            const count = child.stdout.?.readStreaming(io, &.{confirmation_bytes[used..]}) catch |err| switch (err) {
+                error.EndOfStream => 0,
+                else => return err,
+            };
+            if (count == 0) break;
+            used += count;
+        }
+        if (used == confirmation_bytes.len) return error.KeyringUnavailable;
+        try @import("platform.zig").checkedExit(try @import("platform.zig").waitOwned(io, &child));
+    }
+    // Do not acknowledge a deletion just because a subprocess exited0.
+    // Confirm the exact primary key is absent with native UI-suppressed lookup.
+    request.set(kSecReturnAttributes, kCFBooleanTrue);
+    request.set(kSecMatchLimit, kSecMatchLimitOne);
+    var result: ?CF = null;
+    const verified = SecItemCopyMatching(request.value, &result);
+    defer if (result) |value| CFRelease(value);
+    try unlocked(keychain);
+    if (verified != not_found) return error.KeyringUnavailable;
+}
+
+fn clear(io: std.Io, identity: Identity, keychain: ?CF) !void {
     if (keychain) |ref| try unlocked(ref);
     const request = try query(identity, keychain, false, true);
     defer request.deinit();
@@ -280,15 +321,12 @@ fn clear(identity: Identity, keychain: ?CF) !void {
             const deleting = try query(identity, keychain, false, true);
             defer deleting.deinit();
             try deleting.string(kSecAttrService, services[index][0..length]);
-            const deleted = SecItemDelete(deleting.value);
-            if (deleted != 0 and deleted != not_found) return error.KeyringUnavailable;
+            try deleteOwned(io, deleting, services[index][0..length], identity.account, keychain orelse return error.KeyringUnavailable);
         }
         if (keychain) |ref| try unlocked(ref);
         return;
     }
-    const status = SecItemDelete(request.value);
-    if (status != 0 and status != not_found) return error.KeyringUnavailable;
-    if (keychain) |ref| try unlocked(ref);
+    try deleteOwned(io, request, bar_service, identity.account, keychain orelse return error.KeyringUnavailable);
 }
 
 fn terminalService(raw: []const u8) bool {
@@ -345,7 +383,7 @@ pub fn worker(io: std.Io, args: []const []const u8) !void {
     }
     if (secret.len != 0) return error.InvalidKeychainWorker;
     if (clearing) {
-        try clear(identity, default_ref);
+        try clear(io, identity, default_ref);
         return acknowledgement(io);
     }
     if (!std.mem.eql(u8, args[0], "lookup") and !std.mem.eql(u8, args[0], "lookup-auto")) return error.InvalidKeychainWorker;
@@ -403,6 +441,8 @@ fn upgradeProbe(io: std.Io, operation: []const u8, directory: []const u8) !void 
         defer std.crypto.secureZero(u8, &output);
         const count = try lookupStable(io, identity, ref.?, &output);
         if (!std.mem.eql(u8, output[0..count], "synthetic-cross-build-token")) return error.SyntheticIdentityMismatch;
+        const terminal_count = try lookupStable(io, terminal, ref.?, &output);
+        if (!std.mem.eql(u8, output[0..terminal_count], "synthetic-upgrade-terminal")) return error.SyntheticIdentityMismatch;
         try store(identity, ref, "synthetic-cross-build-updated");
         const updated = try lookupStable(io, identity, ref.?, &output);
         if (!std.mem.eql(u8, output[0..updated], "synthetic-cross-build-updated")) return error.SyntheticIdentityMismatch;
@@ -417,8 +457,8 @@ fn upgradeProbe(io: std.Io, operation: []const u8, directory: []const u8) !void 
         if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
     } else if (std.mem.eql(u8, operation, "upgrade-clear")) {
         if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
-        try clear(identity, ref);
-        try clear(.{ .terminal = true, .account = identity.account }, ref);
+        try clear(io, identity, ref);
+        try clear(io, .{ .terminal = true, .account = identity.account }, ref);
     } else if (std.mem.eql(u8, operation, "upgrade-absent")) {
         if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
         var output: [limits.secret]u8 = undefined;
@@ -483,7 +523,7 @@ fn synthetic(io: std.Io, directory: []const u8) !void {
     try std.testing.expectError(error.KeyringUnavailable, lookupStable(io, term_a, keychain, &output));
     try std.testing.expectError(error.KeyringUnavailable, store(term_a, keychain, "synthetic-locked-write"));
     try std.testing.expectError(error.KeyringUnavailable, unlocked(keychain));
-    try std.testing.expectError(error.KeyringUnavailable, clear(.{ .terminal = true, .account = account_a }, keychain));
+    try std.testing.expectError(error.KeyringUnavailable, clear(io, .{ .terminal = true, .account = account_a }, keychain));
     if (SecKeychainUnlock(keychain, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
     // Boundaries use the actual signed-tool read path, not cast/inverse mocks.
     var maximum: [limits.secret]u8 = @splat('x');
@@ -495,7 +535,7 @@ fn synthetic(io: std.Io, directory: []const u8) !void {
     const k = try lookupStable(io, term_a, keychain, &output);
     if (!std.mem.eql(u8, output[0..k], "synthetic-terminal-updated")) return error.SyntheticIdentityMismatch;
     const removed: Identity = .{ .terminal = true, .account = account_a };
-    try clear(removed, keychain);
+    try clear(io, removed, keychain);
     if (try lookupStable(io, term_a, keychain, &output) != 0 or try lookupStable(io, term_other, keychain, &output) != 0) return error.SyntheticItemStillExists;
     if (try lookupStable(io, bar_a, keychain, &output) == 0 or try lookupStable(io, bar_b, keychain, &output) == 0) return error.SyntheticIdentityMismatch;
     const retained = try query(bar_a, keychain, false, false);
@@ -507,8 +547,8 @@ fn synthetic(io: std.Io, directory: []const u8) !void {
     const retained_status = SecItemCopyMatching(retained.value, &unrelated);
     defer if (unrelated) |value| CFRelease(value);
     if (retained_status != 0 or unrelated == null) return error.SyntheticNamespaceCrossed;
-    try clear(bar_a, keychain);
-    try clear(bar_b, keychain);
+    try clear(io, bar_a, keychain);
+    try clear(io, bar_b, keychain);
     if (SecKeychainDelete(keychain) != 0) return error.SyntheticKeychainCleanupFailed;
 }
 
