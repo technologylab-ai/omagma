@@ -22,6 +22,7 @@ extern var kSecAttrLabel: CF;
 extern var kSecAttrGeneric: CF;
 extern var kSecAttrSynchronizable: CF;
 extern var kSecValueData: CF;
+extern var kSecAttrAccess: CF;
 extern var kSecReturnData: CF;
 extern var kSecReturnAttributes: CF;
 extern var kSecMatchLimit: CF;
@@ -55,8 +56,14 @@ extern fn SecItemDelete(CF) i32;
 extern fn SecKeychainSetUserInteractionAllowed(u8) i32;
 extern fn SecKeychainCreate([*:0]const u8, u32, [*]const u8, u8, ?CF, *?CF) i32;
 extern fn SecKeychainDelete(CF) i32;
+extern fn SecKeychainOpen([*:0]const u8, *?CF) i32;
+extern fn SecKeychainCopyDefault(*?CF) i32;
+extern fn SecKeychainGetStatus(CF, *u32) i32;
+extern fn SecKeychainGetPath(CF, *u32, [*]u8) i32;
 extern fn SecKeychainLock(CF) i32;
 extern fn SecKeychainUnlock(CF, u32, [*]const u8, u8) i32;
+extern fn SecTrustedApplicationCreateFromPath(?[*:0]const u8, *?CF) i32;
+extern fn SecAccessCreate(CF, ?CF, *?CF) i32;
 extern "c" fn proc_pidpath(c_int, [*]u8, u32) c_int;
 const not_found = -25300;
 const duplicate = -25299;
@@ -178,11 +185,81 @@ fn store(identity: Identity, keychain: ?CF, secret: []const u8) !void {
     if (updated != not_found) return error.KeyringUnavailable;
     const adding = try query(identity, keychain, true, false);
     defer adding.deinit();
+    const access = try trustedAccess();
+    defer CFRelease(access);
+    adding.set(kSecAttrAccess, access);
     try adding.data(kSecValueData, secret);
     const created = SecItemAdd(adding.value, null);
     if (created == duplicate) {
         if (SecItemUpdate(request.value, changed.value) != 0) return error.KeyringUnavailable;
     } else if (created != 0) return error.KeyringUnavailable;
+}
+
+fn trustedAccess() !CF {
+    var own: ?CF = null;
+    var system: ?CF = null;
+    if (SecTrustedApplicationCreateFromPath(null, &own) != 0 or SecTrustedApplicationCreateFromPath("/usr/bin/security", &system) != 0 or own == null or system == null) return error.KeyringUnavailable;
+    defer CFRelease(own.?);
+    defer CFRelease(system.?);
+    const apps = [_]CF{ own.?, system.? };
+    const list = CFArrayCreate(null, &apps, 2, &kCFTypeArrayCallBacks) orelse return error.OutOfMemory;
+    defer CFRelease(list);
+    const text = "Omagma account credential";
+    const descriptor = CFStringCreateWithBytes(null, text.ptr, text.len, 0x08000100, 0) orelse return error.OutOfMemory;
+    defer CFRelease(descriptor);
+    var access: ?CF = null;
+    if (SecAccessCreate(descriptor, list, &access) != 0 or access == null) return error.KeyringUnavailable;
+    return access.?;
+}
+
+fn unlocked(keychain: CF) !void {
+    var status: u32 = 0;
+    if (SecKeychainGetStatus(keychain, &status) != 0 or status & 1 == 0) return error.KeyringUnavailable;
+}
+
+/// Only this exact default/probe keychain and primary key reach the signed
+/// system tool. Native metadata and unlocked-state checks run with UI disabled.
+fn lookupStable(io: std.Io, identity: Identity, keychain: CF, out: []u8) !usize {
+    try unlocked(keychain);
+    const request = try query(identity, keychain, false, false);
+    defer request.deinit();
+    request.set(kSecReturnAttributes, kCFBooleanTrue);
+    request.set(kSecMatchLimit, kSecMatchLimitOne);
+    var attributes: ?CF = null;
+    const result = SecItemCopyMatching(request.value, &attributes);
+    defer if (attributes) |value| CFRelease(value);
+    if (result == not_found) return 0;
+    if (result != 0 or attributes == null) return error.KeyringUnavailable;
+    var path: [4096]u8 = undefined;
+    var path_length: u32 = path.len;
+    if (SecKeychainGetPath(keychain, &path_length, &path) != 0 or path_length == 0 or path_length >= path.len) return error.KeyringUnavailable;
+    var service_buffer: [192]u8 = undefined;
+    const service = try identity.service(&service_buffer);
+    var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/security", "find-generic-password", "-s", service, "-a", identity.account, "-w", std.mem.sliceTo(&path, 0) }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    defer {
+        @import("platform.zig").closePipes(&child, io);
+        if (child.id != null) child.kill(io);
+    }
+    var captured: [limits.secret + 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &captured);
+    var length: usize = 0;
+    while (length < captured.len) {
+        const n = child.stdout.?.readStreaming(io, &.{captured[length..]}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
+        if (n == 0) break;
+        length += n;
+    }
+    if (length == captured.len) return error.SecretOutputTooLarge;
+    @import("platform.zig").closePipes(&child, io);
+    try @import("platform.zig").checkedExit(try child.wait(io));
+    try unlocked(keychain);
+    const value = std.mem.trimEnd(u8, captured[0..length], "\r\n");
+    try validSecret(value);
+    if (value.len > out.len) return error.SecretOutputTooLarge;
+    @memcpy(out[0..value.len], value);
+    return value.len;
 }
 fn clear(identity: Identity, keychain: ?CF) !void {
     const request = try query(identity, keychain, false, true);
@@ -258,24 +335,33 @@ pub fn worker(io: std.Io, args: []const []const u8) !void {
     const secret = input[marker.len..length];
     // This affects only the short-lived worker, including legacy keychains.
     if (SecKeychainSetUserInteractionAllowed(0) != 0) return error.KeyringUnavailable;
-    if (probing) {
-        if (terminal or !std.mem.eql(u8, identity.account, "synthetic-probe-do-not-use@example.invalid") or secret.len != 0) return error.InvalidKeychainWorker;
-        try synthetic(io);
+    if (std.mem.startsWith(u8, args[0], "upgrade-")) {
+        if (terminal or !std.mem.eql(u8, identity.account, "synthetic-probe-do-not-use@example.invalid")) return error.InvalidKeychainWorker;
+        try upgradeProbe(io, args[0], secret);
         return acknowledgement(io);
     }
+    if (probing) {
+        if (terminal or !std.mem.eql(u8, identity.account, "synthetic-probe-do-not-use@example.invalid") or secret.len == 0) return error.InvalidKeychainWorker;
+        try synthetic(io, secret);
+        return acknowledgement(io);
+    }
+    var default_ref: ?CF = null;
+    if (SecKeychainCopyDefault(&default_ref) != 0 or default_ref == null) return error.KeyringUnavailable;
+    defer CFRelease(default_ref.?);
+    try unlocked(default_ref.?);
     if (std.mem.eql(u8, args[0], "store")) {
-        try store(identity, null, secret);
+        try store(identity, default_ref, secret);
         return acknowledgement(io);
     }
     if (secret.len != 0) return error.InvalidKeychainWorker;
     if (clearing) {
-        try clear(identity, null);
+        try clear(identity, default_ref);
         return acknowledgement(io);
     }
     if (!std.mem.eql(u8, args[0], "lookup") and !std.mem.eql(u8, args[0], "lookup-auto")) return error.InvalidKeychainWorker;
     var output: [limits.secret]u8 = undefined;
     defer std.crypto.secureZero(u8, &output);
-    const n = try lookup(identity, null, &output);
+    const n = try lookupStable(io, identity, default_ref.?, &output);
     var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll(output[0..n]);
     try writer.interface.flush();
@@ -300,13 +386,53 @@ fn acknowledgement(io: std.Io) !void {
     try std.Io.File.stdout().writeStreamingAll(io, "OK\n");
 }
 
-fn synthetic(io: std.Io) !void {
-    var random: [16]u8 = undefined;
-    io.random(&random);
-    var path_buffer: [192]u8 = undefined;
-    const directory = try std.fmt.bufPrint(&path_buffer, "/tmp/omagma-keychain-probe-{s}", .{std.fmt.bytesToHex(random, .lower)});
-    try std.Io.Dir.createDirAbsolute(io, directory, .fromMode(0o700));
-    defer std.Io.Dir.cwd().deleteTree(io, directory) catch {};
+fn upgradeProbe(io: std.Io, operation: []const u8, directory: []const u8) !void {
+    if (!std.mem.startsWith(u8, directory, "/tmp/omagma-keychain-upgrade-") or directory.len > 192 or std.mem.indexOfScalar(u8, directory, 0) != null or std.mem.indexOf(u8, directory, "..") != null) return error.InvalidKeychainWorker;
+    var dir = try std.Io.Dir.openDirAbsolute(io, directory, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    if ((try dir.stat(io)).permissions.toMode() & 0o077 != 0) return error.InvalidKeychainWorker;
+    var storage: [256]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&storage, "{s}/fixture.keychain", .{directory}, 0);
+    const password = "synthetic-keychain-pass-not-a-user-password";
+    var ref: ?CF = null;
+    const creating = std.mem.eql(u8, operation, "upgrade-create");
+    const status = if (creating) SecKeychainCreate(path, password.len, password.ptr, 0, null, &ref) else SecKeychainOpen(path, &ref);
+    if (status != 0 or ref == null) return error.SyntheticKeychainUnavailable;
+    defer CFRelease(ref.?);
+    const identity: Identity = .{ .terminal = false, .account = "synthetic-upgrade@example.invalid" };
+    if (creating) {
+        try store(identity, ref, "synthetic-cross-build-token");
+    } else if (std.mem.eql(u8, operation, "upgrade-check")) {
+        if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+        var output: [limits.secret]u8 = undefined;
+        defer std.crypto.secureZero(u8, &output);
+        const count = try lookupStable(io, identity, ref.?, &output);
+        if (!std.mem.eql(u8, output[0..count], "synthetic-cross-build-token")) return error.SyntheticIdentityMismatch;
+        try store(identity, ref, "synthetic-cross-build-updated");
+        const updated = try lookupStable(io, identity, ref.?, &output);
+        if (!std.mem.eql(u8, output[0..updated], "synthetic-cross-build-updated")) return error.SyntheticIdentityMismatch;
+    } else if (std.mem.eql(u8, operation, "upgrade-verify")) {
+        if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+        var output: [limits.secret]u8 = undefined;
+        defer std.crypto.secureZero(u8, &output);
+        const count = try lookupStable(io, identity, ref.?, &output);
+        if (!std.mem.eql(u8, output[0..count], "synthetic-cross-build-updated")) return error.SyntheticIdentityMismatch;
+        if (SecKeychainLock(ref.?) != 0) return error.SyntheticKeychainUnavailable;
+        try std.testing.expectError(error.KeyringUnavailable, lookupStable(io, identity, ref.?, &output));
+        if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+    } else if (std.mem.eql(u8, operation, "upgrade-write")) {
+        if (SecKeychainUnlock(ref.?, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+        try store(identity, ref, "synthetic-cross-build-updated");
+    } else if (std.mem.eql(u8, operation, "upgrade-delete")) {
+        if (SecKeychainDelete(ref.?) != 0) return error.SyntheticKeychainCleanupFailed;
+    } else return error.InvalidKeychainWorker;
+}
+
+fn synthetic(io: std.Io, directory: []const u8) !void {
+    if (!std.mem.startsWith(u8, directory, "/tmp/omagma-keychain-probe-") or directory.len > 192 or std.mem.indexOfScalar(u8, directory, 0) != null or std.mem.indexOf(u8, directory, "..") != null) return error.InvalidKeychainWorker;
+    var dir = try std.Io.Dir.openDirAbsolute(io, directory, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    if ((try dir.stat(io)).permissions.toMode() & 0o077 != 0) return error.InvalidKeychainWorker;
     var keychain_path: [256]u8 = undefined;
     const filename = try std.fmt.bufPrintSentinel(&keychain_path, "{s}/fixture.keychain", .{directory}, 0);
     const password = "synthetic-keychain-pass-not-a-user-password";
@@ -324,7 +450,7 @@ fn synthetic(io: std.Io) !void {
     term_other.client = "synthetic-client-b";
     var output: [limits.secret]u8 = undefined;
     defer std.crypto.secureZero(u8, &output);
-    if (try lookup(bar_a, keychain, &output) != 0) return error.SyntheticItemAlreadyExists;
+    if (try lookupStable(io, bar_a, keychain, &output) != 0) return error.SyntheticItemAlreadyExists;
     try store(bar_a, keychain, "synthetic-bar-a");
     try store(bar_b, keychain, "synthetic-bar-b");
     try store(term_a, keychain, "synthetic-terminal-a");
@@ -335,9 +461,9 @@ fn synthetic(io: std.Io) !void {
     try foreign.string(kSecAttrLabel, terminal_service);
     try foreign.data(kSecValueData, "synthetic-unrelated-kept");
     if (SecItemAdd(foreign.value, null) != 0) return error.SyntheticKeychainUnavailable;
-    const n = try lookup(bar_a, keychain, &output);
+    const n = try lookupStable(io, bar_a, keychain, &output);
     if (!std.mem.eql(u8, output[0..n], "synthetic-bar-a")) return error.SyntheticIdentityMismatch;
-    const m = try lookup(term_a, keychain, &output);
+    const m = try lookupStable(io, term_a, keychain, &output);
     if (!std.mem.eql(u8, output[0..m], "synthetic-terminal-a")) return error.SyntheticIdentityMismatch;
     // A display-name edit must not change the service/account primary key.
     const relabel_query = try query(term_a, keychain, false, false);
@@ -346,18 +472,25 @@ fn synthetic(io: std.Io) !void {
     defer relabel.deinit();
     try relabel.string(kSecAttrLabel, "Renamed fictional credential");
     if (SecItemUpdate(relabel_query.value, relabel.value) != 0) return error.SyntheticKeychainUnavailable;
-    if (try lookup(term_a, keychain, &output) == 0) return error.SyntheticIdentityMismatch;
+    if (try lookupStable(io, term_a, keychain, &output) == 0) return error.SyntheticIdentityMismatch;
     if (SecKeychainLock(keychain) != 0) return error.SyntheticKeychainUnavailable;
-    try std.testing.expectError(error.KeyringUnavailable, lookup(term_a, keychain, &output));
+    try std.testing.expectError(error.KeyringUnavailable, lookupStable(io, term_a, keychain, &output));
     try std.testing.expectError(error.KeyringUnavailable, store(term_a, keychain, "synthetic-locked-write"));
+    try std.testing.expectError(error.KeyringUnavailable, unlocked(keychain));
     if (SecKeychainUnlock(keychain, password.len, password.ptr, 1) != 0) return error.SyntheticKeychainUnavailable;
+    // Boundaries use the actual signed-tool read path, not cast/inverse mocks.
+    var maximum: [limits.secret]u8 = @splat('x');
+    defer std.crypto.secureZero(u8, &maximum);
+    try store(term_a, keychain, &maximum);
+    const maximum_count = try lookupStable(io, term_a, keychain, &output);
+    if (maximum_count != limits.secret or !std.mem.eql(u8, output[0..maximum_count], &maximum)) return error.SyntheticIdentityMismatch;
     try store(term_a, keychain, "synthetic-terminal-updated");
-    const k = try lookup(term_a, keychain, &output);
+    const k = try lookupStable(io, term_a, keychain, &output);
     if (!std.mem.eql(u8, output[0..k], "synthetic-terminal-updated")) return error.SyntheticIdentityMismatch;
     const removed: Identity = .{ .terminal = true, .account = account_a };
     try clear(removed, keychain);
-    if (try lookup(term_a, keychain, &output) != 0 or try lookup(term_other, keychain, &output) != 0) return error.SyntheticItemStillExists;
-    if (try lookup(bar_a, keychain, &output) == 0 or try lookup(bar_b, keychain, &output) == 0) return error.SyntheticIdentityMismatch;
+    if (try lookupStable(io, term_a, keychain, &output) != 0 or try lookupStable(io, term_other, keychain, &output) != 0) return error.SyntheticItemStillExists;
+    if (try lookupStable(io, bar_a, keychain, &output) == 0 or try lookupStable(io, bar_b, keychain, &output) == 0) return error.SyntheticIdentityMismatch;
     const retained = try query(bar_a, keychain, false, false);
     defer retained.deinit();
     try retained.string(kSecAttrService, "io.example.unrelated-password");

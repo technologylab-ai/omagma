@@ -1,83 +1,146 @@
-# Native macOS terminal client
+# Omagma on macOS
 
-Omagma's experimental CLI and TUI run natively on macOS. The Omarchy bar remains
-a Linux desktop integration. The terminal uses the same separate accounts,
-bounded cache, local drafts, attachment limits and operation receipts as Linux.
-See [terminal mail](TERMINAL.md) and the [agent CLI](AGENT-CLI.md).
+The experimental TUI and agent CLI run natively on Apple Silicon and Intel Macs.
+The bar widget remains a Linux Omarchy integration. Mac terminal use needs no
+Omarchy, Quickshell, tmux, Python runtime or Zig compiler.
 
-## Build and try it
+## Install with Homebrew
 
-Source builds need Xcode Command Line Tools and **Zig 0.17.0 exactly**. Download
-the official archive matching the Mac's CPU from [Zig downloads](https://ziglang.org/download/),
-verify its SHA256 or signature, prepend its extracted directory to this shell's
-`PATH`, and check `zig version`. Keep the system compiler unchanged.
+Homebrew is the preferred Mac installation:
 
 ```sh
-zig version
-zig build -Doptimize=safe -j2
-zig-out/bin/omagma --version
-zig-out/bin/omagma tui --fixtures
+brew install renerocksai/tap/omagma
+omagma --version
 ```
 
-The fixture preview uses fictional mail and contacts without Google access.
-The resulting binary uses macOS system libc, Security and CoreFoundation; it
-does not require Quickshell, Omarchy, tmux or a Python runtime for ordinary use.
-Binary packaging and a Homebrew formula are separate follow-up work.
+If an `omagma` command already exists, inspect it before replacing or upgrading
+it. Homebrew verifies its selected release download. Then [connect your Google
+accounts](SETUP.md#full-tuicli-permissions), or give your agent the public
+[setup URL](AGENT-SETUP.md) and ask it to guide you one step at a time. The agent
+fetches the instructions and prepares local files itself; you do not need a
+source checkout.
 
-## Connect your account
+For a fresh terminal-only installation, use one Google OAuth registration,
+leave `oauthClientFile` absent or empty, and authorize with `--client-file`.
+There is no bar registration or read-only bar setup prerequisite. If you already
+have a read-only registration in the configuration, preserve it and use a
+different registration for broader terminal permissions.
 
-Follow [Google account setup](SETUP.md) and
-[full terminal permissions](SETUP.md#full-tuicli-permissions). The Google OAuth
-registration is the same kind used on Linux; select **Desktop app** where the
-Console asks for the application type. Consent happens in the configured Chrome
-profile. Each account has its own terminal grant and credential identity.
-
-Default Chrome locations are `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
-and `$HOME/Library/Application Support/Google/Chrome`. Override `chrome` and
-`chromeUserData` in your private configuration if your installation differs.
-Configure the actual profile directory for each account; display labels are not
-profile directory names. Keep the account configuration, registration JSON and
-cache outside Git.
-
-Native Keychain credentials are stored separately for the read-only bar namespace
-and terminal namespace. Terminal identity includes the account, Google client
-and grant. Revoking one account does not clear another account or its read-only
-credentials. No refresh token is passed through command-line arguments or the
-JSONL/UI protocol. A private exec worker contains synchronous Keychain calls so
-the parent can enforce its deadline and reap the child.
-
-Keychain access does not display unlock or permission dialogs. Unlock the relevant
-keychain explicitly if Omagma reports `KeyringUnavailable`, then retry the
-requested operation. Normal mail reads remain read-only; sending, contact edits
-and mailbox changes still require the account's explicit capabilities.
-
-`omagma cache-refresh` can run a read-only cache update. The supplied systemd
-timer is for Linux; this change does not install a Mac background service.
-
-## Native verification
-
-Developer checks use fictional provider data, owned PTYs and a temporary synthetic
-keychain, with no real OAuth/mail/profile changes. Run them under the cooperative
-[host reservation](VERIFICATION.md#cooperative-host-measurement-lock):
+After the account is connected:
 
 ```sh
-zig build test probes -Doptimize=debug -j2
-zig build -Doptimize=debug -j2
-zig-out/bin/omagma probe-keyring
-python3 tests/terminal_macos.py --binary zig-out/bin/omagma
-python3 tests/launch_macos.py --binary zig-out/bin/omagma
-python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode debug
+omagma tui
+omagma mail list --account personal@example.com --limit 30
 ```
 
-Repeat the appropriate checks with `-Doptimize=safe` and `--build-mode safe`.
-The Mac PTY harness keeps its session owner alive until terminal settings have
-been verified, then reaps the guardian/editor/TUI. The detached-launch witness
-checks literal arguments, an independent session, closed unrelated descriptors,
-null standard streams and exec failure without opening any desktop application.
+Use your configured account in place of the fictional example. Reading does not
+mark mail read. Sending or changing mailbox/contact data requires your own
+explicit action and the account's requested capabilities.
 
-Local qualification covers native Apple Silicon on macOS 26.6.2 with SDK 27.0.
-The proposed CI also runs native Apple Silicon and Intel macOS checks plus Linux
-static-musl regression checks. Intel runtime results require that CI; a cross
-build alone does not establish them. No Mac Omarchy bar, real Google consent,
-live send/contact operations or Mac memory baseline is claimed by these fixture
-checks. Historical Linux evidence keeps its original platform and version.
+## Manual release bundle
+
+If Homebrew is unavailable, download `SHA256SUMS` and the matching archive from
+[the same latest release](https://github.com/technologylab-ai/omagma/releases/latest):
+
+| `uname -m` | Bundle |
+| --- | --- |
+| `arm64` | `omagma-VERSION-macos-arm64.tar.gz` |
+| `x86_64` | `omagma-VERSION-macos-x86_64.tar.gz` |
+
+`VERSION` is the release number without `v`. Mac binaries target macOS 13.0 and
+later and use system libraries. A deployment target is not evidence of testing
+on that oldest OS; native test-platform details belong to
+[developer qualification](DEVELOPMENT.md#native-macos-checks). The dated Linux
+bar memory measurements do not measure the Mac client.
+
+Select only your archive's checksum line: Apple's `shasum` does not support the
+Linux `--ignore-missing` option. In the download directory, choose your actual
+filename and run:
+
+```sh
+omagma_bundle=omagma-VERSION-macos-arm64.tar.gz
+awk -v selected="$omagma_bundle" '$2 == selected { print; count++ } END { if (count != 1) exit 1 }' SHA256SUMS > omagma-selected.sha256
+shasum -a 256 --check omagma-selected.sha256
+```
+
+The selection must succeed and the archive must report `OK`. Stop if either
+command fails. Checksums detect corrupt or mismatched downloads; they are not a
+separate signature.
+
+Extract into a persistent versioned directory and verify the executable before
+consent:
+
+```sh
+omagma_release_dir="$HOME/.local/share/omagma/releases/${omagma_bundle%.tar.gz}"
+mkdir -p "$omagma_release_dir"
+tar -xzf "$omagma_bundle" -C "$omagma_release_dir"
+"$omagma_release_dir/omagma/zig-out/bin/omagma" --version
+mkdir -p "$HOME/.local/bin"
+ln -s "$omagma_release_dir/omagma/zig-out/bin/omagma" "$HOME/.local/bin/omagma"
+```
+
+Inspect an existing `omagma` command or symlink before changing it. Ensure
+`$HOME/.local/bin` is on PATH or invoke the verified executable by its absolute
+path. The archive includes the audited source/docs tree; its Linux QML and
+systemd files do not need installing on a Mac. Raw `omagma-macos-arm64` and
+`omagma-macos-x86_64` executables are also available with `LICENSES.txt`.
+
+## Accounts, Chrome and Keychain
+
+Private configuration is at `$HOME/.config/omagma/config.json`, or
+`$XDG_CONFIG_HOME/omagma/config.json` when set. The terminal cache defaults to
+`$HOME/.cache/omagma/terminal`, with `XDG_CACHE_HOME` honored. Use mode `0700`
+for directories and `0600` for config and downloaded registration files. Keep
+these files outside the release directory and Git; cache and drafts are private
+plaintext, not application-encrypted storage.
+
+Omitting `chrome` and `chromeUserData` uses the native defaults:
+
+- Executable: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+- Data directory: `$HOME/Library/Application Support/Google/Chrome`
+
+Override them only when your existing Chrome installation differs. Use the
+actual named profile directory from `chrome://version`, such as `Profile 1`,
+for each account. Display labels are not directory names; `Default` is rejected
+to avoid ambiguous routing. Never put unexpanded `$HOME` or `~` inside JSON.
+
+Refresh tokens use the current default user Keychain, normally your login
+keychain. Terminal identity includes the account, Google registration and grant.
+A binary upgrade retains those identities. Keychain access does not open unlock
+or permission dialogs: unlock the relevant keychain explicitly if Omagma
+reports `KeyringUnavailable`, then retry. See [privacy and credential handling](PRIVACY.md).
+
+Follow [account setup](SETUP.md) for Google Console, per-account consent and
+reconnection. An agent can verify status and real mail/contact reads after
+consent; installation needs no test send, contact edit, fixture suite or GUI
+qualification.
+
+## Upgrade, remove and background fetching
+
+```sh
+brew update
+brew upgrade omagma
+```
+
+For a manual installation, verify a new versioned bundle first, then update the
+existing command symlink. Keep private config, grants, cache and Chrome profiles.
+Restart an open TUI after an upgrade or permission change.
+
+`brew uninstall omagma`, or removing the manual executable/symlink, leaves
+private configuration, cached mail and credentials intact. Use the documented
+[disconnect/revoke actions](PRIVACY.md#disconnect-or-remove) when you also want
+to remove credentials; uninstalling is not Google-side revocation.
+
+Mac installation does not create a background service. The supplied five-minute
+systemd timer is Linux-only. `omagma cache-refresh` is an explicit read-only
+cache update and requires a configured read-only grant even on a terminal-only
+installation; this optional background path is separate from interactive full
+terminal access. See [background cache](TERMINAL-BACKGROUND.md).
+
+## Source builds
+
+Release/Homebrew installation needs no compiler. Source development requires
+Xcode Command Line Tools and exactly Zig 0.17.0 selected on the task's PATH;
+[development](DEVELOPMENT.md#build-from-source) explains the native SDK and
+baseline targets. Keep developer fixtures and qualification separate from
+ordinary account setup.

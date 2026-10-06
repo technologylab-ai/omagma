@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
 
 receipt = Path(sys.argv[1])
 inherited_fd = int(sys.argv[2])
@@ -17,5 +18,11 @@ receipt.write_text(json.dumps({
     "pid": os.getpid(), "session": os.getsid(0), "group": os.getpgrp(),
     "inheritedSentinel": inherited, "stdinEof": os.read(0, 1) == b"",
     "stdoutIsTty": os.isatty(1), "stderrIsTty": os.isatty(2),
+    "ignoredJobControl": signal.getsignal(signal.SIGTTOU) == signal.SIG_IGN,
     "argv": sys.argv[3:], "blockedSignals": sorted(int(value) for value in signal.pthread_sigmask(signal.SIG_BLOCK, [])),
 }) + "\n")
+
+# Pin this exact owned PID until the parent acknowledges its receipt.
+deadline = time.monotonic() + 10
+while not receipt.with_suffix(".release").exists() and time.monotonic() < deadline:
+    time.sleep(.01)

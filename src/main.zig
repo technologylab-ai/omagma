@@ -45,6 +45,13 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (std.mem.eql(u8, mode, "probe-keyring-upgrade")) {
+        const phase = args.next() orelse return error.Args;
+        const directory = args.next() orelse return error.Args;
+        if (args.next() != null) return error.Args;
+        try @import("keyring.zig").upgradeProbe(io, phase, directory);
+        return;
+    }
     if (std.mem.eql(u8, mode, "keychain-worker")) {
         if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
         var command: [5][]const u8 = undefined;

@@ -17,10 +17,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install exact Linux compiler
+        run: python3 .github/install_zig.py
       - name: Preserve the Linux static-musl CLI and TUI
         run: |
           set -e
-          python3 .github/install_zig.py
           for mode in debug safe; do
             zig build test -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all
             zig build -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --prefix ".verification-linux-$mode"
@@ -52,7 +53,17 @@ jobs:
             "$binary" probe-keyring
             python3 tests/terminal_integration.py --binary "$binary" --build-mode "$mode"
             python3 tests/terminal_macos.py --binary "$binary"
+            python3 tests/terminal_transport.py --binary "$binary" --build-mode "$mode"
             python3 tests/launch_macos.py --binary "$binary"
             ".verification-macos-$mode/bin/auth_probe" launch
             ".verification-macos-$mode/bin/auth_probe" callback
+          done
+      - name: Native credential upgrade boundary
+        run: |
+          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary .verification-macos-safe/bin/omagma
+      - name: Native Safe lifecycle and quiet gates
+        run: |
+          set -e
+          for kind in cli tui; do
+            python3 tests/terminal_measure_macos.py --binary .verification-macos-safe/bin/omagma --kind "$kind" --cycles 1000 --warmup 100 --idle-seconds 60 --output "$RUNNER_TEMP/macos-$kind-safe.json"
           done

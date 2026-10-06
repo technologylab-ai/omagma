@@ -125,6 +125,7 @@ fn nativeLookup(io: std.Io, operation: []const u8, terminal: bool, address: []co
     return out[0..n];
 }
 fn nativeCall(io: std.Io, operation: []const u8, terminal: bool, address: []const u8, client: []const u8, grant: []const u8, secret: ?[]const u8, out: []u8) !usize {
+    if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
     var executable: [4096]u8 = undefined;
     const length = try std.process.executablePath(io, &executable);
     var input: [native.marker.len + limits.secret]u8 = undefined;
@@ -148,11 +149,20 @@ pub fn runNativeWorker(io: std.Io, args: []const []const u8) !void {
     if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
     return native.worker(io, args);
 }
+pub fn upgradeProbe(io: std.Io, phase: []const u8, directory: []const u8) !void {
+    if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
+    const operation = if (std.mem.eql(u8, phase, "create")) "upgrade-create" else if (std.mem.eql(u8, phase, "check")) "upgrade-check" else if (std.mem.eql(u8, phase, "verify")) "upgrade-verify" else if (std.mem.eql(u8, phase, "write")) "upgrade-write" else if (std.mem.eql(u8, phase, "delete")) "upgrade-delete" else return error.InvalidKeychainWorker;
+    var output: [1]u8 = undefined;
+    _ = try nativeCall(io, operation, false, "synthetic-probe-do-not-use@example.invalid", "", "", directory, &output);
+}
 fn run(io: std.Io, argv: []const []const u8, input: ?[]const u8, out: []u8, allow_absent: bool) anyerror!usize {
-    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = if (input != null) .pipe else .ignore, .stdout = .pipe, .stderr = .ignore, .request_resource_usage_statistics = true });
+    var child = try std.process.spawn(io, .{ .argv = argv, .pgid = if (builtin.os.tag == .macos) 0 else null, .stdin = if (input != null) .pipe else .ignore, .stdout = .pipe, .stderr = .ignore, .request_resource_usage_statistics = true });
     defer {
         platform.closePipes(&child, io);
-        if (child.id != null) child.kill(io);
+        if (child.id) |pid| {
+            if (builtin.os.tag == .macos) std.posix.kill(-pid, .KILL) catch {};
+            child.kill(io);
+        }
     }
     if (input) |secret| {
         var writer = child.stdin.?.writerStreaming(io, &.{});
@@ -197,7 +207,14 @@ fn run(io: std.Io, argv: []const []const u8, input: ?[]const u8, out: []u8, allo
 pub fn syntheticProbe(io: std.Io) !void {
     const account = "synthetic-probe-do-not-use@example.invalid";
     if (builtin.os.tag == .macos) {
-        _ = try nativeCall(io, "probe", false, account, "", "", null, &probe_output);
+        var random: [16]u8 = undefined;
+        io.random(&random);
+        var path_buffer: [192]u8 = undefined;
+        const directory = try std.fmt.bufPrint(&path_buffer, "/tmp/omagma-keychain-probe-{s}", .{std.fmt.bytesToHex(random, .lower)});
+        try std.Io.Dir.createDirAbsolute(io, directory, .fromMode(0o700));
+        // Parent owns cleanup even if a synchronous native worker is killed.
+        defer std.Io.Dir.cwd().deleteTree(io, directory) catch {};
+        _ = try nativeCall(io, "probe", false, account, "", "", directory, &probe_output);
         return;
     }
     const secret = "synthetic-omagma-token-not-a-credential";

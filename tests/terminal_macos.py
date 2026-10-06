@@ -44,14 +44,21 @@ def guardian():
 
 class ChildStatus:
     def __init__(self, process, state):
-        self.process, self.state, self.pid = process, state, process.pid
+        self.process, self.state = process, state
 
     def value(self):
         return json.loads(self.state.read_text()) if self.state.is_file() else None
 
+    @property
+    def pid(self):
+        value = self.value()
+        return value["pid"] if value else self.process.pid
+
     def poll(self):
         value = self.value()
-        return value["exitCode"] if value is not None else self.process.poll()
+        if value is not None and value["exitCode"] is not None:
+            return value["exitCode"]
+        return self.process.poll()
 
     @property
     def returncode(self):
@@ -64,7 +71,7 @@ class ChildStatus:
 
 
 class DarwinTerminal(Terminal):
-    def __init__(self, binary, directory):
+    def __init__(self, binary, directory, extra=(), history_limit=None):
         directory = Path(directory)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.guardian_state = directory / "guardian-state.json"
@@ -72,7 +79,7 @@ class DarwinTerminal(Terminal):
         launcher = directory / "guardian-launcher"
         launcher.write_text(f"#!{sys.executable}\nimport sys\nsys.path.insert(0,{str(Path(__file__).resolve().parent)!r})\nfrom terminal_macos import guardian\nguardian()\n")
         launcher.chmod(0o700)
-        super().__init__(launcher, directory, columns=140, rows=34, environment={
+        super().__init__(launcher, directory, extra=extra, history_limit=history_limit, columns=140, rows=34, environment={
             "NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0",
             "OMAGMA_GUARDIAN_BINARY": str(binary), "OMAGMA_GUARDIAN_STATE": str(self.guardian_state),
             "OMAGMA_GUARDIAN_RELEASE": str(self.guardian_release)})
@@ -81,6 +88,21 @@ class DarwinTerminal(Terminal):
         self.binary = binary
 
     def close(self):
+        if self.process.poll() is None:
+            value = self.process.value()
+            if value:
+                try:
+                    os.kill(value["pid"], signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 3
+                while self.process.poll() is None and time.monotonic() < deadline:
+                    self.pump(.02)
+                if self.process.poll() is None:
+                    try:
+                        os.kill(value["pid"], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
         if self.process.poll() is not None:
             self.guardian_release.write_text("owned terminal restoration checked\n")
             try:
@@ -105,7 +127,7 @@ def cli_case(binary, directory):
     print("PASS macOS CLI:3 accounts/list/full bodies/isolation/zero sends/clean exit")
 
 
-def tui_case(binary, directory, terminate=False):
+def tui_case(binary, directory, terminate=False, terminate_editor=False):
     terminal = DarwinTerminal(binary, directory)
     try:
         terminal.until(lambda: reader_contains(terminal.screen, "Synthetic personal@example.com message 096."))
@@ -118,11 +140,12 @@ def tui_case(binary, directory, terminate=False):
             terminal.until(lambda: "Subject:" in terminal.text() and "Attach" in terminal.text())
             terminal.send(b"e")
             terminal.until(lambda: "OMAGMA TEST EDITOR:" in terminal.text())
-            terminal.send(b"s")
-            terminal.until(lambda: "Reviewed fixture editor body." in terminal.text() and "Attach" in terminal.text())
-        result = terminal.finish(signal_mode=signal.SIGTERM if terminate else False)
+            if not terminate_editor:
+                terminal.send(b"s")
+                terminal.until(lambda: "Reviewed fixture editor body." in terminal.text() and "Attach" in terminal.text())
+        result = terminal.finish(signal_mode=signal.SIGTERM if terminate or terminate_editor else False)
         require(result["termiosRestored"], "native TUI did not restore live owned PTY")
-        print("PASS macOS TUI:" + ("SIGTERM wake/cancellation" if terminate else "cached mail/account navigation/compose/editor save") + "/restored live tty/zero sends/clean exit")
+        print("PASS macOS TUI:" + ("SIGTERM during editor/cancellation" if terminate_editor else "SIGTERM wake/cancellation" if terminate else "cached mail/account navigation/compose/editor save") + "/restored live tty/zero sends/clean exit")
     except Exception:
         print(terminal.text())
         raise
@@ -140,6 +163,7 @@ def main():
         cli_case(args.binary.resolve(), root / "cli")
         tui_case(args.binary.resolve(), root / "tui")
         tui_case(args.binary.resolve(), root / "signal", terminate=True)
+        tui_case(args.binary.resolve(), root / "editor-signal", terminate_editor=True)
 
 
 if __name__ == "__main__":
