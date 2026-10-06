@@ -221,12 +221,25 @@ def run_case(binary,directory,name):
             require(editor['initialCanonical'] and editor['initialEcho'] and editor['stdinIsTty'], 'EDITOR did not inherit restored cooked terminal')
             require(terminal.screen.mouse_modes==set(),'mouse tracking remainsenabled insideEDITOR')
             terminal.send(b's')
-            terminal.until(lambda:'Compose' in terminal.text() and 'Fictional mouse editor body.' in terminal.text())
+            # Restoring tracking and the changed body precedes the foreground
+            # draft-save acknowledgement. Editing remains intentionally fenced
+            # during that save, so await its truthful sync row and saved title
+            # within the original condition deadline before testing the click.
+            terminal.until(lambda: ''.join(terminal.screen.cells[1]).strip() == 'Local draft · no mail sent'
+                and 'Compose · saved locally · not sent' in terminal.text()
+                and 'Fictional mouse editor body.' in terminal.text()
+                and 'Editor returned · draft retained' in terminal.text()
+                and terminal.screen.mouse_tracking_mode == 1002)
             modes(terminal)
+            returned_editor=json.loads(terminal.editor_log.read_text())
+            require(returned_editor.get('exited') is True and returned_editor.get('action') == 's'
+                    and returned_editor['pid'] == editor['pid'], 'controlled editor did not complete its one save invocation')
             # Click known draft field, enter literaltext, thenback; no send.
             click(terminal,*point(terminal,'Subject:'))
             terminal.send(b'Mouse field edit');terminal.gap(.1);terminal.send(b'\x1b');terminal.gap()
             require('Mouse field edit' in terminal.text(),'post-editor click reporting was not restored')
+            require(json.loads(terminal.editor_log.read_text()) == returned_editor,
+                    'post-editor click or field typing unexpectedly re-entered the editor')
             terminal.send(b'q');terminal.until(lambda:terminal.screen.locate('Mail ·') is not None)
             click(terminal,*list_point(terminal,1));terminal.until(lambda:contains(terminal,ACCOUNTS[0],95))
             result.update(editorCookedTerminal=True,trackingOffDuringEditor=True,trackingRestoredAfterEditor=True,postEditorClickWorks=True)
