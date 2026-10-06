@@ -22,6 +22,13 @@ pub const Position = struct {
 };
 pub const Options = struct { mode: Mode = .words, marker_at: ?usize = null, base_row: usize = 0 };
 pub const Glyph = struct { text: []const u8, columns: u16, position: Position, byte_offset: usize, marker: bool = false };
+fn standaloneAscii(input: []const u8, offset: usize) bool {
+    // A following non-ASCII code point may join this ASCII character (combining
+    // marks, variation selectors/keycaps or ZWJ). Keep those on the unchanged
+    // Unicode path. Printable ASCII followed by ASCII/end is one cell in every
+    // supported terminal width method; CR/LF/control clustering is excluded.
+    return input[offset] >= 0x20 and input[offset] < 0x7f and (offset + 1 == input.len or input[offset + 1] < 0x80);
+}
 pub const Iterator = struct {
     text: []const u8,
     width: u16,
@@ -46,11 +53,20 @@ pub const Iterator = struct {
     }
     fn wordWidth(self: *const Iterator, start: usize, end: usize) u16 {
         var result: u16 = 0;
-        var graphemes = vaxis.unicode.graphemeIterator(self.text[start..end]);
-        while (graphemes.next()) |gr| {
-            const raw = gr.bytes(self.text[start..end]);
-            result +|= @max(vaxis.gwidth.gwidth(if (raw.len > 128) "�" else raw, self.method), 1);
+        const word = self.text[start..end];
+        var prefix: usize = 0;
+        while (prefix < word.len and standaloneAscii(word, prefix)) : (prefix += 1) {
+            result +|= 1;
             if (result > self.width) break;
+        }
+        if (result <= self.width and prefix < word.len) {
+            const tail = word[prefix..];
+            var graphemes = vaxis.unicode.graphemeIterator(tail);
+            while (graphemes.next()) |gr| {
+                const raw = gr.bytes(tail);
+                result +|= @max(vaxis.gwidth.gwidth(if (raw.len > 128) "�" else raw, self.method), 1);
+                if (result > self.width) break;
+            }
         }
         if (self.options.marker_at) |at| {
             if (!self.marker_done and at >= start and at <= end) result +|= 1;
@@ -129,15 +145,17 @@ pub const Iterator = struct {
                     continue; // A soft wrap omits only the separating whitespace.
                 }
             }
-            var graphemes = vaxis.unicode.graphemeIterator(self.text[self.offset..]);
-            const gr = graphemes.next() orelse return null;
-            const bytes = gr.bytes(self.text[self.offset..]);
-            const shown = if (bytes.len > 128) "�" else bytes;
-            const columns = @max(vaxis.gwidth.gwidth(shown, self.method), 1);
+            const raw = if (standaloneAscii(self.text, self.offset)) self.text[self.offset .. self.offset + 1] else blk: {
+                var graphemes = vaxis.unicode.graphemeIterator(self.text[self.offset..]);
+                const gr = graphemes.next() orelse return null;
+                break :blk gr.bytes(self.text[self.offset..]);
+            };
+            const shown = if (raw.len > 128) "�" else raw;
+            const columns = if (raw.len == 1 and raw[0] >= 0x20 and raw[0] < 0x7f) 1 else @max(vaxis.gwidth.gwidth(shown, self.method), 1);
             self.position.wrap(columns, self.width);
             const position = self.position;
             const byte_offset = self.offset;
-            self.offset += gr.len;
+            self.offset += raw.len;
             self.position.column +|= columns;
             return .{ .text = shown, .columns = columns, .position = position, .byte_offset = byte_offset };
         }
@@ -179,6 +197,47 @@ test "reader polish: caret uses full current word and same emitted virtual marke
         try std.testing.expectEqual(expected, glyph.position);
     };
     try std.testing.expectEqual(@as(usize, 1), markers);
+}
+test "reader performance: guarded ASCII agrees with independent Unicode graphemes and numeric wrapping" {
+    const corpus = [_][]const u8{
+        "Fictional bounded navigation line.",
+        "ASCII a\u{301} b 1\u{fe0f}\u{20e3} \u{600}c 🇦🇹 👩‍💻 界 z",
+        "A\u{200d}B x\u{fe0f} z",
+        "spaces  preserve literal spacing and trailing ASCII",
+    };
+    for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth, .no_zwj }) |method| {
+        for (corpus) |input| for ([_]u16{ 3, 7, 43 }) |width| {
+            var measured = Iterator.init(input, width, method, .{ .mode = .literal });
+            // Reference uses one unmodified dependency grapheme iterator,
+            // independent of the optimized per-cell ASCII branch.
+            var reference = vaxis.unicode.graphemeIterator(input);
+            var row: usize = 0;
+            var column: u16 = 0;
+            while (reference.next()) |expected| {
+                const raw = expected.bytes(input);
+                const shown = if (raw.len > 128) "�" else raw;
+                const columns = @max(vaxis.gwidth.gwidth(shown, method), 1);
+                if (column +| columns > width) {
+                    row += 1;
+                    column = 0;
+                }
+                const actual = measured.next() orelse return error.MissingExpectedGlyph;
+                try std.testing.expectEqualStrings(shown, actual.text);
+                try std.testing.expectEqual(columns, actual.columns);
+                try std.testing.expectEqual(expected.start, actual.byte_offset);
+                try std.testing.expectEqual(row, actual.position.row);
+                try std.testing.expectEqual(column, actual.position.column);
+                column +|= columns;
+            }
+            try std.testing.expect(measured.next() == null);
+            try std.testing.expectEqual(Position{ .row = row, .column = column }, measured.position);
+        };
+        // Combining bytes must belong to the ASCII base, and adding the
+        // virtual caret moves the complete word rather than detaching it.
+        const input = "1234567890123 a\u{301}b";
+        try std.testing.expectEqual(Position{ .row = 0, .column = 16 }, after(input, 16, method, .{}));
+        try std.testing.expectEqual(Position{ .row = 1, .column = 1 }, caret(input, 17, 16, method, .words));
+    }
 }
 test "reader polish: long whitespace before an overwide token preserves every cell and caret" {
     const allocator = std.testing.allocator;

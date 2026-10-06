@@ -1130,6 +1130,14 @@ const App = struct {
         const current = self.statusContext();
         if (!std.meta.eql(current, self.status_owner)) self.say(false, "Ready", .{});
     }
+    fn keepBackgroundDiagnostic(self: *const App, kind: JobKind) bool {
+        // Incidental cache/label/identity readiness must not erase the current
+        // field/action diagnostic in that exact context. A foreground label
+        // picker, explicit actions/retry results and changed contexts retain
+        // normal status behavior; errors never become globally sticky.
+        const background = kind == .recipient_cache or kind == .recipient_refresh or kind == .identities or (kind == .labels_list and !self.label_picker);
+        return background and self.status_kind == .failure and std.meta.eql(self.statusContext(), self.status_owner);
+    }
     fn diagnostic(self: *App, code: []const u8) void {
         self.status_error_len = 0;
         if (code.len == 0 or code.len > self.status_error_code.len) return;
@@ -2207,7 +2215,7 @@ const App = struct {
             status.state = if (status.cache_ready) .refreshing else .fetching;
             status.error_len = 0;
             self.say(false, "{s}", .{if (status.cache_ready) "Cached mail ready · fetching latest changes" else "Fetching mail…"});
-        } else self.say(false, "{s}", .{switch (kind) {
+        } else if (!self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
             .cached_search => "Searching cached mail…",
             .recipient_cache => "Loading recent-mail recipients… · typing remains available",
             .recipient_refresh => "Updating recent sent-mail recipients… · typing remains available",
@@ -2649,7 +2657,7 @@ const App = struct {
         switch (kind) {
             .labels_list => {
                 try self.replaceLabels(response);
-                self.say(false, "{s}", .{if (self.label_picker) "Choose label · Enter Add · - Remove" else "Ready"});
+                if (!self.keepBackgroundDiagnostic(.labels_list)) self.say(false, "{s}", .{if (self.label_picker) "Choose label · Enter Add · - Remove" else "Ready"});
             },
             .batch, .undo => {
                 const result_value = try self.data(self.job_arena.allocator(), response);
@@ -2745,7 +2753,7 @@ const App = struct {
                         break;
                     };
                 }
-                self.say(false, "Verified sending identities ready · f chooses From", .{});
+                if (!self.keepBackgroundDiagnostic(.identities)) self.say(false, "Verified sending identities ready · f chooses From", .{});
             },
             .autosave => {
                 const result = try self.data(self.job_arena.allocator(), response);
@@ -4609,6 +4617,9 @@ const App = struct {
                 const after = match_at + highlight.len;
                 next_match = if (cache_query.find(clean[after..], highlight)) |relative| after + relative else null;
             }
+            // Count every row/byte for the full-body scrollbar, but construct
+            // styles only for cells that can actually reach this viewport.
+            if (glyph.position.row < offset or glyph.position.row - offset >= win.height or glyph.columns > win.width) continue;
             var cell_style = self.style(if (glyph.marker) .accent else tone);
             if (!glyph.marker) if (next_match) |match_at| if (glyph.byte_offset >= match_at and glyph.byte_offset < match_at + highlight.len) {
                 if (self.mono) cell_style.reverse = true else {
@@ -4616,7 +4627,7 @@ const App = struct {
                     cell_style.fg = .{ .rgb = self.palette.background };
                 }
             };
-            if (glyph.position.row >= offset and glyph.position.row - offset < win.height and glyph.columns <= win.width) win.writeCell(glyph.position.column, @intCast(glyph.position.row - offset), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = cell_style });
+            win.writeCell(glyph.position.column, @intCast(glyph.position.row - offset), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = cell_style });
         }
         return iterator.position.row + 1;
     }
@@ -6950,6 +6961,71 @@ test "editor persistence: exit save uses operation acknowledgement rather than r
         try std.testing.expectEqualStrings("Retained termination body 🌋", app.compose.fields[4].value());
         try std.testing.expect(app.job.future == null);
     }
+}
+
+test "status polish: queued recipient cache loading preserves same-context diagnostic and help only" {
+    const CachedRecipients = struct {
+        fn call(_: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const value = try std.json.parseFromSlice(Value, allocator, request, .{});
+            defer value.deinit();
+            if (!same(text(get(value.value, "cmd")), "mail.recipients")) return error.ExpectedCachedRecipients;
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"recipients\":[]}}");
+        }
+    };
+    const allocator = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try allocator.create(Loop);
+    defer allocator.destroy(loop);
+    loop.init(std.testing.io, allocator, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var app = factory.app(allocator);
+    defer app.deinit();
+    app.loop = loop;
+    app.client.cachedFn = CachedRecipients.call;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.mode = .attachment;
+    app.previous_mode = .compose;
+    app.compose_active = true;
+    app.sayError("NotRegularFile");
+    const expected = try allocator.dupe(u8, app.status[0..app.status_len]);
+    defer allocator.free(expected);
+    // Reproduce the exact queued writer from the trace, not just a hypothetical
+    // status-context change: recipient-refresh completion starts cached loading.
+    try app.apply(.recipient_refresh, "{\"ok\":true,\"data\":{}}");
+    try std.testing.expect(try app.dispatchComposer());
+    try std.testing.expectEqual(JobKind.recipient_cache, app.job.kind);
+    try std.testing.expectEqualStrings(expected, app.status[0..app.status_len]);
+    try std.testing.expectEqualStrings("NotRegularFile", app.status_error_code[0..app.status_error_len]);
+    app.job.future.?.await(app.io);
+    try app.finish();
+    try std.testing.expectEqualStrings(expected, app.status[0..app.status_len]);
+    try app.apply(.labels_list, "{\"ok\":true,\"data\":{\"labels\":[]}}");
+    try std.testing.expectEqualStrings(expected, app.status[0..app.status_len]);
+    try app.apply(.identities, "{\"ok\":true,\"data\":{\"identities\":[]}}");
+    try std.testing.expectEqualStrings(expected, app.status[0..app.status_len]);
+    try app.onKey(.{ .codepoint = Key.escape });
+    try app.onKey(.{ .codepoint = '?' });
+    try std.testing.expectEqual(Mode.help, app.mode);
+    try std.testing.expectEqualStrings("NotRegularFile", app.status_error_code[0..app.status_error_len]);
+    app.mode = .browse;
+    app.clearObsoleteStatus();
+    try std.testing.expectEqualStrings("Ready", app.status[0..app.status_len]);
+    try std.testing.expectEqual(@as(usize, 0), app.status_error_len);
+    // A real foreground retry result remains able to clear the previous error.
+    app.mode = .compose;
+    app.sayError("NotRegularFile");
+    try app.composerChanged();
+    try std.testing.expect(!app.warning and app.status_kind == .view);
+    try std.testing.expectEqual(@as(usize, 0), app.status_error_len);
+    app.sayError("NotRegularFile");
+    app.selection_generation +%= 1;
+    try std.testing.expect(!app.keepBackgroundDiagnostic(.recipient_cache));
+    try std.testing.expect(!app.keepBackgroundDiagnostic(.read));
+    app.sayError("NotRegularFile");
+    app.label_picker = true;
+    try std.testing.expect(!app.keepBackgroundDiagnostic(.labels_list));
 }
 
 test "status polish: header context and list counts do not invent mailbox totals" {
