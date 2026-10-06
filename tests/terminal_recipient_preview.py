@@ -78,7 +78,7 @@ def correspondents(binary, directory):
         # its first metadata request while typing and selecting local matches.
         current = json.loads(source.path(ACCOUNTS[0]).read_text())
         hold.write_text('Owned fictional Sent metadata hold\n')
-        current['sync']['fixtureProgress'] = {'phase':'metadata','completed':0,
+        current['sync']['fixtureProgress'] = {'phase':'metadata','completed':1,
             'fixtureHold':hold.name,'fixtureEntered':entered.name}
         source.path(ACCOUNTS[0]).write_text(json.dumps(current))
         terminal.send(b'c')
@@ -95,7 +95,9 @@ def correspondents(binary, directory):
         require('ORIGINAL LINE' not in panel_text(terminal,'Draft preview'), 'draft preview shows unrelated incoming content')
         require(hold.exists(), 'background hold ended before cached completion')
         hold.unlink()
-        terminal.send(b'\x1b\x13')
+        terminal.send(b'\x1b')
+        terminal.gap(.06)
+        terminal.send(b'\x13')
         terminal.until(lambda:'Sending account:' in terminal.text())
         with Client(binary,directory,extra=extra) as client:
             drafts = client.request('draft.list')['drafts']
@@ -106,6 +108,13 @@ def correspondents(binary, directory):
             require(client.request('cache.stats')['fixtureSends']==0,'recipient test sent mail')
         terminal.finish()
         print('PASS recipients: unsaved Inbox/Sent metadata, no contacts permission, isolation/dedup and Ctrl+N/P during held background fetch')
+    except Exception:
+        # This owned fixture contains only fictional data. Current cells and
+        # separate gate state distinguish candidate/UI faults from bad gates.
+        print(json.dumps({'candidateVisible':'caroline-new@example.test' in terminal.text(),
+                          'metadataHoldEntered':entered.exists(), 'holdRetained':hold.exists()}))
+        print(terminal.text())
+        raise
     finally:
         hold.unlink(missing_ok=True)
         terminal.close()
