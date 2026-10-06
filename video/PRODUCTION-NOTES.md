@@ -18,7 +18,8 @@ npm dependencies.
 | Mail, people, accounts | Invented in `capture/promo_fixture.py`. The smoke-test mail reuses the public fixture text from `tests/terminal_publication.py` |
 | Bar dropdown | The repository's offscreen Quickshell test shell (`offscreen.qml`), with fictional snapshots injected as `tests/ui_capture.py --publication` does |
 | Bar strip (workspaces, clock) | A neutral drawing of the host bar. It shows only the real Omagma icon, with no unread badge (the widget has none) |
-| CLI cameo | The exact command `omagma mail list --fixtures --account work@example.com --limit 2 \| jq .` and its real stdout (display trimmed by lines/width only) |
+| Launch example | Normal user command `omagma tui`; the recording harness uses `--fixtures` to supply fictional mail |
+| CLI cameo | Normal user example `omagma mail list --account work@example.com --limit 2 \| jq .`, over real stdout captured with the fictional provider; the raw capture command retains `--fixtures` |
 | Logo | The approved envelope with flowing magma (`assets/omagma-logo.png`), rendered from a high-resolution copy of the same artwork. Only the interior of the magma blob is gently displaced; the silhouette and envelope are unchanged |
 | Palette | `src/terminal/theme.zig` fallback palette; `website/site.css` magma/ink/text tokens |
 | Captions | [BRIEF.md](BRIEF.md). Claims match README.md, docs/FEATURES.md and docs/TERMINAL.md |
@@ -33,6 +34,8 @@ npm dependencies.
   scope on screen. The real
   `metadata 1/32` line is shown as the app drew it: a batch counter, not an
   Inbox total.
+- On-screen launch and CLI examples use normal user commands. `--fixtures` belongs
+  to the recording harness and raw receipts, rather than the product launch examples.
 - Keycaps appear only for keys the harness actually sent. The pointer appears
   only for a mouse event actually sent at that cell. Border pulses follow
   borders the app drew, at moments where focus or sending really changed.

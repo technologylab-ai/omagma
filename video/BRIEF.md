@@ -125,7 +125,7 @@ are the first cuts if the song is short.
 | 12 | Review | riser | `Ctrl` `S`: account, From, recipients, subject, attachments | **Nothing sends until you press `y`.** |
 | 13 | Eruption | **drop** | `y` keycap hits on the drop; the real result; magma pulse along every border, then cooling | **A tiny volcano that sends mail.** |
 | 14 | Calm *(optional)* | drop | Inbox up to date; slow pull back | — |
-| 15 | Agents | drop tail | A side panel with the real `omagma mail list … --fixtures` command and its first JSON lines | **Plus a JSONL CLI for your agents.** / *Experimental* |
+| 15 | Agents | drop tail | A side panel with the normal `omagma mail list …` usage example and real fictional-provider JSON lines | **Plus a JSONL CLI for your agents.** / *Experimental* |
 | 16 | Outro | ending hit | Logo with flowing magma; name; tagline; platforms; URL; fine print | **omagma** / *Gmail, one account at a time.* / *Omarchy bar · Linux & macOS terminal · Agent CLI* / `technologylab-ai.github.io/omagma` / *TUI and CLI are experimental. Fictional demo mail.* |
 
 The received-file picker, draft recovery after restart, contacts, labels and
@@ -174,7 +174,7 @@ Calmer reading stays in the quiet opening.
 | Film (s) | Music | Scene | Caption |
 | --- | --- | --- | --- |
 | 0.0–4.5 | dark swell | Logo in the dark, wordmark rises from a seam, logo flies into the bar | — |
-| 4.5–8.9 | bass enters | A molten wave pours from the icon and cools into the real dropdown; account switch; `omagma tui --fixtures` typed on a seam | **A tiny volcano in your Omarchy bar.** / *Three Gmail accounts at a glance. Read-only.* |
+| 4.5–8.9 | bass enters | A molten wave pours from the icon and cools into the real dropdown; account switch; normal `omagma tui` typed on a seam | **A tiny volcano in your Omarchy bar.** / *Three Gmail accounts at a glance. Read-only.* |
 | 8.9–13.3 | intro steps up | The terminal opens out of the seam; real cache-first startup, "Refreshing cached mail" → "Up to date" | **Cached mail first.** / *Gmail catches up.* + *Real TUI · fictional mail* |
 | 13.3–15.5 | | `1` `3` `2` | **Three accounts. Never mixed.** |
 | 15.5–21.6 | phrase accent on the click | `j` `j` `j`, a click on the smoke-test row, then the reader framed on the right | **Vim keys. Or just click.**, then the memory stat (memory revision): **3 accounts.** / **~11 MB.** / *Whole TUI process: 10.6 MB settled RSS · Linux v0.2.4 · 3 fictional accounts · small mail · Excludes terminal emulator, editor and bar* |
@@ -186,7 +186,7 @@ Calmer reading stays in the quiet opening.
 | 39.6–43.9 | **drop** | `y` → "Saved by mock provider"; heat ring and border pulse | **A tiny volcano that sends mail.** |
 | 43.9–48.1 | | `/volcano` → real filtered cache results | **`/` searches the cache. `\` asks Gmail.** |
 | 48.1–53.5 | phrase | `v` reader below, `z` full-screen smoke-test mail | **Read beside, below, or full screen.** |
-| 53.5–56.7 | | The exact `omagma mail list … --fixtures \| jq .` and its output | **Plus a JSONL CLI for your agents.** / *omagma cli · experimental* |
+| 53.5–56.7 | | Normal `omagma mail list … \| jq .` usage over real fictional-provider output | **Plus a JSONL CLI for your agents.** / *omagma cli · experimental* |
 | 56.7–61.9 | last phrase, stop, tail | Logo, name, tagline, platforms, URL, experimental/fictional fine print; flare on the music's stop | — |
 
 The memory revision's poster adds one restrained block under the headline:

@@ -572,7 +572,9 @@ function cli(s, t) {
   const a = s.at, body = $('#cli .body'), panel = $('#cli .panel')
   const k = viscous((t - s.t0) / .25)
   panel.style.transform = `translateX(${(1 - k) * 60}px)`; panel.style.opacity = k
-  const command = CLI?.command || 'omagma mail list --fixtures --account work@example.com --limit 3'
+  // Show normal user usage; the recorded command and output retain the fictional provider.
+  const command = (CLI?.command || 'omagma mail list --account work@example.com --limit 2 | jq .')
+    .replace(/(^|\s)--fixtures(?=\s|$)/g, '').trim()
   const typeEnd = (a.out ?? s.t0 + 1) - M.beat * .25
   const n = Math.floor(clamp((t - (a.type ?? s.t0)) / Math.max(.2, typeEnd - (a.type ?? s.t0))) * command.length + 1e-6)
   let html = `<span class="ps">❯</span> ${escape(command.slice(0, n))}`

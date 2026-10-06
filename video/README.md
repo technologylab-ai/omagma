@@ -92,8 +92,10 @@ throwaway profile.
    in `promo_fixture.py` are fictional. The compose take must end with exactly
    one fixture send, counted against the take's own fixture root. `bar.py` grabs the
    real dropdown from the offscreen Quickshell test shell, with fictional
-   injected snapshots. The CLI cameo is the exact
-   `omagma mail list --fixtures …` command, pretty-printed by a real `jq .`.
+   injected snapshots. The CLI output is captured using
+   `omagma mail list --fixtures …` and pretty-printed by a real `jq .`. On-screen
+   launch and CLI examples omit the harness flag and show normal user commands
+   (`omagma tui` and `omagma mail list …`); the raw capture keeps the flag.
    Every capture is scanned for local identities and for addresses outside
    the fixture's known fictional set (a pane may truncate or wrap one).
 2. **Measure** (`analyze/analyze_track.py`) records duration, loudness, tempo,
