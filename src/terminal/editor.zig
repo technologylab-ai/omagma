@@ -5,6 +5,10 @@ const types = @import("types.zig");
 const files = @import("files.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const darwin = struct {
+    extern "c" fn tcgetpgrp(fd: c_int) c_int;
+    extern "c" fn tcsetpgrp(fd: c_int, group: c_int) c_int;
+};
 
 pub const Result = struct {
     body: []u8,
@@ -107,6 +111,16 @@ fn waitCancellation(io: Io, cancellation: *Io.Event) !void {
 // std.posix wrappers select std.c with libc but its declarations are absent;
 // do not pass the Linux pointer signature to a libc value-signature function.
 fn foregroundGroup(fd: std.posix.fd_t) !std.posix.pid_t {
+    if (@import("builtin").os.tag == .macos) while (true) {
+        const group = darwin.tcgetpgrp(fd);
+        switch (std.posix.errno(group)) {
+            .SUCCESS => return group,
+            .INTR => continue,
+            .NOTTY => return error.NotATerminal,
+            .BADF => return error.BadFileDescriptor,
+            else => return error.TerminalControlFailed,
+        }
+    };
     while (true) {
         var group: std.os.linux.pid_t = undefined;
         switch (std.os.linux.errno(std.os.linux.tcgetpgrp(fd, &group))) {
@@ -119,6 +133,18 @@ fn foregroundGroup(fd: std.posix.fd_t) !std.posix.pid_t {
     }
 }
 fn setForegroundGroup(fd: std.posix.fd_t, group: std.posix.pid_t) !void {
+    if (@import("builtin").os.tag == .macos) while (true) {
+        switch (std.posix.errno(darwin.tcsetpgrp(fd, group))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .NOTTY => return error.NotATerminal,
+            .IO => return error.ProcessOrphaned,
+            .BADF => return error.BadFileDescriptor,
+            .PERM => return error.NotAPgrpMember,
+            .INVAL => return error.InvalidForegroundGroup,
+            else => return error.TerminalControlFailed,
+        }
+    };
     while (true) {
         switch (std.os.linux.errno(std.os.linux.tcsetpgrp(fd, &group))) {
             .SUCCESS => return,

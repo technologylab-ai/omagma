@@ -362,6 +362,7 @@ test "fcntl flags preserve Linux x86_64 and arm64 scalar bits" {
     try std.testing.expectEqual(@as(u32, 0), flagBits(.{}));
 }
 test "raw fcntl errors remain kernel errors when linked with musl" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     // Linux UAPI EBADF=9. Raw syscalls return -9, whereas libc returns -1
     // and stores errno separately. Never decode a raw result via posix.errno.
     try std.testing.expectEqual(@as(u16, 9), @as(u16, @intCast(@backingInt(linux.errno(linux.fcntl(-1, linux.F.GETFL, 0))))));

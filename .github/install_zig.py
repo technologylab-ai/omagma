@@ -1,4 +1,4 @@
-"""Install the exact official Linux compiler from checked archive metadata."""
+"""Install the exact official Linux/macOS compiler from checked archive metadata."""
 import hashlib
 import json
 import os
@@ -17,11 +17,12 @@ version = package_versions()[1]
 metadata = json.loads((ROOT / ".github/zig-release.json").read_text())
 if version != "0.17.0" or metadata["version"] != version:
     raise SystemExit("Expected exact Zig 0.17.0 and matching archive metadata")
-if platform.system() != "Linux":
-    raise SystemExit("Release CI requires a native Linux compiler")
+system = {"Linux": "linux", "Darwin": "macos"}.get(platform.system())
+if system is None:
+    raise SystemExit("Compiler CI supports native Linux/macOS hosts")
 arch = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[platform.machine()]
-item = metadata["artifacts"][arch + "-linux"]
-expected_url = f"https://ziglang.org/download/{version}/zig-{arch}-linux-{version}.tar.xz"
+item = metadata["artifacts"][arch + "-" + system]
+expected_url = f"https://ziglang.org/download/{version}/zig-{arch}-{system}-{version}.tar.xz"
 if item["tarball"] != expected_url:
     raise SystemExit("Expected official exact-release archive URL")
 directory = Path(os.environ["RUNNER_TEMP"]) / "omagma-zig"

@@ -60,20 +60,13 @@ fn openAccountDirectory(io: std.Io, root: []const u8, account: []const u8, optio
 /// Nonblocking and NOFOLLOW even if a path is swapped between stat and open.
 /// Raw Linux errno decoding is required for static-musl raw syscall results.
 fn openRefreshFile(dir: std.Io.Dir, io: std.Io, create: bool) !std.Io.File {
-    const linux = std.os.linux;
     const before = dir.statFile(io, "refresh.lock", .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound and create) null else return err;
     if (before) |stat| if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0 or stat.size != 0) return error.InsecureRefreshLease;
-    var flags: linux.O = .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true, .NOCTTY = true };
-    flags.CREAT = create;
-    const raw = linux.openat(dir.handle, "refresh.lock", flags, 0o600);
-    switch (linux.errno(raw)) {
-        .SUCCESS => {},
-        .NOENT => return error.FileNotFound,
-        .LOOP, .ISDIR => return error.InsecureRefreshLease,
-        .ACCES, .PERM => return error.AccessDenied,
+    const file = @import("../native_file.zig").openAt(io, dir, "refresh.lock", .{ .read_write = true, .create = create, .mode = 0o600 }) catch |err| switch (err) {
+        error.FileNotFound, error.AccessDenied, error.Canceled => return err,
+        error.SymbolicLinkNotAllowed, error.IsDir => return error.InsecureRefreshLease,
         else => return error.RefreshLeaseOpenFailed,
-    }
-    const file: std.Io.File = .{ .handle = @intCast(raw), .flags = .{ .nonblocking = true } };
+    };
     errdefer file.close(io);
     const stat = try file.stat(io);
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0 or stat.size != 0) return error.InsecureRefreshLease;
@@ -778,11 +771,17 @@ test "refresh lease is exclusive across handles and does not lock cached reads" 
     defer other.release();
     var live = (try RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = false })).?;
     defer live.release();
-    // Literal Linux kernel oracles, independent of packed flag definitions.
-    const fd_flags = std.os.linux.fcntl(lease.file.handle, 1, 0);
-    try std.testing.expectEqual(@as(usize, 1), fd_flags);
-    const open_flags = std.os.linux.fcntl(lease.file.handle, 3, 0);
-    try std.testing.expect(open_flags & 2048 != 0);
+    // Independent literal kernel/libc flag expectations for supported hosts.
+    if (@import("builtin").os.tag == .linux) {
+        const fd_flags = std.os.linux.fcntl(lease.file.handle, 1, 0);
+        try std.testing.expectEqual(@as(usize, 1), fd_flags);
+        const open_flags = std.os.linux.fcntl(lease.file.handle, 3, 0);
+        try std.testing.expect(open_flags & 2048 != 0);
+    } else if (@import("builtin").os.tag == .macos) {
+        try std.testing.expectEqual(@as(c_int, 1), std.c.fcntl(lease.file.handle, std.c.F.GETFD));
+        const open_flags = std.c.fcntl(lease.file.handle, std.c.F.GETFL);
+        try std.testing.expect(open_flags >= 0 and open_flags & 4 != 0);
+    }
     lease.release();
     try std.testing.expect(!try refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
 }
@@ -801,8 +800,15 @@ test "refresh lease rejects symlink directory fifo and public mode before blocki
     try dir.createDir(std.testing.io, "refresh.lock", .fromMode(0o700));
     try std.testing.expectError(error.InsecureRefreshLease, refreshActive(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
     try dir.deleteDir(std.testing.io, "refresh.lock");
-    const made = std.os.linux.mknodat(dir.handle, "refresh.lock", 0o010000 | 0o600, 0);
-    try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(made));
+    if (@import("builtin").os.tag == .macos) {
+        const Native = struct {
+            extern "c" fn mkfifoat(fd: c_int, path: [*:0]const u8, mode: std.c.mode_t) c_int;
+        };
+        try std.testing.expectEqual(@as(c_int, 0), Native.mkfifoat(dir.handle, "refresh.lock", 0o600));
+    } else {
+        const made = std.os.linux.mknodat(dir.handle, "refresh.lock", 0o010000 | 0o600, 0);
+        try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(made));
+    }
     try std.testing.expectError(error.InsecureRefreshLease, RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
     try dir.deleteFile(std.testing.io, "refresh.lock");
     const file = try dir.createFile(std.testing.io, "refresh.lock", .{ .permissions = .fromMode(0o644) });
@@ -816,6 +822,7 @@ fn closeRawPair(pair: *[2]std.os.linux.fd_t) void {
     };
 }
 test "refresh lease kernel ownership releases after a reaped child exits" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

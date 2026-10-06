@@ -11,9 +11,9 @@ pub const Config = struct {
     refresh_seconds: u32 = 0,
     pub fn defaults(self: *Config, home: []const u8) !void {
         self.* = .{};
-        try self.chrome.set("/usr/bin/google-chrome-stable");
+        try self.chrome.set(if (@import("builtin").os.tag == .macos) "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" else "/usr/bin/google-chrome-stable");
         var path: [4096]u8 = undefined;
-        try self.chrome_data.set(try std.fmt.bufPrint(&path, "{s}/.config/google-chrome", .{home}));
+        try self.chrome_data.set(try std.fmt.bufPrint(&path, if (@import("builtin").os.tag == .macos) "{s}/Library/Application Support/Google/Chrome" else "{s}/.config/google-chrome", .{home}));
         const defs = .{ .{ "personal@example.com", "Profile 3", true }, .{ "work@example.com", "Profile 1", true }, .{ "optional@example.com", "Profile 2", false } };
         inline for (defs, 0..) |d, i| {
             try self.accounts[i].address.set(d[0]);

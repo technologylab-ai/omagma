@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) void {
     };
 }
 fn app(init: std.process.Init) !void {
-    if (builtin.os.tag != .linux) return error.LinuxRequired;
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
     // Runtime bookkeeping is outside the application slab but its worker count
     // and virtual stack reservations are explicit rather than unlimited.
     var runtime = std.Io.Threaded.init(init.gpa, .{ .stack_size = 1024 * 1024, .concurrent_limit = .limited(16), .async_limit = .limited(16), .environ = init.minimal.environ });
@@ -45,6 +45,31 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (std.mem.eql(u8, mode, "keychain-worker")) {
+        if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
+        var command: [5][]const u8 = undefined;
+        var count: usize = 0;
+        while (args.next()) |arg| {
+            if (count == command.len) return error.InvalidArgv;
+            command[count] = arg;
+            count += 1;
+        }
+        if (count != command.len) return error.InvalidArgv;
+        try @import("keyring.zig").runNativeWorker(io, &command);
+        return;
+    }
+    if (std.mem.eql(u8, mode, "__launch-worker")) {
+        if (builtin.os.tag != .macos) return error.UnsupportedPlatform;
+        var command: [16][]const u8 = undefined;
+        var count: usize = 0;
+        while (args.next()) |arg| {
+            if (count == command.len) return error.InvalidArgv;
+            command[count] = arg;
+            count += 1;
+        }
+        try @import("platform.zig").launchDarwinWorker(io, command[0..count]);
+        return;
+    }
     if (std.mem.eql(u8, mode, "cache-refresh")) {
         try @import("terminal/background.zig").run(init, io, &args);
         return;
@@ -158,7 +183,10 @@ fn app(init: std.process.Init) !void {
         var parse_alloc = std.heap.FixedBufferAllocator.init(&parse_buffer);
         try config.load(io, path, parse_alloc.allocator(), &config_storage);
     }
-    if (std.mem.eql(u8, mode, "daemon")) try daemon.run(io, &config, options) else if (std.mem.eql(u8, mode, "auth")) {
+    if (std.mem.eql(u8, mode, "daemon")) {
+        if (builtin.os.tag != .linux) return error.LinuxRequired;
+        try daemon.run(io, &config, options);
+    } else if (std.mem.eql(u8, mode, "auth")) {
         const a = &config.accounts[config.index(account orelse return error.AccountRequired) orelse return error.UnknownAccount];
         if (!a.enabled) return error.AccountDisabled;
         try @import("open_target.zig").checkProfile(io, &config, a);
