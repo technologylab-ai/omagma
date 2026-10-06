@@ -198,7 +198,9 @@ case "$cmd" in
     cp "$cache/poster/$name/poster.png" "${OUT%.mp4}-poster.png"
     magick "${OUT%.mp4}-poster.png" -quality 90 "${OUT%.mp4}-poster.jpg"
     report "$OUT" "$(python3 -c "print(round($dur * $FPS))")"
-    note "done: $OUT, ${OUT%.mp4}-poster.png, video/out/$name.cuts.json"
+    # Each film output keeps the resolved cut times it was rendered from.
+    cp "$here/out/$name.cuts.json" "${OUT%.mp4}.cuts.json"
+    note "done: $OUT, ${OUT%.mp4}-poster.png, ${OUT%.mp4}.cuts.json"
     ;;
   preview)
     cut=${1:?usage: video/build.sh preview CUT}; logo

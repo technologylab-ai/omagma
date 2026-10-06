@@ -31,8 +31,18 @@ The current film is reproduced with the user's song saved as
 
 ```sh
 HOST_TOKEN=<coordinator token> video/build.sh capture
-HOST_TOKEN=<coordinator token> video/build.sh film video/tracks/slow-eruption.json video/cache/music/slow-eruption.mp3
+HOST_TOKEN=<coordinator token> OUT=video/out/omagma-slow-eruption-memory.mp4 \
+  video/build.sh film video/tracks/slow-eruption.json video/cache/music/slow-eruption.mp3
 ```
+
+The current cut map is the **memory revision**. Beside the held smoke-test
+reader, it shows a source-qualified stat overlay: **3 accounts. ~11 MB.**, with
+its scope on screen (whole TUI process, 10.6 MB settled RSS, Linux v0.2.4,
+three fictional accounts with small mail, excluding the terminal emulator,
+editor and bar). The figure comes from the published v0.2.4 measurement in
+`docs/MEMORY.md`; see PRODUCTION-NOTES.md. A caption with `"style": "stat"`
+takes a `kicker`, a molten `big` figure and `small` scope lines. `poster.memory`
+adds the short poster version.
 
 `TAKES=main,stream` and `SIZE=132x36` limit or resize a capture. Helpers:
 `python3 video/tools/tape_text.py TAPE [MARK…]` prints a tape's real screens;
@@ -40,10 +50,11 @@ HOST_TOKEN=<coordinator token> video/build.sh film video/tracks/slow-eruption.js
 beat-level kick/snare/onset evidence and fits local beat grids;
 `video/tools/audio_edit.py` renders a cut map's soundtrack montage.
 
-The film step writes `video/out/omagma-<song>.mp4`, plus a `-poster.png` and
-`-poster.jpg`. It also writes `<song>.cuts.json`, with every scene, caption,
-keycap and sync time resolved to seconds, and `.report.json`, which records
-ffprobe, frame count and loudness. `video/cache/` and `video/out/` are
+The film step writes `video/out/omagma-<song>.mp4` (or `OUT=`), plus a
+`-poster.png` and `-poster.jpg`, a matching `.cuts.json` with every scene,
+caption, keycap and sync time resolved to seconds, and `.report.json`, which
+records ffprobe, frame count and loudness. Use a new `OUT=` for each revision,
+so earlier deliveries stay untouched. `video/cache/` and `video/out/` are
 ignored by Git; music is never committed.
 
 **Heavy steps** (capture, analyze, sheet, draft, film) run only inside the

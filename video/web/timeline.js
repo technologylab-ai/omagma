@@ -105,7 +105,7 @@ function resolve(cut) {
     if (s.kind === 'term') resolveTerm(s, list[i - 1])
   })
   // A caption makes way when the next one in the same place arrives: quick exit, short delayed entry.
-  const family = (pos) => ({ 'left-low': 'left', 'bottom-low': 'bottom' })[pos || 'left'] || pos || 'left'
+  const family = (pos) => ({ 'left-low': 'left', stat: 'left', 'bottom-low': 'bottom' })[pos || 'left'] || pos || 'left'
   const all = list.flatMap((s) => s.captions).sort((a, b) => a.t0 - b.t0)
   all.forEach((c, i) => {
     const next = all.slice(i + 1).find((n) => family(n.pos) === family(c.pos))
@@ -507,10 +507,11 @@ const POSITIONS = {
   left: 'left:110px;top:380px;width:660px', 'left-low': 'left:110px;top:640px;width:640px',
   bottom: 'left:110px;bottom:170px;width:1400px', 'bottom-low': 'left:110px;bottom:70px;width:1500px',
   top: 'left:110px;top:96px;width:1500px', center: 'left:0;right:0;top:400px',
+  stat: 'left:110px;top:258px;width:700px',
 }
-const SCRIM = { left: 'left', 'left-low': 'left', bottom: 'bottom', 'bottom-low': 'bottom', center: 'center', top: 'top' }
+const SCRIM = { left: 'left', 'left-low': 'left', stat: 'stat', bottom: 'bottom', 'bottom-low': 'bottom', center: 'center', top: 'top' }
 function scrims() {
-  for (const side of ['left', 'bottom', 'center', 'top']) {
+  for (const side of ['left', 'bottom', 'center', 'top', 'stat']) {
     if (!$(`#captions .scrim.${side}`)) {
       const el = document.createElement('div'); el.className = `scrim ${side}`; $('#captions').prepend(el)
     }
@@ -529,7 +530,8 @@ function captions(t) {
       el.id = `cap-${c.id}`
       el.className = `cap ${c.pos === 'center' ? 'center' : ''} ${c.style || ''}`
       el.style.cssText = POSITIONS[c.pos || 'left']
-      el.innerHTML = `<div class="clip"><div class="big">${c.big}</div></div><div class="seam"></div>${c.small ? `<div class="small">${c.small}</div>` : ''}`
+      el.innerHTML = `${c.kicker ? `<div class="kicker">${c.kicker}</div>` : ''}<div class="clip"><div class="big">${c.big}</div></div>` +
+        `<div class="seam"></div>${c.small ? `<div class="small">${c.small}</div>` : ''}`
       $('#captions').append(el)
     }
     el.style.display = 'block'
@@ -541,18 +543,24 @@ function captions(t) {
       scrim.style.opacity = Math.max(+scrim.style.opacity || 0, v).toFixed(3)
     }
     el.style.transform = `translateY(${(-16 * exit).toFixed(1)}px)`
-    const big = $('.big', el), seamEl = $('.seam', el), small = $('.small', el)
-    const k = viscous((local - .05) / .55), heat = 1 - smooth(.12, 1.0, local)
+    const big = $('.big', el), seamEl = $('.seam', el), small = $('.small', el), kicker = $('.kicker', el)
+    // A stat leads with its kicker; the figure itself rises half a beat later, on the beat.
+    const lead = kicker ? M.beat / 2 : 0
+    if (kicker) {
+      const kk = easeOut(local / .35)
+      kicker.style.opacity = kk.toFixed(3); kicker.style.transform = `translateX(${((1 - kk) * -24).toFixed(1)}px)`
+    }
+    const k = viscous((local - lead - .05) / .55), heat = 1 - smooth(lead + .12, lead + 1.2, local)
     big.style.transform = `translateY(${((1 - k) * 105).toFixed(2)}%)`
-    if (c.style === 'molten') big.style.backgroundPosition = `${(-t * 40) % 200}% 0`
+    if (c.style === 'molten' || c.style === 'stat') big.style.backgroundPosition = `${(-t * 40) % 200}% 0`
     else big.style.color = `rgb(${mix(244, 255, heat) | 0}, ${mix(240, 214, heat) | 0}, ${mix(247, 168, heat) | 0})`
-    big.style.textShadow = c.style === 'molten' ? `0 0 ${18 + 30 * heat}px rgba(255, 130, 50, ${.35 + .4 * heat})` : heat > .01 ? `0 0 ${36 * heat}px rgba(255, 140, 60, ${.6 * heat})` : ''
-    seamEl.style.transform = `scaleX(${easeOut(local / .3).toFixed(4)})`
+    big.style.textShadow = c.style === 'molten' || c.style === 'stat' ? `0 0 ${18 + 30 * heat}px rgba(255, 130, 50, ${.35 + .4 * heat})` : heat > .01 ? `0 0 ${36 * heat}px rgba(255, 140, 60, ${.6 * heat})` : ''
+    seamEl.style.transform = `scaleX(${easeOut((local - lead) / .3).toFixed(4)})`
     seamEl.style.setProperty('--hotspot', `${(15 + 75 * ((local * .45) % 1)).toFixed(1)}%`)
     seamEl.style.opacity = (.45 + .55 * heat).toFixed(3)
     seamEl.style.boxShadow = `0 0 ${(4 + 18 * heat).toFixed(1)}px rgba(255, 140, 60, ${(.25 + .6 * heat).toFixed(3)})`
     if (small) {
-      const ks = easeOut((local - .3) / .4)
+      const ks = easeOut((local - lead - .3) / .4)
       small.style.opacity = ks.toFixed(3); small.style.transform = `translateY(${((1 - ks) * 12).toFixed(1)}px)`
     }
   }
@@ -627,6 +635,12 @@ function poster() {
   win.style.transform = `translate(${(W / 2 - cx * s).toFixed(2)}px, ${(H / 2 - cy * s).toFixed(2)}px) scale(${s.toFixed(5)})`
   pulses({ pulses: [{ t: 0, dur: 1, pane: 'focused' }] }, .5, tape, index)
   $('#term .pointer').style.display = 'none'
+  const memory = $('#poster .memory'), m = spec.memory
+  memory.style.display = m ? 'block' : 'none'
+  if (m) {
+    $('.line', memory).innerHTML = `${m.kicker} <span>${m.big}</span>`
+    $('.small', memory).textContent = m.small
+  }
   const ctx = $('#poster .logo').getContext('2d')
   ctx.clearRect(0, 0, 520, 520); ctx.drawImage(LOGO.flow.draw(2.4, { amount: 1, glow: .55 }), 0, 0)
   $('#bg .heat').style.opacity = .34

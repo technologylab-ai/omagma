@@ -86,14 +86,19 @@ body { font-family: var(--display); color: var(--text0); -webkit-font-smoothing:
 
 /* Poster: a real TUI state with the logo, name and one line */
 #poster { z-index: 1; }
-#poster .logo { position: absolute; left: 112px; top: 214px; width: 132px; height: 132px; filter: drop-shadow(0 0 40px rgba(236, 122, 53, .45)); }
-#poster .word { position: absolute; left: 264px; top: 232px; font-size: 96px; font-weight: 800; letter-spacing: -.035em; line-height: 1; }
-#poster .headline { position: absolute; left: 112px; top: 430px; width: 760px; font-size: 76px; font-weight: 850; letter-spacing: -.03em; line-height: 1.04;
+#poster .logo { position: absolute; left: 112px; top: 150px; width: 132px; height: 132px; filter: drop-shadow(0 0 40px rgba(236, 122, 53, .45)); }
+#poster .word { position: absolute; left: 264px; top: 168px; font-size: 96px; font-weight: 800; letter-spacing: -.035em; line-height: 1; }
+#poster .headline { position: absolute; left: 112px; top: 350px; width: 760px; font-size: 76px; font-weight: 850; letter-spacing: -.03em; line-height: 1.04;
   background: linear-gradient(100deg, var(--hot) 0%, var(--hi) 30%, var(--core) 62%, var(--hi) 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
   filter: drop-shadow(0 0 22px rgba(255, 130, 50, .35)); }
-#poster .seam { position: absolute; left: 114px; top: 610px; width: 600px; height: 4px; border-radius: 3px; box-shadow: 0 0 16px rgba(255, 140, 60, .7);
+#poster .seam { position: absolute; left: 114px; top: 530px; width: 600px; height: 4px; border-radius: 3px; box-shadow: 0 0 16px rgba(255, 140, 60, .7);
   background: linear-gradient(90deg, rgba(180, 70, 27, 0), var(--deep) 6%, var(--core) 40%, var(--hot) 68%, var(--core) 90%, rgba(180, 70, 27, 0)); }
-#poster .url { position: absolute; left: 114px; top: 660px; font-family: var(--mono); font-size: 30px; color: var(--accent); }
+#poster .memory { position: absolute; left: 114px; top: 590px; width: 640px; display: none; }
+#poster .memory .line { font-size: 54px; font-weight: 850; letter-spacing: -.03em; line-height: 1.1; color: var(--text0); }
+#poster .memory .line span { background: linear-gradient(100deg, var(--hot) 0%, var(--hi) 35%, var(--core) 75%, var(--hi) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 14px rgba(255, 130, 50, .35)); }
+#poster .memory .small { font-size: 23px; line-height: 1.45; color: var(--text2); margin-top: 10px; white-space: pre-line; }
+#poster .url { position: absolute; left: 114px; top: 860px; font-family: var(--mono); font-size: 30px; color: var(--accent); }
 
 /* Captions rise out of a molten seam */
 #captions { position: absolute; inset: 0; pointer-events: none; }
@@ -102,6 +107,8 @@ body { font-family: var(--display); color: var(--text0); -webkit-font-smoothing:
   background: linear-gradient(90deg, rgba(10, 13, 20, .95) 0%, rgba(10, 13, 20, .88) 58%, rgba(10, 13, 20, 0) 100%); }
 .scrim.bottom { left: 0; right: 0; bottom: 0; height: 380px;
   background: linear-gradient(0deg, rgba(10, 13, 20, .95) 0%, rgba(10, 13, 20, .86) 42%, rgba(10, 13, 20, 0) 100%); }
+.scrim.stat { left: 0; top: 0; bottom: 0; width: 796px;
+  background: linear-gradient(90deg, rgba(10, 13, 20, .99) 0%, rgba(10, 13, 20, .985) 95%, rgba(10, 13, 20, 0) 100%); }
 .scrim.top { left: 0; right: 0; top: 0; height: 330px;
   background: linear-gradient(180deg, rgba(10, 13, 20, .95) 0%, rgba(10, 13, 20, .86) 50%, rgba(10, 13, 20, 0) 100%); }
 .scrim.center { inset: 0; background: radial-gradient(60% 50% at 50% 50%, rgba(10, 13, 20, .9) 0%, rgba(10, 13, 20, .72) 55%, rgba(10, 13, 20, .35) 100%); }
@@ -112,6 +119,14 @@ body { font-family: var(--display); color: var(--text0); -webkit-font-smoothing:
   background: linear-gradient(90deg, rgba(180, 70, 27, .0), var(--deep) 6%, var(--core) 40%, var(--hot) var(--hotspot, 70%), var(--core) 90%, rgba(180, 70, 27, 0)); }
 .cap .small { font-size: 34px; font-weight: 500; color: var(--text2); margin-top: 18px; letter-spacing: -.005em; white-space: pre-line; }
 .cap code, .cap kbd { font-family: var(--mono); font-size: .86em; color: var(--accent); font-weight: 700; }
+/* Stat: a white kicker, one molten figure rising from its seam, readable scope lines */
+.cap.stat .kicker { font-size: 70px; font-weight: 850; letter-spacing: -.03em; line-height: 1.04; color: var(--text0); margin-bottom: 2px; }
+.cap.stat .big { font-size: 188px; letter-spacing: -.05em; line-height: .98; padding-right: .06em;
+  background: linear-gradient(100deg, var(--hot) 0%, var(--hi) 25%, var(--core) 50%, var(--hi) 75%, var(--hot) 100%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; }
+.cap.stat .seam { width: 560px; margin-top: 4px; }
+.cap.stat .small { font-size: 30px; line-height: 1.5; margin-top: 22px; color: var(--text1); }
+.cap.stat .small b { color: var(--accent); font-weight: 650; }
 .cap.center { text-align: center; }
 .cap.center .seam { width: 860px; margin-left: auto; margin-right: auto; transform-origin: 50% 50%; }
 .cap.molten .big { font-size: 96px; background: linear-gradient(100deg, var(--hot) 0%, var(--hi) 25%, var(--core) 50%, var(--hi) 75%, var(--hot) 100%);

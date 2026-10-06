@@ -36,8 +36,9 @@ not on fire."), and the climax pays it off by replying to it.
 - Every Omagma pixel comes from the real published v0.2.4 executable in fixture
   mode, driven through an owned PTY or the offscreen Quickshell UI. Accounts,
   people and mail are fictional (`example.com`/`.org`/`.net`).
-- The film re-times genuine states to the music. It never claims a duration,
-  speed-up or RAM figure, and never shows a UI state the app did not produce.
+- The film re-times genuine states to the music. It never claims a duration
+  or speed-up, and never shows a UI state the app did not produce. Its only
+  memory figure is the scoped overlay described below.
 - Overlays mark real events only: keycaps show keys actually sent; a pointer
   shows a mouse event actually sent at that cell; the molten border pulse
   follows the borders the app drew. The pulse happens only when focus or
@@ -46,12 +47,15 @@ not on fire."), and the climax pays it off by replying to it.
   appears. The outro states that the TUI and CLI are experimental.
 - The bar is Linux/Omarchy-only and read-only. The TUI/CLI run on Linux and
   macOS. There are no calendar views, label management or tmux scenes.
-- Memory: no stat card. The only memory reference is the joke inside the
-  fictional smoke-test mail, which is already on the public screenshots. If a
-  memory line is ever added, use exactly: "Three-account bar ≈31 MB (v0.2.2,
-  2026-10-05, excludes Chrome/widgets)" or "TUI ≈11 MB settled (v0.2.4 synthetic
-  Linux, excludes terminal/editor/bar)", sourced from docs/MEMORY.md, and never
-  attribute the bar number to the TUI.
+- Memory: at the user's request, the memory revision adds one stat overlay
+  ("3 accounts. ~11 MB.") beside the held smoke-test mail. This supersedes the
+  first cut's "no stat card" choice. It is an editorial overlay grounded in the
+  published v0.2.4 measurement, not an app widget. The overlay shows its scope
+  on screen: the whole TUI process, 10.6 MB settled RSS, Linux v0.2.4, three
+  fictional accounts with small mail, excluding the terminal emulator, editor
+  and bar. Never attribute the bar's ≈31 MB to the TUI. Never present ~11 MB as
+  an upper bound, a live real-account figure, a Mac figure or a browser
+  comparison.
 
 ## Look
 
@@ -173,8 +177,8 @@ Calmer reading stays in the quiet opening.
 | 4.5–8.9 | bass enters | A molten wave pours from the icon and cools into the real dropdown; account switch; `omagma tui --fixtures` typed on a seam | **A tiny volcano in your Omarchy bar.** / *Three Gmail accounts at a glance. Read-only.* |
 | 8.9–13.3 | intro steps up | The terminal opens out of the seam; real cache-first startup, "Refreshing cached mail" → "Up to date" | **Cached mail first.** / *Gmail catches up.* + *Real TUI · fictional mail* |
 | 13.3–15.5 | | `1` `3` `2` | **Three accounts. Never mixed.** |
-| 15.5–21.0 | phrase accent on the click | `j` `j` `j`, a click on the smoke-test row, then a large reader view | **Vim keys. Or just click.** |
-| 21.0–25.4 | | `J` to the newsletter, `z` expands the real table | **HTML-only mail, as clean text.** / *Tables and lists kept. Nothing remote loads.* |
+| 15.5–21.6 | phrase accent on the click | `j` `j` `j`, a click on the smoke-test row, then the reader framed on the right | **Vim keys. Or just click.**, then the memory stat (memory revision): **3 accounts.** / **~11 MB.** / *Whole TUI process: 10.6 MB settled RSS · Linux v0.2.4 · 3 fictional accounts · small mail · Excludes terminal emulator, editor and bar* |
+| 21.6–25.4 | | `J` to the newsletter, `z` expands the real table | **HTML-only mail, as clean text.** / *Tables and lists kept. Nothing remote loads.* |
 | 25.4–29.8 | drums enter at 26.5 | Fast scroll to the cache tail, real placeholders with `metadata 1/32`, real older rows arrive | **Keep scrolling. Older mail flows in.** / *Placeholders turn into real rows.* |
 | 29.8–33.1 | | `R`, Cc `ced` → `Ctrl` `N` → Enter, the reply typed; "saved locally · not sent" | **Reply-all. Addresses complete locally.** / *The draft saves locally. Nothing is sent yet.* |
 | 33.1–35.3 | | `A` + Tab completion, twice; both files listed with sizes | **Attach files. Tab completes paths.** |
@@ -184,6 +188,10 @@ Calmer reading stays in the quiet opening.
 | 48.1–53.5 | phrase | `v` reader below, `z` full-screen smoke-test mail | **Read beside, below, or full screen.** |
 | 53.5–56.7 | | The exact `omagma mail list … --fixtures \| jq .` and its output | **Plus a JSONL CLI for your agents.** / *omagma cli · experimental* |
 | 56.7–61.9 | last phrase, stop, tail | Logo, name, tagline, platforms, URL, experimental/fictional fine print; flare on the music's stop | — |
+
+The memory revision's poster adds one restrained block under the headline:
+**3 accounts. ~11 MB**, with *Whole TUI process, Linux v0.2.4, fictional mail.
+Excludes terminal emulator, editor and bar.*
 
 The poster is a separate composition of one real tape state: the smoke-test
 mail in the reader, the warm selected row, the logo, the name, the line
