@@ -129,7 +129,9 @@ def digests(directory, account=ACCOUNTS[0]):
 def seed(binary, directory, fixture, accounts=(ACCOUNTS[0],), bodies=BODY_IDS, extra=(), byte_guard=False):
     with Client(binary, directory, extra=fixture.options(*extra)) as client:
         for account in accounts:
-            client.request("mail.refresh", account, limit=40)
+            # This suite qualifies a complete 40-body offline head, larger
+            # than the normal 32-body prefetch. Request that workload explicitly.
+            client.request("mail.refresh", account, limit=40, prefetchLimit=RETAINED_COUNT)
             ids = [m["id"] for m in pages(client, account)]
             expected = fixture.data[account]["expected"]["baselineIds"]
             require(ids == (expected[:len(ids)] if byte_guard else expected),
