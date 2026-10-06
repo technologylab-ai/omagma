@@ -9,10 +9,33 @@ These are dated Linux x86_64 observations, not measurements of every later sourc
 | Mode | Approximate footprint | Observation |
 | --- | ---: | --- |
 | Bar, three connected accounts | **31 MB** | v0.2.2, 2026-10-05; backend PSS plus separately attributed UI share |
-| Agent CLI, three fictional accounts | **9 MB** settled | v0.2.3 local mouse-runtime workload; whole-process RSS |
-| TUI, three fictional accounts | **12 MB** settled | v0.2.3 local mouse-runtime workload; whole-process RSS |
+| Agent CLI, three fictional accounts | **8 MB** settled | v0.2.4, 2026-10-06; published executable, whole-process RSS |
+| TUI, three fictional accounts | **11 MB** settled | v0.2.4, 2026-10-06; published executable, whole-process RSS |
 
 Bar totals exclude Chrome and unrelated shell widgets. Terminal totals exclude the emulator, external editor and separately running bar. Large bodies and a full cache have separate workloads below. Allocation limits describe reserved or capped storage; they are not a prediction of resident RAM. Installing Omagma does not require running these measurement procedures.
+
+## Published terminal workload, v0.2.4
+
+The actual published Linux x86_64 static-musl executable, using exact Zig 0.17.0
+in Safe mode, completed 100 warm-ups, 1,000 measured cycles and 60 quiet seconds.
+Its SHA-256 is `5483e981701fb06b34f6a69d6f47b6c4fd236862ba87df4c031129553578dc03`.
+
+| Whole process workload | Settled RSS / PSS (KiB) | OS peak RSS (KiB) | Warm growth (KiB) |
+| --- | ---: | ---: | ---: |
+| Agent CLI | 7,648 / 7,640 | 11,532 | 0 |
+| TUI | 10,328 / 10,320 | 13,884 | 36 |
+| Complete 2 MiB HTML plaintext fallback | 23,748 / 23,740 | 34,652 | -48 |
+
+All three observed zero quiet CPU and no refused allocations. Both TUI workloads
+emitted zero quiet bytes. The application-owned heap stays capped at 64 MiB,
+with a separate 16 MiB backend/HTTP reservation; those bounds are separate from
+resident memory. The complete large-mail tail remains reachable.
+
+Native Mac measurements use RSS and physical footprint rather than Linux PSS.
+[Release qualification](evidence/terminal-0.2.4.md) records their separate
+artifacts, platforms, workloads and downloaded/Homebrew checks. These synthetic
+process lifetimes do not replace the dated live three-account bar estimate or
+isolate a compiler effect.
 
 ## Terminal modes, 0.2.2
 
