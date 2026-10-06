@@ -58,6 +58,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared Zig compiler
         run: python3 .github/install_zig.py
+      - name: Ensure the timezone fixture database is available
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tzdata
+          test -f /etc/localtime
+          test -f /usr/share/zoneinfo/Europe/Vienna
+          test -f /usr/share/zoneinfo/Asia/Kathmandu
       - name: Debug correctness checks
         run: |
           zig version
@@ -89,6 +96,21 @@ jobs:
           python3 tests/terminal_html.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-html.json
           python3 tests/terminal_repaint.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-repaint.json
           python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
+      - name: Debug current terminal and agent feature acceptance
+        run: |
+          .verification-debug/bin/omagma build-info
+          sha256sum .verification-debug/bin/omagma
+          python3 tests/publication_gif.py
+          for suite in \
+            terminal_wishlist_backend terminal_cache_windows \
+            terminal_composer_workflow terminal_compose_attachments \
+            terminal_triage_ui terminal_reader_context \
+            terminal_scroll_progress terminal_loading terminal_fetch_wheel \
+            terminal_local_ui terminal_polish_reader terminal_polish_compose \
+            terminal_polish_status terminal_timezone terminal_recipient_preview
+          do
+            python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
+          done
       - name: Safe correctness and standalone probes
         run: |
           zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe
@@ -134,6 +156,22 @@ jobs:
             .verification-debug/bin/auth_probe keyring
             .verification-safe/bin/auth_probe keyring
           '
+      - name: Safe current terminal and agent feature acceptance
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          dist/omagma-linux-$RELEASE_ARCH build-info
+          sha256sum dist/omagma-linux-$RELEASE_ARCH
+          for suite in \
+            terminal_wishlist_backend terminal_cache_windows \
+            terminal_composer_workflow terminal_compose_attachments \
+            terminal_triage_ui terminal_reader_context \
+            terminal_scroll_progress terminal_loading terminal_fetch_wheel \
+            terminal_local_ui terminal_polish_reader terminal_polish_compose \
+            terminal_polish_status terminal_timezone terminal_recipient_preview
+          do
+            python3 "tests/$suite.py" --binary "dist/omagma-linux-$RELEASE_ARCH"
+          done
       - name: Safe terminal workflows and memory
         run: |
           python3 tests/terminal_cache.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-cache-safe.json

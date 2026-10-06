@@ -28,6 +28,7 @@ the original documents, not generated HTML.
 
 The design templates and CSS were authored with Claude Opus 5.5 at xhigh effort
 from an isolated public-only snapshot, then reviewed and integrated locally.
-The approved logo and screenshots remain actual project assets. New terminal
-features are identified as source-only; historical memory observations retain
-their dates and accounting boundaries.
+The approved logo and screenshots remain actual project assets. The guides
+describe current project features; historical memory observations
+retain their dates and accounting boundaries. The sidebar version follows
+`build.zig.zon` automatically when the application version changes.

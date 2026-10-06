@@ -38,11 +38,11 @@ release qualification have their own instructions in `AGENTS.md`.
 ## Configure accounts
 
 - Reuse the user's existing choices and private config. Ask only for missing
-  account addresses, Chrome profile directories, client-file paths and
+  account addresses, Chrome profile directories, registration JSON paths and
   background-refresh preference. Configure only requested accounts.
 - Store config under `${XDG_CONFIG_HOME:-$HOME/.config}/omagma/config.json`
   unless an explicit existing path is used. Keep the directory 0700 and the
-  file 0600. Keep downloaded OAuth JSON outside Git with file mode 0600.
+  file 0600. Keep downloaded registration JSON outside Git with file mode 0600.
 - Map each account to its existing Chrome profile directory, such as
   `Profile 1`, rather than its display name. `chrome://version` shows the
   profile path. The current build requires distinct named profiles and
@@ -55,7 +55,7 @@ release qualification have their own instructions in `AGENTS.md`.
 ## Connect the requested permissions
 
 `docs/SETUP.md` has both permission sets and Console steps. The bar uses
-`gmail.readonly`. Full TUI/CLI features use a **different Desktop OAuth client
+`gmail.readonly`. Full TUI/CLI features use a **different Google OAuth registration
 in the same project**, with Gmail API and People API enabled.
 
 Recommend agent-guided Google setup. Give one small Console step at a time,
@@ -67,8 +67,10 @@ Keep the detailed Console procedure in `docs/SETUP.md`.
 For all currently implemented terminal features, request
 `mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.
 The backend maps these six local capabilities to only `gmail.modify` and
-`contacts`. Keep the original bar client/config entry. A copied or renamed
-client JSON is not a separate client ID. TUI and CLI share the terminal grant.
+`contacts`. Keep the original bar registration/config entry. Create a new
+Google OAuth registration for terminal permissions; copying or renaming an
+existing registration JSON does not create another registration. TUI and CLI
+share the terminal grant.
 
 Preserve the existing Google audience/publishing choice. For External Testing,
 ensure each requested account is a test user. Use current primary Google docs
@@ -80,7 +82,7 @@ Use the verified executable and the existing config path:
 ```sh
 /absolute/path/to/omagma auth --account ACCOUNT --config /private/config.json
 /absolute/path/to/omagma terminal-auth authorize --account ACCOUNT \
-  --config /private/config.json --client-file /private/terminal-client.json \
+  --config /private/config.json --client-file /private/terminal-registration.json \
   --capabilities mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp
 /absolute/path/to/omagma terminal-auth status --account ACCOUNT --config /private/config.json
 ```

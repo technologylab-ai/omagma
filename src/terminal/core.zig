@@ -168,7 +168,7 @@ pub const Session = struct {
         var req = request.?;
         if (cached_only) {
             const command = j.text(req, "cmd");
-            if (!std.mem.eql(u8, command, "labels.list") and !std.mem.eql(u8, command, "accounts.identities") and !std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
+            if (!std.mem.eql(u8, command, "labels.list") and !std.mem.eql(u8, command, "accounts.identities") and !std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.recipients") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
             try req.object.put(a, "cacheOnly", .{ .bool = true });
         }
         const account = j.text(req, "account");
@@ -646,9 +646,34 @@ pub const Session = struct {
         return j.value(a, .{ .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try storage.refreshActive(s.io, s.cache_root, store.state.account, s.options), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
     }
     fn cachedDispatch(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
+        const cmd = j.text(req, "cmd");
+        if (std.mem.eql(u8, cmd, "mail.recipients")) try s.capability(a, address, req, "mail-read");
         var store = try storage.Store.openCached(s.io, a, s.cache_root, address, s.options);
         defer store.close();
-        const cmd = j.text(req, "cmd");
+        if (std.mem.eql(u8, cmd, "mail.recipients")) {
+            var known = @import("recipient_cache.zig").Builder.init(a, address);
+            defer known.deinit();
+            var aliases: [32][]const u8 = undefined;
+            for (store.state.identities, 0..) |identity, index| aliases[index] = identity.address;
+            known.self_aliases = aliases[0..store.state.identities.len];
+            for (store.state.entries) |entry| {
+                try s.io.checkCancel();
+                try known.mail(entry.message);
+            }
+            for (store.state.outbox) |message| {
+                try s.io.checkCancel();
+                try known.mail(message);
+            }
+            const contacts_allowed = allowed: {
+                s.capability(a, address, req, "contacts-read") catch break :allowed false;
+                break :allowed true;
+            };
+            if (contacts_allowed) for (store.state.contacts) |contact| {
+                try s.io.checkCancel();
+                try known.contact(contact);
+            };
+            return j.value(a, .{ .recipients = try known.result(), .cached = true, .contactsIncluded = contacts_allowed });
+        }
         if (std.mem.eql(u8, cmd, "mail.list")) return cachedList(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.search")) return cacheSearch(a, &store, req, s.allocator);
         if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, true);
@@ -2194,6 +2219,55 @@ test "cached contacts distinguish absent empty and loaded data without granting 
     try std.testing.expectEqual(@as(usize, 1), (try array(try session.cachedDispatch(a, "fictional@example.test", search), "contacts")).len);
     session.options.fixture_scenario = "readonly";
     try std.testing.expectError(error.PermissionDenied, session.cachedDispatch(a, "fictional@example.test", req));
+}
+
+test "recipient cache: actual cached client sees body-free Sent To Cc and fences grants and accounts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/recipients", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .fixture_scenario = "readonly", .cache_dir = root });
+    defer session.deinit();
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, "personal@example.com", session.options);
+        defer store.close();
+        try store.put(.{ .id = "unread-sent-body", .threadId = "sent", .from = .{ .address = "personal@example.com" }, .to = &.{.{ .address = "caroline@example.test", .name = "Caroline Composer" }}, .cc = &.{.{ .address = "copied@example.test" }}, .labels = &.{"SENT"}, .receivedAt = 42 }, false);
+        try store.save();
+        try std.testing.expectEqual(@as(usize, 0), store.find("unread-sent-body").?.bytes);
+    }
+    const raw = try session.client().callCached(a, "{\"cmd\":\"mail.recipients\",\"account\":\"personal@example.com\"}");
+    const response = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+    try std.testing.expect(try j.boolean(response, "ok", false));
+    const data = j.get(response, "data").?;
+    try std.testing.expect(!try j.boolean(data, "contactsIncluded", true));
+    const values = try array(data, "recipients");
+    try std.testing.expectEqual(@as(usize, 2), values.len);
+    try std.testing.expectEqualStrings("caroline@example.test", j.text(values[0], "address"));
+    try std.testing.expectEqualStrings("copied@example.test", j.text(values[1], "address"));
+    const unknown = try std.json.parseFromSliceLeaky(Value, a, try session.client().callCached(a, "{\"cmd\":\"mail.recipients\",\"account\":\"unknown@example.test\"}"), .{});
+    try std.testing.expectEqualStrings("UnknownAccount", j.text(j.get(unknown, "error").?, "code"));
+    session.config.accounts[0].enabled = false;
+    const disabled = try std.json.parseFromSliceLeaky(Value, a, try session.client().callCached(a, "{\"cmd\":\"mail.recipients\",\"account\":\"personal@example.com\"}"), .{});
+    try std.testing.expectEqualStrings("AccountDisabled", j.text(j.get(disabled, "error").?, "code"));
+    session.config.accounts[0].enabled = true;
+    const auth = @import("auth.zig");
+    const scopes = try auth.scopesFor(a, &.{"mail-read"});
+    const grant_id = auth.grantIdentity(scopes);
+    const registry: auth.Registry = .{ .accounts = try a.dupe(auth.Grant, &.{.{ .account = "personal@example.com", .clientFile = "/tmp/fictional-client.json", .clientId = "fictional.apps.googleusercontent.com", .grantId = &grant_id, .capabilities = &.{"mail-read"}, .scopes = scopes, .enabled = false }}) };
+    const file = try tmp.dir.createFile(std.testing.io, "disabled-grants.json", .{ .permissions = .fromMode(0o600) });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, try std.json.Stringify.valueAlloc(a, registry, .{}));
+    session.options.fixtures = false;
+    session.options.grant_file = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/disabled-grants.json", .{tmp.sub_path});
+    const denied = try std.json.parseFromSliceLeaky(Value, a, try session.client().callCached(a, "{\"cmd\":\"mail.recipients\",\"account\":\"personal@example.com\"}"), .{});
+    try std.testing.expectEqualStrings("PermissionDenied", j.text(j.get(denied, "error").?, "code"));
 }
 
 test "wishlist: old primary draft operation wire keeps optional nulls absent" {

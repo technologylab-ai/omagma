@@ -587,7 +587,7 @@ def exercise(terminal, action):
     require([layout[n]["row"] for n in layout] == sorted(layout[n]["row"] for n in layout),
             "composer field positions overlap or reorder")
     require(all(layout[n]["column"] < 60 for n in layout), "composer fields escaped the left split pane")
-    require("Original thread / preview" in terminal.text(), "split composer omitted context pane")
+    require("Draft preview" in terminal.text(), "split composer omitted its own draft preview")
     terminal.send(b"e")
     terminal.until(lambda: terminal.editor_log.exists())
     entered = json.loads(terminal.editor_log.read_text())

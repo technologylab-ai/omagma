@@ -6,8 +6,8 @@ Linux x86_64/arm64 binaries or complete bundles; [setup](SETUP.md) is the canoni
 account/permission guide. No compiler or test harness is needed for a bundle.
 
 Project source is MIT-licensed, with third-party notices included in releases.
-Omagma does not ship a shared OAuth client or a service receiving Gmail data.
-Each user supplies a Google Desktop OAuth client and authorizes accounts locally.
+Omagma does not ship a shared Google OAuth registration or a service receiving Gmail data.
+Each user creates a Google OAuth registration and authorizes accounts locally. Read-only bar access and broader terminal access use separate registration client IDs in the same Google project.
 
 A shared public registration would need maintained identity/support/privacy
 information and Google's applicable verification. Google classifies

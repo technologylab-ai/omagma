@@ -1,6 +1,6 @@
 # Terminal UI design
 
-Developer reference for the current terminal layout, rendering and ownership contracts. Start with [development](DEVELOPMENT.md); user controls and setup belong in [the terminal guide](TERMINAL.md) and [account permissions](SETUP.md#full-tuicli-permissions). The TUI and CLI remain experimental. Local changes after published v0.2.3 keep the package version unchanged; dated [verification](TERMINAL-VERIFICATION.md) qualifies only its named artifacts. Development uses fictional mail and isolated PTYs, while the bar retains its separate read-only behavior.
+Developer reference for the current terminal layout, rendering and ownership contracts. Start with [development](DEVELOPMENT.md); user controls and setup belong in [the terminal guide](TERMINAL.md) and [account permissions](SETUP.md#full-tuicli-permissions). The TUI and CLI remain experimental. Current source includes changes after the published v0.2.3 checkpoint; dated [verification](TERMINAL-VERIFICATION.md) qualifies only its named artifacts. Development uses fictional mail and isolated PTYs, while the bar retains its separate read-only behavior.
 
 ## Terminal backend
 

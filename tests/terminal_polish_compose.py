@@ -81,10 +81,14 @@ def compose_case(binary, directory):
     terminal = start(binary, directory, source, columns=160, rows=40)
     try:
         terminal.until(lambda: "PREVIEW LINE 000" in terminal.text())
-        terminal.send(b"c")
+        terminal.send(b"r")
         terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
         original_id = draft(binary, directory, source)["id"]
-        terminal.send(b"ialex@example.test\t\t\tPolish composer fixture\tLB literal typing")
+        # This workflow checks an original reply preview. A fresh compose now
+        # correctly has only its own draft preview.
+        terminal.send(b"i\x1b[H" + b"\x1b[3~" * 256 + b"alex@example.test\t\t\t"
+                      + b"\x1b[H" + b"\x1b[3~" * 256 + b"Polish composer fixture\t"
+                      + b"\x1b[A" * 256 + b"\x1b[H" + b"LB literal typing")
         terminal.until(lambda: "Body: INSERT" in terminal.text() and "LB literal typing" in terminal.text())
         require("Received attachments" not in terminal.text() and "Links · explicit" not in terminal.text(), "typing L/B opened a preview picker")
         body = terminal.screen.locate("Body: INSERT")
@@ -95,13 +99,13 @@ def compose_case(binary, directory):
         require("Ctrl+S Review" not in panel_text(terminal, "Compose"), "composer has an extra in-pane shortcut footer")
         terminal.send(b"\x1b")
         terminal.gap(.05)
-        preview_before = panel_text(terminal, "Original thread / preview")
+        preview_before = panel_text(terminal, "Original message")
         require("PREVIEW LINE 000" in preview_before, "original preview did not start with expected body")
         terminal.send(b"\x04")
-        terminal.until(lambda: "PREVIEW LINE 000" not in panel_text(terminal, "Original thread / preview"))
-        require("PREVIEW LINE" in panel_text(terminal, "Original thread / preview"), "keyboard preview scroll erased the body")
+        terminal.until(lambda: "PREVIEW LINE 000" not in panel_text(terminal, "Original message"))
+        require("PREVIEW LINE" in panel_text(terminal, "Original message"), "keyboard preview scroll erased the body")
         terminal.send(b"\x15")
-        terminal.until(lambda: "PREVIEW LINE 000" in panel_text(terminal, "Original thread / preview"))
+        terminal.until(lambda: "PREVIEW LINE 000" in panel_text(terminal, "Original message"))
         terminal.send(b"?")
         terminal.until(lambda: "NAVIGATION" in terminal.text())
         terminal.send(b"\x1b")

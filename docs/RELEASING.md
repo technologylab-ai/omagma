@@ -4,8 +4,8 @@ End users should [install a verified release bundle](INSTALL.md). This page is f
 maintainers building the Linux backend and publishing matching plugin assets.
 [Development](DEVELOPMENT.md) covers faster local iteration: it keeps the package
 version unchanged and does not publish a release or rerun resource qualification
-for every interface edit. Source-tree features after v0.2.3 are not automatically
-present in that immutable release's bundles.
+for every interface edit. Existing release assets remain immutable; each new
+version bundles its own qualified source tree.
 
 ## Version and compiler
 
@@ -35,9 +35,9 @@ Each architecture produces a raw binary and a complete plugin bundle:
 
 The bundle includes tracked public project contents: runtime QML/JavaScript,
 manifest, assets, examples, docs, setup skill and optional user service/timer
-files under `systemd/`. The v0.2.3 tracked release tree also contains both
-`systemd/omagma-cache-refresh.service` and `.timer`; packaging does not enable
-them. Its added backend is `omagma/zig-out/bin/omagma`, preserving the plugin's
+files under `systemd/`, including `omagma-cache-refresh.service` and `.timer`;
+packaging does not enable them. The included backend is
+`omagma/zig-out/bin/omagma`, preserving the plugin's
 default lookup. Packaging stamps the bundle manifest with the package version.
 Private config, OAuth downloads, local notes and raw live-test output stay
 excluded. `--version` reports `omagma VERSION`.
@@ -50,7 +50,7 @@ port. Keep archive metadata, package pin, source guard, scripts and CI in sync.
 
 ## Continuous release checks
 
-The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After both architectures succeed, the `main` publication step collects the bundles, raw binaries and combined `SHA256SUMS` for the package version.
+The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. Current-feature acceptance also covers account-scoped bulk/undo, cached-window navigation/search, forwarding/files, composer recovery/completion, reader context, actual loading/progress, mouse/wheel routing, compact layouts and local timezone displays. The fixture timezone database is installed and checked before either native suite. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After both architectures succeed, the `main` publication step collects the bundles, raw binaries and combined `SHA256SUMS` for the package version.
 
 The GitHub CLI uploads all six assets through an internal draft before publishing; it cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The workflow refuses to replace an existing release, draft or tag. It does not expose an incomplete release as latest.
 

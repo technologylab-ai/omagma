@@ -14,15 +14,15 @@ Gmail links open in the account’s configured Chrome profile. Reading a message
 
 Refresh tokens are stored in Secret Service, using Omagma’s service name and the verified account address. They are passed to the keyring helper through stdin rather than command-line arguments. Access tokens remain in backend memory. Neither token type is sent to the bar UI or terminal client’s response frames.
 
-Consent opens your configured Chrome profile and returns through a temporary local IPv4 callback listener. Omagma verifies the random state, PKCE exchange and returned Gmail identity before accepting the grant. The consent command has a 180-second deadline. Keep the downloaded OAuth client JSON and account configuration private, outside Git. Desktop apps cannot keep a client secret confidential; refresh tokens still need protection. [Google’s installed-app model](https://developers.google.com/identity/protocols/oauth2/native-app).
+Consent opens your configured Chrome profile and returns through a temporary local IPv4 callback listener. Omagma verifies the random state, PKCE exchange and returned Gmail identity before accepting the grant. The consent command has a 180-second deadline. Keep the downloaded Google OAuth registration JSON and account configuration private, outside Git. Google treats installed applications as unable to keep registration secrets confidential; refresh tokens still need protection. [Google’s installed-app model](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 ## Terminal client
 
-The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate Secret Service namespace and a different Desktop OAuth client, preserving the bar’s read-only authorization. Installation or read access alone does not authorize an agent to send mail or change contacts.
+The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate Secret Service namespace and a different Google OAuth registration, preserving the bar’s read-only authorization. Installation or read access alone does not authorize an agent to send mail or change contacts.
 
 Terminal modes save cached mail, local drafts, contacts and operation receipts in owner-only directories and files. The defaults are `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; directories use mode 0700 and files use 0600. Live and fixture data have separate namespaces, and account/message filename components are hashes. **Mail and drafts are plaintext on disk, not encrypted at rest.** Filesystem permissions restrict access; a backup or administrator with file access can still read them.
 
-The cache keeps the newest mail within message-count and byte quotas. Old-tail eviction removes mail and its cached bodies while preserving drafts and uncertain-operation receipts. Clearing the mail cache also preserves drafts, contacts and receipts. See [cache behavior](TUI-CACHE.md). Current source builds additionally save account addresses, mailbox/selected-message context and key/layout preferences in the private `omagma/ui.json` configuration file.
+The cache keeps the newest mail within message-count and byte quotas. Old-tail eviction removes mail and its cached bodies while preserving drafts and uncertain-operation receipts. Clearing the mail cache also preserves drafts, contacts and receipts. See [cache behavior](TUI-CACHE.md). Omagma also saves account addresses, mailbox/selected-message context and key/layout preferences in the private `omagma/ui.json` configuration file.
 
 The CLI returns requested mail and contacts to its caller. Treat its stdout, redirected files and agent logs as private. Local send and invitation receipts contain account/message identities and submission state; they are private too. An uncertain send is retained for review rather than automatically resubmitted.
 
@@ -30,7 +30,7 @@ The CLI returns requested mail and contacts to its caller. Treat its stdout, red
 
 Display text is sanitized to remove terminal controls and directional formatting. A supplied plain-text body takes precedence. HTML-only mail becomes bounded formatted text; scripts, stylesheets, remote images and other remote resources never run or load.
 
-The current source reader’s link chooser opens only an explicitly selected HTTP(S) URL in the account’s Chrome profile. Received attachments are saved only after you choose a destination; existing files are not overwritten. Its Open action delegates a saved, private file of a supported document/image type to the desktop viewer. Reading mail does not automatically launch a link or attachment.
+The reader’s link chooser opens only an explicitly selected HTTP(S) URL in the account’s Chrome profile. Received attachments are saved only after you choose a destination; existing files are not overwritten. Its Open action delegates a saved, private file of a supported document/image type to the desktop viewer. Reading mail does not automatically launch a link or attachment.
 
 Fixture providers make no Gmail API or keyring requests. You can try fictional mail with `omagma tui --fixtures`; this is optional and does not grant live permissions.
 

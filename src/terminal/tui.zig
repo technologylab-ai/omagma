@@ -34,7 +34,7 @@ const Loop = input_loop.Loop(Event);
 const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, attachment };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const Focus = layout.Focus;
-const JobKind = enum { batch, undo, labels_list, refresh, list, cached_search, read, thread, drafts, draft_read, draft_operations, compose, autosave, identities, save, save_review, save_back, send, contacts, contact_write, mutation, invitation_inspect, invitation, open, attachment_save };
+const JobKind = enum { batch, undo, labels_list, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_operations, compose, autosave, identities, save, save_review, save_back, send, contacts, contact_write, mutation, invitation_inspect, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -677,6 +677,14 @@ const App = struct {
     contacts_account: Field = .{},
     contacts_state: ContactsState = .loading,
     contacts_cache_ready: bool = false,
+    recipient_arena: ?std.heap.ArenaAllocator = null,
+    recipient_values: []const Value = &.{},
+    recipient_account: Field = .{},
+    recipient_ready: bool = false,
+    pending_recipient_cache: bool = false,
+    pending_recipient_refresh: bool = false,
+    recipient_refreshed: [3]bool = @splat(false),
+    compose_original: bool = false,
     pending_contacts: bool = false,
     pending_cached_contacts: bool = false,
     folder: usize = 0,
@@ -810,6 +818,8 @@ const App = struct {
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        self.recipient_account.deinit(self.allocator);
+        if (self.recipient_arena) |*arena| arena.deinit();
         self.custom_label.deinit(self.allocator);
         self.undo_token.deinit(self.allocator);
         self.undo_account.deinit(self.allocator);
@@ -2179,6 +2189,8 @@ const App = struct {
             self.say(false, "{s}", .{if (status.cache_ready) "Cached mail ready · fetching latest changes" else "Fetching mail…"});
         } else self.say(false, "{s}", .{switch (kind) {
             .cached_search => "Searching cached mail…",
+            .recipient_cache => "Loading recent-mail recipients… · typing remains available",
+            .recipient_refresh => "Updating recent sent-mail recipients… · typing remains available",
             .read => "Fetching body…",
             .thread => "Fetching thread…",
             else => "Working…",
@@ -2250,7 +2262,7 @@ const App = struct {
         }
     }
     fn worker(self: *App) void {
-        self.job.response = (if (self.job.kind == .cached_search) self.cachedSearchResponse() else if (self.job.kind == .refresh) self.refreshResponse() else self.client.callWithProgress(self.job_arena.allocator(), self.job.request, self.fetchSink())) catch |err| blk: {
+        self.job.response = (if (self.job.kind == .cached_search or self.job.kind == .recipient_cache) self.cachedSearchResponse() else if (self.job.kind == .refresh) self.refreshResponse() else self.client.callWithProgress(self.job_arena.allocator(), self.job.request, self.fetchSink())) catch |err| blk: {
             self.job.failure = err;
             break :blk null;
         };
@@ -2349,6 +2361,8 @@ const App = struct {
         self.pending_cached_thread = false;
         self.pending_contacts = false;
         self.pending_cached_contacts = false;
+        self.pending_recipient_cache = false;
+        self.pending_recipient_refresh = false;
         self.pending_read = false;
         self.pending_thread = false;
         self.pending_page = false;
@@ -2496,9 +2510,9 @@ const App = struct {
                 if (same(failure_code, "ExternalRefreshWaitTimedOut") or same(failure_code, "ExternalRefreshStatusUnavailable")) self.sync[index].state = .cached;
                 if (index == self.account_index and !self.compose_active) self.sayFailure("Refresh failed · cached mail retained", failure_code);
             }
-        } else if (((self.job.kind == .identities or self.job.kind == .labels_list or self.job.kind == .cached_search) and self.job.account_index != self.account_index) or
+        } else if (((self.job.kind == .identities or self.job.kind == .labels_list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh) and self.job.account_index != self.account_index) or
             (self.job.kind == .contacts and (self.job.contacts_generation != self.contacts_generation or !self.contactsOpen() or self.job.account_index != self.account_index)) or
-            (self.job.generation != self.generation and (self.job.kind == .list or self.job.kind == .cached_search or self.job.kind == .drafts or self.job.kind == .read or self.job.kind == .thread or self.job.kind == .contacts or self.job.kind == .invitation_inspect)) or
+            (self.job.generation != self.generation and (self.job.kind == .list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh or self.job.kind == .drafts or self.job.kind == .read or self.job.kind == .thread or self.job.kind == .contacts or self.job.kind == .invitation_inspect)) or
             (self.job.selection_generation != self.selection_generation and (self.job.kind == .read or self.job.kind == .thread or self.job.kind == .invitation_inspect)))
         {
             // Account/query/list identity changed while the provider was busy.
@@ -2575,7 +2589,12 @@ const App = struct {
                 } else if (pending == .new) try self.composeNew(null) else {
                     // The user can move the cursor while a read is finishing.
                     // Reply to the captured identity, never the later selection.
-                    self.clearReader();
+                    var retained_original = same(self.reader_account.value(), self.account());
+                    if (retained_original) {
+                        retained_original = false;
+                        for (self.thread) |message| retained_original = retained_original or same(text(get(message, "id")), self.pending_compose_id[0..self.pending_compose_id_len]);
+                    }
+                    if (!retained_original) self.clearReader();
                     if (pending == .forward) try self.start(.compose, .{ .account = self.account(), .cmd = "mail.forward", .messageId = self.pending_compose_id[0..self.pending_compose_id_len] }) else try self.start(.compose, .{ .account = self.account(), .cmd = "mail.reply", .messageId = self.pending_compose_id[0..self.pending_compose_id_len], .all = pending == .reply_all });
                 }
             } else if (self.pending_read) {
@@ -2633,6 +2652,12 @@ const App = struct {
                 self.pending_list = true;
             },
             .refresh => unreachable, // Refresh metadata/merge is handled by finish.
+            .recipient_cache => {
+                try self.replaceRecipients(response);
+            },
+            .recipient_refresh => {
+                self.pending_recipient_cache = true;
+            },
             .cached_search => {
                 self.pending_cached_list = false;
                 try self.replaceList(.cached_search, response);
@@ -2667,6 +2692,12 @@ const App = struct {
                 }
                 self.compose_active = true;
                 self.mode = .compose;
+                self.pending_read = false;
+                self.pending_thread = false;
+                if (kind == .draft_read or !self.compose_original) {
+                    self.compose_original = false;
+                    self.clearReader();
+                }
                 self.composeCachedContacts();
                 self.pending_identities = true;
                 if (kind == .compose) {
@@ -2805,11 +2836,11 @@ const App = struct {
     }
     fn chooseAccount(self: *App, index: usize) !void {
         if (index >= self.accounts.len or self.mode == .compose or self.mode == .review or self.mode == .contact_edit) return;
-        if (self.job.future != null and self.job.kind != .refresh and self.job.kind != .list and self.job.kind != .cached_search and self.job.kind != .drafts and self.job.kind != .read and self.job.kind != .thread and self.job.kind != .contacts) {
+        if (self.job.future != null and self.job.kind != .refresh and self.job.kind != .list and self.job.kind != .cached_search and self.job.kind != .recipient_cache and self.job.kind != .recipient_refresh and self.job.kind != .drafts and self.job.kind != .read and self.job.kind != .thread and self.job.kind != .contacts) {
             self.say(true, "Wait for the current account's change to finish", .{});
             return;
         }
-        if (self.job.future != null and self.job.kind == .cached_search) self.preemptReadOnly();
+        if (self.job.future != null and (self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh)) self.preemptReadOnly();
         self.search_saved_valid = false;
         self.search_restore_pending = false;
         self.rememberWorkingContext();
@@ -3072,6 +3103,8 @@ const App = struct {
         if (self.page_loading) self.say(false, "Loading {s} mail page…", .{if (forward) "next" else "previous"});
     }
     fn composeNew(self: *App, reply_all: ?bool) !void {
+        self.compose_original = reply_all != null;
+        if (reply_all == null and self.job.future != null and readOnlyJob(self.job.kind)) self.preemptReadOnly();
         const target_id = self.readerReplyId();
         if (self.job.future != null) {
             if (reply_all != null and target_id.len == 0) return;
@@ -3090,6 +3123,7 @@ const App = struct {
         } else try self.start(.compose, .{ .account = self.account(), .cmd = "draft.create", .draft = types.Draft{} });
     }
     fn composeForward(self: *App) !void {
+        self.compose_original = true;
         const target_id = self.readerReplyId();
         if (target_id.len == 0) return;
         if (self.job.future != null) {
@@ -3155,9 +3189,9 @@ const App = struct {
         self.say(false, "Saving draft locally… · typing remains available", .{});
     }
     fn composeCompletions(self: *const App) completion.Matches {
-        if (!self.compose.insert_mode or self.compose.selected >= 3 or !same(self.contacts_account.value(), self.account()) or self.compose.unknown_outcome) return .{ .range = .{ .start = 0, .end = 0, .query = "" } };
+        if (!self.compose.insert_mode or self.compose.selected >= 3 or self.compose.unknown_outcome) return .{ .range = .{ .start = 0, .end = 0, .query = "" } };
         const field = &self.compose.fields[self.compose.selected];
-        return completion.collect(self.contacts, field.value(), field.cursor);
+        return completion.collectKnown(if (same(self.recipient_account.value(), self.account())) self.recipient_values else &.{}, if (same(self.contacts_account.value(), self.account()) and self.contacts_query.value().len == 0) self.contacts else &.{}, self.account(), field.value(), field.cursor);
     }
     fn acceptCompletion(self: *App, index: usize) !void {
         const matches = self.composeCompletions();
@@ -3171,19 +3205,34 @@ const App = struct {
         try self.composerChanged();
     }
     fn composeCachedContacts(self: *App) void {
-        if (same(self.contacts_account.value(), self.account()) and self.contacts_query.value().len == 0 and self.contacts_cache_ready) return;
-        self.contacts = &.{};
-        self.contacts_cache_ready = false;
-        self.contacts_generation +%= 1;
-        self.contacts_query.set(self.allocator, "") catch return;
-        self.contacts_account.set(self.allocator, self.account()) catch return;
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-        // A single local attempt avoids provider waits or cache-lock retries
-        // in the composer. Explicit a/Contacts can refresh the address book.
-        const request = std.json.Stringify.valueAlloc(arena.allocator(), .{ .account = self.account(), .cmd = "contacts.list", .cacheOnly = true }, .{}) catch return;
-        const response = self.client.callCached(arena.allocator(), request) catch return;
-        self.replaceContacts(response, true) catch return;
+        if (!same(self.recipient_account.value(), self.account())) {
+            self.recipient_values = &.{};
+            self.recipient_ready = false;
+            self.recipient_account.set(self.allocator, self.account()) catch return;
+        }
+        self.pending_recipient_cache = true;
+        if (!self.recipient_refreshed[self.account_index]) self.pending_recipient_refresh = true;
+    }
+    fn replaceRecipients(self: *App, response: []const u8) !void {
+        var replacement: std.heap.ArenaAllocator = .init(self.allocator);
+        defer replacement.deinit();
+        const result = try self.data(replacement.allocator(), response);
+        const values = get(result, "recipients");
+        if (values != .array or values.array.items.len > @import("recipient_cache.zig").max_candidates) return error.InvalidRecipientCandidates;
+        for (values.array.items) |value| {
+            try recipients.validateAddress(text(get(value, "address")));
+            try recipients.validateHeader(text(get(value, "name")));
+        }
+        if (self.recipient_arena) |*previous| previous.deinit();
+        self.recipient_arena = replacement;
+        replacement = .init(self.allocator);
+        self.recipient_values = values.array.items;
+        try self.recipient_account.set(self.allocator, self.account());
+        self.recipient_ready = true;
+    }
+    fn recipientHint(self: *const App) []const u8 {
+        if (self.pending_recipient_cache or self.pending_recipient_refresh or (self.job.future != null and (self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh))) return "Fetching recent-mail suggestions… · keep typing";
+        return "No matching recent-mail recipient · type an address";
     }
     fn replaceIdentities(self: *App, response: []const u8) !void {
         var replacement: std.heap.ArenaAllocator = .init(self.allocator);
@@ -3265,9 +3314,22 @@ const App = struct {
             try self.autosaveDraft();
             return self.job.future != null;
         }
+        if (self.pending_recipient_cache and self.compose_active and !self.compose.unknown_outcome) {
+            self.pending_recipient_cache = false;
+            try self.start(.recipient_cache, .{ .account = self.account(), .cmd = "mail.recipients", .cacheOnly = true });
+            return true;
+        }
         if (self.pending_identities and self.compose_active and !self.compose.unknown_outcome) {
             self.pending_identities = false;
             try self.start(.identities, .{ .account = self.account(), .cmd = "accounts.identities" });
+            return true;
+        }
+        if (self.pending_recipient_refresh and self.compose_active and !self.compose.unknown_outcome) {
+            self.pending_recipient_refresh = false;
+            self.recipient_refreshed[self.account_index] = true;
+            // One bounded metadata-only Sent head per account/session. Never
+            // search the provider on keystrokes or fetch full mailbox history.
+            try self.start(.recipient_refresh, .{ .account = self.account(), .cmd = "mail.list", .label = "SENT", .limit = @as(usize, 32) });
             return true;
         }
         return false;
@@ -3540,7 +3602,7 @@ const App = struct {
     }
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
-            .refresh, .list, .cached_search, .read, .thread, .drafts, .draft_read, .draft_operations, .contacts, .invitation_inspect, .identities, .autosave, .labels_list => true,
+            .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .contacts, .invitation_inspect, .identities, .autosave, .labels_list => true,
             else => false,
         };
     }
@@ -3920,6 +3982,10 @@ const App = struct {
             self.compose.selected = (self.compose.selected + 4) % 5;
         } else if (self.compose.insert_mode) {
             const matches = self.composeCompletions();
+            if (self.compose.selected < 3 and matches.len == 0 and (key.matches('n', .{ .ctrl = true }) or key.matches('p', .{ .ctrl = true }))) {
+                self.say(false, "{s}", .{self.recipientHint()});
+                return;
+            }
             if (matches.len > 0 and (key.matches('n', .{ .ctrl = true }) or key.matches(Key.down, .{}))) {
                 self.compose.completion_selected = (self.compose.completion_selected + 1) % matches.len;
             } else if (matches.len > 0 and (key.matches('p', .{ .ctrl = true }) or key.matches(Key.up, .{}))) {
@@ -4717,8 +4783,15 @@ const App = struct {
     }
     fn composeCompletionDraw(self: *App, win: vaxis.Window) !void {
         const matches = self.composeCompletions();
-        if (matches.len == 0 or win.width < 20) return;
+        if (win.width < 20) return;
         const row = self.compose.selected + 2;
+        if (matches.len == 0) {
+            if (!self.compose.insert_mode or self.compose.selected >= 3 or matches.range.query.len == 0) return;
+            recipients.validateAddress(matches.range.query) catch {
+                if (row < win.height) try self.line(win, row, self.recipientHint(), .muted);
+            };
+            return;
+        }
         const visible: usize = @min(4, @min(matches.len, win.height -| (row + 2)));
         if (visible == 0) return;
         self.compose.completion_selected = @min(self.compose.completion_selected, matches.len - 1);
@@ -4786,13 +4859,12 @@ const App = struct {
         self.compose.body_scroll = @min(self.compose.body_scroll, body_lines -| @as(usize, body.height));
         try self.composeAttachmentsDraw(left, attachment_row, attachment_rows);
         if (split) {
-            const right = self.panel(win, left_width, win.width - left_width, if (self.compose.unknown_outcome) " Submission receipt " else " Original thread / preview ", false);
+            const right = self.panel(win, left_width, win.width - left_width, if (self.compose.unknown_outcome) " Submission receipt " else if (self.compose_original and self.thread.len > 0) " Original message " else " Draft preview ", false);
             if (self.compose.unknown_outcome) {
                 const receipt = try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown\nOperation: {s}\nReason: {s}\n\nThe original recovery draft is protected.\nNo edit or automatic resend.\n\n:receipt checks the journal.\nq keeps it and returns to mail.", .{ self.compose.operation_id.value(), self.compose.operation_error.value() });
                 _ = try self.flow(right, receipt, 0, 0);
-            } else if (self.thread.len > 0) try self.readerDraw(right) else {
-                try self.line(right, 1, "Draft preview", .muted);
-                const preview_area = right.child(.{ .y_off = 3 });
+            } else if (self.compose_original and self.thread.len > 0) try self.readerDraw(right) else {
+                const preview_area = right.child(.{ .y_off = 1 });
                 self.reader_height = preview_area.height;
                 const clean = try safe(self.frame.allocator(), value_in, true);
                 self.reader_lines = positionAfter(preview_area, clean).row + 1;
@@ -6745,4 +6817,62 @@ test "status polish: two-row mail cards use the final row without a trailing gap
     try std.testing.expectEqual(@as(usize, 1), mailRowCapacity(4));
     try std.testing.expectEqual(@as(usize, 2), mailRowCapacity(6));
     try std.testing.expectEqual(@as(usize, 1), mailRowCapacity(0));
+}
+
+test "recipient preview: Ctrl N P works for unsaved correspondents without contacts and scopes results" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+    try app.replaceRecipients("{\"ok\":true,\"data\":{\"recipients\":[{\"address\":\"caroline-new@example.test\",\"name\":\"Caroline New\"},{\"address\":\"caroline-old@example.test\",\"name\":\"Caroline Old\"}]}}");
+    app.mode = .compose;
+    app.compose.insert_mode = true;
+    try app.compose.fields[0].set(allocator, "caro, last@example.test");
+    app.compose.fields[0].cursor = 4;
+    try std.testing.expectEqual(@as(usize, 2), app.composeCompletions().len);
+    try app.onComposeKey(.{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 1), app.compose.completion_selected);
+    try app.onComposeKey(.{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 0), app.compose.completion_selected);
+    try app.onComposeKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqualStrings("caroline-new@example.test, last@example.test", app.compose.fields[0].value());
+    try app.compose.fields[0].set(allocator, "caro");
+    app.account_index = 1;
+    try std.testing.expectEqual(@as(usize, 0), app.composeCompletions().len);
+    try app.onComposeKey(.{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "No matching") != null);
+    try std.testing.expectEqualStrings("caro", app.compose.fields[0].value());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "recipient preview: a fresh composer renders its draft and not unrelated inbox body" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.read_arena.allocator(), "[{\"id\":\"unrelated\",\"bodyText\":\"UNRELATED_INBOX_BODY\"}]", .{}));
+    app.mode = .compose;
+    app.compose_active = true;
+    try app.compose.fields[4].set(allocator, "Own new draft body");
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 160, .rows = 32, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 160, .height = 32, .screen = &screen };
+    try app.composeDraw(win);
+    var visible: std.ArrayList(u8) = .empty;
+    defer visible.deinit(allocator);
+    for (0..screen.height) |row| for (0..screen.width) |column| try visible.appendSlice(allocator, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, visible.items, "Draft preview") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible.items, "Own new draft body") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible.items, "UNRELATED_INBOX_BODY") == null);
+    app.reader_lines = 100;
+    app.reader_height = 20;
+    app.selected = 7;
+    try app.onComposeKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 10), app.reader_scroll);
+    try std.testing.expectEqual(@as(usize, 7), app.selected);
+    try app.onComposeKey(.{ .codepoint = 'u', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 0), app.reader_scroll);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }

@@ -2,6 +2,19 @@ const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
 pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "", bodyError: []const u8 = "" };
+// Address count alone allows tens of KiB per broad inbound header. Bound the
+// compact To/Cc index independently; immutable full messages retain all data.
+const participant_bytes = 4096;
+fn participantPrefix(values: []const t.Address, remaining: *usize) []const t.Address {
+    var count: usize = 0;
+    for (values[0..@min(values.len, t.Limits.recipients)]) |address| {
+        const bytes = address.address.len +| address.name.len;
+        if (bytes > remaining.*) break;
+        remaining.* -= bytes;
+        count += 1;
+    }
+    return values[0..count];
+}
 const BodyRecord = struct { schema: u8 = 1, account: []const u8, message: t.Message };
 fn readPrivate(dir: std.Io.Dir, io: std.Io, a: std.mem.Allocator, name: []const u8, limit: usize) ![]const u8 {
     const before = try dir.statFile(io, name, .{ .follow_symlinks = false });
@@ -347,8 +360,12 @@ pub const Store = struct {
         metadata.bodyText = "";
         metadata.bodyHtml = null;
         metadata.bodySource = .unknown;
-        metadata.to = &.{};
-        metadata.cc = &.{};
+        // Keep bounded participant metadata for cache-only completion,
+        // including Sent recipients. Full body records preserve every header
+        // participant for reply-all; this compact index is never a full read.
+        var participant_budget: usize = participant_bytes;
+        metadata.to = participantPrefix(message.to, &participant_budget);
+        metadata.cc = participantPrefix(message.cc, &participant_budget);
         metadata.replyTo = &.{};
         metadata.attachments = &.{};
         metadata.invitation = null;
@@ -666,6 +683,39 @@ fn entryPosition(entries: []const Entry, entry: Entry) usize {
         if (newestFirst({}, entries[middle], entry)) start = middle + 1 else end = middle;
     }
     return start;
+}
+
+test "recipient cache: compact To Cc persistence bounds counts and bytes without truncating full mail" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/recipients", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true, .metadata_limit = 2 });
+    defer store.close();
+    var addresses: [33]t.Address = undefined;
+    for (&addresses, 0..) |*address, index| address.* = .{ .address = try std.fmt.allocPrint(a, "person-{d}@example.test", .{index}) };
+    try store.put(.{ .id = "broad", .threadId = "broad", .to = &addresses, .cc = &.{.{ .address = "copied@example.test" }}, .bodyText = "Full body", .receivedAt = 2 }, true);
+    try std.testing.expectEqual(@as(usize, 32), store.find("broad").?.message.to.len);
+    try std.testing.expectEqual(@as(usize, 33), (try store.read("broad")).?.to.len);
+    const long_name: [256]u8 = @splat('N');
+    for (&addresses) |*address| address.name = &long_name;
+    try store.put(.{ .id = "budget", .threadId = "budget", .to = &addresses, .cc = &addresses, .receivedAt = 1 }, false);
+    const budget = store.find("budget").?.message;
+    var bytes: usize = 0;
+    for (budget.to) |address| bytes += address.address.len + address.name.len;
+    for (budget.cc) |address| bytes += address.address.len + address.name.len;
+    try std.testing.expect(bytes <= 4096);
+    try std.testing.expectEqual(@as(usize, 14), budget.to.len);
+    try std.testing.expectEqual(@as(usize, 0), budget.cc.len);
+    try store.save();
+    store.close();
+    var cached = try Store.openCached(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer cached.close();
+    try std.testing.expectEqualStrings("person-31@example.test", cached.find("broad").?.message.to[31].address);
+    try std.testing.expectEqualStrings("copied@example.test", cached.find("broad").?.message.cc[0].address);
+    try std.testing.expectEqual(@as(usize, 0), cached.find("budget").?.bytes);
 }
 
 test "mail count eviction removes received-time tail including body and ignores older paging" {

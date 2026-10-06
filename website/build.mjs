@@ -7,6 +7,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.dirname(here);
 const dist = path.join(here, 'dist');
 const github = 'https://github.com/technologylab-ai/omagma';
+const packageDeclaration = await fs.readFile(path.join(repo, 'build.zig.zon'), 'utf8');
+const packageVersion = packageDeclaration.match(/\.version\s*=\s*"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"/)?.[1];
+if (!packageVersion) throw new Error('Missing package version in build.zig.zon');
 const base = process.env.OMAGMA_SITE_BASE ?? '/omagma/';
 if (!/^\/(?:[a-zA-Z0-9_-]+\/)*$/.test(base)) throw new Error('OMAGMA_SITE_BASE must be an absolute path ending in /');
 const siteUrl = new URL(process.env.OMAGMA_SITE_URL ?? 'https://technologylab-ai.github.io/omagma/');
@@ -142,7 +145,7 @@ for (const [source, target] of imageRoutes) {
   await fs.copyFile(path.join(repo, source), path.join(dist, target));
 }
 for (const name of ['site.css', 'site.js']) await fs.copyFile(path.join(here, name), path.join(dist, 'assets', name));
-const common = { base, section: 'Omagma', title: 'Omagma — mail without the weight', description: 'Separate Gmail accounts in a compact Omarchy bar, experimental terminal client and agent CLI.', body: '', sidebar: '', toc: '', source_url: `${github}/blob/main/README.md` };
+const common = { base, version: escape(packageVersion), section: 'Omagma', title: 'Omagma — mail without the weight', description: 'Separate Gmail accounts in a compact Omarchy bar, experimental terminal client and agent CLI.', body: '', sidebar: '', toc: '', source_url: `${github}/blob/main/README.md` };
 const decorate = (html, route) => {
   const canonical = new URL(route, siteUrl).href;
   const social = new URL('assets/omagma-social-preview.png', siteUrl).href;

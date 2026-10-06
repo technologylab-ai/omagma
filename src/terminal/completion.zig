@@ -81,6 +81,47 @@ pub fn collect(contacts: []const Value, raw: []const u8, cursor: usize) Matches 
     }
     return out;
 }
+pub fn collectKnown(known: []const Value, contacts: []const Value, self_address: []const u8, raw: []const u8, cursor: usize) Matches {
+    var out: Matches = .{ .range = token(raw, cursor) };
+    if (out.range.query.len == 0 or out.range.query.len > 254) return out;
+    // The cached projection is already ranked by recent interaction. Saved
+    // contacts remain a compatibility fallback while that projection loads.
+    for ([_]u8{ 3, 2, 1 }) |wanted_quality| {
+        for (known) |value| {
+            const address = text(field(value, "address"));
+            const name = text(field(value, "name"));
+            recipients.validateAddress(address) catch continue;
+            if (std.ascii.eqlIgnoreCase(address, self_address) or std.ascii.eqlIgnoreCase(address, out.range.query) or matchQuality(name, address, out.range.query) != wanted_quality) continue;
+            var duplicate = false;
+            for (out.slice()) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous.address, address);
+            if (duplicate) continue;
+            out.values[out.len] = .{ .address = address, .name = name };
+            out.len += 1;
+            if (out.len == max_matches) return out;
+        }
+        const saved = collect(contacts, raw, cursor);
+        for (saved.slice()) |candidate| {
+            if (std.ascii.eqlIgnoreCase(candidate.address, self_address) or matchQuality(candidate.name, candidate.address, out.range.query) != wanted_quality) continue;
+            var duplicate = false;
+            for (out.slice()) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous.address, candidate.address);
+            if (duplicate) continue;
+            out.values[out.len] = candidate;
+            out.len += 1;
+            if (out.len == max_matches) return out;
+        }
+    }
+    return out;
+}
+fn matchQuality(name: []const u8, address: []const u8, query: []const u8) u8 {
+    const at = std.mem.indexOfScalar(u8, address, '@') orelse address.len;
+    const local = address[0..at];
+    if (std.ascii.startsWithIgnoreCase(local, query)) return 3;
+    for (name, 0..) |_, index| if (index == 0 or !std.ascii.isAlphanumeric(name[index - 1])) {
+        if (std.ascii.startsWithIgnoreCase(name[index..], query)) return 3;
+    };
+    if (includes(local, query) or includes(name, query)) return 2;
+    return if (includes(address, query)) 1 else 0;
+}
 pub fn replace(allocator: std.mem.Allocator, raw: []const u8, range: Range, address: []const u8) ![]u8 {
     try recipients.validateAddress(address);
     if (range.start > range.end or range.end > raw.len) return error.InvalidCompletionRange;

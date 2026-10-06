@@ -4,10 +4,8 @@ Choose the interface that fits your work: a compact read-only bar, an
 experimental terminal client, or an experimental agent CLI. All three keep
 configured accounts separate and open Gmail in each account's Chrome profile.
 
-This catalogue describes the current development checkout. **Source only**
-marks additions after the published v0.2.3 release; its binary assets are
-unchanged. Ordinary unmarked capabilities below are available in v0.2.3.
-Detailed controls and examples live in the linked guides.
+This catalogue describes Omagma’s current features. Detailed controls and
+examples live in the linked guides.
 
 ## At a glance
 
@@ -18,7 +16,7 @@ Detailed controls and examples live in the linked guides.
 | [Agent CLI](AGENT-CLI.md) | The shared mail operations as structured commands and responses | The same account-specific terminal permissions as the TUI |
 
 If the bar is all you need, install it and authorize only the read-only scope.
-It needs neither People API nor the second terminal OAuth client. The dated
+It needs neither People API nor the second terminal Google OAuth registration. The dated
 three-account v0.2.2 measurement was approximately **31 MB** for the backend and attributed
 bar UI together; Chrome and unrelated widgets are excluded. See
 [memory accounting](MEMORY.md) for the exact version/date and assumptions.
@@ -36,7 +34,7 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Memory-only mail snapshots. The bar never sends, changes labels or read
   status, or saves mail to disk.
 
-[Install the bar](INSTALL.md) · [Read-only account setup](SETUP.md#read-only-google-oauth-client)
+[Install the bar](INSTALL.md) · [Read-only account setup](SETUP.md#read-only-google-oauth-registration)
 · [Bar controls](UI.md)
 
 ### Experimental terminal mail client
@@ -59,10 +57,11 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Inspect calendar invitations and send accept/tentative/decline RSVP emails.
   There are no calendar views.
 
-**Source only:** forwarding with original files, sender identities/signatures,
-autocomplete, draft autosave/recovery, bulk selection/undo, custom-label views,
-folded conversations, link/received-file pickers, cached-body search,
-continuous cache-window navigation and personalized working context.
+- Forward with original files, choose sender identities/signatures, use
+  autocomplete and recover drafts automatically. Bulk selection/undo,
+  custom-label views, folded conversations, link/received-file pickers,
+  cached-body search, continuous cache-window navigation and personalized
+  working context are included.
 
 [Terminal workflows and keys](TERMINAL.md) · [Full terminal permissions](SETUP.md#full-tuicli-permissions)
 
@@ -76,7 +75,7 @@ continuous cache-window navigation and personalized working context.
   mailbox changes, contacts and invitation replies.
 - Explicit account identity, locally checked capabilities and durable
   operation receipts. Unknown send outcomes are not automatically retried.
-- **Source only:** forward planning, verified sender discovery, bulk per-item
+- Forward planning, verified sender discovery, bulk per-item
   outcomes/undo, richer cached-body search, relative cache-window anchors and
   incomplete-draft recovery commands.
 
@@ -95,27 +94,27 @@ continuous cache-window navigation and personalized working context.
   blocks and simple tables. Remote resources never load.
 - Missing bodies and partial cached threads are identified explicitly; a
   snippet is not passed off as a complete body.
-- **Source only:** both-direction scrolling moves through adjacent cached
+- Both-direction scrolling moves through adjacent cached
   windows, including after restarting in a middle position. Cached searches
   never fetch missing bodies or older Gmail pages.
-- **Source only:** loading placeholders animate during unavailable-mail fetches
+- Loading placeholders animate during unavailable-mail fetches
   and become real rows as metadata/body previews arrive. Batch `n/m` counters
   describe actual work, not Inbox totals; cached mail stays usable.
-- **Source only:** wheel/touchpad scrolling works over row gaps and loading
+- Wheel/touchpad scrolling works over row gaps and loading
   placeholders, while unfinished rows remain unclickable.
-- **Source only:** compact word-wrapped reader headers, current-window counts,
+- Compact word-wrapped reader headers, current-window counts,
   reader progress and fixed last-synced timestamps keep short panes useful.
-- **Source only:** mail dates and sync times follow the computer's local
+- Mail dates and sync times follow the computer's local
   timezone, including historical DST and fractional offsets. An unavailable
   timezone is explicitly identified when UTC is used as a fallback.
-- **Source only:** `{`/`}` chooses a thread message, `t` folds its body, and
+- `{`/`}` chooses a thread message, `t` folds its body, and
   `Q`/`S` folds quoted history or a signature while keeping the focused card.
   An earlier-message cue identifies collapsed cards above the viewport.
-- **Source only:** `/` searches cached metadata and downloaded bodies with
+- `/` searches cached metadata and downloaded bodies with
   match excerpts/highlights. Returning from
   search restores the prior selected mail, focus and scroll.
-- `\` explicitly searches Gmail; ordinary `/` cache search is also available
-  in v0.2.3, with metadata-only matching.
+- `\` explicitly searches Gmail; `/` searches cached metadata and downloaded
+  bodies without a network request.
 
 [Reading](TERMINAL.md#read-and-navigate) · [Search](TERMINAL.md#search) · [Cache behavior](TUI-CACHE.md)
 
@@ -130,23 +129,24 @@ continuous cache-window navigation and personalized working context.
   `:save-attachment NUMBER /absolute/path` command saves a received file.
 - `$EDITOR`, then `$VISUAL`, then an available nvim/vi/nano supplies external
   editing; fixed quoted arguments are supported without invoking a shell.
-- **Source only:** debounced local recovery preserves unfinished addresses,
+- Debounced local recovery preserves unfinished addresses,
   body and files. Autosave, paste, editor save and leaving compose never send.
-- **Source only:** Ctrl+N/P and Enter choose cached recipient suggestions in
-  the selected address field.
-- **Source only:** `f` or the alias action cycles verified sender identities;
+- Ctrl+N/P and Enter choose account-local cached correspondents and saved
+  contacts in the selected address field. Regular correspondents need not be
+  saved contacts; name/address matching remains local during background refresh.
+- `f` or the alias action cycles verified sender identities;
   configured sender names and plaintext signatures are retained.
-- **Source only:** sizes and individual `[x]` controls stay visible, and the
+- Sizes and individual `[x]` controls stay visible, and the
   wheel reaches longer outgoing file lists.
-- **Source only:** Tab/Shift+Tab completes and cycles literal paths, including
+- Tab/Shift+Tab completes and cycles literal paths, including
   paths with spaces; Ctrl+U clears a suggested path. No shell expansion occurs.
-- **Source only:** received files have a picker across the loaded thread and a
+- Received files have a picker across the loaded thread and a
   suggested XDG Downloads filename. Collisions get a fresh name; saves refuse
   overwrite and create private files. Save & open explicitly invokes a viewer.
-- **Source only:** `L` opens an account-profile URL chooser.
-- **Source only:** Ctrl+D/U or PageUp/PageDown scrolls the original preview in
+- `L` opens an account-profile URL chooser.
+- Ctrl+D/U or PageUp/PageDown scrolls the original preview in
   normal compose mode; preview link/file actions retain the outgoing draft.
-- **Source only:** the contact's name and address share selection highlighting.
+- The contact's name and address share selection highlighting.
   Local autocomplete and contact pickers remain account-specific.
 
 [Compose, replies and files](TERMINAL.md) · [Contact commands](AGENT-CLI.md#commands)
@@ -155,20 +155,20 @@ continuous cache-window navigation and personalized working context.
 
 - Archive and Trash are reversible; reading does not automatically mark mail
   read. Star/unread changes are explicit.
-- **Source only:** Space selects mail and Ctrl+A selects the current page.
+- Space selects mail and Ctrl+A selects the current page.
   Bulk actions return per-message results; Ctrl+Z/`:undo` reverses confirmed
   successful touched-label changes, preserving unrelated changes.
-- **Source only:** custom-label, Spam, All Mail and Unread views complement
+- Custom-label, Spam, All Mail and Unread views complement
   Inbox/Sent/local Drafts/Archive/Trash. The label chooser filters by name and
   has explicit Add/Remove actions.
 - `q` goes back through reader, search, help and compose
   contexts before quitting; in text-entry fields it remains a normal character.
-- **Source only:** account/mailbox/selected-message/reader-scroll context,
+- Account/mailbox/selected-message/reader-scroll context,
   split ratios and mailbox key remaps restore from private preferences.
   `:split`, `:bind` and `:unbind` provide lightweight personalization.
 - Ctrl+L reloads the Omarchy palette. `NO_COLOR` retains meaningful text states
   and selected-item highlighting.
-- **Source only:** configurable body prefetch accepts 0–64; zero disables it.
+- Configurable body prefetch accepts 0–64; zero disables it.
 
 [Organization and keys](TERMINAL.md) · [Background cache](TERMINAL-BACKGROUND.md)
 
@@ -184,10 +184,10 @@ continuous cache-window navigation and personalized working context.
   attachment bytes as base64url; callers save them with their own file tools.
   There is no `--output-file` option. The interactive save/path picker is a
   TUI convenience.
-- **Source only:** per-item bulk outcomes and undo tokens, relative before/after
+- Per-item bulk outcomes and undo tokens, relative before/after
   cache anchors with retained-boundary fallback, and raw local recovery fields
   support agent-controlled workflows.
-- **Source only:** CLI/API batches can mark selected mail as spam or restore it
+- CLI/API batches can mark selected mail as spam or restore it
   from Spam to Inbox, with the same per-item outcomes and undo rules.
 
 [Commands, data and limits](AGENT-CLI.md) · [Receipts and recovery](TERMINAL.md)
@@ -195,7 +195,7 @@ continuous cache-window navigation and personalized working context.
 ## Permissions, storage and current limits
 
 Full TUI/CLI use requests six local capabilities that map to two Google scopes:
-`gmail.modify` and `contacts`. It uses a separate Desktop client and grant;
+`gmail.modify` and `contacts`. It uses a separate Google OAuth registration and grant;
 the bar continues using its single `gmail.readonly` permission.
 [Account setup](SETUP.md) is the canonical permission guide.
 

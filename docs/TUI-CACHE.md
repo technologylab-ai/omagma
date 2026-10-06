@@ -1,14 +1,14 @@
 # Cache-first terminal startup
 
-This guide describes the current development checkout. The public v0.2.3 release remains unchanged; newer window, search and progress behavior requires the current source build. [Installation](INSTALL.md), [terminal guide](TERMINAL.md).
+The TUI and CLI share a bounded private mail cache. [Installation](INSTALL.md), [terminal guide](TERMINAL.md).
 
 ## Startup and refresh
 
 Available cached mail appears immediately while Omagma checks Gmail in the background. A cold account shows **Fetching mail**; a warm account keeps usable rows and downloaded bodies visible during refresh. Fetch state has its own colored line, separate from action messages. `NO_COLOR` keeps explicit text states.
 
-**Source-only progress:** once a fetch knows its actual bounded batch, `metadata 1/32` or `bodies 1/32` shows completed work. This is not the Inbox size or unread count. Already cached bodies do not count as downloads. Before the batch is known, the line simply says fetching. The fixed **Synced** time uses the computer's local timezone and the date's DST offset; it is also source-only polish. An explicit `TZ` setting overrides the system timezone, including `TZ=UTC0` for UTC. Unsupported settings visibly show `UTC (TZ unavailable)`. Stored mail and synchronization timestamps remain UTC.
+Once a fetch knows its actual bounded batch, `metadata 1/32` or `bodies 1/32` shows completed work. This is not the Inbox size or unread count. Already cached bodies do not count as downloads. Before the batch is known, the line simply says fetching. The fixed **Synced** time uses the computer's local timezone and the date's DST offset. An explicit `TZ` setting overrides the system timezone, including `TZ=UTC0` for UTC. Unsupported settings visibly show `UTC (TZ unavailable)`. Stored mail and synchronization timestamps remain UTC.
 
-**Source-only placeholders** become real, interactive rows after a window commits. In both versions, a missing/unsupported body is identified clearly, partial cached threads are marked, and a snippet is not presented as a full message. New results preserve selection where possible; an open composer keeps its original context.
+Loading placeholders become real, interactive rows after a window commits. A missing/unsupported body is identified clearly, partial cached threads are marked, and a snippet is not presented as a full message. New results preserve selection where possible; an open composer keeps its original context.
 
 Refresh requests changes since the last completed update. Unchanged mail does not need another body download. If that history is no longer available, Omagma rebuilds a bounded recent snapshot. Interrupted or failed refreshes leave previously cached mail and drafts usable.
 
@@ -22,15 +22,15 @@ For example, keep a smaller recent cache and fill up to 32 bodies:
 omagma tui --metadata-limit 1000 --disk-limit-bytes 268435456
 ```
 
-**Source-only configurable prefetch:** add `--prefetch-bodies N` for 0–64. The normal head is the smaller of the requested page and 32; a larger value fills more retained bodies without changing the displayed window, while zero disables automatic body filling. The explicit flag is absent from v0.2.3. Selecting a missing body in ordinary mailbox/Gmail results can still fetch it read-only; local cache search does not.
+Add `--prefetch-bodies N` for 0–64. The normal head is the smaller of the requested page and 32; a larger value fills more retained bodies without changing the displayed window, while zero disables automatic body filling. Selecting a missing body in ordinary mailbox/Gmail results can still fetch it read-only; local cache search does not.
 
 Use the same cache and policy choices for the CLI or [background timer](TERMINAL-BACKGROUND.md). The cache is shared across callers, so an explicitly changed policy affects what stays available to other views.
 
 ## Windows and search
 
-**Source-only adjacent windows:** the TUI displays at most 32 rows, and scrolling past an edge moves to adjacent cached mail. Moving older can request one Gmail page after the cache tail; moving newer uses cached metadata, including after a middle-position restart. It does not download the whole mailbox. v0.2.3 uses explicit `[`/`]` page controls. A selected full body can still need a read-only fetch if absent.
+The TUI displays at most 32 rows, and scrolling past an edge moves to adjacent cached mail. Moving older can request one Gmail page after the cache tail; moving newer uses cached metadata, including after a middle-position restart. It does not download the whole mailbox. `[`/`]` also provides explicit page controls. A selected full body can still need a read-only fetch if absent.
 
-`/` searches retained mail without fetching missing bodies or uncached older results. **Source only:** downloaded-plaintext matching, quoted phrases, compound/negative terms and the extended filters. v0.2.3 local search is metadata-only with simpler predicates. `\` explicitly searches Gmail in either version. CLI callers choose `--cached` / `--server`; JSONL uses `cacheOnly:true` / `false`.
+`/` searches retained metadata and downloaded plaintext without fetching missing bodies or uncached older results. It supports quoted phrases, compound/negative terms and the field filters listed in the [terminal guide](TERMINAL.md#search). `\` explicitly searches Gmail. CLI callers choose `--cached` / `--server`; JSONL uses `cacheOnly:true` / `false`.
 
 Local search is a subset, not proof that the rest of Gmail lacks a match. For CLI pagination, keep the returned cursor with its account/query/label. Restart after `InvalidCursor`, for example when newly downloaded bodies change body-search results. [CLI contract](AGENT-CLI.md).
 
@@ -42,8 +42,8 @@ To clear one account's retained mail explicitly:
 omagma cache clear --account personal@example.com
 ```
 
-This removes local mail metadata and bodies, preserving local drafts, contacts
-and operation receipts. Source builds also preserve undo receipts, downloaded
+This removes local mail metadata and bodies, preserving local drafts, contacts,
+operation receipts, undo receipts, downloaded
 label and sender-identity lists; the fixture provider keeps its synthetic sent
 outbox. It does not delete anything from Gmail. The next
 refresh fills a bounded recent cache again. Use the same `--cache-dir` option

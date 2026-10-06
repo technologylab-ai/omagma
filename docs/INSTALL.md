@@ -87,7 +87,7 @@ upgrades. Terminal-only installations can use the raw release binary and its
 Read-only terminal mail can use your bar authorization. For replies, sending,
 mailbox changes or contacts, follow [terminal permissions](SETUP.md#full-tuicli-permissions).
 The TUI and CLI are experimental; [the terminal guide](TERMINAL.md) explains
-their workflows and which features currently require a source build.
+their workflows and controls.
 
 ## Optional demo
 
@@ -98,8 +98,8 @@ accounts. Demo mode is optional; it is not an installation check or prerequisite
 
 ## Source fallback
 
-If a compatible release is unavailable, or you want features that have not yet
-been released, follow [source builds](DEVELOPMENT.md#build-from-source). They
+To build Omagma from a checkout, follow
+[source builds](DEVELOPMENT.md#build-from-source). They
 require **Zig 0.17.0 exactly**; Omarchy may still provide 0.16.x. Select the
 matching official compiler for that shell without replacing the system compiler.
 Then link the absolute checkout directory as the user plugin folder and use the

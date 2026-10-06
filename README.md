@@ -23,7 +23,7 @@ For manual setup:
 
 1. [Download the latest release](https://github.com/technologylab-ai/omagma/releases/latest), choosing the complete Linux **x86_64** or **arm64** bundle and its `SHA256SUMS`.
 2. Follow [installation](docs/INSTALL.md) to verify the download and add the widget to your bar.
-3. Follow [account setup](docs/SETUP.md) to create your Google OAuth client, map each account to its Chrome profile, and approve access.
+3. Follow [account setup](docs/SETUP.md) to create your Google OAuth registration, map each account to its Chrome profile, and approve access.
 
 **No Zig compiler is needed for a release.** The bundle includes the Quickshell UI and a static musl backend. Live mail needs Chrome, an unlocked Secret Service keyring with `secret-tool`, and system CA certificates. The bar needs Omarchy’s Quickshell plugin host; the TUI needs a UTF-8 terminal. ARM backend builds are tested separately; ARM desktop integration has not been qualified.
 
@@ -37,7 +37,7 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 ## Terminal and agents
 
-**The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides account-separated mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, drafts, replies/reply-all, contacts, attachments, mailbox changes and invitation replies. `$EDITOR` can compose in a full-screen editor and then return to the TUI; tmux is not required. Calendar views, permanent mail deletion, contact deletion and label creation/renaming/deletion are outside the current scope. See [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) for supported actions and interface differences.
+**The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides account-separated mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, drafts, replies/reply-all, forwarding, contacts, attachments, mailbox changes and invitation replies. `$EDITOR` can compose in a full-screen editor and then return to the TUI; tmux is not required. Calendar views, permanent mail deletion, contact deletion and label creation/renaming/deletion are outside the current scope. See [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) for supported actions and interface differences.
 
 Available cached mail appears immediately while Gmail refreshes in the background. The default disk cache keeps the newest **2,000 messages within 256 MiB per account**, evicting the oldest tail. The cache is private plaintext storage, separate from the bar’s memory-only cache. `/` searches the cache, and `\` explicitly searches Gmail. An optional [five-minute timer](docs/TERMINAL-BACKGROUND.md) keeps the terminal cache ready while the TUI is closed.
 
@@ -45,7 +45,7 @@ Available cached mail appears immediately while Gmail refreshes in the backgroun
 
 Existing bar credentials allow read-only mail access. Sending, mailbox changes and contacts need [separate terminal authorization](docs/SETUP.md#full-tuicli-permissions); the bar keeps its read-only grant. Choose the permissions you want to use and authorize each account separately.
 
-**Release and source features:** the published **v0.2.3** binaries include cache-first startup, mouse navigation and native HTML mail display. The current source checkout additionally implements forwarding with files, recipient autocomplete, sending identities and signatures, draft autosave/recovery, bulk actions with undo, custom-label views, folded threads, link/attachment pickers, cached-body search, continuous scrolling through cached mail, and saved working context/key mappings/pane proportions. These additions have not been published in a newer release; the v0.2.3 assets remain unchanged. The terminal guides identify the source-only workflows.
+Forward files, choose verified sending identities, recover drafts automatically, and search downloaded bodies. Folded threads, link and attachment pickers, bulk changes with undo, continuous cached-mail navigation, and saved working context keep daily mail work compact. See [the feature catalogue](docs/FEATURES.md) for the complete overview.
 
 To explore without Google credentials, use the optional fictional-mail demo:
 

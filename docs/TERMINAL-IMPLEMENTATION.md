@@ -3,8 +3,8 @@
 Developer reference for the current source tree. Start with [development](DEVELOPMENT.md)
 for local builds and focused checks; ordinary use is covered by [the terminal guide](TERMINAL.md)
 and [account setup](SETUP.md#full-tuicli-permissions). The TUI and CLI remain experimental.
-The local development changes after published v0.2.3 keep the package version unchanged;
-release bundles do not automatically contain later source-tree features. Dated results
+Current source is newer than the published v0.2.3 checkpoint; a new release
+qualifies its own candidate and does not replace that checkpoint. Dated results
 below identify their own artifacts and do not qualify every current change.
 
 ## Current implementation

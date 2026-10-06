@@ -73,7 +73,7 @@
         <figcaption class="shot__caption">
           <span class="shot__caption-text">
             <span class="tag tag--experimental">Experimental</span>
-            <span>Current source <code>omagma tui</code> with fictional mail — a real terminal capture.</span>
+            <span><code>omagma tui</code> with fictional mail — a real terminal capture.</span>
           </span>
           <a class="shot__link" href="{{base}}assets/omagma-tui.png">Full-size capture</a>
         </figcaption>
@@ -103,8 +103,8 @@
             <dl class="iface__access">
               <dt>Permission</dt>
               <dd><code>gmail.readonly</code></dd>
-              <dt>OAuth client</dt>
-              <dd>One Desktop client</dd>
+              <dt>Google OAuth</dt>
+              <dd>One registration</dd>
               <dt>Mail kept</dt>
               <dd>In memory only</dd>
             </dl>
@@ -137,7 +137,7 @@
               <dt>To read</dt>
               <dd>The bar’s <code>gmail.readonly</code> grant</dd>
               <dt>Full access</dt>
-              <dd><code>gmail.modify</code> + <code>contacts</code>, separate Desktop client</dd>
+              <dd><code>gmail.modify</code> + <code>contacts</code>, separate Google OAuth registration</dd>
               <dt>Mail kept</dt>
               <dd>Private plaintext disk cache</dd>
             </dl>
@@ -184,18 +184,18 @@
             <li>Linux x86_64</li>
           </ul>
         </div>
-        <p class="memory__fine">Chrome and unrelated shell widgets are excluded. Both figures are approximate observations, not a controlled benchmark, and the 31&nbsp;MB estimate covers the bar only — not the terminal client or newer source builds. <a href="{{base}}docs/memory/">Memory measurements <span aria-hidden="true">→</span></a></p>
+        <p class="memory__fine">Chrome and unrelated shell widgets are excluded. Both figures are approximate observations, not a controlled benchmark, and the 31&nbsp;MB estimate covers the bar only — not the terminal client or later versions. <a href="{{base}}docs/memory/">Memory measurements <span aria-hidden="true">→</span></a></p>
       </div>
     </section>
 
-    <!-- Cache-first terminal behavior, with source-only progress clearly marked -->
+    <!-- Cache-first terminal behavior and progressive loading -->
     <section class="section" id="cache" aria-labelledby="cache-title">
       <div class="wrap split">
         <div class="split__text">
           <p class="eyebrow">Terminal cache</p>
           <h2 id="cache-title">Cached mail first. Gmail catches up.</h2>
           <p>The terminal client opens with the mail it already has and keeps it readable while Gmail refreshes in the background; a refresh requests only the changes since its last update. By default each account keeps its newest 2,000 messages within 256&nbsp;MiB and evicts the oldest tail. An optional five-minute timer keeps the cache ready even while the TUI is closed.</p>
-          <p class="source-note"><span class="tag tag--source">Source only</span> Placeholder rows turn into messages as metadata and bodies arrive, a <code>metadata 1/32</code> or <code>bodies 1/32</code> counter reports the batch in progress — not your Inbox size — and scrolling past either end of the 32-row list moves continuously through adjacent cached mail. v0.2.3 uses explicit <kbd>[</kbd> and <kbd>]</kbd> pages instead.</p>
+          <p>Placeholder rows turn into messages as metadata and bodies arrive. A <code>metadata 1/32</code> or <code>bodies 1/32</code> counter reports the batch in progress, and scrolling past either end of the 32-row list moves continuously through adjacent cached mail.</p>
           <p>Cached mail is private plaintext with owner-only permissions, kept apart from the bar’s memory-only snapshot.</p>
           <p class="links">
             <a class="more" href="{{base}}docs/tui-cache/">Cache behavior <span aria-hidden="true">→</span></a>
@@ -212,69 +212,12 @@
           </div>
           <figcaption class="shot__caption">
             <span class="shot__caption-text">
-              <span class="tag tag--source">Source only</span>
-              <span>Fictional mail loading in a current source build.</span>
+              <span class="tag tag--experimental">Experimental</span>
+              <span>Fictional mail loading while cached messages stay readable.</span>
             </span>
             <button class="shot__link motion-toggle" type="button" data-animation-toggle data-animated="{{base}}assets/omagma-fetch.gif" data-still="{{base}}assets/omagma-fetch.png" aria-pressed="true">Pause animation</button>
           </figcaption>
         </figure>
-      </div>
-    </section>
-
-    <!-- Release vs source: what is published and what is not -->
-    <section class="section" id="releases" aria-labelledby="releases-title">
-      <div class="wrap">
-        <header class="section-head">
-          <p class="eyebrow">Release and source</p>
-          <h2 id="releases-title">What’s released, and what’s only in source.</h2>
-          <p class="section-head__intro">The published v0.2.3 binaries are unchanged. Terminal and CLI work added since then lives in the source checkout and hasn’t been released yet; the guides mark it <strong>Source only</strong>.</p>
-        </header>
-
-        <div class="ledger">
-          <section class="ledger__col" aria-labelledby="ledger-release">
-            <h3 class="ledger__title" id="ledger-release"><span class="tag tag--release">Release</span> v0.2.3 bundles</h3>
-            <p class="ledger__sub">Published · static musl backend · no compiler needed</p>
-            <ul class="ticks">
-              <li>Read-only bar for up to three accounts, with optional background refresh</li>
-              <li>Cache-first terminal startup</li>
-              <li>Mouse navigation</li>
-              <li>Native display of HTML-only mail</li>
-              <li>Replies, local drafts, attachments, contacts, single-message actions and RSVP</li>
-              <li>Metadata cache search and explicit Gmail search</li>
-              <li>Agent CLI: one-shot commands and JSONL</li>
-            </ul>
-            <p class="ledger__foot"><a href="https://github.com/technologylab-ai/omagma/releases/latest">Download the latest release</a> for Linux x86_64 or arm64, with <code>SHA256SUMS</code>.</p>
-          </section>
-
-          <section class="ledger__col ledger__col--source" aria-labelledby="ledger-source">
-            <h3 class="ledger__title" id="ledger-source"><span class="tag tag--source">Source only</span> Current checkout</h3>
-            <p class="ledger__sub">Unreleased · build with Zig 0.17.0 exactly</p>
-            <ul class="ticks">
-              <li>Forwarding with original files</li>
-              <li>Recipient autocomplete, sending identities and signatures</li>
-              <li>Draft autosave and recovery</li>
-              <li>Bulk actions with undo</li>
-              <li>Custom-label, Spam, All Mail and Unread views</li>
-              <li>Folded threads, quoted history and signatures</li>
-              <li>Link and received-file pickers</li>
-              <li>Search inside downloaded message bodies</li>
-              <li>Loading placeholders, <code>n/m</code> batch counters and continuous cache windows</li>
-              <li>Saved working context, key mappings and pane proportions</li>
-            </ul>
-            <p class="ledger__foot">Omarchy may still ship Zig 0.16.x; use the official 0.17.0 build without replacing your system compiler. <a href="{{base}}docs/development/#build-from-source">Build from source</a></p>
-          </section>
-        </div>
-
-        <dl class="scope-notes">
-          <div>
-            <dt><span class="tag tag--planned">Planned</span></dt>
-            <dd>Creating, renaming and deleting arbitrary labels in the TUI and CLI. Assigning and removing existing labels already works.</dd>
-          </div>
-          <div>
-            <dt>Not included</dt>
-            <dd>A combined Inbox, calendar views, permanent mail deletion, contact deletion, synchronized Gmail drafts, and an embedded editor pane — <code>$EDITOR</code> takes over the terminal instead.</dd>
-          </div>
-        </dl>
       </div>
     </section>
 
@@ -293,15 +236,15 @@
             <div class="code-block">
 <button class="copy-code" type="button" data-copy="setup-prompt" aria-label="Copy setup prompt">Copy</button><pre><code id="setup-prompt">Read AGENTS.md and follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.</code></pre>
             </div>
-            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and whether you want five-minute background refresh. If you already downloaded an OAuth client file, give its local path — never paste its contents or any tokens. For sending and mailbox changes in the terminal, use the <a href="{{base}}docs/agent-setup/#terminal-client-and-agents">full-access prompt</a>.</p>
+            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and whether you want five-minute background refresh. If you already downloaded the Google registration JSON, give its local path — never paste its contents or any tokens. For sending and mailbox changes in the terminal, use the <a href="{{base}}docs/agent-setup/#terminal-client-and-agents">full-access prompt</a>.</p>
           </div>
 
           <div class="google">
             <h3>What the Google part involves</h3>
             <ol class="numbered">
-              <li><strong>Your own Google project.</strong> Create a Google Cloud project, enable the Gmail API and configure the consent screen. Omagma uses Desktop OAuth clients that you create and keep private.</li>
-              <li><strong>One client for the bar.</strong> A Desktop client with <code>gmail.readonly</code> covers the bar and read-only terminal browsing.</li>
-              <li><strong>A second client for writing.</strong> Full TUI and CLI access uses a separate Desktop client in the same project, with <code>gmail.modify</code> and <code>contacts</code> (People API). The bar keeps its read-only grant.</li>
+              <li><strong>Your own Google project.</strong> Create a Google Cloud project, enable the Gmail API and configure the consent screen. Register Omagma with Google and keep its downloaded registration files private.</li>
+              <li><strong>One OAuth registration for the bar.</strong> A Google OAuth registration with <code>gmail.readonly</code> covers the bar and read-only terminal browsing.</li>
+              <li><strong>A second registration for writing.</strong> Full TUI and CLI access uses a separate Google OAuth registration in the same project, with <code>gmail.modify</code> and <code>contacts</code> (People API). The bar keeps its read-only grant.</li>
               <li><strong>Consent per account, in its own profile.</strong> Each account maps to an existing Chrome profile. Consent opens there, and Omagma checks the returned address before storing the token in your Secret Service keyring.</li>
             </ol>
             <p class="fine">While a Google app is in Testing, these grants expire after seven days; reconnecting is one command per account.</p>
@@ -313,7 +256,7 @@
           <ol class="numbered numbered--row">
             <li><strong>Download.</strong> Get the complete Linux x86_64 or arm64 bundle and its <code>SHA256SUMS</code> from the <a href="https://github.com/technologylab-ai/omagma/releases/latest">latest release</a>.</li>
             <li><strong>Install.</strong> Verify the checksum, extract, and add the widget to your bar. <a href="{{base}}docs/install/">Installation guide</a></li>
-            <li><strong>Connect accounts.</strong> Create your OAuth client, map each account to its Chrome profile and approve access. <a href="{{base}}docs/setup/">Account setup</a></li>
+            <li><strong>Connect accounts.</strong> Create your Google OAuth registration, map each account to its Chrome profile and approve access. <a href="{{base}}docs/setup/">Account setup</a></li>
           </ol>
           <p class="fine">Needs Omarchy’s Quickshell plugin host for the bar, Chrome, an unlocked Secret Service keyring with <code>secret-tool</code>, and system CA certificates; the TUI needs a UTF-8 terminal. Release bundles are static, so no Zig compiler is needed. arm64 backend builds are tested separately; ARM desktop integration has not been qualified.</p>
           <p class="fine">Optional preview: <code>omagma tui --fixtures</code> shows fictional mail without contacting Google. It isn’t part of installation.</p>

@@ -4,9 +4,8 @@ Start with installation and account setup, then choose the bar, terminal or
 agent guide. The bar is read-only; the experimental TUI and CLI can use a
 separate account grant for sending and mailbox/contact changes.
 
-The published v0.2.3 bundles and the current development checkout have
-different feature coverage. User guides identify newer source-only behavior;
-release evidence records what was checked at its dated revision.
+These guides describe Omagma’s current features. Dated evidence reports retain
+the versions and revisions that were measured.
 
 ## Get started
 
@@ -20,8 +19,7 @@ release evidence records what was checked at its dated revision.
 ## Everyday use
 
 The [feature catalogue](FEATURES.md) lists the main capabilities first, then
-smaller reading, composition, organization and agent workflow details. It marks
-newer source-only behavior separately from the released bundle.
+smaller reading, composition, organization and agent workflow details.
 
 | Guide | What you will find |
 | --- | --- |
@@ -39,7 +37,7 @@ newer source-only behavior separately from the released bundle.
 - [Memory](MEMORY.md): what the published measurements include, with dates,
   versions and workload limits.
 - [Distribution and Google registration](DISTRIBUTION.md): user-supplied OAuth
-  clients and the distinction between testing, publishing and verification.
+  registrations and the distinction between testing, publishing and verification.
 - [License notices](../LICENSES/README.md): bundled third-party licenses.
 
 ## Development and reference

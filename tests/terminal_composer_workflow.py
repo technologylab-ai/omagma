@@ -109,7 +109,9 @@ def completion_aliases(binary, directory):
         require(incomplete["from"]["name"] == "Configured Primary", "primary sender name not honored")
         terminal.send(b"\x7f" * 5 + b"al")
         terminal.until(lambda: "Recipients ·" in terminal.text() and "alex-personal@example.org" in terminal.text())
-        terminal.send(b"\r")
+        # Recent mail participants now precede saved-only contacts. Select the
+        # saved contact explicitly; retaining it is the behavior under test.
+        terminal.send(b"\x0e\r")
         terminal.until(lambda: "To: alex-personal@example.org" in terminal.text())
         # Tab keeps its field behavior while editing; type a useful subject.
         terminal.send(b"\t" * 3 + b"Composer workflow fixture\tTyped reply text.")
