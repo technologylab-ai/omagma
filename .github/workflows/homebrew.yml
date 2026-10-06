@@ -68,7 +68,8 @@ jobs:
           path.chmod(0o600)
           PY
           export GIT_SSH_COMMAND="ssh -i \"$task_tap_root/key\" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$task_tap_root/known_hosts\" -o GlobalKnownHostsFile=/dev/null"
-          git clone --branch main --single-branch git@github.com:renerocksai/homebrew-tap.git "$task_tap_root/tap"
+          task_tap_host=github.com
+          git clone --branch main --single-branch "git@$task_tap_host:renerocksai/homebrew-tap.git" "$task_tap_root/tap"
           export OMAGMA_TAP_FORMULA="$task_tap_root/tap/Formula/omagma.rb"
           python3 - <<'PY'
           import os, re
