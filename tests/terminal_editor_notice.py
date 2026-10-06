@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import signal
 import tempfile
 
 from terminal_integration import ACCOUNTS, Client, require
@@ -21,26 +22,36 @@ def exercise(binary, directory, action):
         source.path(ACCOUNTS[0]).write_text(json.dumps(data))
         terminal.send(b'c')
         terminal.until(lambda: 'Draft preview' in terminal.text() and entered.exists())
+        if action == 'terminate-editor':
+            terminal.send(b'\t\t\t\ti' + 'Retained signal editor body 🌋'.encode())
+            terminal.until(lambda: 'Retained signal editor body' in terminal.text())
+            terminal.send(b'\x1b')
+            terminal.gap(.06)
         terminal.send(b'e')
         terminal.until(lambda: terminal.editor_log.exists())
         require(hold.exists(), 'recipient fixture finished before editor preemption')
         editor = json.loads(terminal.editor_log.read_text())
         require(editor['stdinIsTty'] and editor['stdoutIsTty'] and editor['fileExists'],
                 'editor takeover did not have its owned draft and controlling PTY')
-        terminal.send({'save': b's', 'cancel': b'x', 'save-error': b'r'}[action])
-        expected_notice = 'Editor returned' if action == 'save' else 'Editor exited 1'
-        terminal.until(lambda: 'exitCode' in json.loads(terminal.editor_log.read_text())
-                       and 'Compose' in terminal.text() and expected_notice in terminal.text())
-        terminal.gap(.2)
-        require(expected_notice in terminal.text(), 'background completion cleared the editor action outcome')
-        expected_body = 'Reviewed fixture editor body.\nCafé and emoji 👋 remain intact.\n' if action != 'cancel' else ''
+        if action == 'terminate-editor':
+            result = terminal.finish(signal_mode=signal.SIGTERM)
+            expected_body = 'Retained signal editor body 🌋'
+            require('DraftPersistenceFailed' not in terminal.text(), 'retained editor warning was treated as a failed save')
+        else:
+            terminal.send({'save': b's', 'cancel': b'x', 'save-error': b'r'}[action])
+            expected_notice = 'Editor returned' if action == 'save' else 'Editor exited 1'
+            terminal.until(lambda: 'exitCode' in json.loads(terminal.editor_log.read_text())
+                           and 'Compose' in terminal.text() and expected_notice in terminal.text())
+            terminal.gap(.2)
+            require(expected_notice in terminal.text(), 'background completion cleared the editor action outcome')
+            expected_body = 'Reviewed fixture editor body.\nCafé and emoji 👋 remain intact.\n' if action != 'cancel' else ''
+            result = terminal.finish()
         with Client(binary, directory, extra=extra) as client:
             drafts = client.request('draft.list')['drafts']
             require(len(drafts) == 1, 'editor result created or lost a local draft')
             draft = client.request('draft.read', draftId=drafts[0]['id'])
             require(draft['bodyText'] == expected_body, 'editor notice changed the retained draft body')
             require(client.request('cache.stats')['fixtureSends'] == 0, 'editor result sent mail')
-        result = terminal.finish()
         require(result['termiosRestored'] and result['exitCode'] == 0, 'editor notice run did not restore its terminal')
         print(f'PASS editor notice: {action}, held recipient fetch preempted, outcome visible, exact draft/no-send/TTY restored')
     except Exception:
@@ -54,9 +65,9 @@ def exercise(binary, directory, action):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True, type=Path)
-    parser.add_argument('--case', choices=['all', 'save', 'cancel', 'save-error'], default='all')
+    parser.add_argument('--case', choices=['all', 'save', 'cancel', 'save-error', 'terminate-editor'], default='all')
     args = parser.parse_args()
-    for action in ('save', 'cancel', 'save-error'):
+    for action in ('save', 'cancel', 'save-error', 'terminate-editor'):
         if args.case not in ('all', action):
             continue
         with tempfile.TemporaryDirectory(prefix='omagma-editor-notice-') as directory:

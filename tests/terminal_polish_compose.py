@@ -138,7 +138,18 @@ def compose_case(binary, directory):
         terminal.until(lambda: received.exists() and "Subject:" in terminal.text() and "Received attachments" not in terminal.text())
         require(received.read_bytes() == FIRST, "compose preview saved the wrong received file")
         terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text() and "Attachment 2: alpha summary.txt" in terminal.text())
+        terminal.until(lambda: "Sending account:" in terminal.text() and "Review send" in terminal.text())
+        require("personal@example.com" in terminal.text() and "alex@example.test" in terminal.text(),
+                "reply review lost its actual sending identity or recipient")
+        # This reply deliberately keeps its120-line quoted original. Outgoing
+        # attachment review follows that body; visit those rows explicitly.
+        for _ in range(8):
+            if "Attachment 2: alpha summary.txt" in terminal.text():
+                break
+            terminal.send(b"\x1b[6~")
+            terminal.gap(.08)
+        terminal.until(lambda: "Attachment 1: alpha notes.txt" in terminal.text()
+                       and "Attachment 2: alpha summary.txt" in terminal.text())
         retained = draft(binary, directory, source)
         require(retained["id"] == original_id and retained["bodyText"].startswith("LB literal typing"), "preview/picker changed draft identity or body")
         require(retained["to"][0]["address"] == "alex@example.test", "preview/picker changed recipients")

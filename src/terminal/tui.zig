@@ -3384,8 +3384,23 @@ const App = struct {
         // Preserve valid edited fields through the same local draft operation.
         try self.saveDraft(.save);
         if (self.job.future) |*future| future.await(self.io);
+        // Capture the save acknowledgement before finish frees its response
+        // or dispatches another job. A retained editor warning is UI state,
+        // not evidence that the local save failed.
+        const saved = self.draftSaveConfirmed();
         try self.finish();
-        if (self.warning) return error.DraftPersistenceFailed;
+        if (!saved) return error.DraftPersistenceFailed;
+    }
+    fn draftSaveConfirmed(self: *App) bool {
+        if (self.job.kind != .save or !self.job.done.load(.acquire) or self.job.failure != null or self.job.account_index != self.account_index) return false;
+        const response = self.job.response orelse return false;
+        if (response.len > response_limit) return false;
+        const result = std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{ .allocate = .alloc_always, .max_value_len = response_limit }) catch return false;
+        if (get(result, "ok") != .bool or !truth(get(result, "ok"))) return false;
+        const acknowledged_account = text(get(result, "account"));
+        if (acknowledged_account.len != 0 and !same(acknowledged_account, self.account())) return false;
+        const id = text(get(get(result, "data"), "id"));
+        return id.len != 0 and same(id, self.compose.id.value());
     }
     fn canEditAttachments(self: *const App) bool {
         return !self.compose.unknown_outcome and (self.job.future == null or readOnlyJob(self.job.kind));
@@ -6878,6 +6893,63 @@ test "editor notice: saved canceled and failed results survive background work w
     try std.testing.expectEqualStrings(unknown, app.status[0..app.status_len]);
     try std.testing.expect(app.compose.unknown_outcome);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "editor persistence: exit save uses operation acknowledgement rather than retained warning" {
+    const SaveClient = struct {
+        fail_transport: bool = false,
+        reject: bool = false,
+        calls: usize = 0,
+        fn call(ctx: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const value = try std.json.parseFromSlice(Value, allocator, request, .{});
+            defer value.deinit();
+            if (!same(text(get(value.value, "cmd")), "draft.update")) return error.ExpectedLocalDraftSave;
+            if (!same(text(get(get(value.value, "draft"), "bodyText")), "Retained termination body 🌋")) return error.ChangedDraftBody;
+            if (self.fail_transport) return error.CacheBusy;
+            return allocator.dupe(u8, if (self.reject) "{\"ok\":false,\"error\":{\"code\":\"DiskQuotaExceeded\"}}" else "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"local-draft\"}}");
+        }
+    };
+    const allocator = std.testing.allocator;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try allocator.create(Loop);
+    defer allocator.destroy(loop);
+    loop.init(std.testing.io, allocator, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var save: SaveClient = .{};
+    var app = factory.app(allocator);
+    defer app.deinit();
+    app.loop = loop;
+    app.client = .{ .ctx = &save, .callFn = SaveClient.call };
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.revision = 1;
+    try app.compose.id.set(allocator, "local-draft");
+    try app.compose.fields[4].set(allocator, "Retained termination body 🌋");
+    app.sayEditorResult(130);
+    try std.testing.expect(app.warning);
+    try app.persistDraftAtExit();
+    try std.testing.expect(app.warning);
+    try std.testing.expectEqual(StatusKind.action, app.status_kind);
+    try std.testing.expect(std.mem.startsWith(u8, app.status[0..app.status_len], "Editor exited 130"));
+    try std.testing.expectEqual(@as(usize, 1), save.calls);
+    try std.testing.expectEqual(@as(u64, 1), app.compose.saved_revision);
+    // Both an actual worker failure and a structured failed acknowledgement
+    // remain failures regardless of the preceding UI warning's value.
+    for (0..2) |failure| {
+        save.fail_transport = failure == 0;
+        save.reject = failure == 1;
+        app.action_notice = false;
+        app.say(false, "Ready", .{});
+        try std.testing.expect(!app.warning);
+        try std.testing.expectError(error.DraftPersistenceFailed, app.persistDraftAtExit());
+        try std.testing.expectEqualStrings("Retained termination body 🌋", app.compose.fields[4].value());
+        try std.testing.expect(app.job.future == null);
+    }
 }
 
 test "status polish: header context and list counts do not invent mailbox totals" {

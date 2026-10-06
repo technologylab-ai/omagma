@@ -179,7 +179,7 @@ def run_case(binary,directory,name):
             terminal.send(b'\x1b[H');terminal.until(lambda:selected_mail(terminal,96) and contains(terminal,ACCOUNTS[0],96))
             rect=reader_rectangle(terminal.screen);require(rect is not None,'reader wheel target absent')
             click(terminal,rect['right']-2,rect['top']+2)
-            terminal.until(lambda:'h/Esc/q List' in terminal.text())
+            terminal.until(lambda:'Esc/q List' in terminal.text())
             before=[text for _,text in reader_rows(terminal.screen)]
             terminal.mouse_stage='reader-wheel-down'
             report(terminal,rect['right']-2,rect['top']+2,65)

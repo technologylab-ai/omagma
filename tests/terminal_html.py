@@ -46,7 +46,7 @@ def screen_capture(terminal):
     return {"currentCells": ["".join(row) for row in terminal.screen.cells],
             "cellGrid": [row[:] for row in terminal.screen.cells],
             "currentStyleRuns": runs, "readerRectangle": reader_rectangle(terminal.screen),
-            "processExitCode": terminal.process.poll()}
+            "processExitCode": terminal.process.poll(), "stage": getattr(terminal, "html_stage", "unspecified")}
 
 
 def failed_view(failure, terminal, metrics_path):
@@ -317,11 +317,15 @@ def resource_case(binary, directory, cycles, idle):
         terminal = None
         try:
             terminal = start(binary, owned, fixture, path, columns=100, rows=24, extra=("--fixture-scenario", "offline-refresh"))
+            terminal.html_stage = "large-visible-head"
             terminal.until(lambda: reader_contains(terminal.screen, "Fictional large HTML"), seconds=20)
+            terminal.html_stage = "offline-state"
             terminal.until(lambda: "Offline cached mail" in terminal.text())
+            terminal.html_stage = "end-visible-tail"
             terminal.send(b"l")
             terminal.send(b"G")
             terminal.until(lambda: reader_contains(terminal.screen, "Fictional large tail marker."))
+            terminal.html_stage = "home-visible-head"
             terminal.send(b"\x1b[H")
             terminal.until(lambda: reader_contains(terminal.screen, "Fictional large HTML"))
             original = [text for _, text in reader_rows(terminal.screen)]
@@ -335,8 +339,10 @@ def resource_case(binary, directory, cycles, idle):
             samples = []
             baseline = process_sample(terminal.process.pid)
             with Sampler(terminal.process.pid) as sampler:
+                terminal.html_stage = "warmup-navigation"
                 for _ in range(100): navigate()
                 started = time.monotonic()
+                terminal.html_stage = "measured-navigation"
                 for index in range(repetitions):
                     navigate()
                     samples.append({"cycle": index + 1, **process_sample(terminal.process.pid)})
@@ -349,9 +355,11 @@ def resource_case(binary, directory, cycles, idle):
                                    "rssAbsoluteLimit": None, "pssAbsoluteLimit": None}
                     terminal.gap(.25)
                     output_before = terminal.output_total
+                    terminal.html_stage = "quiet-interval"
                     measurement["quiet"] = quiet(terminal.process, idle, terminal.pump)
                     require(terminal.output_total == output_before, "HTML reader redrew while quiet without input")
                     measurement["quiet"].update(inputKeysIssued=0, outputBytesAdded=0)
+            terminal.html_stage = "clean-exit"
             terminal.finish()
             require(body_snapshot(owned) == before, "large HTML navigation changed cached body bytes")
             counts.append(html_metrics(path))

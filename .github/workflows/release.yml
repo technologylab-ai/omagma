@@ -307,7 +307,39 @@ jobs:
           python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} probe-keyring
       - name: Native Keychain survives the packaged binary upgrade
-        run: python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}
+        run: |
+          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }} --homebrew-resign
+      - name: Native credential-free HTTPS with system CA certificates
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, signal, subprocess
+          from pathlib import Path
+          checks = []
+          for mode, binary in [('debug', Path('.verification-macos-debug/bin/omagma')),
+                               ('safe', Path('dist/omagma-macos-' + os.environ['RELEASE_ARCH']))]:
+              info = json.loads(subprocess.check_output([str(binary.resolve()), 'build-info'], text=True, timeout=10))
+              assert info['zigVersion'] == '0.17.0' and info['optimizeMode'] == mode, info
+              child = subprocess.Popen([str(binary.resolve()), 'probe-https'], stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+              try:
+                  out, err = child.communicate(timeout=45)
+              except subprocess.TimeoutExpired:
+                  os.killpg(child.pid, signal.SIGKILL)
+                  child.communicate()
+                  raise
+              assert child.returncode == 0 and not err, 'HTTPS probe failed or emitted diagnostics'
+              assert len(out.splitlines()) == 1, 'HTTPS probe did not emit one bounded frame'
+              frame = json.loads(out)
+              assert frame['ok'] and frame['status'] == 401, frame
+              assert 0 <= frame['bodyBytes'] <= 524288 and 0 <= frame['httpPeakBytes'] <= 8 * 1024 * 1024, frame
+              checks.append({'buildInfo': info, 'binarySha256': hashlib.sha256(binary.read_bytes()).hexdigest(), **frame})
+          Path('tests/results').mkdir(parents=True, exist_ok=True)
+          Path('tests/results/macos-credential-free-https.json').write_text(json.dumps({'passed': True, 'credentialsUsed': False, 'checks': checks}, indent=2) + '\n')
+          print('PASS native Debug and packaged Safe HTTPS: credential-free401 and bounded storage')
+          PY
       - name: Native macOS memory and quiet CPU gates
         run: |
           python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind cli --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-cli-memory.json
