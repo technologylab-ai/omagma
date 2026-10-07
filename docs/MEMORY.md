@@ -9,10 +9,34 @@ These are dated Linux x86_64 observations, not measurements of every later sourc
 | Mode | Approximate footprint | Observation |
 | --- | ---: | --- |
 | Bar, three connected accounts | **31 MB** | v0.2.2, 2026-10-05; backend PSS plus separately attributed UI share |
-| Agent CLI, three fictional accounts | **8 MB** settled | v0.2.4, 2026-10-06; published executable, whole-process RSS |
-| TUI, three fictional accounts | **11 MB** settled | v0.2.4, 2026-10-06; published executable, whole-process RSS |
+| Agent CLI, three fictional accounts | **8.5 MB** settled | v0.2.5, 2026-10-07; published executable, whole-process RSS |
+| TUI, three fictional accounts | **11 MB** settled | v0.2.5, 2026-10-07; published executable, whole-process RSS |
 
 Bar totals exclude Chrome and unrelated shell widgets. Terminal totals exclude the emulator, external editor and separately running bar. Large bodies and a full cache have separate workloads below. Allocation limits describe reserved or capped storage; they are not a prediction of resident RAM. Installing Omagma does not require running these measurement procedures.
+
+## Published terminal workload, v0.2.5
+
+The published Linux x86_64 static-musl Safe executable, exact Zig 0.17.0,
+passed native CI workloads with 100 warm-ups, 1,000 measured cycles and
+60 quiet seconds. Its SHA-256 is
+`dbf57aca3c570f918135e72909921b17d474d2c5b24ab33db83923a696f58cc0`;
+actual downloaded bytes separately passed functional checks and were installed.
+
+| Whole process workload | Settled RSS / PSS (KiB) | OS peak RSS (KiB) | Warm growth (KiB) |
+| --- | ---: | ---: | ---: |
+| Agent CLI | 8,268 / 8,260 | 12,312 | 0 |
+| TUI | 11,008 / 11,000 | 14,556 | 0 |
+| Complete 2 MiB HTML plaintext fallback | 27,852 / 27,844 | 38,764 | 4 |
+
+All refused zero allocations. CLI quiet CPU was zero; both TUI workloads
+observed 0.016666% of one core and emitted zero quiet bytes. The cache observer
+uses a finite wait and leaves the idle screen unchanged. Allocation limits
+remain separate from these resident totals. Rounded decimal totals are
+approximately 8.5 MB CLI, 11 MB ordinary TUI and 29 MB for the large-body
+fallback. [Release evidence](evidence/terminal-0.2.5.md) records both Linux
+architectures and native Mac RSS/physical-footprint results separately.
+These process lifetimes do not establish an isolated compiler or feature cost.
+The dated live bar estimate above and earlier measurements below remain unchanged.
 
 ## Published terminal workload, v0.2.4
 

@@ -71,3 +71,4 @@ steps or claims about a later development build.
 - [Cache-first release](evidence/terminal-0.2.2.md)
 - [HTML reader](evidence/terminal-0.2.3.md) and [mouse support](evidence/terminal-0.2.3-mouse.md)
 - [Terminal features and native Linux/macOS release](evidence/terminal-0.2.4.md)
+- [Live arrivals, navigation and rendering release](evidence/terminal-0.2.5.md)
