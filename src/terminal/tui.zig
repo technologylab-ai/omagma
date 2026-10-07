@@ -4421,7 +4421,7 @@ const App = struct {
                 try self.preview(false);
             }
         } else if (key.matches(Key.home, .{})) {
-            try self.jumpFirstMail();
+            if (self.focus == .reader) self.scrollReader(false, std.math.maxInt(usize)) else try self.jumpFirstMail();
         } else if (key.matches('[', .{})) try self.page(false) else if (key.matches(']', .{})) try self.page(true) else if (key.matches('/', .{})) {
             try self.beginSearch(.cache);
         } else if (key.matches('\\', .{})) {
@@ -5767,6 +5767,37 @@ test "persisted selected body refusal remains local and does not mark mailbox of
     try std.testing.expect(!app.body_cache_miss);
     try std.testing.expectEqualStrings("Local full body", text(get(app.thread[0], "bodyText")));
     try std.testing.expectEqual(SyncState.current, app.sync[0].state);
+}
+
+test "HTML reader Home preserves the selected body focus and prepared document" {
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"},{\"id\":\"b\"}],\"cached\":true,\"cacheReady\":true}}");
+    app.selected = 1;
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"b\",\"bodySource\":\"html\",\"bodyText\":\"Keep this body\",\"bodyHtml\":\"<p><b>Keep this body</b></p>\"}}", true);
+    app.prepareVisibleMarkup(&app.markup[0], app.thread[0]);
+    const prepared_text = app.markup[0].prepared.?.document.blocks[0].spans[0].text;
+    app.focus = .reader;
+    app.reader_scroll = 10;
+    app.reader_lines = 30;
+    app.reader_height = 8;
+    app.reader_anchor_card = true;
+    app.reader_card_pinned = true;
+    try app.onKey(.{ .codepoint = Key.home });
+    try std.testing.expectEqual(Focus.reader, app.focus);
+    try std.testing.expectEqual(@as(usize, 1), app.selected);
+    try std.testing.expectEqual(@as(usize, 0), app.reader_scroll);
+    try std.testing.expect(!app.reader_anchor_card and !app.reader_card_pinned);
+    try app.onKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqual(@as(usize, 1), app.reader_scroll);
+    try std.testing.expectEqualStrings("b", app.messageId());
+    try std.testing.expectEqualStrings("b", app.reader_message.value());
+    app.prepareVisibleMarkup(&app.markup[0], app.thread[0]);
+    try std.testing.expectEqual(@as(u64, 1), app.html_stats.htmlDocumentBuilds);
+    try std.testing.expect(prepared_text.ptr == app.markup[0].prepared.?.document.blocks[0].spans[0].text.ptr);
 }
 
 test "HTML reader provenance prefers plain and recognizes only exact legacy conversion" {

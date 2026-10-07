@@ -466,7 +466,10 @@ def resource_case(binary, directory, cycles, idle):
         finally:
             if terminal is not None: terminal.close()
     require(counts[0]["htmlDocumentBuilds"] > 0, "HTML resource gate never attempted bounded HTML formatting")
-    require(counts[0] == counts[1], "navigation reparsed/relaid out the entire unchanged HTML document")
+    if counts[0] != counts[1]:
+        raise HtmlFailure("navigation reparsed/relaid out the entire unchanged HTML document",
+                          {"baselineHtmlMetrics": counts[0], "navigationHtmlMetrics": counts[1],
+                           "measurement": measurement})
     deep_dir = directory / "deep"
     fixture = HtmlFixture(deep_dir, "depth")
     seed(binary, deep_dir, fixture, bodies=("shared-msg-096",))
