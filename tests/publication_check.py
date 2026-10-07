@@ -24,6 +24,41 @@ SECRET_PATTERNS = [
 PUBLIC_LICENSES = {'LICENSES/uucode-LICENSE_Bjoern_Hoehrmann.txt': 'de219cece932aad5a817bf763393d8d149d378a15d2ad5320e3331eac07626dd'}
 IGNORED_PARTS = {".local-notes", ".zig-cache", "zig-pkg", "zig-out", "dist", "node_modules", "__pycache__"}
 PUBLIC_GIFS = {"docs/images/omagma-fetch.gif"}
+# The high-resolution copy of the user-approved logo is part of the public
+# launch-film source. A different file at this path needs another review.
+PUBLIC_RASTERS = {
+    "video/assets/omagma-logo-master.png": "6ca7de5cc234de73567f6a1812e6161c7b9d45742d6047cd1c23101e7041c9b3",
+}
+# This documentation example describes a pane truncating a fictional address.
+# Accept only that exact ellipsis-terminated excerpt in its reviewed source;
+# .exam and other prefixes are not generally fictional domains.
+PUBLIC_EMAIL_EXCERPTS = {
+    "video/capture/tape.py": {b"holds" + b"@" + b"library.exam" + "…".encode()},
+}
+
+
+def example_domain(domain):
+    domain = domain.lower()
+    return (domain in EXAMPLE_DOMAINS
+            or any(domain.endswith(b"." + root) for root in EXAMPLE_DOMAINS if root.startswith(b"example."))
+            or domain.endswith((b".example", b".invalid")))
+
+
+def private_email(name, data):
+    excerpts = PUBLIC_EMAIL_EXCERPTS.get(name, ())
+    for match in EMAIL.finditer(data):
+        if example_domain(match[1]):
+            continue
+        if any(data[match.start():match.start() + len(excerpt)] == excerpt for excerpt in excerpts):
+            continue
+        return True
+    return False
+
+
+def reviewed_raster(name, data):
+    if name in PUBLIC_RASTERS:
+        return hashlib.sha256(data).hexdigest() == PUBLIC_RASTERS[name]
+    return name == "assets/omagma-logo.png" or name.startswith("docs/images/omagma")
 
 
 def validate_gif(data):
@@ -131,7 +166,7 @@ def main():
                 issues.append({"file": name, "reason": str(error)})
             continue
         if path.suffix == ".png":
-            if name != "assets/omagma-logo.png" and not name.startswith("docs/images/omagma"):
+            if not reviewed_raster(name, data):
                 issues.append({"file": name, "reason": "unreviewed raster artifact staged"})
             if not data.startswith(b"\x89PNG\r\n\x1a\n"):
                 issues.append({"file": name, "reason": "invalid PNG"})
@@ -152,7 +187,7 @@ def main():
             issues.append({"file": name, "reason": "personal/local absolute path"})
         if any(pattern.search(data) for pattern in SECRET_PATTERNS):
             issues.append({"file": name, "reason": "credential-like literal"})
-        if PUBLIC_LICENSES.get(name) != hashlib.sha256(data).hexdigest() and any(domain.lower() not in EXAMPLE_DOMAINS and not domain.lower().endswith((b".example", b".invalid")) for domain in EMAIL.findall(data)):
+        if PUBLIC_LICENSES.get(name) != hashlib.sha256(data).hexdigest() and private_email(name, data):
             issues.append({"file": name, "reason": "nonfictional literal email address"})
     result = {"filesChecked": len(names), "passed": bool(names) and not issues, "issues": issues,
               "scope": "Staged text, artifact paths and PNG/GIF metadata; every screenshot/animation frame requires visual review."}

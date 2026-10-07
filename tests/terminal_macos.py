@@ -71,7 +71,8 @@ class ChildStatus:
 
 
 class DarwinTerminal(Terminal):
-    def __init__(self, binary, directory, extra=(), history_limit=None):
+    def __init__(self, binary, directory, extra=(), history_limit=None, *,
+                 columns=140, rows=34, screen_type=None, environment=None):
         directory = Path(directory)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.guardian_state = directory / "guardian-state.json"
@@ -79,10 +80,12 @@ class DarwinTerminal(Terminal):
         launcher = directory / "guardian-launcher"
         launcher.write_text(f"#!{sys.executable}\nimport sys\nsys.path.insert(0,{str(Path(__file__).resolve().parent)!r})\nfrom terminal_macos import guardian\nguardian()\n")
         launcher.chmod(0o700)
-        super().__init__(launcher, directory, extra=extra, history_limit=history_limit, columns=140, rows=34, environment={
-            "NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0",
+        settings = {"NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0", **(environment or {}),
             "OMAGMA_GUARDIAN_BINARY": str(binary), "OMAGMA_GUARDIAN_STATE": str(self.guardian_state),
-            "OMAGMA_GUARDIAN_RELEASE": str(self.guardian_release)})
+            "OMAGMA_GUARDIAN_RELEASE": str(self.guardian_release)}
+        options = {} if screen_type is None else {"screen_type": screen_type}
+        super().__init__(launcher, directory, extra=extra, history_limit=history_limit,
+                         columns=columns, rows=rows, environment=settings, **options)
         self.guardian_process = self.process
         self.process = ChildStatus(self.guardian_process, self.guardian_state)
         self.binary = binary

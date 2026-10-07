@@ -48,6 +48,40 @@ def find_release(repo, tag):
         page += 1
 
 
+def release_notes(version, zig, repo, root=ROOT):
+    """Prefer reviewed version-specific highlights without changing uploads."""
+    path = root / "docs" / "release-notes" / (version + ".md")
+    if path.exists():
+        highlights = path.read_text().strip()
+        if not highlights or len(highlights.encode()) > 64 * 1024:
+            raise ValueError("Versioned release notes are empty or oversized")
+    else:
+        highlights = (
+            "Linux x86_64/arm64 static musl backends and complete Omarchy plugin bundles, "
+            "plus native macOS Apple Silicon/Intel CLI and TUI bundles. The Omarchy bar is Linux-only; "
+            "macOS binaries use system libraries and frameworks.\n\n"
+            "Includes the account-separated bar, **experimental** Vim-oriented terminal mail client "
+            "(`omagma tui`) and bounded JSONL agent CLI (`omagma cli`). Cached mail, formatted HTML-only "
+            "reading, drafts, compose/reply/forward, contacts, multiple attachments, invitation replies, "
+            "bulk actions/undo, existing labels and saved working context share account-scoped capabilities. "
+            "No tmux is required. Users authorize their requested terminal permissions; sending and "
+            "mailbox/contact changes require an explicit action. Remote mail resources never load."
+        )
+    tag = "v" + version
+    return (highlights + "\n\n"
+            f"Built with exact Zig {zig} in assertion-enabled Safe mode.\n\n"
+            f"Download the matching `omagma-{version}-OS-ARCH.tar.gz` bundle and `SHA256SUMS`; "
+            "Zig is not needed for installation. Homebrew is preferred on Mac. Native platform checks "
+            "gate publication. Linux and macOS resource accounting remain separate; ARM Omarchy desktop "
+            "integration requires local verification. Dedicated test mailboxes belong to developer "
+            "live-write qualification, not ordinary setup.\n\n"
+            f"[Terminal guide](https://github.com/{repo}/blob/{tag}/docs/TERMINAL.md) · "
+            f"[Agent CLI contract](https://github.com/{repo}/blob/{tag}/docs/AGENT-CLI.md)\n\n"
+            f"[Linux installation](https://github.com/{repo}/blob/{tag}/docs/INSTALL.md) · "
+            f"[macOS installation](https://github.com/{repo}/blob/{tag}/docs/MACOS.md) · "
+            f"[Agent setup workflow](https://github.com/{repo}/blob/{tag}/skills/omagma-setup/SKILL.md)\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Report whether this commit needs a release")
@@ -80,14 +114,7 @@ def main():
         raise ValueError("Combined release checksums are incomplete or incorrect")
     with tempfile.TemporaryDirectory(prefix="omagma-release-notes-") as temporary:
         notes = Path(temporary) / "notes.md"
-        notes.write_text(f"Linux x86_64/arm64 static musl backends and complete Omarchy plugin bundles, plus native macOS Apple Silicon/Intel CLI and TUI bundles. The Omarchy bar is Linux-only; macOS binaries use system libraries and frameworks.\n\n"
-                         f"Includes the account-separated bar and **experimental** Vim-oriented terminal mail client (`omagma tui`) and bounded JSONL agent CLI (`omagma cli`). Compose/reply, contacts, attachments and invitation replies are fixture-qualified. Users authorize their own requested terminal permissions; sends and mailbox/contact changes require an explicit action. Dedicated test mailboxes belong to developer live-write qualification, not ordinary setup. No tmux is required.\n\n"
-                         f"HTML-only mail has a native theme-colored text view with headings, emphasis, lists, quotes and readable tables. Plain-text alternatives take precedence; remote resources never load. Click accounts, mailboxes, messages and contacts, use the wheel, or disable tracking with --no-mouse.\n\n"
-                         f"This version includes forwarding and multiple files, cached correspondent completion, sender identities/signatures, draft recovery, bulk actions with undo, existing-label views, folded threads, link/file pickers, continuous cached-mail scrolling, local timezone display and saved working context. New compose shows its own draft preview; replies preserve their original context.\n\n"
-                         f"Built with exact Zig {zig} in assertion-enabled safe mode.\n\n"
-                         f"Download the matching `omagma-{version}-OS-ARCH.tar.gz` bundle and `SHA256SUMS`; Zig is not needed for installation. Native platform checks gate publication. Linux resource gates and macOS resource measurements have separate accounting; ARM Omarchy desktop integration requires local verification.\n\n"
-                         f"[Terminal guide](https://github.com/{repo}/blob/{tag}/docs/TERMINAL.md) · [Agent CLI contract](https://github.com/{repo}/blob/{tag}/docs/AGENT-CLI.md)\n\n"
-                         f"[Linux installation](https://github.com/{repo}/blob/{tag}/docs/INSTALL.md) · [macOS installation](https://github.com/{repo}/blob/{tag}/docs/MACOS.md) · [Agent setup workflow](https://github.com/{repo}/blob/{tag}/skills/omagma-setup/SKILL.md)\n")
+        notes.write_text(release_notes(version, zig, repo))
         # With asset arguments, gh creates an internal draft, uploads all assets,
         # then publishes it. Ordinary upload/publish failures clean up that draft.
         command = ["gh", "release", "create", tag, "--repo", repo, "--target", commit, "--title",

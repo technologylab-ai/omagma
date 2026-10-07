@@ -13,6 +13,8 @@ version bundles its own qualified source tree.
 
 Bump `.version` in `build.zig.zon`, commit the change and push `main` to request a new version. The release workflow checks for an existing `vVERSION` GitHub release. It publishes only a new version and does not replace existing release assets. `workflow_dispatch` on a development branch verifies that branch without publishing; publication is restricted to `main`. A prerelease version remains a prerelease rather than becoming latest.
 
+Review `docs/release-notes/VERSION.md` before requesting publication. The publisher uses that version's highlights and appends matching compiler, download and setup links; a generic description is available when no versioned notes exist. Release notes describe the complete current application, including its experimental terminal status.
+
 ## Local packaging
 
 From a source checkout with the declared Zig compiler and Python 3, stage or commit the intended public changes first. The packager uses audited tracked files and rejects unstaged tracked changes; ignored or untracked files are not bundled. On shared hosts, reserve the complete build/check workload using the [cooperative lock](VERIFICATION.md#cooperative-host-measurement-lock) before starting.

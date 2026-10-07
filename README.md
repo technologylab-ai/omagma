@@ -41,6 +41,10 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 **The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides account-separated mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, drafts, replies/reply-all, forwarding, contacts, attachments, mailbox changes and invitation replies. `$EDITOR` can compose in a full-screen editor and then return to the TUI; tmux is not required. Calendar views, permanent mail deletion, contact deletion and label creation/renaming/deletion are outside the current scope. See [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) for supported actions and interface differences.
 
+![Omagma TUI with fictional mail, compact links and a new-mail card](docs/images/omagma-tui-arrivals.png)
+
+The running TUI adopts background cache updates, preserving your reading spot. A **New mail** card accumulates arrivals per account and clears on interaction. `gg` jumps to the first cached mail. Long links use compact colored labels with complete destinations available through `L`; HTML images use text placeholders. [0.2.5 release notes](docs/release-notes/0.2.5.md).
+
 Available cached mail appears immediately while Gmail refreshes in the background. The default disk cache keeps the newest **2,000 messages within 256 MiB per account**, evicting the oldest tail. The cache is private plaintext storage, separate from the bar’s memory-only cache. `/` searches the cache, and `\` explicitly searches Gmail. An optional [five-minute Linux timer](docs/TERMINAL-BACKGROUND.md) keeps the terminal cache ready while the TUI is closed; Mac installation does not add a background service.
 
 `omagma cli` and `omagma agent` provide a JSONL interface. One-shot `mail`, `draft`, `contacts`, `invitations`, `operation` and `cache` commands share that interface’s account-scoped executor. Explicit pagination can fetch more than the bar’s 30 messages. See [terminal workflows and keys](docs/TERMINAL.md) and [the agent CLI contract](docs/AGENT-CLI.md).
@@ -67,7 +71,7 @@ Fixture mode never contacts Google. It is optional and is not part of normal ins
 - [Terminal cache](docs/TUI-CACHE.md) and [background terminal fetching](docs/TERMINAL-BACKGROUND.md)
 - [Privacy and credentials](docs/PRIVACY.md) and [memory measurements](docs/MEMORY.md)
 - [Development and source builds](docs/DEVELOPMENT.md), [architecture and transport](docs/TRANSPORT.md), and [release publishing](docs/RELEASING.md)
-- Social images: [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)
+- Social images: [New mail and compact links](docs/images/omagma-tui-arrivals.png) · [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)
 
 ## Build from source
 

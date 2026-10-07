@@ -23,6 +23,7 @@ const slug = value => text(value).toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, ''
 // documentation must never silently become a deployment artifact.
 const sourceFiles = [
   'README.md', 'AGENTS.md', 'EVIDENCE.md', 'LICENSES/README.md', 'skills/omagma-setup/SKILL.md',
+  'docs/release-notes/0.2.5.md',
   ...['AGENT-CLI', 'AGENT-SETUP', 'BACKGROUND-REFRESH', 'DEVELOPMENT', 'DISTRIBUTION', 'FEATURES', 'INSTALL', 'MACOS', 'MEMORY', 'PRIVACY', 'PROTOCOL', 'README', 'RELEASING', 'SETUP', 'TERMINAL-BACKGROUND', 'TERMINAL-IMPLEMENTATION', 'TERMINAL-PROVIDER-DESIGN', 'TERMINAL-UI-DESIGN', 'TERMINAL-VERIFICATION', 'TERMINAL', 'TRANSPORT', 'TUI-CACHE', 'UI', 'VERIFICATION', 'ZIG017-WIKI-FOLLOWUP'].map(name => `docs/${name}.md`),
   ...['terminal-0.2.0', 'terminal-0.2.1', 'terminal-0.2.2', 'terminal-0.2.3-mouse', 'terminal-0.2.3', 'terminal-0.2.4', 'zig-0.17.0'].map(name => `docs/evidence/${name}.md`),
 ];
@@ -47,7 +48,7 @@ const navGroups = [
 const nav = active => navGroups.map(([label, entries]) => `<section class="nav-group"><h2>${label}</h2><ul>${entries.map(([source, name]) => `<li><a href="${base}${routes.get(source)}"${source === active ? ' aria-current="page" class="active"' : ''}>${name}</a></li>`).join('')}</ul></section>`).join('');
 const sectionFor = source => navGroups.find(([, entries]) => entries.some(([s]) => s === source))?.[0] ?? (source.includes('evidence') || source === 'EVIDENCE.md' ? 'Historical evidence' : 'Reference');
 const publicImages = new Set(['assets/omagma-logo.png', 'docs/images/omagma.png', 'docs/images/omagma-social.png', 'docs/images/omagma-social-preview.png']);
-for (const name of ['omagma-tui.png', 'omagma-tui-below.png', 'omagma-fetch.png', 'omagma-fetch.gif']) {
+for (const name of ['omagma-tui.png', 'omagma-tui-below.png', 'omagma-tui-arrivals.png', 'omagma-fetch.png', 'omagma-fetch.gif']) {
   const source = `docs/images/${name}`;
   try {
     if (!(await fs.lstat(path.join(repo, source))).isFile()) throw new Error(`Public image must be a regular file: ${source}`);

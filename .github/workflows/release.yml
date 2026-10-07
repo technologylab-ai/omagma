@@ -59,7 +59,10 @@ jobs:
       - name: Install the declared Zig compiler
         run: python3 .github/install_zig.py
       - name: Release format and architecture oracles
-        run: python3 tests/release_binary.py
+        run: |
+          python3 tests/release_binary.py
+          python3 tests/publication_privacy.py
+          python3 tests/release_notes.py
       - name: Ensure the timezone fixture database is available
         run: |
           sudo apt-get update
@@ -234,7 +237,10 @@ jobs:
       - name: Install the declared native Zig compiler
         run: python3 .github/install_zig.py
       - name: Release format and architecture oracles
-        run: python3 tests/release_binary.py
+        run: |
+          python3 tests/release_binary.py
+          python3 tests/publication_privacy.py
+          python3 tests/release_notes.py
       - name: Verify native host, SDK and timezone fixtures
         run: |
           test "$(uname -m)" = '${{ matrix.machine }}'
@@ -273,6 +279,7 @@ jobs:
           # Linux /proc resource and stock session-leader PTY harnesses stay in
           # the Linux job; these checks do not establish a macOS memory baseline.
           python3 tests/terminal_macos.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_macos_features.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-features.json
           python3 tests/launch_macos.py --binary .verification-macos-debug/bin/omagma
           .verification-macos-debug/bin/omagma probe-keyring
           .verification-macos-debug/bin/auth_probe keyring
@@ -304,6 +311,7 @@ jobs:
           python3 tests/terminal_cache_windows.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_transport.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-transport.json
           python3 tests/terminal_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_macos_features.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-features.json
           python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} probe-keyring
       - name: Native Keychain survives the packaged binary upgrade
