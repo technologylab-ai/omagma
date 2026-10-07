@@ -186,7 +186,12 @@ pub const Session = struct {
         if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
         if (!s.options.fixtures and j.get(req, "grantFile") == null) try req.object.put(a, "grantFile", .{ .string = s.options.grant_file orelse try std.fmt.allocPrint(a, "{s}/omagma/terminal-grants.json", .{s.env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{s.env.get("HOME") orelse return error.HomeRequired})}) });
         if ((id != .null and id != .string and id != .integer) or (id == .string and id.string.len > 256)) return failure(out_allocator, .null, account, "InvalidRequest", "id must be a bounded string or integer");
-        const data = s.dispatch(a, req) catch |err| return failureForError(out_allocator, id, account, err);
+        const data = s.dispatch(a, req) catch |err| {
+            // Internal cached callers own a cancelable lifetime. Keep the
+            // cancellation signal out of protocol normalization for that path.
+            if (cached_only and err == error.Canceled) return err;
+            return failureForError(out_allocator, id, account, err);
+        };
         return successResponse(out_allocator, id, account, j.text(req, "cmd"), s.options.fixtures, data);
     }
     fn failure(a: std.mem.Allocator, id: Value, account: []const u8, code: []const u8, message: []const u8) ![]const u8 {

@@ -105,6 +105,7 @@ jobs:
         run: |
           .verification-debug/bin/omagma build-info
           sha256sum .verification-debug/bin/omagma
+          python3 tests/terminal_exit_refresh.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-exit-refresh.json
           python3 tests/publication_gif.py
           python3 tests/homebrew_formula.py
           for suite in \
@@ -169,6 +170,7 @@ jobs:
         run: |
           dist/omagma-linux-$RELEASE_ARCH build-info
           sha256sum dist/omagma-linux-$RELEASE_ARCH
+          python3 tests/terminal_exit_refresh.py --binary dist/omagma-linux-$RELEASE_ARCH --build-mode safe --output tests/results/terminal-safe-exit-refresh.json
           for suite in \
             terminal_wishlist_backend terminal_cache_windows terminal_arrivals \
             terminal_composer_workflow terminal_compose_attachments \

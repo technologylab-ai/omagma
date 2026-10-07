@@ -886,7 +886,7 @@ const App = struct {
         }
         // The cached first frame is already visible. Establish notification
         // baselines before starting this TUI's provider refresh.
-        self.cache_watch.prime();
+        try self.cache_watch.prime();
         self.cache_activity = self.cache_watch.latest;
         for (self.cache_activity, 0..) |value_in, index| if (value_in) |activity| self.new_mail.observe(index, activity.inboxArrivalCount);
         try self.cache_watch.start();
@@ -913,15 +913,22 @@ const App = struct {
     }
     fn adoptBackgroundCache(self: *App) !void {
         if (!self.cache_reload[self.account_index] or self.mode != .browse or self.drafts_list or self.label_picker or self.reader_overlay != .none or self.query.value().len > 0 or self.job.future != null or self.page_loading) return;
-        // A current generation needs a fresh cursor, but the selected ID and
-        // its complete reader context survive the local snapshot replacement.
-        try self.cursor.set(self.allocator, "");
-        self.clearHistory();
+        // Provider-visible older mail can lie outside the retained cache.
+        // Probe the anchor before changing the page or its navigation history.
         const screen_row = self.selected -| self.top;
         const at_head = self.top == 0 and !(self.has_more_cached_before orelse (self.previous_cursor.value().len > 0));
         self.background_merge = true;
         defer self.background_merge = false;
-        if (try self.loadCachedList(self.messageId())) {
+        const merged = self.loadCachedListImpl(self.messageId(), true) catch |err| switch (err) {
+            error.AnchorNotCached => {
+                self.cache_reload[self.account_index] = false;
+                return;
+            },
+            error.CacheBusy => return,
+            else => return err,
+        };
+        if (merged) {
+            self.clearHistory();
             // At the newest head, show newly prepended rows while retaining
             // selection. A scrolled/later window stays visually anchored.
             self.top = if (at_head) 0 else self.selected -| screen_row;
@@ -2235,12 +2242,15 @@ const App = struct {
         return false;
     }
     fn loadCachedList(self: *App, requested_anchor: []const u8) !bool {
+        return self.loadCachedListImpl(requested_anchor, false);
+    }
+    fn loadCachedListImpl(self: *App, requested_anchor: []const u8, require_anchor: bool) !bool {
         const anchor = if (self.first_mail_pending) "" else requested_anchor;
         if (!self.synchronous_cache_search and self.cacheSearch() and cache_query.needsBody(self.query.value())) {
             try self.startCachedSearch(anchor);
             return self.view_ready or self.sync[self.account_index].cache_ready;
         }
-        if (self.view_ready and self.view_generation != self.generation and !self.page_loading) {
+        if (!require_anchor and self.view_ready and self.view_generation != self.generation and !self.page_loading) {
             self.messages = &.{};
             self.view_ready = false;
             if (!self.compose_active) self.clearReader();
@@ -2252,7 +2262,7 @@ const App = struct {
             .cmd = if (self.cacheSearch()) "mail.search" else "mail.list",
             .cacheOnly = true,
             .limit = @as(usize, 32),
-            .cursor = if (anchor.len > 0 or self.page_relative) "" else self.cursor.value(),
+            .cursor = if (require_anchor or anchor.len > 0 or self.page_relative) "" else self.cursor.value(),
             .anchorMessageId = if (anchor.len > 0) anchor else self.restore_message.value(),
             .beforeMessageId = if (self.page_relative and !self.page_loading_forward) self.page_relative_boundary.value() else "",
             .afterMessageId = if (self.page_relative and self.page_loading_forward) self.page_relative_boundary.value() else "",
@@ -2264,6 +2274,12 @@ const App = struct {
             return err;
         };
         if (response) |bytes| {
+            if (require_anchor and anchor.len > 0) {
+                const result = try self.data(arena.allocator(), bytes);
+                var present = false;
+                for (items(get(result, "messages"))) |message| present = present or same(text(get(message, "id")), anchor);
+                if (!present) return error.AnchorNotCached;
+            }
             self.pending_cached_list = false;
             try self.replaceList(.list, bytes);
             if (!self.compose_active and self.thread.len == 0 and self.messages.len > 0) {
@@ -2356,7 +2372,10 @@ const App = struct {
     fn reportFetchProgress(ctx: *anyopaque, update: types.FetchProgress) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (self.job.progress.publish(update)) {
-            const posted = self.loop.tryPostEvent(.fetch_progress) catch false;
+            const posted = self.loop.tryPostEvent(.fetch_progress) catch |err| blk: {
+                if (err == error.Canceled) self.io.recancel();
+                break :blk false;
+            };
             if (!posted) self.job.progress.acknowledged();
         }
     }
@@ -2368,7 +2387,10 @@ const App = struct {
         if (self.job.kind == .refresh and update.kind == .page) return;
         self.job.loading_rows.publish(update);
         if (!self.job.progress.wake_pending.swap(true, .acq_rel)) {
-            const posted = self.loop.tryPostEvent(.fetch_progress) catch false;
+            const posted = self.loop.tryPostEvent(.fetch_progress) catch |err| blk: {
+                if (err == error.Canceled) self.io.recancel();
+                break :blk false;
+            };
             if (!posted) self.job.progress.acknowledged();
         }
     }
@@ -2393,7 +2415,7 @@ const App = struct {
             // stops, and no infinite Threaded timeout sleep.
             self.io.sleep(.fromMilliseconds(180), .awake) catch return;
             if (!self.loading_tick_pending.swap(true, .acq_rel)) {
-                const posted = self.loop.tryPostEvent(.loading_tick) catch false;
+                const posted = self.loop.tryPostEvent(.loading_tick) catch |err| if (err == error.Canceled) return else false;
                 if (!posted) self.loading_tick_pending.store(false, .release);
             }
         }
@@ -4202,7 +4224,11 @@ const App = struct {
             return;
         }
         if (!self.paste) key = self.normalizeBrowseKey(key);
-        try self.retryLocalCache();
+        self.retryLocalCache() catch |err| {
+            // A broken pending cache lookup must not discard Back/Quit input.
+            // Continue through the normal mode and write-safety fences below.
+            if (!(key.matches('q', .{}) or key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true }) or key.matches('q', .{ .ctrl = true }))) return err;
+        };
         if (self.paste) {
             const changing = self.job.future != null and !readOnlyJob(self.job.kind);
             if ((self.mode == .compose and (changing or self.compose.unknown_outcome)) or (self.mode == .contact_edit and changing)) {
@@ -5773,6 +5799,59 @@ test "persisted selected body refusal remains local and does not mark mailbox of
     try std.testing.expect(!app.body_cache_miss);
     try std.testing.expectEqualStrings("Local full body", text(get(app.thread[0], "bodyText")));
     try std.testing.expectEqual(SyncState.current, app.sync[0].state);
+}
+
+test "local UI: cache retry failures do not discard mailbox quit keys" {
+    const BrokenCache = struct {
+        fn local(_: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+            return error.InvalidCacheRecord;
+        }
+    };
+    const allocator = std.testing.allocator;
+    for ([_]Key{ .{ .codepoint = 'q' }, .{ .codepoint = Key.escape }, .{ .codepoint = 'c', .mods = .{ .ctrl = true } } }) |key| {
+        var client: CacheTestClient = .{};
+        var app = client.app(allocator);
+        defer app.deinit();
+        app.client.cachedFn = BrokenCache.local;
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+        try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"retained-mail\"}],\"cached\":true,\"cacheReady\":true}}");
+        app.focus = .list;
+        app.pending_cached_list = true;
+        try std.testing.expectError(error.InvalidCacheRecord, app.onKey(.{ .codepoint = 'j' }));
+        try std.testing.expect(!app.quit);
+        try app.onKey(key);
+        try std.testing.expect(app.quit);
+        try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    }
+}
+
+test "local UI: passive cache merge retains a provider page outside the cache tail" {
+    const CachedHead = struct {
+        fn local(_: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"retained-096\"},{\"id\":\"retained-057\"}],\"cached\":true,\"cacheReady\":true}}");
+        }
+    };
+    const allocator = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(allocator);
+    defer app.deinit();
+    app.client.cachedFn = CachedHead.local;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"provider-056\"}],\"nextCursor\":\"L:older\"}}");
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"provider-056\",\"bodyText\":\"VISIBLE PROVIDER BODY 056\"}}", false);
+    try app.cursor.set(allocator, "L:current-provider-page");
+    try app.previous_cursors.append(allocator, try allocator.dupe(u8, "L:previous-provider-page"));
+    app.new_mail.pending[0] = 2;
+    app.cache_reload[0] = true;
+    try app.adoptBackgroundCache();
+    try std.testing.expectEqualStrings("provider-056", app.messageId());
+    try std.testing.expectEqualStrings("VISIBLE PROVIDER BODY 056", text(get(app.thread[0], "bodyText")));
+    try std.testing.expectEqualStrings("L:current-provider-page", app.cursor.value());
+    try std.testing.expectEqualStrings("L:older", app.next_cursor.value());
+    try std.testing.expectEqualStrings("L:previous-provider-page", app.previous_cursors.items[0]);
+    try std.testing.expect(!app.cache_reload[0]);
+    try std.testing.expectEqual(@as(u64, 2), app.new_mail.pending[0]);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
 test "HTML reader Home preserves the selected body focus and prepared document" {

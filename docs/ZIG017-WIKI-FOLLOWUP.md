@@ -168,3 +168,35 @@ Candidate `80332934766f9f45af2ba4c92d466d53b27c8bf4` passed same-name native upg
 The deletion helper now discards human stdout/stderr. It still requires the finite owned child wait to succeed and verifies the exact service/account key is absent with native UI-suppressed lookup plus unlocked-state checking before ACK. No scope, ACL, token limit or application reservation was widened. The upgrade test independently copies a byte-identical public raw filename and exercises both ordinary and exact Homebrew re-sign variants without renaming the re-signed executable to hide the boundary. Failed and successful receipts retain their original source/binary identities.
 
 The correction and independent raw-filename regression are in `a82e3a0f4d88b0db1ee4d0093dba5a0dbab0eaa0`. Repackaging that revision preserved the exact measured Linux static executable, SHA-256 `5483e981701fb06b34f6a69d6f47b6c4fd236862ba87df4c031129553578dc03`; native Mac bytes are qualified separately.
+
+## Owned task cancellation follow-up, 2026-10-07
+
+This is an application lifetime lesson, **not a new Zig 0.17 regression**. Both
+exact 0.16 and 0.17 Threaded implementations acknowledge cancellation once:
+`Thread.checkCancel` transitions `canceling` to `canceled`, returns `Canceled`,
+then later checks in the `canceled` state return normally. `Syscall.start`
+subsequently treats that thread as uncancelable unless cancellation is rearmed.
+The exact 0.17 source is `std/Io/Threaded.zig:908–933,1365–1368,2381–2397`,
+revision `7647adab80dd088f4de3610fd245915a912eb6ad`. The unchanged-contract
+0.16/0.17 file identities are respectively
+`eb7bbb4ddf590ec3d0d2a1ee5c3845ef4984d9e440965a3e7c920cd0c906df94` and
+`1a770001e309f24c8c58a9fdb3c095994c454cbfa9dba9d4f1dede2f134eeac7`.
+
+Omagma's watcher caught canceled cache probes as ordinary errors and continued
+its loop. A normalized JSON error could obscure the same cancellation. A
+controlled stamp/read wait acknowledged the real cancellation request; the
+old owner join then exceeded an eight-second diagnostic watchdog. The fixed
+watcher joins promptly for raw stamp/read cancellation and encoded error
+responses. It records independent owner shutdown intent, terminates on
+`Canceled`, and propagates cancellation across internal cached calls. A void
+progress callback that catches cancellation rearms it for its caller; a
+canceled animation post exits its task. Finite waits and joined ownership stay
+intact. Public CLI error framing and write/uncertain-send safeguards remain
+separate from those internal lifetime signals.
+
+The independent held-refresh PTY gate keeps the provider blocked at body
+31/32, sends one mailbox `q`, and requires the original five-second clean exit,
+full terminal restoration, no sends, no checkpoint advancement, released
+refresh ownership and no surviving session children. Debug and Safe local
+checks pass in approximately 0.05 seconds; these are focused checks, not a
+replacement for the final release's platform and memory qualification.
