@@ -33,7 +33,7 @@ An open TUI picks up updates written by the [background cache timer](TERMINAL-BA
 
 A compact **New mail** card appears at the top right of the main mailbox screen. It accumulates newly received Inbox messages separately for each account while you leave the TUI unattended. A key, click, wheel gesture or paste clears the card and continues the normal action. The card stays hidden in compose, contacts, search, review and expanded reading. Existing unread mail, initial cache filling, label changes and older-page downloads do not create arrival alerts.
 
-`gg` jumps to the first mail in the entire cached mailbox or cached result set, including from a later window; on the main screen it works from either the list or reader. In expanded reading, `gg` scrolls the current body to its start. Home keeps its focused-pane behavior.
+`gg` jumps to the first mail in the entire cached mailbox or cached result set, including from a later window; on the main screen it works from either the list or reader. In expanded reading, `gg` scrolls the current body to its start. Home scrolls a focused reader to the top; in the mail list it selects the first row of the current window, keeping that window.
 
 The list holds at most 32 messages at a time. Move past its last row with `j`, Down, the wheel or PageDown to load the next window and select the adjacent older message. Move above its first row with `k`, Up, the wheel or PageUp to return to adjacent newer cached mail. Existing mail remains readable while another window loads. Repeated boundary input requests one window.
 

@@ -2992,11 +2992,11 @@ const App = struct {
     }
     fn chooseAccount(self: *App, index: usize) !void {
         if (index >= self.accounts.len or self.mode == .compose or self.mode == .review or self.mode == .contact_edit) return;
-        if (self.job.future != null and self.job.kind != .refresh and self.job.kind != .list and self.job.kind != .cached_search and self.job.kind != .recipient_cache and self.job.kind != .recipient_refresh and self.job.kind != .drafts and self.job.kind != .read and self.job.kind != .thread and self.job.kind != .contacts) {
+        if (self.job.future != null and self.job.kind != .refresh and self.job.kind != .list and self.job.kind != .cached_search and self.job.kind != .recipient_cache and self.job.kind != .recipient_refresh and self.job.kind != .drafts and self.job.kind != .read and self.job.kind != .thread and self.job.kind != .contacts and self.job.kind != .labels_list and self.job.kind != .identities) {
             self.say(true, "Wait for the current account's change to finish", .{});
             return;
         }
-        if (self.job.future != null and (self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh)) self.preemptReadOnly();
+        if (self.job.future != null and (self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh or self.job.kind == .labels_list or self.job.kind == .identities)) self.preemptReadOnly();
         self.search_saved_valid = false;
         self.search_restore_pending = false;
         self.rememberWorkingContext();
@@ -4421,7 +4421,13 @@ const App = struct {
                 try self.preview(false);
             }
         } else if (key.matches(Key.home, .{})) {
-            if (self.focus == .reader) self.scrollReader(false, std.math.maxInt(usize)) else try self.jumpFirstMail();
+            if (self.focus == .reader) self.scrollReader(false, std.math.maxInt(usize)) else {
+                self.selected = 0;
+                self.top = 0;
+                self.reader_scroll = 0;
+                self.selection_generation +%= 1;
+                try self.preview(false);
+            }
         } else if (key.matches('[', .{})) try self.page(false) else if (key.matches(']', .{})) try self.page(true) else if (key.matches('/', .{})) {
             try self.beginSearch(.cache);
         } else if (key.matches('\\', .{})) {
@@ -5798,6 +5804,75 @@ test "HTML reader Home preserves the selected body focus and prepared document" 
     app.prepareVisibleMarkup(&app.markup[0], app.thread[0]);
     try std.testing.expectEqual(@as(u64, 1), app.html_stats.htmlDocumentBuilds);
     try std.testing.expect(prepared_text.ptr == app.markup[0].prepared.?.document.blocks[0].spans[0].text.ptr);
+    // List Home keeps this cached window; gg separately owns whole-cache top.
+    client.behavior = .escaped_body;
+    app.focus = .list;
+    try app.cursor.set(allocator, "C:current-window");
+    const generation = app.generation;
+    try app.onKey(.{ .codepoint = Key.home });
+    try std.testing.expectEqual(Focus.list, app.focus);
+    try std.testing.expectEqualStrings("a", app.messageId());
+    try std.testing.expectEqualStrings("C:current-window", app.cursor.value());
+    try std.testing.expectEqual(generation, app.generation);
+}
+
+test "local UI: one account switch cancels held labels and identity reads" {
+    const HeldMetadata = struct {
+        io: Io,
+        entered: Io.Event = .unset,
+        release: Io.Event = .unset,
+        canceled: std.atomic.Value(bool) = .init(false),
+        fn provider(context: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const parsed = try std.json.parseFromSlice(Value, allocator, request, .{});
+            defer parsed.deinit();
+            const cmd = text(get(parsed.value, "cmd"));
+            if (same(cmd, "labels.list") or same(cmd, "accounts.identities")) {
+                self.entered.set(self.io);
+                self.release.wait(self.io) catch |err| {
+                    if (err == error.Canceled) self.canceled.store(true, .release);
+                    return err;
+                };
+            }
+            return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"TransientFailure\"}}");
+        }
+        fn local(_: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const parsed = try std.json.parseFromSlice(Value, allocator, request, .{});
+            defer parsed.deinit();
+            if (!same(text(get(parsed.value, "account")), "work@example.com")) return error.WrongAccount;
+            const cmd = text(get(parsed.value, "cmd"));
+            if (same(cmd, "labels.list")) return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"labels\":[{\"id\":\"INBOX\",\"name\":\"Inbox\"}]}}");
+            if (same(cmd, "mail.list")) return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"same-id\"}],\"cached\":true,\"cacheReady\":true}}");
+            if (same(cmd, "mail.read")) return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"same-id\",\"bodyText\":\"WORK CACHED BODY\"}}");
+            return error.UnexpectedRequest;
+        }
+    };
+    const allocator = std.testing.allocator;
+    for ([_]JobKind{ .labels_list, .identities }) |kind| {
+        var client: HeldMetadata = .{ .io = std.testing.io };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try allocator.create(Loop);
+        defer allocator.destroy(loop);
+        loop.init(std.testing.io, allocator, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(allocator);
+        defer app.deinit();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = HeldMetadata.provider, .cachedFn = HeldMetadata.local };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"},{\"address\":\"work@example.com\"}]", .{}));
+        try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"same-id\"}],\"cached\":true,\"cacheReady\":true}}");
+        try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"same-id\",\"bodyText\":\"PERSONAL OLD BODY\"}}", true);
+        try app.start(kind, .{ .cmd = if (kind == .labels_list) "labels.list" else "accounts.identities", .account = "personal@example.com" });
+        try client.entered.waitTimeout(app.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(10) } });
+        try app.onKey(.{ .codepoint = '2' });
+        try std.testing.expectEqual(@as(usize, 1), app.account_index);
+        try std.testing.expect(client.canceled.load(.acquire));
+        try std.testing.expectEqualStrings("work@example.com", app.reader_account.value());
+        try std.testing.expectEqualStrings("WORK CACHED BODY", text(get(app.thread[0], "bodyText")));
+        app.cancelJob();
+    }
 }
 
 test "HTML reader provenance prefers plain and recognizes only exact legacy conversion" {
