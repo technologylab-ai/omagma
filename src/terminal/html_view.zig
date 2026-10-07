@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const html = @import("html_document.zig");
 const theme = @import("theme.zig");
+const reader_tools = @import("reader_tools.zig");
 
 const max_lines = 16384;
 const max_runs = 65536;
@@ -81,18 +82,31 @@ fn safeText(allocator: std.mem.Allocator, text: []const u8, pre: bool) ![]const 
     return normalized;
 }
 
-fn sanitizeSpans(allocator: std.mem.Allocator, source: []const html.Span, pre: bool, total: *usize) ![]const html.Span {
-    const spans = try allocator.alloc(html.Span, source.len);
-    for (source, spans) |span, *dest| {
-        dest.* = span;
-        dest.text = try safeText(allocator, span.text, pre);
-        if (dest.text.len > 2 * 1024 * 1024 -| total.*) return error.HtmlLayoutUnavailable;
-        total.* += dest.text.len;
-        // Links affect semantic color/underline only. Vaxis URI fields are
-        // never populated, including for mail-controlled OSC8 destinations.
-        if (span.link != null) dest.style.underline = true;
+fn preparedSpan(allocator: std.mem.Allocator, spans: *std.ArrayList(html.Span), span: html.Span, count: *usize) !void {
+    if (span.text.len == 0) return;
+    if (count.* >= html.Limits.spans) return error.HtmlLayoutUnavailable;
+    count.* += 1;
+    var result = span;
+    // Semantic appearance only; never populate terminal OSC8 metadata.
+    if (result.link != null) result.style.underline = true;
+    try spans.append(allocator, result);
+}
+fn sanitizeSpans(allocator: std.mem.Allocator, source: []const html.Span, pre: bool, total: *usize, count: *usize) ![]const html.Span {
+    var spans: std.ArrayList(html.Span) = .empty;
+    for (source) |span| {
+        const clean = try safeText(allocator, span.text, pre);
+        const display = try reader_tools.displayLinks(allocator, clean);
+        if (display.text.len > 2 * 1024 * 1024 -| total.*) return error.HtmlLayoutUnavailable;
+        total.* += display.text.len;
+        var offset: usize = 0;
+        for (display.ranges) |range| {
+            try preparedSpan(allocator, &spans, .{ .text = display.text[offset..range.start], .style = span.style, .link = span.link }, count);
+            try preparedSpan(allocator, &spans, .{ .text = display.text[range.start..range.end], .style = span.style, .link = span.link orelse range.url }, count);
+            offset = range.end;
+        }
+        try preparedSpan(allocator, &spans, .{ .text = display.text[offset..], .style = span.style, .link = span.link }, count);
     }
-    return spans;
+    return spans.toOwnedSlice(allocator);
 }
 
 pub const Prepared = struct {
@@ -112,15 +126,16 @@ pub const Prepared = struct {
         const owned = arena.allocator();
         var document = try html.parse(input, owned);
         var semantic_bytes: usize = 0;
+        var semantic_spans: usize = 0;
         const blocks = try owned.alloc(html.Block, document.blocks.len);
         for (document.blocks, blocks) |source, *dest| {
             dest.* = source;
-            dest.spans = try sanitizeSpans(owned, source.spans, source.kind == .pre, &semantic_bytes);
+            dest.spans = try sanitizeSpans(owned, source.spans, source.kind == .pre, &semantic_bytes, &semantic_spans);
             if (source.table) |table| {
                 const rows = try owned.alloc(html.Row, table.rows.len);
                 for (table.rows, rows) |row, *result_row| {
                     const cells = try owned.alloc(html.Cell, row.cells.len);
-                    for (row.cells, cells) |cell, *result_cell| result_cell.* = .{ .spans = try sanitizeSpans(owned, cell.spans, false, &semantic_bytes), .header = cell.header };
+                    for (row.cells, cells) |cell, *result_cell| result_cell.* = .{ .spans = try sanitizeSpans(owned, cell.spans, false, &semantic_bytes, &semantic_spans), .header = cell.header };
                     result_row.* = .{ .cells = cells };
                 }
                 dest.table = .{ .rows = rows };
@@ -517,6 +532,30 @@ test "semantic style maps flags and roles without hyperlink metadata" {
     try std.testing.expectEqual(vaxis.Style.Underline.single, link.ul_style);
     const mono = style(palette, true, .{ .bold = true }, .heading);
     try std.testing.expect(mono.fg == .default and mono.bg == .default and mono.bold);
+}
+
+test "HTML reader display compacts bare URLs and retains human labels and original hrefs" {
+    var prepared = try Prepared.init(std.testing.allocator, "<p><a href='https://example.test/guide?tracking=abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz'>Guide</a> then https://example.test/guide?tracking=abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz</p>");
+    defer prepared.deinit();
+    try prepared.ensure(100, .unicode);
+    var visible: std.ArrayList(u8) = .empty;
+    defer visible.deinit(std.testing.allocator);
+    var saw_label = false;
+    var saw_compact = false;
+    for (prepared.cached.runs) |run| {
+        try visible.appendSlice(std.testing.allocator, run.text);
+        if (std.mem.eql(u8, run.text, "Guide")) {
+            saw_label = true;
+            try std.testing.expectEqual(Role.link, run.role);
+        }
+        if (std.mem.eql(u8, run.text, "https://example.test/guide…")) {
+            saw_compact = true;
+            try std.testing.expectEqual(Role.link, run.role);
+        }
+    }
+    try std.testing.expect(saw_label and saw_compact);
+    try std.testing.expectEqualStrings("Guide then https://example.test/guide…", visible.items);
+    try std.testing.expectEqualStrings("https://example.test/guide?tracking=abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz", prepared.document.blocks[0].spans[0].link.?);
 }
 
 test "semantic layouts wrap unicode words and table cells within responsive bounds" {

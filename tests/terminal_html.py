@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import hashlib
+import html as html_escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -22,10 +23,10 @@ from terminal_measure import Sampler, process_sample, quiet, summarize, allocato
 from terminal_ui import palette, theme_path, UI_FIXTURES
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "probes"))
-from html_fixture import HTML_ROOT, MANIFEST, HtmlFixture, body_snapshot, document, rewrite_legacy, substitute
+from html_fixture import HTML_ROOT, MANIFEST, HtmlFixture, body, body_snapshot, document, rewrite_legacy, substitute
 
 CASES = ("html-body-provenance", "html-legacy-cache", "html-structure-style", "html-responsive-tables",
-         "html-safety-flatten", "html-cached-legacy-view", "html-large-navigation-reuse")
+         "html-safety-flatten", "html-cached-legacy-view", "html-reader-ux", "html-large-navigation-reuse")
 
 
 class HtmlFailure(Exception):
@@ -296,6 +297,8 @@ def safety_case(binary, directory):
         result["layoutTablesFlattened"] = True
         terminal.finish()
         return result
+
+
     except Exception as failure:
         wrapped = failed_view(failure, terminal, layout_dir / "html-metrics.json")
         terminal = None
@@ -304,6 +307,95 @@ def safety_case(binary, directory):
         fixture.release()
         if terminal is not None: terminal.close()
 
+
+def reader_ux_fixture(directory, variant, spec, tracker_url):
+    """Populate ordinary MIME fixtures; no renderer-derived expected output."""
+    fixture = HtmlFixture(directory, "document", tracker_url=tracker_url)
+    expected = {}
+    for account in ACCOUNTS:
+        source = fixture.data[account]["baseline"]
+        message = next(value for value in source["messages"] if value["id"] == MANIFEST["htmlMessageId"])
+        literal = substitute(variant["bodyTemplate"], account, tracker_url)
+        literal = literal.replace("{longUrlHtml}", html_escape.escape(spec["longUrl"], quote=True))
+        literal = literal.replace("{longPathHtml}", html_escape.escape(spec["longPathUrl"], quote=True))
+        literal = literal.replace("{longUrl}", spec["longUrl"]).replace("{longPathUrl}", spec["longPathUrl"])
+        headers = [value for value in message["payload"]["headers"]
+                   if value["name"].lower() not in {"content-type", "content-transfer-encoding", "content-disposition"}]
+        message["payload"] = {"partId": "", "mimeType": variant["mimeType"], "filename": "",
+            "headers": headers + [{"name": "Content-Type", "value": variant["mimeType"] + "; charset=utf-8"}],
+            "body": body(literal)}
+        fixture.stage(account, "baseline")
+        expected[account] = literal
+    return fixture, expected
+
+
+def reader_ux_case(binary, directory):
+    spec = json.loads((HTML_ROOT / "reader-ux.json").read_text())
+    observations = []
+    with resource_peer() as (peer, origin):
+        for variant in spec["variants"]:
+            owned = directory / variant["name"]
+            fixture, expected = reader_ux_fixture(owned, variant, spec, origin)
+            seed(binary, owned, fixture, bodies=(MANIFEST["htmlMessageId"],))
+            saved = body_snapshot(owned)
+            with Client(binary, owned, extra=fixture.options()) as client:
+                message = client.request("mail.read", messageId=MANIFEST["htmlMessageId"], cacheOnly=True)
+                if variant["mimeType"] == "text/plain":
+                    require(message["bodySource"] == "plain" and message["bodyText"] == expected[ACCOUNTS[0]],
+                            "HTML-looking or technical plaintext changed its authoritative bytes/provenance")
+                else:
+                    require(message["bodySource"] == "html" and message["bodyHtml"] == expected[ACCOUNTS[0]],
+                            "marketing HTML source bytes/provenance changed while preparing its view")
+            if variant.get("cliOnly"):
+                observations.append({"variant": variant["name"], "plainProvenanceAndBytesPreserved": True})
+                continue  # Display inference for mislabeled plaintext has no blanket policy.
+            fixture.stage(ACCOUNTS[0], "baseline", held=True)
+            path = owned / "html-metrics.json"
+            terminal = None
+            try:
+                terminal = start(binary, owned, fixture, path)
+                fixture.wait_entered(terminal.process, pump=terminal.pump)
+                terminal.until(lambda: reader_contains(terminal.screen, variant["visible"][0]))
+                terminal.send(b"l")
+                visible = [substitute(value, ACCOUNTS[0]) for value in variant["visible"]]
+                if variant["name"] in {"marketing-html", "plain-links-and-literals"}:
+                    visible.extend((spec["longDisplay"], spec["longPathDisplay"]))
+                observed = collect_reader(terminal, visible)
+                joined = "\n".join(observed)
+                canonical = "".join(joined.split())
+                require(not any("".join(value.split()) in canonical for value in variant["absent"]),
+                        "marketing view leaked raw tags, comments or CSS/filter debris")
+                for value in variant["styled"]:
+                    reset_reader(terminal)
+                    terminal.until(lambda value=value: within_reader(terminal, value) is not None)
+                    style = cell_style(terminal, value)
+                    require(style[0] == palette(UI_FIXTURES / "theme-colors.toml", "cyan") and style[4],
+                            "human HTML link label lost cyan/underline styling")
+                if variant["name"] in {"marketing-html", "plain-links-and-literals"}:
+                    reset_reader(terminal)
+                    terminal.until(lambda: within_reader(terminal, "https://example.test") is not None)
+                    style = cell_style(terminal, "https://example.test")
+                    require(style[0] == palette(UI_FIXTURES / "theme-colors.toml", "cyan") and style[4],
+                            "visible naked/plain URL lost cyan/underline styling")
+                    require(spec["longUrl"] not in canonical and spec["longPathUrl"] not in canonical,
+                            "long URL tracking tail still occupies the reading view")
+                require(b"\x1b]8;" not in terminal.output and b"\x1b]52;" not in terminal.output,
+                        "reader UX emitted mail-authored terminal controls")
+                terminal.finish()
+                require(body_snapshot(owned) == saved, "reader UX rewrote immutable source/body cache")
+                require(peer.requests == [], "reader UX fetched an image or marketing resource")
+                observations.append({"variant": variant["name"], "readableBody": True,
+                    "compactStyledLinks": variant["name"] in {"marketing-html", "plain-links-and-literals"},
+                    "literalSourcePreserved": True, "remoteResourcesRequested": 0})
+            except Exception as failure:
+                wrapped = failed_view(failure, terminal, path)
+                terminal = None
+                raise wrapped from failure
+            finally:
+                fixture.release()
+                if terminal is not None: terminal.close()
+    return {"variants": observations, "remoteResourcesRequested": 0,
+            "longUrlSourceBytes": len(spec["longUrl"].encode()), "displayLimitBytes": spec["displayLimitBytes"]}
 
 def resource_case(binary, directory, cycles, idle):
     counts = []
@@ -422,6 +514,7 @@ def main():
                 if name in CASES[:2]: data = cli_case(binary, directory, name == "html-legacy-cache")
                 elif name == "html-safety-flatten": data = safety_case(binary, directory)
                 elif name == "html-large-navigation-reuse": data = resource_case(binary, directory, args.resource_cycles, args.idle_seconds)
+                elif name == "html-reader-ux": data = reader_ux_case(binary, directory)
                 else: data = formatted_case(binary, directory, name)
                 receipt = {"name": name, "passed": True, **data}
             except Exception as error:

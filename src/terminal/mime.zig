@@ -1321,3 +1321,15 @@ test "body provenance preserves plain preference and the legacy HTML text fallba
     const legacy = try std.json.parseFromSliceLeaky(types.Message, a, "{\"id\":\"legacy\",\"threadId\":\"thread\",\"bodyText\":\"Literal old body\"}", .{});
     try std.testing.expectEqual(types.BodySource.unknown, legacy.bodySource);
 }
+
+test "HTML reader fallback keeps legacy literal escaped technical fragments byte compatible" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const html = "<p>Use &lt;span class=&quot;sample&quot;&gt; and x &lt; y &amp;&amp; y &gt; z.</p><pre>std::vector&lt;T&gt;\n&lt;script&gt;literal&lt;/script&gt;</pre>";
+    try std.testing.expectEqualStrings("Use <span class=\"sample\"> and x < y && y > z.\nstd::vector<T>\n<script>literal</script>", try htmlToText(html, a));
+    const plain = try parse("Content-Type: text/plain; charset=utf-8\r\n\r\n<div>Literal technical body</div>", a);
+    try std.testing.expectEqual(types.BodySource.plain, plain.body_source);
+    try std.testing.expectEqualStrings("<div>Literal technical body</div>", plain.body_text);
+    try std.testing.expectEqualStrings("", plain.body_html);
+}

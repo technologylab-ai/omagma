@@ -98,6 +98,9 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   remains available for selecting text.
 - HTML-only text keeps headings, emphasis, lists, quotes, code/preformatted
   blocks and simple tables. Remote resources never load.
+- Links are colored and underlined in HTML and plain-text mail. Long visible
+  URLs use compact labels while `L` keeps their full destinations. HTML images
+  show caption placeholders; decorative empty-alt images stay hidden.
 - Missing bodies and partial cached threads are identified explicitly; a
   snippet is not passed off as a complete body.
 - Both-direction scrolling moves through adjacent cached

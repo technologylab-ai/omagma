@@ -47,9 +47,9 @@ Mouse support is enabled by default. Click accounts, mailboxes, messages and con
 
 The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use the Omarchy palette when available, with a built-in fallback elsewhere. Narrow tables stack their cells; complex presentation tables flatten into reading order.
 
-Scripts, remote images and other resources never run or load. Image alt text may appear. Links have styled labels and open only when explicitly chosen. The CLI receives decoded plaintext and optional HTML data rather than this styled screen.
+Scripts, remote images and other resources never run or load. Images show `[Image: caption]` using alt text or a title, or `[Image]` when neither is available; explicitly empty alt text hides decorative images. Links use the theme's cyan and underline, including HTTP(S) URLs in plain-text mail. Human-written link labels stay intact. Long visible URLs are shortened to their host/path and an ellipsis; `L` retains the complete destinations, including query parameters. These display changes leave stored mail and CLI bodies intact.
 
-Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted lines remain intact; long URLs or words split within the pane. The composer uses the same layout for its caret and text.
+Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted lines remain intact; overwide words split within the pane. The composer uses the same layout for its caret and text, keeping its editable content complete.
 
 ## Search
 

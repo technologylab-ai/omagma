@@ -34,12 +34,25 @@ pub fn parse(input: []const u8, allocator: std.mem.Allocator) !Document {
     var offset: usize = 0;
     while (offset < input.len) {
         try context.tick();
-        if (std.mem.startsWith(u8, input[offset..], "<!--")) {
-            offset = if (std.mem.indexOf(u8, input[offset + 4 ..], "-->")) |end| offset + 4 + end + 3 else input.len;
+        if (context.rawHidden()) |name| {
+            // Script/style bodies are raw text, not nested HTML. A quoted
+            // "<script>" must not consume the real closer and hide the mail tail.
+            offset = try rawHiddenEnd(input, offset, name);
+            try context.close(name);
+        } else if (std.mem.startsWith(u8, input[offset..], "<!--")) {
+            offset = commentEnd(input, offset + 4);
         } else if (input[offset] == '<') {
             if (try tagAt(input, offset)) |tag| {
+                const begin = offset;
                 offset = tag.end;
                 if (tag.name.len == 0) continue;
+                // Unescaped generic/type names occur in real technical code.
+                // Only bare unknown tags in code/pre get this literal treatment;
+                // real HTML formatting and escaped markup keep their semantics.
+                if (!context.state.skip and context.state.style.code and !knownTag(tag.name) and tag.attributes.len == 0) {
+                    try context.text(input[begin..offset]);
+                    continue;
+                }
                 if (tag.closing) try context.close(tag.name) else try context.open(tag);
             } else {
                 if (!context.state.skip) try context.text("<");
@@ -103,6 +116,20 @@ const Tag = struct {
 fn white(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\r' or c == '\n' or c == 12;
 }
+fn commentEnd(input: []const u8, start: usize) usize {
+    var i = start;
+    while (i < input.len) : (i += 1) {
+        if (std.mem.startsWith(u8, input[i..], "-->")) return i + 3;
+        if (std.mem.startsWith(u8, input[i..], "--!>")) return i + 4;
+    }
+    return input.len;
+}
+fn knownTag(name: []const u8) bool {
+    for ([_][]const u8{ "html", "head", "title", "body", "style", "script", "template", "noscript", "svg", "math", "iframe", "object", "canvas", "xml", "p", "div", "span", "section", "article", "main", "header", "footer", "address", "figure", "figcaption", "caption", "pre", "li", "ol", "ul", "blockquote", "table", "thead", "tbody", "tfoot", "tr", "td", "th", "b", "strong", "i", "em", "u", "s", "strike", "del", "code", "kbd", "samp", "a", "font", "center", "sup", "sub", "small", "big", "form", "button", "select", "option", "textarea", "label", "video", "audio" }) |v| if (std.ascii.eqlIgnoreCase(name, v)) return true;
+    if (voidTag(name)) return true;
+    if (name.len == 2 and (name[0] == 'h' or name[0] == 'H') and name[1] >= '1' and name[1] <= '6') return true;
+    return std.ascii.startsWithIgnoreCase(name, "o:") or std.ascii.startsWithIgnoreCase(name, "w:") or std.ascii.startsWithIgnoreCase(name, "v:");
+}
 fn tagAt(input: []const u8, start: usize) !?Tag {
     if (start + 1 >= input.len) return null;
     var i = start + 1;
@@ -113,18 +140,37 @@ fn tagAt(input: []const u8, start: usize) !?Tag {
     }
     if (i >= input.len) return null;
     if (input[i] == '!' or input[i] == '?') {
-        const end = std.mem.indexOfScalarPos(u8, input, i, '>') orelse return .{ .name = "", .attributes = "", .end = input.len };
-        if (end - start > Limits.tag_bytes) return error.HtmlTooComplex;
-        return .{ .name = "", .attributes = "", .end = end + 1 };
+        var quote: u8 = 0;
+        var brackets: usize = 0;
+        while (i < input.len) : (i += 1) {
+            if (i - start > Limits.tag_bytes) return error.HtmlTooComplex;
+            const c = input[i];
+            if (quote != 0) {
+                if (c == quote) quote = 0;
+            } else if (c == '"' or c == '\'') {
+                quote = c;
+            } else if (c == '[') {
+                brackets += 1;
+            } else if (c == ']') {
+                brackets -|= 1;
+            } else if (c == '>' and brackets == 0) {
+                return .{ .name = "", .attributes = "", .end = i + 1 };
+            }
+        }
+        return .{ .name = "", .attributes = "", .end = input.len };
     }
     if (!std.ascii.isAlphabetic(input[i])) return null;
     const name_start = i;
     while (i < input.len and (std.ascii.isAlphanumeric(input[i]) or input[i] == ':' or input[i] == '-')) : (i += 1) {}
     const name = input[name_start..i];
+    // A raw mailbox or a comparison is not an attribute-bearing HTML tag.
+    if (i < input.len and !white(input[i]) and input[i] != '/' and input[i] != '>') return null;
     const attributes_start = i;
     var quote: u8 = 0;
+    var nested: ?usize = null;
     while (i < input.len) : (i += 1) {
         if (i - start > Limits.tag_bytes) return error.HtmlTooComplex;
+        if (input[i] == '<' and nested == null) nested = i;
         if (quote != 0) {
             if (input[i] == quote) quote = 0;
             continue;
@@ -133,12 +179,32 @@ fn tagAt(input: []const u8, start: usize) !?Tag {
             quote = input[i];
             continue;
         }
+        if (input[i] == '<') {
+            // Recover at the next markup boundary without swallowing its tag.
+            return if (knownTag(name)) .{ .name = "", .attributes = "", .end = i } else null;
+        }
         if (input[i] == '>') {
             const attrs = std.mem.trimEnd(u8, input[attributes_start..i], " \t\r\n");
             return .{ .name = name, .attributes = attrs, .end = i + 1, .closing = closing, .self_closing = std.mem.endsWith(u8, attrs, "/") };
         }
     }
+    // Truncated known markup must not become visible attribute fragments.
+    // Unknown '<T' or '<limit' text remains literal instead of being guessed.
+    if (knownTag(name)) return .{ .name = "", .attributes = "", .end = nested orelse input.len };
     return null;
+}
+fn rawHiddenEnd(input: []const u8, start: usize, name: []const u8) !usize {
+    var offset = start;
+    while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |next| {
+        offset = next + 1;
+        if (offset >= input.len or input[offset] != '/') continue;
+        const begin = offset + 1;
+        if (begin + name.len > input.len or !std.ascii.eqlIgnoreCase(input[begin..][0..name.len], name)) continue;
+        const boundary = begin + name.len;
+        if (boundary < input.len and input[boundary] != '>' and input[boundary] != '/' and !white(input[boundary])) continue;
+        if (try tagAt(input, next)) |tag| return tag.end;
+    }
+    return input.len;
 }
 fn voidTag(name: []const u8) bool {
     for ([_][]const u8{ "br", "hr", "img", "meta", "link", "input", "area", "base", "col", "embed", "source", "track", "wbr" }) |v| if (std.ascii.eqlIgnoreCase(name, v)) return true;
@@ -148,12 +214,26 @@ fn blockTag(name: []const u8) bool {
     for ([_][]const u8{ "p", "div", "section", "article", "main", "header", "footer", "address", "figure", "figcaption", "caption", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "li", "blockquote", "tr", "td", "th", "table" }) |v| if (std.ascii.eqlIgnoreCase(name, v)) return true;
     return false;
 }
-fn hidden(tag: Tag) bool {
-    for ([_][]const u8{ "head", "style", "script", "template", "svg", "noscript", "iframe", "object", "canvas", "math" }) |v| if (tag.is(v)) return true;
+fn hidden(tag: Tag, a: std.mem.Allocator) !bool {
+    for ([_][]const u8{ "head", "style", "script", "template", "svg", "noscript", "iframe", "object", "canvas", "math", "xml", "o:officedocumentsettings", "o:documentproperties", "o:customdocumentproperties", "w:worddocument" }) |v| if (tag.is(v)) return true;
     if (tag.attribute("hidden") != null) return true;
     if (tag.attribute("aria-hidden")) |v| if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, v, " \t\r\n"), "true")) return true;
     if (tag.attribute("style")) |style| {
-        var properties = std.mem.splitScalar(u8, style, ';');
+        const decoded = try decodeAttribute(a, style);
+        var css: std.ArrayList(u8) = .empty;
+        try css.ensureTotalCapacityPrecise(a, decoded.len);
+        var i: usize = 0;
+        while (i < decoded.len) {
+            if (std.mem.startsWith(u8, decoded[i..], "/*")) {
+                const end = std.mem.indexOfPos(u8, decoded, i + 2, "*/") orelse break;
+                try css.append(a, ' ');
+                i = end + 2;
+            } else {
+                try css.append(a, decoded[i]);
+                i += 1;
+            }
+        }
+        var properties = std.mem.splitScalar(u8, css.items, ';');
         while (properties.next()) |property| {
             const colon = std.mem.indexOfScalar(u8, property, ':') orelse continue;
             const key = std.mem.trim(u8, property[0..colon], " \t\r\n");
@@ -288,6 +368,13 @@ const Context = struct {
         for (decoded) |c| if (c <= 32 or c == 127) return null;
         return decoded;
     }
+    fn rawHidden(self: *const Context) ?[]const u8 {
+        if (!self.state.skip) return null;
+        for (self.stack[0..self.depth]) |frame| {
+            if (!frame.before.skip and (std.ascii.eqlIgnoreCase(frame.name, "script") or std.ascii.eqlIgnoreCase(frame.name, "style"))) return frame.name;
+        }
+        return null;
+    }
     fn open(self: *Context, tag: Tag) !void {
         if (!self.state.skip) {
             if (tag.is("p")) try self.close(tag.name);
@@ -308,7 +395,7 @@ const Context = struct {
             }
         }
         const before = self.state;
-        self.state.skip = self.state.skip or hidden(tag);
+        self.state.skip = self.state.skip or try hidden(tag, self.a);
         var is_data = false;
         var next_ordinal: u32 = 1;
         if (!self.state.skip) {
@@ -375,11 +462,26 @@ const Context = struct {
                 if (self.table != null and self.table.?.cell_active) try self.lineBreak() else try self.pushBlock(.{ .kind = .rule });
             }
             if (tag.is("img")) {
-                const alt = tag.attribute("alt") orelse "[image]";
-                if (alt.len > 1024) return error.HtmlTooComplex;
-                if (alt.len != 0) {
+                const alt = tag.attribute("alt");
+                // An intentionally empty alt marks decorative/tracking noise.
+                if (alt == null or std.mem.trim(u8, alt.?, " \t\r\n").len != 0) {
+                    const raw = alt orelse tag.attribute("title") orelse "";
+                    if (raw.len > 1024) return error.HtmlTooComplex;
+                    const caption = std.mem.trim(u8, try decodeAttribute(self.a, raw), " \t\r\n");
                     try self.rune(' ');
-                    try self.text(alt);
+                    if (caption.len == 0) {
+                        try self.text("[Image]");
+                    } else {
+                        try self.text("[Image: ");
+                        // Attribute entities have already been decoded once.
+                        var cursor: usize = 0;
+                        while (cursor < caption.len) {
+                            const n = try std.unicode.utf8ByteSequenceLength(caption[cursor]);
+                            try self.rune(try std.unicode.utf8Decode(caption[cursor..][0..n]));
+                            cursor += n;
+                        }
+                        try self.text("]");
+                    }
                     try self.rune(' ');
                 }
             }
@@ -521,6 +623,9 @@ fn entity(input: []const u8) ?Entity {
         .{ "ugrave", 0xf9 },  .{ "ucirc", 0xfb },  .{ "uuml", 0xfc },    .{ "Uuml", 0xdc },   .{ "szlig", 0xdf },
     };
     for (names) |pair| if (std.mem.eql(u8, name, pair[0])) return .{ .consumed = end + 1, .codepoint = pair[1] };
+    for ([_]struct { []const u8, u21 }{ .{ "AMP", '&' }, .{ "LT", '<' }, .{ "GT", '>' }, .{ "QUOT", '"' } }) |pair| {
+        if (std.mem.eql(u8, name, pair[0])) return .{ .consumed = end + 1, .codepoint = pair[1] };
+    }
     return null;
 }
 fn decodeAttribute(a: std.mem.Allocator, input: []const u8) ![]const u8 {
@@ -691,4 +796,52 @@ test "large token capacity reservation preserves preceding style and complete by
     try std.testing.expect(!doc.blocks[0].spans[1].style.bold);
     try std.testing.expectEqual(@as(usize, 4096), doc.blocks[0].spans[1].text.len);
     for (doc.blocks[0].spans[1].text) |c| try std.testing.expectEqual(@as(u8, 'x'), c);
+}
+
+test "HTML reader repairs malformed tag boundaries without leaking attributes or losing code" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const broken_quote = try parse("<p>Before <span class='broken<p>Visible</p>", a);
+    try std.testing.expectEqualStrings("Before\nVisible", try Oracle.document(a, broken_quote));
+    const interrupted = try parse("<p>Before <span class=x <b>Visible</b> after</p>", a);
+    try std.testing.expectEqualStrings("Before Visible after", try Oracle.document(a, interrupted));
+    const truncated = try parse("<p>Before<span class=unfinished", a);
+    try std.testing.expectEqualStrings("Before", try Oracle.document(a, truncated));
+    const literal = try parse("<pre>std::vector<T>\nx < y &amp;&amp; y > z\n<custom>literal</custom></pre><p>&lt;span class=&quot;x&quot;&gt; &amp;lt;script&amp;gt; &LT;tag&GT; &AMP;</p>", a);
+    try std.testing.expectEqualStrings("std::vector<T>\nx < y && y > z\n<custom>literal</custom>\n<span class=\"x\"> &lt;script&gt; <tag> &", try Oracle.document(a, literal));
+    const address = try parse("<p>Contact <person@example.test> or compare x < y.</p>", a);
+    try std.testing.expectEqualStrings("Contact <person@example.test> or compare x < y.", try Oracle.document(a, address));
+}
+
+test "HTML reader ignores raw script strings Office metadata and decoded hidden CSS" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = try parse("<p>Before<script>const x = '<script>'; bad </p></script> after<style>p:before{content:'<style>'}</style> tail</p>", a);
+    try std.testing.expectEqualStrings("Before after tail", try Oracle.document(a, raw));
+    const office = try parse("<!DOCTYPE html [<!ENTITY marker 'hidden > metadata'>]><xml><o:DocumentProperties><o:Author>Metadata author</o:Author></o:DocumentProperties></xml><o:OfficeDocumentSettings>Hidden settings</o:OfficeDocumentSettings><p>Visible<o:p>&nbsp;</o:p> text<!--hidden --!> tail</p>", a);
+    try std.testing.expectEqualStrings("Visible text tail", try Oracle.document(a, office));
+    const styles = try parse("<p>Shown<span style='d&#105;splay:/**/n&#111;ne !important'>Hidden</span><span style='visibility&#58; hidden'>Hidden2</span><span style='mso-hide:all'>Hidden3</span> End</p>", a);
+    try std.testing.expectEqualStrings("Shown End", try Oracle.document(a, styles));
+}
+
+test "HTML reader image placeholders use alt title or generic label without tracking resources" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try parse("<p>Start<img src='https://example.test/pixel?private=unused' alt='Map &amp; route'><img title='Diagram &lt;T&gt;'><img><img alt='' title='Decorative'><img alt='   '><img hidden alt='Hidden'><img alt='&amp;lt;literal&amp;gt;'>End</p>", a);
+    try std.testing.expectEqualStrings("Start [Image: Map & route] [Image: Diagram <T>] [Image] [Image: &lt;literal&gt;] End", try Oracle.document(a, doc));
+    for (doc.blocks) |block| for (block.spans) |span| {
+        try std.testing.expect(span.link == null);
+        try std.testing.expect(std.mem.indexOf(u8, span.text, "private") == null);
+    };
+}
+
+test "HTML reader leaves orphan CSS and escaped tutorials literal without guessing markup" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try parse("<p>Technical note: .sample { color: red; } &lt;div&gt;</p><pre>&lt;style&gt;body { display: none; }&lt;/style&gt;</pre>", a);
+    try std.testing.expectEqualStrings("Technical note: .sample { color: red; } <div>\n<style>body { display: none; }</style>", try Oracle.document(a, doc));
 }

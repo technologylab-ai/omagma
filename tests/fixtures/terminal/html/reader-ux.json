@@ -1,0 +1,77 @@
+{
+  "synthetic": true,
+  "networkRequired": false,
+  "displayLimitBytes": 64,
+  "longUrl": "https://example.test/guides/2026/october/notes?campaign=fictional&tracking=fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-tail-marker",
+  "longDisplay": "https://example.test/guides/2026/october/notes…",
+  "longPathUrl": "https://example.test/archive/fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-notes?campaign=fictional",
+  "longPathDisplay": "https://example.test/archive/fictional-path-fictional-path-fi…",
+  "variants": [
+    {
+      "name": "marketing-html",
+      "mimeType": "text/html",
+      "bodyTemplate": "<!doctype html><html><head><style>.mso-card { filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0); }</style></head><body><h1>Fictional marketing bulletin</h1><p>Fictional {account}: café 👋.</p><p><a href=\"{longUrlHtml}\">Read the report</a></p><p>Visible destination: <a href=\"{longUrlHtml}\">{longUrlHtml}</a></p><p>Archive: <a href=\"{longPathHtml}\">{longPathHtml}</a></p><img src=\"{trackerUrl}/hero\" alt=\"Fictional mountain\"><img src=\"{trackerUrl}/unlabeled\"><img src=\"{trackerUrl}/decorative\" alt=\"\"><p>Fictional marketing tail.</p></body></html>",
+      "visible": [
+        "Fictional marketing bulletin",
+        "Read the report",
+        "[Image: Fictional mountain]",
+        "[Image]",
+        "Fictional marketing tail."
+      ],
+      "absent": [
+        "DXImageTransform",
+        "Opacity=0",
+        "<img",
+        "<style",
+        "filter:"
+      ],
+      "styled": [
+        "Read the report"
+      ]
+    },
+    {
+      "name": "malformed-marketing-html",
+      "mimeType": "text/html",
+      "bodyTemplate": "<!doctype html><html><head><!--[if mso]><xml>HIDDEN_MSO_LAYOUT</xml><![endif]--><style>HIDDEN_FILTER_STYLE .card { filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0); }</style></head><body><h1>Fictional imperfect letter</h1><p>Fictional {account}: café 👋.</p></style></div><table role=\"presentation\"><tr><td><div>Readable offer without tag debris</td><td><p>Useful second column</td></tr></table><p><a href=\"{longUrlHtml}\">Offer details</a></p><img src=\"{trackerUrl}/offer\" alt=\"Fictional offer artwork\"><p>Fictional imperfect tail.</body></html>",
+      "visible": [
+        "Fictional imperfect letter",
+        "Readable offer without tag debris",
+        "Useful second column",
+        "Offer details",
+        "[Image: Fictional offer artwork]",
+        "Fictional imperfect tail."
+      ],
+      "absent": [
+        "HIDDEN_MSO_LAYOUT",
+        "HIDDEN_FILTER_STYLE",
+        "DXImageTransform",
+        "filter:",
+        "</style>",
+        "</div>",
+        "<table"
+      ],
+      "styled": [
+        "Offer details"
+      ]
+    },
+    {
+      "name": "plain-links-and-literals",
+      "mimeType": "text/plain",
+      "bodyTemplate": "Fictional plain-link note\nFictional {account}: café 👋.\nRead: {longUrl}\nArchive: {longPathUrl}\nKeep this literal code example: <b>Hello</b> and x < y.\nKeep the address example: <team@example.test>.\nFictional plain tail.\n",
+      "visible": [
+        "Fictional plain-link note",
+        "Keep this literal code example: <b>Hello</b> and x < y.",
+        "Keep the address example: <team@example.test>.",
+        "Fictional plain tail."
+      ],
+      "absent": [],
+      "styled": []
+    },
+    {
+      "name": "html-looking-plain",
+      "mimeType": "text/plain",
+      "bodyTemplate": "<html><body><h1>Fictional mislabeled-looking example</h1><p>This deliberately has text/plain provenance for {account}.</p></body></html>",
+      "cliOnly": true
+    }
+  ]
+}

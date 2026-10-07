@@ -4729,13 +4729,23 @@ const App = struct {
         return self.flowClean(win, clean, offset, 0, .text, .{ .marker_at = @min(prefix.len, clean.len) });
     }
     fn flowClean(self: *App, win: vaxis.Window, clean: []const u8, offset: usize, base_row: usize, tone: Tone, options: text_layout.Options) usize {
+        return self.flowStyled(win, clean, offset, base_row, tone, options, &.{});
+    }
+    fn flowReaderText(self: *App, win: vaxis.Window, value_in: []const u8, offset: usize, base_row: usize) !usize {
+        const clean = try safe(self.frame.allocator(), value_in, true);
+        const display = try reader_tools.displayLinks(self.frame.allocator(), clean);
+        return self.flowStyled(win, display.text, offset, base_row, .text, .{}, display.ranges);
+    }
+    fn flowStyled(self: *App, win: vaxis.Window, clean: []const u8, offset: usize, base_row: usize, tone: Tone, options: text_layout.Options, link_ranges: []const reader_tools.LinkRange) usize {
         if (win.width == 0) return base_row;
         const highlight = if (self.cacheSearch()) self.search_highlight.value() else "";
         var next_match = cache_query.find(clean, highlight);
         var layout_options = options;
         layout_options.base_row = base_row;
         var iterator = text_layout.Iterator.init(clean, win.width, win.screen.width_method, layout_options);
+        var link_index: usize = 0;
         while (iterator.next()) |glyph| {
+            while (link_index < link_ranges.len and glyph.byte_offset >= link_ranges[link_index].end) link_index += 1;
             while (next_match) |match_at| {
                 if (glyph.byte_offset < match_at + highlight.len) break;
                 const after = match_at + highlight.len;
@@ -4745,6 +4755,7 @@ const App = struct {
             // styles only for cells that can actually reach this viewport.
             if (glyph.position.row < offset or glyph.position.row - offset >= win.height or glyph.columns > win.width) continue;
             var cell_style = self.style(if (glyph.marker) .accent else tone);
+            if (!glyph.marker and link_index < link_ranges.len and glyph.byte_offset >= link_ranges[link_index].start) cell_style = html_view.style(self.palette, self.mono, .{}, .link);
             if (!glyph.marker) if (next_match) |match_at| if (glyph.byte_offset >= match_at and glyph.byte_offset < match_at + highlight.len) {
                 if (self.mono) cell_style.reverse = true else {
                     cell_style.bg = .{ .rgb = self.palette.yellow };
@@ -4892,7 +4903,7 @@ const App = struct {
             }
             if (!rich_drawn) {
                 const folded = try reader_tools.fold(self.frame.allocator(), text(get(message, "bodyText")), self.fold_quotes, self.fold_signatures);
-                row = try self.flow(win, folded.text, self.reader_scroll, row);
+                row = try self.flowReaderText(win, folded.text, self.reader_scroll, row);
             }
             var links_in_text: reader_tools.Links = .{};
             reader_tools.findLinks(text(get(message, "bodyText")), &links_in_text);
