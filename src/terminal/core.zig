@@ -126,11 +126,18 @@ pub const Session = struct {
         s.allocator.free(s.cache_root);
     }
     pub fn client(s: *Session) t.Client {
-        return .{ .ctx = s, .callFn = call, .cachedFn = callCached, .callProgressFn = callProgress };
+        return .{ .ctx = s, .callFn = call, .cachedFn = callCached, .cacheStampFn = callCacheStamp, .callProgressFn = callProgress };
     }
     fn call(ctx: *anyopaque, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         const s: *Session = @ptrCast(@alignCast(ctx));
         return s.execute(out_allocator, raw);
+    }
+    fn callCacheStamp(ctx: *anyopaque, account: []const u8) !?t.CacheStamp {
+        const s: *Session = @ptrCast(@alignCast(ctx));
+        try recipients.validateAddress(account);
+        const index = s.config.index(account) orelse return error.UnknownAccount;
+        if (!s.config.accounts[index].enabled) return error.AccountDisabled;
+        return storage.cacheStamp(s.io, s.cache_root, account, s.options);
     }
     fn callCached(ctx: *anyopaque, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
         const s: *Session = @ptrCast(@alignCast(ctx));
@@ -168,7 +175,7 @@ pub const Session = struct {
         var req = request.?;
         if (cached_only) {
             const command = j.text(req, "cmd");
-            if (!std.mem.eql(u8, command, "labels.list") and !std.mem.eql(u8, command, "accounts.identities") and !std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.recipients") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
+            if (!std.mem.eql(u8, command, "labels.list") and !std.mem.eql(u8, command, "accounts.identities") and !std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.recipients") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.activity") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
             try req.object.put(a, "cacheOnly", .{ .bool = true });
         }
         const account = j.text(req, "account");
@@ -248,7 +255,7 @@ pub const Session = struct {
             if (!s.options.fixtures) try @import("../open_target.zig").openSavedAttachment(s.io, a, path);
             return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures });
         }
-        if (try j.boolean(req, "cacheOnly", false)) return s.cachedDispatch(a, address, req);
+        if (std.mem.eql(u8, cmd, "cache.activity") or try j.boolean(req, "cacheOnly", false)) return s.cachedDispatch(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.undo")) return s.batchMail(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.prefetch")) {
             var request = try j.copyObject(a, req);
@@ -674,6 +681,7 @@ pub const Session = struct {
             };
             return j.value(a, .{ .recipients = try known.result(), .cached = true, .contactsIncluded = contacts_allowed });
         }
+        if (std.mem.eql(u8, cmd, "cache.activity")) return j.value(a, .{ .inboxArrivalCount = store.state.inboxArrivalCount, .generation = store.state.generation, .lastSyncAt = store.state.lastSyncAt });
         if (std.mem.eql(u8, cmd, "mail.list")) return cachedList(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.search")) return cacheSearch(a, &store, req, s.allocator);
         if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, true);
@@ -864,7 +872,7 @@ pub const Session = struct {
         const remote_cursor = if (view) |v| if (!v.stale) v.remoteCursor else "" else "";
         const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(remote_cursor.len));
         _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, remote_cursor);
-        return j.value(a, .{ .cacheWindow = window.direction, .boundaryFallback = window.fallback, .hasMoreCachedBefore = offset != 0, .hasMoreCachedAfter = end < candidates.items.len, .messages = candidates.items[offset..end], .cursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset, key }) else @as(?[]const u8, null), .nextCursor = if (end < candidates.items.len) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, end, key }) else @as(?[]const u8, null), .remoteCursor = if (remote_cursor.len != 0) try std.fmt.allocPrint(a, "L:{d}:{s}:{s}", .{ store.state.generation, key, encoded }) else @as(?[]const u8, null), .hasMoreRemote = remote_cursor.len != 0, .cached = true, .cacheReady = ready, .partial = true, .stale = if (view) |v| v.stale else false, .viewIncomplete = if (view) |v| v.incomplete else false, .lastSyncAt = if (view) |v| v.lastSyncAt else @as(i64, 0), .generation = store.state.generation, .previousCursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset - @min(offset, @as(usize, @intCast(limit))), key }) else @as(?[]const u8, null) });
+        return j.value(a, .{ .cacheWindow = window.direction, .boundaryFallback = window.fallback, .hasMoreCachedBefore = offset != 0, .hasMoreCachedAfter = end < candidates.items.len, .messages = candidates.items[offset..end], .cursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset, key }) else @as(?[]const u8, null), .nextCursor = if (end < candidates.items.len) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, end, key }) else @as(?[]const u8, null), .remoteCursor = if (remote_cursor.len != 0) try std.fmt.allocPrint(a, "L:{d}:{s}:{s}", .{ store.state.generation, key, encoded }) else @as(?[]const u8, null), .hasMoreRemote = remote_cursor.len != 0, .cached = true, .cacheReady = ready, .partial = true, .stale = if (view) |v| v.stale else false, .viewIncomplete = if (view) |v| v.incomplete else false, .lastSyncAt = if (view) |v| v.lastSyncAt else @as(i64, 0), .generation = store.state.generation, .inboxArrivalCount = store.state.inboxArrivalCount, .previousCursor = if (offset > 0) try std.fmt.allocPrint(a, "C:{d}:{d}:{s}", .{ store.state.generation, offset - @min(offset, @as(usize, @intCast(limit))), key }) else @as(?[]const u8, null) });
     }
 
     const FixtureRemote = struct {
@@ -1320,6 +1328,10 @@ pub const Session = struct {
         if (commit.state.generation != expected) return error.CacheChanged;
         // This final synced index is the only checkpoint advancement. Failed or
         // cancelled partial jobs leave old history for replay, skipping full IDs.
+        // Metadata and bodies may have committed before a canceled attempt.
+        // Advance the arrival counter only with the successful history checkpoint;
+        // replay still retains typed added IDs even when their metadata is known.
+        if (!std.mem.eql(u8, commit.state.historyId, plan.historyId)) commit.state.inboxArrivalCount +|= @as(u64, @intCast(plan.inboxArrivals()));
         commit.state.historyId = plan.historyId;
         commit.state.lastSyncAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds();
         if (commit.findView(&key)) |view| {

@@ -76,6 +76,7 @@ only the cases relevant to a change and use the explicitly built local binary:
 ```sh
 python3 tests/terminal_wishlist_backend.py --binary /path/to/local/omagma
 python3 tests/terminal_cache_windows.py --binary /path/to/local/omagma
+python3 tests/terminal_arrivals.py --binary /path/to/local/omagma
 python3 tests/terminal_scroll_progress.py --binary /path/to/local/omagma
 python3 tests/terminal_loading.py --binary /path/to/local/omagma
 python3 tests/terminal_local_ui.py --binary /path/to/local/omagma

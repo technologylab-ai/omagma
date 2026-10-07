@@ -54,12 +54,18 @@ pub const ProgressSink = struct {
         if (self.rowFn) |function| function(self.ctx, update);
     }
 };
+/// Private file identity only; no cache paths or account data cross the callback.
+pub const CacheStamp = struct { inode: u64, size: u64, mtime_ns: i128 };
 /// The caller owns returned JSON bytes. Requests share the agent CLI contract.
 pub const Client = struct {
     ctx: *anyopaque,
     callFn: *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]const u8,
     cachedFn: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]const u8 = null,
+    cacheStampFn: ?*const fn (*anyopaque, []const u8) anyerror!?CacheStamp = null,
     callProgressFn: ?*const fn (*anyopaque, std.mem.Allocator, []const u8, ProgressSink) anyerror![]const u8 = null,
+    pub fn cacheStamp(self: Client, account: []const u8) !?CacheStamp {
+        return (self.cacheStampFn orelse return error.CacheUnsupported)(self.ctx, account);
+    }
     pub fn callCached(self: Client, allocator: std.mem.Allocator, request: []const u8) ![]const u8 {
         return (self.cachedFn orelse return error.CacheUnsupported)(self.ctx, allocator, request);
     }

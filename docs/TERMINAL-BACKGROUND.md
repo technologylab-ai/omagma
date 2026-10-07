@@ -7,6 +7,8 @@ separate from ordinary interactive terminal setup.
 
 A user systemd timer can refresh the terminal cache every five minutes, even while the TUI is closed. It runs the native `omagma cache-refresh` command, processes enabled accounts sequentially and exits afterward. It reuses each account's existing **read-only bar grant**; sending, mailbox changes and contacts are not part of this job.
 
+A running TUI observes completed cache changes, adopts new rows without a manual refresh and preserves its selected mail. On the main mailbox screen, a top-right **New mail** card accumulates incoming Inbox arrivals per account until your next interaction. It stays out of compose, contacts, search and review screens.
+
 The timer and TUI share the same disk cache and account refresh coordination. A simultaneous refresh is coalesced while cached reading remains available. The popup retains its independent 30-message memory snapshot and refresh setting. Enabling this timer does not reload the desktop or change terminal write permissions.
 
 A terminal-only installation still needs the read-only bar Google OAuth registration and `omagma auth` for each account when using this timer. The full terminal grant is not used for automatic fetching. You do not need to install the bar widget; follow [read-only account setup](SETUP.md#read-only-google-oauth-registration).

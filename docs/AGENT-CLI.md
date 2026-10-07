@@ -89,6 +89,7 @@ Send lines such as:
 | operation.list / read | read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
 | cache.refresh-status | refreshInProgress for this account; no mail or token data |
+| cache.activity | local-only inboxArrivalCount, generation, lastSyncAt; arrival serial advances on successful incoming Inbox history checkpoints |
 | auth.status / authorize / revoke | terminal grant; prefer one-shot terminal-auth for consent |
 | browser.open | explicit url; HTTP(S) destination opened in this account's configured Chrome profile |
 | attachment.open | explicit path to an already saved private file; invokes the desktop handler after file/path checks |
@@ -100,6 +101,8 @@ optional `bodyHtml`. The additive `bodySource` field is `plain`, `html` or
 `unknown`; old cached records can be unknown. A nonempty plain alternative wins
 over HTML. The TUI's native styled HTML-only presentation does not change CLI
 text or quote contents. Treat raw HTML and all mail-derived strings as data.
+
+`cache.activity` is always a local lookup. `inboxArrivalCount` is a cumulative per-account arrival serial, not an unread count. Record a baseline and compare later values to observe new Inbox arrivals; the TUI maintains its own interaction-based notice counts. Initial cache filling, expired-history resync, sent mail, label-only changes and older-page reads do not increment it.
 
 CLI/cache timestamps such as `receivedAt` remain absolute epoch milliseconds.
 The TUI's local-time display does not change these values.

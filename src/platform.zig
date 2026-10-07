@@ -449,7 +449,8 @@ fn waitCancellationCase(io: std.Io, comptime preserving: bool) !void {
     if (@import("builtin").link_libc) {
         try std.testing.expectEqual(@as(std.c.pid_t, 0), std.c.waitpid(pid, null, @intCast(std.posix.W.NOHANG)));
     } else {
-        try std.testing.expectEqual(@as(usize, 0), std.os.linux.wait4(pid, null, std.os.linux.W.NOHANG, null));
+        var wait_status: i32 = 0;
+        try std.testing.expectEqual(@as(usize, 0), std.os.linux.wait4(pid, &wait_status, std.os.linux.W.NOHANG, null));
     }
     killOwned(io, &child);
     try std.testing.expect(child.id == null);
@@ -458,7 +459,8 @@ fn waitCancellationCase(io: std.Io, comptime preserving: bool) !void {
         try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(pid, null, @intCast(std.posix.W.NOHANG)));
         try std.testing.expectEqual(std.posix.E.CHILD, std.posix.errno(-1));
     } else {
-        const result = std.os.linux.wait4(pid, null, std.os.linux.W.NOHANG, null);
+        var wait_status: i32 = 0;
+        const result = std.os.linux.wait4(pid, &wait_status, std.os.linux.W.NOHANG, null);
         try std.testing.expectEqual(std.os.linux.E.CHILD, std.os.linux.errno(result));
     }
 }

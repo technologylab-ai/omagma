@@ -11,6 +11,8 @@ const loading = @import("loading.zig");
 const layout = @import("layout.zig");
 const theme = @import("theme.zig");
 const timezone = @import("timezone.zig");
+const cache_watch = @import("cache_watch.zig");
+const mail_notice = @import("mail_notice.zig");
 const selection = @import("selection.zig");
 const cache_query = @import("cache_query.zig");
 const preferences = @import("preferences.zig");
@@ -29,7 +31,7 @@ const Key = vaxis.Key;
 const max_cols = 240;
 const max_rows = 80;
 const response_limit = types.Limits.runtime_bytes / 2;
-const Event = union(enum) { fetch_progress, loading_tick, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, compose_idle, terminate };
+const Event = union(enum) { fetch_progress, loading_tick, cache_changed, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, compose_idle, terminate };
 const Loop = input_loop.Loop(Event);
 const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, attachment };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
@@ -166,7 +168,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "j / k · arrows", .action = "Move through the focused pane" },
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
     .{ .keys = "Enter", .action = "Open mail or choose the focused item" },
-    .{ .keys = "gg / G · Home / End", .action = "First or last mail; reader start or end" },
+    .{ .keys = "gg", .action = "First mail in the entire cached mailbox; expanded reader starts at top" },
+    .{ .keys = "G · Home / End", .action = "List start/end; reader start/end" },
     .{ .keys = "Ctrl+D / Ctrl+U", .action = "Half-page down or up" },
     .{ .keys = "[ / ]", .action = "Previous or next page of mail" },
     .{ .keys = "1 / 2 / 3", .action = "Switch account" },
@@ -667,6 +670,14 @@ const App = struct {
     list_partial: bool = false,
     cache_view_missing: bool = false,
     sync: [3]SyncStatus = @splat(.{}),
+    cache_watch: cache_watch.Watch = .{},
+    cache_activity: [3]?cache_watch.Activity = @splat(null),
+    cache_reload: [3]bool = @splat(false),
+    new_mail: mail_notice.Notice = .{},
+    last_interaction_at: i64 = 0,
+    notice_rect: ?layout.Rect = null,
+    first_mail_pending: bool = false,
+    background_merge: bool = false,
     help_scroll: usize = 0,
     help_lines: usize = 0,
     help_height: usize = 0,
@@ -817,6 +828,7 @@ const App = struct {
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        self.cache_watch.stop();
         self.recipient_account.deinit(self.allocator);
         if (self.recipient_arena) |*arena| arena.deinit();
         self.custom_label.deinit(self.allocator);
@@ -857,6 +869,120 @@ const App = struct {
         self.list_arena.deinit();
         self.account_arena.deinit();
         self.zone.deinit(self.allocator);
+    }
+    fn postCacheChanged(context: *anyopaque) !bool {
+        const self: *App = @ptrCast(@alignCast(context));
+        return self.loop.tryPostEvent(.cache_changed);
+    }
+    fn startCacheWatch(self: *App) !void {
+        self.cache_watch.io = self.io;
+        self.cache_watch.allocator = self.allocator;
+        self.cache_watch.client = self.client;
+        self.cache_watch.context = self;
+        self.cache_watch.postFn = postCacheChanged;
+        for (self.accounts, 0..) |account_value, index| {
+            if (get(account_value, "enabled") != .null and !truth(get(account_value, "enabled"))) continue;
+            self.cache_watch.accounts[index] = text(get(account_value, "address"));
+        }
+        // The cached first frame is already visible. Establish notification
+        // baselines before starting this TUI's provider refresh.
+        self.cache_watch.prime();
+        self.cache_activity = self.cache_watch.latest;
+        for (self.cache_activity, 0..) |value_in, index| if (value_in) |activity| self.new_mail.observe(index, activity.inboxArrivalCount);
+        try self.cache_watch.start();
+    }
+    fn onCacheChanged(self: *App) !void {
+        const changes = try self.cache_watch.take();
+        for (changes.values, 0..) |value_in, index| {
+            if (changes.mask & (@as(u8, 1) << @intCast(index)) == 0) continue;
+            const activity = value_in orelse continue;
+            if (activity.lastSyncAt <= self.last_interaction_at) self.new_mail.seen[index] = activity.inboxArrivalCount else self.new_mail.observe(index, activity.inboxArrivalCount);
+            const previous = self.cache_activity[index];
+            if (previous == null or previous.?.generation != activity.generation or previous.?.lastSyncAt != activity.lastSyncAt) self.cache_reload[index] = true;
+            // A body commit may not change generation. Retry an outstanding
+            // local body read after that atomic replacement too.
+            if (index == self.account_index and (self.pending_cached_list or self.pending_cached_read)) self.cache_reload[index] = true;
+            self.cache_activity[index] = activity;
+            if (activity.lastSyncAt > self.sync[index].last_sync_at) {
+                self.sync[index].last_sync_at = activity.lastSyncAt;
+                self.sync[index].cache_ready = true;
+                self.sync[index].error_len = 0;
+                if (self.job.future == null or self.job.account_index != index or self.job.kind != .refresh) self.sync[index].state = .current;
+            }
+        }
+    }
+    fn adoptBackgroundCache(self: *App) !void {
+        if (!self.cache_reload[self.account_index] or self.mode != .browse or self.drafts_list or self.label_picker or self.reader_overlay != .none or self.query.value().len > 0 or self.job.future != null or self.page_loading) return;
+        // A current generation needs a fresh cursor, but the selected ID and
+        // its complete reader context survive the local snapshot replacement.
+        try self.cursor.set(self.allocator, "");
+        self.clearHistory();
+        const screen_row = self.selected -| self.top;
+        const at_head = self.top == 0 and !(self.has_more_cached_before orelse (self.previous_cursor.value().len > 0));
+        self.background_merge = true;
+        defer self.background_merge = false;
+        if (try self.loadCachedList(self.messageId())) {
+            // At the newest head, show newly prepended rows while retaining
+            // selection. A scrolled/later window stays visually anchored.
+            self.top = if (at_head) 0 else self.selected -| screen_row;
+            self.cache_reload[self.account_index] = false;
+            if (self.pending_cached_read) try self.preview(self.pending_cached_thread);
+        }
+    }
+    fn mainScreenNotice(self: *const App) bool {
+        return self.mode == .browse and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0 and self.new_mail.visible();
+    }
+    fn acknowledgeNewMail(self: *App) void {
+        self.last_interaction_at = Io.Timestamp.now(self.io, .real).toMilliseconds();
+        self.new_mail.clear();
+    }
+    fn drawNewMail(self: *App, win: vaxis.Window) !void {
+        if (!self.mainScreenNotice() or win.width < 16 or win.height < 9) return;
+        const width: u16 = @min(win.width - 2, 54);
+        const measure = win.child(.{ .width = width - 4 });
+        var rows: usize = 0;
+        for (self.new_mail.pending, 0..) |count, index| {
+            if (count == 0 or index >= self.accounts.len) continue;
+            const address = try safe(self.frame.allocator(), text(get(self.accounts[index], "address")), false);
+            rows += positionAfter(measure, address).row + 2;
+        }
+        const height: u16 = @intCast(@min(rows + 2, win.height - 4));
+        const rect: layout.Rect = .{ .x = win.width - width - 1, .y = 2, .width = width, .height = height };
+        const area = win.child(.{ .x_off = rect.x, .y_off = rect.y, .width = rect.width, .height = rect.height });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " New mail ", true).child(.{ .x_off = 1, .width = width - 4 });
+        var row: usize = 0;
+        for (self.new_mail.pending, 0..) |count, index| {
+            if (count == 0 or index >= self.accounts.len or row >= inner.height) continue;
+            const address = try safe(self.frame.allocator(), text(get(self.accounts[index], "address")), false);
+            _ = try self.flowTone(inner, address, 0, row, .sender);
+            row += positionAfter(inner, address).row + 1;
+            try self.line(inner, row, try std.fmt.allocPrint(self.frame.allocator(), "{d} new {s}", .{ count, if (count == 1) @as([]const u8, "message") else "messages" }), .accent);
+            row += 1;
+        }
+        self.notice_rect = rect;
+    }
+    fn jumpFirstMail(self: *App) !void {
+        if (self.drafts_list) {
+            self.selected = 0;
+            self.top = 0;
+            return;
+        }
+        if (self.job.future != null and self.job.kind != .refresh and readOnlyJob(self.job.kind)) self.preemptReadOnly();
+        self.completePageLoad();
+        self.clearHistory();
+        try self.cursor.set(self.allocator, "");
+        try self.restore_message.set(self.allocator, "");
+        self.selected = 0;
+        self.top = 0;
+        self.reader_scroll = 0;
+        self.focus = .list;
+        self.generation +%= 1;
+        self.selection_generation +%= 1;
+        self.view_ready = false;
+        self.first_mail_pending = true;
+        const ready = self.loadCachedList("") catch |err| if (err == error.CacheBusy) false else return err;
+        if (!ready and self.job.future == null) try self.reload();
     }
     fn account(self: *const App) []const u8 {
         return if (self.account_index < self.accounts.len) text(get(self.accounts[self.account_index], "address")) else "";
@@ -1943,8 +2069,8 @@ const App = struct {
         const same_view = self.view_ready and self.view_generation == self.generation;
         const next_page = self.page_loading and self.page_loading_account == self.account_index and self.page_loading_generation == self.generation;
         const retained_search = kind == .cached_search and self.view_ready;
-        const saved = if (next_page) "" else if (same_view or retained_search) self.messageId() else self.restore_message.value();
-        var selected = if (next_page) @as(usize, 0) else @min(self.selected, messages.len -| 1);
+        const saved = if (next_page or self.first_mail_pending) "" else if (same_view or retained_search) self.messageId() else self.restore_message.value();
+        var selected = if (next_page or self.first_mail_pending) @as(usize, 0) else @min(self.selected, messages.len -| 1);
         if (next_page and self.page_loading_forward) for (messages, 0..) |message, index| {
             var repeated = false;
             for (self.messages) |previous_message| repeated = repeated or same(text(get(previous_message, "id")), text(get(message, "id")));
@@ -1996,6 +2122,7 @@ const App = struct {
         self.has_more_cached_before = if (get(result, "hasMoreCachedBefore") == .bool) truth(get(result, "hasMoreCachedBefore")) else null;
         self.has_more_cached_after = if (get(result, "hasMoreCachedAfter") == .bool) truth(get(result, "hasMoreCachedAfter")) else null;
         self.selected = selected;
+        self.first_mail_pending = false;
         if (self.search_restore_pending) self.top = @min(self.search_saved_top, selected);
         if (next_page) {
             self.top = 0; // listDraw positions the selected edge in its viewport.
@@ -2008,7 +2135,7 @@ const App = struct {
         std.mem.swap(Field, &self.remote_cursor, &remote);
         if (!retain_reader) self.clearReader();
         if (kind != .drafts) self.syncMetadata(self.account_index, result);
-        if (!self.compose_active) self.say(false, "{s}", .{if (messages.len == 0 and self.list_cached and self.list_partial) "No rows in cached subset · Ready" else if (messages.len == 0) "No messages match this mailbox" else "Ready"});
+        if (!self.compose_active and !self.background_merge) self.say(false, "{s}", .{if (messages.len == 0 and self.list_cached and self.list_partial) "No rows in cached subset · Ready" else if (messages.len == 0) "No messages match this mailbox" else "Ready"});
     }
     fn replaceReader(self: *App, full_thread: bool, response: []const u8, cached_view: bool) !void {
         var replacement: std.heap.ArenaAllocator = .init(self.allocator);
@@ -2107,7 +2234,8 @@ const App = struct {
         if (bodyRefusal(selected_value) != null) return true;
         return false;
     }
-    fn loadCachedList(self: *App, anchor: []const u8) !bool {
+    fn loadCachedList(self: *App, requested_anchor: []const u8) !bool {
+        const anchor = if (self.first_mail_pending) "" else requested_anchor;
         if (!self.synchronous_cache_search and self.cacheSearch() and cache_query.needsBody(self.query.value())) {
             try self.startCachedSearch(anchor);
             return self.view_ready or self.sync[self.account_index].cache_ready;
@@ -3812,6 +3940,11 @@ const App = struct {
         self.leaveContacts();
     }
     fn onMouse(self: *App, mouse: vaxis.Mouse) !void {
+        if (mouse.type == .press) {
+            const notice = self.notice_rect;
+            self.acknowledgeNewMail();
+            if (notice) |rect| if (mouse.col >= rect.x and mouse.col < rect.x + rect.width and mouse.row >= rect.y and mouse.row < rect.y + rect.height) return;
+        }
         self.action_notice = false;
         if (self.options.no_mouse or mouse.type != .press or mouse.mods.shift or mouse.mods.alt or mouse.mods.ctrl) return;
         const wheel: ?bool = switch (mouse.button) {
@@ -4056,6 +4189,7 @@ const App = struct {
         }
     }
     fn onKey(self: *App, original_key: Key) !void {
+        self.acknowledgeNewMail();
         self.action_notice = false;
         var key = original_key;
         if (self.label_picker) {
@@ -4260,13 +4394,7 @@ const App = struct {
         if (key.matches('g', .{})) {
             if (self.g_pending) {
                 self.g_pending = false;
-                self.selected = 0;
-                self.top = 0;
-                self.reader_scroll = 0;
-                if (self.focus == .list) {
-                    self.selection_generation +%= 1;
-                    try self.preview(false);
-                }
+                if (self.expanded and self.focus == .reader) self.reader_scroll = 0 else try self.jumpFirstMail();
             } else {
                 self.g_pending = true;
                 self.g_at = now;
@@ -4293,11 +4421,7 @@ const App = struct {
                 try self.preview(false);
             }
         } else if (key.matches(Key.home, .{})) {
-            self.selected = 0;
-            self.top = 0;
-            self.reader_scroll = 0;
-            self.selection_generation +%= 1;
-            try self.preview(false);
+            try self.jumpFirstMail();
         } else if (key.matches('[', .{})) try self.page(false) else if (key.matches(']', .{})) try self.page(true) else if (key.matches('/', .{})) {
             try self.beginSearch(.cache);
         } else if (key.matches('\\', .{})) {
@@ -5085,6 +5209,7 @@ const App = struct {
         self.clearObsoleteStatus();
         self.mouse_hits.clear();
         const win = self.vx.window();
+        self.notice_rect = null;
         self.invitation_confirm_ready = false;
         win.clear();
         win.hideCursor();
@@ -5120,6 +5245,7 @@ const App = struct {
         if (self.mode == .help) try self.helpDraw(win) else if (self.mode == .trash_confirm) try self.overlay(win, " Move selected mail to Trash? ", "This moves the selected message to Trash.\nIt does not permanently delete mail.\n\ny Confirm · n / Esc Cancel") else if (self.mode == .invitation) {
             try self.invitationDraw(win);
         }
+        try self.drawNewMail(win);
     }
 };
 
@@ -5205,6 +5331,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     try app.draw();
     try vx.render(tty.writer());
     try tty.writer().flush();
+    try app.startCacheWatch();
     // The first colored phase and available cached bodies are already on
     // screen before terminal capability negotiation or any provider fetch.
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
@@ -5212,6 +5339,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     try app.refreshMailbox();
     while (!app.quit and received_signal.load(.acquire) == 0) {
         app.finish() catch |err| app.sayError(@errorName(err));
+        app.adoptBackgroundCache() catch {};
         try app.draw();
         try vx.render(tty.writer());
         try tty.writer().flush();
@@ -5223,13 +5351,17 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
             .key_press => |key| app.onKey(key) catch |err| app.sayError(@errorName(err)),
             .mouse => |mouse| app.onMouse(mouse) catch |err| app.sayError(@errorName(err)),
             .winsize => |size| try app.resize(size),
-            .paste_start => app.paste = true,
+            .paste_start => {
+                app.acknowledgeNewMail();
+                app.paste = true;
+            },
             .paste_end => app.paste = false,
             .operation_done => {},
             .fetch_progress => {
                 app.job.progress.acknowledged();
                 app.hydrateArrivingMail() catch {};
             },
+            .cache_changed => app.onCacheChanged() catch {},
             .loading_tick => {
                 app.loading_tick_pending.store(false, .release);
                 if (app.loadingActive()) {

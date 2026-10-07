@@ -10,6 +10,8 @@ Once a fetch knows its actual bounded batch, `metadata 1/32` or `bodies 1/32` sh
 
 Loading placeholders become real, interactive rows after a window commits. A missing/unsupported body is identified clearly, partial cached threads are marked, and a snippet is not presented as a full message. New results preserve selection where possible; an open composer keeps its original context.
 
+Open TUIs observe atomic cache replacements from the background timer and other clients. They retain the current reader, show new rows at the newest head and anchor the selected mail’s screen row in an older/scrolled window while adopting the updated list, deferring view replacement during editing and review. Confirmed incoming Inbox additions drive the per-account arrival card; unread counts and cache row differences are not treated as new arrivals. A bootstrap or expired-history resync updates the mail snapshot without inventing arrival counts.
+
 Refresh requests changes since the last completed update. Unchanged mail does not need another body download. If that history is no longer available, Omagma rebuilds a bounded recent snapshot. Interrupted or failed refreshes leave previously cached mail and drafts usable.
 
 ## Retention and body downloads

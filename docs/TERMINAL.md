@@ -29,6 +29,12 @@ environment setting overrides the system timezone. Restart the TUI after
 changing it; if local rules cannot be loaded, the display labels its UTC
 fallback. Cache and CLI epoch timestamps stay unchanged.
 
+An open TUI picks up updates written by the [background cache timer](TERMINAL-BACKGROUND.md) or another Omagma client. New cached rows appear without Ctrl+R, preserving the selected mail and reader position where possible. At the newest head, new rows appear above your selection; when you are farther down, the selected mail stays at its screen row. It remains visible even if insertions would push it beyond the viewport. Compose, contacts, searches and review overlays keep their working context.
+
+A compact **New mail** card appears at the top right of the main mailbox screen. It accumulates newly received Inbox messages separately for each account while you leave the TUI unattended. A key, click, wheel gesture or paste clears the card and continues the normal action. The card stays hidden in compose, contacts, search, review and expanded reading. Existing unread mail, initial cache filling, label changes and older-page downloads do not create arrival alerts.
+
+`gg` jumps to the first mail in the entire cached mailbox or cached result set, including from a later window; on the main screen it works from either the list or reader. In expanded reading, `gg` scrolls the current body to its start. Home keeps its focused-pane behavior.
+
 The list holds at most 32 messages at a time. Move past its last row with `j`, Down, the wheel or PageDown to load the next window and select the adjacent older message. Move above its first row with `k`, Up, the wheel or PageUp to return to adjacent newer cached mail. Existing mail remains readable while another window loads. Repeated boundary input requests one window.
 
 After the cached tail, ordinary forward movement can fetch one older Gmail page. Backward movement uses cached metadata; a selected body that is missing can still be fetched read-only. `/` cache searches never fetch missing bodies or older provider results. `[` and `]` remain explicit page controls; `[` selects the previous window's first row.
@@ -101,7 +107,8 @@ actions; `unspam` removes Spam and restores Inbox membership. See
 
 | Key | Action |
 | --- | --- |
-| j/k, arrows, gg/G, Ctrl+D/U | Move or scroll focused pane |
+| j/k, arrows, G, Ctrl+D/U | Move or scroll focused pane |
+| gg | First cached mail; expanded reader: start of body |
 | h/l, Tab/Shift+Tab, Enter | Change pane or open selected item |
 | 1/2/3 | Switch account |
 | / / \ | Search cache / Gmail |

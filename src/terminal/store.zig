@@ -109,6 +109,17 @@ pub fn refreshActive(io: std.Io, root: []const u8, account: []const u8, options:
     return true;
 }
 
+/// Observe atomic index replacement without parsing it, allocating or waiting
+/// for a store/refresh lock. Missing caches are not created by a watch probe.
+pub fn cacheStamp(io: std.Io, root: []const u8, account: []const u8, options: t.Options) !?t.CacheStamp {
+    const dir = openAccountDirectory(io, root, account, options, false) catch |err| if (err == error.FileNotFound) return null else return err;
+    defer dir.close(io);
+    const stat = dir.statFile(io, "index.json", .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) return null else return err;
+    if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
+    if (stat.size >= 16 * 1024 * 1024) return error.CacheLimitExceeded;
+    return .{ .inode = @intCast(stat.inode), .size = stat.size, .mtime_ns = stat.mtime.toNanoseconds() };
+}
+
 pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "" };
 pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
 pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
@@ -138,6 +149,9 @@ pub const State = struct {
     fixtureProvider: []FixtureProviderRecord = &.{},
     historyId: []const u8 = "",
     lastSyncAt: i64 = 0,
+    /// Cumulative incoming Inbox additions at successful history checkpoints.
+    /// Default zero keeps old schema-1 indexes readable; cache.clear preserves it.
+    inboxArrivalCount: u64 = 0,
     quotaFloor: ?QuotaFloor = null,
     quotaDiskLimit: usize = 0,
     metadataPolicy: usize = 0,
@@ -1076,4 +1090,31 @@ test "wishlist: legacy protected draft retains literal bytes with primary sender
     try std.testing.expectEqualStrings(old, try readPrivate(store.dir, store.io, a, name, t.Limits.body_bytes));
     draft.from = .{ .address = "different@example.test" };
     try std.testing.expectError(error.UnknownOutcome, store.putDraft(draft, draft.id));
+}
+
+test "cache activity: legacy indexes baseline zero and secure stamps never parse or wait" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const legacy = try std.json.parseFromSliceLeaky(State, a, "{\"account\":\"legacy@example.test\"}", .{});
+    try std.testing.expectEqual(@as(u64, 0), legacy.inboxArrivalCount);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/activity", .{tmp.sub_path});
+    try std.testing.expect((try cacheStamp(std.testing.io, root, "self@example.test", .{ .fixtures = true })) == null);
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    store.state.inboxArrivalCount = 7;
+    try store.save();
+    const before = (try cacheStamp(std.testing.io, root, "self@example.test", .{ .fixtures = true })).?;
+    try store.clearMail();
+    try std.testing.expectEqual(@as(u64, 7), store.state.inboxArrivalCount);
+    // Keep the exclusive writer lock held: a stamp must not take that lock.
+    // Invalid JSON remains stat-able, demonstrating that the probe never parses.
+    try store.write("index.json", "not json");
+    const after = (try cacheStamp(std.testing.io, root, "self@example.test", .{ .fixtures = true })).?;
+    try std.testing.expect(!std.meta.eql(before, after));
+    try store.dir.deleteFile(std.testing.io, "index.json");
+    try store.dir.symLink(std.testing.io, "unrelated", "index.json", .{});
+    try std.testing.expectError(error.InsecureCacheFile, cacheStamp(std.testing.io, root, "self@example.test", .{ .fixtures = true }));
 }

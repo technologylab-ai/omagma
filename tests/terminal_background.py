@@ -21,7 +21,8 @@ from terminal_pty import Terminal
 from terminal_status_screen import StatusScreen
 
 CASES = ("native-first-and-quiet-coalesce", "held-lease-cli-tui", "native-signal-restart",
-         "refresh-lease-file-safety", "age-and-persisted-policy", "automatic-read-only-gates")
+         "refresh-lease-file-safety", "age-and-persisted-policy", "automatic-read-only-gates",
+         "activity-arrivals-and-isolation", "activity-failed-refresh", "activity-checkpoint-replay")
 OUTCOMES = {"refreshed", "fresh", "in_progress", "auth_needed", "offline", "local_failure"}
 
 
@@ -259,6 +260,97 @@ def run_case(binary, directory, name):
                     "denied automatic requests reached provider")
         return {"nativeReadOnlySlots": 3, "nonReadCapabilitiesDenied": 4, "arbitraryAutomaticScopesDenied": 3,
                 "providerCallsForDeniedRequests": 0, "mutationRequests": 0, "realCredentialUse": False}
+    if name == "activity-arrivals-and-isolation":
+        with Client(binary, directory, extra=fixture.options()) as client:
+            cold = cached(client, "cache.activity")
+            require(set(cold) == {"inboxArrivalCount", "generation", "lastSyncAt"}, "activity fields changed or leaked paths")
+            require(cold["inboxArrivalCount"] == 0 and cold["lastSyncAt"] == 0, "existing/cold baseline was counted as new mail")
+        seed(binary, directory, fixture, accounts=ACCOUNTS)
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(all(cached(client, "cache.activity", account)["inboxArrivalCount"] == 0 for account in ACCOUNTS),
+                    "bootstrap history counted baseline mail")
+        fixture.stage(ACCOUNTS[0], "delta")
+        native(binary, directory, fixture, "--force")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            activity = cached(client, "cache.activity")
+            require(activity["inboxArrivalCount"] == 2, "typed added IDs were not deduplicated or labels/deletion were counted")
+            require(cached(client, "mail.list", label="INBOX")["inboxArrivalCount"] == 2, "cached list activity disagreed")
+            require(all(cached(client, "cache.activity", account)["inboxArrivalCount"] == 0 for account in ACCOUNTS[1:]),
+                    "colliding message IDs mixed account arrival counts")
+            client.request("mail.list", label="INBOX", limit=12)
+            client.request("draft.create", draft={"to": ["recipient@example.org"], "subject": "Synthetic local draft", "bodyText": "Never sent."})
+            client.request("mail.archive", messageId="shared-msg-092")
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2, "prefetch/draft/label writes counted as arrivals")
+        native(binary, directory, fixture, "--force")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2, "same checkpoint counted twice")
+        fixture.stage(ACCOUNTS[0], "expired")
+        native(binary, directory, fixture, "--force")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2, "history-expiry resync guessed an arrival count")
+            client.request("cache.clear")
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2, "cache clear made cumulative count decrease")
+        # Simulate an old index only after every cache owner has closed.
+        path = account_dir(directory, ACCOUNTS[0]) / "index.json"
+        legacy = json.loads(path.read_text());legacy.pop("inboxArrivalCount")
+        path.write_text(json.dumps(legacy) + "\n")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 0, "legacy index did not baseline zero")
+        return {"incomingAdds": 2, "duplicateHistoryDeduplicated": True, "accountsIsolated": 3,
+                "bootstrapResyncLabelsDraftsPrefetchExcluded": True, "legacyCounterBaseline": 0}
+    if name == "activity-failed-refresh":
+        seed(binary, directory, fixture)
+        fixture.stage(ACCOUNTS[0], "delta")
+        with Client(binary, directory, scenario="offline-refresh", extra=fixture.options()) as client:
+            before = cached(client, "cache.activity")
+            require(client.request("mail.refresh", label="INBOX", limit=32, ok=False)["code"] == "TransientFailure", "fixture failure was not exercised")
+            after = cached(client, "cache.activity")
+            require(before == after and after["inboxArrivalCount"] == 0, "failed refresh advanced activity")
+        native(binary, directory, fixture, "--force")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2, "successful retry lost failed additions")
+        return {"failedRefreshCounter": 0, "successfulRetryCounter": 2}
+    if name == "activity-checkpoint-replay":
+        seed(binary, directory, fixture, accounts=ACCOUNTS)
+        fixture.stage(ACCOUNTS[0], "delta")
+        hold, entered = fixture.root / "activity-body.hold", fixture.root / "activity-body.entered"
+        hold.write_text("Synthetic body phase held\n")
+        source = json.loads(fixture.path(ACCOUNTS[0]).read_text())
+        source["sync"]["fixtureProgress"] = {"phase": "bodies", "completed": 1,
+            "fixtureHold": hold.name, "fixtureEntered": entered.name}
+        fixture.path(ACCOUNTS[0]).write_text(json.dumps(source) + "\n")
+        owner = Native(binary, directory, fixture, "--force")
+        try:
+            deadline = time.monotonic() + 10
+            while not entered.exists():
+                require(owner.process.poll() is None and time.monotonic() < deadline, "partial body checkpoint was not reached")
+                owner.pump(.01)
+            with Client(binary, directory, extra=fixture.options()) as client:
+                pending = cached(client, "cache.activity")
+                require(pending["inboxArrivalCount"] == 0, "metadata intermediate commit advanced arrivals")
+                require(metrics(client)["historyId"] == "1000", "body hold happened after checkpoint advancement")
+                ids = {message["id"] for message in cached(client, "mail.list", label="INBOX")["messages"]}
+                require({"shared-msg-097", "shared-msg-098"} <= ids, "replay did not begin after committed added metadata")
+                coalesced = client.request("mail.refresh", label="INBOX", limit=32)
+                require(coalesced["coalesced"] and coalesced["refreshInProgress"] and coalesced["inboxArrivalCount"] == 0,
+                        "lease coalescing advanced arrival count")
+            owner.process.send_signal(signal.SIGTERM)
+            stopped = owner.wait(seconds=5)
+            require(stopped["interrupted"], "partial refresh did not cancel")
+        finally:
+            owner.close();hold.unlink(missing_ok=True)
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 0, "canceled partial job counted arrivals")
+        fixture.stage(ACCOUNTS[0], "delta")
+        native(binary, directory, fixture, "--force")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2 and metrics(client)["historyId"] == "1001",
+                    "replaying already-cached metadata lost or duplicated arrivals")
+        native(binary, directory, fixture, "--force")
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(cached(client, "cache.activity")["inboxArrivalCount"] == 2, "completed replay counted twice")
+        return {"metadataBeforeCheckpointCounter": 0, "canceledCounter": 0, "replayedCounter": 2,
+                "coalescedCounter": 0, "sameCheckpointCounter": 2}
     raise AssertionError("unknown background case")
 
 

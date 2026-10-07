@@ -369,6 +369,9 @@ pub const RefreshPlan = struct {
     messages: []const types.Message = &.{},
     labels: []const LabelUpdate = &.{},
     deleted: []const []const u8 = &.{},
+    /// Typed messagesAdded IDs, distinct from labels/scoped-view metadata.
+    /// Preserved even when replay finds their intermediate metadata cached.
+    added: []const []const u8 = &.{},
     resync: bool = false,
     nextCursor: []const u8 = "",
     labelId: []const u8 = "",
@@ -380,6 +383,19 @@ pub const RefreshPlan = struct {
     /// Only authoritatively projected IDs may survive a missing/expired history
     /// checkpoint. Requested query membership is separate from account retention.
     retentionIds: []const []const u8 = &.{},
+    pub fn inboxArrivals(self: RefreshPlan) usize {
+        if (self.resync) return 0;
+        var count: usize = 0;
+        for (self.added, 0..) |id, index| {
+            if (containsId(self.added[0..index], id) or containsId(self.deleted, id)) continue;
+            for (self.messages) |message| {
+                if (!std.mem.eql(u8, id, message.id)) continue;
+                if (containsId(message.labels, "INBOX") and !containsId(message.labels, "SENT")) count += 1;
+                break;
+            }
+        }
+        return count;
+    }
 };
 pub const LabelUpdate = struct { id: []const u8, labels: []const []const u8 };
 fn historyId(value: []const u8) !void {
@@ -552,7 +568,7 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
         completed += 1;
         transport.progress(.metadata, completed, total);
     }
-    var plan: RefreshPlan = .{ .historyId = checkpoint, .messages = messages.items, .labels = labels.items, .deleted = deleted.items, .metadataGets = messages.items.len, .historyPages = pages };
+    var plan: RefreshPlan = .{ .historyId = checkpoint, .messages = messages.items, .labels = labels.items, .deleted = deleted.items, .added = added.items, .metadataGets = messages.items.len, .historyPages = pages };
     if (try j.boolean(request, "forceView", false) or (events != 0 and j.text(request, "query").len != 0)) {
         const view = try fetchView(a, transport, request);
         plan.viewIds = try j.decode([]const []const u8, a, j.get(view, "ids") orelse return error.InvalidProviderResponse);
@@ -936,6 +952,8 @@ test "history pages deduplicate added IDs retain deletions and only get minimal 
     try std.testing.expectEqual(@as(usize, 1), oracle.minimal_calls);
     try std.testing.expectEqual(@as(usize, 0), oracle.list_calls);
     try std.testing.expectEqualStrings("new", plan.messages[0].id);
+    try std.testing.expectEqual(@as(usize, 1), plan.added.len);
+    try std.testing.expectEqualStrings("new", plan.added[0]);
     try std.testing.expectEqualStrings("gone", plan.deleted[0]);
     try std.testing.expectEqualStrings("cached", plan.labels[0].id);
     try std.testing.expectEqualStrings("STARRED", plan.labels[0].labels[1]);
@@ -1184,4 +1202,25 @@ test "fetch progress: metadata fraction uses actual provider IDs not requested m
     try std.testing.expectEqualStrings("recent-inbox", recorder.rows[0].message.id);
     try std.testing.expectEqualStrings("recent-sent", recorder.rows[1].message.id);
     try std.testing.expectEqual(@as(usize, 0), recorder.rows[0].message.bodyText.len);
+}
+
+test "cache activity: only typed incoming Inbox additions count and replay keeps identity" {
+    const messages = [_]types.Message{
+        .{ .id = "new", .threadId = "t", .labels = &.{"INBOX"} },
+        .{ .id = "label-only", .threadId = "t", .labels = &.{"INBOX"} },
+        .{ .id = "tail", .threadId = "t", .labels = &.{"INBOX"} },
+        .{ .id = "sent", .threadId = "t", .labels = &.{"SENT"} },
+        .{ .id = "self-sent", .threadId = "t", .labels = &.{ "INBOX", "SENT" } },
+        .{ .id = "archived", .threadId = "t", .labels = &.{} },
+        .{ .id = "deleted", .threadId = "t", .labels = &.{"INBOX"} },
+    };
+    var plan: RefreshPlan = .{ .historyId = "2", .messages = &messages, .added = &.{ "new", "new", "sent", "self-sent", "archived", "deleted", "missing" }, .deleted = &.{"deleted"} };
+    try std.testing.expectEqual(@as(usize, 1), plan.inboxArrivals());
+    // A replay is classified by the same typed IDs, not an uncached-ID diff.
+    try std.testing.expectEqual(@as(usize, 1), plan.inboxArrivals());
+    plan.resync = true;
+    try std.testing.expectEqual(@as(usize, 0), plan.inboxArrivals());
+    plan.resync = false;
+    plan.added = &.{};
+    try std.testing.expectEqual(@as(usize, 0), plan.inboxArrivals());
 }

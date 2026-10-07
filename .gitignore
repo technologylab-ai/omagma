@@ -15,3 +15,6 @@ config.local.json
 # Static documentation dependencies and generated output stay local.
 website/node_modules/
 website/dist/
+
+# Local TUI iteration binaries are not release artifacts.
+.local-tui-*/

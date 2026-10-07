@@ -105,7 +105,7 @@ jobs:
           python3 tests/publication_gif.py
           python3 tests/homebrew_formula.py
           for suite in \
-            terminal_wishlist_backend terminal_cache_windows \
+            terminal_wishlist_backend terminal_cache_windows terminal_arrivals \
             terminal_composer_workflow terminal_compose_attachments \
             terminal_triage_ui terminal_reader_context \
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
@@ -167,7 +167,7 @@ jobs:
           dist/omagma-linux-$RELEASE_ARCH build-info
           sha256sum dist/omagma-linux-$RELEASE_ARCH
           for suite in \
-            terminal_wishlist_backend terminal_cache_windows \
+            terminal_wishlist_backend terminal_cache_windows terminal_arrivals \
             terminal_composer_workflow terminal_compose_attachments \
             terminal_triage_ui terminal_reader_context \
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \

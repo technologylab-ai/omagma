@@ -50,6 +50,9 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   count/byte retention evicts the oldest mail tail.
 - An optional Linux read-only five-minute cache timer keeps mail ready while the
   TUI is closed.
+- An open TUI adopts background cache updates and shows a main-screen-only
+  arrival card with separate account counts; interaction clears it automatically.
+- `gg` reaches the first mail across cached windows without scrolling back manually.
 - Separate cache search and explicit Gmail search; explicit page navigation
   fetches beyond the bar's recent-mail limit.
 - Local drafts, compose/reply/reply-all, outgoing attachments and explicit
