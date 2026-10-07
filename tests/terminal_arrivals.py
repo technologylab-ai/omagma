@@ -116,7 +116,10 @@ def run(binary, directory, case):
                 tui.until(lambda:'3 new messages' in tui.text() and '2 new messages' in tui.text(),seconds=10)
                 require(ACCOUNTS[0] in tui.text() and ACCOUNTS[1] in tui.text(), 'per-account accumulation lost identity')
                 tui.send(b'h')
-                tui.until(lambda:'New mail' not in tui.text())
+                # A VT stream can erase the overlay heading before the body
+                # underneath it is repainted. Observe both parts of one ready
+                # frame before independently checking the retained message.
+                tui.until(lambda:'New mail' not in tui.text() and contains_body(tui,96))
                 require(contains_body(tui,96), 'passive reload moved the selected reader')
                 tui.gap(2.1)
                 require('New mail' not in tui.text(), 'dismissed arrivals were replayed by the observer')

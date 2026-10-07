@@ -57,11 +57,11 @@
     {
       "name": "plain-links-and-literals",
       "mimeType": "text/plain",
-      "bodyTemplate": "Fictional plain-link note\nFictional {account}: café 👋.\nRead: {longUrl}\nArchive: {longPathUrl}\nKeep this literal code example: <b>Hello</b> and x < y.\nKeep the address example: <team@example.test>.\nFictional plain tail.\n",
+      "bodyTemplate": "Fictional plain-link note\nFictional {account}: café 👋.\nRead: {longUrl}\nArchive: {longPathUrl}\nKeep this literal code example: <b>Hello</b> and x < y.\nKeep the address example: <team@example.org>.\nFictional plain tail.\n",
       "visible": [
         "Fictional plain-link note",
         "Keep this literal code example: <b>Hello</b> and x < y.",
-        "Keep the address example: <team@example.test>.",
+        "Keep the address example: <team@example.org>.",
         "Fictional plain tail."
       ],
       "absent": [],
