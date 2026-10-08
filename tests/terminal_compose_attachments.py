@@ -27,12 +27,13 @@ def run(binary, directory, key):
             path.write_bytes(contents)
             if index == 0: terminal.send(b'A')
             else: click(terminal, *point(terminal, '[Add A]'))
-            terminal.until(lambda: 'Attach file path:' in terminal.text())
+            terminal.until(lambda: 'Attach file · local draft' in terminal.text() and 'Path:' in terminal.text()
+                           and '[Attach]' in terminal.text())
             terminal.send(str(path).encode() + b'\r')
             terminal.until(lambda: f'Attachments {index + 1}' in terminal.text() and terminal.screen.locate(name) is not None)
             attached_at = terminal.screen.locate(name)
             require(f'{len(contents)} B' in ''.join(terminal.screen.cells[attached_at['row']]),
-                    'visible attachment row has the wrong source byte size')
+                    'visible small-file attachment row has the wrong source byte size')
         terminal.gap(.1)
         # Remove only the first file with its explicitly rendered local control.
         at = terminal.screen.locate('first.txt')
@@ -48,6 +49,7 @@ def run(binary, directory, key):
             drafts = client.request('draft.list')['drafts']
             require(len(drafts) == 1, 'attachment edits created another draft')
             draft = client.request('draft.read', draftId=drafts[0]['id'])
+            require(draft['bodyFormat']=='markdown','attachment edit changed the new composition format')
             require([f['filename'] for f in draft['attachments']] == ['second.bin', 'third.pdf'], 'multiple files not retained after review/save')
             for attachment in draft['attachments']:
                 raw = attachment['data']

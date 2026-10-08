@@ -32,6 +32,15 @@ The CLI returns requested mail and contacts to its caller. Treat its stdout, red
 
 Display text is sanitized to remove terminal controls and directional formatting. A supplied plain-text body takes precedence. HTML-only mail becomes bounded formatted text; scripts, stylesheets, remote images and other remote resources never run or load.
 
+Markdown composition retains editable source in
+the private draft and derives outgoing HTML plus a plain-text alternative
+locally. Raw HTML is escaped; remote Markdown images remain inert text or safe
+links. Fenced-code highlighting never executes code or loads a grammar from
+the network. The small “Sent with omagma” footer uses the approved logo embedded
+in the email, the volcano emoji and a public project link; it contains no
+remotely fetched image or tracking request. Previewing, changing format and
+autosaving do not send mail.
+
 The reader’s link chooser opens only an explicitly selected HTTP(S) URL in the account’s Chrome profile. Received attachments are saved only after you choose a destination; existing files are not overwritten. Its Open action delegates a saved, private file of a supported document/image type to the desktop viewer. Reading mail does not automatically launch a link or attachment.
 
 Fixture providers make no Gmail API or keyring requests. You can try fictional mail with `omagma tui --fixtures`; this is optional and does not grant live permissions.

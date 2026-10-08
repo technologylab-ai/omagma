@@ -115,7 +115,10 @@ jobs:
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
             terminal_local_ui terminal_polish_reader terminal_polish_compose \
             terminal_polish_status terminal_timezone terminal_recipient_preview \
-            terminal_editor_notice
+            terminal_editor_notice \
+            terminal_file_dialog terminal_invitations terminal_cli_parity \
+            terminal_cli_usage terminal_forward_ux \
+            terminal_markdown_mail terminal_markdown_compose
           do
             python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
           done
@@ -178,7 +181,10 @@ jobs:
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
             terminal_local_ui terminal_polish_reader terminal_polish_compose \
             terminal_polish_status terminal_timezone terminal_recipient_preview \
-            terminal_editor_notice
+            terminal_editor_notice \
+            terminal_file_dialog terminal_invitations terminal_cli_parity \
+            terminal_cli_usage terminal_forward_ux \
+            terminal_markdown_mail terminal_markdown_compose
           do
             python3 "tests/$suite.py" --binary "dist/omagma-linux-$RELEASE_ARCH"
           done
@@ -196,6 +202,10 @@ jobs:
           python3 tests/terminal_mouse.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-mouse.json
           python3 tests/terminal_measure.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-cli-memory.json
           python3 tests/terminal_measure.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-tui-memory.json
+      - name: Safe Markdown preview allocation lifecycle
+        run: |
+          python3 tests/terminal_markdown_lifecycle.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-cli-memory.json
+          python3 tests/terminal_markdown_lifecycle.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-tui-memory.json
       - name: Safe memory gate
         run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-memory.json
       - name: Safe background scheduling memory gate
@@ -275,6 +285,11 @@ jobs:
           python3 tests/terminal_wishlist_backend.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_cache_windows.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
+      - name: Debug portable Markdown, invitation and command acceptance
+        run: |
+          python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
+          python3 tests/terminal_cli_parity.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-cli-parity.json
+          python3 tests/terminal_markdown_mail.py --binary .verification-macos-debug/bin/omagma --receipt tests/results/macos-debug-markdown.json
       - name: Debug native terminal, Keychain and detached lifecycle
         run: |
           # This guardian keeps the owned Darwin PTY alive for termios checks.
@@ -316,6 +331,13 @@ jobs:
           python3 tests/terminal_macos_features.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-features.json
           python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} probe-keyring
+      - name: Safe portable Markdown, invitation and command acceptance
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 tests/terminal_cli_usage.py --binary dist/omagma-macos-$RELEASE_ARCH --build-mode safe --receipt tests/results/macos-safe-usage.json
+          python3 tests/terminal_cli_parity.py --binary dist/omagma-macos-$RELEASE_ARCH --build-mode safe --receipt tests/results/macos-safe-cli-parity.json
+          python3 tests/terminal_markdown_mail.py --binary dist/omagma-macos-$RELEASE_ARCH --receipt tests/results/macos-safe-markdown.json
       - name: Native Keychain survives the packaged binary upgrade
         run: |
           python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}
@@ -360,6 +382,12 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 7
+      - name: Safe native Markdown preview allocation lifecycle
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 tests/terminal_markdown_lifecycle.py --kind cli --binary dist/omagma-macos-$RELEASE_ARCH --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-cli-memory.json
+          python3 tests/terminal_markdown_lifecycle.py --kind tui --binary dist/omagma-macos-$RELEASE_ARCH --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-tui-memory.json
       - name: Preserve synthetic macOS verification receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

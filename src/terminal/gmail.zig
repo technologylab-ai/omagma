@@ -176,6 +176,60 @@ pub fn executeProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, 
     return try dispatchAuthorized(io, a, account, session.capabilities, transport, cmd, request);
 }
 
+/// The cached attachment is an authoritative positional argument from core's
+/// account-scoped message read, never a caller-supplied JSON request field.
+pub fn executeAttachment(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, attachment: types.Attachment, progress_sink: ?types.ProgressSink) !types.Attachment {
+    var session: NetworkSession = undefined;
+    try session.init(io, a, config, account, "mail.attachment", request);
+    defer session.close();
+    var transport = session.transport();
+    transport.progress_sink = progress_sink;
+    return attachmentAuthorized(a, account, session.capabilities, transport, try j.required(request, "messageId"), attachment);
+}
+
+/// Gmail may rotate opaque attachment IDs between FULL reads of an immutable
+/// message. Download the known token first; refreshing the message before that
+/// GET would discard the only identity the caller actually selected.
+pub fn attachmentAuthorized(a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, message_id: []const u8, expected: types.Attachment) !types.Attachment {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
+    try mime.validateAttachment(expected.filename, expected.mimeType);
+    if (expected.id.len == 0 or expected.id.len > 1024) return error.InvalidAttachmentId;
+    if (expected.size > types.Limits.body_bytes) return error.BodyTooLarge;
+    try b.identifier(message_id);
+    if (expected.data.len > 0 or expected.size == 0) return expected;
+    return downloadAttachment(a, transport, message_id, expected) catch |err| switch (err) {
+        // Only an unavailable/invalid token warrants one fresh metadata read.
+        // Auth, network, decoding and byte-count failures stay explicit.
+        error.MessageNotFound, error.ProviderRejected => {
+            const fresh = try read(a, transport, message_id);
+            var resolved: ?types.Attachment = null;
+            for (fresh.attachments) |candidate| {
+                if (!std.mem.eql(u8, candidate.filename, expected.filename) or
+                    !std.mem.eql(u8, candidate.mimeType, expected.mimeType) or candidate.size != expected.size) continue;
+                if (resolved != null) return error.AmbiguousAttachment;
+                resolved = candidate;
+            }
+            const selected = resolved orelse return error.AttachmentNotFound;
+            if (selected.data.len > 0 or selected.size == 0) return selected;
+            return downloadAttachment(a, transport, message_id, selected);
+        },
+        else => return err,
+    };
+}
+fn downloadAttachment(a: std.mem.Allocator, transport: Transport, message_id: []const u8, attachment: types.Attachment) !types.Attachment {
+    const value = try transport.request(a, .GET, try std.fmt.allocPrint(a, "{s}/attachments/{s}", .{ try messageUrl(a, message_id, ""), try escaped(a, attachment.id) }), null);
+    const data = try j.required(value, "data");
+    const decoded = try mime.decodeBase64Url(data, a);
+    if (decoded.len != attachment.size) return error.BodySizeMismatch;
+    // Gmail permits padded base64url. Every outgoing/shared Attachment DTO uses
+    // the existing no-padding contract, including forward draft validation.
+    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(decoded.len));
+    var result = attachment;
+    result.data = std.base64.url_safe_no_pad.Encoder.encode(encoded, decoded);
+    return result;
+}
+
 fn requiredCapability(cmd: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) return "mail-send";
     if (std.mem.eql(u8, cmd, "invitation.reply")) return "calendar-rsvp";
@@ -232,30 +286,46 @@ const LabelResolver = struct {
         return found orelse error.LabelNotFound;
     }
 };
-fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, payload: j.Value, map: *std.json.ObjectMap, depth: usize, parts: *usize) anyerror!void {
+const ExternalBodiesBudget = struct { parts: usize = 0, bytes: usize = 0 };
+fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, payload: j.Value, map: *std.json.ObjectMap, depth: usize, budget: *ExternalBodiesBudget) anyerror!void {
     if (depth > mime.max_depth) return error.MimeTooDeep;
-    parts.* += 1;
-    if (parts.* > mime.max_parts) return error.TooManyMimeParts;
+    budget.parts += 1;
+    if (budget.parts > mime.max_parts) return error.TooManyMimeParts;
     const body = j.get(payload, "body");
     const mime_type = j.text(payload, "mimeType");
     if (body) |value| {
         const attachment = j.text(value, "attachmentId");
-        if (attachment.len > 0 and j.text(payload, "filename").len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html") or std.ascii.eqlIgnoreCase(mime_type, "text/calendar"))) {
+        const filename = j.text(payload, "filename");
+        const calendar = mime.isCalendarPart(mime_type, filename);
+        const inline_text = filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html"));
+        if (attachment.len > 0 and (calendar or inline_text)) {
             if (attachment.len > 1024) return error.InvalidAttachmentId;
+            const declared = if (j.get(value, "size")) |size| try b.integer(size) else 0;
+            if (declared < 0 or declared > mime.max_body_bytes) return error.BodyTooLarge;
+            if (calendar and declared > mime.max_calendar_bytes) return error.CalendarTooLarge;
+            const declared_bytes: usize = @intCast(declared);
             if (!map.contains(attachment)) {
+                if (declared_bytes > mime.max_raw_bytes - budget.bytes) return error.DecodedMessageTooLarge;
                 const url = try std.fmt.allocPrint(a, "{s}/attachments/{s}", .{ try messageUrl(a, id, ""), try escaped(a, attachment) });
-                try map.put(a, attachment, try transport.request(a, .GET, url, null));
+                const response = try transport.request(a, .GET, url, null);
+                const encoded = try j.required(response, "data");
+                const decoded = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(std.mem.trimEnd(u8, encoded, "=")) catch return error.InvalidBase64;
+                if (decoded > mime.max_body_bytes) return error.BodyTooLarge;
+                if (calendar and decoded > mime.max_calendar_bytes) return error.CalendarTooLarge;
+                if (decoded > mime.max_raw_bytes - budget.bytes) return error.DecodedMessageTooLarge;
+                budget.bytes += decoded;
+                try map.put(a, attachment, response);
             }
         }
     }
-    for (try array(payload, "parts")) |part| try externalBodies(a, transport, id, part, map, depth + 1, parts);
+    for (try array(payload, "parts")) |part| try externalBodies(a, transport, id, part, map, depth + 1, budget);
 }
 fn read(a: std.mem.Allocator, transport: Transport, id: []const u8) !types.Message {
     const value = try transport.request(a, .GET, try messageUrl(a, id, "?format=full"), null);
     if (!std.mem.eql(u8, j.text(value, "id"), id)) return error.MessageIdentityMismatch;
     var map: std.json.ObjectMap = .empty;
-    var parts: usize = 0;
-    try externalBodies(a, transport, id, j.get(value, "payload") orelse return error.InvalidProviderResponse, &map, 0, &parts);
+    var budget: ExternalBodiesBudget = .{};
+    try externalBodies(a, transport, id, j.get(value, "payload") orelse return error.InvalidProviderResponse, &map, 0, &budget);
     return @import("gmail_decode.zig").normalize(value, a, .{ .object = map }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         error.MissingField, error.InvalidEncoding, error.UnsupportedEncoding, error.InvalidIdentifier => return error.MalformedMessage,
@@ -350,7 +420,8 @@ fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transp
     }
     const bytes = try a.alloc(u8, types.Limits.request_bytes);
     const attachments = try mime.composeAttachments(draft.attachments, a);
-    const raw = try mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = draft.bodyText, .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments }, bytes);
+    const prepared = try @import("markdown_mail.zig").prepare(a, draft);
+    const raw = try mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments }, bytes);
     const encoded_size = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
     if (encoded_size > types.Limits.request_bytes - 1024) return error.FormTooLarge;
     const encoded = try a.alloc(u8, encoded_size);
@@ -686,8 +757,8 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
             try io.checkCancel();
             if (!std.mem.eql(u8, j.text(entry, "threadId"), id)) return error.MessageIdentityMismatch;
             var map: std.json.ObjectMap = .empty;
-            var parts: usize = 0;
-            try externalBodies(a, transport, j.text(entry, "id"), j.get(entry, "payload") orelse return error.InvalidProviderResponse, &map, 0, &parts);
+            var budget: ExternalBodiesBudget = .{};
+            try externalBodies(a, transport, j.text(entry, "id"), j.get(entry, "payload") orelse return error.InvalidProviderResponse, &map, 0, &budget);
             dest.* = try @import("gmail_decode.zig").normalize(entry, a, .{ .object = map });
             transport.progress(.bodies, index + 1, entries.len);
         }
@@ -703,14 +774,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         const attachment_id = try j.required(request, "attachmentId");
         const message = try read(a, transport, id);
         for (message.attachments) |attachment| if (std.mem.eql(u8, attachment.id, attachment_id)) {
-            if (attachment.data.len > 0) return j.value(a, attachment);
-            const value = try transport.request(a, .GET, try std.fmt.allocPrint(a, "{s}/attachments/{s}", .{ try messageUrl(a, id, ""), try escaped(a, attachment_id) }), null);
-            const data = try j.required(value, "data");
-            const decoded = try mime.decodeBase64Url(data, a);
-            if (decoded.len != attachment.size) return error.BodySizeMismatch;
-            var result = attachment;
-            result.data = data;
-            return j.value(a, result);
+            return j.value(a, try attachmentAuthorized(a, account, capabilities, transport, id, attachment));
         };
         return error.AttachmentNotFound;
     }
@@ -1074,6 +1138,77 @@ test "typed cache prefetch refuses invalid identity and absent read permission b
     try std.testing.expectEqual(@as(usize, 0), spy.calls);
 }
 
+test "invitation Gmail: named external Teams calendars fetch through read-only transport" {
+    const Oracle = struct {
+        kind: []const u8,
+        declared: usize = calendar.len,
+        message_calls: usize = 0,
+        attachment_calls: usize = 0,
+        const calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:teams-external@example.test\r\nDTSTAMP:20261007T090000Z\r\nDTSTART:20261012T080000Z\r\nSUMMARY:Fictional Teams meeting\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE;RSVP=TRUE:mailto:self@example.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(body == null);
+            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/meeting-fixture?format=full")) {
+                self.message_calls += 1;
+                return j.value(a, .{ .id = "meeting-fixture", .threadId = "meeting-thread", .internalDate = "0", .payload = .{
+                    .mimeType = self.kind,
+                    .filename = "invite.ics",
+                    .headers = [_]mime.Header{ .{ .name = "From", .value = "host@example.test" }, .{ .name = "Content-Type", .value = self.kind } },
+                    .body = .{ .attachmentId = "named-calendar", .size = self.declared },
+                } });
+            }
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/meeting-fixture/attachments/named-calendar", url);
+            self.attachment_calls += 1;
+            const storage = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(calendar.len));
+            return j.value(a, .{ .size = calendar.len, .data = std.base64.url_safe_no_pad.Encoder.encode(storage, calendar) });
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream" }) |kind| {
+        var oracle: Oracle = .{ .kind = kind };
+        const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+        const message = try readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, transport, "meeting-fixture");
+        try std.testing.expectEqual(@as(usize, 1), oracle.message_calls);
+        try std.testing.expectEqual(@as(usize, 1), oracle.attachment_calls);
+        try std.testing.expectEqualStrings(Oracle.calendar, message.invitation.?);
+        try std.testing.expectEqual(@as(usize, 1), message.attachments.len);
+        try std.testing.expectEqualStrings("invite.ics", message.attachments[0].filename);
+        try std.testing.expectEqualStrings(Oracle.calendar, try mime.decodeBase64Url(message.attachments[0].data, a));
+        var invite: invitation.Invitation = .{};
+        try invitation.parse(message.invitation.?, "self@example.test", &.{}, &invite);
+        try std.testing.expectEqualStrings("teams-external@example.test", invite.uid.slice());
+        try std.testing.expectEqualStrings("self@example.test", invite.attendee.slice());
+        oracle.declared = 131073;
+        try std.testing.expectError(error.CalendarTooLarge, readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, transport, "meeting-fixture"));
+        try std.testing.expectEqual(@as(usize, 2), oracle.message_calls);
+        try std.testing.expectEqual(@as(usize, 1), oracle.attachment_calls);
+    }
+}
+
+test "invitation Gmail: calendar candidates share the cumulative external-body quota before downloads" {
+    const Spy = struct {
+        calls: usize = 0,
+        fn request(ctx: *anyopaque, _: std.mem.Allocator, _: std.http.Method, _: []const u8, _: ?j.Value) anyerror!j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            return error.UnexpectedProviderCall;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var spy: Spy = .{};
+    const transport: Transport = .{ .context = &spy, .requestFn = Spy.request };
+    const payload = try j.value(a, .{ .mimeType = "application/octet-stream", .filename = "invite.ics", .body = .{ .size = 256, .attachmentId = "quota-calendar" } });
+    var map: std.json.ObjectMap = .empty;
+    var budget: ExternalBodiesBudget = .{ .bytes = mime.max_raw_bytes - 255 };
+    try std.testing.expectError(error.DecodedMessageTooLarge, externalBodies(a, transport, "fixture", payload, &map, 0, &budget));
+    try std.testing.expectEqual(@as(usize, 0), spy.calls);
+}
+
 test "wishlist: send-as verified identities signatures and sender wire" {
     const Oracle = struct {
         settings: usize = 0,
@@ -1117,6 +1252,124 @@ test "wishlist: send-as verified identities signatures and sender wire" {
     _ = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, "mail.send", request);
     try std.testing.expectEqual(@as(usize, 1), oracle.sends);
     try std.testing.expectEqual(@as(usize, 3), oracle.settings);
+}
+
+test "markdown mail: authorized Gmail transport sends rendered alternatives and forbids readonly writes" {
+    const Oracle = struct {
+        calls: usize = 0,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            try std.testing.expectEqual(std.http.Method.POST, method);
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", url);
+            const encoded = try j.required(body orelse return error.MissingField, "raw");
+            const raw = try mime.decodeBase64Url(encoded, a);
+            try std.testing.expect(std.mem.indexOf(u8, raw, "Content-Type: multipart/alternative;") != null);
+            try std.testing.expect(std.mem.indexOf(u8, raw, "Content-Type: multipart/related; type=\"text/html\";") != null);
+            const decoded = try mime.parse(raw, a);
+            try std.testing.expect(std.mem.startsWith(u8, decoded.body_text, "Hello fixture."));
+            try std.testing.expect(std.mem.indexOf(u8, decoded.body_html, "<strong>Hello</strong> fixture.") != null);
+            try std.testing.expect(std.mem.indexOf(u8, decoded.body_html, "<script>") == null);
+            const cid = std.mem.trim(u8, decoded.attachments[0].content_id, "<>");
+            try std.testing.expect(std.mem.indexOf(u8, decoded.body_html, try std.fmt.allocPrint(a, "src=\"cid:{s}\"", .{cid})) != null);
+            return std.json.parseFromSliceLeaky(j.Value, a, "{\"id\":\"synthetic-sent\",\"threadId\":\"synthetic-thread\"}", .{});
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+    const request = try j.value(a, .{ .operationId = "markdown-wire", .draft = .{ .to = [_]types.Address{.{ .address = "peer@example.test" }}, .bodyText = "**Hello** fixture.\n\n<script>literal</script>", .bodyFormat = "markdown", .bodyHtml = "<script>ignored caller HTML</script>" } });
+    try std.testing.expectError(error.PermissionDenied, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "mail.send", request));
+    try std.testing.expectEqual(@as(usize, 0), oracle.calls);
+    const receipt = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, "mail.send", request);
+    try std.testing.expectEqualStrings("applied", j.text(receipt, "outcome"));
+    try std.testing.expectEqual(@as(usize, 1), oracle.calls);
+}
+
+test "forward attachment: cached opaque selection downloads directly and canonicalizes padded bytes" {
+    const Oracle = struct {
+        calls: usize = 0,
+        data: []const u8,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(body == null);
+            // A fresh FULL response would rotate this identity. No FULL read
+            // should precede the selected immutable file's valid token GET.
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/forward-message/attachments/cached-token", url);
+            return j.value(a, .{ .data = self.data });
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { wire: []const u8, canonical: []const u8, bytes: []const u8 }{
+        .{ .wire = "AA==", .canonical = "AA", .bytes = &.{0} },
+        .{ .wire = "AP8=", .canonical = "AP8", .bytes = &.{ 0, 0xff } },
+        .{ .wire = "AP8", .canonical = "AP8", .bytes = &.{ 0, 0xff } },
+        .{ .wire = "AP-A", .canonical = "AP-A", .bytes = &.{ 0, 0xff, 0x80 } },
+    }) |case| {
+        var oracle: Oracle = .{ .data = case.wire };
+        const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+        const expected: types.Attachment = .{ .id = "cached-token", .filename = "fixture.bin", .mimeType = "image/jpeg", .size = case.bytes.len };
+        try std.testing.expectError(error.PermissionDenied, attachmentAuthorized(a, "self@example.test", &.{}, transport, "forward-message", expected));
+        try std.testing.expectEqual(@as(usize, 0), oracle.calls);
+        const file = try attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected);
+        try std.testing.expectEqualStrings(case.canonical, file.data);
+        try std.testing.expectEqualStrings(expected.id, file.id);
+        try std.testing.expectEqualStrings(expected.filename, file.filename);
+        try std.testing.expectEqual(expected.size, file.size);
+        try std.testing.expectEqualSlices(u8, case.bytes, try mime.decodeBase64Url(file.data, a));
+        try std.testing.expectEqual(@as(usize, 1), oracle.calls);
+        // This is the strict shared forward/source contract that the old
+        // provider response's '=' padding failed before any draft was saved.
+        try @import("core.zig").validateDraft(.{ .bodyText = "Retained forward source", .attachments = &.{file} }, false);
+    }
+}
+
+test "forward attachment: expired token resolves unique current metadata and refuses ambiguity or changed bytes" {
+    const Oracle = struct {
+        calls: usize = 0,
+        ambiguous: bool = false,
+        mismatch: bool = false,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(body == null);
+            if (std.mem.endsWith(u8, url, "/attachments/cached-token")) return error.MessageNotFound;
+            if (std.mem.endsWith(u8, url, "/attachments/fresh-token")) return j.value(a, .{ .data = if (self.mismatch) "AA==" else "AP8=" });
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/forward-message?format=full", url);
+            var parts: j.Value = .{ .array = .init(a) };
+            try parts.array.append(try j.value(a, .{ .partId = "0", .mimeType = "text/plain", .filename = "", .body = .{ .size = 5, .data = "VGV4dAo" } }));
+            for (0..if (self.ambiguous) @as(usize, 2) else 1) |index| {
+                try parts.array.append(try j.value(a, .{ .partId = if (index == 0) "1" else "2", .mimeType = "image/jpeg", .filename = "fixture.bin", .headers = .{.{ .name = "Content-Disposition", .value = "inline; filename=fixture.bin" }}, .body = .{ .size = 2, .attachmentId = if (index == 0) "fresh-token" else "another-fresh-token" } }));
+            }
+            var message = try j.value(a, .{ .id = "forward-message", .threadId = "forward-thread", .internalDate = "42", .payload = .{ .mimeType = "multipart/mixed", .headers = .{ .{ .name = "From", .value = "Sender <sender@example.test>" }, .{ .name = "Message-ID", .value = "<original@example.test>" } } } });
+            try message.object.getPtr("payload").?.object.put(a, "parts", parts);
+            return message;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const expected: types.Attachment = .{ .id = "cached-token", .filename = "fixture.bin", .mimeType = "image/jpeg", .size = 2 };
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+    const resolved = try attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected);
+    try std.testing.expectEqualStrings("fresh-token", resolved.id);
+    try std.testing.expectEqualStrings("AP8", resolved.data);
+    try std.testing.expectEqual(@as(usize, 3), oracle.calls);
+    try @import("core.zig").validateDraft(.{ .bodyText = "Original source remains untouched", .attachments = &.{resolved} }, false);
+    oracle = .{ .ambiguous = true };
+    try std.testing.expectError(error.AmbiguousAttachment, attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected));
+    try std.testing.expectEqual(@as(usize, 2), oracle.calls);
+    oracle = .{ .mismatch = true };
+    try std.testing.expectError(error.BodySizeMismatch, attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected));
+    try std.testing.expectEqual(@as(usize, 3), oracle.calls);
 }
 
 test "wishlist: labels minimal snapshot and exact modify wire" {

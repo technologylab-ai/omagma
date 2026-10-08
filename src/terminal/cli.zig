@@ -21,6 +21,7 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     var req = j.object(sa);
     var draft = j.object(sa);
     var has_draft = false;
+    var source_format: ?[]const u8 = null;
     const interactive = std.mem.eql(u8, mode, "tui");
     const jsonl = std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent");
     if (!interactive and !jsonl) {
@@ -29,6 +30,7 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             try help(io);
             return;
         }
+        if (!knownVerb(mode, verb)) return error.UnknownCommand;
         const family = if (std.mem.eql(u8, mode, "invitations")) "invitation" else if (std.mem.eql(u8, mode, "terminal-auth")) "auth" else mode;
         const command = if (eq(family, "mail") and eq(verb, "drafts")) "draft.list" else if (eq(family, "mail") and eq(verb, "compose")) "draft.create" else if (eq(family, "mail") and eq(verb, "labels")) "labels.list" else if (eq(family, "mail") and eq(verb, "identities")) "accounts.identities" else if (eq(family, "mail") and eq(verb, "open-link")) "browser.open" else if (eq(family, "mail") and eq(verb, "open-attachment")) "attachment.open" else try std.fmt.allocPrint(sa, "{s}.{s}", .{ family, verb });
         try req.object.put(sa, "cmd", .{ .string = command });
@@ -77,6 +79,7 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             has_draft = true;
             continue;
         }
+        if (!valueOption(arg)) return error.UnknownOption;
         const v = args.next() orelse return error.ValueRequired;
         if (eq(arg, "--config")) options.config_file = v else if (eq(arg, "--metrics-file")) metrics_file = v else if (eq(arg, "--grant-file")) options.grant_file = v else if (eq(arg, "--client-file")) try req.object.put(sa, "clientFile", .{ .string = v }) else if (eq(arg, "--capabilities")) {
             var values: j.Value = .{ .array = .init(sa) };
@@ -113,6 +116,10 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             try req.object.put(sa, if (eq(arg, "--before-message-id")) "beforeMessageId" else "afterMessageId", .{ .string = v });
         } else if (eq(arg, "--boundary-received-at")) {
             try req.object.put(sa, "boundaryReceivedAt", .{ .integer = try std.fmt.parseInt(i64, v, 10) });
+        } else if (eq(arg, "--format")) {
+            if (!eq(v, "markdown") and !eq(v, "plain")) return error.InvalidBodyFormat;
+            if (interactive or jsonl) return error.FormatRequiresComposeCommand;
+            source_format = v;
         } else if (eq(arg, "--from")) {
             try draft.object.put(sa, "from", .{ .string = v });
             has_draft = true;
@@ -155,6 +162,17 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     if (has_draft) {
         if (req.object.get("draft") != null) return error.ConflictingDraftOptions;
         try req.object.put(sa, "draft", draft);
+    }
+    if (source_format) |format| {
+        const command = j.text(req, "cmd");
+        if (eq(command, "mail.reply") or eq(command, "mail.forward")) {
+            try req.object.put(sa, "bodyFormat", .{ .string = format });
+        } else if (eq(command, "draft.create") or eq(command, "draft.update") or eq(command, "draft.preview") or eq(command, "mail.send")) {
+            if (eq(command, "draft.preview") and j.text(req, "draftId").len != 0 and req.object.get("draft") == null) return error.FormatRequiresDraftSource;
+            var formatted = try j.copyObject(sa, req.object.get("draft") orelse draft);
+            try formatted.object.put(sa, "bodyFormat", .{ .string = format });
+            try req.object.put(sa, "draft", formatted);
+        } else return error.FormatRequiresComposeCommand;
     }
     var session = try core.Session.init(io, a, init.environ_map, options);
     defer session.deinit();
@@ -212,6 +230,39 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
+// Reject misspelled one-shot verbs before loading configuration, accounts or
+// credentials. JSONL command frames retain the shared executor's error contract.
+fn knownVerb(mode: []const u8, verb: []const u8) bool {
+    const families = [_]struct { name: []const u8, verbs: []const []const u8 }{
+        .{ .name = "mail", .verbs = &.{ "list", "search", "read", "thread", "attachment", "open", "sync", "refresh", "recipients", "reply", "forward", "send", "archive", "trash", "restore", "mark", "batch", "undo", "prefetch", "drafts", "compose", "labels", "identities", "open-link", "open-attachment" } },
+        .{ .name = "draft", .verbs = &.{ "list", "read", "create", "update", "preview", "recovery-save", "send", "discard" } },
+        .{ .name = "contacts", .verbs = &.{ "list", "search", "upsert" } },
+        .{ .name = "invitations", .verbs = &.{ "inspect", "reply" } },
+        .{ .name = "cache", .verbs = &.{ "stats", "clear", "activity", "refresh-status" } },
+        .{ .name = "operation", .verbs = &.{ "list", "read" } },
+        .{ .name = "terminal-auth", .verbs = &.{ "status", "authorize", "revoke" } },
+    };
+    for (families) |family| if (eq(mode, family.name)) {
+        for (family.verbs) |candidate| if (eq(verb, candidate)) return true;
+        return false;
+    };
+    return false;
+}
+// Boolean flags have already been handled above. Check the name before taking
+// a value so an unknown final flag stays UnknownOption rather than ValueRequired.
+fn valueOption(arg: []const u8) bool {
+    for ([_][]const u8{
+        "--config", "--metrics-file", "--grant-file", "--client-file", "--capabilities",
+        "--fixture-root", "--fixture-scenario", "--cache-dir", "--ui-file", "--editor-mode",
+        "--metadata-limit", "--cache-messages", "--prefetch-bodies", "--disk-limit-bytes", "--cache-bytes",
+        "--account", "--action", "--undo-token", "--url", "--path", "--message-ids", "--message-id", "--id",
+        "--before-message-id", "--after-message-id", "--boundary-received-at", "--format", "--from",
+        "--limit", "--cursor", "--query", "--label", "--thread-id", "--draft-id", "--attachment-id",
+        "--operation-id", "--status", "--to", "--cc", "--bcc", "--subject", "--body", "--attach-file",
+        "--body-file", "--draft-file", "--contact-file", "--expected-etag", "--add-label", "--remove-label",
+    }) |candidate| if (eq(arg, candidate)) return true;
+    return false;
+}
 fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator, html_metrics: ?HtmlMetrics) !void {
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -236,6 +287,7 @@ fn readStdin(io: std.Io, a: std.mem.Allocator, limit: usize) ![]const u8 {
 pub fn help(io: std.Io) !void {
     var buf: [2048]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
-    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|refresh|compose|reply|forward|send|archive|trash|restore|mark|batch|undo|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN.\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
+    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|mark|batch|undo|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN.\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
+    try w.interface.writeAll("Outgoing bodies: --format markdown|plain (default plain) on compose/create/update/send/reply/forward.\nDraft source stays in bodyText; JSONL uses draft.bodyFormat (reply/forward: bodyFormat).\nReview rendered alternatives with draft preview --draft-id ID, or --body-file FILE --format markdown.\n");
     try w.interface.flush();
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const b = @import("../bounded.zig");
 const recipients = @import("recipients.zig");
 const types = @import("types.zig");
+const markdown_logo = @import("markdown_logo.zig");
 
 pub const max_raw_bytes = types.Limits.request_bytes;
 pub const max_body_bytes = types.Limits.body_bytes;
@@ -10,6 +11,9 @@ pub const max_headers = 256;
 pub const max_parts = 128;
 pub const max_depth = 16;
 pub const max_attachments = 32;
+/// Calendar discovery uses the same bound as the invitation parser. Other
+/// attachment types remain governed by the ordinary attachment/body limits.
+pub const max_calendar_bytes = 128 * 1024;
 /// Last millisecond of year 9999, within the terminal timestamp formatter's range.
 pub const max_received_at_ms: i64 = 253402300799999;
 pub const Header = struct { name: []const u8, value: []const u8 };
@@ -241,6 +245,69 @@ fn isAttached(headers: []const Header, filename: []const u8) !bool {
     return filename.len > 0 or std.ascii.startsWithIgnoreCase(disposition, "attachment");
 }
 
+/// Some Outlook exports carry the calendar as a named binary .ics attachment.
+/// Only explicit calendar MIME types or .ics octet-stream files qualify; a
+/// conference URL or arbitrary body text never creates an invitation.
+pub fn isCalendarPart(mime_type: []const u8, filename: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(mime_type, "text/calendar") or
+        std.ascii.eqlIgnoreCase(mime_type, "application/ics") or
+        (std.ascii.eqlIgnoreCase(mime_type, "application/octet-stream") and
+            filename.len >= 4 and std.ascii.eqlIgnoreCase(filename[filename.len - 4 ..], ".ics"));
+}
+fn calendarEnvelope(data: []const u8) bool {
+    const value = std.mem.trim(u8, data, "\r\n");
+    const begin = "BEGIN:VCALENDAR";
+    const end = "END:VCALENDAR";
+    return value.len > begin.len + end.len and
+        std.ascii.eqlIgnoreCase(value[0..begin.len], begin) and
+        (value[begin.len] == '\r' or value[begin.len] == '\n') and
+        std.ascii.eqlIgnoreCase(value[value.len - end.len ..], end) and
+        value[value.len - end.len - 1] == '\n';
+}
+fn calendarText(data: []const u8, charset: []const u8, a: std.mem.Allocator) ![]const u8 {
+    // Calendar folds can split a multibyte character. Remove the one folding
+    // whitespace byte before charset validation, preserving every logical
+    // content-line byte (including any further whitespace).
+    var unfolded: ?[]u8 = null;
+    var used: usize = 0;
+    var pos: usize = 0;
+    while (pos < data.len) {
+        const newline: usize = if (data[pos] == '\r' and pos + 1 < data.len and data[pos + 1] == '\n') 2 else if (data[pos] == '\n') 1 else 0;
+        if (newline != 0 and pos + newline < data.len and (data[pos + newline] == ' ' or data[pos + newline] == '\t')) {
+            if (unfolded == null) {
+                unfolded = try a.alloc(u8, data.len);
+                @memcpy(unfolded.?[0..pos], data[0..pos]);
+                used = pos;
+            }
+            pos += newline + 1;
+            continue;
+        }
+        if (unfolded) |output| {
+            output[used] = data[pos];
+            used += 1;
+        }
+        pos += 1;
+    }
+    return try convertCharset(if (unfolded) |output| output[0..used] else data, charset, a);
+}
+/// Accept repeated representations only when their literal calendar lines
+/// match. Do not use UID alone: differing sequence, attendees or recurrence
+/// could authorize a reply to a different request.
+fn sameCalendar(left: []const u8, right: []const u8) bool {
+    const first = std.mem.trimEnd(u8, left, "\r\n");
+    const second = std.mem.trimEnd(u8, right, "\r\n");
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < first.len and j < second.len) {
+        if (first[i] == '\r' and i + 1 < first.len and first[i + 1] == '\n') i += 1;
+        if (second[j] == '\r' and j + 1 < second.len and second[j + 1] == '\n') j += 1;
+        if (first[i] != second[j]) return false;
+        i += 1;
+        j += 1;
+    }
+    return i == first.len and j == second.len;
+}
+
 const Context = struct {
     allocator: std.mem.Allocator,
     parts: usize = 0,
@@ -261,13 +328,29 @@ const Context = struct {
     }
     fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8) !void {
         const attached = try isAttached(headers, filename);
-        if (std.ascii.eqlIgnoreCase(mime_type, "text/calendar")) {
-            if (self.calendar != null) return error.AmbiguousCalendarPart;
-            self.calendar = try convertCharset(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator);
+        const decoded_filename = try decodeHeader(filename, self.allocator);
+        const calendar_type = std.ascii.eqlIgnoreCase(mime_type, "text/calendar");
+        if (isCalendarPart(mime_type, decoded_filename)) {
+            if (data.len > max_calendar_bytes) return error.CalendarTooLarge;
+            const calendar: ?[]const u8 = calendarText(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator) catch |err| switch (err) {
+                error.InvalidUtf8, error.InvalidCharsetData, error.UnsupportedCharset => if (calendar_type) return err else null,
+                else => return err,
+            };
+            if (calendar) |value| {
+                if (value.len > max_calendar_bytes) return error.CalendarTooLarge;
+                // Binary .ics files need an actual VCALENDAR envelope. The
+                // invitation parser performs full method/identity validation
+                // before either inspection or submission.
+                if (calendar_type or calendarEnvelope(value)) {
+                    if (self.calendar) |existing| {
+                        if (!sameCalendar(existing, value)) return error.AmbiguousCalendarPart;
+                    } else self.calendar = value;
+                }
+            }
         }
         if (attached or (!std.ascii.eqlIgnoreCase(mime_type, "text/plain") and !std.ascii.eqlIgnoreCase(mime_type, "text/html") and !std.ascii.eqlIgnoreCase(mime_type, "text/calendar"))) {
             if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
-            try self.attachments.append(self.allocator, .{ .filename = try decodeHeader(filename, self.allocator), .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .size = data.len, .data = data });
+            try self.attachments.append(self.allocator, .{ .filename = decoded_filename, .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .size = data.len, .data = data });
         }
         if (attached) return;
         if (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) {
@@ -333,6 +416,7 @@ const Context = struct {
         const declared = if (b.optional(body, "size")) |v| try b.integer(v) else 0;
         if (declared < 0 or declared > max_body_bytes) return error.BodyTooLarge;
         const filename = if (b.optional(part, "filename")) |v| try b.string(v) else "";
+        if (isCalendarPart(mime_type, filename) and declared > max_calendar_bytes) return error.CalendarTooLarge;
         const part_id = if (b.optional(part, "partId")) |v| try b.string(v) else "";
         var external_id: ?[]const u8 = null;
         var external_data: ?[]const u8 = null;
@@ -345,7 +429,7 @@ const Context = struct {
                     external_data = if (v == .object) try b.string(try b.field(v, "data")) else try b.string(v);
                 };
                 if (external_data == null) {
-                    if (filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html") or std.ascii.eqlIgnoreCase(mime_type, "text/calendar"))) return error.ExternalBodyRequired;
+                    if (isCalendarPart(mime_type, filename) or (filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")))) return error.ExternalBodyRequired;
                     if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
                     try self.attachments.append(self.allocator, .{ .id = try self.allocator.dupe(u8, text), .filename = try decodeHeader(filename, self.allocator), .mime_type = try self.allocator.dupe(u8, mime_type), .size = @intCast(declared), .data = "" });
                     return;
@@ -400,6 +484,7 @@ pub fn parameter(content_type: []const u8, name: []const u8) ?[]const u8 {
         if (content_type[pos] != '=') continue;
         const key = std.mem.trim(u8, content_type[start..pos], " \t");
         pos += 1;
+        while (pos < content_type.len and (content_type[pos] == ' ' or content_type[pos] == '\t')) pos += 1;
         var value_start = pos;
         var end = pos;
         if (pos < content_type.len and content_type[pos] == '"') {
@@ -743,6 +828,8 @@ pub const Compose = struct {
     subject: []const u8,
     body: []const u8,
     html: ?[]const u8 = null,
+    /// Fixed public branding image, independent of the user's attachment quota.
+    inline_logo: bool = false,
     calendar: ?[]const u8 = null,
     message_id: []const u8,
     date: []const u8,
@@ -816,21 +903,26 @@ fn emitBase64Line(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeAll("\r\n");
 }
 fn emitText(writer: *std.Io.Writer, text: []const u8) !void {
+    return emitTextParts(writer, &.{text});
+}
+fn emitTextParts(writer: *std.Io.Writer, parts: []const []const u8) !void {
     var chunk: [57]u8 = undefined;
     var used: usize = 0;
-    var pos: usize = 0;
-    while (pos < text.len) : (pos += 1) {
-        const newline = text[pos] == '\r' or text[pos] == '\n';
-        const bytes: [2]u8 = if (newline) .{ '\r', '\n' } else .{ text[pos], 0 };
-        for (bytes[0..if (newline) @as(usize, 2) else 1]) |c| {
-            chunk[used] = c;
-            used += 1;
-            if (used == chunk.len) {
-                try emitBase64Line(writer, &chunk);
-                used = 0;
+    for (parts) |text| {
+        var pos: usize = 0;
+        while (pos < text.len) : (pos += 1) {
+            const newline = text[pos] == '\r' or text[pos] == '\n';
+            const bytes: [2]u8 = if (newline) .{ '\r', '\n' } else .{ text[pos], 0 };
+            for (bytes[0..if (newline) @as(usize, 2) else 1]) |c| {
+                chunk[used] = c;
+                used += 1;
+                if (used == chunk.len) {
+                    try emitBase64Line(writer, &chunk);
+                    used = 0;
+                }
             }
+            if (text[pos] == '\r' and pos + 1 < text.len and text[pos + 1] == '\n') pos += 1;
         }
-        if (text[pos] == '\r' and pos + 1 < text.len and text[pos + 1] == '\n') pos += 1;
     }
     if (used > 0) try emitBase64Line(writer, chunk[0..used]);
 }
@@ -899,6 +991,34 @@ fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment) !void {
     }
 }
 
+/// Transport-only unique CID. The generated review HTML has a trusted branding
+/// placeholder; binding it to the operation's RFC Message-ID changes no prose,
+/// styling, attachments or remote-resource policy.
+pub fn logoContentId(message_id: []const u8, out: []u8) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(message_id, &digest, .{});
+    return std.fmt.bufPrint(out, "omagma-logo.{s}@omagma.invalid", .{std.fmt.bytesToHex(digest, .lower)});
+}
+fn htmlPart(writer: *std.Io.Writer, html: []const u8, inline_logo: bool, message_id: []const u8) !void {
+    if (!inline_logo) return textPart(writer, "text/html", html);
+    const needle = "<img src=\"cid:omagma-logo@omagma.invalid\"";
+    const found = std.mem.indexOf(u8, html, needle) orelse return error.MissingLogoReference;
+    if (std.mem.indexOf(u8, html[found + needle.len ..], needle) != null) return error.AmbiguousLogoReference;
+    var cid_buffer: [128]u8 = undefined;
+    const cid = try logoContentId(message_id, &cid_buffer);
+    const value_at = found + "<img src=\"cid:".len;
+    try writer.writeAll("Content-Type: multipart/related; type=\"text/html\"; boundary=\"omagma-v1-related\"\r\n\r\n--omagma-v1-related\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n");
+    try emitTextParts(writer, &.{ html[0..value_at], cid, html[value_at + markdown_logo.content_id.len ..] });
+    try writer.print("--omagma-v1-related\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=\"omagma-logo.png\"\r\nContent-ID: <{s}>\r\nContent-Transfer-Encoding: base64\r\n\r\n", .{cid});
+    var offset: usize = 0;
+    while (offset < markdown_logo.png.len) {
+        const end = @min(offset + 57, markdown_logo.png.len);
+        try emitBase64Line(writer, markdown_logo.png[offset..end]);
+        offset = end;
+    }
+    try writer.writeAll("--omagma-v1-related--\r\n");
+}
+
 pub fn encode(compose: Compose, out: []u8) ![]const u8 {
     try recipients.validateEnvelope(compose.envelope);
     try recipients.validateAddress(compose.from.address.slice());
@@ -912,6 +1032,7 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
     if (compose.html) |html| try validateBody(html);
     if (compose.calendar) |calendar| try validateBody(calendar);
     if (compose.html != null and compose.calendar != null) return error.UnsupportedComposeParts;
+    if (compose.inline_logo and compose.html == null) return error.UnsupportedComposeParts;
     if (compose.attachments.len > 16) return error.TooManyAttachments;
     var attachment_bytes: usize = 0;
     for (compose.attachments) |attachment| {
@@ -939,7 +1060,7 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
             try writer.writeAll("Content-Type: multipart/alternative; boundary=\"omagma-v1-alt\"\r\n\r\n--omagma-v1-alt\r\n");
             try textPart(&writer, "text/plain", compose.body);
             try writer.writeAll("--omagma-v1-alt\r\n");
-            try textPart(&writer, "text/html", compose.html.?);
+            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.message_id);
             try writer.writeAll("--omagma-v1-alt--\r\n");
         } else try textPart(&writer, "text/plain", compose.body);
         if (compose.calendar) |ics| {
@@ -947,7 +1068,7 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
             try textPart(&writer, "text/calendar; method=REPLY", ics);
         } else if (compose.html != null and !mixed) {
             try writer.writeAll("--omagma-v1-part\r\n");
-            try textPart(&writer, "text/html", compose.html.?);
+            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.message_id);
         }
         for (compose.attachments) |attachment| {
             try writer.writeAll("--omagma-v1-part\r\n");
@@ -963,6 +1084,50 @@ pub fn base64Url(raw: []const u8, out: []u8) ![]const u8 {
     const size = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
     if (size > out.len) return error.OutputTooSmall;
     return std.base64.url_safe_no_pad.Encoder.encode(out, raw);
+}
+
+test "markdown mail: alternatives related approved CID and sixteen user files keep independent octets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rendered = try @import("markdown_mail.zig").render(a, "# Subject\n\n**Hello** fixture. Literal `cid:omagma-logo@omagma.invalid` remains.\n\n`<img src=\"cid:omagma-logo@omagma.invalid\">` stays literal too.");
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("self@example.test");
+    var envelope_out: recipients.Envelope = .{};
+    var peer: recipients.Mailbox = .{};
+    try peer.address.set("peer@example.test");
+    try envelope_out.to.append(peer);
+    var files: [16]Attachment = undefined;
+    for (&files, 0..) |*file, i| file.* = .{ .filename = try std.fmt.allocPrint(a, "file-{d}.bin", .{i}), .mime_type = "application/octet-stream", .data = &.{ 0, 0xff, 0x80, '\r', '\n' } };
+    const output = try a.alloc(u8, max_raw_bytes);
+    const compose: Compose = .{ .from = sender, .envelope = &envelope_out, .subject = "Synthetic", .body = rendered.plain, .html = rendered.html, .inline_logo = true, .message_id = "<markdown@example.test>", .date = "Mon, 05 Oct 2026 12:00:00 +0000", .attachments = &files };
+    const raw = try encode(compose, output);
+    for ([_][]const u8{ "Content-Type: multipart/mixed;", "Content-Type: multipart/alternative;", "Content-Type: multipart/related; type=\"text/html\";", "Content-ID: <omagma-logo.", "Content-Disposition: inline; filename=\"omagma-logo.png\"" }) |part| try std.testing.expect(std.mem.indexOf(u8, raw, part) != null);
+    const plain_at = std.mem.indexOf(u8, raw, "Content-Type: text/plain;").?;
+    const related_at = std.mem.indexOf(u8, raw, "Content-Type: multipart/related;").?;
+    const html_at = std.mem.indexOf(u8, raw, "Content-Type: text/html;").?;
+    const image_at = std.mem.indexOf(u8, raw, "Content-Type: image/png").?;
+    try std.testing.expect(plain_at < related_at and related_at < html_at and html_at < image_at);
+    const decoded = try parse(raw, a);
+    var cid_buffer: [128]u8 = undefined;
+    const cid = try logoContentId(compose.message_id, &cid_buffer);
+    const bound_html = try std.mem.replaceOwned(u8, a, rendered.html, "<img src=\"cid:omagma-logo@omagma.invalid\"", try std.fmt.allocPrint(a, "<img src=\"cid:{s}\"", .{cid}));
+    try std.testing.expectEqualStrings(try std.mem.replaceOwned(u8, a, bound_html, "\n", "\r\n"), decoded.body_html);
+    try std.testing.expect(std.mem.indexOf(u8, decoded.body_html, "cid:omagma-logo@omagma.invalid</code>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, decoded.body_html, "&lt;img src=&quot;cid:omagma-logo@omagma.invalid&quot;&gt;") != null);
+    try std.testing.expectEqualStrings(rendered.plain, std.mem.trimEnd(u8, decoded.body_text, "\r\n"));
+    try std.testing.expectEqual(@as(usize, 17), decoded.attachments.len);
+    try std.testing.expectEqualStrings(cid, std.mem.trim(u8, decoded.attachments[0].content_id, "<>"));
+    try std.testing.expectEqualSlices(u8, markdown_logo.png, decoded.attachments[0].data);
+    for (decoded.attachments[1..]) |file| try std.testing.expectEqualSlices(u8, &.{ 0, 0xff, 0x80, '\r', '\n' }, file.data);
+    var standalone = compose;
+    standalone.attachments = &.{};
+    const no_files = try encode(standalone, output);
+    try std.testing.expect(std.mem.indexOf(u8, no_files, "multipart/mixed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, no_files, "multipart/alternative") != null);
+    var second_cid_buffer: [128]u8 = undefined;
+    const other_cid = try logoContentId("<other-markdown@example.test>", &second_cid_buffer);
+    try std.testing.expect(!std.mem.eql(u8, cid, other_cid));
 }
 
 test "literal MIME quoted printable charset and HTML text decode independently" {
@@ -1300,6 +1465,108 @@ test "Raw MIME and outgoing attachment bytes retain their independent rules" {
     const raw = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nYWJjZGVmZ2g=\r\n";
     try std.testing.expectEqualStrings("abcdefgh", (try parse(raw, a)).body_text);
     try std.testing.expectError(error.BodySizeMismatch, composeAttachments(&.{.{ .id = "", .filename = "fixture.txt", .size = 7, .data = "YWJjZGVmZ2g" }}, a));
+}
+
+test "invitation MIME: named Outlook Teams and Zoom calendar attachments are actionable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Fictional Outlook-shaped data, including quoted Windows timezone names
+    // and a folded Teams description. The conferencing service is irrelevant
+    // to the calendar transport.
+    const calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:teams-fixture@example.test\r\nDTSTAMP:20261007T090000Z\r\nDTSTART;TZID=\"W. Europe Standard Time\":20261012T100000\r\nORGANIZER;CN=\"Fixture Host\":MAILTO:host@example.test\r\nATTENDEE;CN=\"Fixture Guest\";RSVP=TRUE:MAILTO:self@example.test\r\nDESCRIPTION:Join the fixture meeting at https://teams.microsoft.com/\r\n l/meetup-join/fictional\r\nSUMMARY:Calendar fixture\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream" }) |kind| {
+        const raw = try std.fmt.allocPrint(a, "From: host@example.test\r\nTo: self@example.test\r\nContent-Type: {s}; charset=utf-8; method=REQUEST; name=\"invite.ics\"\r\nContent-Disposition: attachment; filename=\"invite.ics\"\r\n\r\n{s}", .{ kind, calendar });
+        const message = try parse(raw, a);
+        try std.testing.expect(message.calendar != null);
+        try std.testing.expect(std.mem.indexOf(u8, message.calendar.?, "https://teams.microsoft.com/l/meetup-join/fictional") != null);
+        try std.testing.expectEqual(@as(usize, 1), message.attachments.len);
+        try std.testing.expectEqualStrings("invite.ics", message.attachments[0].filename);
+        // Download keeps the original wire bytes even though calendar
+        // discovery unfolds logical lines for validation and JSON storage.
+        try std.testing.expectEqualStrings(calendar, message.attachments[0].data);
+    }
+    const zoom = try parse("Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"ZOOM.ICS\"\r\n\r\nBEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:zoom-fixture@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nDESCRIPTION:https://example.zoom.us/j/00000000000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", a);
+    try std.testing.expect(zoom.calendar != null);
+}
+
+test "invitation MIME: named Gmail external calendar payloads require and preserve downloaded bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:external-fixture@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(calendar.len));
+    const data = std.base64.url_safe_no_pad.Encoder.encode(encoded, calendar);
+    var map: std.json.Value = .{ .object = .empty };
+    var download: std.json.Value = .{ .object = .empty };
+    try download.object.put(a, "data", .{ .string = data });
+    try map.object.put(a, "calendar-download", download);
+    for ([_][]const u8{ "text/calendar", "application/ics", "application/octet-stream" }) |kind| {
+        var part = try GmailSizeOracle.part(a, kind, @intCast(calendar.len), "");
+        try part.object.put(a, "filename", .{ .string = "invite.ics" });
+        var body = try b.field(part, "body");
+        try body.object.put(a, "attachmentId", .{ .string = "calendar-download" });
+        try part.object.put(a, "body", body);
+        const message = try GmailSizeOracle.wrap(a, part);
+        try std.testing.expectError(error.ExternalBodyRequired, parseGmail(message, a));
+        const parsed = try parseGmailExternal(message, a, map);
+        try std.testing.expectEqualStrings(calendar, parsed.calendar.?);
+        try std.testing.expectEqual(@as(usize, 1), parsed.attachments.len);
+        try std.testing.expectEqualStrings("calendar-download", parsed.attachments[0].id);
+        try std.testing.expectEqualStrings(calendar, parsed.attachments[0].data);
+    }
+}
+
+test "invitation MIME: equivalent repeats are accepted but differing requests remain ambiguous" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:fixture@example.test\r\nSEQUENCE:3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const repeated = "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:fixture@\n example.test\nSEQUENCE:3\nEND:VEVENT\nEND:VCALENDAR";
+    const conflict = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:fixture@example.test\r\nSEQUENCE:4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const raw = try std.fmt.allocPrint(a, "Content-Type: multipart/mixed; boundary=\"calendar-repeat\"\r\n\r\n--calendar-repeat\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\n{s}\r\n--calendar-repeat\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=invite.ics\r\n\r\n{s}\r\n--calendar-repeat--\r\n", .{ first, repeated });
+    const parsed = try parse(raw, a);
+    try std.testing.expect(parsed.calendar != null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.attachments.len);
+    const ambiguous = try std.fmt.allocPrint(a, "Content-Type: multipart/mixed; boundary=\"calendar-repeat\"\r\n\r\n--calendar-repeat\r\nContent-Type: text/calendar\r\n\r\n{s}\r\n--calendar-repeat\r\nContent-Type: text/calendar\r\n\r\n{s}\r\n--calendar-repeat--\r\n", .{ first, conflict });
+    try std.testing.expectError(error.AmbiguousCalendarPart, parse(ambiguous, a));
+}
+
+test "invitation MIME: calendar folds may divide UTF8 but ordinary attachments and HTML cannot fabricate RSVP" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const divided = "Content-Type: text/calendar; charset=utf-8\r\n\r\nBEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:utf8-fixture@example.test\r\nSUMMARY:Caf\xc3\r\n \xa9\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const parsed = try parse(divided, a);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.calendar.?, "SUMMARY:Café\r\n") != null);
+    const malformed = try parse("Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=invite.ics\r\n\r\n<html>https://example.zoom.us/j/00000000000</html>", a);
+    try std.testing.expect(malformed.calendar == null);
+    try std.testing.expectEqual(@as(usize, 1), malformed.attachments.len);
+    const binary = try parse("Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=invite.ics\r\n\r\n\xff\x00", a);
+    try std.testing.expect(binary.calendar == null);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0 }, binary.attachments[0].data);
+    const link = try parse("Content-Type: text/html; charset=utf-8\r\n\r\n<p>Join Zoom Meeting</p><a href=\"https://example.zoom.us/j/00000000000\">Join</a>", a);
+    try std.testing.expect(link.calendar == null);
+    try std.testing.expect(!isCalendarPart("application/octet-stream", "notes.txt"));
+    try std.testing.expect(!isCalendarPart("text/html", "invite.ics"));
+    const oversized = try GmailSizeOracle.part(a, "text/calendar", 131073, "");
+    try std.testing.expectError(error.CalendarTooLarge, parseGmail(try GmailSizeOracle.wrap(a, oversized), a));
+}
+
+test "MIME charset: numeric German and Windows punctuation bytes obey explicit declarations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Independent byte oracles avoid an encode/decode round trip and retain
+    // explicit Latin/Windows declarations even when the octets resemble UTF8.
+    try std.testing.expectEqualStrings("öüäß", try convertCharset(&.{ 0xf6, 0xfc, 0xe4, 0xdf }, "ISO-8859-1", a));
+    try std.testing.expectEqualStrings("€ ‘–’", try convertCharset(&.{ 0x80, 0x20, 0x91, 0x96, 0x92 }, "windows-1252", a));
+    try std.testing.expectEqualStrings("öü", try convertCharset(&.{ 0xc3, 0xb6, 0xc3, 0xbc }, "UTF-8", a));
+    try std.testing.expectEqualStrings("Ã¶Ã¼", try convertCharset(&.{ 0xc3, 0xb6, 0xc3, 0xbc }, "ISO-8859-1", a));
+    const declared = try parse("Content-Type: text/plain; charset = \"ISO-8859-1\"\r\n\r\nBen\xf6tigen f\xfcr", a);
+    try std.testing.expectEqualStrings("Benötigen für", declared.body_text);
+    try std.testing.expectEqualStrings("utf-8", parameter("text/calendar; charset = \"utf-8\"; method = \"REQUEST\"", "charset").?);
+    try std.testing.expectEqualStrings("REQUEST", parameter("text/calendar; charset = \"utf-8\"; method = \"REQUEST\"", "method").?);
 }
 
 test "body provenance preserves plain preference and the legacy HTML text fallback" {

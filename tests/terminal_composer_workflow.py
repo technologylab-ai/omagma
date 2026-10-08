@@ -81,7 +81,8 @@ def add_files(terminal, directory, existing=0):
             terminal.send(b"A")
         else:
             click(terminal, *point(terminal, "[Add A]"))
-        terminal.until(lambda: "Attach file path:" in terminal.text())
+        terminal.until(lambda: "Attach file · local draft" in terminal.text() and "Path:" in terminal.text()
+                       and "[Attach]" in terminal.text())
         terminal.send(str(path).encode() + b"\r")
         terminal.until(lambda: f"Attachments {existing + number}" in terminal.text()
                        and f"Attached added-{number}.txt" in terminal.text())

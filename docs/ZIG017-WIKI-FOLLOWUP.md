@@ -2,6 +2,19 @@
 
 Durable curator handoff, 2026-10-05. Keep this file in the repository across agent compaction. It records candidate lessons; the referenced wiki and other projects were treated as read-only. Do not infer that a candidate has already been incorporated upstream.
 
+## Later application sizing bug: widen before arithmetic
+
+A local TUI iteration after v0.2.5 used `@intCast(10 + @min(entry_count, 14))`
+for an adaptive file dialog. A 24-entry directory triggered an integer-overflow
+panic in both Debug and Safe. Independent compile-log probes with exact
+0.16.0 and 0.17.0 both identify that bounded `@min` result as `u4`; adding ten
+overflows before the outer cast can widen it. This is an application arithmetic
+error, **not a new Zig 0.17 regression**. Widen the bounded count to `u16`
+before addition. Literal expectations for empty, four, fourteen, twenty-four
+and 128-entry cases, plus owned-PTY navigation, protect the fix. The system
+compiler was unchanged, and these local checks are not new release or memory
+qualification. A general integer-inference lesson may be useful to curators.
+
 Audience: wiki curators and developers, not installers. [Development](DEVELOPMENT.md)
 and [the documentation index](README.md#development-and-reference) provide the
 current workflow. The dated identities, measurements, failures and classifications

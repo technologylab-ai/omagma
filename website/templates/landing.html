@@ -131,6 +131,7 @@
             <div class="iface__body">
               <p>Full messages and threads, with the reader beside or below the list, Vim keys, mouse navigation and a native text view of HTML-only mail. Scripts and remote images never load.</p>
               <p>Search the cache with <kbd>/</kbd> or Gmail with <kbd>\</kbd>. Write drafts, replies and reply-all with attachments; create and edit contacts; archive, Trash, star and apply existing labels; answer invitations with an RSVP email. <code>$EDITOR</code> takes over the terminal to compose, then hands it back.</p>
+              <p>Compose Markdown source with a rendered outgoing preview, original reply context and a plain-text alternative. <kbd>Ctrl+T</kbd> changes format, normal compose <kbd>p</kbd> changes preview, and send review requires explicit <kbd>y</kbd>.</p>
               <p><a class="more" href="{{base}}docs/terminal/">Terminal guide <span aria-hidden="true">→</span></a></p>
             </div>
             <dl class="iface__access">
@@ -151,7 +152,7 @@
             </div>
             <div class="iface__body">
               <p>One-shot commands and a JSONL client on the same account-scoped executor as the TUI. Every request names its account, pages return up to 100 messages with explicit cursors, and cached and Gmail search stay distinct.</p>
-              <p>Sends and RSVPs record durable operation receipts. An unknown outcome is never retried automatically.</p>
+              <p>Sends and RSVPs record durable operation receipts. An unknown outcome is never retried automatically. Use <code>--format markdown|plain</code> and local <code>draft preview</code> for rendered HTML and plain alternatives.</p>
               <p><a class="more" href="{{base}}docs/agent-cli/">CLI contract <span aria-hidden="true">→</span></a></p>
             </div>
             <dl class="iface__access">

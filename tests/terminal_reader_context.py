@@ -85,7 +85,8 @@ def reader_case(binary, directory):
         destination = directory / "second received attachment.txt"
         click(terminal, *point(terminal, "reader-two.txt"))
         click(terminal, *point(terminal, "[s Save]"))
-        terminal.until(lambda: "Save to a new absolute path:" in terminal.text())
+        terminal.until(lambda: "Save attachment · new file" in terminal.text() and "Path:" in terminal.text()
+                       and "[Save]" in terminal.text())
         terminal.send(b"\x15" + str(destination).encode() + b"\r")
         terminal.until(lambda: destination.exists())
         require(destination.read_bytes() == SECOND, "click Save targeted the wrong received attachment")
@@ -93,7 +94,8 @@ def reader_case(binary, directory):
         terminal.send(b"B")
         terminal.until(lambda: "Received attachments" in terminal.text())
         terminal.send(b"jo")
-        terminal.until(lambda: "then open it:" in terminal.text())
+        terminal.until(lambda: "Save attachment · new file" in terminal.text() and "Path:" in terminal.text()
+                       and "[Save & open]" in terminal.text())
         opened = directory / "explicitly opened fixture.txt"
         terminal.send(b"\x15" + str(opened).encode() + b"\r")
         terminal.until(lambda: opened.exists() and "Attachment saved · mock file-open validated" in terminal.text())

@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, initial-scale=1">
+<title>Omagma v0.2.6 — Small eruptions, big ideas</title>
+<style>
+:root{
+  --orange:#ff9e61;
+  --molten:#ec7a35;
+  --navy:#0a0d14;
+  --ink:#fbf3ea;
+  --sans:"Adwaita Sans","Noto Color Emoji",sans-serif;
+  --mono:"JetBrainsMono Nerd Font","JetBrainsMono NF","JetBrainsMono Nerd Font Mono","JetBrains Mono",monospace;
+  --emoji:"Noto Color Emoji";
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;animation:none!important;transition:none!important;}
+html,body{width:1920px;height:1080px;overflow:hidden;background:#05070b;}
+#stage{position:fixed;left:0;top:0;width:1920px;height:1080px;overflow:hidden;background:var(--navy);color:var(--ink);
+  font-family:var(--sans);-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision;font-kerning:normal;}
+.L{position:absolute;left:0;top:0;}
+.full{width:1920px;height:1080px;}
+img{display:block;-webkit-user-drag:none;user-select:none;}
+.emoji{font-family:var(--emoji);font-weight:400;font-style:normal;letter-spacing:0;-webkit-text-fill-color:initial;}
+
+/* ---------- atmosphere ---------- */
+#bg{background:
+  radial-gradient(1100px 760px at 78% 16%,rgba(36,48,78,.50),rgba(10,13,20,0) 70%),
+  radial-gradient(900px 640px at 6% 104%,rgba(236,122,53,.13),rgba(10,13,20,0) 70%),
+  linear-gradient(180deg,#0c1019 0%,#0a0d14 54%,#080a10 100%);}
+#contours{left:-200px;top:-160px;width:2320px;height:1440px;opacity:.6;
+  background:repeating-radial-gradient(ellipse 120% 92% at 80% 104%,rgba(255,158,97,.055) 0 1.2px,rgba(255,158,97,0) 1.8px 36px);}
+#glow{left:-260px;top:600px;width:2440px;height:1180px;transform-origin:50% 50%;
+  background:radial-gradient(closest-side,rgba(255,142,76,.48) 0%,rgba(236,122,53,.22) 36%,rgba(236,122,53,.07) 66%,rgba(236,122,53,0) 100%);}
+#embers .e{position:absolute;left:0;top:0;border-radius:50%;
+  background:radial-gradient(circle,#fff3e4 0%,#ffb47e 30%,rgba(236,122,53,.5) 55%,rgba(236,122,53,0) 72%);}
+#flash{mix-blend-mode:screen;visibility:hidden;
+  background:radial-gradient(ellipse 72% 64% at 50% 62%,rgba(255,176,118,.9) 0%,rgba(236,122,53,.36) 44%,rgba(236,122,53,0) 76%);}
+#vignette{background:radial-gradient(ellipse 80% 74% at 50% 46%,rgba(0,0,0,0) 56%,rgba(2,3,6,.58) 100%);}
+#fade{background:#05070b;}
+
+/* ---------- screenshot frames (camera viewports over actual assets) ---------- */
+.frame{position:absolute;left:0;top:0;width:0;height:0;transform-origin:50% 50%;visibility:hidden;}
+.frame>.halo{position:absolute;inset:0;border-radius:22px;
+  box-shadow:0 44px 110px rgba(0,0,0,.6),0 0 0 1px rgba(255,158,97,.10),0 0 90px rgba(236,122,53,.20);}
+.frame>.clip{position:absolute;inset:0;border-radius:22px;overflow:hidden;background:#0a0d14;}
+.shot{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;max-height:none;}
+.frame>.shade{position:absolute;inset:0;border-radius:22px;
+  background:radial-gradient(ellipse 74% 70% at 50% 50%,rgba(0,0,0,0) 60%,rgba(4,6,10,.40) 100%);}
+.frame>.rim{position:absolute;inset:0;border-radius:22px;
+  box-shadow:inset 0 0 0 1px rgba(255,158,97,.30),inset 0 1px 0 rgba(255,255,255,.06);}
+#md-edge{width:4px;margin-left:-2px;border-radius:2px;visibility:hidden;
+  background:linear-gradient(180deg,rgba(255,158,97,0) 0%,#ffd6b3 18%,#ff9e61 50%,#ffd6b3 82%,rgba(255,158,97,0) 100%);
+  box-shadow:0 0 24px 7px rgba(236,122,53,.55);}
+
+/* ---------- decorative light browser frame (content = actual browser.png) ---------- */
+#bwin{position:absolute;left:580px;top:40px;width:1260px;height:1000px;transform-origin:50% 60%;visibility:hidden;}
+#bwin>.halo{position:absolute;inset:0;border-radius:20px;
+  box-shadow:0 60px 140px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.10),0 0 170px rgba(236,122,53,.32);}
+#bwin>.chrome{position:absolute;inset:0;border-radius:20px;overflow:hidden;background:#fffaf4;}
+#bbar{position:absolute;left:0;top:0;right:0;height:48px;background:linear-gradient(180deg,#f8f2eb,#efe7dd);
+  border-bottom:1px solid rgba(60,40,20,.10);}
+#bbar .dots{position:absolute;left:22px;top:17px;display:flex;gap:9px;}
+#bbar .dots i{display:block;width:14px;height:14px;border-radius:50%;}
+#bbar .dots i:nth-child(1){background:#ff9e61;}
+#bbar .dots i:nth-child(2){background:#f4c9a4;}
+#bbar .dots i:nth-child(3){background:#e3d7c9;}
+#bbar .tab{position:absolute;left:50%;top:0;height:48px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;
+  font-size:17px;font-weight:600;color:#5a4636;white-space:nowrap;letter-spacing:-.005em;}
+#bbar .tab img{height:20px;width:auto;}
+#bview{position:absolute;left:0;top:48px;right:0;bottom:0;overflow:hidden;background:#fffaf4;}
+
+/* ---------- captions ---------- */
+.cap{position:absolute;left:88px;top:352px;width:440px;visibility:hidden;}
+.cap .num{display:flex;align-items:center;gap:18px;height:30px;font-family:var(--mono);font-size:24px;font-weight:700;
+  letter-spacing:.08em;color:var(--orange);}
+.cap .rule{display:block;width:88px;height:2px;border-radius:1px;transform-origin:0 50%;
+  background:linear-gradient(90deg,#ff9e61,rgba(255,158,97,0));}
+.cap .title{margin-top:26px;font-size:62px;line-height:1.05;font-weight:800;letter-spacing:-.03em;color:var(--ink);}
+.cap .line{display:block;white-space:nowrap;}
+.cap .lw{display:inline-block;}
+.cap .w{display:inline-block;}
+.cap .hl{background:linear-gradient(180deg,#ffc49c 0%,#ff9e61 48%,#ec7a35 100%);-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent;padding-bottom:.08em;}
+.cap .subs{margin-top:42px;display:flex;flex-direction:column;gap:16px;}
+.cap .sub{display:flex;align-items:center;gap:16px;font-size:28px;font-weight:600;color:#efe3d6;letter-spacing:-.01em;}
+.cap .plus{display:inline-flex;justify-content:center;width:48px;color:var(--orange);font-weight:800;font-size:32px;}
+.key{display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:12px;
+  border:2px solid #ff9e61;background:rgba(255,158,97,.10);font-family:var(--mono);font-size:27px;font-weight:800;
+  color:#ffb27c;line-height:1;box-shadow:0 4px 0 rgba(236,122,53,.55);}
+
+/* ---------- corner bug ---------- */
+#bug{left:88px;top:958px;display:flex;align-items:center;gap:14px;visibility:hidden;}
+#bug img{height:48px;width:auto;}
+#bug .name{font-size:28px;font-weight:800;letter-spacing:-.02em;}
+#bug .ver{font-family:var(--mono);font-size:19px;font-weight:700;color:var(--orange);padding:4px 10px;
+  border:1.5px solid rgba(255,158,97,.55);border-radius:8px;}
+
+/* ---------- opening lockup ---------- */
+#lk-row{position:absolute;left:0;top:0;width:1920px;height:1080px;display:flex;align-items:center;justify-content:center;gap:46px;}
+#lk-logo-wrap{position:relative;}
+#lk-halo{position:absolute;left:50%;top:50%;width:560px;height:560px;margin:-280px 0 0 -280px;border-radius:50%;
+  background:radial-gradient(closest-side,rgba(255,150,86,.42),rgba(236,122,53,.12) 55%,rgba(236,122,53,0));}
+#lk-logo{position:relative;height:200px;width:auto;}
+#lk-text{display:flex;flex-direction:column;gap:20px;}
+#lk-word{font-size:156px;line-height:.92;font-weight:800;letter-spacing:-.045em;}
+#lk-meta{display:flex;align-items:center;gap:18px;}
+.pill{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--orange);padding:6px 16px;
+  border:2px solid rgba(255,158,97,.6);border-radius:12px;background:rgba(255,158,97,.08);}
+#lk-meta .muted{font-size:30px;font-weight:500;color:#aab2c3;}
+
+/* ---------- outro ---------- */
+#outro{visibility:hidden;}
+#o-logo-pos{position:absolute;left:960px;top:366px;width:0;height:0;}
+#o-logo-anim{position:absolute;left:0;top:0;width:0;height:0;transform-origin:0 0;}
+#o-logo{position:absolute;left:0;top:0;height:250px;width:auto;transform:translate(-50%,-50%);}
+#o-halo{position:absolute;left:-340px;top:-340px;width:680px;height:680px;border-radius:50%;
+  background:radial-gradient(closest-side,rgba(255,150,86,.55),rgba(236,122,53,.18) 50%,rgba(236,122,53,0));}
+.ring{position:absolute;left:-170px;top:-170px;width:340px;height:340px;border-radius:50%;
+  border:3px solid rgba(255,158,97,.9);box-shadow:0 0 40px rgba(236,122,53,.6),inset 0 0 30px rgba(236,122,53,.35);}
+#o-title{position:absolute;left:0;top:548px;width:1920px;text-align:center;font-size:112px;line-height:1;font-weight:800;letter-spacing:-.04em;}
+#o-title .v{font-weight:300;color:var(--orange);letter-spacing:-.02em;margin-left:.22em;}
+#o-pill-row{position:absolute;left:0;top:692px;width:1920px;display:flex;justify-content:center;}
+#o-pill{font-family:var(--mono);font-size:22px;font-weight:700;letter-spacing:.24em;text-transform:uppercase;color:var(--orange);
+  padding:9px 20px 9px 26px;border:2px solid rgba(255,158,97,.6);border-radius:999px;background:rgba(255,158,97,.06);}
+#o-next{position:absolute;left:0;top:782px;width:1920px;text-align:center;font-size:34px;font-weight:600;color:#e8dccf;}
+#o-next .dot{margin:0 .55em;color:var(--orange);}
+#o-next .repo{font-family:var(--mono);font-size:31px;color:#ffb27c;font-weight:600;}
+/* Requested release quality-of-life recap; editorial text, no fabricated UI. */
+#qol{visibility:hidden;background:radial-gradient(ellipse 90% 90% at 75% 40%,rgba(10,13,20,.90),rgba(10,13,20,.96));}
+#q-kicker{position:absolute;left:185px;top:145px;display:flex;align-items:center;gap:18px;font-family:var(--mono);font-size:24px;font-weight:700;letter-spacing:.08em;color:var(--orange);}
+#q-kicker i{display:block;width:88px;height:2px;background:linear-gradient(90deg,#ff9e61,transparent);}
+#q-title{position:absolute;left:185px;top:214px;font-size:76px;line-height:1.10;font-weight:800;letter-spacing:-.035em;}
+#q-title .warm{color:var(--orange);}
+#q-list{position:absolute;left:185px;top:370px;display:flex;flex-direction:column;gap:35px;}
+.q-row{display:flex;align-items:center;gap:26px;font-size:39px;line-height:1.28;font-weight:550;letter-spacing:-.012em;}
+.q-row .q-bullet{display:block;width:11px;height:11px;flex:0 0 11px;border-radius:50%;background:var(--orange);box-shadow:0 0 22px rgba(236,122,53,.4);}
+.q-row .shortcut{color:#ffc49c;font-family:var(--mono);font-size:35px;}
+</style>
+</head>
+<body>
+<div id="stage" aria-hidden="true">
+  <div id="bg" class="L full"></div>
+  <div id="contours" class="L"></div>
+  <div id="glow" class="L"></div>
+  <div id="embers" class="L full"></div>
+
+  <!-- 01 · actual TUI notification -->
+  <div id="f-notif" class="frame">
+    <div class="halo"></div>
+    <div class="clip"><img id="im-notif" class="shot" src="/video/cache/short026/assets/notification-detail.png" alt=""></div>
+    <div class="shade"></div><div class="rim"></div>
+  </div>
+  <!-- 02a · actual native file browser -->
+  <div id="f-picker" class="frame">
+    <div class="halo"></div>
+    <div class="clip"><img id="im-picker" class="shot" src="/video/cache/short026/assets/picker-detail.png" alt=""></div>
+    <div class="shade"></div><div class="rim"></div>
+  </div>
+  <!-- 02b · actual composer with attachment -->
+  <div id="f-attached" class="frame">
+    <div class="halo"></div>
+    <div class="clip"><img id="im-attached" class="shot" src="/video/cache/short026/assets/attached.png" alt=""></div>
+    <div class="shade"></div><div class="rim"></div>
+  </div>
+  <!-- 03 · actual Markdown source + outgoing preview -->
+  <div id="f-md" class="frame">
+    <div class="halo"></div>
+    <div class="clip"><img id="im-md" class="shot" src="/video/cache/short026/assets/composer.png" alt=""></div>
+    <div class="shade"></div><div class="rim"></div>
+  </div>
+  <div id="md-edge" class="L"></div>
+
+  <!-- 04 · actual HTML mail, light browser render (decorative frame only) -->
+  <div id="bwin">
+    <div class="halo"></div>
+    <div class="chrome">
+      <div id="bbar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div class="tab"><img src="/video/cache/short026/assets/logo.png" alt=""><span>Small eruptions, big ideas <span class="emoji">🌋</span></span></div>
+      </div>
+      <div id="bview"><img id="im-browser" class="shot" src="/video/cache/short026/assets/browser.png" alt=""></div>
+    </div>
+  </div>
+
+  <div id="caps" class="L full"></div>
+
+  <div id="qol" class="L full">
+    <div id="q-kicker"><span>05</span><i></i></div>
+    <div id="q-title">Small fixes. <span class="warm">Smoother flow.</span></div>
+    <div id="q-list">
+      <div class="q-row"><i class="q-bullet"></i><span>Replies start above quotes · <span class="shortcut">Ctrl+G</span> jumps to body top</span></div>
+      <div class="q-row"><i class="q-bullet"></i><span>Reliable forwards · decimal attachment sizes</span></div>
+      <div class="q-row"><i class="q-bullet"></i><span>Tab &amp; mouse polish · <span class="shortcut">Ctrl+F</span> completion</span></div>
+      <div class="q-row"><i class="q-bullet"></i><span>Calendar replies · clean text &amp; umlauts</span></div>
+      <div class="q-row"><i class="q-bullet"></i><span>Gmail open · clearer help, errors &amp; aliases</span></div>
+    </div>
+  </div>
+
+  <div id="bug" class="L"><img id="bug-logo" src="/video/cache/short026/assets/logo.png" alt=""><span class="name">Omagma</span><span class="ver">v0.2.6</span></div>
+
+  <div id="lockup" class="L full">
+    <div id="lk-row">
+      <div id="lk-logo-wrap"><div id="lk-halo"></div><img id="lk-logo" src="/video/cache/short026/assets/logo.png" alt=""></div>
+      <div id="lk-text">
+        <div id="lk-word">Omagma</div>
+        <div id="lk-meta"><span class="pill">v0.2.6</span><span class="muted">what’s new</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="outro" class="L full">
+    <div id="o-logo-pos">
+      <div class="ring" id="o-ring1"></div>
+      <div class="ring" id="o-ring2"></div>
+      <div id="o-logo-anim"><div id="o-halo"></div><img id="o-logo" src="/video/cache/short026/assets/logo.png" alt=""></div>
+    </div>
+    <div id="o-title">Omagma<span class="v">v0.2.6</span></div>
+    <div id="o-pill-row"><span id="o-pill">experimental</span></div>
+    <div id="o-next">Out now<span class="dot">·</span><span class="repo">github.com/technologylab-ai/omagma</span></div>
+  </div>
+
+  <div id="flash" class="L full"></div>
+  <div id="vignette" class="L full"></div>
+  <div id="fade" class="L full"></div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* =============================== FILM ================================= */
+const DUR = 31.7333333333;
+window.FILM = { duration: DUR, fps: 30, width: 1920, height: 1080 };
+
+/* Measured music landmarks, film seconds (source = film + 158.226667). */
+const M = Object.freeze({ roll: 5.1023, drop: 9.3753, shift: 19.3593, last: 26.4653, stop: 28.8933 });
+
+/* ============================ CROP CONTRACT ============================
+   Normalized boxes [u0, v0, u1, v1] on the FULL actual screenshot
+   (u = x / imageWidth, v = y / imageHeight). Measure on the real PNGs
+   and edit here; the camera fits each box (plus pad) into its viewport. */
+const CROP = {
+  notifCard:      [0, 0, 1, 1], // exact actual 54x4 card crop, no surrounding partial text
+  pickerModal:    [0, 0, 1, 1], // exact actual 92x12 modal crop
+  attachedFocus:  [0.006, 0.790, 0.595, 0.937], // actual bottom-left attachment count/file row
+  mdSourceTop:    [0.006, 0.242, 0.595, 0.493], // actual raw heading, three bullets and table
+  mdSourceBottom: [0.006, 0.470, 0.595, 0.785], // actual Python/Zig source + literal inline code
+  mdPreview:      [0.607, 0.080, 0.997, 0.795], // actual outgoing preview incl. link/footer
+};
+/* Browser camera: w = visible fraction of image width (0.60 ≈ 864 CSS px of 1440),
+   codeCy = vertical center of the Python+Zig pair / image height. cy 0 = top, 1 = bottom. */
+const BROWSER = { w: 1.00, cx: 0.50, codeCy: 0.65 }; // measured tight actual mail crop: 728x659 CSS px
+
+const TUI_REGION = { x: 580, y: 96, w: 1260, h: 888 };
+const BWIN = { x: 580, y: 40, w: 1260, h: 1000, bar: 48 };
+
+const CAPS = [
+  { num: '01', lines: ['New mail,', 'at a glance.'], hl: ['glance'], tin: 1.38, tout: 4.25 },
+  { num: '02', lines: ['Native file', 'browser for', 'attachments.'], hl: ['file', 'browser'], tin: 4.78, tout: 10.30 },
+  { num: '03', lines: ['Write in', 'Markdown.'], hl: ['Markdown'], tin: 10.88, tout: 13.95 },
+  { num: '04', lines: ['Sent as', 'gorgeous', 'HTML.'], hl: ['HTML'], tin: 14.50, tout: 21.15,
+    subs: [
+      { tin: 15.70, html: '<span class="key">o</span><span>Open mail in Gmail</span>' },
+      { tin: 19.95, html: '<span class="plus">+</span><span>a tiny new footer <span class="emoji">🌋</span></span>' },
+    ] },
+];
+
+/* =============================== MATH ================================= */
+const clamp = (x, a = 0, b = 1) => (x < a ? a : x > b ? b : x);
+const lerp = (a, b, p) => a + (b - a) * p;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const E = {
+  lin: p => p,
+  out: p => 1 - Math.pow(1 - p, 3),
+  outQuint: p => 1 - Math.pow(1 - p, 5),
+  in: p => p * p * p,
+  io: p => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2),
+  ioSine: p => -(Math.cos(Math.PI * p) - 1) / 2,
+};
+const ease = (t, a, b, e = 'out') => E[e](prog(t, a, b));
+const pulse = (t, at, atk, dec) => (t < at - atk ? 0 : t < at ? (t - at + atk) / atk : Math.exp(-(t - at) / dec));
+const fx = (x, d = 3) => x.toFixed(d);
+
+/* =============================== DOM ================================== */
+const $ = id => document.getElementById(id);
+const EL = {
+  contours: $('contours'), glow: $('glow'), flash: $('flash'), vignette: $('vignette'), fade: $('fade'),
+  qol: $('qol'), qKicker: $('q-kicker'), qTitle: $('q-title'), qRows: Array.from(document.querySelectorAll('.q-row')),
+  caps: $('caps'), bug: $('bug'), bugLogo: $('bug-logo'),
+  lockup: $('lockup'), lkRow: $('lk-row'), lkLogoWrap: $('lk-logo-wrap'), lkLogo: $('lk-logo'), lkHalo: $('lk-halo'),
+  lkWord: $('lk-word'), lkMeta: $('lk-meta'),
+  outro: $('outro'), oLogoAnim: $('o-logo-anim'), oHalo: $('o-halo'), oRing1: $('o-ring1'), oRing2: $('o-ring2'),
+  oTitle: $('o-title'), oPill: $('o-pill-row'), oNext: $('o-next'), mdEdge: $('md-edge'), embers: $('embers'),
+};
+const SHOTS = [
+  { id: 'notification', src: '/video/cache/short026/assets/notification-detail.png', frame: $('f-notif'), img: $('im-notif') },
+  { id: 'picker', src: '/video/cache/short026/assets/picker-detail.png', frame: $('f-picker'), img: $('im-picker') },
+  { id: 'attached', src: '/video/cache/short026/assets/attached.png', frame: $('f-attached'), img: $('im-attached') },
+  { id: 'composer', src: '/video/cache/short026/assets/composer.png', frame: $('f-md'), img: $('im-md') },
+  { id: 'browser', src: '/video/cache/short026/assets/browser.png', frame: $('bwin'), img: $('im-browser') },
+];
+const SHOT = {};
+for (const s of SHOTS) {
+  s.halo = s.frame.querySelector(':scope > .halo');
+  s.clip = s.frame.querySelector(':scope > .clip');
+  s.shade = s.frame.querySelector(':scope > .shade');
+  s.rim = s.frame.querySelector(':scope > .rim');
+  SHOT[s.id] = s;
+}
+
+function setLayer(el, op, tf) {
+  if (op <= 0.001) { el.style.visibility = 'hidden'; el.style.opacity = '0'; }
+  else { el.style.visibility = 'visible'; el.style.opacity = op >= 0.999 ? '1' : fx(op, 4); }
+  if (tf !== undefined) el.style.transform = tf;
+}
+
+/* ---- captions ---- */
+for (const c of CAPS) {
+  const el = document.createElement('div'); el.className = 'cap';
+  const num = document.createElement('div'); num.className = 'num';
+  const nt = document.createElement('span'); nt.textContent = c.num;
+  const rule = document.createElement('span'); rule.className = 'rule';
+  num.append(nt, rule);
+  const title = document.createElement('div'); title.className = 'title';
+  c.words = []; c.lineEls = [];
+  for (const line of c.lines) {
+    const ln = document.createElement('div'); ln.className = 'line';
+    const lw = document.createElement('span'); lw.className = 'lw';
+    line.split(' ').forEach((tok, j) => {
+      if (j) lw.appendChild(document.createTextNode(' '));
+      const w = document.createElement('span'); w.className = 'w';
+      const m = /^(.*?)([.,!?:;]*)$/.exec(tok);
+      if (c.hl.includes(m[1])) {
+        const h = document.createElement('span'); h.className = 'hl'; h.textContent = m[1]; w.appendChild(h);
+        if (m[2]) w.appendChild(document.createTextNode(m[2]));
+      } else w.textContent = tok;
+      lw.appendChild(w); c.words.push(w);
+    });
+    ln.appendChild(lw); title.appendChild(ln); c.lineEls.push(lw);
+  }
+  el.append(num, title);
+  c.subEls = [];
+  if (c.subs) {
+    const box = document.createElement('div'); box.className = 'subs';
+    for (const s of c.subs) {
+      const se = document.createElement('div'); se.className = 'sub'; se.innerHTML = s.html;
+      box.appendChild(se); c.subEls.push({ el: se, key: se.querySelector('.key'), tin: s.tin });
+    }
+    el.appendChild(box);
+  }
+  c.el = el; c.numEl = num; c.ruleEl = rule; c.titleEl = title;
+  EL.caps.appendChild(el);
+}
+
+/* ---- embers (seeded, deterministic) ---- */
+const rnd = (() => { let a = 0x0526C0DE; return () => { a |= 0; a = (a + 0x6D2B79F5) | 0;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })();
+const EMBERS = [];
+for (let i = 0; i < 54; i++) {
+  const el = document.createElement('div'); el.className = 'e';
+  const r = rnd(), size = 3 + r * r * 13;
+  const d = { el, x: rnd() * 1920, ph: rnd(), sp: 22 + rnd() * 64, amp: 6 + rnd() * 26, fr: 0.25 + rnd() * 0.7,
+              fp: rnd() * 6.2832, fl: 1.2 + rnd() * 3.2, flp: rnd() * 6.2832, depth: 0.45 + 0.55 * rnd() };
+  el.style.width = el.style.height = fx(size, 2) + 'px';
+  EL.embers.appendChild(el); EMBERS.push(d);
+}
+const SPAN = 1260;
+function applyEmbers(t, intensity) {
+  const T = t + 1.25 * Math.max(0, t - 28.5); // monotonic warp: embers accelerate in the outro
+  for (const d of EMBERS) {
+    const travel = (d.ph * SPAN + d.sp * (0.6 + 0.4 * d.depth) * T) % SPAN;
+    const life = travel / SPAN;
+    const y = 1110 - travel;
+    const x = d.x + d.amp * Math.sin(d.fr * T + d.fp);
+    const flick = 0.72 + 0.28 * Math.sin(d.fl * t + d.flp);
+    const op = intensity * d.depth * flick * Math.pow(Math.sin(Math.PI * life), 0.9);
+    d.el.style.opacity = fx(clamp(op), 3);
+    d.el.style.transform = `translate3d(${fx(x, 1)}px,${fx(y, 1)}px,0)`;
+  }
+}
+
+/* ============================== CAMERA ================================ */
+function buildKeys() {
+  const C = CROP, B = BROWSER, card = C.notifCard;
+  const ccx = (card[0] + card[2]) / 2, ccy = (card[1] + card[3]) / 2;
+  return {
+    notification: [
+      { t: 1.00, w: 1 },
+      { t: 4.85, w: 1, e: 'lin' },
+    ],
+    picker: [
+      { t: 4.52, w: 1 },
+      { t: M.drop, w: 1, e: 'lin' },
+    ],
+    attached: [
+      { t: M.drop, w: 1 },
+      { t: 9.85, box: C.attachedFocus, pad: 0.05, e: 'io' },
+      { t: 10.88, box: C.attachedFocus, pad: 0.05, e: 'lin' },
+    ],
+    composer: [
+      { t: 10.50, w: 1 },
+      { t: 11.25, box: C.mdSourceTop, pad: 0.03, e: 'io' },
+      { t: 12.10, box: C.mdSourceBottom, pad: 0.03, e: 'io' },
+      { t: 12.65, box: C.mdSourceBottom, pad: 0.03, e: 'lin' },
+      { t: 13.45, box: C.mdPreview, pad: 0.03, e: 'io' },
+      { t: 14.45, box: C.mdPreview, pad: 0.03, e: 'lin' },
+    ],
+    browser: [
+      { t: 13.90, cx: B.cx, cy: 0, w: B.w * 1.10 },
+      { t: 14.55, cx: B.cx, cy: 0, w: B.w, e: 'out' },
+      { t: 16.80, cx: B.cx, cy: 0, w: B.w * 0.975, e: 'lin' },
+      { t: 17.55, cx: B.cx, cy: B.codeCy, w: B.w * 0.975, e: 'io' },
+      { t: 19.55, cx: B.cx, cy: B.codeCy, w: B.w * 0.95, e: 'lin' },
+      { t: 19.95, cx: B.cx, cy: 1, w: B.w * 0.95, e: 'io' },
+      { t: 22.05, cx: B.cx, cy: 1, w: B.w * 0.925, e: 'lin' },
+    ],
+  };
+}
+function clampCam(c, sh) {
+  const s = Math.max(c.s, sh.sMin); // never reveal outside the actual image
+  const vw = sh.Vw / s, vh = sh.Vh / s;
+  const cx = vw >= sh.W ? sh.W / 2 : clamp(c.cx, vw / 2, sh.W - vw / 2);
+  const cy = vh >= sh.H ? sh.H / 2 : clamp(c.cy, vh / 2, sh.H - vh / 2);
+  return { s, cx, cy };
+}
+function resolveKey(k, sh) {
+  const { W, H, Vw, Vh } = sh;
+  let s, cx, cy;
+  if (k.box) {
+    const [u0, v0, u1, v1] = k.box, pad = k.pad == null ? 0.05 : k.pad;
+    const bw = Math.max(1e-3, u1 - u0) * W, bh = Math.max(1e-3, v1 - v0) * H;
+    s = Math.min(Vw / bw, Vh / bh) / (1 + 2 * pad);
+    cx = (u0 + u1) / 2 * W; cy = (v0 + v1) / 2 * H;
+  } else {
+    s = Vw / ((k.w == null ? 1 : k.w) * W);
+    cx = (k.cx == null ? 0.5 : k.cx) * W; cy = (k.cy == null ? 0.5 : k.cy) * H;
+  }
+  if (k.zoom) s *= k.zoom;
+  return clampCam({ s, cx, cy }, sh);
+}
+function interpCam(A, B, p, sh) {
+  const s = Math.exp(lerp(Math.log(A.s), Math.log(B.s), p));
+  let cx = lerp(A.cx, B.cx, p), cy = lerp(A.cy, B.cy, p);
+  if (Math.abs(Math.log(B.s / A.s)) > 0.03) { // zoom about the stationary point when it lies on the image
+    const fX = (A.cx * A.s - B.cx * B.s) / (A.s - B.s), fY = (A.cy * A.s - B.cy * B.s) / (A.s - B.s);
+    if (fX > -0.15 * sh.W && fX < 1.15 * sh.W && fY > -0.15 * sh.H && fY < 1.15 * sh.H) {
+      cx = fX - (fX - A.cx) * A.s / s; cy = fY - (fY - A.cy) * A.s / s;
+    }
+  }
+  return clampCam({ s, cx, cy }, sh);
+}
+function camAt(sh, t) {
+  const K = sh.keys, R = sh.res;
+  if (t <= K[0].t) return R[0];
+  for (let i = 0; i < K.length - 1; i++) {
+    const b = K[i + 1];
+    if (t < b.t) { const a = K[i]; return interpCam(R[i], R[i + 1], E[b.e || 'io'](clamp((t - a.t) / (b.t - a.t))), sh); }
+  }
+  return R[R.length - 1];
+}
+
+/* ============================== LAYOUT ================================ */
+let FONTS_OK = false, LAYOUT = null;
+function fitRect(aspect, R) {
+  let w = R.w, h = w / aspect;
+  if (h > R.h) { h = R.h; w = h * aspect; }
+  return { x: R.x + (R.w - w) / 2, y: R.y + (R.h - h) / 2, w, h };
+}
+function fitCaptions() {
+  const MAXW = 440;
+  for (const c of CAPS) {
+    let fs = 62; c.titleEl.style.fontSize = fs + 'px';
+    while (fs > 40 && Math.max(...c.lineEls.map(l => l.offsetWidth)) > MAXW) { fs -= 2; c.titleEl.style.fontSize = fs + 'px'; }
+  }
+}
+function buildLayout() {
+  const L = { shots: {}, morph: null };
+  const keys = buildKeys();
+  for (const s of SHOTS) {
+    const W = s.img.naturalWidth, H = s.img.naturalHeight;
+    if (!(W > 0 && H > 0)) return null;
+    let rect, Vw, Vh;
+    if (s.id === 'browser') { rect = { x: BWIN.x, y: BWIN.y, w: BWIN.w, h: BWIN.h }; Vw = BWIN.w; Vh = BWIN.h - BWIN.bar; }
+    else {
+      rect = fitRect(W / H, TUI_REGION); Vw = rect.w; Vh = rect.h;
+      Object.assign(s.frame.style, { left: rect.x + 'px', top: rect.y + 'px', width: rect.w + 'px', height: rect.h + 'px' });
+    }
+    s.img.style.width = W + 'px'; s.img.style.height = H + 'px'; // natural size, uniform scale only
+    const sh = { W, H, Vw, Vh, rect, sMin: Math.max(Vw / W, Vh / H), keys: keys[s.id] };
+    sh.res = sh.keys.map(k => resolveKey(k, sh));
+    L.shots[s.id] = sh;
+  }
+  const md = L.shots.composer.rect;
+  Object.assign(EL.mdEdge.style, { left: md.x + 'px', top: md.y + 'px', height: md.h + 'px' });
+  fitCaptions();
+  EL.lkRow.style.transform = 'none'; EL.lkLogoWrap.style.transform = 'none'; EL.bug.style.transform = 'none';
+  const a = EL.lkLogo.getBoundingClientRect(), b = EL.bugLogo.getBoundingClientRect();
+  if (a.height > 0 && b.height > 0) {
+    const ox = a.left + a.width / 2, oy = a.top + a.height / 2;
+    L.morph = { ox, oy, dx: b.left + b.width / 2 - ox, dy: b.top + b.height / 2 - oy, k: b.height / a.height };
+  }
+  return L;
+}
+
+/* =============================== STATE ================================ */
+function ring(t, at, dur, amp) {
+  if (t < at) return { op: 0, sc: 0.62 };
+  const k = prog(t, at, at + dur);
+  return { op: amp * Math.pow(1 - k, 1.6), sc: lerp(0.62, 2.7, E.out(k)) };
+}
+function state(t) {
+  const S = {};
+  S.fade = Math.max(1 - ease(t, 0, 0.34, 'out'), ease(t, 31.12, DUR, 'ioSine'));
+  S.flash = 0.10 * pulse(t, M.roll, 0.05, 0.30) + 0.46 * pulse(t, M.drop, 0.06, 0.42) +
+            0.08 * pulse(t, M.shift, 0.05, 0.40) + 0.12 * pulse(t, M.last, 0.05, 0.45) +
+            0.50 * pulse(t, M.stop, 0.06, 0.55);
+  const build = ease(t, M.roll, M.drop, 'in') * (1 - ease(t, M.drop, M.drop + 1.8, 'out'));
+  const bro = ease(t, 13.9, 14.8, 'out') * (1 - ease(t, 21.4, 22.05, 'io'));
+  const warm = ease(t, 28.2, M.stop, 'out');
+  const open = 1 - ease(t, 0.9, 1.9, 'io');
+  S.glowOp = clamp(0.56 + 0.26 * open + 0.22 * build + 0.24 * bro + 0.40 * warm + 0.5 * S.flash);
+  S.glowSc = 1 + 0.03 * Math.sin(t * 0.62) + 0.07 * build + 0.10 * warm + 0.05 * S.flash;
+  S.embers = clamp(0.9 * open + 0.55 * (1 - open) * (1 - bro) * (1 - warm) + 0.38 * bro + warm);
+  S.vignette = 1 - 0.45 * bro;
+
+  S.lock = { op: 1 - ease(t, 1.10, 1.46, 'in'), morph: ease(t, 0.98, 1.46, 'io'),
+             logo: ease(t, 0.06, 0.62, 'out'), word: ease(t, 0.22, 0.80, 'out'), meta: ease(t, 0.42, 0.92, 'out') };
+  S.bug = ease(t, 1.22, 1.58, 'out') * (1 - ease(t, 27.85, 28.25, 'io'));
+
+  const nIn = ease(t, 1.00, 1.62, 'out'), nOut = ease(t, 4.40, 4.85, 'io');
+  S.notif = { op: nIn * (1 - nOut), ty: (1 - nIn) * 46, sc: lerp(0.965, 1, nIn) * lerp(1, 1.05, nOut) };
+
+  const pIn = ease(t, 4.52, 5.05, 'out');
+  S.picker = { op: t < M.drop ? pIn : 0, ty: (1 - pIn) * 34, sc: lerp(0.955, 1, pIn) };
+
+  const aOut = ease(t, 10.42, 10.88, 'io');
+  const punch = t >= M.drop ? 1 + 0.045 * Math.pow(1 - prog(t, M.drop, M.drop + 0.5), 3) : 1;
+  S.attached = { op: t >= M.drop ? 1 - aOut : 0, tx: -70 * aOut, sc: punch * lerp(1, 0.985, aOut) };
+
+  const mOut = ease(t, 13.90, 14.45, 'io');
+  S.md = { op: t >= 10.50 ? 1 - mOut : 0, wipe: ease(t, 10.50, 11.08, 'io'), ty: -46 * mOut, sc: lerp(1, 0.965, mOut) };
+
+  const bIn = ease(t, 13.90, 14.80, 'out'), bOp = ease(t, 13.90, 14.40, 'out'), bOut = ease(t, 21.40, 22.05, 'in');
+  S.browser = { op: bOp * (1 - bOut), ty: (1 - bIn) * 180 + bOut * 90, sc: lerp(0.955, 1, bIn) * lerp(1, 0.92, bOut) };
+
+  S.qol = { op: ease(t, 21.40, 21.95, 'out') * (1 - ease(t, 28.05, 28.55, 'in')), title: ease(t, 21.50, 22.10, 'out') };
+
+  const rise = ease(t, 28.28, M.stop, 'out');
+  S.outro = {
+    vis: t >= 28.25 ? 1 : 0,
+    logoOp: ease(t, 28.28, 28.62, 'out'),
+    logoTy: (1 - rise) * 140,
+    logoSc: lerp(0.8, 1, rise) * (1 + 0.065 * pulse(t, M.stop, 0.05, 0.22)),
+    haloOp: rise * (0.7 + 0.3 * pulse(t, M.stop, 0.05, 0.6)),
+    ring1: ring(t, M.stop, 1.15, 0.75),
+    ring2: ring(t, M.stop + 0.16, 1.30, 0.40),
+    title: ease(t, 28.98, 29.46, 'out'),
+    pill: ease(t, 29.18, 29.62, 'out'),
+    next: ease(t, 29.36, 29.84, 'out'),
+  };
+  return S;
+}
+
+/* =============================== APPLY ================================ */
+function applyShot(id, t, op, tf) {
+  const s = SHOT[id];
+  setLayer(s.frame, op, tf);
+  const sh = LAYOUT && LAYOUT.shots[id];
+  if (!sh) return null;
+  const cam = camAt(sh, t);
+  const tx = sh.Vw / 2 - cam.cx * cam.s, ty = sh.Vh / 2 - cam.cy * cam.s;
+  s.img.style.transform = `translate(${fx(tx)}px,${fx(ty)}px) scale(${fx(cam.s, 6)})`;
+  if (s.shade) s.shade.style.opacity = fx(0.25 + 0.75 * clamp((cam.s / sh.sMin - 1) / 0.7));
+  return cam;
+}
+function applyCaps(t) {
+  for (const c of CAPS) {
+    setLayer(c.el, t >= c.tin - 0.14 && t < c.tout + 0.40 ? 1 : 0);
+    const out = ease(t, c.tout, c.tout + 0.36, 'in');
+    const n = ease(t, c.tin - 0.12, c.tin + 0.30, 'out');
+    c.numEl.style.opacity = fx(n * (1 - out), 4);
+    c.numEl.style.transform = `translateY(${fx((1 - n) * 14 - out * 10, 2)}px)`;
+    c.ruleEl.style.transform = `scaleX(${fx(ease(t, c.tin, c.tin + 0.6, 'out'), 4)})`;
+    c.words.forEach((w, i) => {
+      const a = c.tin + i * 0.06, p = ease(t, a, a + 0.55, 'outQuint');
+      w.style.opacity = fx(p * (1 - out), 4);
+      w.style.transform = `translateY(${fx((1 - p) * 38 - out * 16, 2)}px)`;
+    });
+    for (const s of c.subEls) {
+      const p = ease(t, s.tin, s.tin + 0.45, 'out');
+      s.el.style.opacity = fx(p * (1 - out), 4);
+      s.el.style.transform = `translateY(${fx((1 - p) * 18 - out * 10, 2)}px)`;
+      if (s.key) {
+        // Editorial shortcut hint; no unrecorded keypress is depicted.
+        s.key.style.transform = 'none';
+        s.key.style.boxShadow = '0 4px 0 rgba(236,122,53,.55)';
+        s.key.style.background = 'rgba(255,158,97,.10)';
+      }
+    }
+  }
+}
+function fadeUp(el, p, dist) {
+  el.style.opacity = fx(p, 4);
+  el.style.transform = `translateY(${fx((1 - p) * dist, 2)}px)`;
+}
+
+function render(tIn) {
+  let t = +tIn; if (!Number.isFinite(t)) t = 0; t = clamp(t, 0, DUR);
+  if (!LAYOUT && FONTS_OK) LAYOUT = buildLayout();
+  const S = state(t);
+
+  EL.contours.style.transform = `translate(${fx(-t * 3, 2)}px,${fx(-t * 5, 2)}px)`;
+  EL.glow.style.opacity = fx(S.glowOp, 4);
+  EL.glow.style.transform = `scale(${fx(S.glowSc, 5)})`;
+  applyEmbers(t, S.embers);
+
+  // opening lockup → corner bug morph
+  const lk = S.lock, mo = LAYOUT && LAYOUT.morph;
+  setLayer(EL.lockup, lk.op);
+  if (mo) {
+    EL.lkRow.style.transformOrigin = `${fx(mo.ox, 2)}px ${fx(mo.oy, 2)}px`;
+    EL.lkRow.style.transform = `translate(${fx(mo.dx * lk.morph, 2)}px,${fx(mo.dy * lk.morph, 2)}px) scale(${fx(lerp(1, mo.k, lk.morph), 5)})`;
+  } else EL.lkRow.style.transform = 'none';
+  EL.lkLogoWrap.style.opacity = fx(lk.logo, 4);
+  EL.lkLogoWrap.style.transform = `scale(${fx(lerp(0.84, 1, lk.logo), 5)})`;
+  EL.lkHalo.style.opacity = fx(0.9 + 0.1 * Math.sin(t * 5), 4);
+  EL.lkWord.style.opacity = fx(lk.word, 4);
+  EL.lkWord.style.transform = `translateX(${fx((1 - lk.word) * -34, 2)}px)`;
+  EL.lkMeta.style.opacity = fx(lk.meta, 4);
+  EL.lkMeta.style.transform = `translateY(${fx((1 - lk.meta) * 16, 2)}px)`;
+  setLayer(EL.bug, S.bug);
+
+  // feature shots (actual screenshots only)
+  applyShot('notification', t, S.notif.op, `translate(0px,${fx(S.notif.ty, 2)}px) scale(${fx(S.notif.sc, 5)})`);
+  applyShot('picker', t, S.picker.op, `translate(0px,${fx(S.picker.ty, 2)}px) scale(${fx(S.picker.sc, 5)})`);
+  applyShot('attached', t, S.attached.op, `translate(${fx(S.attached.tx, 2)}px,0px) scale(${fx(S.attached.sc, 5)})`);
+  applyShot('composer', t, S.md.op, `translate(0px,${fx(S.md.ty, 2)}px) scale(${fx(S.md.sc, 5)})`);
+  const md = SHOT.composer, w = S.md.wipe;
+  const cp = w >= 1 ? 'none' : `inset(0 ${fx((1 - w) * 100)}% 0 0 round 22px)`;
+  md.clip.style.clipPath = cp; md.shade.style.clipPath = cp; md.rim.style.clipPath = cp;
+  md.halo.style.opacity = fx(w, 4);
+  const mdW = LAYOUT ? LAYOUT.shots.composer.rect.w : 0;
+  setLayer(EL.mdEdge, w > 0 && w < 1 ? Math.sin(Math.PI * w) : 0, `translateX(${fx(mdW * w, 2)}px)`);
+  applyShot('browser', t, S.browser.op, `translate(0px,${fx(S.browser.ty, 2)}px) scale(${fx(S.browser.sc, 5)})`);
+
+  applyCaps(t);
+
+  // Requested editorial improvements: absolute-time stagger, no CSS timers.
+  setLayer(EL.qol, S.qol.op);
+  fadeUp(EL.qKicker, S.qol.title, 18);
+  fadeUp(EL.qTitle, S.qol.title, 32);
+  EL.qRows.forEach((row, i) => fadeUp(row, ease(t, 22.00 + i * 0.20, 22.48 + i * 0.20, 'out'), 28));
+
+  // outro
+  const O = S.outro;
+  setLayer(EL.outro, O.vis);
+  EL.oLogoAnim.style.opacity = fx(O.logoOp, 4);
+  EL.oLogoAnim.style.transform = `translate(0px,${fx(O.logoTy, 2)}px) scale(${fx(O.logoSc, 5)})`;
+  EL.oHalo.style.opacity = fx(O.haloOp, 4);
+  EL.oRing1.style.opacity = fx(O.ring1.op, 4); EL.oRing1.style.transform = `scale(${fx(O.ring1.sc, 4)})`;
+  EL.oRing2.style.opacity = fx(O.ring2.op, 4); EL.oRing2.style.transform = `scale(${fx(O.ring2.sc, 4)})`;
+  fadeUp(EL.oTitle, O.title, 30); fadeUp(EL.oPill, O.pill, 18); fadeUp(EL.oNext, O.next, 18);
+
+  setLayer(EL.flash, S.flash);
+  EL.vignette.style.opacity = fx(S.vignette, 4);
+  setLayer(EL.fade, S.fade);
+  return true;
+}
+window.render = render;
+
+/* ================================ QA ================================== */
+window.qa = function qa(tIn) {
+  let t = +tIn; if (!Number.isFinite(t)) t = 0; t = clamp(t, 0, DUR);
+  const S = state(t);
+  const op = {
+    title: S.lock.op,
+    notification: S.notif.op,
+    picker: S.picker.op,
+    attached: S.attached.op,
+    markdown: S.md.wipe > 0 ? S.md.op * Math.max(0.35, S.md.wipe) : 0,
+    browser: S.browser.op,
+    improvements: S.qol.op,
+    outro: S.outro.vis ? Math.max(S.outro.logoOp, S.outro.title) : 0,
+  };
+  let scene = 'title', best = -1;
+  for (const k of Object.keys(op)) if (op[k] > best) { best = op[k]; scene = k; }
+  const MAP = { notification: 'notification', picker: 'picker', attached: 'attached', markdown: 'composer', browser: 'browser' };
+  const visibleAssets = [], crops = {};
+  for (const k of Object.keys(MAP)) {
+    if (op[k] <= 0.01) continue;
+    const s = SHOT[MAP[k]]; visibleAssets.push(s.src);
+    const sh = LAYOUT && LAYOUT.shots[MAP[k]];
+    if (sh) {
+      const c = camAt(sh, t), vw = sh.Vw / c.s, vh = sh.Vh / c.s;
+      crops[s.src] = { u0: +((c.cx - vw / 2) / sh.W).toFixed(4), v0: +((c.cy - vh / 2) / sh.H).toFixed(4),
+                       u1: +((c.cx + vw / 2) / sh.W).toFixed(4), v1: +((c.cy + vh / 2) / sh.H).toFixed(4),
+                       pxScale: +c.s.toFixed(4), zoom: +(c.s / sh.sMin).toFixed(3) };
+    }
+  }
+  if (S.lock.op > 0.01 || S.bug > 0.01 || op.outro > 0.01 || op.browser > 0.01) visibleAssets.push('/video/cache/short026/assets/logo.png');
+  const captions = CAPS.filter(c => t >= c.tin - 0.12 && t < c.tout + 0.36).map(c => `${c.num} ${c.lines.join(' ')}`);
+  if (S.qol.op > 0.01) captions.push('Small fixes. Smoother flow.', ...EL.qRows.map(row => row.textContent));
+  return { t: +t.toFixed(4), frame: Math.round(t * 30), scene, visibleAssets, captions, crops, opacity: op, ready: !!LAYOUT };
+};
+
+/* =============================== READY ================================ */
+function waitImg(img) {
+  const src = img.getAttribute('src');
+  return new Promise((resolve, reject) => {
+    const done = () => (img.naturalWidth > 0 && img.naturalHeight > 0) ? resolve(img) : reject(new Error('Asset missing or undecodable: ' + src));
+    if (img.complete) done();
+    else {
+      img.addEventListener('load', done, { once: true });
+      img.addEventListener('error', () => reject(new Error('Asset missing: ' + src)), { once: true });
+    }
+  }).then(i => (typeof i.decode === 'function' ? i.decode().catch(() => {}) : Promise.resolve()).then(() => i));
+}
+const IMGS = Array.from(document.querySelectorAll('#stage img'));
+window.READY = Promise.all([document.fonts ? document.fonts.ready : Promise.resolve(), ...IMGS.map(waitImg)])
+  .then(() => {
+    FONTS_OK = true; LAYOUT = buildLayout();
+    if (!LAYOUT) throw new Error('Layout failed: an asset has no intrinsic size');
+    render(0);
+    const assets = {};
+    for (const s of SHOTS) assets[s.src] = [s.img.naturalWidth, s.img.naturalHeight];
+    assets['/video/cache/short026/assets/logo.png'] = [EL.lkLogo.naturalWidth, EL.lkLogo.naturalHeight];
+    return { ok: true, duration: DUR, fps: 30, frames: Math.round(DUR * 30), assets };
+  });
+window.READY.catch(e => console.error('[omagma film] READY rejected:', e));
+render(0);
+})();
+</script>
+</body>
+</html>

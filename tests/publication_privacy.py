@@ -50,6 +50,19 @@ class PublicationPrivacy(unittest.TestCase):
         secret = b"ya" + b"29." + b"A" * 30
         self.assertTrue(any(pattern.search(secret) for pattern in check.SECRET_PATTERNS))
 
+    def test_embedded_mail_logo_is_exact_approved_public_asset(self):
+        approved = (check.ROOT / "assets/omagma-logo.png").read_bytes()
+        embedded = (check.ROOT / "src/terminal/omagma-logo.png").read_bytes()
+        self.assertEqual(embedded, approved)
+        self.assertEqual(hashlib.sha256(embedded).hexdigest(),
+                         "e2e844a35476454f11b513404041135327fec6354f7b6e7e0269a32fdf56d3c4")
+        for name in ("assets/omagma-logo.png", "src/terminal/omagma-logo.png"):
+            with self.subTest(name=name):
+                self.assertTrue(check.reviewed_raster(name, embedded))
+                self.assertFalse(check.reviewed_raster(name, embedded + b"unreviewed change"))
+        self.assertFalse(check.reviewed_raster("src/terminal/other-logo.png", embedded))
+        self.assertFalse(check.reviewed_raster("src/terminal/private.png", embedded))
+
 
 if __name__ == "__main__":
     unittest.main()

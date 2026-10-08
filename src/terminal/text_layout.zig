@@ -167,9 +167,94 @@ pub fn after(text: []const u8, width: u16, method: vaxis.gwidth.Method, options:
     return iterator.position;
 }
 pub fn caret(text: []const u8, byte_cursor: usize, width: u16, method: vaxis.gwidth.Method, mode: Mode) Position {
-    var iterator = Iterator.init(text, width, method, .{ .mode = mode, .marker_at = byte_cursor });
-    while (iterator.next()) |glyph| if (glyph.marker) return glyph.position;
-    return iterator.position;
+    if (width == 0) return .{};
+    // A cursor is an overlay on the ordinary text, never another glyph in its
+    // word width. Inserting a virtual cell moves text and can reflow a whole
+    // word even before any source bytes have changed.
+    const at = @min(byte_cursor, text.len);
+    var iterator = Iterator.init(text, width, method, .{ .mode = mode });
+    var previous: Position = .{};
+    var previous_byte_end: usize = 0;
+    while (iterator.next()) |glyph| {
+        if (at == glyph.byte_offset) return glyph.position;
+        if (at < glyph.byte_offset) return gapCaret(text, previous_byte_end, at, previous, width);
+        // Field cursors lie on grapheme boundaries. A caller supplying an
+        // interior byte still gets its complete grapheme's leading cell.
+        if (at < iterator.offset) return glyph.position;
+        previous = glyph.position;
+        previous.column +|= glyph.columns;
+        previous_byte_end = iterator.offset;
+    }
+    return gapCaret(text, previous_byte_end, at, previous, width);
+}
+
+fn gapCaret(text: []const u8, start: usize, end: usize, previous: Position, width: u16) Position {
+    var result = previous;
+    // Iterator omits newline glyphs and separating whitespace at soft wraps.
+    // Preserve each hard line break up to the cursor. Positions inside omitted
+    // soft-wrap separators stay at the preceding text boundary; the next
+    // actual glyph uses its wrapped position instead.
+    for (text[@min(start, end)..end]) |byte| if (byte == '\n') result.newline();
+    // A terminal cursor cannot occupy a column just beyond the right edge.
+    // This extra cursor row does not add a source character or move any glyph.
+    if (width > 0 and result.column >= width) result.newline();
+    return result;
+}
+
+test "composer caret: ASCII column zero newline gaps and exact width use nonshifting coordinates" {
+    const Case = struct { text: []const u8, at: usize, width: u16, expected: Position };
+    const cases = [_]Case{
+        .{ .text = "L\nnext", .at = 0, .width = 8, .expected = .{ .row = 0, .column = 0 } },
+        .{ .text = "AL\nnext", .at = 1, .width = 8, .expected = .{ .row = 0, .column = 1 } },
+        .{ .text = "AL\n\nNext", .at = 2, .width = 10, .expected = .{ .row = 0, .column = 2 } },
+        .{ .text = "AL\n\nNext", .at = 3, .width = 10, .expected = .{ .row = 1, .column = 0 } },
+        .{ .text = "AL\n\nNext", .at = 4, .width = 10, .expected = .{ .row = 2, .column = 0 } },
+        .{ .text = "AL\n\nNext", .at = 99, .width = 10, .expected = .{ .row = 2, .column = 4 } },
+        .{ .text = "ABCD", .at = 4, .width = 4, .expected = .{ .row = 1, .column = 0 } },
+        .{ .text = "ABCD\nEF", .at = 4, .width = 4, .expected = .{ .row = 1, .column = 0 } },
+        .{ .text = "ABCD\nEF", .at = 5, .width = 4, .expected = .{ .row = 1, .column = 0 } },
+        .{ .text = "ABCD\nEF", .at = 7, .width = 4, .expected = .{ .row = 1, .column = 2 } },
+        .{ .text = "\n", .at = 0, .width = 4, .expected = .{ .row = 0, .column = 0 } },
+        .{ .text = "\n", .at = 1, .width = 4, .expected = .{ .row = 1, .column = 0 } },
+        .{ .text = "", .at = 0, .width = 4, .expected = .{ .row = 0, .column = 0 } },
+        .{ .text = "A\tB", .at = 1, .width = 8, .expected = .{ .row = 0, .column = 1 } },
+        .{ .text = "A\tB", .at = 2, .width = 8, .expected = .{ .row = 0, .column = 4 } },
+        .{ .text = "A\t", .at = 2, .width = 4, .expected = .{ .row = 1, .column = 0 } },
+        .{ .text = "abc  def", .at = 3, .width = 5, .expected = .{ .row = 0, .column = 3 } },
+        .{ .text = "abc  def", .at = 4, .width = 5, .expected = .{ .row = 0, .column = 3 } },
+        .{ .text = "abc  def", .at = 5, .width = 5, .expected = .{ .row = 1, .column = 0 } },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, caret(case.text, case.at, case.width, .unicode, .words));
+    // This independent rendered-cell oracle has no virtual caret or inserted
+    // source whitespace: the user's expected A and L remain adjacent.
+    var source = Iterator.init("AL\nnext", 8, .unicode, .{});
+    const first = source.next().?;
+    const second = source.next().?;
+    try std.testing.expectEqualStrings("A", first.text);
+    try std.testing.expectEqual(Position{ .row = 0, .column = 0 }, first.position);
+    try std.testing.expectEqualStrings("L", second.text);
+    try std.testing.expectEqual(Position{ .row = 0, .column = 1 }, second.position);
+}
+
+test "composer caret: normal word wrapping and complete Unicode graphemes ignore cursor width" {
+    const input = "1234567890123 a\u{301}b";
+    for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth, .no_zwj }) |method| {
+        try std.testing.expectEqual(Position{ .row = 0, .column = 15 }, caret(input, 17, 16, method, .words));
+        var normal = Iterator.init(input, 16, method, .{});
+        var last: Glyph = undefined;
+        while (normal.next()) |glyph| last = glyph;
+        try std.testing.expectEqualStrings("b", last.text);
+        try std.testing.expectEqual(Position{ .row = 0, .column = 15 }, last.position);
+    }
+    try std.testing.expectEqual(Position{ .row = 0, .column = 0 }, caret("a\u{301}b", 1, 8, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 0, .column = 1 }, caret("a\u{301}b", 3, 8, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 0, .column = 1 }, caret("A界B", 1, 4, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 0, .column = 3 }, caret("A界B", 4, 4, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 1, .column = 0 }, caret("A界B", 5, 4, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 1, .column = 0 }, caret("ABC界", 3, 4, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 0, .column = 0 }, caret("👩‍💻!", 1, 8, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 0, .column = 2 }, caret("👩‍💻!", 11, 8, .unicode, .words));
+    try std.testing.expectEqual(Position{ .row = 1, .column = 0 }, caret("👩‍💻!", 11, 2, .unicode, .words));
 }
 test "reader polish: plaintext words newlines indentation tabs and long tokens have one shared layout" {
     const allocator = std.testing.allocator;
@@ -184,7 +269,7 @@ test "reader polish: plaintext words newlines indentation tabs and long tokens h
     const measured = after(input, 16, .unicode, .{});
     try std.testing.expectEqual(iterator.position, measured);
 }
-test "reader polish: caret uses full current word and same emitted virtual marker" {
+test "reader polish: caret uses normal full word wrapping and legacy marker remains available" {
     const input = "1234567890 longword";
     const byte_cursor = 13;
     const expected = caret(input, byte_cursor, 16, .unicode, .words);
@@ -232,11 +317,12 @@ test "reader performance: guarded ASCII agrees with independent Unicode grapheme
             try std.testing.expect(measured.next() == null);
             try std.testing.expectEqual(Position{ .row = row, .column = column }, measured.position);
         };
-        // Combining bytes must belong to the ASCII base, and adding the
-        // virtual caret moves the complete word rather than detaching it.
+        // Combining bytes belong to their ASCII base. Cursor measurement uses
+        // normal text and leaves an exactly fitting word on its original row.
         const input = "1234567890123 a\u{301}b";
         try std.testing.expectEqual(Position{ .row = 0, .column = 16 }, after(input, 16, method, .{}));
-        try std.testing.expectEqual(Position{ .row = 1, .column = 1 }, caret(input, 17, 16, method, .words));
+        try std.testing.expectEqual(Position{ .row = 0, .column = 15 }, caret(input, 17, 16, method, .words));
+        try std.testing.expectEqual(Position{ .row = 1, .column = 0 }, caret(input, input.len, 16, method, .words));
     }
 }
 test "reader polish: long whitespace before an overwide token preserves every cell and caret" {

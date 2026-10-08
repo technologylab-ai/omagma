@@ -57,6 +57,21 @@ Reply uses Reply-To when present, otherwise From. Reply-all adds original To and
 
 Generate an RFC 5322 message with CRLF, a fresh Message-ID, correct From/To/Cc/Bcc, Date, Subject, MIME-Version and UTF-8 body. Use RFC 2047 encoded words for non-ASCII header text and base64 MIME transfer encoding with bounded line lengths. Gmail accepts a base64url RFC message in the JSON `raw` field and delivers to the envelope header recipients. [Sending guide](https://developers.google.com/workspace/gmail/api/guides/sending), [send endpoint](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send), [message format](https://www.rfc-editor.org/rfc/rfc5322.html), [MIME body encoding](https://www.rfc-editor.org/rfc/rfc2045.html).
 
+Markdown drafts keep exact `bodyText` source and an explicit `bodyFormat`;
+legacy and omitted new CLI formats are plain. `draft.preview` and send prepare
+the same bounded semantic plain text and escaped inline-CSS HTML. Markdown
+replies/forwards escape the literal original before quoting it. Raw HTML and
+remote image syntax cannot introduce active content. Code fences use bounded
+native lexical highlighting without execution or network-loaded grammars.
+
+Markdown MIME uses a plain/HTML alternative, with the HTML and approved tiny
+PNG in a related part; genuine user attachments wrap that structure in mixed
+MIME. The logo has a fixed 16 KiB internal allowance, consumes no user attachment
+slot and still counts toward the serialized wire limit. Its Content-ID is unique
+to the submitted RFC Message-ID. It introduces no remote image request. Preview
+and provider preparation use the same renderer; fixture checks do not establish
+appearance or delivery in a real receiving email client.
+
 To attach a reply to an existing Gmail thread, supply threadId, compliant In-Reply-To/References and a matching subject. Preserve the original Message-ID and reference chain with bounded validation. Missing/invalid source identifiers must not produce a false threading claim. [Gmail thread rules](https://developers.google.com/workspace/gmail/api/guides/threads).
 
 Application choice: never automatically retry a non-idempotent send after a timeout or connection loss that might follow submission. Return an outcome-unknown result and retain the draft plus generated Message-ID for reconciliation. A user can explicitly decide to retry after inspecting the result. Preview and fixture modes never call the real send endpoint.

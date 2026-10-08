@@ -72,7 +72,7 @@ FocusScope {
   Keys.onPressed: function(event) {
     if (event.key === Qt.Key_Escape) root.closeRequested()
     else if (event.key === Qt.Key_R && (event.modifiers & Qt.ControlModifier)) service.refresh()
-    else if (event.modifiers & Qt.AltModifier && event.key >= Qt.Key_1 && event.key <= Qt.Key_3) {
+    else if (event.modifiers & Qt.ControlModifier && event.key >= Qt.Key_1 && event.key <= Qt.Key_3) {
       const target = service.accounts[event.key - Qt.Key_1]
       if (target) service.selectAccount(target.account)
     }
@@ -465,7 +465,7 @@ FocusScope {
             Layout.minimumWidth: 0
             Layout.fillHeight: true
             text: root.selectedMessage ? root.selectedMessage.snippet
-              : "Enter opens · Ctrl+R refreshes · Alt+1–3 switches account · Esc closes"
+              : "Enter opens · Ctrl+R refreshes · Ctrl+1–3 switches account · Esc closes"
             textFormat: Text.PlainText
             color: root.muted
             font.family: root.fontFamily
@@ -480,7 +480,7 @@ FocusScope {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
         visible: root.selectedMessage === null
-        text: "Enter opens · Ctrl+R refreshes · Alt+1–3 switches account · Esc closes"
+        text: "Enter opens · Ctrl+R refreshes · Ctrl+1–3 switches account · Esc closes"
         textFormat: Text.PlainText
         color: root.muted
         font.family: root.fontFamily

@@ -20,7 +20,7 @@ interfaces for the authorized account.
 
 The TUI adds interactive conveniences: vim/mouse navigation, styled HTML and
 tables, pane layouts, the link chooser, quote/signature/thread folding, saved layouts/keymaps, `$EDITOR`, recipient/path completion, and automatic local
-draft recovery. CLI callers supply recipients and bodies (including through
+draft recovery. CLI callers supply recipients and body source (including through
 `--body-file` or `--body-stdin`) and explicitly save/update/recover drafts.
 The CLI returns decoded plain text and structured data rather than the styled
 screen, and can request up to 100 messages per page rather than the TUI's
@@ -72,19 +72,20 @@ Send lines such as:
 | mail.thread | threadId; chronological messages |
 | mail.attachment | messageId, attachmentId; filename,mimeType,size,data(base64url without padding) |
 | mail.open | optional messageId; explicitly opens configured Chrome profile |
-| mail.reply | messageId, all:boolean; creates a local reply/reply-all draft |
-| mail.forward | messageId; creates an unaddressed local forward draft preserving bounded received attachments |
+| mail.reply | messageId, all:boolean, optional bodyFormat plain/markdown; creates a local reply/reply-all draft |
+| mail.forward | messageId, optional bodyFormat plain/markdown; creates an unaddressed local forward draft preserving bounded received attachments |
 | mail.send | draft, operationId; durable submission receipt |
 | mail.archive / trash / restore | messageId; reversible label mutation |
 | mail.mark | messageId, unread/starred booleans, addLabels/removeLabels arrays |
 | mail.batch | messageIds (1..100 distinct IDs), action archive/trash/restore/spam/unspam/mark, optional unread/starred/addLabels/removeLabels; per-ID outcomes and undoToken |
 | mail.undo | undoToken; restores only actual touched-label changes for confirmed successful batch items |
-| draft.create / update | draft; update also requires draftId |
+| draft.create / update | draft with bodyText source and optional bodyFormat plain/markdown; update also requires draftId |
+| draft.preview | draft or draftId; bodyFormat, exact bodyText source, rendered plainText and optional bodyHtml; local preview without saving or sending |
 | draft.recovery-save | draft.recoveryFields exact five raw fields To/Cc/Bcc/Subject/Body, optional draftId; incomplete local recovery that cannot be sent |
 | draft.list / read / send / discard | read/send/discard require draftId; send also requires operationId |
 | contacts.list / search | live list pages accept limit 1..100 and cursor; search accepts query (live up to 30); cacheOnly uses downloaded contacts; results include resourceName,etag,name,emails and live nextCursor |
 | contacts.upsert | contact; editing requires resourceName and expectedEtag or contact.etag |
-| invitation.inspect | messageId; validated uid, organizer, attendee, sequence, summary,start |
+| invitation.inspect | messageId; validated uid, organizer, attendee, sequence, recurrenceId, summary,start |
 | invitation.reply | messageId,status accepted/tentative/declined,operationId |
 | operation.list / read | read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
@@ -122,14 +123,65 @@ Results report `searchScope:"metadata-and-cached-bodies"`, `partial:true`, `matc
 {"cmd":"mail.refresh","account":"personal@example.com","label":"INBOX","limit":32,"prefetchLimit":64}
 ```
 
-Reads do not mark read. Use mail.mark explicitly if requested. There is no permanent delete. Draft bodies are plaintext UTF-8. To/Cc/Bcc accept RFC address-list strings or arrays of address objects `{address,name}`. Optional draft.from accepts one address object or single RFC address-list string; an alias is verified again on every live send, and accounts.identities reads aliases/plain signatures through the existing mail grant. Reply planning honors Reply-To, self aliases, original recipients and References; it never promotes Bcc into reply-all. Missing/invalid Message-ID gives an explicit error. Forwarding chooses no recipient and does not join the original thread; missing or oversized original attachments fail instead of disappearing silently.
+Reads do not mark read. Use mail.mark explicitly if requested. There is no permanent delete. Draft `bodyText` is UTF-8 source, interpreted according to `bodyFormat`. To/Cc/Bcc accept RFC address-list strings or arrays of address objects `{address,name}`. Optional draft.from accepts one address object or single RFC address-list string; an alias is verified again on every live send, and accounts.identities reads aliases/plain signatures through the existing mail grant. Reply planning honors Reply-To, self aliases, original recipients and References; it never promotes Bcc into reply-all. Missing/invalid Message-ID gives an explicit error. Forwarding chooses no recipient and does not join the original thread; missing or oversized original attachments fail instead of disappearing silently.
 
 ```json
 {"cmd":"draft.create","account":"personal@example.com","draft":{"to":[{"address":"alex@example.org"}],"subject":"Demo 🌋","bodyText":"Hello!"}}
 {"cmd":"draft.send","account":"personal@example.com","draftId":"USE_RETURNED_ID","operationId":"task-unique-send-1"}
 ```
 
-Attachments are `{id:"",filename:"safe-basename.txt",mimeType:"text/plain",size:DECODED_BYTES,data:"BASE64URL_NO_PADDING"}` in draft.attachments. Body plus encoded attachments must fit the 3 MiB request. One-shot compose/send accept repeated `--attach-file FILE`, using application/octet-stream. Both JSONL `mail.attachment` and one-shot `omagma mail attachment` return JSON/base64url on stdout; they do not write a downloaded file, and there is no `--output-file` option. The TUI offers an interactive save picker. A CLI caller decodes `data` and writes it through its own tool to an explicitly chosen private path, refusing overwrite and treating filenames as untrusted.
+Attachments are `{id:"",filename:"safe-basename.txt",mimeType:"text/plain",size:DECODED_BYTES,data:"BASE64URL_NO_PADDING"}` in draft.attachments. `size` stays an exact integer byte count in CLI responses; the TUI's kB/MB display does not change it. Body plus encoded attachments must fit the 3 MiB request. One-shot compose/send accept repeated `--attach-file FILE`, using application/octet-stream. Both JSONL `mail.attachment` and one-shot `omagma mail attachment` return JSON/base64url on stdout; they do not write a downloaded file, and there is no `--output-file` option. The TUI offers an interactive save picker. A CLI caller decodes `data` and writes it through its own tool to an explicitly chosen private path, refusing overwrite and treating filenames as untrusted.
+
+## Markdown drafts and preview
+
+Fresh CLI drafts and direct sends default to `plain`.
+Set `draft.bodyFormat:"markdown"` to opt in, or use
+top-level `bodyFormat:"markdown"` for `mail.reply`/`mail.forward`. Existing
+drafts retain their saved format when an update omits it, and legacy drafts
+remain plain. Source stays exact through save, recovery and preview: ordinary
+drafts use `bodyText`, while incomplete recovery drafts retain the raw body in
+`recoveryFields[4]`. Generated HTML is derived locally.
+
+`draft.preview` accepts an existing `draftId` or a supplied `draft` and returns
+`bodyFormat`, source `bodyText`, the outgoing `plainText` alternative, and
+optional `bodyHtml`. It neither saves nor submits the supplied source. Preview
+can inspect an unfinished recovery draft; that draft still requires a normal
+validated update before sending. Markdown sends contain rendered HTML and a
+readable plain-text alternative. The saved draft retains Markdown source,
+while Sent message `bodyText` contains the rendered plain alternative.
+
+```json
+{"cmd":"draft.create","account":"personal@example.com","draft":{"to":"alex@example.org","subject":"Notes","bodyFormat":"markdown","bodyText":"## Review\n\n**Ready** for Thursday."}}
+{"cmd":"draft.preview","account":"personal@example.com","draftId":"USE_RETURNED_ID"}
+{"cmd":"mail.reply","account":"personal@example.com","messageId":"PROVIDER_ID","all":true,"bodyFormat":"markdown"}
+```
+
+Supported syntax includes headings, emphasis, strikethrough, lists, quotes,
+tables, links and fenced code. Known fence languages receive bounded syntax
+highlighting; unknown languages remain literal code. Raw HTML is escaped,
+unsafe link schemes stay inert, and Markdown images become alt text or safe
+links without loading remote images. Markdown HTML includes a small grey
+“Sent with omagma” footer, volcano emoji and the approved tiny logo embedded
+in the email. No branding image is fetched from a server. The terminal preview
+shows this content; receiving email clients control their final appearance.
+
+One-shot `--format markdown|plain` applies to `mail compose`, `draft create`,
+`draft update`, direct `mail send`, `mail reply/forward` and supplied-source
+`draft preview`. It can accompany `--body-file`, `--body-stdin` or
+`--draft-file`. `draft send` and `draft preview --draft-id` use the saved format;
+change it through an explicit draft update first.
+
+```sh
+omagma mail compose --account personal@example.com --to alex@example.org \
+  --subject Notes --body-file /absolute/private/notes.md --format markdown
+omagma draft preview --account personal@example.com --draft-id LOCAL_ID
+omagma draft preview --account personal@example.com \
+  --body-file /absolute/private/notes.md --format markdown
+omagma draft send --account personal@example.com --draft-id LOCAL_ID --operation-id TASK_ID
+```
+
+Review the returned alternatives before a task-authorized send. Rendering does
+not add a grant or bypass the account, recipient, attachment or request limits.
 
 ## Side effects and uncertainty
 
@@ -148,6 +200,10 @@ Contact updates use CONTACT-source etags and reject conflicts. Live writes inval
 
 **Bulk and undo:** bulk actions preserve independent per-message outcomes and never submit sends. Up to 16 account-scoped undo receipts persist under the private cache quota. The receipt records actual pre-action membership only for touched labels. Undo therefore preserves unrelated labels changed later. Rejected, pending, unknown and already restored entries are skipped; an uncertain undo is not repeated automatically. Cache clear preserves these receipts. Apply bulk actions only to IDs explicitly selected for the intended account; a batch is a bounded sequence with partial outcomes, not a transaction.
 
+**Meeting invitations:** JSONL `invitation.inspect`/`invitation.reply` and one-shot `invitations inspect`/`invitations reply` share calendar recognition and receipts. Recognized MIME forms are `text/calendar`, `application/ics`, and `application/octet-stream` with a `.ics` filename, including named external Outlook/Teams attachments. Calendar data is limited to 128 KiB and must identify exactly one requested event or recurrence instance and an attendee belonging to the selected account or a verified send-as alias. Matching duplicate MIME representations are accepted; conflicting calendars are refused. Inspection requires `mail-read`; reply additionally requires `calendar-rsvp` and an operation ID. If an older cached message retained only a calendar attachment reference, explicit inspection or reply refreshes that one message and preserves unrelated cached bodies.
+
+Reply sends a standard iTIP email response to the calendar organizer, preserving UID, sequence and recurrence identity; email From/Reply-To do not choose the destination. The three states are `accepted`, `tentative` and `declined`, mapped to the corresponding attendee PARTSTAT. A copied Zoom/Teams join link alone is not a calendar request and cannot be given an invented RSVP. Calendar API access is unnecessary. Unknown submissions are not retried automatically. Inspection can fetch mail or verified identities; `--cached` is not an invitation command option.
+
 Configurable body prefetch defaults to the smaller of the display page and 32. `prefetchLimit` or `--prefetch-bodies N` explicitly selects 0..64; 64 can fill a larger retained head while the display page stays 32. Zero disables automatic body filling. TUI startup and the background `cache-refresh` command share this policy, fixed message/disk quotas and old-tail eviction. Cached mail remains readable while refresh runs.
 
 ## One-shot interface
@@ -159,7 +215,12 @@ One-shot command families are `mail`, `draft`, `contacts`, `invitations`,
 discovers sending identities.
 `mail open-link --url URL` opens a link in the account's Chrome
 profile, and `mail open-attachment --path FILE` opens an already saved local
-file in its viewer. The latter does not download a received attachment.
+file in its viewer. The latter does not download a received attachment. Live
+viewer opening requires an absolute path to a regular file with private
+permissions and a supported extension (`.pdf`, `.txt`, `.md`, `.csv`, `.png`,
+`.jpg`, `.jpeg`, `.gif` or `.webp`). Fixture commands report a fixture result
+without launching a browser/viewer; attachment opening in fixtures does not
+validate a saved file's existence.
 Account discovery is JSONL `accounts.list`; there is no `omagma accounts list`
 command family.
 
@@ -217,7 +278,8 @@ The CLI does not launch the TUI's editor, autocomplete or styled renderer.
 | `--message-id ID` / `--id ID`, `--thread-id ID`, `--attachment-id ID` | Returned provider identities for read/thread/attachment operations |
 | `--draft-id ID`, `--operation-id ID` | Local draft/receipt identities; sends and RSVP require a stable operation ID |
 | `--to LIST`, `--cc LIST`, `--bcc LIST`, `--subject TEXT` | Outgoing address lists and subject |
-| `--body-file FILE`, `--body-stdin`, `--body TEXT` | Plaintext body; file/stdin avoids putting it in argv |
+| `--body-file FILE`, `--body-stdin`, `--body TEXT` | UTF-8 source body; file/stdin avoids putting it in argv |
+| `--format markdown\|plain` | Explicit source interpretation for compose/create/update/direct send/reply/forward or supplied-source preview; new CLI source defaults to plain |
 | `--attach-file FILE` (repeatable), `--draft-file FILE` | Regular outgoing files or a structured draft JSON object |
 | `--all` / `--reply-all` | Plan a reply-all draft |
 | `--unread` / `--read`, `--starred` / `--unstarred`, `--add-label LABEL`, `--remove-label LABEL` | Explicit mail.mark changes; label flags may repeat |

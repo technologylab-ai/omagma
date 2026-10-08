@@ -451,6 +451,32 @@ pub const Store = struct {
         if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
         return stat.size == entry.bytes;
     }
+    /// A narrowly scoped decoder upgrade for a legacy named calendar part.
+    /// Normal reads keep immutable bodies. This explicit inspection adds the
+    /// newly fetched calendar without removing metadata, labels or view IDs.
+    pub fn upgradeInvitation(s: *Store, message: t.Message) !bool {
+        const calendar = message.invitation orelse return false;
+        if (calendar.len > @import("invitation.zig").max_calendar_bytes) return error.CalendarTooLarge;
+        const previous = (try s.read(message.id)) orelse return false;
+        if (previous.invitation != null) return false;
+        var named_calendar = false;
+        for (previous.attachments) |part| named_calendar = named_calendar or @import("mime.zig").isCalendarPart(part.mimeType, part.filename);
+        if (!named_calendar) return false;
+        if (message.bodyText.len > t.Limits.body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.body_bytes)) return error.BodyTooLarge;
+        const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
+        if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
+        const name = try s.fileName("mail", message.id);
+        try s.makeRoom(raw.len, name);
+        const entry = s.find(message.id) orelse return false;
+        const digest = hash(raw);
+        const owned_hash = try s.allocator.dupe(u8, &digest);
+        // The checked atomic write succeeds before the old reference changes.
+        try s.write(name, raw);
+        entry.bytes = raw.len;
+        entry.bodyHash = owned_hash;
+        entry.bodyError = "";
+        return true;
+    }
     pub fn read(s: *Store, id: []const u8) !?t.Message {
         return s.readWithAllocator(s.allocator, id);
     }
@@ -480,6 +506,8 @@ pub const Store = struct {
         try list.appendSlice(s.allocator, s.state.outbox);
         var metadata = message;
         metadata.bodyText = "";
+        metadata.bodyHtml = null;
+        metadata.bodySource = .unknown;
         metadata.attachments = &.{};
         metadata.invitation = null;
         try list.append(s.allocator, metadata);
@@ -535,7 +563,10 @@ pub const Store = struct {
         };
         if (id != null and index == null) return error.DraftNotFound;
         if (index == null and s.state.drafts.len == 128) return error.DraftLimitExceeded;
-        const raw = try std.json.Stringify.valueAlloc(s.allocator, d, .{ .emit_null_optional_fields = false });
+        var draft_value = try j.value(s.allocator, d);
+        // Keep an unchanged legacy uncertain draft byte-for-byte compatible.
+        if (d.bodyFormat == .plain) _ = draft_value.object.orderedRemove("bodyFormat");
+        const raw = try std.json.Stringify.valueAlloc(s.allocator, draft_value, .{ .emit_null_optional_fields = false });
         const name = try s.fileName("draft", d.id);
         const previous = if (index != null) try readPrivate(s.dir, s.io, s.allocator, name, 4 * t.Limits.body_bytes) else null;
         if (previous) |old| for (s.state.operations) |operation| {

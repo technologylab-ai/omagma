@@ -24,10 +24,12 @@ SECRET_PATTERNS = [
 PUBLIC_LICENSES = {'LICENSES/uucode-LICENSE_Bjoern_Hoehrmann.txt': 'de219cece932aad5a817bf763393d8d149d378a15d2ad5320e3331eac07626dd'}
 IGNORED_PARTS = {".local-notes", ".zig-cache", "zig-pkg", "zig-out", "dist", "node_modules", "__pycache__"}
 PUBLIC_GIFS = {"docs/images/omagma-fetch.gif"}
-# The high-resolution copy of the user-approved logo is part of the public
-# launch-film source. A different file at this path needs another review.
+# These exact user-approved logos are public source assets. The terminal copy
+# embeds the same small PNG as the website; changed bytes need another review.
 PUBLIC_RASTERS = {
     "video/assets/omagma-logo-master.png": "6ca7de5cc234de73567f6a1812e6161c7b9d45742d6047cd1c23101e7041c9b3",
+    "assets/omagma-logo.png": "e2e844a35476454f11b513404041135327fec6354f7b6e7e0269a32fdf56d3c4",
+    "src/terminal/omagma-logo.png": "e2e844a35476454f11b513404041135327fec6354f7b6e7e0269a32fdf56d3c4",
 }
 # This documentation example describes a pane truncating a fictional address.
 # Accept only that exact ellipsis-terminated excerpt in its reviewed source;
@@ -58,7 +60,7 @@ def private_email(name, data):
 def reviewed_raster(name, data):
     if name in PUBLIC_RASTERS:
         return hashlib.sha256(data).hexdigest() == PUBLIC_RASTERS[name]
-    return name == "assets/omagma-logo.png" or name.startswith("docs/images/omagma")
+    return name.startswith("docs/images/omagma")
 
 
 def validate_gif(data):

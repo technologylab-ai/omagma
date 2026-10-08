@@ -23,7 +23,7 @@ Rows show sender, subject and time. Select a row to see its plain-text snippet. 
 | --- | --- |
 | Escape | Close the dropdown |
 | Ctrl+R | Refresh the selected account |
-| Alt+1 / Alt+2 / Alt+3 | Choose a configured account |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 | Choose a configured account |
 | Up / Down | Select a message |
 | Enter | Open the selected message in Gmail |
 

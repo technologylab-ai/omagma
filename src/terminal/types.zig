@@ -79,6 +79,9 @@ pub const Client = struct {
 pub const Address = struct { address: []const u8, name: []const u8 = "" };
 pub const Attachment = struct { id: []const u8, filename: []const u8, mimeType: []const u8 = "application/octet-stream", size: usize = 0, data: []const u8 = "" };
 pub const BodySource = enum { unknown, plain, html };
+/// bodyText stays the editable source. Legacy drafts and omitted CLI fields
+/// retain their literal meaning; fresh TUI composers opt into Markdown.
+pub const BodyFormat = enum { plain, markdown };
 pub const Message = struct {
     id: []const u8,
     threadId: []const u8,
@@ -113,6 +116,7 @@ pub const Draft = struct {
     bcc: []const Address = &.{},
     subject: []const u8 = "",
     bodyText: []const u8 = "",
+    bodyFormat: BodyFormat = .plain,
     threadId: []const u8 = "",
     inReplyTo: []const u8 = "",
     references: []const u8 = "",

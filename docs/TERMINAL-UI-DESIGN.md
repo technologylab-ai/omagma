@@ -162,11 +162,43 @@ ignores injected mouse reports as well.
 
 The provider checks capabilities and returns visible rejection errors. Legacy and enhanced keyboard input accept shifted `R`, `G`, `D`, `U` and `I`. `gg` clears on an unrelated key or after 750 ms. Help uses grouped key/action rows, fits the usual terminal height and scrolls with `j`/`k`, arrows, PageUp/PageDown or Ctrl+U/Ctrl+D when narrower; Home/End reach its ends. Mouse interaction is supported: click accounts, mailboxes, messages and contacts, and scroll the pane under the pointer with the wheel. Incoming provisional loading rows stay noninteractive until committed. Selection clicks never send mail or apply mailbox/contact changes; `--no-mouse` keeps mouse handling in the terminal.
 
-Compose starts in normal mode. Tab or `j`/`k` selects To/Cc/Bcc/Subject/body; `i` or Enter enters text insertion and Escape returns to normal mode. Arrow movement and deletion operate on grapheme boundaries. The body wraps and follows the caret using visual rows, including a paragraph with no newline. Recipient and subject fields scroll horizontally while editing, preserving their labels and visible caret. At 90 columns or more, the form shares the screen with its original thread or draft preview. From initially uses the selected account; verified send-as aliases remain within that account and can be chosen explicitly. The contact picker adds one address to the selected recipient field, using To when opened from subject/body.
+Compose starts in normal mode. Tab/Shift+Tab focuses fields and controls;
+`j`/`k` selects To/Cc/Bcc/Subject/body. `i` or Enter enters text insertion in a
+field, Enter activates a focused control, and Escape returns to normal mode.
+Arrow movement and deletion operate on grapheme boundaries. The body wraps and
+follows the caret using visual rows, including a paragraph with no newline.
+Recipient and subject fields scroll horizontally while editing, preserving
+their labels and visible caret. At 90 columns or more, the form shares the
+screen with the selected preview. From initially uses the selected account;
+verified send-as aliases remain within that account and can be chosen
+explicitly. The contact picker adds one address to the selected recipient field,
+using To when opened from subject/body.
 
-Normal compose `A` opens a literal file-path prompt. Only regular files qualify; there are up to 16 attachments, at most 2 MiB of combined attachment bytes and a 3 MiB serialized request cap. A shared file helper opens with Linux `O_NONBLOCK|O_NOFOLLOW` and validates the same descriptor before reading, rejecting FIFOs, devices and leaf symlinks. The CLI's attachment/body/draft/contact file options use the same helper; explicit stdin remains a stream. Paths are not shell commands or expanded variables. Attachments use their basename and `application/octet-stream`; review lists names and sizes. Existing attachments survive draft editing and `$EDITOR` return. `:detach NUMBER` removes a one-based attachment before saving or submission.
+Fresh TUI compose/reply/reply-all/forward drafts use Markdown, while reopened
+drafts retain their persisted format and older drafts remain plain. Ctrl+T
+changes format without rewriting source. Normal compose `p` selects the rendered
+outgoing preview, original reply/forward context or plain alternative. Below
+90 columns it opens the preview full-screen; Escape/`q` returns to source. One
+retained preview per draft revision shares the native backend renderer; raw HTML
+and remote images stay inert. Known fenced languages receive bounded lexical
+colouring. The embedded approved logo, volcano emoji and public-link footer are
+generated content, with no remote fetch. CLI source keeps its plain default and
+can explicitly select Markdown and request `draft.preview`.
 
-Native path completion scans at most 4096 directory entries and retains at most 64 matching regular files/directories. Hidden entries appear only for a dotted prefix; symlinks and special files are excluded. Tab extends a common prefix or cycles a chosen path, Shift+Tab cycles backward, and Ctrl+U clears the prompt. Directory names retain a trailing slash; no input variable or shell syntax is expanded. Received-save defaults use XDG user-dirs Downloads or literal HOME/Downloads and a sanitized, fresh collision name. Default directories are created owner-only only after explicit Save. Parent directory descriptors are opened one component at a time without following symlinks; mode 0600 exclusive file creation and cleanup use that checked descriptor.
+Normal compose `A` opens the compact file popup with a literal path field.
+Tab/Shift+Tab traverses its controls and Enter activates the focused control;
+Ctrl+F completes the path. Only regular files qualify; there are up to 16
+attachments, at most 2 MiB of combined attachment bytes and a 3 MiB serialized
+request cap. A shared file helper opens with Linux `O_NONBLOCK|O_NOFOLLOW` and
+validates the same descriptor before reading, rejecting FIFOs, devices and leaf
+symlinks. The CLI's attachment/body/draft/contact file options use the same
+helper; explicit stdin remains a stream. Paths are not shell commands or
+expanded variables. Attachments use their basename and `application/octet-stream`;
+review lists names and sizes. Existing attachments survive draft editing and
+`$EDITOR` return. `:detach NUMBER` removes a one-based attachment before saving
+or submission.
+
+Native path completion scans at most 4096 directory entries and retains at most 64 matching regular files/directories. Hidden entries appear only for a dotted prefix; symlinks and special files are excluded. Ctrl+F extends a common prefix or cycles a chosen path, Ctrl+Shift+F cycles backward, and Ctrl+U clears the path. Directory names retain a trailing slash; no input variable or shell syntax is expanded. Received-save defaults use XDG user-dirs Downloads or literal HOME/Downloads and a sanitized, fresh collision name. Default directories are created owner-only only after explicit Save. Parent directory descriptors are opened one component at a time without following symlinks; mode 0600 exclusive file creation and cleanup use that checked descriptor.
 
 Composer normal-mode preview scrolling and L/B pickers preserve its mode, account, body and outgoing files. Insert mode leaves those letters as text. A preview action that interrupts an in-flight local autosave queues a new local save rather than dropping the dirty revision. Body caret measurement and painting share the same complete-text word-wrap walker, including the virtual caret's width.
 
@@ -176,7 +208,15 @@ Bracketed paste inserts data into the active field and cannot invoke navigation,
 
 The shared recipient/threading planner creates replies and reply-all drafts. The UI edits To/Cc/Bcc, subject and body without duplicating its address or self-alias rules. Escape or `q` from normal compose saves the local draft and returns to the mailbox. After a 1.5-second idle debounce (or 10 seconds of continuous edits), autosave writes a local recovery revision without blocking input or sending mail. It retains incomplete recipient text, restores it on reopen, and requires validated fields before review/submission. Autosave completion updates only identity/revision state and cannot overwrite newer input.
 
-Ctrl+S or `:send` saves a draft and opens **Review send**. Review exposes account, From, recipients, subject, thread context and body; its explicit `y` submits. Editor save, ordinary Enter, paste and navigation never send. Explicit save/review owns a fixed validated revision; mutations to that pending review are rejected. Debounced autosave instead permits continued editing and queues newer local revisions. Fixture submission says **Saved by mock provider**. Successful submission does not assert recipient delivery.
+Ctrl+S or `:send` saves a draft and opens **Review send**. Review exposes account,
+From, recipients, subject, format, thread context, attachments and the outgoing
+rendered body; its explicit `y` submits. Markdown submission uses the reviewed
+HTML plus semantic plain alternative, retaining the source in its saved draft.
+Editor save, ordinary Enter, paste, preview/format changes and navigation never
+send. Explicit save/review owns a fixed validated revision; mutations to that
+pending review are rejected. Debounced autosave instead permits continued
+editing and queues newer local revisions. Fixture submission says **Saved by mock
+provider**. Successful submission does not assert recipient delivery.
 
 An unknown or interrupted submission retains its operation identity and original recovery draft. The form is protected from edits or retry, and `q` returns to mail without rewriting it. Reopening a saved draft checks the operation journal before enabling review; `:receipt` checks again. Stable error codes explain rejection or uncertainty without exposing raw provider responses. RSVP submission also blocks duplicate status keys while busy, retains the inspected message identity and protects an interrupted result. The backend journal remains authoritative across process restarts.
 

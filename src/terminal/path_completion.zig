@@ -88,7 +88,7 @@ pub const State = struct {
         var scanned: usize = 0;
         while (scanned < max_entries) : (scanned += 1) {
             const entry = (try iterator.next(io)) orelse break;
-            if (!std.mem.startsWith(u8, entry.name, fragment) or !validPath(entry.name) or (fragment.len == 0 and std.mem.startsWith(u8, entry.name, "."))) continue;
+            if (!std.ascii.startsWithIgnoreCase(entry.name, fragment) or !validPath(entry.name) or (fragment.len == 0 and std.mem.startsWith(u8, entry.name, "."))) continue;
             const kind = if (entry.kind == .unknown) (try dir.statFile(io, entry.name, .{ .follow_symlinks = false })).kind else entry.kind;
             if (kind != .directory and kind != .file) continue;
             if (entries.items.len >= max_matches) {
@@ -118,7 +118,7 @@ pub const State = struct {
         for (entries.items[1..]) |entry| {
             common = @min(common, entry.path.len);
             var index: usize = 0;
-            while (index < common and entries.items[0].path[index] == entry.path[index]) : (index += 1) {}
+            while (index < common and std.ascii.toLower(entries.items[0].path[index]) == std.ascii.toLower(entry.path[index])) : (index += 1) {}
             common = index;
         }
         while (common > 0 and !std.unicode.utf8ValidateSlice(entries.items[0].path[0..common])) common -= 1;
@@ -278,6 +278,31 @@ test "path completion: safe defaults preserve names and add nonexisting collisio
     const parsed = (try configuredDownloads(allocator, "XDG_DOWNLOAD_DIR=\"$HOME/My Downloads\"\n", root)).?;
     defer allocator.free(parsed);
     try std.testing.expect(std.mem.endsWith(u8, parsed, "/My Downloads"));
+}
+
+test "path completion: lowercase prefixes find exact filename spelling and mixed-case choices" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const file = try temporary.dir.createFile(std.testing.io, "README.md", .{});
+    file.close(std.testing.io);
+    const prefix = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/rea", .{temporary.sub_path});
+    defer a.free(prefix);
+    var state: State = .{};
+    defer state.deinit();
+    const unique = try state.tab(std.testing.io, a, prefix);
+    try std.testing.expectEqual(@as(usize, 1), unique.matches);
+    try std.testing.expect(std.mem.endsWith(u8, unique.path.?, "/README.md"));
+    const second = try temporary.dir.createFile(std.testing.io, "readme.txt", .{});
+    second.close(std.testing.io);
+    state.reset();
+    const common = try state.tab(std.testing.io, a, prefix);
+    try std.testing.expectEqual(@as(usize, 2), common.matches);
+    try std.testing.expect(std.mem.endsWith(u8, common.path.?, "/README."));
+    const copied = try a.dupe(u8, common.path.?);
+    defer a.free(copied);
+    const chosen = try state.tab(std.testing.io, a, copied);
+    try std.testing.expect(std.mem.endsWith(u8, chosen.path.?, "/README.md"));
 }
 
 test "path completion: candidate quota and symlink parent refusal stay bounded" {

@@ -20,7 +20,7 @@ from build_info import build_mode, read_build_info
 from terminal_cache import ProviderFixture, seed, metrics
 from terminal_html import screen_capture
 from terminal_integration import ACCOUNTS, ROOT, Client, require
-from terminal_pty import Terminal, child_session, FIXTURES
+from terminal_pty import Terminal, child_session, FIXTURES, cursor_after_source, source_location
 from terminal_reader import reader_contains, reader_rectangle
 from terminal_repaint_screen import PreservedScreen
 
@@ -138,7 +138,10 @@ def run_plain(binary, directory, reflow):
             terminal.send(b"c")
             terminal.until(lambda:"Compose" in terminal.text() and "Subject:" in terminal.text())
             terminal.send(b"\t\t\t\tiOwned composer text")
-            terminal.until(lambda:terminal.screen.locate("▏") is not None)
+            terminal.until(lambda:source_location(terminal,"Owned composer text") is not None
+                           and terminal.screen.state == "ground"
+                           and {"row":terminal.screen.y,"column":terminal.screen.x}
+                               == cursor_after_source(terminal,"Owned composer text"))
             old_clear = terminal.screen.full_physical_clears
             old_border = any(row[224]=="│" for row in terminal.screen.cells)
             require(old_border,"old225-column renderer border was never present")

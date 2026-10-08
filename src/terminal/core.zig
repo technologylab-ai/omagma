@@ -7,6 +7,7 @@ const storage = @import("store.zig");
 const cache_query = @import("cache_query.zig");
 const triage = @import("triage.zig");
 const batch = @import("batch.zig");
+const markdown_mail = @import("markdown_mail.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
 const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
@@ -55,7 +56,10 @@ fn operationPayload(a: std.mem.Allocator, draft: t.Draft, account: []const u8, c
     // Preserve legacy outer calendar:null; omit only the newly optional draft
     // fields so an unchanged old uncertain operation keeps its fingerprint.
     const bytes = try std.json.Stringify.valueAlloc(a, canonical, .{ .emit_null_optional_fields = false });
-    const value = try std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_if_needed });
+    var value = try std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_if_needed });
+    // Plain is the legacy wire/source interpretation. Keep historical uncertain
+    // fingerprints identical when an older draft gains the default field.
+    if (canonical.bodyFormat == .plain) _ = value.object.orderedRemove("bodyFormat");
     return std.json.Stringify.valueAlloc(a, .{ .draft = value, .calendar = if (calendar) |ics| try calendarIdentity(a, ics) else null }, .{});
 }
 const CacheWindow = struct { start: usize, end: usize, direction: []const u8 = "head", fallback: bool = false };
@@ -289,6 +293,12 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "draft.list")) return j.value(a, .{ .drafts = store.state.drafts });
         if (std.mem.eql(u8, cmd, "draft.read")) return j.value(a, try store.draft(try j.required(req, "draftId")));
+        if (std.mem.eql(u8, cmd, "draft.preview")) {
+            const draft = if (j.get(req, "draft")) |input| try decodeDraft(a, input) else try store.draft(try j.required(req, "draftId"));
+            try validateDraft(draft, false);
+            const prepared = try markdown_mail.prepare(a, draft);
+            return j.value(a, .{ .bodyFormat = draft.bodyFormat, .bodyText = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText, .plainText = prepared.plain, .bodyHtml = prepared.html });
+        }
         if (std.mem.eql(u8, cmd, "draft.recovery-save")) {
             const input = j.get(req, "draft") orelse return error.MissingField;
             const fields = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.MissingField);
@@ -302,6 +312,7 @@ pub const Session = struct {
             try clean.object.put(a, "subject", .{ .string = fields[3] });
             try clean.object.put(a, "bodyText", .{ .string = fields[4] });
             var draft = try decodeDraft(a, clean);
+            if (j.get(input, "bodyFormat") == null and j.text(req, "draftId").len != 0) draft.bodyFormat = (try store.draft(j.text(req, "draftId"))).bodyFormat;
             try validateDraft(draft, false);
             draft.recoveryFields = fields;
             // The recovery body lives in the raw fields once, while the index
@@ -314,7 +325,9 @@ pub const Session = struct {
             return j.value(a, .{ .discarded = true });
         }
         if (std.mem.eql(u8, cmd, "draft.create") or std.mem.eql(u8, cmd, "draft.update")) {
-            const draft = try decodeDraft(a, j.get(req, "draft") orelse return error.MissingField);
+            const input = j.get(req, "draft") orelse return error.MissingField;
+            var draft = try decodeDraft(a, input);
+            if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "bodyFormat") == null) draft.bodyFormat = (try store.draft(try j.required(req, "draftId"))).bodyFormat;
             try validateDraft(draft, false);
             return j.value(a, try store.putDraft(draft, if (std.mem.eql(u8, cmd, "draft.update")) try j.required(req, "draftId") else null));
         }
@@ -323,16 +336,18 @@ pub const Session = struct {
             return s.send(a, &store, req, draft, null);
         }
         if (std.mem.eql(u8, cmd, "mail.reply")) {
+            const format = try requestBodyFormat(req);
             const message = try s.read(a, &store, try j.required(req, "messageId"), req);
             const threading = try @import("mime.zig").threading(message.messageId, message.references, message.inReplyTo, a);
             var envelope: recipients.Envelope = .{};
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
             try recipients.replyIncoming(a, address, aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), try j.boolean(req, "all", false), &envelope);
-            const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = try quote(a, message.bodyText), .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references };
+            const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = try quote(a, if (format == .markdown) try markdown_mail.escapeSource(a, message.bodyText) else message.bodyText), .bodyFormat = format, .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references };
             try validateDraft(d, false);
             return j.value(a, try store.putDraft(d, null));
         }
         if (std.mem.eql(u8, cmd, "mail.forward")) {
+            const format = try requestBodyFormat(req);
             const message = try s.read(a, &store, try j.required(req, "messageId"), req);
             if (message.attachments.len > 16) return error.TooManyAttachments;
             var total: usize = 0;
@@ -340,17 +355,14 @@ pub const Session = struct {
             if (total > t.Limits.body_bytes) return error.AttachmentsTooLarge;
             const attachments = try a.dupe(t.Attachment, message.attachments);
             for (attachments) |*attachment| if (attachment.data.len == 0 and attachment.size != 0) {
-                if (s.options.fixtures) return error.AttachmentNotFound;
                 var request = try j.copyObject(a, req);
                 try request.object.put(a, "attachmentId", .{ .string = attachment.id });
-                store.release();
-                const value = try s.remote(a, address, "mail.attachment", request);
-                try s.reopenBody(a, &store);
-                attachment.* = try j.decode(t.Attachment, a, value);
+                attachment.* = try s.fetchKnownAttachment(a, &store, request, message);
             };
             // A forward is a new conversation, not a reply to the old thread.
-            const body = try std.fmt.allocPrint(a, "\n\n---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, message.bodyText });
-            const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}), .bodyText = body, .attachments = attachments };
+            const original = try std.fmt.allocPrint(a, "---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, message.bodyText });
+            const body = if (format == .markdown) try quote(a, try markdown_mail.escapeSource(a, original)) else try std.fmt.allocPrint(a, "\n\n{s}", .{original});
+            const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}), .bodyText = body, .bodyFormat = format, .attachments = attachments };
             try validateDraft(draft, false);
             return j.value(a, try store.putDraft(draft, null));
         }
@@ -414,14 +426,7 @@ pub const Session = struct {
             return j.value(a, .{ .messages = messages.items });
         }
         if (std.mem.eql(u8, cmd, "mail.attachment")) {
-            if (!s.options.fixtures) {
-                try s.capability(a, address, req, "mail-read");
-                return s.remote(a, address, cmd, req);
-            }
-            const m = try s.read(a, &store, try j.required(req, "messageId"), req);
-            const id = try j.required(req, "attachmentId");
-            for (m.attachments) |attachment| if (std.mem.eql(u8, attachment.id, id)) return j.value(a, attachment);
-            return error.AttachmentNotFound;
+            return j.value(a, try s.fetchKnownAttachment(a, &store, req, null));
         }
         if (std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) {
             try s.capability(a, address, req, "mail-modify");
@@ -484,7 +489,15 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search") or std.mem.eql(u8, cmd, "contacts.upsert")) return s.contacts(a, &store, req, cmd);
         if (std.mem.eql(u8, cmd, "invitation.reply") or std.mem.eql(u8, cmd, "invitation.inspect")) {
             try s.capability(a, address, req, if (std.mem.eql(u8, cmd, "invitation.inspect")) "mail-read" else "calendar-rsvp");
-            const m = try s.read(a, &store, try j.required(req, "messageId"), req);
+            const message_id = try j.required(req, "messageId");
+            var m = try s.read(a, &store, message_id, req);
+            // Repair old metadata-only calendar attachments only when the
+            // user explicitly inspects this mail. Cache browsing stays local.
+            if (m.invitation == null) for (m.attachments) |part| {
+                if (!@import("mime.zig").isCalendarPart(part.mimeType, part.filename)) continue;
+                m = try s.readMessage(a, &store, message_id, req, false);
+                break;
+            };
             const ics = m.invitation orelse return error.NotInvitation;
             var invite: invitation.Invitation = .{};
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
@@ -1533,12 +1546,32 @@ pub const Session = struct {
         return @import("gmail_decode.zig").normalize(v, a, j.get(source, "externalBodies"));
     }
     fn read(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value) !t.Message {
+        return s.readMessage(a, store, id, req, true);
+    }
+    fn fetchKnownAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, known_message: ?t.Message) !t.Attachment {
+        try s.capability(a, store.state.account, req, "mail-read");
+        const message_id = try j.required(req, "messageId");
+        const attachment_id = try j.required(req, "attachmentId");
+        const message = known_message orelse try s.read(a, store, message_id, req);
+        if (!std.mem.eql(u8, message.id, message_id)) return error.MessageIdentityMismatch;
+        for (message.attachments) |selected| if (std.mem.eql(u8, selected.id, attachment_id)) {
+            if (selected.data.len > 0 or selected.size == 0) return selected;
+            if (s.options.fixtures) return error.AttachmentNotFound;
+            const account = store.state.account;
+            store.release();
+            const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachment, .{ s.io, a, &s.config, account, req, selected, s.progress_sink });
+            try s.reopenBody(a, store);
+            return downloaded;
+        };
+        return error.AttachmentNotFound;
+    }
+    fn readMessage(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value, allow_cached: bool) !t.Message {
         try s.capability(a, store.state.account, req, "mail-read");
         if (s.options.fixtures) {
             if (try store.readOutbox(id)) |sent| return sent;
             if (store.state.fixtureProvider.len != 0) _ = try s.fixtureProviderSource(a, store);
         }
-        if (try store.read(id)) |cached| {
+        if (if (allow_cached) try store.read(id) else null) |cached| {
             var m = cached;
             if (store.find(id)) |entry| {
                 m.labels = entry.message.labels;
@@ -1553,6 +1586,7 @@ pub const Session = struct {
             store.release();
             var m = try j.decode(t.Message, a, try s.remote(a, account, "mail.read", req));
             try s.reopenBody(a, store);
+            if (!allow_cached) _ = try store.upgradeInvitation(m);
             if (store.state.generation == expected) try store.put(m, true) else {
                 _ = try store.putBody(m);
                 if (store.find(m.id)) |entry| {
@@ -1573,6 +1607,7 @@ pub const Session = struct {
                 m.unread = existing.message.unread;
             }
             store.state.fixtureCalls += 1;
+            if (!allow_cached) _ = try store.upgradeInvitation(m);
             try store.put(m, true);
             try store.save();
             s.reportRow(.{ .kind = .body, .message = m });
@@ -1799,15 +1834,16 @@ pub const Session = struct {
         };
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and (std.mem.eql(u8, operation.hash, &digest) or (draft.id.len > 0 and std.mem.eql(u8, operation.draftId, draft.id)))) return j.value(a, operation);
         if (store.state.operations.len == 1000) return error.OperationJournalFull;
+        const prepared = try markdown_mail.prepare(a, draft);
         // Persist uncertainty before dispatch, including on process failure.
         var operations: std.ArrayList(storage.Operation) = .empty;
         try operations.appendSlice(a, store.state.operations);
         const wire_identity = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ store.state.account, operation_id });
         const wire_hash = storage.Store.hash(wire_identity);
-        if (s.options.fixtures) {
+        {
             var from: recipients.Mailbox = .{};
             const sender = draft.from orelse t.Address{ .address = store.state.account };
-            if (!std.ascii.eqlIgnoreCase(sender.address, store.state.account)) {
+            if (s.options.fixtures and !std.ascii.eqlIgnoreCase(sender.address, store.state.account)) {
                 const source = try s.fixture(a, store.state.account);
                 var verified = false;
                 if (j.get(source, "identities")) |identities_value| for (try valueArray(identities_value)) |identity| {
@@ -1828,7 +1864,9 @@ pub const Session = struct {
             };
             const mime = @import("mime.zig");
             const wire = try a.alloc(u8, mime.max_raw_bytes);
-            _ = try mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = draft.bodyText, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = "Mon, 05 Oct 2026 12:00:00 +0000", .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = try mime.composeAttachments(draft.attachments, a) }, wire);
+            const raw = mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = "Mon, 05 Oct 2026 12:00:00 +0000", .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = try mime.composeAttachments(draft.attachments, a) }, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
+            // Gmail's outer JSON base64url envelope shares the request quota.
+            if (std.base64.url_safe_no_pad.Encoder.calcSize(raw.len) > t.Limits.request_bytes - 1024) return error.FormTooLarge;
         }
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
         const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
@@ -1865,7 +1903,7 @@ pub const Session = struct {
             store.state.fixtureSends += 1;
             operation.messageId = try store.nextId("sent");
             operation.outcome = if (s.scenario("applied-lost")) "unknown" else "applied";
-            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(draft.bodyText, 240), .bodyText = draft.bodyText, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = draft.attachments, .invitation = calendar };
+            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(prepared.plain, 240), .bodyText = prepared.plain, .bodyHtml = prepared.html, .bodySource = .plain, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = draft.attachments, .invitation = calendar };
             // Copy the receipt first: put() can grow the entries slice, never operations.
             store.putOutbox(sent) catch {
                 operation.outcome = "unknown";
@@ -1916,6 +1954,7 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
         if (field != .string) return error.InvalidRequest;
     };
     var draft = try j.decode(t.Draft, a, try j.value(a, .{ .id = j.text(v, "id"), .subject = j.text(v, "subject"), .bodyText = j.text(v, "bodyText"), .threadId = j.text(v, "threadId"), .inReplyTo = j.text(v, "inReplyTo"), .references = j.text(v, "references") }));
+    draft.bodyFormat = try requestBodyFormat(v);
     draft.to = if (j.get(v, "to")) |x| try decodeAddresses(a, x) else &.{};
     draft.cc = if (j.get(v, "cc")) |x| try decodeAddresses(a, x) else &.{};
     draft.bcc = if (j.get(v, "bcc")) |x| try decodeAddresses(a, x) else &.{};
@@ -1933,6 +1972,11 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
     draft.attachments = if (j.get(v, "attachments")) |x| try j.decode([]const t.Attachment, a, x) else &.{};
     _ = try @import("mime.zig").composeAttachments(draft.attachments, a);
     return draft;
+}
+fn requestBodyFormat(v: Value) !t.BodyFormat {
+    const field = j.get(v, "bodyFormat") orelse return .plain;
+    const text = try j.string(field);
+    return std.meta.stringToEnum(t.BodyFormat, text) orelse error.InvalidBodyFormat;
 }
 pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (send and d.recoveryFields != null) return error.UnfinishedDraft;
@@ -2296,6 +2340,84 @@ test "wishlist: old primary draft operation wire keeps optional nulls absent" {
     try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
     draft.from = .{ .address = "SELF@example.test" };
     try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
+}
+
+test "markdown mail: persisted sources recovery preview compose reply forward send and uncertainty" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/markdown", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const source = "# Markdown\n\n**Hello** fixture.\n\n- first\n- second";
+    const created = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = source, .bodyFormat = "markdown" } }));
+    const id = j.text(created, "id");
+    const read_draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = id }));
+    try std.testing.expectEqualStrings(source, j.text(read_draft, "bodyText"));
+    try std.testing.expectEqualStrings("markdown", j.text(read_draft, "bodyFormat"));
+    const preview = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.preview", .account = account, .draftId = id }));
+    try std.testing.expect(std.mem.indexOf(u8, j.text(preview, "bodyHtml"), "<strong>Hello</strong>") != null);
+    const receipt = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = id, .operationId = "markdown-send" }));
+    try std.testing.expectEqualStrings("applied", j.text(receipt, "outcome"));
+    const sent = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = j.text(receipt, "messageId") }));
+    try std.testing.expectEqualStrings(j.text(preview, "bodyHtml"), j.text(sent, "bodyHtml"));
+    try std.testing.expectEqualStrings(j.text(preview, "plainText"), j.text(sent, "bodyText"));
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        const persisted = try store.draft(id);
+        try std.testing.expectEqual(t.BodyFormat.markdown, persisted.bodyFormat);
+        try std.testing.expectEqualStrings(source, persisted.bodyText);
+        try store.put(.{ .id = "original", .threadId = "original-thread", .from = .{ .address = "peer@example.test" }, .to = &.{.{ .address = account }}, .subject = "Original", .bodyText = "# Original *literal* [link](javascript:bad)\n<tag>", .messageId = "<original@example.test>", .attachments = &.{.{ .id = "fixture-file", .filename = "fixture.bin", .size = 3, .data = "AP-A" }} }, true);
+        try store.save();
+    }
+    const replied = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.reply", .account = account, .messageId = "original", .bodyFormat = "markdown", .all = true }));
+    try std.testing.expectEqualStrings("markdown", j.text(replied, "bodyFormat"));
+    try std.testing.expectEqualStrings("original-thread", j.text(replied, "threadId"));
+    const reply_preview = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.preview", .account = account, .draftId = j.text(replied, "id") }));
+    try std.testing.expect(std.mem.indexOf(u8, j.text(reply_preview, "plainText"), "> # Original *literal* [link](javascript:bad)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, j.text(reply_preview, "bodyHtml"), "href=\"javascript:") == null);
+    const forwarded = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.forward", .account = account, .messageId = "original", .bodyFormat = "markdown" }));
+    try std.testing.expectEqualStrings("", j.text(forwarded, "threadId"));
+    try std.testing.expectEqual(@as(usize, 1), (try array(forwarded, "attachments")).len);
+    var forward_draft = try decodeDraft(a, forwarded);
+    forward_draft.to = &.{.{ .address = "forward-peer@example.test" }};
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = forward_draft.id, .draft = forward_draft }));
+    const forwarded_receipt = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = forward_draft.id, .operationId = "markdown-forward" }));
+    try std.testing.expectEqualStrings("applied", j.text(forwarded_receipt, "outcome"));
+    const replied_receipt = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = j.text(replied, "id"), .operationId = "markdown-reply" }));
+    try std.testing.expectEqualStrings("applied", j.text(replied_receipt, "outcome"));
+    const legacy_reply = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.reply", .account = account, .messageId = "original" }));
+    try std.testing.expectEqualStrings("plain", j.text(legacy_reply, "bodyFormat"));
+    const legacy = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .bodyText = "**literal**" } }));
+    const legacy_preview = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.preview", .account = account, .draftId = j.text(legacy, "id") }));
+    try std.testing.expectEqualStrings("**literal**", j.text(legacy_preview, "plainText"));
+    try std.testing.expect(j.get(legacy_preview, "bodyHtml") == null);
+    try std.testing.expectError(error.DraftNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.preview", .account = "work@example.com", .draftId = id })));
+    const recovery = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.recovery-save", .account = account, .draft = .{ .bodyFormat = "markdown", .recoveryFields = [_][]const u8{ "unfinished", "", "", "Recovery", "**Retained** source" } } }));
+    const recovery_read = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = j.text(recovery, "id") }));
+    try std.testing.expectEqualStrings("markdown", j.text(recovery_read, "bodyFormat"));
+    const recovery_preview = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.preview", .account = account, .draftId = j.text(recovery, "id") }));
+    try std.testing.expect(std.mem.indexOf(u8, j.text(recovery_preview, "bodyHtml"), "<strong>Retained</strong>") != null);
+    try std.testing.expectError(error.UnfinishedDraft, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = j.text(recovery, "id"), .operationId = "recovery-send" })));
+    session.options.fixture_scenario = "unknown-send";
+    const unknown_source: t.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "**Unknown**", .bodyFormat = .markdown };
+    const unknown = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.send", .account = account, .draft = unknown_source, .operationId = "markdown-unknown" }));
+    const replay = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.send", .account = account, .draft = unknown_source, .operationId = "markdown-replay" }));
+    try std.testing.expectEqualStrings("unknown", j.text(unknown, "outcome"));
+    try std.testing.expectEqualStrings(j.text(unknown, "id"), j.text(replay, "id"));
+    var different_format = unknown_source;
+    different_format.bodyFormat = .plain;
+    try std.testing.expectError(error.OperationConflict, session.dispatch(a, try j.value(a, .{ .cmd = "mail.send", .account = account, .draft = different_format, .operationId = "markdown-unknown" })));
+    try std.testing.expectError(error.InvalidBodyFormat, decodeDraft(a, try j.value(a, .{ .bodyFormat = "html" })));
 }
 
 test "wishlist: body search pagination binds changing body residency" {

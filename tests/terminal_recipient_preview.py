@@ -82,8 +82,9 @@ def correspondents(binary, directory):
             'fixtureHold':hold.name,'fixtureEntered':entered.name}
         source.path(ACCOUNTS[0]).write_text(json.dumps(current))
         terminal.send(b'c')
-        terminal.until(lambda:'Subject:' in terminal.text() and 'Draft preview' in terminal.text())
-        require('ORIGINAL LINE 000' not in panel_text(terminal,'Draft preview'), 'new composer inherited Inbox body')
+        terminal.until(lambda:'Subject:' in terminal.text() and 'Outgoing preview' in terminal.text()
+                       and '[Plain Ctrl+T]' in terminal.text())
+        require('ORIGINAL LINE 000' not in panel_text(terminal,'Outgoing preview'), 'new composer inherited Inbox body')
         terminal.send(b'icaro')
         terminal.until(lambda:'caroline-new@example.test' in terminal.text() and entered.exists())
         # Physical Ctrl+N, Ctrl+P and Enter select an unsaved correspondent
@@ -91,8 +92,8 @@ def correspondents(binary, directory):
         terminal.send(b'\x0e\x10\r')
         terminal.until(lambda:'caroline-new@example.test' in ''.join(terminal.screen.lines()))
         terminal.send(b'\t\t\tRecipient fixture\tOwn draft body')
-        terminal.until(lambda:'Own draft body' in panel_text(terminal,'Draft preview'))
-        require('ORIGINAL LINE' not in panel_text(terminal,'Draft preview'), 'draft preview shows unrelated incoming content')
+        terminal.until(lambda:'Outgoing preview' in terminal.text() and 'Own draft body' in panel_text(terminal,'Outgoing preview'))
+        require('ORIGINAL LINE' not in panel_text(terminal,'Outgoing preview'), 'draft preview shows unrelated incoming content')
         require(hold.exists(), 'background hold ended before cached completion')
         hold.unlink()
         terminal.send(b'\x1b')
@@ -105,6 +106,7 @@ def correspondents(binary, directory):
             value = client.request('draft.read',draftId=drafts[0]['id'])
             require(value['to'][0]['address']=='caroline-new@example.test','Ctrl+N/P inserted another recipient')
             require(value['bodyText']=='Own draft body','completion/background fetch changed typed body')
+            require(value['bodyFormat']=='markdown','completion/background fetch changed default source format')
             require(client.request('cache.stats')['fixtureSends']==0,'recipient test sent mail')
         terminal.finish()
         print('PASS recipients: unsaved Inbox/Sent metadata, no contacts permission, isolation/dedup and Ctrl+N/P during held background fetch')
@@ -125,13 +127,21 @@ def preview(binary, directory):
     terminal = begin(binary,directory,extra)
     try:
         terminal.send(b'r')
-        terminal.until(lambda:'Subject:' in terminal.text() and 'Original message' in terminal.text())
+        terminal.until(lambda:'Subject:' in terminal.text() and 'Outgoing preview' in terminal.text())
+        terminal.send(b'p')
+        terminal.until(lambda:'Original message' in terminal.text())
         require('ORIGINAL LINE 000' in panel_text(terminal,'Original message'),'reply lost original context')
         terminal.send(b'\x04')
         terminal.until(lambda:'ORIGINAL LINE 000' not in panel_text(terminal,'Original message'))
         require('ORIGINAL LINE' in panel_text(terminal,'Original message'),'Ctrl+D erased original context')
         terminal.send(b'\x15')
         terminal.until(lambda:'ORIGINAL LINE 000' in panel_text(terminal,'Original message'))
+        with Client(binary,directory,extra=extra) as client:
+            drafts=client.request('draft.list')['drafts']
+            require(len(drafts)==1,'preview navigation created another draft')
+            require(client.request('draft.read',draftId=drafts[0]['id'])['bodyFormat']=='markdown',
+                    'Original preview changed the outgoing source format')
+            require(client.request('cache.stats')['fixtureSends']==0,'preview navigation sent mail')
         terminal.finish()
         print('PASS previews: reply original stays frozen and Ctrl+D/U scroll it without mailbox traversal')
     finally:

@@ -3,6 +3,7 @@ const b = @import("../bounded.zig");
 const recipients = @import("recipients.zig");
 
 pub const max_calendar_bytes = 128 * 1024;
+pub const max_calendar_properties = 1024;
 pub const Status = enum { accepted, tentative, declined };
 pub const Invitation = struct {
     uid: b.Text(1024) = .{},
@@ -26,7 +27,6 @@ pub fn parseReply(ics: []const u8, account: []const u8, aliases: []const []const
 }
 fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8, expected_method: []const u8, out: *Invitation) !void {
     if (ics.len > max_calendar_bytes) return error.CalendarTooLarge;
-    if (!std.unicode.utf8ValidateSlice(ics)) return error.InvalidUtf8;
     try recipients.validateAddress(account);
     if (aliases.len > recipients.max_recipients) return error.TooManyAliases;
     for (aliases) |alias| try recipients.validateAddress(alias);
@@ -53,8 +53,11 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
     var properties: usize = 0;
     while (try lines.next(&unfolded)) |line| {
         if (line.len == 0) continue;
+        // Unfold first: RFC 5545 permits a physical fold to divide a UTF-8
+        // sequence. The logical content line must still be valid UTF-8.
+        if (!std.unicode.utf8ValidateSlice(line)) return error.InvalidUtf8;
         properties += 1;
-        if (properties > 1024) return error.TooManyCalendarProperties;
+        if (properties > max_calendar_properties) return error.TooManyCalendarProperties;
         const prop = try property(line);
         if (timezone) try appendTimezone(out, line);
         if (std.ascii.eqlIgnoreCase(prop.name, "BEGIN")) {
@@ -130,7 +133,9 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
             recurrence = true;
         } else if (std.ascii.eqlIgnoreCase(prop.name, "ATTENDEE")) {
             attendees += 1;
-            if (attendees > 32) return error.TooManyAttendees;
+            // Incoming meetings can have more participants than an outgoing
+            // mail envelope. This scan retains one responding identity and
+            // stays bounded by the calendar property/byte budgets.
             const address = try mailto(prop.value);
             var selected = std.ascii.eqlIgnoreCase(address, account);
             for (aliases) |alias| selected = selected or std.ascii.eqlIgnoreCase(address, alias);
@@ -325,4 +330,64 @@ test "recurring RSVP preserves bounded VTIMEZONE component used by recurrence" {
     const result = try reply(&invite, .accepted, "20261005T120000Z", &buffer);
     try std.testing.expect(std.mem.indexOf(u8, result, "BEGIN:VTIMEZONE\r\nTZID:Custom/Fixture\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "RECURRENCE-ID;TZID=Custom/Fixture:20261012T100000\r\n") != null);
+}
+
+test "invitation parse: Outlook quoted parameters folds and large meetings select exactly one identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var calendar: std.ArrayList(u8) = .empty;
+    try calendar.appendSlice(a, "BEGIN:VCALENDAR\r\nPRODID:-//Fixture//Outlook-shaped//EN\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:teams-meeting-\r\n fixture@example.test\r\nDTSTAMP:20261007T090000Z\r\nSEQUENCE:12\r\nORGANIZER;CN=\"Fixture Host: Team\":MAILTO:host@example.test\r\nDTSTART;TZID=\"W. Europe Standard Time\":20261012T100000\r\nRECURRENCE-ID;TZID=\"W. Europe Standard Time\":20261012T100000\r\nSUMMARY:Fixture Teams meeting\r\n");
+    for (0..80) |number| try calendar.appendSlice(a, try std.fmt.allocPrint(a, "ATTENDEE;CN=\"Guest {d}\";ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:guest{d}@example.test\r\n", .{ number, number }));
+    try calendar.appendSlice(a, "ATTENDEE;CN=\"Fixture, Guest; Department\";ROLE=REQ-PARTICIPANT;RSVP=TRUE:MAILTO:alias@example.test\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+    var invite: Invitation = .{};
+    try parse(calendar.items, "self@example.test", &.{"alias@example.test"}, &invite);
+    try std.testing.expectEqualStrings("teams-meeting-fixture@example.test", invite.uid.slice());
+    try std.testing.expectEqualStrings("host@example.test", invite.organizer.slice());
+    try std.testing.expectEqualStrings("alias@example.test", invite.attendee.slice());
+    try std.testing.expectEqual(@as(u32, 12), invite.sequence);
+    try std.testing.expectEqualStrings(";TZID=\"W. Europe Standard Time\"", invite.recurrence_parameters.slice());
+    try std.testing.expectError(error.NotAnAttendee, parse(calendar.items, "absent@example.test", &.{}, &invite));
+    // Both the primary identity and an alias must not silently choose one
+    // membership when two calendar users could receive the response.
+    try std.testing.expectError(error.AmbiguousAttendee, parse(calendar.items, "guest0@example.test", &.{"alias@example.test"}, &invite));
+}
+
+test "invitation reply: RFC5546 minimal replies omit DTSTART and preserve literal original identity" {
+    const calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:provider-fixture@example.test\r\nDTSTAMP:20261007T090000Z\r\nDTSTART:20261012T080000Z\r\nDTEND:20261012T090000Z\r\nSUMMARY:Fixture meeting\r\nSEQUENCE:5\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE;RSVP=TRUE:mailto:self@example.test\r\nATTENDEE:mailto:other@example.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    var invite: Invitation = .{};
+    try parse(calendar, "self@example.test", &.{}, &invite);
+    var output: [4096]u8 = undefined;
+    for ([_]struct { status: Status, partstat: []const u8 }{
+        .{ .status = .accepted, .partstat = "ATTENDEE;PARTSTAT=ACCEPTED:mailto:self@example.test\r\n" },
+        .{ .status = .tentative, .partstat = "ATTENDEE;PARTSTAT=TENTATIVE:mailto:self@example.test\r\n" },
+        .{ .status = .declined, .partstat = "ATTENDEE;PARTSTAT=DECLINED:mailto:self@example.test\r\n" },
+    }) |expected| {
+        const response = try reply(&invite, expected.status, "20261007T100000Z", &output);
+        try std.testing.expect(std.mem.indexOf(u8, response, "METHOD:REPLY\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response, "UID:provider-fixture@example.test\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response, "DTSTAMP:20261007T100000Z\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response, "ORGANIZER:mailto:host@example.test\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response, "SEQUENCE:5\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, response, expected.partstat) != null);
+        try std.testing.expect(std.mem.indexOf(u8, response, "DTSTART:") == null);
+        try std.testing.expect(std.mem.indexOf(u8, response, "other@example.test") == null);
+    }
+}
+
+test "invitation parse: UTF8 folds property budget and unrelated event ambiguity stay bounded" {
+    const divided = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:utf8-fixture@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nSUMMARY:Caf\xc3\r\n \xa9\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    var invite: Invitation = .{};
+    try parse(divided, "self@example.test", &.{}, &invite);
+    try std.testing.expectEqualStrings("Café", invite.summary.slice());
+    try std.testing.expectError(error.AmbiguousInvitation, parse("BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:first@example.test\nORGANIZER:mailto:host@example.test\nATTENDEE:mailto:self@example.test\nEND:VEVENT\nBEGIN:VEVENT\nUID:second@example.test\nEND:VEVENT\nEND:VCALENDAR\n", "self@example.test", &.{}, &invite));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var properties: std.ArrayList(u8) = .empty;
+    try properties.appendSlice(a, "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:many@example.test\nORGANIZER:mailto:host@example.test\n");
+    for (0..1024) |number| try properties.appendSlice(a, try std.fmt.allocPrint(a, "ATTENDEE:mailto:guest{d}@example.test\n", .{number}));
+    try properties.appendSlice(a, "END:VEVENT\nEND:VCALENDAR\n");
+    try std.testing.expectError(error.TooManyCalendarProperties, parse(properties.items, "self@example.test", &.{}, &invite));
+    try std.testing.expectError(error.NotInvitationRequest, parse("BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:PUBLISH\nBEGIN:VEVENT\nUID:zoom-import@example.test\nEND:VEVENT\nEND:VCALENDAR\n", "self@example.test", &.{}, &invite));
 }

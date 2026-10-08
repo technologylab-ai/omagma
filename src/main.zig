@@ -28,8 +28,33 @@ var unassigned_reserve: [l.app_reservation - assigned_bytes]u8 = undefined;
 pub fn main(init: std.process.Init) void {
     app(init) catch |err| {
         std.debug.print("omagma: {s}\n", .{@errorName(err)});
+        if (usageError(err)) std.debug.print("Try omagma --help for available commands and options.\n", .{});
         std.process.exit(1);
     };
+}
+fn usageError(err: anyerror) bool {
+    return switch (err) {
+        error.UnknownMode,
+        error.UnknownOption,
+        error.UnknownCommand,
+        error.CommandRequired,
+        error.ValueRequired,
+        error.InvalidArgv,
+        error.Args,
+        error.AccountRequired,
+        error.ConfigRequired,
+        error.UrlRequired,
+        error.ValueOutOfRange,
+        => true,
+        else => false,
+    };
+}
+fn printHelp(io: std.Io) !void {
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
+    try writer.interface.flush();
+    try @import("terminal/cli.zig").help(io);
 }
 fn app(init: std.process.Init) !void {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
@@ -82,7 +107,7 @@ fn app(init: std.process.Init) !void {
         try @import("terminal/background.zig").run(init, io, &args);
         return;
     }
-    if (std.mem.eql(u8, mode, "--version")) {
+    if (std.mem.eql(u8, mode, "--version") or std.mem.eql(u8, mode, "version")) {
         var buffer: [256]u8 = undefined;
         var writer = std.Io.File.stdout().writer(io, &buffer);
         try writer.interface.print("omagma {s}\n", .{@import("build_options").version});
@@ -100,8 +125,6 @@ fn app(init: std.process.Init) !void {
         try @import("terminal/cli.zig").run(init, io, mode, &args);
         return;
     }
-    const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
-    try config.defaults(home);
     if (std.mem.eql(u8, mode, "budget")) {
         var buffer: [1024]u8 = undefined;
         var writer = std.Io.File.stdout().writer(io, &buffer);
@@ -109,14 +132,7 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
-    if (std.mem.eql(u8, mode, "help") or std.mem.eql(u8, mode, "--help")) {
-        var buffer: [2048]u8 = undefined;
-        var writer = std.Io.File.stdout().writer(io, &buffer);
-        try writer.interface.print("omagma {s} (Zig {s})\n  --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
-        try writer.interface.flush();
-        try @import("terminal/cli.zig").help(io);
-        return;
-    }
+    if (std.mem.eql(u8, mode, "help") or std.mem.eql(u8, mode, "--help") or std.mem.eql(u8, mode, "-h")) return printHelp(io);
     if (std.mem.eql(u8, mode, "probe-keyring") or std.mem.eql(u8, mode, "probe-callback")) {
         if (std.mem.eql(u8, mode, "probe-keyring")) {
             try @import("keyring.zig").syntheticProbe(io);
@@ -163,10 +179,12 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
+    if (!std.mem.eql(u8, mode, "daemon") and !std.mem.eql(u8, mode, "auth") and !std.mem.eql(u8, mode, "status")) return error.UnknownMode;
     var options: daemon.Options = .{};
     var config_path: ?[]const u8 = null;
     var account: ?[]const u8 = null;
     while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return printHelp(io);
         if (std.mem.eql(u8, arg, "--config")) config_path = args.next() orelse return error.ConfigRequired else if (std.mem.eql(u8, arg, "--account")) account = args.next() orelse return error.AccountRequired else if (std.mem.eql(u8, arg, "--fixtures")) options.fixtures = true else if (std.mem.eql(u8, arg, "--dry-run-open")) options.dry_open = true else if (std.mem.eql(u8, arg, "--fixture-delay-ms")) options.fixture_delay_ms = try std.fmt.parseInt(u32, args.next() orelse return error.ValueRequired, 10) else if (std.mem.eql(u8, arg, "--fixture-fail-account")) options.fixture_fail = args.next() orelse return error.ValueRequired else if (std.mem.eql(u8, arg, "--fixture-empty-account")) options.fixture_empty = args.next() orelse return error.ValueRequired else if (std.mem.eql(u8, arg, "--fixture-rows")) {
             options.fixture_rows = try std.fmt.parseInt(usize, args.next() orelse return error.ValueRequired, 10);
             if (options.fixture_rows > l.max_rows) return error.InvalidRowCount;
@@ -176,6 +194,8 @@ fn app(init: std.process.Init) !void {
         } else return error.UnknownOption;
     }
     if (options.fixture_auto_refresh_ms > 0 and !options.fixtures) return error.FixtureOptionRequiresFixtures;
+    const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
+    try config.defaults(home);
     var default_path: [4096]u8 = undefined;
     if (config_path == null and !options.fixtures) {
         const base = init.environ_map.get("XDG_CONFIG_HOME");

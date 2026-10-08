@@ -18,3 +18,8 @@ website/dist/
 
 # Local TUI iteration binaries are not release artifacts.
 .local-tui-*/
+.development-*/
+
+# Media generation keeps audio, frame caches and encoded masters local.
+video/cache/
+video/out/

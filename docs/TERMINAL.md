@@ -59,11 +59,29 @@ Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted line
 
 The CLI exposes both modes through `omagma mail search --cached` / `--server`, or JSONL `cacheOnly:true` / `false`. See [the CLI guide](AGENT-CLI.md) and [cache behavior](TUI-CACHE.md).
 
+Error status lines include a short diagnostic code. `?` opens Help with that
+code and its explanation at the top; Escape/`q` returns to the current view.
+
 ## Compose, reply and forward
 
 Use `c` for a new message, `r` for reply and `R` for reply-all. `f`/`F` forwards, and a reply from the reader targets its focused thread card. Forwarding creates an unaddressed draft with the original attachments; choose recipients before sending.
 
-Compose starts in normal mode. Tab or `j`/`k` selects To, Cc, Bcc, Subject or Body. `i` or Enter begins insertion; Escape returns to normal mode. Letters such as `q`, `L` and `B` remain text while inserting. The selected field has a row highlight, and the body follows its caret.
+New reply, reply-all and forward bodies place the caret above quoted mail,
+ready for writing at the top. Ctrl+G focuses the body and jumps to its start
+without changing the text. Reopening an existing draft keeps its usual editing
+behavior; Ctrl+G is available there too.
+
+New messages, replies, reply-all and forwards start
+in **Markdown**. Existing drafts keep their saved format; older drafts remain
+**Plain**. Ctrl+T toggles Markdown/Plain without rewriting the editable source.
+The Body label shows the current format (MD or Plain); the Ctrl+T button
+names the format that pressing it switches to.
+
+Compose starts in normal mode. Tab/Shift+Tab moves through fields and controls;
+`j`/`k` also selects To, Cc, Bcc, Subject or Body. `i` or Enter begins insertion
+in a field, and Enter activates a focused control. Escape returns to normal
+mode. Letters such as `q`, `p`, `L` and `B` remain text while inserting. The
+selected field has a row highlight, and the body follows its caret.
 
 Body receives a full selection row, From has a separate explicit alias action, and one footer keeps the relevant shortcuts visible.
 
@@ -71,23 +89,51 @@ Body receives a full selection row, From has a separate explicit alias action, a
 
 Changes save locally after a pause, including unfinished addresses. An unfinished recovery draft must be corrected before review and sending. Drafts appear under **Drafts** and survive restart; they are local Omagma drafts, not Gmail's web draft folder.
 
-At 90 columns or more, a new message shows its own draft preview. Replies and forwards retain their original message context. Normal Ctrl+D/U or PageDown/PageUp scrolls it, and `L`/`B` opens its links or received files. These actions preserve the outgoing draft, account, recipients and attachments.
+At 90 columns or more, the composer shows the outgoing rendered preview beside
+the editable source. In normal mode, `p` switches between that preview, the
+original message for replies/forwards, and the plain-text alternative. Original
+thread context stays available while composing. Below 90 columns, `p` opens
+the preview full-screen; Escape/`q` returns to source. Ctrl+D/U or PageDown/PageUp
+scrolls the selected preview, and `L`/`B` opens links or received files from the
+original context. These actions preserve the outgoing draft, account, recipients
+and attachments.
+
+Markdown supports headings, emphasis, strikethrough, lists, quotes, tables,
+links and fenced code. Supported fence languages receive syntax highlighting;
+unknown languages remain literal code. The outgoing email includes rendered
+HTML and a readable plain-text alternative. Raw HTML is escaped and remote
+Markdown images stay inert as alt text or safe links. A small footer reads **[logo] Sent with omagma 🌋**: the approved tiny logo
+comes first, “Sent with” stays grey, and only “omagma” is an orange, underlined
+link to the project website. The volcano finishes the line. Rendering fetches no resources.
+Plain mode sends the source literally. The native preview shows the outgoing
+content; final styling follows the receiving email client.
 
 `e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
 
-Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review; only explicit `y` sends. Review shows the account, selected From alias, recipients, subject, body, threading and attachments. If the provider result is uncertain, keep the draft, use `:receipt` to inspect its journal and check Sent mail before attempting another send.
+Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review;
+only explicit `y` sends. Review shows the account, selected From alias,
+recipients, subject, format, rendered outgoing body, threading and attachments.
+Review the outgoing preview and plain alternative before confirming. Saving,
+switching format or preview, and pressing Enter on a control never submit mail.
+If the provider result is uncertain, keep the draft, use `:receipt` to inspect
+its journal and check Sent mail before attempting another send.
 
 ## Attachments and links
 
 `A` or **Add A** attaches another outgoing file. `:detach NUMBER` or its **[x]** removes one. Filenames and sizes stay visible, and the wheel scrolls the attachment list. You can attach up to 16 regular files, within the limits below; files remain attached through saving and editor return.
 
-Attachment paths are literal and direct paths with spaces need no quoting. Tab completes files/directories, Tab/Shift+Tab cycles bounded matches and Ctrl+U clears the prompt. Completion excludes symlinks and special files. Shell expressions or variables are not expanded.
+Attachment paths are literal and direct paths with spaces need no quoting.
+Ctrl+F completes files/directories; Ctrl+Shift+F cycles matches backward.
+Filename prefix matching ignores ASCII case and returns the actual spelling.
+Tab/Shift+Tab moves among popup controls and Ctrl+U clears the path. Completion
+excludes symlinks and special files. Shell expressions or variables are not
+expanded.
 
-`B`, `:attachments` or a file click opens the thread's attachment list. `s` or Enter chooses Save; `o` chooses Save & open. The prompt suggests a sanitized, fresh name in XDG Downloads or `HOME/Downloads`; Ctrl+U replaces it and Tab completes paths. Saving creates a new private file and refuses overwrite or symlink traversal.
+`B`, `:attachments` or a file click opens the thread's attachment list. `s` or Enter chooses Save; `o` chooses Save & open. The popup suggests a sanitized, fresh name in XDG Downloads or `HOME/Downloads`; Ctrl+U replaces it and Ctrl+F completes paths. Saving creates a new private file and refuses overwrite or symlink traversal.
 
 Numeric `:save-attachment NUMBER /absolute/path` also saves a file directly. Paths with spaces are literal. If a completion list is visible, Escape hides it first; Escape again leaves the path prompt. Saving/opening a received file reports the explicit result while retaining its originating reader or draft.
 
-`L` opens the link chooser; Enter opens the selected literal HTTP(S) destination in this account's Chrome profile. `o` in the mailbox opens selected mail in Gmail. Rendering mail never launches anything automatically.
+`L` opens the link chooser; Enter opens the selected literal HTTP(S) destination in this account's Chrome profile. `o` opens the selected mail in Gmail; with a thread message focused, it opens that exact message. In normal reply/forward mode it opens the original context. Each action uses the current account's configured Chrome profile. Rendering mail never launches anything automatically.
 
 ## Labels, bulk actions and contacts
 
@@ -101,7 +147,15 @@ actions; `unspam` removes Spam and restores Inbox membership. See
 
 `a` opens this account's address book. Search with `/`, create with `n`, edit with `e`, and save a contact with Ctrl+S. Contacts require People API permissions. Version conflicts are reported so you can refresh before editing again. Contact deletion is not implemented.
 
-`I` inspects a calendar invitation and offers accepted, tentative or declined replies. This sends an RSVP email; there is no Calendar API permission, calendar view or calendar editing.
+`I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
+
+A copied Teams/Zoom join link alone has no organizer/attendee scheduling identity. Such mail can be read and opened with `o`, but Omagma cannot invent a valid RSVP. This needs no Calendar API permission, calendar view or calendar editing; sending a response requires the account's existing terminal RSVP/send grant.
+
+File operations use a compact popup over the current draft or reader. `A` opens the attachment browser; `B` in the reader chooses received files and offers Save or Save & open. Arrows and the mouse wheel browse, clicking a row selects it, and the explicit Attach/Save button or Enter performs the action. Enter on a directory navigates into it. Tab/Shift+Tab move through the path, folder controls, file list and action buttons; Enter activates the focused control. Ctrl+F completes a literal path, Ctrl+U clears it, and Esc returns to the same draft or attachment picker. Printable `q`, `j` and `k` remain filename text. Ctrl+O goes to the parent folder, Ctrl+G goes Home, Ctrl+T toggles hidden files, and Ctrl+N/P browse entries; the buttons show these shortcuts. In the composer, Tab continues from Body to Add and then each attachment’s `[x]`; Shift+Tab goes backwards, and Enter activates Add or removes the focused file. `x` also removes the focused file, while Esc returns to Body. Multiple outgoing files are added with repeated `A`; the composer shows their combined size against its 2 MiB limit. Attachment sizes use rounded decimal kB/MB consistently, with bytes for very small files; the underlying byte limits are unchanged.
+
+Save creates a new file. An existing filename produces an inline error and retains the entered path, so you can choose another name; no overwrite is implicit. Popup clicks stay inside the popup. Saving or attaching does not send mail.
+
+List previews decode escaped punctuation such as `&#39;`. The reader can repair strong repeated patterns caused by UTF-8 text decoded as Windows-1252 in prose, while preserving literal URLs and technical/code examples. Stored mail and CLI body text retain their original normalized bytes; ambiguous text keeps its original display.
 
 ## Keys
 
@@ -117,6 +171,11 @@ actions; `unspam` removes Spam and restores Inbox membership. See
 | {/}, t, Q/S | Reader: thread card, fold body, quotes/signature |
 | c / r / R | Compose / reply / reply-all |
 | f / F in mailbox | Forward |
+| Ctrl+T in compose | Toggle Markdown/Plain without changing source |
+| p in normal compose | Outgoing preview / original context / plain alternative |
+| Tab/Shift+Tab, Enter in normal compose | Focus fields/controls; edit a field or activate a control |
+| Ctrl+S / :send in compose | Open outgoing send review |
+| y in send review | Explicitly submit the reviewed draft |
 | A in normal compose | Add outgoing attachment |
 | L / B | Links / received-file picker |
 | o | Open selected mail in Gmail |
@@ -146,7 +205,7 @@ You can use your own accounts after consent, including sending a first message t
 | Retained mail per account | Default 2,000 entries / 256 MiB; configurable up to 10,000 / 1 GiB |
 | Display/result window | 32 in the TUI; up to 100 per CLI page |
 | Loaded thread | 100 messages |
-| Message body | 2 MiB |
+| Message body / draft source / each rendered alternative | 2 MiB |
 | Outgoing attachments | 16 files, 2 MiB combined decoded bytes |
 | Incoming attachments | 32 per message |
 | Outgoing recipients | 32 across To/Cc/Bcc |
@@ -159,3 +218,5 @@ Encoded bodies and attachments must also fit the request limit; an oversized or 
 Every send or RSVP has an operation identity and a recorded outcome: applied, rejected or unknown. Applied means provider acceptance, not delivery. An unknown receipt protects its recovery draft; inspect the provider before deciding what to do next. Local duplicate guards do not guarantee server-side idempotency.
 
 Cache files and drafts contain plaintext protected by owner-only filesystem permissions, not encryption at rest. Keep private configuration, credentials, cache files and real-mail captures outside Git. See [cache behavior](TUI-CACHE.md), [agent CLI](AGENT-CLI.md) and [developer references](DEVELOPMENT.md) for the deeper contracts.
+
+Omagma uses Ctrl for modified app commands. Letter shortcuts cover file navigation; `i` enters compose editing, `gg`/`G` navigate mail, and Ctrl+A/E move to the start/end of a text line. Home/End and arrow keys remain optional aliases. Ctrl+1/2/3 also switches accounts from the mailbox, matching the bar popup.

@@ -47,6 +47,25 @@ def child_session():
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
+class CursorScreen(Screen):
+    """Track native cursor controls without turning the cursor into a cell."""
+    def __init__(self, columns=100, rows=24):
+        super().__init__(columns, rows)
+        self.cursor_visible = False
+        self.cursor_shape = 0
+
+    def csi(self, sequence, final):
+        super().csi(sequence, final)
+        if sequence.startswith("?") and final in {"h", "l"}:
+            if "25" in sequence[1:].split(";"):
+                self.cursor_visible = final == "h"
+        elif final == "q" and sequence.endswith(" "):
+            try:
+                self.cursor_shape = int(sequence.strip() or "0")
+            except ValueError:
+                pass
+
+
 class Terminal:
     def __init__(self, binary, directory, extra=(), history_limit=None, environment=None, screen_type=Screen, columns=100, rows=24):
         self.binary = binary
@@ -204,6 +223,71 @@ def open_composer(terminal):
     terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
 
 
+def body_bounds(terminal):
+    label = terminal.screen.locate("Body:")
+    if label is None:
+        return None
+    cells = terminal.screen.cells[label["row"]]
+    left = next((x for x in range(label["column"], -1, -1) if cells[x] == "│"), None)
+    right = next((x for x in range(label["column"], terminal.columns) if cells[x] == "│"), None)
+    if left is None or right is None:
+        return None
+    bottom = next((y for y in range(label["row"] + 1, terminal.rows)
+                   if "Attachments" in "".join(terminal.screen.cells[y][left + 1:right])
+                   or terminal.screen.cells[y][left] in {"╰", "└", "┗"}), None)
+    if bottom is None:
+        return None
+    # Body captions include a format prefix (MD/Plain). Source column zero is
+    # the composer's content origin, one padding cell inside its border, not
+    # the column of the Body substring or a duplicate in the outgoing preview.
+    inner_padding = 1
+    return {"left": left + 1 + inner_padding, "right": right - inner_padding,
+            "top": label["row"] + 1, "bottom": bottom}
+
+
+def source_location(terminal, value):
+    bounds = body_bounds(terminal)
+    if bounds is None:
+        return None
+    for row in range(bounds["top"], bounds["bottom"]):
+        for column in range(bounds["left"], bounds["right"]):
+            if terminal.screen.cells[row][column] and "".join(
+                    terminal.screen.cells[row][column:bounds["right"]]).startswith(value):
+                return {"row": row, "column": column}
+    return None
+
+
+def native_body_cursor(terminal):
+    screen = terminal.screen
+    bounds = body_bounds(terminal)
+    # Vaxis paints cells, positions the native cursor, then emits DECTCEM.
+    # Inspect x/y only after that final show sequence has completed.
+    if (bounds is None or screen.state != "ground" or not screen.cursor_visible
+            or screen.cursor_shape != 2 or not bounds["left"] <= screen.x < bounds["right"]
+            or not bounds["top"] <= screen.y < bounds["bottom"]):
+        return None
+    return {"row": screen.y, "column": screen.x}
+
+
+def cursor_after_source(terminal, value):
+    location = source_location(terminal, value)
+    if location is None:
+        return None
+    # These endpoint labels are ASCII. A cursor after the final text cell
+    # occupies the next row's first column rather than a virtual extra glyph.
+    bounds = body_bounds(terminal)
+    column = location["column"] + len(value)
+    return {"row": location["row"] + (column >= bounds["right"]),
+            "column": bounds["left"] if column >= bounds["right"] else column}
+
+
+def source_has_virtual_caret(terminal):
+    bounds = body_bounds(terminal)
+    return bounds is not None and any("▏" in "".join(
+        terminal.screen.cells[row][bounds["left"]:bounds["right"]])
+        for row in range(bounds["top"], bounds["bottom"]))
+
+
 def gmail_search(terminal, query):
     # These legacy workflows intentionally fetch older provider mail, so use
     # the explicit Gmail search key rather than the new retained-cache slash.
@@ -315,10 +399,11 @@ def exercise(terminal, action):
         fifo = terminal.directory / "synthetic attachment fifo"
         os.mkfifo(fifo, 0o600)
         terminal.send(b"A")
-        terminal.until(lambda: "Attach file path:" in terminal.text())
+        terminal.until(lambda: "Attach file · local draft" in terminal.text() and "Path:" in terminal.text()
+                       and "[Attach]" in terminal.text())
         started = time.monotonic()
         terminal.send(str(fifo).encode() + b"\r")
-        terminal.until(lambda: "Operation failed" in terminal.text(), seconds=2)
+        terminal.until(lambda: "File not selected" in terminal.text(), seconds=2)
         elapsed = time.monotonic() - started
         terminal.send(b"\x1b")
         terminal.gap()
@@ -363,23 +448,36 @@ def exercise(terminal, action):
         terminal.gap()
         body = "Café 👋—" * 180 + "BODY-END"
         terminal.send(b"\ti" + body.encode())
-        terminal.until(lambda: terminal.screen.locate("BODY-END▏") is not None)
-        end_caret = terminal.screen.locate("BODY-END▏")
-        require(terminal.screen.locate("Body:")["row"] < end_caret["row"] < 20 and end_caret["column"] < 59,
-                "wrapped single-line body caret escaped the composer body pane")
-        terminal.send(b"\x1b[H")
-        terminal.until(lambda: terminal.screen.locate("▏Café") is not None)
-        home_caret = terminal.screen.locate("▏Café")
-        require(home_caret["column"] < 59 and home_caret["row"] > terminal.screen.locate("Body:")["row"],
-                "Home did not scroll the wrapped body caret back into view")
-        terminal.send(b"\x1b[F")
-        terminal.until(lambda: terminal.screen.locate("BODY-END▏") is not None)
+        terminal.until(lambda: source_location(terminal, "BODY-END") is not None
+                       and native_body_cursor(terminal) == cursor_after_source(terminal, "BODY-END"))
+        end_caret = native_body_cursor(terminal)
+        require(not source_has_virtual_caret(terminal), "body emitted a text caret that shifts its source cells")
+        terminal.send(b"\x01")
+        terminal.until(lambda: source_location(terminal, "Café") is not None
+                       and native_body_cursor(terminal) == source_location(terminal, "Café")
+                       and native_body_cursor(terminal)["row"] == body_bounds(terminal)["top"])
+        home_caret = native_body_cursor(terminal)
+        require(home_caret["column"] == body_bounds(terminal)["left"],
+                "Ctrl+A did not scroll the wrapped body cursor to its first source cell")
+        terminal.send(b"\x05")
+        terminal.until(lambda: source_location(terminal, "BODY-END") is not None
+                       and native_body_cursor(terminal) == cursor_after_source(terminal, "BODY-END"))
         terminal.send(b"\x1b[D" * 4)
-        terminal.until(lambda: terminal.screen.locate("BODY▏-END") is not None)
+        terminal.until(lambda: source_location(terminal, "BODY-END") is not None
+                       and native_body_cursor(terminal) == {
+                           "row": source_location(terminal, "BODY-END")["row"],
+                           "column": source_location(terminal, "BODY-END")["column"] + 4})
+        middle_caret = native_body_cursor(terminal)
+        require(terminal.screen.cells[middle_caret["row"]][middle_caret["column"]] == "-",
+                "native cursor replaced or moved the body character beneath it")
         terminal.send(b"!")
-        terminal.until(lambda: terminal.screen.locate("BODY!▏-END") is not None)
+        terminal.until(lambda: source_location(terminal, "BODY!-END") is not None
+                       and native_body_cursor(terminal) == {
+                           "row": source_location(terminal, "BODY!-END")["row"],
+                           "column": source_location(terminal, "BODY!-END")["column"] + 5})
+        require(not source_has_virtual_caret(terminal), "typing inserted a visual caret cell into body text")
         terminal.send(b"\x1b")
-        terminal.gap()
+        terminal.until(lambda: not terminal.screen.cursor_visible)
         result = terminal.finish()
         expected = body[:-4] + "!" + body[-4:]
         result.update(retained_draft(terminal, expected))
@@ -387,7 +485,41 @@ def exercise(terminal, action):
             draft = client.request("draft.list")["drafts"][0]
             require(draft["subject"] == subject, "horizontal Subject scrolling changed persisted content")
         result.update(longSubjectCaret=subject_caret, wrappedBodyEndCaret=end_caret,
-                      wrappedBodyHomeCaret=home_caret, bodyHasNewlines=False)
+                      wrappedBodyHomeCaret=home_caret, bodyHasNewlines=False,
+                      bodyCursorShape="native block", bodyTextHasVirtualCaret=False)
+        return result
+    if action == "column-zero-caret":
+        open_composer(terminal)
+        terminal.send(b"\t\t\t\tiL\rnext")
+        terminal.until(lambda: source_location(terminal, "next") is not None
+                       and native_body_cursor(terminal) == cursor_after_source(terminal, "next"))
+        terminal.send(b"\x01")
+        terminal.until(lambda: source_location(terminal, "next") is not None
+                       and native_body_cursor(terminal) == source_location(terminal, "next"))
+        terminal.send(b"\x1b[A")
+        terminal.until(lambda: source_location(terminal, "L") is not None
+                       and native_body_cursor(terminal) == source_location(terminal, "L"))
+        before = native_body_cursor(terminal)
+        require(before["column"] == body_bounds(terminal)["left"],
+                "Up to column zero added a leading source cell")
+        require(not source_has_virtual_caret(terminal), "column-zero cursor rendered as an extra text glyph")
+        terminal.send(b"A")
+        terminal.until(lambda: source_location(terminal, "AL") is not None
+                       and native_body_cursor(terminal) == {
+                           "row": before["row"], "column": before["column"] + 1})
+        after = native_body_cursor(terminal)
+        require(source_location(terminal, "AL") == before,
+                "typing at column zero shifted the first source character")
+        require(terminal.screen.cells[before["row"]][before["column"]] == "A"
+                and terminal.screen.cells[before["row"]][before["column"] + 1] == "L",
+                "typed A and original L are not adjacent native source cells")
+        require(not source_has_virtual_caret(terminal), "typing A emitted a phantom body caret/space")
+        terminal.send(b"\x1b")
+        terminal.until(lambda: not terminal.screen.cursor_visible and source_location(terminal, "AL") == before)
+        result = terminal.finish()
+        result.update(retained_draft(terminal, "AL\nnext"), columnZeroBefore=before,
+                      cursorAfterInsert=after, adjacentSourceCells="AL", exactPersistedBody="AL\nnext",
+                      bodyCursorShape="native block", bodyTextHasVirtualCaret=False)
         return result
     if action == "save-incoming-attachment":
         terminal.until(lambda: "Ready" in terminal.text())
@@ -426,7 +558,8 @@ def exercise(terminal, action):
         path = terminal.directory / "fixture attachment.bin"
         path.write_bytes(data)
         terminal.send(b"A")
-        terminal.until(lambda: "Attach file path:" in terminal.text())
+        terminal.until(lambda: "Attach file · local draft" in terminal.text() and "Path:" in terminal.text()
+                       and "[Attach]" in terminal.text())
         terminal.send(str(path).encode() + b"\r")
         # Autosave may replace the attachment-success notice. The durable row
         # and its source byte size are the user-visible result of attaching.
@@ -606,7 +739,8 @@ def exercise(terminal, action):
     require([layout[n]["row"] for n in layout] == sorted(layout[n]["row"] for n in layout),
             "composer field positions overlap or reorder")
     require(all(layout[n]["column"] < 60 for n in layout), "composer fields escaped the left split pane")
-    require("Draft preview" in terminal.text(), "split composer omitted its own draft preview")
+    terminal.until(lambda: "Outgoing preview" in terminal.text())
+    require("Outgoing preview" in terminal.text(), "split composer omitted its own outgoing preview")
     terminal.send(b"e")
     terminal.until(lambda: terminal.editor_log.exists())
     entered = json.loads(terminal.editor_log.read_text())
@@ -636,7 +770,7 @@ def main():
     parser.add_argument("--build-mode", type=build_mode, default="debug")
     cases = ["save", "cancel", "save-error", "interrupt", "mail-controls", "edit-sigterm", "attach-detach", "review-cancel",
              "review-send", "unknown-send-reopen", "contact-create", "rsvp-cancel", "account-page-navigation",
-             "long-field-caret", "save-incoming-attachment", "long-rsvp-review",
+             "long-field-caret", "column-zero-caret", "save-incoming-attachment", "long-rsvp-review",
              "utf8-fragments", "fifo-local-attachment", "fifo-editor-readback"]
     parser.add_argument("--case", action="append", choices=cases)
     parser.add_argument("--output", type=Path)
@@ -654,7 +788,8 @@ def main():
                 extra = ("--fixture-scenario", "unknown-send") if name == "unknown-send-reopen" else ()
                 if name == "long-rsvp-review":
                     extra = ("--fixture-root", str(long_invitation_fixture(Path(directory))))
-                terminal = Terminal(binary, Path(directory) / name, extra=extra)
+                terminal = Terminal(binary, Path(directory) / name, extra=extra,
+                                    screen_type=CursorScreen if name in {"long-field-caret", "column-zero-caret"} else Screen)
                 receipt.update(exercise(terminal, name), passed=True)
             except Exception as error:
                 receipt.update(passed=False, error=f"{type(error).__name__}: {error}")

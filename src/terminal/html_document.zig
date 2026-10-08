@@ -14,23 +14,49 @@ pub const Limits = struct {
     pub const link_bytes = 2048;
     pub const all_link_bytes = 256 * 1024;
 };
-pub const Style = packed struct { bold: bool = false, italic: bool = false, underline: bool = false, code: bool = false, strike: bool = false };
+pub const CodeToken = enum(u3) { none, keyword, string, comment, number };
+pub const FooterStyle = enum(u2) { none, text, link };
+pub const Style = packed struct { bold: bool = false, italic: bool = false, underline: bool = false, code: bool = false, strike: bool = false, code_token: CodeToken = .none, footer: FooterStyle = .none };
 pub const Span = struct { text: []const u8, style: Style = .{}, link: ?[]const u8 = null };
 pub const Kind = enum { paragraph, heading, pre, list_item, quote, rule, table };
 pub const Cell = struct { spans: []const Span, header: bool = false };
 pub const Row = struct { cells: []const Cell };
 pub const Table = struct { rows: []const Row };
-pub const Block = struct { kind: Kind, spans: []const Span = &.{}, level: u8 = 0, ordered: bool = false, ordinal: u32 = 1, table: ?Table = null };
+pub const Block = struct {
+    kind: Kind,
+    spans: []const Span = &.{},
+    level: u8 = 0,
+    ordered: bool = false,
+    ordinal: u32 = 1,
+    table: ?Table = null,
+    list_group: u32 = 0,
+    list_start: bool = false,
+    list_continuation: bool = false,
+    list_loose: bool = false,
+    list_paragraph: bool = false,
+    quote_depth: u8 = 0,
+};
 pub const Document = struct { blocks: []const Block };
+pub const ParseOptions = struct {
+    /// Only for HTML produced locally by the escaped Markdown renderer. Mail
+    /// received from providers must keep the default and cannot supply colours.
+    generated_markdown: bool = false,
+};
 
 /// Caller owns every result and scratch allocation: use an arena and keep it
 /// alive while displaying Document. Output text/URLs never borrow input. Errors
 /// mean the viewer should use its existing plain fallback, not refuse the mail.
 /// This is a semantic mail filter, with no CSS engine, resource loads or actions.
 pub fn parse(input: []const u8, allocator: std.mem.Allocator) !Document {
+    return parseWithOptions(input, allocator, .{});
+}
+pub fn parseGeneratedMarkdown(input: []const u8, allocator: std.mem.Allocator) !Document {
+    return parseWithOptions(input, allocator, .{ .generated_markdown = true });
+}
+pub fn parseWithOptions(input: []const u8, allocator: std.mem.Allocator, options: ParseOptions) !Document {
     if (input.len > Limits.input_bytes) return error.HtmlTooLarge;
     if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
-    var context: Context = .{ .a = allocator, .input = input };
+    var context: Context = .{ .a = allocator, .input = input, .options = options };
     var offset: usize = 0;
     while (offset < input.len) {
         try context.tick();
@@ -247,12 +273,13 @@ fn hidden(tag: Tag, a: std.mem.Allocator) !bool {
     return false;
 }
 
-const State = struct { style: Style = .{}, link: ?[]const u8 = null, skip: bool = false, pre: bool = false, kind: Kind = .paragraph, level: u8 = 0, ordered: bool = false, ordinal: u32 = 1, list_depth: u8 = 0, quote_depth: u8 = 0 };
-const Frame = struct { name: []const u8, before: State, next_ordinal: u32 = 1, data_table: bool = false };
+const State = struct { style: Style = .{}, link: ?[]const u8 = null, skip: bool = false, pre: bool = false, kind: Kind = .paragraph, level: u8 = 0, ordered: bool = false, ordinal: u32 = 1, list_depth: u8 = 0, quote_depth: u8 = 0, list_group: u32 = 0, list_loose: bool = false, list_paragraph: bool = false };
+const Frame = struct { name: []const u8, before: State, next_ordinal: u32 = 1, data_table: bool = false, list_loose: bool = false, item_started: bool = false, list_group: u32 = 0, list_started: bool = false };
 const TableBuilder = struct { rows: std.ArrayList(Row) = .empty, cells: std.ArrayList(Cell) = .empty, cell_active: bool = false, cell_header: bool = false };
 const Context = struct {
     a: std.mem.Allocator,
     input: []const u8,
+    options: ParseOptions = .{},
     blocks: std.ArrayList(Block) = .empty,
     spans: std.ArrayList(Span) = .empty,
     text_buffer: std.ArrayList(u8) = .empty,
@@ -270,6 +297,7 @@ const Context = struct {
     pending_space: bool = false,
     table_depth: usize = 0,
     table: ?TableBuilder = null,
+    next_list_group: u32 = 1,
     fn tick(self: *Context) !void {
         self.work += 1;
         if (self.work > Limits.tokens) return error.HtmlTooComplex;
@@ -296,7 +324,27 @@ const Context = struct {
         if (self.spans.items.len != 0) {
             const last = &self.spans.items[self.spans.items.len - 1];
             if (!self.block_state.pre) last.text = std.mem.trimEnd(u8, last.text, " \t\n");
-            try self.pushBlock(.{ .kind = self.block_state.kind, .spans = try self.spans.toOwnedSlice(self.a), .level = self.block_state.level, .ordered = self.block_state.ordered, .ordinal = self.block_state.ordinal });
+            var continuation = false;
+            var list_start = false;
+            if (self.block_state.kind == .list_item) {
+                var index = self.depth;
+                while (index != 0) {
+                    index -= 1;
+                    if (!std.ascii.eqlIgnoreCase(self.stack[index].name, "li")) continue;
+                    continuation = self.stack[index].item_started;
+                    self.stack[index].item_started = true;
+                    break;
+                }
+                index = self.depth;
+                while (index != 0) {
+                    index -= 1;
+                    if (self.stack[index].list_group == 0 or self.stack[index].list_group != self.block_state.list_group) continue;
+                    list_start = !self.stack[index].list_started;
+                    self.stack[index].list_started = true;
+                    break;
+                }
+            }
+            try self.pushBlock(.{ .kind = self.block_state.kind, .spans = try self.spans.toOwnedSlice(self.a), .level = self.block_state.level, .ordered = self.block_state.ordered, .ordinal = self.block_state.ordinal, .list_group = self.block_state.list_group, .list_start = list_start, .list_continuation = continuation, .list_loose = self.block_state.list_loose, .list_paragraph = self.block_state.list_paragraph, .quote_depth = self.block_state.quote_depth });
         }
         self.pending_space = false;
     }
@@ -404,6 +452,23 @@ const Context = struct {
             if (tag.is("u")) self.state.style.underline = true;
             if (tag.is("s") or tag.is("strike") or tag.is("del")) self.state.style.strike = true;
             if (tag.is("code") or tag.is("kbd") or tag.is("samp")) self.state.style.code = true;
+            if (self.options.generated_markdown and self.state.pre and self.state.style.code and tag.is("span")) {
+                if (tag.attribute("class")) |class| self.state.style.code_token = generatedCodeToken(class);
+            }
+            if (self.options.generated_markdown and !self.state.pre and !self.state.style.code) {
+                if (tag.attribute("class")) |class| {
+                    if (tag.is("div") and std.mem.eql(u8, class, "omagma-footer")) self.state.style.footer = .text;
+                    if (tag.is("a") and self.state.style.footer != .none and std.mem.eql(u8, class, "omagma-footer-link")) {
+                        // The separator before the link belongs to its grey
+                        // prefix. Do not migrate it into the underlined brand.
+                        if (self.pending_space and (self.text_buffer.items.len != 0 or self.spans.items.len != 0)) {
+                            self.pending_space = false;
+                            try self.append(" ");
+                        }
+                        self.state.style.footer = .link;
+                    }
+                }
+            }
             if (tag.is("a")) {
                 self.state.style.underline = true;
                 self.state.link = if (tag.attribute("href")) |href| try self.safeLink(href) else null;
@@ -426,21 +491,41 @@ const Context = struct {
             if (tag.is("ol") or tag.is("ul")) {
                 self.state.list_depth +|= 1;
                 self.state.ordered = tag.is("ol");
+                self.state.list_group = self.next_list_group;
+                self.next_list_group += 1; // At most Limits.tokens tag opens.
+                self.state.list_loose = false;
+                self.state.list_paragraph = false;
                 if (tag.attribute("start")) |v| next_ordinal = std.fmt.parseInt(u32, v, 10) catch 1;
             }
             if (tag.is("li")) {
                 self.state.kind = .list_item;
                 self.state.level = @min(self.state.list_depth -| 1, 8);
+                self.state.list_paragraph = false;
                 var i = self.depth;
                 while (i != 0) {
                     i -= 1;
                     if (std.ascii.eqlIgnoreCase(self.stack[i].name, "ol") or std.ascii.eqlIgnoreCase(self.stack[i].name, "ul")) {
                         self.state.ordinal = self.stack[i].next_ordinal;
+                        self.state.list_loose = self.stack[i].list_loose;
                         self.stack[i].next_ordinal +|= 1;
                         break;
                     }
                 }
                 if (tag.attribute("value")) |v| self.state.ordinal = std.fmt.parseInt(u32, v, 10) catch self.state.ordinal;
+            }
+            if (tag.is("p") and self.state.kind == .list_item) {
+                // Explicit paragraphs distinguish loose HTML lists from tight
+                // direct li text. Their later blocks retain the item identity.
+                self.state.list_loose = true;
+                self.state.list_paragraph = true;
+                var index = self.depth;
+                while (index != 0) {
+                    index -= 1;
+                    if (std.ascii.eqlIgnoreCase(self.stack[index].name, "ul") or std.ascii.eqlIgnoreCase(self.stack[index].name, "ol")) {
+                        self.stack[index].list_loose = true;
+                        break;
+                    }
+                }
             }
             if (tag.is("table")) {
                 try self.begin();
@@ -494,7 +579,7 @@ const Context = struct {
             return;
         }
         if (self.depth == Limits.depth) return error.HtmlTooComplex;
-        self.stack[self.depth] = .{ .name = tag.name, .before = before, .next_ordinal = next_ordinal, .data_table = is_data };
+        self.stack[self.depth] = .{ .name = tag.name, .before = before, .next_ordinal = next_ordinal, .data_table = is_data, .list_group = if (tag.is("ul") or tag.is("ol")) self.state.list_group else 0 };
         self.depth += 1;
     }
     fn close(self: *Context, name: []const u8) !void {
@@ -511,14 +596,16 @@ const Context = struct {
         }
     }
     fn pop(self: *Context) !void {
-        self.depth -= 1;
-        const frame = self.stack[self.depth];
+        // Keep the closing item's frame available until its final block has
+        // captured continuation metadata, including malformed implicit closes.
+        const frame = self.stack[self.depth - 1];
         if (!self.state.skip) {
             if (std.ascii.eqlIgnoreCase(frame.name, "table")) {
                 if (frame.data_table) try self.finishTable() else try self.flushBlock();
                 self.table_depth -|= 1;
             } else if (self.table != null and (std.ascii.eqlIgnoreCase(frame.name, "td") or std.ascii.eqlIgnoreCase(frame.name, "th"))) try self.finishCell() else if (self.table != null and std.ascii.eqlIgnoreCase(frame.name, "tr")) try self.finishRow() else if (blockTag(frame.name)) try self.flushBlock();
         }
+        self.depth -= 1;
         self.state = frame.before;
     }
     fn finishCell(self: *Context) !void {
@@ -600,6 +687,86 @@ const Context = struct {
         return headers != 0 or (compact and consistent and rows >= 2 and columns >= 2 and columns <= 6);
     }
 };
+
+fn generatedCodeToken(class: []const u8) CodeToken {
+    if (std.mem.eql(u8, class, "omagma-syntax-keyword")) return .keyword;
+    if (std.mem.eql(u8, class, "omagma-syntax-string")) return .string;
+    if (std.mem.eql(u8, class, "omagma-syntax-comment")) return .comment;
+    if (std.mem.eql(u8, class, "omagma-syntax-number")) return .number;
+    return .none;
+}
+
+test "markdown preview: list paragraphs retain item identity through nested children" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try parse("<p>Before</p><ol start='3'><li><p>Alpha</p><p>detail</p><ul><li>Child</li></ul>tail</li><li><p>Beta</p></li></ol><p>After</p>", a);
+    try std.testing.expectEqual(@as(usize, 7), doc.blocks.len);
+    const first = doc.blocks[1];
+    const detail = doc.blocks[2];
+    const child = doc.blocks[3];
+    const tail = doc.blocks[4];
+    const next = doc.blocks[5];
+    try std.testing.expect(first.list_loose and first.list_paragraph and !first.list_continuation);
+    try std.testing.expect(detail.list_continuation and detail.list_paragraph and detail.ordinal == 3);
+    try std.testing.expectEqual(first.list_group, detail.list_group);
+    try std.testing.expect(child.level == 1 and !child.ordered and !child.list_continuation and !child.list_loose);
+    try std.testing.expect(child.list_group != first.list_group);
+    try std.testing.expect(tail.list_continuation and !tail.list_paragraph and tail.level == 0);
+    try std.testing.expectEqual(first.list_group, tail.list_group);
+    try std.testing.expect(next.ordinal == 4 and next.list_loose and !next.list_continuation);
+    try std.testing.expectEqual(Kind.paragraph, doc.blocks[6].kind);
+    try std.testing.expectEqualStrings("Before\nAlpha\ndetail\nChild\ntail\nBeta\nAfter", try Oracle.document(a, doc));
+    const malformed = try parse("<ul><li><p>One</p><p>More</p><li>Two</ul><p>Tail", a);
+    try std.testing.expectEqual(@as(usize, 4), malformed.blocks.len);
+    try std.testing.expect(malformed.blocks[1].list_continuation and !malformed.blocks[2].list_continuation);
+    try std.testing.expectEqualStrings("One\nMore\nTwo\nTail", try Oracle.document(a, malformed));
+}
+
+test "markdown preview: only explicit generated provenance accepts exact fenced token classes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = "<p><span class='omagma-syntax-keyword'>Outside</span></p><pre><code><span class='omagma-syntax-keyword' style='color:#000;background:url(https://tracker.example.test)' onclick='run()'>const</span> <span class='omagma-syntax-string'>&quot;&lt;script&gt;&quot;</span> <span class='omagma-syntax-comment'>// note</span> <span class='omagma-syntax-number'>42</span> <span class='omagma-syntax-keyword extra'>unknown</span></code></pre>";
+    const received = try parse(source, a);
+    for (received.blocks) |block| for (block.spans) |span| try std.testing.expectEqual(CodeToken.none, span.style.code_token);
+    const generated = try parseGeneratedMarkdown(source, a);
+    try std.testing.expectEqual(CodeToken.none, generated.blocks[0].spans[0].style.code_token);
+    var seen: [5]bool = @splat(false);
+    for (generated.blocks[1].spans) |span| {
+        seen[@backingInt(span.style.code_token)] = true;
+        if (std.mem.eql(u8, span.text, "unknown")) try std.testing.expectEqual(CodeToken.none, span.style.code_token);
+        try std.testing.expect(span.link == null);
+    }
+    for (seen) |present| try std.testing.expect(present);
+    try std.testing.expectEqualStrings(try Oracle.document(a, received), try Oracle.document(a, generated));
+    try std.testing.expectEqualStrings("Outside\nconst \"<script>\" // note 42 unknown", try Oracle.document(a, generated));
+}
+
+test "markdown footer: generated provenance accepts only contextual exact footer classes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = "<p><a class='omagma-footer-link' href='https://example.test'>Ordinary</a></p><div class='omagma-footer' style='color:#ff0000'><img src='cid:omagma-logo@omagma.invalid' alt=''>Sent with <a class='omagma-footer-link' href='https://technologylab-ai.github.io/omagma/' style='text-decoration:none;color:#00ff00'>omagma</a> 🌋</div><p>After</p><div class='omagma-footer extra'>Not branded</div><pre><code><div class='omagma-footer'>Code</div></code></pre>";
+    const received = try parse(source, a);
+    for (received.blocks) |block| for (block.spans) |span| try std.testing.expectEqual(FooterStyle.none, span.style.footer);
+    const generated = try parseGeneratedMarkdown(source, a);
+    try std.testing.expectEqualStrings(try Oracle.document(a, received), try Oracle.document(a, generated));
+    try std.testing.expectEqual(FooterStyle.none, generated.blocks[0].spans[0].style.footer);
+    const footer = generated.blocks[1].spans;
+    try std.testing.expectEqual(@as(usize, 3), footer.len);
+    try std.testing.expectEqualStrings("Sent with ", footer[0].text);
+    try std.testing.expectEqual(FooterStyle.text, footer[0].style.footer);
+    try std.testing.expect(!footer[0].style.underline and footer[0].link == null);
+    try std.testing.expectEqualStrings("omagma", footer[1].text);
+    try std.testing.expectEqual(FooterStyle.link, footer[1].style.footer);
+    try std.testing.expect(footer[1].style.underline);
+    try std.testing.expectEqualStrings("https://technologylab-ai.github.io/omagma/", footer[1].link.?);
+    try std.testing.expectEqualStrings(" 🌋", footer[2].text);
+    try std.testing.expectEqual(FooterStyle.text, footer[2].style.footer);
+    try std.testing.expect(!footer[2].style.underline and footer[2].link == null);
+    for (generated.blocks[2..]) |block| for (block.spans) |span| try std.testing.expectEqual(FooterStyle.none, span.style.footer);
+}
 
 const Entity = struct { consumed: usize, codepoint: ?u21 = null, text: []const u8 = "" };
 fn entity(input: []const u8) ?Entity {

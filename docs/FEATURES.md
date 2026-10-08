@@ -58,6 +58,9 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Local drafts, compose/reply/reply-all, outgoing attachments and explicit
   sending review. `$EDITOR` can take over the terminal and return afterward;
   no tmux dependency.
+- Markdown source with an outgoing rendered
+  preview, plain alternative and retained reply/forward context. New TUI
+  compositions default to Markdown; existing drafts retain their format.
 - Contact list/search, create/edit, and account-scoped archive, Trash/restore,
   star/unread and existing-label assignment.
 - Inspect calendar invitations and send accept/tentative/decline RSVP emails.
@@ -79,6 +82,8 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   cache-only versus server search.
 - Decoded body/envelope/thread/attachment data, drafts, replies, sending,
   mailbox changes, contacts and invitation replies.
+- Explicit Markdown/Plain draft formats and local rendered `draft.preview`;
+  CLI source defaults to Plain.
 - Explicit account identity, locally checked capabilities and durable
   operation receipts. Unknown send outcomes are not automatically retried.
 - Forward planning, verified sender discovery, bulk per-item
@@ -131,6 +136,12 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 
 - Normal/insert modes keep editing separate from commands. To/Cc/Bcc/subject
   and body remain visible; sending requires a review and explicit confirmation.
+- Ctrl+T switches Markdown/Plain without rewriting source; normal compose `p`
+  selects outgoing preview, original reply/forward context or plain alternative.
+  Tab/Shift+Tab focuses controls and Enter activates the selected control.
+- Markdown mail includes headings, lists, quotes, tables and highlighted fenced
+  code, rendered HTML and meaningful plain text. Raw HTML and remote images
+  stay inert. The tiny approved footer logo is embedded, with no remote fetch.
 - Multiple outgoing attachments survive local saves and `$EDITOR` return.
   Limits are explicit: up to 16 files and 2 MiB of aggregate decoded outgoing
   attachments, with a separate 2 MiB body limit and 3 MiB request limit.
@@ -147,13 +158,16 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   configured sender names and plaintext signatures are retained.
 - Sizes and individual `[x]` controls stay visible, and the
   wheel reaches longer outgoing file lists.
-- Tab/Shift+Tab completes and cycles literal paths, including
-  paths with spaces; Ctrl+U clears a suggested path. No shell expansion occurs.
+- In file popups, Tab/Shift+Tab focuses the path, folder controls, rows and
+  action buttons; Enter activates the selected control. Ctrl+F completes
+  literal paths with spaces, matching filename prefixes without regard to ASCII
+  case and retaining their actual spelling. Ctrl+U clears the path. No shell
+  expansion occurs.
 - Received files have a picker across the loaded thread and a
   suggested XDG Downloads filename. Collisions get a fresh name; saves refuse
   overwrite and create private files. Save & open explicitly invokes a viewer.
 - `L` opens an account-profile URL chooser.
-- Ctrl+D/U or PageUp/PageDown scrolls the original preview in
+- Ctrl+D/U or PageUp/PageDown scrolls the selected preview in
   normal compose mode; preview link/file actions retain the outgoing draft.
 - The contact's name and address share selection highlighting.
   Local autocomplete and contact pickers remain account-specific.
@@ -193,6 +207,9 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   attachment bytes as base64url; callers save them with their own file tools.
   There is no `--output-file` option. The interactive save/path picker is a
   TUI convenience.
+- JSONL `draft.bodyFormat` and one-shot `--format markdown|plain` select the
+  outgoing interpretation. `draft.preview` returns unchanged source, generated
+  HTML and its plain alternative without sending or saving the supplied body.
 - Per-item bulk outcomes and undo tokens, relative before/after
   cache anchors with retained-boundary fallback, and raw local recovery fields
   support agent-controlled workflows.

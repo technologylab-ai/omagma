@@ -141,11 +141,13 @@ def tui_case(binary, directory, terminate=False, terminate_editor=False):
             terminal.until(lambda: reader_contains(terminal.screen, "Synthetic work@example.com message 095."))
             terminal.send(b"c")
             terminal.until(lambda: "Subject:" in terminal.text() and "Attach" in terminal.text())
+            terminal.until(lambda: "MD · Body:" in terminal.text() and "[Plain Ctrl+T]" in terminal.text())
             terminal.send(b"e")
             terminal.until(lambda: "OMAGMA TEST EDITOR:" in terminal.text())
             if not terminate_editor:
                 terminal.send(b"s")
                 terminal.until(lambda: "Reviewed fixture editor body." in terminal.text() and "Attach" in terminal.text())
+                terminal.until(lambda: "MD · Body:" in terminal.text() and "[Plain Ctrl+T]" in terminal.text())
         result = terminal.finish(signal_mode=signal.SIGTERM if terminate or terminate_editor else False)
         require(result["termiosRestored"], "native TUI did not restore live owned PTY")
         print("PASS macOS TUI:" + ("SIGTERM during editor/cancellation" if terminate_editor else "SIGTERM wake/cancellation" if terminate else "cached mail/account navigation/compose/editor save") + "/restored live tty/zero sends/clean exit")

@@ -25,10 +25,25 @@ pub fn style(palette: theme.Palette, mono: bool, flags: html.Style, role: Role) 
             .code, .text => palette.foreground,
         } };
         result.bg = .{ .rgb = if (flags.code or role == .code) palette.selection else palette.background };
+        if ((flags.code or role == .code) and flags.code_token != .none) result.fg = .{ .rgb = switch (flags.code_token) {
+            .none => palette.foreground,
+            .keyword => palette.accent,
+            .string => palette.green,
+            .comment => palette.muted,
+            .number => palette.cyan,
+        } };
+    }
+    if (flags.code or role == .code) {
+        if (flags.code_token == .keyword) result.bold = true;
+        if (flags.code_token == .comment) result.italic = true;
     }
     if (role == .heading or role == .table_header) result.bold = true;
     if (role == .quote) result.italic = true;
     if (role == .link) result.ul_style = .single;
+    if (!flags.code and role != .code and flags.footer != .none) {
+        if (!mono) result.fg = .{ .rgb = if (flags.footer == .link) palette.accent else palette.muted };
+        if (flags.footer == .link) result.ul_style = .single;
+    }
     return result;
 }
 
@@ -121,10 +136,18 @@ pub const Prepared = struct {
     layout_builds: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, input: []const u8) !Prepared {
+        return initWithOptions(allocator, input, .{});
+    }
+    /// The caller must provide locally escaped Markdown HTML, never mail read
+    /// from a provider. Only the four fixed code token classes gain appearance.
+    pub fn initGeneratedMarkdown(allocator: std.mem.Allocator, input: []const u8) !Prepared {
+        return initWithOptions(allocator, input, .{ .generated_markdown = true });
+    }
+    fn initWithOptions(allocator: std.mem.Allocator, input: []const u8, options: html.ParseOptions) !Prepared {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
         const owned = arena.allocator();
-        var document = try html.parse(input, owned);
+        var document = try html.parseWithOptions(input, owned, options);
         var semantic_bytes: usize = 0;
         var semantic_spans: usize = 0;
         const blocks = try owned.alloc(html.Block, document.blocks.len);
@@ -275,6 +298,7 @@ const Builder = struct {
     role: Role = .text,
     open: bool = false,
     pending_space: bool = false,
+    pending_footer: html.FooterStyle = .none,
 
     fn add(self: *Builder, text: []const u8, columns: u16, flags: html.Style, role: Role) !void {
         if (text.len == 0) return;
@@ -288,6 +312,7 @@ const Builder = struct {
         self.marker = marker;
         self.role = role;
         self.pending_space = false;
+        self.pending_footer = .none;
         try self.newLine(true);
     }
     fn newLine(self: *Builder, first: bool) !void {
@@ -340,11 +365,15 @@ const Builder = struct {
                 if (span.text[offset] == '\n') {
                     try self.newLine(false);
                     self.pending_space = false;
+                    self.pending_footer = .none;
                     offset += 1;
                     continue;
                 }
                 if (span.text[offset] == ' ' or span.text[offset] == '\t') {
-                    if (pre) try self.chunk(" ", flags, role) else self.pending_space = self.column > self.prefix_width;
+                    if (pre) try self.chunk(" ", flags, role) else {
+                        self.pending_space = self.column > self.prefix_width;
+                        self.pending_footer = if (self.pending_space) flags.footer else .none;
+                    }
                     offset += 1;
                     continue;
                 }
@@ -353,8 +382,16 @@ const Builder = struct {
                 const word = span.text[offset..end];
                 const wanted = textWidth(word, self.method, self.width +| 1);
                 const gap: u16 = @intFromBool(self.pending_space and self.column > self.prefix_width);
-                if (!pre and self.column > self.prefix_width and self.column +| gap +| wanted > self.width) try self.newLine(false) else if (gap > 0) try self.add(" ", 1, flags, role);
+                if (!pre and self.column > self.prefix_width and self.column +| gap +| wanted > self.width) try self.newLine(false) else if (gap > 0) {
+                    // Only generated footer whitespace keeps its own role.
+                    // Ordinary/received HTML retains existing following-word
+                    // appearance; no CSS or general style ownership changes.
+                    const spacing_flags: html.Style = if (self.pending_footer == .none) flags else .{ .footer = self.pending_footer, .underline = self.pending_footer == .link };
+                    const spacing_role = if (self.pending_footer == .none) role else if (self.pending_footer == .link) Role.link else Role.text;
+                    try self.add(" ", 1, spacing_flags, spacing_role);
+                }
                 self.pending_space = false;
+                self.pending_footer = .none;
                 try self.chunk(word, flags, role);
                 offset = end;
             }
@@ -501,7 +538,15 @@ fn buildLayout(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
     }
     var builder: Builder = .{ .allocator = allocator, .scratch_allocator = scratch_allocator, .width = width, .method = method };
     for (document.blocks, 0..) |block, index| {
-        if (index > 0 and block.kind != .list_item) try builder.blank();
+        if (index > 0) {
+            const previous = document.blocks[index - 1];
+            const list_gap = block.kind == .list_item and
+                ((block.list_continuation and block.list_paragraph) or
+                    previous.kind != .list_item or
+                    (block.list_start and block.level == 0 and !block.list_continuation) or
+                    (block.list_loose and !block.list_continuation and previous.level >= block.level));
+            if (block.kind != .list_item or list_gap) try builder.blank();
+        }
         switch (block.kind) {
             .table => if (block.table) |table| try renderTable(&builder, table),
             .rule => {
@@ -510,9 +555,13 @@ fn buildLayout(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
                 try builder.finishLine();
             },
             else => {
-                const role: Role = if (block.kind == .heading) .heading else if (block.kind == .quote) .quote else if (block.kind == .pre) .code else .text;
-                const indent: u16 = if (block.kind == .list_item or block.kind == .quote) @min(@as(u16, block.level) * 2, @min(@as(u16, 12), width / 4)) else if (block.kind == .pre) @min(@as(u16, 2), width / 4) else 0;
-                const marker = if (block.kind == .quote) "│ " else if (block.kind == .list_item) (if (block.ordered) try std.fmt.allocPrint(allocator, "{d}. ", .{block.ordinal}) else "• ") else "";
+                const quoted_list = block.kind == .list_item and block.quote_depth > 0;
+                const role: Role = if (block.kind == .heading) .heading else if (block.kind == .quote or quoted_list) .quote else if (block.kind == .pre) .code else .text;
+                const list_indent: u16 = @min(@as(u16, block.level) * 2, @min(@as(u16, 12), width / 4));
+                const indent: u16 = if (quoted_list) @min(@as(u16, block.quote_depth) * 2, @min(@as(u16, 12), width / 4)) else if (block.kind == .list_item or block.kind == .quote) list_indent else if (block.kind == .pre) @min(@as(u16, 2), width / 4) else 0;
+                const item_marker = if (block.kind == .quote) "│ " else if (block.kind == .list_item) (if (block.ordered) try std.fmt.allocPrint(allocator, "{d}. ", .{block.ordinal}) else "• ") else "";
+                const list_marker = if (block.kind == .list_item and block.list_continuation) blanks[0..textWidth(item_marker, method, width)] else item_marker;
+                const marker = if (quoted_list) try std.fmt.allocPrint(allocator, "│ {s}{s}", .{ blanks[0..list_indent], list_marker }) else list_marker;
                 try builder.begin(indent, marker, role);
                 try builder.spans(block.spans, block.kind == .pre, false);
                 try builder.finishLine();
@@ -532,6 +581,133 @@ test "semantic style maps flags and roles without hyperlink metadata" {
     try std.testing.expectEqual(vaxis.Style.Underline.single, link.ul_style);
     const mono = style(palette, true, .{ .bold = true }, .heading);
     try std.testing.expect(mono.fg == .default and mono.bg == .default and mono.bold);
+}
+
+fn expectWindowLines(win: vaxis.Window, expected: []const []const u8) !void {
+    const allocator = std.testing.allocator;
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(allocator);
+    for (0..win.height) |row| {
+        value.clearRetainingCapacity();
+        for (0..win.width) |column| try value.appendSlice(allocator, win.screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (row < expected.len) expected[row] else "", std.mem.trimEnd(u8, value.items, " "));
+    }
+}
+
+test "markdown preview: tight nested and loose lists keep before after gaps without duplicate markers" {
+    const allocator = std.testing.allocator;
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 14, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 14, .screen = &screen };
+    var tight = try Prepared.init(allocator, "<p>Before</p><ul><li>Alpha<ul><li>Child</li></ul>tail</li><li>Beta</li></ul><p>After</p>");
+    defer tight.deinit();
+    try tight.ensure(40, .unicode);
+    _ = tight.draw(win, 0, 0, .{}, false);
+    try expectWindowLines(win, &.{ "Before", "", "• Alpha", "  • Child", "  tail", "• Beta", "", "After" });
+    win.fill(.{});
+    var loose = try Prepared.init(allocator, "<p>Before</p><ol start='3'><li><p>Alpha</p><p>detail</p><ul><li>Child</li></ul></li><li><p>Beta</p></li></ol><p>After</p>");
+    defer loose.deinit();
+    try loose.ensure(40, .unicode);
+    _ = loose.draw(win, 0, 0, .{}, false);
+    try expectWindowLines(win, &.{ "Before", "", "3. Alpha", "", "   detail", "  • Child", "", "4. Beta", "", "After" });
+    try loose.ensure(20, .unicode);
+    for (loose.cached.lines) |line| try std.testing.expect(line.columns <= 20);
+}
+
+test "markdown preview: generated code colours render fixed tokens while received classes stay inert" {
+    const allocator = std.testing.allocator;
+    const input = "<pre><code><span class='omagma-syntax-keyword' style='color:#000'>const</span> <span class='omagma-syntax-string'>&quot;&lt;tag&gt;&quot;</span>\n<span class='omagma-syntax-comment'>// note</span> <span class='omagma-syntax-number'>42</span></code></pre>";
+    const palette: theme.Palette = .{};
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 6, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 6, .screen = &screen };
+    var generated = try Prepared.initGeneratedMarkdown(allocator, input);
+    defer generated.deinit();
+    try generated.ensure(40, .unicode);
+    _ = generated.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{ "  const \"<tag>\"", "  // note 42" });
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.accent }, screen.readCell(2, 0).?.style.fg));
+    try std.testing.expect(screen.readCell(2, 0).?.style.bold);
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.green }, screen.readCell(8, 0).?.style.fg));
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.muted }, screen.readCell(2, 1).?.style.fg));
+    try std.testing.expect(screen.readCell(2, 1).?.style.italic);
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.cyan }, screen.readCell(10, 1).?.style.fg));
+    win.fill(.{});
+    _ = generated.draw(win, 0, 0, palette, true);
+    try std.testing.expect(screen.readCell(2, 0).?.style.fg == .default and screen.readCell(2, 0).?.style.bold);
+    try std.testing.expect(screen.readCell(2, 1).?.style.fg == .default and screen.readCell(2, 1).?.style.italic);
+    var received = try Prepared.init(allocator, input);
+    defer received.deinit();
+    try received.ensure(40, .unicode);
+    win.fill(.{});
+    _ = received.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{ "  const \"<tag>\"", "  // note 42" });
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.foreground }, screen.readCell(2, 0).?.style.fg));
+    try std.testing.expect(!screen.readCell(2, 0).?.style.bold and !screen.readCell(2, 1).?.style.italic);
+}
+
+test "markdown preview: quoted reply lists retain quote bars and folding ownership" {
+    const allocator = std.testing.allocator;
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 10, .screen = &screen };
+    var prepared = try Prepared.init(allocator, "<blockquote><p>Context</p><ol start='3'><li>First<ul><li>Child</li></ul></li><li>Second</li></ol></blockquote><p>After</p>");
+    defer prepared.deinit();
+    try prepared.ensure(40, .unicode);
+    _ = prepared.draw(win, 0, 0, .{}, false);
+    try expectWindowLines(win, &.{ "  │ Context", "", "  │ 3. First", "  │   • Child", "  │ 4. Second", "", "After" });
+    win.fill(.{});
+    _ = prepared.drawFolded(win, 0, 0, .{}, false, true, false);
+    var visible: std.ArrayList(u8) = .empty;
+    defer visible.deinit(allocator);
+    for (0..win.height) |row| for (0..win.width) |column| try visible.appendSlice(allocator, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, visible.items, "After") != null);
+    for ([_][]const u8{ "Context", "First", "Child", "Second" }) |hidden| try std.testing.expect(std.mem.indexOf(u8, visible.items, hidden) == null);
+}
+
+test "markdown footer: native generated footer has grey text and only orange underlined brand" {
+    const allocator = std.testing.allocator;
+    const input = "<div class='omagma-footer' style='color:#ff0000'><img src='cid:omagma-logo@omagma.invalid' alt=''>Sent with <a class='omagma-footer-link' href='https://technologylab-ai.github.io/omagma/' style='color:#00ff00;text-decoration:none'>omagma</a> 🌋</div>";
+    const palette: theme.Palette = .{};
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 4, .screen = &screen };
+    var generated = try Prepared.initGeneratedMarkdown(allocator, input);
+    defer generated.deinit();
+    try generated.ensure(40, .unicode);
+    _ = generated.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{"Sent with omagma 🌋"});
+    for (0..10) |column| {
+        const appearance = screen.readCell(@intCast(column), 0).?.style;
+        if (!vaxis.Color.eql(.{ .rgb = palette.muted }, appearance.fg) or appearance.ul_style != .off)
+            std.debug.print("native footer prefix cell {d}: fg={any}, underline={any}\n", .{ column, appearance.fg, appearance.ul_style });
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.muted }, appearance.fg));
+        try std.testing.expectEqual(vaxis.Style.Underline.off, appearance.ul_style);
+    }
+    for (10..16) |column| {
+        const appearance = screen.readCell(@intCast(column), 0).?.style;
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.accent }, appearance.fg));
+        try std.testing.expectEqual(vaxis.Style.Underline.single, appearance.ul_style);
+    }
+    for ([_]u16{ 16, 17 }) |column| {
+        const appearance = screen.readCell(column, 0).?.style;
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.muted }, appearance.fg));
+        try std.testing.expectEqual(vaxis.Style.Underline.off, appearance.ul_style);
+    }
+    win.fill(.{});
+    _ = generated.draw(win, 0, 0, palette, true);
+    try std.testing.expect(screen.readCell(0, 0).?.style.fg == .default);
+    try std.testing.expect(screen.readCell(10, 0).?.style.fg == .default);
+    try std.testing.expectEqual(vaxis.Style.Underline.single, screen.readCell(10, 0).?.style.ul_style);
+    var received = try Prepared.init(allocator, input);
+    defer received.deinit();
+    try received.ensure(40, .unicode);
+    win.fill(.{});
+    _ = received.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{"Sent with omagma 🌋"});
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.foreground }, screen.readCell(0, 0).?.style.fg));
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.cyan }, screen.readCell(10, 0).?.style.fg));
+    for (received.document.blocks) |block| for (block.spans) |span| try std.testing.expectEqual(html.FooterStyle.none, span.style.footer);
 }
 
 test "HTML reader display compacts bare URLs and retains human labels and original hrefs" {

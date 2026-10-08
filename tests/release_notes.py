@@ -20,6 +20,15 @@ class ReleaseNotes(unittest.TestCase):
         self.assertIn("omagma-0.2.5-OS-ARCH.tar.gz", text)
         self.assertNotIn("/blob/v0.2.4/", text)
 
+    def test_reviewed_026_quality_of_life_and_matching_links(self):
+        text = release_notes("0.2.6", "0.17.0", "technologylab-ai/omagma")
+        for phrase in ("Markdown mail", "Native attachment picker", "Reliable forwarding",
+                       "Write above the quote", "Ctrl+G", "Invitation replies", "Ctrl+B",
+                       "**experimental**", "no new Google permission", "/blob/v0.2.6/"):
+            self.assertIn(phrase, text)
+        self.assertIn("omagma-0.2.6-OS-ARCH.tar.gz", text)
+        self.assertNotIn("/blob/v0.2.5/", text)
+
     def test_specific_file_precedes_generic_feature_prose(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

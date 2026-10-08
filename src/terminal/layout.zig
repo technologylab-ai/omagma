@@ -5,7 +5,7 @@ pub const Focus = enum { navigation, list, reader };
 pub const Rect = struct { x: u16 = 0, y: u16 = 0, width: u16, height: u16 };
 pub const Panes = struct { navigation: ?Rect = null, list: ?Rect = null, reader: ?Rect = null };
 
-pub const HitKind = enum { label_choice, label_add, label_remove, custom_label, account, folder, contacts, mail_scroll, mail, reader, reader_thread, reader_link, reader_attachment, reader_picker, reader_picker_save, reader_picker_open, contact, compose_field, compose_from, compose_completion, compose_attachment_add, compose_attachment_remove, compose_attachment_scroll, contact_field };
+pub const HitKind = enum { file_row, file_parent, file_home, file_hidden, file_location, file_confirm, file_cancel, label_choice, label_add, label_remove, custom_label, account, folder, contacts, mail_scroll, mail, reader, reader_thread, reader_link, reader_attachment, reader_picker, reader_picker_save, reader_picker_open, contact, compose_field, compose_from, compose_completion, compose_attachment_select, compose_attachment_add, compose_attachment_remove, compose_attachment_scroll, compose_format, compose_preview_toggle, compose_preview_scroll, contact_field };
 pub const Hit = struct { rect: Rect, kind: HitKind, index: usize = 0 };
 /// Populated by drawing, rather than recomputing a second approximation of
 /// wrapped account rows, paged messages or responsive pane geometry.

@@ -20,7 +20,12 @@ navigation, full mail and bounded thread reading, separate local/server search,
 cache-first scrolling, contacts, drafts, replies, reply-all, forwarding and review
 before sending. The reader can be right, below or expanded. A built-in split composer
 keeps the mail context visible. `$EDITOR` runs with terminal takeover and restores
-the TUI afterward. No tmux is required. The upstream embedded VT widget has
+the TUI afterward. New TUI compositions opt into Markdown; saved drafts retain
+their interpretation. A shared native renderer derives bounded HTML and plain
+alternatives from exact draft source for preview and send review. Ctrl+T changes
+format, normal compose `p` selects outgoing/original/plain context, and only
+explicit `y` in review submits. The CLI defaults to Plain and supports explicit
+format selection and local `draft.preview`. No tmux is required. The upstream embedded VT widget has
 process lifecycle and parser issues described in [the UI reference](TERMINAL-UI-DESIGN.md#external-editor);
 embedded arbitrary-editor panes are not implemented.
 

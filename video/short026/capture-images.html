@@ -1,0 +1,10 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#111620}
+#host{position:absolute}.term-grid{position:relative;font-family:"JetBrainsMono Nerd Font","Noto Color Emoji",monospace;font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;color:#e8ebf1}
+.term-text .run{position:absolute;white-space:pre;overflow:visible;height:inherit}.term-text .run.wide{text-align:center}.term-lines{position:absolute;left:0;top:0;overflow:visible}.term-cursor{position:absolute;background:rgba(232,235,241,.82);mix-blend-mode:difference}
+</style></head><body><div id="host"></div><script type="module">
+import {Tape,TermView} from '/video/web/term.js';
+const tapes={};let view;const host=document.querySelector('#host');
+window.READY=(async()=>{await document.fonts.ready;for(const name of ['notification','compose']){const r=await fetch('/video/cache/short026/'+name+'.json');if(!r.ok)throw Error('missing tape '+name);tapes[name]=new Tape(await r.json());}view=new TermView(host,{cellW:12,cellH:24,columns:160,rows:42});return true;})();
+window.capture=(name,mark)=>{const tape=tapes[name],index=tape.mark(mark).frame;view.show(tape,index,{blink:false});const left=(1920-tape.columns*12)/2,top=(1080-tape.rows*24)/2;host.style.left=left+'px';host.style.top=top+'px';return{left,top,panes:tape.panes(index),columns:tape.columns,rows:tape.rows};};
+</script></body></html>

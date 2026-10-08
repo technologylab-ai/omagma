@@ -21,7 +21,7 @@ def exercise(binary, directory, action):
             'fixtureHold': hold.name, 'fixtureEntered': entered.name}
         source.path(ACCOUNTS[0]).write_text(json.dumps(data))
         terminal.send(b'c')
-        terminal.until(lambda: 'Draft preview' in terminal.text() and entered.exists())
+        terminal.until(lambda: 'Outgoing preview' in terminal.text() and entered.exists())
         if action == 'terminate-editor':
             terminal.send(b'\t\t\t\ti' + 'Retained signal editor body 🌋'.encode())
             terminal.until(lambda: 'Retained signal editor body' in terminal.text())

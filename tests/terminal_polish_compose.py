@@ -14,6 +14,8 @@ from terminal_mouse import start
 FIRST = b"First received preview file\n"
 SECOND = b"Second received preview file\n"
 URI = "https://example.test/compose-preview?literal=1"
+ATTACH_TITLE = "Attach file · local draft"
+SAVE_TITLE = "Save attachment · new file"
 
 
 def fixture_setup(binary, directory):
@@ -58,7 +60,7 @@ def panel_text(terminal, title):
 
 
 def prompt_contains(terminal, name):
-    return any("Attach file path:" in line and name in line for line in terminal.screen.lines())
+    return any("Path:" in line and name in line for line in terminal.screen.lines())
 
 
 def draft(binary, directory, source):
@@ -83,12 +85,15 @@ def compose_case(binary, directory):
         terminal.until(lambda: "PREVIEW LINE 000" in terminal.text())
         terminal.send(b"r")
         terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
-        original_id = draft(binary, directory, source)["id"]
-        # This workflow checks an original reply preview. A fresh compose now
-        # correctly has only its own draft preview.
-        terminal.send(b"i\x1b[H" + b"\x1b[3~" * 256 + b"alex@example.test\t\t\t"
-                      + b"\x1b[H" + b"\x1b[3~" * 256 + b"Polish composer fixture\t"
-                      + b"\x1b[A" * 256 + b"\x1b[H" + b"LB literal typing")
+        original = draft(binary, directory, source)
+        original_id = original["id"]
+        require(original["bodyFormat"] == "markdown", "fresh reply did not select Markdown")
+        terminal.until(lambda: "Outgoing preview" in terminal.text() and "[Plain Ctrl+T]" in terminal.text())
+        # Recipient/subject line starts are explicit. The untouched fresh body
+        # caret must already be above the quote, so do not move it to hide a bug.
+        terminal.send(b"i\x01" + b"\x1b[3~" * 256 + b"alex@example.test\t\t\t"
+                      + b"\x01" + b"\x1b[3~" * 256 + b"Polish composer fixture\t"
+                      + b"LB literal typing")
         terminal.until(lambda: "Body: INSERT" in terminal.text() and "LB literal typing" in terminal.text())
         require("Received attachments" not in terminal.text() and "Links · explicit" not in terminal.text(), "typing L/B opened a preview picker")
         body = terminal.screen.locate("Body: INSERT")
@@ -99,6 +104,8 @@ def compose_case(binary, directory):
         require("Ctrl+S Review" not in panel_text(terminal, "Compose"), "composer has an extra in-pane shortcut footer")
         terminal.send(b"\x1b")
         terminal.gap(.05)
+        terminal.send(b"p")
+        terminal.until(lambda: "Original message" in terminal.text())
         preview_before = panel_text(terminal, "Original message")
         require("PREVIEW LINE 000" in preview_before, "original preview did not start with expected body")
         terminal.send(b"\x04")
@@ -118,11 +125,18 @@ def compose_case(binary, directory):
         terminal.until(lambda: "Links · explicit browser open" not in terminal.text() and "Subject:" in terminal.text())
         for number, expected in enumerate(payloads, 1):
             terminal.send(b"A")
-            terminal.until(lambda: "Attach file path:" in terminal.text())
-            terminal.send(str(picks / "alp").encode() + b"\t")
-            terminal.until(lambda: "Files · Tab cycles" in terminal.text() and "alpha notes.txt" in terminal.text())
+            terminal.until(lambda: ATTACH_TITLE in terminal.text() and "Path:" in terminal.text())
+            terminal.send(str(picks / "alp").encode() + b"\x06")
+            terminal.until(lambda: "alpha notes.txt" in terminal.text() and "alpha summary.txt" in terminal.text()
+                           and prompt_contains(terminal, "alpha ") and "Ctrl+F Complete" in terminal.text())
             require("alpha-link.txt" not in terminal.text(), "completion offered a symlink")
-            terminal.send(b"\t" if number == 1 else b"\x1b[Z")
+            # Tab changes control focus, preserving the common-prefix path;
+            # Ctrl+F (or Ctrl+Shift+F) chooses a completed filename explicitly.
+            terminal.send(b"\t")
+            terminal.gap(.05)
+            require(prompt_contains(terminal, "alpha "), "Tab replaced the path instead of focusing a control")
+            terminal.send(b"\x1b[Z")
+            terminal.send(b"\x06" if number == 1 else b"\x1b[102;6u")
             terminal.until(lambda expected=expected: prompt_contains(terminal, expected))
             terminal.send(b"\r")
             terminal.until(lambda number=number: f"Attachments {number}" in terminal.text())
@@ -132,7 +146,7 @@ def compose_case(binary, directory):
         terminal.send(b"B")
         terminal.until(lambda: "Received attachments" in terminal.text() and "preview-one.txt" in terminal.text())
         terminal.send(b"s")
-        terminal.until(lambda: "Save to a new absolute path:" in terminal.text())
+        terminal.until(lambda: SAVE_TITLE in terminal.text() and "[Save]" in terminal.text() and "Path:" in terminal.text())
         received = directory / "home/Downloads/preview-one.txt"
         terminal.send(b"\r")
         terminal.until(lambda: received.exists() and "Subject:" in terminal.text() and "Received attachments" not in terminal.text())
@@ -151,14 +165,16 @@ def compose_case(binary, directory):
         terminal.until(lambda: "Attachment 1: alpha notes.txt" in terminal.text()
                        and "Attachment 2: alpha summary.txt" in terminal.text())
         retained = draft(binary, directory, source)
-        require(retained["id"] == original_id and retained["bodyText"].startswith("LB literal typing"), "preview/picker changed draft identity or body")
+        require(retained["id"] == original_id and retained["bodyText"] == "LB literal typing" + original["bodyText"],
+                "preview/picker changed draft identity, quote source or top-of-quote insertion")
+        require(retained["bodyFormat"] == "markdown", "preview/picker changed draft format")
         require(retained["to"][0]["address"] == "alex@example.test", "preview/picker changed recipients")
         require([file["filename"] for file in retained["attachments"]] == list(payloads), "preview/picker lost outgoing files")
         for file in retained["attachments"]:
             data = base64.urlsafe_b64decode(file["data"] + "=" * (-len(file["data"]) % 4))
-            require(data == payloads[file["filename"]], "Tab selected another outgoing file")
+            require(data == payloads[file["filename"]], "Ctrl+F selected another outgoing file")
         terminal.finish()
-        print("PASS polish compose:Body/From focus, one hints footer, normal preview keys, literal insert, Tab files, received Save preserves draft")
+        print("PASS polish compose:Body/From focus, one hints footer, explicit Original preview, top-of-quote insert, Tab controls/Ctrl+F files, received Save preserves draft")
     except Exception:
         print(terminal.text())
         raise
@@ -182,29 +198,29 @@ def incoming_case(binary, directory):
     try:
         terminal.until(lambda: "PREVIEW LINE 000" in terminal.text())
         terminal.send(b"Bs")
-        terminal.until(lambda: "Save to a new absolute path:" in terminal.text() and "preview-one (2).txt" in terminal.text())
+        terminal.until(lambda: SAVE_TITLE in terminal.text() and "preview-one (2).txt" in terminal.text() and "[Save]" in terminal.text())
         terminal.send(b"\r")
         fresh = downloads / "preview-one (2).txt"
         terminal.until(lambda: fresh.exists())
         require(fresh.read_bytes() == FIRST and existing.read_bytes() == b"KEEP EXISTING", "default collision overwrote an existing file")
         require(fresh.stat().st_mode & 0o077 == 0, "saved default file is not private")
         terminal.send(b"Bjs")
-        terminal.until(lambda: "Save to a new absolute path:" in terminal.text())
-        terminal.send(b"\x15" + str(alternative.parent / "nest").encode() + b"\t")
+        terminal.until(lambda: SAVE_TITLE in terminal.text() and "Path:" in terminal.text())
+        terminal.send(b"\x15" + str(alternative.parent / "nest").encode() + b"\x06")
         terminal.until(lambda: "nested folder/" in terminal.text())
         terminal.send(b"received explicit.txt\r")
         explicit = alternative / "received explicit.txt"
         terminal.until(lambda: explicit.exists())
         require(explicit.read_bytes() == SECOND, "completed literal save directory targeted another file")
         terminal.send(b"Bjs")
-        terminal.until(lambda: "Save to a new absolute path:" in terminal.text())
+        terminal.until(lambda: SAVE_TITLE in terminal.text() and "Path:" in terminal.text())
         terminal.send(b"\x15" + str(explicit).encode() + b"\r")
         terminal.until(lambda: "PathAlreadyExists" in terminal.text() or "already exists" in terminal.text().lower())
         require(explicit.read_bytes() == SECOND, "explicit save overwrote its existing target")
         with Client(binary, directory, extra=source.options()) as client:
             require(client.request("cache.stats")["fixtureSends"] == 0, "received file UX sent mail")
         terminal.finish()
-        print("PASS polish received files:XDG default, fresh collision name, Ctrl+U override, directory Tab completion, no overwrite")
+        print("PASS polish received files:XDG default, fresh collision name, Ctrl+U override, directory Ctrl+F completion, no overwrite")
     except Exception:
         print(terminal.text())
         raise
