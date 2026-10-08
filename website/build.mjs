@@ -23,7 +23,7 @@ const slug = value => text(value).toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, ''
 // documentation must never silently become a deployment artifact.
 const sourceFiles = [
   'README.md', 'AGENTS.md', 'EVIDENCE.md', 'LICENSES/README.md', 'skills/omagma-setup/SKILL.md',
-  'docs/release-notes/0.2.5.md', 'docs/release-notes/0.2.6.md',
+  'docs/release-notes/0.2.5.md', 'docs/release-notes/0.2.6.md', 'docs/release-notes/0.2.7.md',
   'docs/ROADMAP.md',
   ...['AGENT-CLI', 'AGENT-SETUP', 'BACKGROUND-REFRESH', 'DEVELOPMENT', 'DISTRIBUTION', 'FEATURES', 'INSTALL', 'MACOS', 'MEMORY', 'PRIVACY', 'PROTOCOL', 'README', 'RELEASING', 'SETUP', 'TERMINAL-BACKGROUND', 'TERMINAL-IMPLEMENTATION', 'TERMINAL-PROVIDER-DESIGN', 'TERMINAL-UI-DESIGN', 'TERMINAL-VERIFICATION', 'TERMINAL', 'TRANSPORT', 'TUI-CACHE', 'UI', 'VERIFICATION', 'ZIG017-WIKI-FOLLOWUP'].map(name => `docs/${name}.md`),
   ...['terminal-0.2.0', 'terminal-0.2.1', 'terminal-0.2.2', 'terminal-0.2.3-mouse', 'terminal-0.2.3', 'terminal-0.2.4', 'terminal-0.2.5', 'terminal-0.2.6', 'zig-0.17.0'].map(name => `docs/evidence/${name}.md`),

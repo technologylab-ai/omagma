@@ -1,3 +1,3 @@
-.{ .name = .omagma, .version = "0.2.6", .fingerprint = 0xd26a637562e3f5f, .minimum_zig_version = "0.17.0", .dependencies = .{
+.{ .name = .omagma, .version = "0.2.7", .fingerprint = 0xd26a637562e3f5f, .minimum_zig_version = "0.17.0", .dependencies = .{
     .vaxis = .{ .url = "https://github.com/rockorager/libvaxis/archive/6fd944a27fb3d6f596e981076381a3131f2448b4.tar.gz", .hash = "vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mecnD6D7w", .lazy = true },
 }, .paths = .{ "src", "qml", "assets", "tests", "docs", "scripts", "systemd", "skills", ".github", "BarWidget.qml", "Service.qml", "Model.mjs", "manifest.json", "LICENSE", "LICENSES", "build.zig", "build.zig.zon", "README.md", "AGENTS.md", "EVIDENCE.md" } }

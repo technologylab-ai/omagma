@@ -43,7 +43,7 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 ![Omagma TUI with fictional mail, compact links and a new-mail card](docs/images/omagma-tui-arrivals.png)
 
-The running TUI adopts background cache updates, preserving your reading spot. A **New mail** card accumulates arrivals per account and clears on interaction. `gg` jumps to the first cached mail. Long links use compact colored labels with complete destinations available through `L`; HTML images use text placeholders. [0.2.6 release notes](docs/release-notes/0.2.6.md).
+The running TUI adopts background cache updates, preserving your reading spot. A **New mail** card accumulates arrivals per account and clears on interaction. `gg` jumps to the first cached mail. Long links use compact colored labels with complete destinations available through `L`; HTML images use text placeholders. [0.2.7 release notes](docs/release-notes/0.2.7.md).
 
 `T` opens the theme picker: choose the orange **Omagma** palette or **Follow
 Omarchy**, with live preview and a saved preference. Unread subjects, stars and
