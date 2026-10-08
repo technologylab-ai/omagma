@@ -245,7 +245,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "c / r / R · f", .action = "Compose, reply, reply-all or forward with attachments" },
     .{ .keys = "x / D / U", .action = "Archive, review Trash or restore mail" },
     .{ .keys = "s / u", .action = "Toggle starred or unread" },
-    .{ .keys = "m", .action = "Choose labels; / filters, Tab chooses list or Add/Remove" },
+    .{ .keys = "m", .action = "Choose labels; + adds, - removes; / filters; Tab controls" },
     .{ .keys = "I", .action = "Review a calendar invitation reply" },
     .{ .keys = "Ctrl+R", .action = "Refresh mail" },
     .{ .keys = "Ctrl+L", .action = "Reload theme and redraw the screen" },
@@ -1281,8 +1281,8 @@ const App = struct {
             self.mouseRows(inner, choice - first + 2, 1, .label_choice, choice);
         }
         if (inner.height > 1) {
-            var x = try self.actionButton(inner, inner.height - 2, 0, "[Add]", self.dialog_focus.index == 2, count > 0, .label_add, 0);
-            x = try self.actionButton(inner, inner.height - 2, x, "[Remove]", self.dialog_focus.index == 3, count > 0, .label_remove, 0);
+            var x = try self.actionButton(inner, inner.height - 2, 0, "[+ Add]", self.dialog_focus.index == 2, count > 0, .label_add, 0);
+            x = try self.actionButton(inner, inner.height - 2, x, if (inner.width < 28) "[- Rm]" else "[- Remove]", self.dialog_focus.index == 3, count > 0, .label_remove, 0);
             _ = try self.actionButton(inner, inner.height - 2, x, "[Back]", self.dialog_focus.index == 4, true, .label_back, 0);
             try self.line(inner, inner.height - 1, "Tab Controls · Enter Choose · / Filter · Esc/q Back", .muted);
         }
