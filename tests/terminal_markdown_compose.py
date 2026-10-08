@@ -77,8 +77,17 @@ def rendered(terminal, literal):
 
 
 def confirm_and_check(terminal, client, expected_source, original, kind, expected_file, capture_dir):
+    terminal.html_stage = f"{kind}: await complete rendered review"
     terminal.send(b"\x13")
-    terminal.until(lambda: "Review send" in terminal.text() and "Sending account:" in terminal.text())
+    rendered_body = "Bold new body." if kind == "new" else f"{kind.title()} rendered body."
+    raw_body = "**Bold new**" if kind == "new" else "Reply *rendered* body." if kind == "reply" else "Forward **rendered** body."
+    # The guardian PTY can deliver one VT frame in several reads. Its first
+    # account rows alone do not prove the old source pane has been repainted.
+    terminal.until(lambda: "| Review send |" in terminal.screen.lines()[0]
+                   and "Format: Markdown → HTML + plain text" in terminal.text()
+                   and rendered_body in terminal.text() and raw_body not in terminal.text()
+                   and "y Explicit send" in terminal.text())
+    terminal.html_stage = f"{kind}: validate complete rendered review"
     saved = latest_draft(client)
     require(saved["bodyFormat"] == "markdown" and saved["bodyText"] == expected_source, "review changed Markdown source or interpretation")
     require("Markdown" in terminal.text() and "HTML + plain text" in terminal.text(), "review omitted actual outgoing format")
