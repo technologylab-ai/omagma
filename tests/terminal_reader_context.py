@@ -63,15 +63,22 @@ def reader_case(binary, directory):
     fixture = fixture_setup(binary, directory)
     terminal = start(binary, directory, fixture)
     try:
+        terminal.reader_stage="selected-thread-body"
         terminal.until(lambda: reader_contains(terminal.screen, "READER-AUTHORED-TEXT"))
         terminal.send(b"\r")
-        terminal.until(lambda: "3/3" in terminal.text())
+        terminal.until(lambda: "3/3" in terminal.text() and "READER-AUTHORED-TEXT" in terminal.text())
         require("READER-AUTHORED-TEXT" in terminal.text(), "selected thread body did not anchor into view")
+        terminal.reader_stage="fold-quoted-history"
         terminal.send(b"Q")
-        terminal.until(lambda: "Quoted history folded" in terminal.text())
+        terminal.until(lambda: "Quoted history folded" in terminal.text()
+                       and "READER-QUOTED-HISTORY" not in terminal.text()
+                       and reader_contains(terminal.screen, "READER-AUTHORED-TEXT"))
         require("READER-QUOTED-HISTORY" not in terminal.text(), "quote fold retained quoted payload")
+        terminal.reader_stage="fold-signature"
         terminal.send(b"S")
-        terminal.until(lambda: "Signature folded" in terminal.text())
+        terminal.until(lambda: "Signature folded" in terminal.text()
+                       and "READER-SIGNATURE-TAIL" not in terminal.text()
+                       and reader_contains(terminal.screen, "READER-AUTHORED-TEXT"))
         require("READER-SIGNATURE-TAIL" not in terminal.text(), "signature fold retained signature tail")
         terminal.send(b"{t")
         terminal.gap(.1)
@@ -103,6 +110,7 @@ def reader_case(binary, directory):
         quit_cleanly(terminal)
         print("PASS reader: thread folding, explicit URL fixture, mouse save and explicit save/open")
     except Exception:
+        print(json.dumps({"stage":getattr(terminal,"reader_stage","reader"),"outputBytes":terminal.output_total}),file=sys.stderr)
         print(terminal.text(), file=sys.stderr)
         raise
     finally:
@@ -172,10 +180,12 @@ def search_case(binary, directory):
         client.request("contacts.list", ACCOUNTS[0])
     terminal = start(binary, directory, fixture)
     try:
+        terminal.reader_stage="cached-search-selected-body"
         terminal.until(lambda: reader_contains(terminal.screen, "READER-AUTHORED-TEXT"))
         terminal.send(b"/body:READER-AUTHORED-TEXT\r")
         terminal.until(lambda: "Cache search" in terminal.screen.lines()[0])
-        terminal.until(lambda: "Searching cached mail" not in terminal.screen.lines()[1])
+        terminal.until(lambda: "Searching cached mail" not in terminal.screen.lines()[1]
+                       and reader_contains(terminal.screen, "READER-AUTHORED-TEXT"))
         require(reader_contains(terminal.screen, "READER-AUTHORED-TEXT"), "body-aware cache search lost cached reader")
         terminal.send(b"/body:never-present-fixture-term\r")
         terminal.until(lambda: "No rows in cached subset" in terminal.text() or "No matching messages" in terminal.text())
@@ -189,6 +199,7 @@ def search_case(binary, directory):
         quit_cleanly(terminal)
         print("PASS cached search: worker body matches, local empty result, contacts/back and retained reader")
     except Exception:
+        print(json.dumps({"stage":getattr(terminal,"reader_stage","search"),"outputBytes":terminal.output_total}),file=sys.stderr)
         print(terminal.text(), file=sys.stderr)
         raise
     finally:

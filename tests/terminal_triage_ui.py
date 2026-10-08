@@ -35,7 +35,8 @@ def check(binary, directory):
         terminal.send(b'\r')
         terminal.until(lambda: 'Mail action:' in terminal.text() and 'Choose label' not in terminal.text())
         click(terminal, *point(terminal, 'Projects'))
-        terminal.until(lambda: 'Projects' in terminal.text().splitlines()[0])
+        terminal.until(lambda: 'Projects' in terminal.text().splitlines()[0]
+                       and 'Synthetic personal' in terminal.text())
         require('Synthetic personal' in terminal.text(), 'custom-label view failed to show tagged mail')
         click(terminal, *point(terminal, 'Unread'))
         terminal.until(lambda: 'Unread' in terminal.text().splitlines()[0])

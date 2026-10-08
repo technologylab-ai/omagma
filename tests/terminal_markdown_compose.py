@@ -193,7 +193,9 @@ def conversation_case(binary, directory, kind, capture_dir=None):
             else:
                 require(not fresh["threadId"] and len(fresh["attachments"]) == 1, "forward draft lost independent conversation or original file")
             terminal.send(b"p")
-            terminal.until(lambda: "Original message" in terminal.text())
+            terminal.html_stage = f"{kind}: await original literal body"
+            terminal.until(lambda: "Original message" in terminal.text()
+                           and "Literal **stars**" in panel_text(terminal, "Original message"))
             require("Literal **stars**" in panel_text(terminal, "Original message"), "Original selector rendered or rewrote incoming literal Markdown")
             terminal.send(b"p")
             terminal.until(lambda: "Plain-text alternative" in terminal.text())

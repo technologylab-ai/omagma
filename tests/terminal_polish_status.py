@@ -12,7 +12,8 @@ from terminal_scroll_progress import fixture, options, seed
 def run(binary, directory):
     terminal=MouseTerminal(binary,directory,columns=160,rows=42,screen_type=MouseScreen,environment={"NO_COLOR":None,"COLORTERM":"truecolor"})
     try:
-        terminal.until(lambda: terminal.screen.locate('Synced ') is not None)
+        terminal.until(lambda: terminal.screen.locate('Synced ') is not None
+                       and re.search(r'Mail · 1/32',terminal.text()) is not None)
         require('cache age' not in terminal.text(),'idle freshness still uses a frozen relative age')
         require(re.search(r'Mail · 1/32',terminal.text()),'mail title omits the current window position')
         terminal.send(b'jj')
@@ -20,7 +21,8 @@ def run(binary, directory):
         terminal.send(b'a')
         terminal.until(lambda: 'Contacts' in terminal.screen.lines()[0] and terminal.screen.locate('Alex Personal Fixture') is not None)
         require('Reader right' not in terminal.screen.lines()[0] and 'Inbox' not in terminal.screen.lines()[0],'contacts header retains stale mailbox/layout')
-        terminal.until(lambda: terminal.screen.locate('Contacts · 1/2') is not None)
+        terminal.until(lambda: terminal.screen.locate('Contacts · 1/2') is not None
+                       and terminal.screen.locate('alex-personal@example.org') is not None)
         name=terminal.screen.locate('Alex Personal Fixture')
         email=terminal.screen.locate('alex-personal@example.org')
         require(name is not None and email is not None,'contact name/address pair missing')
@@ -28,7 +30,8 @@ def run(binary, directory):
         require(terminal.screen.styles[name['row']][name['column']][1]==selected,'contact name is not selected')
         require(terminal.screen.styles[email['row']][email['column']][1]==selected,'contact address is not selected with its name')
         terminal.send(b'q')
-        terminal.until(lambda: 'Inbox' in terminal.screen.lines()[0])
+        terminal.until(lambda: 'Inbox' in terminal.screen.lines()[0]
+                       and 'q Quit' in terminal.screen.lines()[-2])
         require('Contacts · / Search · n New · e Edit' not in terminal.screen.lines()[-1],'contacts key hints remain in mailbox status')
         terminal.send(b'c')
         terminal.until(lambda: 'Compose' in terminal.screen.lines()[0] and terminal.screen.locate('Subject:') is not None)
@@ -56,8 +59,10 @@ def narrow_capacity(binary, directory):
             if terminal.columns!=columns or terminal.rows!=rows:terminal.resize(columns,rows)
             def ready():
                 title=terminal.screen.locate('Mail · 1/32')
-                if title is None or terminal.screen.locate(f'Scroll fixture personal {97-count:03}') is None:return False
-                return any(p[0]<=title['column']<p[1] and p[2]-1==title['row'] and p[3]-p[2]==height for p in panel_interiors(terminal.screen))
+                last_subject=terminal.screen.locate(f'Scroll fixture personal {97-count:03}')
+                if title is None or last_subject is None:return False
+                return ('Fixture Sender' in terminal.screen.lines()[last_subject['row']+1]
+                        and any(p[0]<=title['column']<p[1] and p[2]-1==title['row'] and p[3]-p[2]==height for p in panel_interiors(terminal.screen)))
             terminal.until(ready)
             title=terminal.screen.locate('Mail ·')
             panel=next((p for p in panel_interiors(terminal.screen)

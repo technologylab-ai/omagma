@@ -73,7 +73,7 @@ class ChildStatus:
 class DarwinTerminal(Terminal):
     def __init__(self, binary, directory, extra=(), history_limit=None, *,
                  columns=140, rows=34, screen_type=None, environment=None):
-        directory = Path(directory)
+        directory = Path(directory).resolve()
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.guardian_state = directory / "guardian-state.json"
         self.guardian_release = directory / "guardian-release"
@@ -164,7 +164,7 @@ def main():
     args = parser.parse_args()
     require(sys.platform == "darwin", "native macOS qualification requires Darwin")
     with tempfile.TemporaryDirectory(prefix="omagma-macos-native-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         cli_case(args.binary.resolve(), root / "cli")
         tui_case(args.binary.resolve(), root / "tui")
         tui_case(args.binary.resolve(), root / "signal", terminate=True)

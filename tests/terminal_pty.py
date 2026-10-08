@@ -595,7 +595,9 @@ def exercise(terminal, action):
     if action in {"review-cancel", "review-send"}:
         compose_fixture(terminal)
         terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text())
+        terminal.until(lambda: "Sending account:" in terminal.text()
+                       and "recipient@example.org" in terminal.text()
+                       and "Reviewed synthetic PTY body." in terminal.text())
         require("recipient@example.org" in terminal.text() and "Reviewed synthetic PTY body." in terminal.text(),
                 "send review did not show the actual recipient and complete short body")
         if action == "review-cancel":

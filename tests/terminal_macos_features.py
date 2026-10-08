@@ -61,11 +61,15 @@ def main():
             patch.object(terminal_markdown_compose, "start", guardian_mouse_start), \
             patch.object(terminal_file_dialog, "start", guardian_mouse_start), \
             tempfile.TemporaryDirectory(prefix="omagma-macos-features-") as temporary:
+        # Darwin's default temporary path starts with the system /var symlink.
+        # The file browser deliberately refuses every symlink component, so
+        # typed fixture paths must use their real owned directory spelling.
+        root = Path(temporary).resolve()
         for case in args.case or CASES:
             result = {"name": case, "passed": False}
             started = time.monotonic()
             try:
-                directory = Path(temporary) / case
+                directory = root / case
                 if case.startswith("markdown-") or case == "file-browser-keyboard":
                     directory.mkdir(mode=0o700)
                 if case == "html-reader-ux":

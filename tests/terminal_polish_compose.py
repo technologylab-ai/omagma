@@ -104,13 +104,18 @@ def compose_case(binary, directory):
         require("Ctrl+S Review" not in panel_text(terminal, "Compose"), "composer has an extra in-pane shortcut footer")
         terminal.send(b"\x1b")
         terminal.gap(.05)
+        terminal.polish_stage="select-original-body"
         terminal.send(b"p")
-        terminal.until(lambda: "Original message" in terminal.text())
+        terminal.until(lambda: "Original message" in terminal.text()
+                       and "PREVIEW LINE 000" in panel_text(terminal, "Original message"))
         preview_before = panel_text(terminal, "Original message")
         require("PREVIEW LINE 000" in preview_before, "original preview did not start with expected body")
+        terminal.polish_stage="scroll-original-down"
         terminal.send(b"\x04")
-        terminal.until(lambda: "PREVIEW LINE 000" not in panel_text(terminal, "Original message"))
+        terminal.until(lambda: "PREVIEW LINE 000" not in panel_text(terminal, "Original message")
+                       and "PREVIEW LINE" in panel_text(terminal, "Original message"))
         require("PREVIEW LINE" in panel_text(terminal, "Original message"), "keyboard preview scroll erased the body")
+        terminal.polish_stage="scroll-original-up"
         terminal.send(b"\x15")
         terminal.until(lambda: "PREVIEW LINE 000" in panel_text(terminal, "Original message"))
         terminal.send(b"?")
@@ -151,8 +156,10 @@ def compose_case(binary, directory):
         terminal.send(b"\r")
         terminal.until(lambda: received.exists() and "Subject:" in terminal.text() and "Received attachments" not in terminal.text())
         require(received.read_bytes() == FIRST, "compose preview saved the wrong received file")
+        terminal.polish_stage="outgoing-review-recipients"
         terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text() and "Review send" in terminal.text())
+        terminal.until(lambda: "Sending account:" in terminal.text() and "Review send" in terminal.text()
+                       and "personal@example.com" in terminal.text() and "alex@example.test" in terminal.text())
         require("personal@example.com" in terminal.text() and "alex@example.test" in terminal.text(),
                 "reply review lost its actual sending identity or recipient")
         # This reply deliberately keeps its120-line quoted original. Outgoing
@@ -176,6 +183,7 @@ def compose_case(binary, directory):
         terminal.finish()
         print("PASS polish compose:Body/From focus, one hints footer, explicit Original preview, top-of-quote insert, Tab controls/Ctrl+F files, received Save preserves draft")
     except Exception:
+        print(json.dumps({"stage":getattr(terminal,"polish_stage","compose"),"outputBytes":terminal.output_total}))
         print(terminal.text())
         raise
     finally:

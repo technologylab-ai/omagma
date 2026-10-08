@@ -65,8 +65,40 @@ def cli_cycle(client, index):
     assert_preview(value, body, markdown)
 
 
-def live_allocations(client):
+def in_request_global_allocations(client):
     return {account: client.request("cache.stats", account)["allocatorUsedBytes"] for account in ACCOUNTS}
+
+
+def final_read_only_state(client):
+    logical, snapshots = {}, {}
+    for account in ACCOUNTS:
+        stats = client.request("cache.stats", account)
+        drafts = client.request("draft.list", account)["drafts"]
+        operations = client.request("operation.list", account)["operations"]
+        require(stats["fixtureSends"] == 0 and not drafts and not operations,
+                "preview gate created or submitted mail")
+        logical[account] = {"metadataEntries": stats["metadataEntries"],
+                            "fixtureProviderEntries": stats["fixtureProviderEntries"],
+                            "fixtureSends": stats["fixtureSends"],
+                            "drafts": len(drafts), "operations": len(operations)}
+        snapshots[account] = stats["allocatorUsedBytes"]
+    return logical, snapshots
+
+
+def allocator_control(binary, home, meter, identity):
+    # Use the measured client's exact cache root/options/data. The global
+    # cache.stats meter includes its current request/store arena, so these
+    # snapshots are diagnostics rather than account-owned retained bytes.
+    with Client(binary, home, extra=("--metrics-file", str(meter))) as client:
+        initial = in_request_global_allocations(client)
+        logical, final = final_read_only_state(client)
+    require(client.process.returncode == 0 and not client.stderr, "allocator control did not exit cleanly")
+    allocation = allocator_receipt(meter)
+    require(allocation["rejectedAllocations"] == 0, "allocator control rejected application allocations")
+    return {**identity, "acceptanceRun": False, "previewCycles": 0,
+            "workload": "matched read-only allocator control without previews",
+            "allocator": allocation, "finalLogicalState": logical,
+            "inRequestGlobalAllocationDiagnostics": {"initialBytes": initial, "finalBytes": final}}
 
 
 def normal(terminal):
@@ -153,30 +185,45 @@ def measure_workload(args, directory, report):
     rows = []
     report["cycleSamples"] = rows
     if args.kind == "cli":
-        with Client(args.binary, directory / "cli", extra=("--metrics-file", str(meter))) as client:
+        home = directory / "cli"
+        identity = {key: report[key] for key in ("binarySha256", "harnessSha256", "sourceSha256")}
+        control_before = allocator_control(args.binary, home, directory / "allocator-control-before.json", identity)
+        report["allocatorControlBefore"] = control_before
+        with Client(args.binary, home, extra=("--metrics-file", str(meter))) as client:
             with sampler_type(client.process.pid) as sampler:
                 for index in range(args.warmup):
                     cli_cycle(client, index)
-                # Per-frame/job arenas must release all renderer allocations.
-                baseline = live_allocations(client)
-                report["liveAllocationBaselineBytes"] = baseline
+                report["inRequestGlobalAllocationDiagnostics"] = {
+                    "meaning": "global meter with the named account's request/store arena live; not per-account retention",
+                    "afterWarmupBytes": in_request_global_allocations(client), "periodicBytes": []}
                 for index in range(args.cycles):
                     cli_cycle(client, args.warmup + index)
                     rows.append(sample(client.process.pid))
                     if (index + 1) % 100 == 0:
-                        live = live_allocations(client)
-                        report["liveAllocationFinalBytes"] = live
-                        require(all(live[account] <= baseline[account] for account in ACCOUNTS), "preview source/format replacement retained live allocations above warm baseline")
+                        report["inRequestGlobalAllocationDiagnostics"]["periodicBytes"].append({
+                            "completedCycles": index + 1, "bytes": in_request_global_allocations(client)})
                         print(f"Markdown CLI {index + 1}/{args.cycles}", flush=True)
-                live = live_allocations(client)
-                report["liveAllocationFinalBytes"] = live
-                require(all(live[account] <= baseline[account] for account in ACCOUNTS), "preview lifecycle did not return at or below warm live allocation baseline")
                 report["quiet"] = quiet(client.process, args.idle_seconds, lambda seconds: cli_quiet_pump(client, seconds))
-                for account in ACCOUNTS:
-                    stats = client.request("cache.stats", account)
-                    require(stats["fixtureSends"] == 0 and not client.request("draft.list", account)["drafts"]
-                            and not client.request("operation.list", account)["operations"], "preview gate created or submitted mail")
+                logical, final = final_read_only_state(client)
+                report["finalLogicalState"] = logical
+                report["inRequestGlobalAllocationDiagnostics"]["finalBytes"] = final
         require(client.process.returncode == 0 and not client.stderr, "CLI gate did not exit cleanly")
+        # Existing exit metrics run after all JSONL request/frame arenas have
+        # been freed, before Session/setup cleanup. Stable matched controls
+        # expose any retained renderer allocations without request-shape noise.
+        report["allocator"] = allocator_receipt(meter)
+        control_after = allocator_control(args.binary, home, directory / "allocator-control-after.json", identity)
+        report["allocatorControlAfter"] = control_after
+        before_bytes = control_before["allocator"]["allocatorUsedBytes"]
+        after_bytes = control_after["allocator"]["allocatorUsedBytes"]
+        report["allocatorReclaim"] = {"controlBeforeBytes": before_bytes, "controlAfterBytes": after_bytes,
+                                      "afterPreviewBytes": report["allocator"]["allocatorUsedBytes"],
+                                      "meaning": "exit snapshot after request arenas, before Session/setup cleanup"}
+        require(before_bytes == after_bytes, "matched allocator control baseline was unstable")
+        require(control_before["finalLogicalState"] == logical == control_after["finalLogicalState"],
+                "preview lifecycle changed per-account logical state")
+        require(report["allocator"]["allocatorUsedBytes"] <= before_bytes,
+                "preview lifecycle retained allocations above stable matched control")
         report["noRetainedAllocationGrowth"] = True
         report["workload"] = "supplied-source Markdown/plain preview replacement across three accounts"
     else:
@@ -257,12 +304,14 @@ def main():
               "binarySha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(), "syntheticOnly": True, "desktopUsed": False, "liveWrites": False,
               "cycles": args.cycles, "warmup": args.warmup, "idleRequestedSeconds": args.idle_seconds,
               "acceptanceRun": args.warmup >= 100 and args.cycles >= 1000 and args.idle_seconds >= 60, "sourceBytes": len(SOURCE.encode()),
+              "harnessSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "sourceSha256": hashlib.sha256(SOURCE.encode()).hexdigest(),
               "limits": {"warmGrowthKiB": 4096, "idlePercentOfOneCore": .5, "terminalHeapBytes": LIMIT},
               "processMetricMeaning": "Darwin RSS/physical footprint; no PSS" if sys.platform == "darwin" else "Linux RSS/PSS; separate from owned allocations",
               "passed": False}
     try:
         with tempfile.TemporaryDirectory(prefix="omagma-markdown-lifecycle-") as temporary:
-            measured(args, Path(temporary), report)
+            measured(args, Path(temporary).resolve(), report)
         require(hashlib.sha256(args.binary.read_bytes()).hexdigest() == report["binarySha256"], "tested binary changed")
         report["passed"] = True
     except Exception as error:

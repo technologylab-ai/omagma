@@ -32,25 +32,34 @@ def exercise(binary, directory):
         client.request("mail.refresh", limit=32, prefetchLimit=32)
     terminal = start(binary, directory, fixture, columns=100, rows=32)
     try:
+        terminal.forward_stage="mailbox-body-and-forward-hint"
         terminal.until(lambda: "UNAVAILABLE-FORWARD-FILE" in terminal.text() and "f Forward" in terminal.screen.lines()[-2])
         footer = terminal.screen.lines()[-2]
         require("f Forward" in footer, "Forward shortcut missing from actual mailbox footer")
+        terminal.forward_stage="unavailable-forward-diagnostic"
         terminal.send(b"f")
-        terminal.until(lambda: "AttachmentNotFound" in terminal.text())
+        terminal.until(lambda: "AttachmentNotFound" in terminal.text()
+                       and "An attachment could not be retrieved" in terminal.text())
         require("An attachment could not be retrieved" in terminal.text(), "forward error lacks readable explanation")
         terminal.send(b"?")
         terminal.until(lambda: "Diagnostic: AttachmentNotFound" in terminal.text() and "NAVIGATION" in terminal.text())
         code = terminal.screen.locate("Diagnostic: AttachmentNotFound")
         help_heading = terminal.screen.locate("NAVIGATION")
         require(code["row"] < help_heading["row"], "diagnostic remains hidden below Help instructions")
+        terminal.forward_stage="help-return-original-body"
         terminal.send(b"\x1b")
         terminal.gap(.05)
-        terminal.until(lambda: "Keyboard & mouse" not in terminal.text())
+        terminal.until(lambda: "Keyboard & mouse" not in terminal.text()
+                       and "UNAVAILABLE-FORWARD-FILE" in terminal.text())
         require("UNAVAILABLE-FORWARD-FILE" in terminal.text(), "Help return lost originating message")
         with Client(binary, directory, extra=fixture.options()) as client:
             require(client.request("draft.list")["drafts"] == [], "failed forward created a partial draft")
             require(client.request("cache.stats")["fixtureSends"] == 0, "forward failure submitted mail")
         return terminal.finish()
+    except Exception:
+        print(json.dumps({"stage":getattr(terminal,"forward_stage","forward"),
+                          "currentCells":terminal.screen.lines(),"outputBytes":terminal.output_total}))
+        raise
     finally:
         terminal.close()
 

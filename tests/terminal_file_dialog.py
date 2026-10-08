@@ -139,6 +139,20 @@ def type_path(terminal, title, path, confirm=False):
         terminal.send(b"\r")
 
 
+def selected_listing_entry(terminal, title, name):
+    bounds = rectangle(terminal, title, required=False)
+    if bounds is None:
+        return False
+    left, right, top, bottom = bounds
+    ordinary_background = terminal.screen.styles[top + 2][left + 1][1]
+    for row in range(top + 5, bottom):
+        value = "".join(terminal.screen.cells[row][left + 1:right])
+        if value.strip().startswith(name):
+            offset = value.index(name)
+            return terminal.screen.styles[row][left + 1 + offset][1] != ordinary_background
+    return False
+
+
 def draft(binary, directory, source):
     with Client(binary, directory, extra=source.options()) as client:
         values = client.request("draft.list")["drafts"]
@@ -423,6 +437,7 @@ def keyboard_case(binary, directory, captures):
     (picks / "README.md").write_bytes(b"Case-insensitive fixture.\n")
     (directory / "home").mkdir(mode=0o700, exist_ok=True)
     (directory / "home/.hidden-test.txt").write_bytes(b"Hidden fictional file.\n")
+    (directory / "home/home-navigation-marker.txt").write_bytes(b"Owned HOME navigation marker.\n")
     terminal = start_ready(binary, directory, source)
     try:
         terminal.send(b"c")
@@ -442,14 +457,17 @@ def keyboard_case(binary, directory, captures):
         terminal.until(lambda: "shared-two.txt" in path_line(terminal, title))
         type_path(terminal, title, picks / "shared-")  # Restore both matches.
         terminal.send(b"\x0e")  # Ctrl+N: next entry, no arrow key required.
-        terminal.until(lambda: "shared-two.txt" in path_line(terminal, title))
+        terminal.until(lambda: selected_listing_entry(terminal, title, "shared-two.txt"))
         terminal.send(b"\x10")  # Ctrl+P: previous entry.
-        terminal.until(lambda: "shared-one.txt" in path_line(terminal, title))
+        terminal.until(lambda: selected_listing_entry(terminal, title, "shared-one.txt"))
         terminal.send(b"\x0f")  # Ctrl+O: parent folder.
-        terminal.until(lambda: f"Folder: {directory}" in popup_text(terminal, title)
+        terminal.until(lambda: "completion files/" in popup_text(terminal, title)
+                       and "home/" in popup_text(terminal, title)
+                       and "provider/" in popup_text(terminal, title)
                        and "shared-one.txt" not in path_line(terminal, title))
         terminal.send(b"\x07")  # Ctrl+G: HOME directory.
-        terminal.until(lambda: f"Folder: {directory / 'home'}" in popup_text(terminal, title))
+        terminal.until(lambda: "home-navigation-marker.txt" in popup_text(terminal, title)
+                       and "completion files/" not in popup_text(terminal, title))
         terminal.send(b"\x14")  # Ctrl+T toggles hidden entries.
         terminal.until(lambda: "[Hidden on]" in popup_text(terminal, title)
                        and ".hidden-test.txt" in popup_text(terminal, title))

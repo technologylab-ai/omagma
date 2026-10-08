@@ -83,7 +83,9 @@ def correspondents(binary, directory):
         source.path(ACCOUNTS[0]).write_text(json.dumps(current))
         terminal.send(b'c')
         terminal.until(lambda:'Subject:' in terminal.text() and 'Outgoing preview' in terminal.text()
-                       and '[Plain Ctrl+T]' in terminal.text())
+                       and '[Plain Ctrl+T]' in terminal.text()
+                       and 'ORIGINAL LINE 000' not in panel_text(terminal,'Outgoing preview')
+                       and 'Sent with omagma' in panel_text(terminal,'Outgoing preview'))
         require('ORIGINAL LINE 000' not in panel_text(terminal,'Outgoing preview'), 'new composer inherited Inbox body')
         terminal.send(b'icaro')
         terminal.until(lambda:'caroline-new@example.test' in terminal.text() and entered.exists())
@@ -126,14 +128,22 @@ def preview(binary, directory):
     _, extra = prepare(binary,directory)
     terminal = begin(binary,directory,extra)
     try:
+        terminal.preview_stage='open-reply'
         terminal.send(b'r')
         terminal.until(lambda:'Subject:' in terminal.text() and 'Outgoing preview' in terminal.text())
+        terminal.preview_stage='select-original-body'
         terminal.send(b'p')
-        terminal.until(lambda:'Original message' in terminal.text())
+        # Pane titles can arrive in a VT read before that pane's body. Wait
+        # for the exact original content the following oracle still requires.
+        terminal.until(lambda:'Original message' in terminal.text()
+                       and 'ORIGINAL LINE 000' in panel_text(terminal,'Original message'))
         require('ORIGINAL LINE 000' in panel_text(terminal,'Original message'),'reply lost original context')
+        terminal.preview_stage='scroll-original-down'
         terminal.send(b'\x04')
-        terminal.until(lambda:'ORIGINAL LINE 000' not in panel_text(terminal,'Original message'))
+        terminal.until(lambda:'ORIGINAL LINE 000' not in panel_text(terminal,'Original message')
+                       and 'ORIGINAL LINE' in panel_text(terminal,'Original message'))
         require('ORIGINAL LINE' in panel_text(terminal,'Original message'),'Ctrl+D erased original context')
+        terminal.preview_stage='scroll-original-up'
         terminal.send(b'\x15')
         terminal.until(lambda:'ORIGINAL LINE 000' in panel_text(terminal,'Original message'))
         with Client(binary,directory,extra=extra) as client:
@@ -144,6 +154,10 @@ def preview(binary, directory):
             require(client.request('cache.stats')['fixtureSends']==0,'preview navigation sent mail')
         terminal.finish()
         print('PASS previews: reply original stays frozen and Ctrl+D/U scroll it without mailbox traversal')
+    except Exception:
+        print(json.dumps({'stage':getattr(terminal,'preview_stage','preview'),
+                          'currentCells':terminal.screen.lines(),'outputBytes':terminal.output_total}))
+        raise
     finally:
         terminal.close()
 
