@@ -230,11 +230,11 @@ img{display:block;-webkit-user-drag:none;user-select:none;}
 'use strict';
 
 /* =============================== FILM ================================= */
-const DUR = 31.7333333333;
+const DUR = 31.1333333333;
 window.FILM = { duration: DUR, fps: 30, width: 1920, height: 1080 };
 
-/* Measured music landmarks, film seconds (source = film + 158.226667). */
-const M = Object.freeze({ roll: 5.1023, drop: 9.3753, shift: 19.3593, last: 26.4653, stop: 28.8933 });
+/* Measured music landmarks: film0–4.47 uses source intro0–4.47; from film4.44, source=film+158.826667. Explicit edit: soundtrack.json. */
+const M = Object.freeze({ roll: 4.5023, drop: 8.7753, shift: 18.7593, last: 25.8653, stop: 28.2933 });
 
 /* ============================ CROP CONTRACT ============================
    Normalized boxes [u0, v0, u1, v1] on the FULL actual screenshot
@@ -257,12 +257,12 @@ const BWIN = { x: 580, y: 40, w: 1260, h: 1000, bar: 48 };
 
 const CAPS = [
   { num: '01', lines: ['New mail,', 'at a glance.'], hl: ['glance'], tin: 1.38, tout: 4.25 },
-  { num: '02', lines: ['Native file', 'browser for', 'attachments.'], hl: ['file', 'browser'], tin: 4.78, tout: 10.30 },
-  { num: '03', lines: ['Write in', 'Markdown.'], hl: ['Markdown'], tin: 10.88, tout: 13.95 },
-  { num: '04', lines: ['Sent as', 'gorgeous', 'HTML.'], hl: ['HTML'], tin: 14.50, tout: 21.15,
+  { num: '02', lines: ['Native file', 'browser for', 'attachments.'], hl: ['file', 'browser'], tin: 4.78, tout: 9.70 },
+  { num: '03', lines: ['Write in', 'Markdown.'], hl: ['Markdown'], tin: 10.28, tout: 13.35 },
+  { num: '04', lines: ['Sent as', 'gorgeous', 'HTML.'], hl: ['HTML'], tin: 13.90, tout: 20.55,
     subs: [
-      { tin: 15.70, html: '<span class="key">o</span><span>Open mail in Gmail</span>' },
-      { tin: 19.95, html: '<span class="plus">+</span><span>a tiny new footer <span class="emoji">🌋</span></span>' },
+      { tin: 15.10, html: '<span class="key">o</span><span>Open mail in Gmail</span>' },
+      { tin: 19.35, html: '<span class="plus">+</span><span>a tiny new footer <span class="emoji">🌋</span></span>' },
     ] },
 ];
 
@@ -368,7 +368,7 @@ for (let i = 0; i < 54; i++) {
 }
 const SPAN = 1260;
 function applyEmbers(t, intensity) {
-  const T = t + 1.25 * Math.max(0, t - 28.5); // monotonic warp: embers accelerate in the outro
+  const T = t + 1.25 * Math.max(0, t - 27.9); // monotonic warp: embers accelerate in the outro
   for (const d of EMBERS) {
     const travel = (d.ph * SPAN + d.sp * (0.6 + 0.4 * d.depth) * T) % SPAN;
     const life = travel / SPAN;
@@ -396,25 +396,25 @@ function buildKeys() {
     ],
     attached: [
       { t: M.drop, w: 1 },
-      { t: 9.85, box: C.attachedFocus, pad: 0.05, e: 'io' },
-      { t: 10.88, box: C.attachedFocus, pad: 0.05, e: 'lin' },
+      { t: 9.25, box: C.attachedFocus, pad: 0.05, e: 'io' },
+      { t: 10.28, box: C.attachedFocus, pad: 0.05, e: 'lin' },
     ],
     composer: [
-      { t: 10.50, w: 1 },
-      { t: 11.25, box: C.mdSourceTop, pad: 0.03, e: 'io' },
-      { t: 12.10, box: C.mdSourceBottom, pad: 0.03, e: 'io' },
-      { t: 12.65, box: C.mdSourceBottom, pad: 0.03, e: 'lin' },
-      { t: 13.45, box: C.mdPreview, pad: 0.03, e: 'io' },
-      { t: 14.45, box: C.mdPreview, pad: 0.03, e: 'lin' },
+      { t: 9.90, w: 1 },
+      { t: 10.65, box: C.mdSourceTop, pad: 0.03, e: 'io' },
+      { t: 11.50, box: C.mdSourceBottom, pad: 0.03, e: 'io' },
+      { t: 12.05, box: C.mdSourceBottom, pad: 0.03, e: 'lin' },
+      { t: 12.85, box: C.mdPreview, pad: 0.03, e: 'io' },
+      { t: 13.85, box: C.mdPreview, pad: 0.03, e: 'lin' },
     ],
     browser: [
-      { t: 13.90, cx: B.cx, cy: 0, w: B.w * 1.10 },
-      { t: 14.55, cx: B.cx, cy: 0, w: B.w, e: 'out' },
-      { t: 16.80, cx: B.cx, cy: 0, w: B.w * 0.975, e: 'lin' },
-      { t: 17.55, cx: B.cx, cy: B.codeCy, w: B.w * 0.975, e: 'io' },
-      { t: 19.55, cx: B.cx, cy: B.codeCy, w: B.w * 0.95, e: 'lin' },
-      { t: 19.95, cx: B.cx, cy: 1, w: B.w * 0.95, e: 'io' },
-      { t: 22.05, cx: B.cx, cy: 1, w: B.w * 0.925, e: 'lin' },
+      { t: 13.30, cx: B.cx, cy: 0, w: B.w * 1.10 },
+      { t: 13.95, cx: B.cx, cy: 0, w: B.w, e: 'out' },
+      { t: 16.20, cx: B.cx, cy: 0, w: B.w * 0.975, e: 'lin' },
+      { t: 16.95, cx: B.cx, cy: B.codeCy, w: B.w * 0.975, e: 'io' },
+      { t: 18.95, cx: B.cx, cy: B.codeCy, w: B.w * 0.95, e: 'lin' },
+      { t: 19.35, cx: B.cx, cy: 1, w: B.w * 0.95, e: 'io' },
+      { t: 21.45, cx: B.cx, cy: 1, w: B.w * 0.925, e: 'lin' },
     ],
   };
 }
@@ -512,13 +512,13 @@ function ring(t, at, dur, amp) {
 }
 function state(t) {
   const S = {};
-  S.fade = Math.max(1 - ease(t, 0, 0.34, 'out'), ease(t, 31.12, DUR, 'ioSine'));
+  S.fade = Math.max(1 - ease(t, 0, 0.34, 'out'), ease(t, 30.52, DUR, 'ioSine'));
   S.flash = 0.10 * pulse(t, M.roll, 0.05, 0.30) + 0.46 * pulse(t, M.drop, 0.06, 0.42) +
             0.08 * pulse(t, M.shift, 0.05, 0.40) + 0.12 * pulse(t, M.last, 0.05, 0.45) +
             0.50 * pulse(t, M.stop, 0.06, 0.55);
   const build = ease(t, M.roll, M.drop, 'in') * (1 - ease(t, M.drop, M.drop + 1.8, 'out'));
-  const bro = ease(t, 13.9, 14.8, 'out') * (1 - ease(t, 21.4, 22.05, 'io'));
-  const warm = ease(t, 28.2, M.stop, 'out');
+  const bro = ease(t, 13.3, 14.2, 'out') * (1 - ease(t, 20.8, 21.45, 'io'));
+  const warm = ease(t, 27.6, M.stop, 'out');
   const open = 1 - ease(t, 0.9, 1.9, 'io');
   S.glowOp = clamp(0.56 + 0.26 * open + 0.22 * build + 0.24 * bro + 0.40 * warm + 0.5 * S.flash);
   S.glowSc = 1 + 0.03 * Math.sin(t * 0.62) + 0.07 * build + 0.10 * warm + 0.05 * S.flash;
@@ -527,7 +527,7 @@ function state(t) {
 
   S.lock = { op: 1 - ease(t, 1.10, 1.46, 'in'), morph: ease(t, 0.98, 1.46, 'io'),
              logo: ease(t, 0.06, 0.62, 'out'), word: ease(t, 0.22, 0.80, 'out'), meta: ease(t, 0.42, 0.92, 'out') };
-  S.bug = ease(t, 1.22, 1.58, 'out') * (1 - ease(t, 27.85, 28.25, 'io'));
+  S.bug = ease(t, 1.22, 1.58, 'out') * (1 - ease(t, 27.25, 27.65, 'io'));
 
   const nIn = ease(t, 1.00, 1.62, 'out'), nOut = ease(t, 4.40, 4.85, 'io');
   S.notif = { op: nIn * (1 - nOut), ty: (1 - nIn) * 46, sc: lerp(0.965, 1, nIn) * lerp(1, 1.05, nOut) };
@@ -535,30 +535,30 @@ function state(t) {
   const pIn = ease(t, 4.52, 5.05, 'out');
   S.picker = { op: t < M.drop ? pIn : 0, ty: (1 - pIn) * 34, sc: lerp(0.955, 1, pIn) };
 
-  const aOut = ease(t, 10.42, 10.88, 'io');
+  const aOut = ease(t, 9.82, 10.28, 'io');
   const punch = t >= M.drop ? 1 + 0.045 * Math.pow(1 - prog(t, M.drop, M.drop + 0.5), 3) : 1;
   S.attached = { op: t >= M.drop ? 1 - aOut : 0, tx: -70 * aOut, sc: punch * lerp(1, 0.985, aOut) };
 
-  const mOut = ease(t, 13.90, 14.45, 'io');
-  S.md = { op: t >= 10.50 ? 1 - mOut : 0, wipe: ease(t, 10.50, 11.08, 'io'), ty: -46 * mOut, sc: lerp(1, 0.965, mOut) };
+  const mOut = ease(t, 13.30, 13.85, 'io');
+  S.md = { op: t >= 9.90 ? 1 - mOut : 0, wipe: ease(t, 9.90, 10.48, 'io'), ty: -46 * mOut, sc: lerp(1, 0.965, mOut) };
 
-  const bIn = ease(t, 13.90, 14.80, 'out'), bOp = ease(t, 13.90, 14.40, 'out'), bOut = ease(t, 21.40, 22.05, 'in');
+  const bIn = ease(t, 13.30, 14.20, 'out'), bOp = ease(t, 13.30, 13.80, 'out'), bOut = ease(t, 20.80, 21.45, 'in');
   S.browser = { op: bOp * (1 - bOut), ty: (1 - bIn) * 180 + bOut * 90, sc: lerp(0.955, 1, bIn) * lerp(1, 0.92, bOut) };
 
-  S.qol = { op: ease(t, 21.40, 21.95, 'out') * (1 - ease(t, 28.05, 28.55, 'in')), title: ease(t, 21.50, 22.10, 'out') };
+  S.qol = { op: ease(t, 20.80, 21.35, 'out') * (1 - ease(t, 27.45, 27.95, 'in')), title: ease(t, 20.90, 21.50, 'out') };
 
-  const rise = ease(t, 28.28, M.stop, 'out');
+  const rise = ease(t, 27.68, M.stop, 'out');
   S.outro = {
-    vis: t >= 28.25 ? 1 : 0,
-    logoOp: ease(t, 28.28, 28.62, 'out'),
+    vis: t >= 27.65 ? 1 : 0,
+    logoOp: ease(t, 27.68, 28.02, 'out'),
     logoTy: (1 - rise) * 140,
     logoSc: lerp(0.8, 1, rise) * (1 + 0.065 * pulse(t, M.stop, 0.05, 0.22)),
     haloOp: rise * (0.7 + 0.3 * pulse(t, M.stop, 0.05, 0.6)),
     ring1: ring(t, M.stop, 1.15, 0.75),
     ring2: ring(t, M.stop + 0.16, 1.30, 0.40),
-    title: ease(t, 28.98, 29.46, 'out'),
-    pill: ease(t, 29.18, 29.62, 'out'),
-    next: ease(t, 29.36, 29.84, 'out'),
+    title: ease(t, 28.38, 28.86, 'out'),
+    pill: ease(t, 28.58, 29.02, 'out'),
+    next: ease(t, 28.76, 29.24, 'out'),
   };
   return S;
 }
@@ -651,7 +651,7 @@ function render(tIn) {
   setLayer(EL.qol, S.qol.op);
   fadeUp(EL.qKicker, S.qol.title, 18);
   fadeUp(EL.qTitle, S.qol.title, 32);
-  EL.qRows.forEach((row, i) => fadeUp(row, ease(t, 22.00 + i * 0.20, 22.48 + i * 0.20, 'out'), 28));
+  EL.qRows.forEach((row, i) => fadeUp(row, ease(t, 21.40 + i * 0.20, 21.88 + i * 0.20, 'out'), 28));
 
   // outro
   const O = S.outro;
