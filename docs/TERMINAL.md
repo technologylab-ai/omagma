@@ -161,7 +161,9 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 
 | Key | Action |
 | --- | --- |
-| j/k, arrows, G, Ctrl+D/U | Move or scroll focused pane |
+| j/k, arrows, G | Move or scroll focused pane |
+| Ctrl+D/U in the mail list | Scroll half a visible page of messages, using the current pane height |
+| PageDown/PageUp in the mail list | Scroll a full visible page of messages |
 | gg | First cached mail; expanded reader: start of body |
 | h/l, Tab/Shift+Tab, Enter | Change pane or open selected item |
 | 1/2/3 | Switch account |

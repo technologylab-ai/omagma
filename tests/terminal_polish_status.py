@@ -87,10 +87,51 @@ def narrow_capacity(binary, directory):
     finally:terminal.close()
 
 
+def mail_page_navigation(binary, directory):
+    source=fixture(directory)
+    seed(binary,directory,source,96)
+    terminal=MouseTerminal(binary,directory,extra=options(source,96),columns=160,rows=42,
+        screen_type=MouseScreen,environment={"NO_COLOR":None,"COLORTERM":"truecolor"})
+    try:
+        terminal.until(lambda:terminal.screen.locate('Scroll fixture personal 096') is not None)
+        # Independent viewport expectations include full and stacked readers,
+        # resizes, odd card counts, and the smallest two-card pane.
+        for columns,rows,layout,count,half in ((160,42,'right',12,6),
+                (100,30,'right',8,4),(160,42,'below',4,2),
+                (100,30,'below',3,1),(48,20,'below',2,1)):
+            terminal.resize(columns,rows)
+            terminal.send(f':layout {layout}\r'.encode())
+            terminal.gap(.05)
+            terminal.send(b'\x1b[H')
+            def at(position, first):
+                title=terminal.screen.locate(f'Mail · {position}/32')
+                subject=terminal.screen.locate(f'Scroll fixture personal {96-first:03}')
+                if title is None or subject is None:return False
+                panel=next((p for p in panel_interiors(terminal.screen)
+                    if p[0]<=title['column']<p[1] and p[2]-1==title['row']),None)
+                return panel is not None and subject['row']==panel[2] and 'Fixture Sender' in terminal.screen.lines()[subject['row']+1]
+            terminal.until(lambda:at(1,0) and terminal.screen.locate(f'Scroll fixture personal {97-count:03}') is not None)
+            terminal.send(b'\x04')
+            terminal.until(lambda:at(half+1,half))
+            terminal.send(b'\x15')
+            terminal.until(lambda:at(1,0))
+            terminal.send(b'\x1b[6~')
+            terminal.until(lambda:at(count+1,count))
+            terminal.send(b'\x1b[5~')
+            terminal.until(lambda:at(1,0))
+        terminal.finish()
+        print('PASS mail paging: Ctrl+D/U moves half the visible cards and viewport; PageDown/Up moves a full viewport, across layouts/resizes')
+    except Exception:
+        print(terminal.text())
+        raise
+    finally:terminal.close()
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path,required=True);a=p.parse_args()
     with tempfile.TemporaryDirectory(prefix='omagma-polish-status-') as directory:
         root=Path(directory)
         run(a.binary.resolve(),root/'status')
         narrow_capacity(a.binary.resolve(),root/'narrow')
+        mail_page_navigation(a.binary.resolve(),root/'paging')
 if __name__=='__main__':main()

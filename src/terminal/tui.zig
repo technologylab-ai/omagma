@@ -206,7 +206,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Enter", .action = "Open mail or choose the focused item" },
     .{ .keys = "gg", .action = "First mail in the entire cached mailbox; expanded reader starts at top" },
     .{ .keys = "gg / G", .action = "Go to the start/end; Home/End are optional aliases" },
-    .{ .keys = "Ctrl+D / Ctrl+U", .action = "Half-page down or up" },
+    .{ .keys = "Ctrl+D / Ctrl+U", .action = "Half a visible mail page down or up" },
+    .{ .keys = "PageDown / PageUp", .action = "Full visible mail page down or up" },
     .{ .keys = "[ / ]", .action = "Previous or next page of mail" },
     .{ .keys = "1 / 2 / 3", .action = "Switch account" },
     .{ .keys = "Click · wheel", .action = "Choose an item or scroll the pointed pane" },
@@ -670,6 +671,7 @@ const App = struct {
     contacts: []const Value = &.{},
     selected: usize = 0,
     top: usize = 0,
+    mail_page_size: usize = 1,
     reader_scroll: usize = 0,
     reader_lines: usize = 0,
     reader_height: usize = 0,
@@ -4363,6 +4365,19 @@ const App = struct {
             .expectedEtag = self.contact_etag.value(),
         });
     }
+    fn movePage(self: *App, down: bool, half: bool) !void {
+        if (self.focus != .list) return self.move(down, @max(self.vx.window().height / 2, 1));
+        const amount = @max(self.mail_page_size / @as(usize, if (half) 2 else 1), 1);
+        const selected_before = self.selected;
+        const top_before = self.top;
+        const generation_before = self.generation;
+        try self.move(down, amount);
+        // Move the viewport with the selection. A cache-window transition
+        // owns its new position; never apply an old window's offset to it.
+        if (self.generation != generation_before or self.selected == selected_before) return;
+        const moved = if (down) self.selected -| selected_before else selected_before -| self.selected;
+        self.top = if (down) @min(top_before +| moved, self.messages.len -| self.mail_page_size) else top_before -| moved;
+    }
     fn move(self: *App, down: bool, amount: usize) !void {
         if (self.focus == .reader) {
             self.scrollReader(down, amount);
@@ -4986,7 +5001,7 @@ const App = struct {
             return;
         }
         self.g_pending = false;
-        if (key.matches('j', .{}) or key.matches(Key.down, .{})) try self.move(true, 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) try self.move(false, 1) else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) try self.move(true, @max(self.vx.window().height / 2, 1)) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) try self.move(false, @max(self.vx.window().height / 2, 1)) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) self.focus = switch (self.focus) {
+        if (key.matches('j', .{}) or key.matches(Key.down, .{})) try self.move(true, 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) try self.move(false, 1) else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) try self.movePage(true, key.mods.ctrl) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) try self.movePage(false, key.mods.ctrl) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) self.focus = switch (self.focus) {
             .navigation => .navigation,
             .list => .navigation,
             .reader => .list,
@@ -5286,9 +5301,10 @@ const App = struct {
         return true;
     }
     fn listDraw(self: *App, win: vaxis.Window) !void {
+        self.mail_page_size = mailRowCapacity(win.height);
         self.mouseArea(win, .mail_scroll, 0);
         if (try self.drawIncomingWindow(win)) return;
-        const count = mailRowCapacity(win.height);
+        const count = self.mail_page_size;
         if (self.selected < self.top) self.top = self.selected;
         if (self.selected >= self.top + count) self.top = self.selected + 1 - count;
         if (self.messages.len == 0) {
