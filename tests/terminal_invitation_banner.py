@@ -67,8 +67,8 @@ def banner(terminal, mono=False):
     area = reader_rectangle(terminal.screen)
     require(where is not None and area is not None, "sticky invitation action absent from reader")
     require(area["left"] <= where["column"] < area["right"]
-            and area["top"] <= where["row"] <= area["top"] + 3,
-            "invitation action was buried in the scrollable body")
+            and area["top"] <= where["row"] < area["bottom"],
+            "invitation action is outside the visible reader")
     edge_row = where["row"] - (1 if terminal.screen.locate("Meeting invitation") else 0)
     expected_edge = "┃" if mono else "▌"
     edge = next((column for column in range(area["left"], min(area["left"] + 3, area["right"]))
@@ -83,7 +83,9 @@ def banner(terminal, mono=False):
     else:
         require(style[1] == ("rgb", 57, 43, 48), "callout does not use theme's tinted surface")
         require(style[0] != ("rgb", 255, 158, 97), "callout action blends into orange label text")
-        body_style = terminal.screen.styles[area["bottom"] - 1][area["left"] + 3]
+        body_row = next(row for row, _ in reader_rows(terminal.screen)
+                        if not edge_row <= row <= where["row"])
+        body_style = terminal.screen.styles[body_row][area["left"] + 3]
         require(style[1] != body_style[1], "callout surface blends into the body")
     return where
 
@@ -108,6 +110,13 @@ def run(binary, directory, capture_dir=None, mono=False):
         first = banner(terminal, mono)
         require("Labels:" in "\n".join(text for _, text in reader_rows(terminal.screen)),
                 "busy label header missing from visual contrast fixture")
+        edge_row = first["row"] - 1
+        before = "".join("".join(text.split()) for row, text in reader_rows(terminal.screen) if row < edge_row)
+        require(before.endswith("Product/launchplanning9"),
+                "invitation callout is not immediately after the full label header")
+        opening = terminal.screen.locate(f"First meeting opening for {ACCOUNTS[0]}.")
+        require(opening is not None and opening["row"] > first["row"],
+                "invitation callout must precede the message body")
         require(not reader_contains(terminal.screen, "Last first meeting line."),
                 "fixture body did not exceed its initial viewport")
         capture(terminal, capture_dir, "invitation-first-frame-mono" if mono else "invitation-first-frame")
@@ -115,7 +124,9 @@ def run(binary, directory, capture_dir=None, mono=False):
         review(terminal, ACCOUNTS[0], "first")
         terminal.send(b"G")
         terminal.until(lambda: reader_contains(terminal.screen, "Last first meeting line."))
-        require(banner(terminal, mono)["row"] == first["row"], "body scrolling moved the sticky action")
+        pinned = banner(terminal, mono)
+        require(pinned["row"] <= reader_rectangle(terminal.screen)["top"] + 3,
+                "invitation action did not pin after its header scrolled away")
         capture(terminal, capture_dir, "invitation-at-end-mono" if mono else "invitation-at-end")
         # Wheel on the callout belongs to the reader, never activates RSVP.
         current = banner(terminal, mono)
@@ -129,7 +140,8 @@ def run(binary, directory, capture_dir=None, mono=False):
         terminal.send(b"\r")
         terminal.until(lambda: "3 mails" in terminal.text() or "/3 mails" in terminal.text())
         terminal.send(b"{")
-        terminal.until(lambda: "2/3 mails" in terminal.text())
+        terminal.until(lambda: "2/3 mails" in terminal.text()
+                       and reader_contains(terminal.screen, "I · Respond"))
         banner(terminal, mono)
         terminal.send(b"I")
         review(terminal, ACCOUNTS[0], "second")
@@ -139,7 +151,8 @@ def run(binary, directory, capture_dir=None, mono=False):
         terminal.until(lambda: "3/3 mails" in terminal.text() and "I · Respond" in terminal.text())
         # Below, expanded and minimum laptop views retain the same visible cue.
         terminal.send(b"v")
-        terminal.until(lambda: "Reader below" in terminal.screen.lines()[0])
+        terminal.until(lambda: "Reader below" in terminal.screen.lines()[0]
+                       and reader_contains(terminal.screen, "I · Respond"))
         banner(terminal, mono)
         capture(terminal, capture_dir, "invitation-below-mono" if mono else "invitation-below")
         terminal.send(b"z")
@@ -174,7 +187,7 @@ def run(binary, directory, capture_dir=None, mono=False):
                 require(client.request("operation.list", account=account)["operations"] == [],
                         "display/review created a write intent")
         terminal.finish()
-        print(f"PASS invitation callout ({'NO_COLOR' if mono else 'theme'}): first frame, tinted distinct header, "
+        print(f"PASS invitation callout ({'NO_COLOR' if mono else 'theme'}): below-label placement, tinted distinct header, "
               "scroll/wheel pinning, exact thread/account review, below/expanded/narrow, compose suppression, zero sends")
     except Exception:
         print(terminal.text(), file=sys.stderr)

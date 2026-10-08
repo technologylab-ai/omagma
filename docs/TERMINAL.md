@@ -205,9 +205,10 @@ actions; `unspam` removes Spam and restores Inbox membership. See
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
 
-Invitations show a distinct callout at the top of the reader, with a calendar
-icon and **I · Respond** cue. It remains visible while the body scrolls, so a
-long message cannot hide the response action. Click the callout or press `I`
+Invitations show a distinct callout directly below the message's labels, with
+a calendar icon and **I · Respond** cue. Once that header scrolls away, the
+callout pins to the reader's top, so a long message cannot hide the response
+action. Click the callout or press `I`
 to review a response; neither action sends a reply by itself.
 
 Invitation review also supports Tab/Shift+Tab across Accept, Tentative, Decline

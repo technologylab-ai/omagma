@@ -736,6 +736,7 @@ const App = struct {
     reader_scroll: usize = 0,
     reader_lines: usize = 0,
     reader_height: usize = 0,
+    reader_invitation_row: ?usize = null,
     reader_account: Field = .{},
     reader_message: Field = .{},
     reader_partial: bool = false,
@@ -6197,6 +6198,10 @@ const App = struct {
         }
         self.mouseArea(win, .reader_invitation, message_index);
     }
+    fn readerInvitationRows(win: vaxis.Window) u16 {
+        if (win.height < 3 or win.width < 16) return 0;
+        return if (win.height >= 12 and win.width >= 30) 2 else 1;
+    }
     fn readerDraw(self: *App, outer: vaxis.Window) !void {
         self.mouseArea(outer, .reader, 0);
         const browsing = self.mode == .browse or (self.mode == .help and self.previous_mode == .browse) or (self.mode == .command and self.previous_mode == .browse);
@@ -6206,12 +6211,7 @@ const App = struct {
         const partial_rows: u16 = if (self.reader_partial and outer.height >= 14) 1 else 0;
         if (partial_rows > 0) try self.line(outer, toolbar_rows + summary_rows, "Cached thread · partial", .muted);
         const invitation_index = self.readerInvitationIndex();
-        // The invitation lives outside the body's scroll viewport. Its filled
-        // surface and accent edge remain distinct from highlighted labels.
-        const invitation_rows: u16 = if (invitation_index != null and outer.height >= 3 and outer.width >= 16) (if (outer.height >= 12 and outer.width >= 30) 2 else 1) else 0;
-        const invitation_gap: u16 = if (invitation_rows > 0 and outer.height >= 6) 1 else 0;
-        const header_rows = toolbar_rows + summary_rows + partial_rows + invitation_rows + invitation_gap;
-        if (invitation_rows > 0) try self.readerInvitationDraw(outer.child(.{ .y_off = toolbar_rows + summary_rows + partial_rows, .height = invitation_rows }), invitation_index.?);
+        const header_rows = toolbar_rows + summary_rows + partial_rows;
         const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows });
         self.reader_height = win.height;
         // Measure the new body before clamping a restored scroll position.
@@ -6249,6 +6249,15 @@ const App = struct {
             self.mouse_hits.count = body_hit_start;
             self.reader_lines = try self.readerBodyDraw(win);
         }
+        if (invitation_index) |index| if (self.reader_invitation_row) |logical_row| {
+            // Follow the message's labels while its header is visible, then
+            // pin the same distinct action at the viewport edge while scrolling.
+            const rows = readerInvitationRows(win);
+            if (rows > 0) {
+                const position = @min(logical_row -| self.reader_scroll, win.height - rows);
+                try self.readerInvitationDraw(win.child(.{ .y_off = @intCast(position), .height = rows }), index);
+            }
+        };
         if (summary_rows > 0) {
             var unread: usize = 0;
             for (self.thread) |message| unread += @intFromBool(truth(get(message, "unread")));
@@ -6318,6 +6327,8 @@ const App = struct {
     }
     fn readerBodyDraw(self: *App, win: vaxis.Window) !usize {
         var row: usize = 0;
+        self.reader_invitation_row = null;
+        const invitation_index = self.readerInvitationIndex();
         var attachment_number: usize = 0;
         for (self.thread, 0..) |message, message_index| {
             self.reader_card_rows[message_index] = row;
@@ -6329,6 +6340,13 @@ const App = struct {
                 row = try self.flowTone(win, try self.fitLine(win, heading, win.width), self.reader_scroll, row, if (message_index == self.reader_card) .accent else .sender);
                 self.readerMouseRows(win, block_start, row - block_start, .reader_thread, message_index);
                 if (!self.reader_cards[message_index]) {
+                    if (invitation_index == message_index) {
+                        const rows = readerInvitationRows(win);
+                        if (rows > 0) {
+                            self.reader_invitation_row = row;
+                            row += rows;
+                        }
+                    }
                     attachment_number += items(get(message, "attachments")).len;
                     continue;
                 }
@@ -6357,6 +6375,13 @@ const App = struct {
             row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
             const labels = try self.readerLabels(message);
             if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
+            if (invitation_index == message_index) {
+                const rows = readerInvitationRows(win);
+                if (rows > 0) {
+                    self.reader_invitation_row = row;
+                    row += rows;
+                }
+            }
             row += 1;
             var rich_drawn = false;
             if (message_index < self.markup.len) {
@@ -7187,7 +7212,12 @@ test "invitation UX: sticky callout follows actual reply target, survives scroll
     defer app.deinit();
     app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
     try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"plain\"},{\"id\":\"meeting\"}]}}");
-    try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"plain\",\"bodyText\":\"Ordinary note\"},{\"id\":\"meeting\",\"subject\":\"Fictional meeting\",\"bodyText\":\"First body line\\nSecond body line\\nThird body line\\nFourth body line\\nFifth body line\\nLast body line\",\"attachments\":[{\"mimeType\":\"application/octet-stream\",\"filename\":\"invite.ics\"}]}]}}", true);
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(a);
+    try wire.appendSlice(a, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"plain\",\"bodyText\":\"Ordinary note\"},{\"id\":\"meeting\",\"subject\":\"Fictional meeting\",\"labels\":[\"INBOX\"],\"bodyText\":\"");
+    for (0..40) |_| try wire.appendSlice(a, "Fictional agenda line\\n");
+    try wire.appendSlice(a, "Last body line\",\"attachments\":[{\"mimeType\":\"application/octet-stream\",\"filename\":\"invite.ics\"}]}]}}");
+    try app.replaceReader(true, wire.items, true);
     app.focus = .list;
     try std.testing.expect(app.readerInvitationIndex() == null);
     app.focus = .reader;
@@ -7207,7 +7237,9 @@ test "invitation UX: sticky callout follows actual reply target, survives scroll
         const first = try markdownTestScreenText(a, &screen);
         defer a.free(first);
         try std.testing.expect(std.mem.indexOf(u8, first, "I · Respond") != null);
-        const edge_row: u16 = if (height >= 6) 1 else 0;
+        var edge_row: u16 = 0;
+        while (edge_row < height and !same(screen.readCell(0, edge_row).?.char.grapheme, if (mono) "┃" else "▌")) edge_row += 1;
+        try std.testing.expect(edge_row < height);
         try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, edge_row).?.char.grapheme);
         if (mono) {
             var reversed_shortcut = false;
@@ -7227,7 +7259,8 @@ test "invitation UX: sticky callout follows actual reply target, survives scroll
         const last = try markdownTestScreenText(a, &screen);
         defer a.free(last);
         try std.testing.expect(std.mem.indexOf(u8, last, "I · Respond") != null);
-        try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, edge_row).?.char.grapheme);
+        const pinned_row: u16 = if (height >= 6) 1 else 0;
+        try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, pinned_row).?.char.grapheme);
     };
     app.mode = .compose;
     try std.testing.expect(app.readerInvitationIndex() == null);
