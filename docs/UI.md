@@ -6,8 +6,9 @@ Rows show sender, subject and time. Select a row to see its plain-text snippet. 
 
 **Open TUI** opens the selected account in Omarchy's default terminal, in a
 centered floating window. The popup closes while the read-only bar backend
-keeps running. You can also add Omagma to the application launcher; see
-[installation](INSTALL.md#application-launcher).
+keeps running. The plugin installation also adds an **Omagma** application
+launcher entry, which can take over Omarchy's **Super+Shift+E** email shortcut;
+see [installation](INSTALL.md#application-launcher).
 
 ## Status labels
 

@@ -105,8 +105,9 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Search Help with `/` by shortcut, description or section; `n`/`N` visits
   highlighted matches. Esc clears a query before leaving Help.
 - The bar's **Open TUI** button opens the selected account in a floating
-  terminal. An optional Omagma application launcher entry opens the TUI
-  directly; see [installation](INSTALL.md#application-launcher).
+  terminal. The Omagma application launcher entry, installed with the plugin,
+  opens the TUI directly and can replace HEY on Omarchy's **Super+Shift+E**
+  shortcut; see [installation](INSTALL.md#keyboard-shortcut).
 - Mouse clicks choose accounts, mailboxes, messages and contacts. `--no-mouse`
   keeps mouse handling in the terminal, and the terminal's selection modifier
   remains available for selecting text.

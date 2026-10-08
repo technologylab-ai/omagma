@@ -40,9 +40,17 @@ release qualification have their own instructions in `AGENTS.md`.
   entry before updating them. Back up affected settings, preserve unrelated
   desktop configuration, and use the included plugin directory. Follow local
   desktop instructions; never edit package-owned Omarchy files.
+- A bar installation also links `omagma` into the user's PATH and installs the
+  Omagma launcher entry and icon, as described in `docs/INSTALL.md`. Inspect
+  existing files first. Offer the optional Super+Shift+E shortcut from
+  `docs/INSTALL.md#keyboard-shortcut`, which replaces Omarchy's HEY binding;
+  change desktop bindings only after the user agrees.
 - For terminal-only setup, put the verified backend on the user's PATH using
   the platform’s installation guide. Inspect an existing `omagma`
   command before changing it.
+  On a Linux desktop without Omarchy, create the generic launcher entry from
+  `docs/INSTALL.md#other-linux-desktops` only if the user wants one; never
+  install the Omarchy `assets/omagma.desktop` there.
 
 ## Configure accounts
 
@@ -119,7 +127,7 @@ Explain any browser click in advance and keep the verification brief. Restart
 an already open TUI after its grant changes; refresh or restart a disconnected
 bar service after onboarding.
 
-Summarize the launch command/bar action, account/profile mapping, permissions,
+Summarize the launch command/bar action/launcher entry and any shortcut, account/profile mapping, permissions,
 background behavior and reconnection command. Keep credentials and real mail
 out of public artifacts. Installation does not imply permission to send mail
 or edit contacts; those actions require the user's own request or explicit

@@ -50,6 +50,27 @@ ln -s "$omagma_release_dir/omagma" "$HOME/.config/omarchy/plugins/io.github.tech
 
 If that plugin path already exists, inspect it before changing it. For an upgrade, prepare and verify a new versioned directory first, then point the existing plugin symlink at it. Preserve private account configuration and keyring credentials. Keep the linked folder available while the plugin is enabled.
 
+The plugin installation also adds the `omagma` command and an **Omagma**
+application launcher entry that opens the TUI in Omarchy's floating terminal. Inspect any existing `omagma`
+command or `omagma.desktop` entry first; do not overwrite an unrelated one.
+For a first installation:
+
+```sh
+omagma_plugin="$HOME/.config/omarchy/plugins/io.github.technologylab_ai.omagma"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/256x256/apps"
+ln -s "$omagma_plugin/zig-out/bin/omagma" "$HOME/.local/bin/omagma"
+cp "$omagma_plugin/assets/omagma.desktop" "$HOME/.local/share/applications/omagma.desktop"
+cp "$omagma_plugin/assets/omagma-logo.png" "$HOME/.local/share/icons/hicolor/256x256/apps/omagma.png"
+update-desktop-database "$HOME/.local/share/applications"
+omagma --version
+```
+
+Confirm `$HOME/.local/bin` is already on PATH: the launcher entry runs
+`omagma tui` from PATH and stays hidden while `omagma` is not found. Linking
+through the plugin path follows future verified plugin upgrades. See
+[terminal command and launcher](#terminal-command-and-launcher) for the
+window size and an optional keyboard shortcut.
+
 Complete [account setup](SETUP.md) using the extracted executable, starting with one account. Keep its private configuration outside the release directory so upgrades preserve it. You can add the widget before authorizing an account; it will show **Disconnected** until access is approved.
 
 Add one object to the desired existing bar section in `~/.config/omarchy/shell.json`, preserving the other entries and settings. For example, append this to `bar.layout.center`:
@@ -71,53 +92,84 @@ User plugin/configuration changes normally hot reload. If discovery needs refres
 
 To remove the widget, remove its bar entry and user plugin symlink. This leaves your configuration and keyring credentials intact. See [privacy](PRIVACY.md) for local disconnection and Google-side revocation.
 
-## Optional terminal command
+## Terminal command and launcher
 
-The verified backend also runs the [TUI and agent CLI](TERMINAL.md). To make
-`omagma tui` available after bar installation, link the plugin's executable into
-an existing user PATH directory. Inspect any existing `omagma` command first;
-do not overwrite an unrelated executable. For a first link:
-
-```sh
-mkdir -p "$HOME/.local/bin"
-ln -s "$HOME/.config/omarchy/plugins/io.github.technologylab_ai.omagma/zig-out/bin/omagma" "$HOME/.local/bin/omagma"
-omagma --version
-omagma tui
-```
-
-Confirm `$HOME/.local/bin` is already on PATH, or invoke the executable by its
-absolute path. Linking through the plugin path follows future verified plugin
-upgrades. Terminal-only installations can use the raw release binary and its
-`LICENSES.txt` without installing the bar.
+The verified backend also runs the [TUI and agent CLI](TERMINAL.md). After the
+plugin installation above, run `omagma tui` in a terminal, or search for
+**Omagma** in the application launcher. Terminal-only installations can use the
+raw release binary and its `LICENSES.txt` without installing the bar; see
+[other Linux desktops](#other-linux-desktops) for an optional launcher entry.
 
 Read-only terminal mail can use your bar authorization. For replies, sending,
 mailbox changes or contacts, follow [terminal permissions](SETUP.md#full-tuicli-permissions).
 The TUI and CLI are experimental; [the terminal guide](TERMINAL.md) explains
 their workflows and controls.
 
-## Application launcher
+### Application launcher
 
-The bar popup's **Open TUI** button opens the selected account in a floating
+This section and the next apply to Omarchy. The bar popup's **Open TUI** button opens the selected account in a floating
 terminal. It uses Omarchy's default terminal and your existing terminal
 configuration. Terminal permissions remain separate from the read-only bar.
 
-After making `omagma` available on PATH, add it to Omarchy's application
-launcher with the supplied desktop entry and icon:
-
-```sh
-mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/256x256/apps"
-cp assets/omagma.desktop "$HOME/.local/share/applications/omagma.desktop"
-cp assets/omagma-logo.png "$HOME/.local/share/icons/hicolor/256x256/apps/omagma.png"
-update-desktop-database "$HOME/.local/share/applications"
-```
-
-Run these commands from the installed bundle folder. Search for **Omagma** in
-the launcher. It runs `omagma tui` using the `TUI.float.omagma` application ID;
-Omarchy's default TUI window rules provide a centered floating window. For a
-larger starting size, copy the rules in
+The **Omagma** launcher entry runs `omagma tui` using the `TUI.float.omagma`
+application ID; Omarchy's default TUI window rules provide a centered floating
+window. For a larger starting size, copy the rules in
 [examples/omagma-hyprland.lua](../examples/omagma-hyprland.lua) into your user
 Hyprland Lua configuration, then run `hyprctl reload` and check
 `hyprctl configerrors`.
+
+### Keyboard shortcut
+
+On Omarchy, the default **Super+Shift+E** binding is *Email*, which opens the HEY web app. To
+open Omagma with that shortcut instead, give your agent this prompt:
+
+> Read the keyboard shortcut section of docs/INSTALL.md at https://github.com/technologylab-ai/omagma/blob/main/docs/INSTALL.md. Make Super+Shift+E open my installed Omagma launcher entry instead of HEY. Check my current Omarchy bindings first, back up my user Hyprland bindings file, never edit /usr/share/omarchy, then reload Hyprland and check for configuration errors.
+
+Or add these lines to the end of `~/.config/hypr/bindings.lua` yourself:
+
+```lua
+-- Omagma on Omarchy's "Email" shortcut, replacing the HEY web app.
+hl.unbind("SUPER + SHIFT + E")
+o.bind("SUPER + SHIFT + E", "Email", { launch = "omagma.desktop", focus = "^TUI[.]float[.]omagma$" })
+```
+
+Then run `hyprctl reload` and check `hyprctl configerrors`. The shortcut starts
+the installed launcher entry; pressing it again focuses the open Omagma window
+instead of starting another one. The unbind is needed so the HEY default does
+not also fire. HEY stays in the launcher, and **Super+Shift+Alt+E** still opens
+a new HEY message. To use a different key, check
+`omarchy menu keybindings --print` for a free one first. Remove the lines to
+restore the default.
+
+### Other Linux desktops
+
+The supplied `omagma.desktop` uses Omarchy's terminal launcher. On other Linux
+desktops you can skip the launcher entirely and run `omagma tui` in a terminal.
+To find Omagma in your application menu, put `omagma` on your PATH and create
+this optional entry instead:
+
+```sh
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/omagma.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Omagma
+GenericName=Terminal email client
+Comment=Read and write Gmail in a fast terminal interface
+Exec=omagma tui
+TryExec=omagma
+Icon=omagma
+Terminal=true
+Categories=Network;Email;
+Keywords=mail;email;gmail;terminal;tui;
+EOF
+```
+
+`Terminal=true` lets your desktop open the TUI in its default terminal. With
+the complete bundle, copy `assets/omagma-logo.png` to
+`~/.local/share/icons/hicolor/256x256/apps/omagma.png` for the Omagma icon;
+otherwise your desktop shows a generic one. Use your desktop's keyboard
+settings if you want a shortcut for it.
 
 ## Optional demo
 
