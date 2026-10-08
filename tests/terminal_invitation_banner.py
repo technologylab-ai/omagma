@@ -113,7 +113,11 @@ def run(binary, directory, capture_dir=None, mono=False):
         edge_row = first["row"] - 1
         before = "".join("".join(text.split()) for row, text in reader_rows(terminal.screen) if row < edge_row)
         require(before.endswith("Product/launchplanning9"),
-                "invitation callout is not immediately after the full label header")
+                "invitation callout is not after the full label header")
+        preceding = [(row, text) for row, text in reader_rows(terminal.screen)
+                     if row < edge_row and text.strip()]
+        require(preceding[-1][0] == edge_row - 2,
+                "invitation callout must have exactly one blank row above it")
         opening = terminal.screen.locate(f"First meeting opening for {ACCOUNTS[0]}.")
         require(opening is not None and opening["row"] > first["row"],
                 "invitation callout must precede the message body")

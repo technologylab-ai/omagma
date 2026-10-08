@@ -6378,6 +6378,7 @@ const App = struct {
             if (invitation_index == message_index) {
                 const rows = readerInvitationRows(win);
                 if (rows > 0) {
+                    if (win.height >= 12) row += 1;
                     self.reader_invitation_row = row;
                     row += rows;
                 }
