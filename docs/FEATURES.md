@@ -99,9 +99,16 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 
 - `h`/`l` or Tab changes pane; `v` switches right/below; `z` expands the reader.
   With the reader focused, `J`/`K` changes mail and `j`/`k` scrolls its body.
+- Ctrl+U/D moves the mail list by half a visible page; PageUp/PageDown moves
+  a full visible page, using the current layout and pane height.
 - Unread subjects are bold and marked `●`; read subjects use normal weight.
   `⭐` stars stay visible independently of bulk selection. Reader headers show
   the account's readable label names.
+- Calendar invitations show a tinted card with an orange edge, calendar icon
+  and response cue below the labels, with spacing when the pane permits. It
+  pins to the reader's top as the header scrolls away. Click it or press `I`
+  for the keyboard-accessible Accept/Tentative/Decline review; Cancel is
+  initially focused. [Invitation replies](TERMINAL.md#labels-bulk-actions-and-contacts).
 - Search Help with `/` by shortcut, description or section; `n`/`N` visits
   highlighted matches. Esc clears a query before leaving Help.
 - The bar's **Open TUI** button opens the selected account in a floating
@@ -146,6 +153,20 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 
 - Normal/insert modes keep editing separate from commands. To/Cc/Bcc/subject
   and body remain visible; sending requires a review and explicit confirmation.
+- Replies, reply-all and forwards offer **Keep formatting** for HTML mail:
+  write a branded Markdown or plain-text note above the read-only original,
+  retaining its layout, styling and embedded images. **Text quote** remains
+  available; forwards also offer **Attach original (.eml)**. The mode chooser
+  supports letter shortcuts, Tab/Shift+Tab, Enter and mouse clicks. The CLI
+  shares formatted replies/forwards through `--preserve-formatting` and original
+  attachment forwarding through `--original`.
+- Formatted drafts own their original content and embedded resources, keeping
+  them through saves, recovery, restarts and source-cache eviction. `$EDITOR`
+  edits only your note. Original HTML is retained without rebuilding its
+  markup; recoverable broken source is tolerated when a safe note insertion
+  point can be found.
+- Missing recipients keep the draft editable and focus To before a submission
+  is started.
 - Ctrl+T switches Markdown/Plain without rewriting source; normal compose `p`
   selects outgoing preview, original reply/forward context or plain alternative.
   Tab/Shift+Tab focuses controls and Enter activates the selected control.

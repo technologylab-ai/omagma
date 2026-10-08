@@ -256,7 +256,10 @@ class FixtureCheck(unittest.TestCase):
             data.decode("utf-8")
             self.assertNotIn(b"/home/", data, str(path.relative_to(ROOT)))
             self.assertNotIn(b"BEGIN PRIVATE KEY", data)
-            self.assertTrue(all(domain.lower() in {b"example.com", b"example.org", b"example.net"}
+            # The HTML compatibility corpus uses the explicitly reserved
+            # example.test domain, also accepted by the publication audit.
+            # Keep this an exact allowlist; unrelated .test addresses fail.
+            self.assertTrue(all(domain.lower() in {b"example.com", b"example.org", b"example.net", b"example.test"}
                                 for domain in address.findall(data)), str(path.relative_to(ROOT)))
 
 
