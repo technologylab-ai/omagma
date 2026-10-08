@@ -9,10 +9,34 @@ These are dated Linux x86_64 observations, not measurements of every later sourc
 | Mode | Approximate footprint | Observation |
 | --- | ---: | --- |
 | Bar, three connected accounts | **31 MB** | v0.2.2, 2026-10-05; backend PSS plus separately attributed UI share |
-| Agent CLI, three fictional accounts | **8.5 MB** settled | v0.2.5, 2026-10-07; published executable, whole-process RSS |
-| TUI, three fictional accounts | **11 MB** settled | v0.2.5, 2026-10-07; published executable, whole-process RSS |
+| Agent CLI, three fictional accounts | **9 MB** settled | v0.2.6, 2026-10-08; published executable, whole-process RSS |
+| TUI, three fictional accounts | **12 MB** settled | v0.2.6, 2026-10-08; published executable, whole-process RSS |
 
 Bar totals exclude Chrome and unrelated shell widgets. Terminal totals exclude the emulator, external editor and separately running bar. Large bodies and a full cache have separate workloads below. Allocation limits describe reserved or capped storage; they are not a prediction of resident RAM. Installing Omagma does not require running these measurement procedures.
+
+## Published terminal workload, v0.2.6
+
+The published Linux x86_64 static-musl Safe executable, exact Zig 0.17.0,
+passed native CI with 100 warm-ups, 1,000 measured cycles and 60 quiet seconds.
+Its SHA-256 is
+`1d693cf3472857275396b6850a629fbb1c0bd3192b96be59d43f0bede2442a56`;
+actual downloaded bytes separately passed functional checks and were installed.
+
+| Whole process workload | Settled RSS / PSS (KiB) | Warm growth (KiB) |
+| --- | ---: | ---: |
+| Agent CLI | 8,460 / 8,452 | 0 |
+| TUI | 11,400 / 11,392 | 24 |
+| Markdown composer lifecycle | 12,968 / 12,960 | 0 |
+| Complete 2 MiB incoming HTML | 29,844 / 29,836 | 1,140 |
+
+All refused zero allocations and emitted no TUI output during their quiet
+minute. CLI, ordinary TUI and Markdown quiet CPU was zero; the large HTML
+workload observed 0.016666% of one core. Rounded decimal totals are about
+9 MB CLI, 12 MB ordinary TUI, 13 MB Markdown composition and 31 MB for the
+large-body workload. These are separate lifetimes, not an isolated feature or
+compiler comparison. [Release evidence](evidence/terminal-0.2.6.md) records
+both Linux architectures and native Mac RSS/physical-footprint results.
+Older measurements and the dated bar estimate remain unchanged.
 
 ## Published terminal workload, v0.2.5
 

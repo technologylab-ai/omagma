@@ -5,6 +5,6 @@
 </style></head><body><div id="host"></div><script type="module">
 import {Tape,TermView} from '/video/web/term.js';
 const tapes={};let view;const host=document.querySelector('#host');
-window.READY=(async()=>{await document.fonts.ready;for(const name of ['notification','compose']){const r=await fetch('/video/cache/short026/'+name+'.json');if(!r.ok)throw Error('missing tape '+name);tapes[name]=new Tape(await r.json());}view=new TermView(host,{cellW:12,cellH:24,columns:160,rows:42});return true;})();
+window.READY=(async()=>{await document.fonts.ready;for(const name of (new URLSearchParams(location.search).has('picker')?['picker']:['notification','compose'])){const r=await fetch('/video/cache/short026/'+(name==='picker'?'picker-revision/':'')+name+'.json');if(!r.ok)throw Error('missing tape '+name);tapes[name]=new Tape(await r.json());}view=new TermView(host,{cellW:12,cellH:24,columns:160,rows:42});return true;})();
 window.capture=(name,mark)=>{const tape=tapes[name],index=tape.mark(mark).frame;view.show(tape,index,{blink:false});const left=(1920-tape.columns*12)/2,top=(1080-tape.rows*24)/2;host.style.left=left+'px';host.style.top=top+'px';return{left,top,panes:tape.panes(index),columns:tape.columns,rows:tape.rows};};
 </script></body></html>

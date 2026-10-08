@@ -45,7 +45,7 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 The running TUI adopts background cache updates, preserving your reading spot. A **New mail** card accumulates arrivals per account and clears on interaction. `gg` jumps to the first cached mail. Long links use compact colored labels with complete destinations available through `L`; HTML images use text placeholders. [0.2.6 release notes](docs/release-notes/0.2.6.md).
 
-The v0.2.5 Linux x86_64 TUI settled at approximately **11 MB of RAM with three fictional accounts** in its 1,000-cycle workload. That is the complete Omagma process, excluding the terminal emulator, editor and separately running bar; larger bodies have separate measurements. [Memory details](docs/MEMORY.md#published-terminal-workload-v025).
+The v0.2.6 Linux x86_64 TUI settled at approximately **12 MB of RAM with three fictional accounts** in its 1,000-cycle workload. Markdown composition settled around **13 MB** in a separate lifecycle workload. These are complete Omagma processes, excluding the terminal emulator, editor and separately running bar; larger bodies have separate measurements. [Memory details](docs/MEMORY.md#published-terminal-workload-v026).
 
 Available cached mail appears immediately while Gmail refreshes in the background. The default disk cache keeps the newest **2,000 messages within 256 MiB per account**, evicting the oldest tail. The cache is private plaintext storage, separate from the bar’s memory-only cache. `/` searches the cache, and `\` explicitly searches Gmail. An optional [five-minute Linux timer](docs/TERMINAL-BACKGROUND.md) keeps the terminal cache ready while the TUI is closed; Mac installation does not add a background service.
 

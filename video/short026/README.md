@@ -9,7 +9,11 @@ Nothing here ships with the application.
 The film is co-designed with actual Claude Opus 5.5 at `xhigh` effort. Its
 deterministic HTML picture source is `film.html`; the collaborating engineer
 captures the UI, integrates the page and verifies the resulting frames.
-The first two beats use exact actual card/modal pixel crops. The light HTML
+The first two beats use exact actual card/modal pixel crops. The fuller
+picker contains ten real fictional files filtered by `Documents/ERUPTION`;
+every visible filename matches the case-insensitive query. Nonmatching
+controls are hidden, and the native selected `eruption-notes.md` is the same
+47-byte file listed in the next attachment shot. The light HTML
 hero displays the syntax-highlighted code at a readable size and retains the
 real new footer. [Storyboard](STORYBOARD.md) records the final edit.
 
@@ -22,7 +26,9 @@ composites these real screenshots with editorial titles and decoration.
 
 The local fixture backend has fixed reserved `example.com` accounts; all
 mail is synthetic and new recipients use `example.test`. No mail is sent,
-including through the mock provider. On-screen version captions identify the
+including through the mock provider. The revised picker alone was captured
+from a packaged Safe v0.2.6 binary; the other original captures retain their
+actual v0.2.5 provenance. Per-scene capture metadata records both honestly. On-screen version captions identify the
 v0.2.6 release feature film; the source binary's actual build information and
 hash are kept in the capture receipt.
 
@@ -48,6 +54,9 @@ For individual stages and a visual review before the master:
 python3 video/short026/capture.py --binary "$OMAGMA" --expected-sha256 "$OMAGMA_SHA256"
 node video/short026/capture-images.mjs
 node video/short026/render.mjs --stills 1.5,5.5,12.5,18.5,24.5,28.0 --out video/cache/short026/review
+# To replace only the picker with a current verified binary:
+python3 video/short026/capture_picker.py --binary "$OMAGMA" --expected-sha256 "$OMAGMA_SHA256"
+node video/short026/capture-images.mjs --picker-only
 # Inspect every feature and cut boundary before the full master.
 node video/short026/render.mjs
 python3 video/short026/encode.py

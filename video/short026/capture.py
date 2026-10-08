@@ -15,6 +15,7 @@ from terminal_arrivals import refresh
 from terminal_integration import Client, require
 from build_info import read_build_info
 from host_lock import owner, identity, start_ticks
+from picker_fixture import create as create_picker_files, record as record_picker, attach_selected
 BODY = """# Small eruptions, big ideas 🌋
 
 - Quiet new-mail cards
@@ -64,10 +65,7 @@ def main():
         # The existing authored fictional fixture uses reserved example.com,
         # .org and .net addresses. New composed peers use example.test.
         seed(binary, directory, source)
-        documents = directory / "Documents"
-        documents.mkdir()
-        (documents / "eruption-notes.md").write_text("# A tiny eruption\nFictional launch notes only.\n")
-        (documents / "lava-study.png").write_bytes((ROOT / "assets/omagma-logo.png").read_bytes())
+        picker_files = create_picker_files(directory, ROOT)
         (directory / "home").mkdir(exist_ok=True)
         notification = Recorder(binary, directory, "notification", extra=source.options("--account", WORK), columns=132, rows=36)
         try:
@@ -94,19 +92,8 @@ def main():
             rec.press(b"\x1b", "compose:normal", show=False)
             rec.gap(.15)
             rec.mark("composer")
-            rec.press("A", "picker:open")
-            rec.wait(lambda: "Attach file ·" in rec.text() and "Path:" in rec.text(), name="picker:opened")
-            rec.press(b"\x15Documents/", "picker:path", show=False)
-            rec.gap(.12)
-            rec.press(b"\r", "picker:folder")
-            rec.wait(lambda: "eruption-notes.md" in rec.text() and "lava-study.png" in rec.text(), name="picker:list")
-            rec.press(b"\x10", "picker:listing", show=False)
-            rec.gap(.08)
-            rec.mark("picker")
-            # Actual dialog's listing is selected using its keyboard routing.
-            # Enter resolves the selected regular file, never a live operation.
-            rec.press(b"\r", "picker:choose")
-            rec.wait(lambda: "Attachments 1" in rec.text() and "Attach file ·" not in rec.text(), name="attached", seconds=3)
+            picker_audit = record_picker(rec)
+            attach_selected(rec)
             rec.press(b"\x13", "review")
             rec.wait(lambda: "Review send" in rec.text() and "Sending account:" in rec.text(), name="review:shown")
             with Client(binary, directory, extra=source.options()) as client:
@@ -134,6 +121,6 @@ def main():
             save(out / "compose.json", rec.tape(info), known=("work@example.com", "personal@example.com", "optional@example.com", "maya@example.test"))
         finally:
             rec.close()
-    (out / "capture-receipt.json").write_text(json.dumps({"binarySha256":sha, "buildInfo":info, "synthetic":True, "liveProviderWrites":0, "fixtureSends":0, "notification":result_notice, "compose":result_compose, "body":BODY}, ensure_ascii=False, indent=2))
+    (out / "capture-receipt.json").write_text(json.dumps({"binarySha256":sha, "buildInfo":info, "synthetic":True, "liveProviderWrites":0, "fixtureSends":0, "notification":result_notice, "compose":result_compose, "body":BODY,"pickerFiles":picker_files,"pickerAudit":picker_audit}, ensure_ascii=False, indent=2))
     print("captured genuine notification, attachment picker, Markdown source/preview and actual CLI HTML; no sends")
 if __name__ == "__main__": main()

@@ -22,5 +22,5 @@ if [[ "$stage" == check ]]; then
   node --check video/short026/render.mjs
   node --check video/short026/capture-images.mjs
   node --check video/short026/qa.mjs
-  python3 -m py_compile video/short026/capture.py video/short026/encode.py
+  python3 -m py_compile video/short026/capture.py video/short026/capture_picker.py video/short026/picker_fixture.py video/short026/encode.py
 fi

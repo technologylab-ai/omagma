@@ -213,3 +213,48 @@ full terminal restoration, no sends, no checkpoint advancement, released
 refresh ownership and no surviving session children. Debug and Safe local
 checks pass in approximately 0.05 seconds; these are focused checks, not a
 replacement for the final release's platform and memory qualification.
+
+## Release 0.2.6 testing lessons, 2026-10-08
+
+No new Zig 0.17 compiler, stdlib or libc regression was established in this
+release. Exact compiler source remains
+`7647adab80dd088f4de3610fd245915a912eb6ad`; the qualified application/test source
+is `8639d60778641af2d612be32af48fc1ec07f84c2`. All four native release jobs
+passed. Earlier failed receipts retain their original source and binary IDs.
+
+These general lessons may suit the wiki's platform-testing guidance:
+
+- **Filesystem fixtures must respect the host.** APFS rejects an invalid UTF-8
+  filename at creation, before an application's enumeration filter can run.
+  The pure unsafe-name rejection assertion remains; creation skips only that
+  exact Mac `BadPathName` case. Darwin's temporary `/var` path also traverses
+  a system symlink. Canonicalize the owned fixture root while preserving the
+  application's refusal to traverse symlink components. Long-path tests retain
+  real long paths and assert selected rows/directory contents, since a narrow
+  file picker deliberately shortens its visible path.
+- **A PTY read is not a complete visual frame.** A title can arrive before its
+  body, and an intermediate clear can satisfy an absence-only predicate.
+  Wait for the original independent body/recipient/current-view landmarks
+  within the existing deadline, then retain the semantic assertions. These
+  fixes change the harness, not application rendering or its budgets.
+- **Measure allocation at the intended lifetime boundary.** Omagma's
+  `cache.stats` in `src/terminal/core.zig:669` samples one global capped meter
+  while its request/store arena is live; account-scoped metadata does not make
+  that reading per-account retained memory. JSONL frames deinitialize at
+  `src/terminal/cli.zig:208`. The existing metrics defer at line 181 runs after
+  those frames and before session/setup cleanup. Matched controls use identical
+  cache/options/data and final read-only calls; before/after control live bytes
+  must agree exactly, and preview live bytes must not exceed them. This provides
+  a strict reclaim witness without a tolerance for transient snapshot shapes.
+
+The original 4 MiB terminal warm-growth, 64 MiB owned-heap, zero-refusal and
+0.5% quiet-CPU limits are unchanged. The controls passed on all native platforms
+with 100 warm-ups, 1,000 measured cycles and 60 quiet seconds. Short source-stage
+smokes remain explicitly separate from that acceptance evidence.
+
+A source-stage build initially supplied an unsupported global-cache CLI flag.
+Installed `zig build -h` confirmed the invocation error; task-local
+`ZIG_GLOBAL_CACHE_DIR` selected the intended cache. No old/new compiler
+comparison established a version change, so this is not a migration gotcha.
+The earlier musl error-code handling mistake and the new transient-allocation
+attribution mistake likewise belong to Omagma's handling/testing.

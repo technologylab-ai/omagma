@@ -51,6 +51,14 @@ def main():
     if abs(float(final_loud["input_i"])+14)>.6 or float(final_loud["input_tp"])>-1.0:raise RuntimeError("social audio loudness/true-peak gate failed")
     capture=json.loads((cache/"capture-receipt.json").read_text())
     receipt={"film":str(a.out),"durationSeconds":DURATION,"frames":952,"binarySha256":capture["binarySha256"],"buildInfo":capture["buildInfo"],"musicSha256":MUSIC_SHA,"musicSourceInterval":[189.96-DURATION,189.96],"musicEnding":"original song ending retained; no montage seams","loudnessBefore":measure,"loudnessFinal":final_loud,"ffprobe":probe,"faststart":faststart(a.out),"pictureSourceSha256":hashlib.sha256((ROOT/'video/short026/film.html').read_bytes()).hexdigest(),"sha256":hashlib.sha256(a.out.read_bytes()).hexdigest(),"encodeCommand":command}
+    if not capture.get("pickerAudit"):
+        picker_receipt=cache/"picker-revision/capture-receipt.json"
+        if picker_receipt.exists():
+            picker=json.loads(picker_receipt.read_text())
+            expected=picker.get("rasterAssets",{}).get("picker-detail.png",{}).get("sha256")
+            actual=hashlib.sha256((cache/"assets/picker-detail.png").read_bytes()).hexdigest()
+            if expected and expected==actual:
+                receipt["sceneCaptureProvenance"]={"base":{"binarySha256":capture["binarySha256"],"buildInfo":capture["buildInfo"]},"picker":{"binarySha256":picker["binarySha256"],"buildInfo":picker["buildInfo"],"query":picker["pickerAudit"]["query"],"visibleFilenames":picker["pickerAudit"]["visibleFilenames"],"assetSha256":actual,"selectedFilename":picker["actualAttachedFilename"],"selectedBytes":picker["actualAttachedBytes"]}}
     a.out.with_suffix(".report.json").write_text(json.dumps(receipt,indent=2))
     print(json.dumps({k:receipt[k] for k in ["film","durationSeconds","frames","sha256","loudnessFinal"]},indent=2))
 if __name__=="__main__":main()
