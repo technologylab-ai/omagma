@@ -11,6 +11,8 @@ const logo_content_id = "omagma-logo@omagma.invalid";
 const max_tokens = 32768;
 const max_tag_bytes = 16384;
 const max_encoding_tags = 32;
+const max_extra_roots = 16;
+const max_root_attributes = 256;
 const utf8_meta = "<meta charset=\"utf-8\">";
 const Span = struct { start: usize, end: usize };
 
@@ -84,7 +86,8 @@ pub fn prepare(a: std.mem.Allocator, note: Note, original: t.Original) !Prepared
     const input = original.bodyHtml;
     const content_start = if (envelope.html_open) |root| root.end else if (envelope.doctype) |doctype| doctype.end else 0;
     if (envelope.html_open) |root| {
-        try envelope.copy(&html, input, 0, root.end);
+        try envelope.copy(&html, input, 0, root.start);
+        try envelope.appendRoot(&html, input);
     } else {
         if (envelope.doctype) |doctype| try envelope.copy(&html, input, 0, doctype.end) else try html.append("<!doctype html>");
         try html.append("<html>");
@@ -248,10 +251,47 @@ const Envelope = struct {
     implicit_head_end: ?usize = null,
     encoding_tags: [max_encoding_tags]Span = undefined,
     encoding_count: usize = 0,
+    extra_roots: [max_extra_roots]Span = undefined,
+    extra_root_count: usize = 0,
+    fn appendRoot(self: *const Envelope, out: *Buffer, input: []const u8) !void {
+        const root = self.html_open orelse return error.InvalidOriginalHtml;
+        if (self.extra_root_count == 0) return out.append(input[root.start..root.end]);
+        const first_tag = try tagAt(input, root.start) orelse return error.InvalidOriginalHtml;
+        var names: [max_root_attributes][]const u8 = undefined;
+        var count: usize = 0;
+        var attributes: AttributeIterator = .{ .input = first_tag.attributes };
+        while (attributes.next()) |attribute| {
+            if (seenAttribute(names[0..count], attribute.name)) continue;
+            if (count == names.len) return error.OriginalHtmlUnavailable;
+            names[count] = attribute.name;
+            count += 1;
+        }
+        // Keep the first tag's spelling, spacing and values. Later opening
+        // roots only contribute absent attributes, matching HTML root repair.
+        try out.append(input[root.start .. root.end - 1]);
+        for (self.extra_roots[0..self.extra_root_count]) |extra| {
+            const tag = try tagAt(input, extra.start) orelse return error.InvalidOriginalHtml;
+            attributes = .{ .input = tag.attributes };
+            while (attributes.next()) |attribute| {
+                if (seenAttribute(names[0..count], attribute.name)) continue;
+                if (count == names.len) return error.OriginalHtmlUnavailable;
+                names[count] = attribute.name;
+                count += 1;
+                try out.append(" ");
+                try out.append(attribute.raw);
+            }
+        }
+        try out.append(">");
+    }
     fn copy(self: *const Envelope, out: *Buffer, input: []const u8, start: usize, end: usize) !void {
         if (start > end or end > input.len) return error.InvalidOriginalHtml;
         var offset = start;
-        for (self.encoding_tags[0..self.encoding_count]) |tag| {
+        var encoding_index: usize = 0;
+        var root_index: usize = 0;
+        while (encoding_index < self.encoding_count or root_index < self.extra_root_count) {
+            const take_root = root_index < self.extra_root_count and (encoding_index == self.encoding_count or self.extra_roots[root_index].start < self.encoding_tags[encoding_index].start);
+            const tag = if (take_root) self.extra_roots[root_index] else self.encoding_tags[encoding_index];
+            if (take_root) root_index += 1 else encoding_index += 1;
             if (tag.end <= start or tag.start >= end) continue;
             if (tag.start < offset or tag.end > end) return error.InvalidOriginalHtml;
             try out.append(input[offset..tag.start]);
@@ -260,6 +300,43 @@ const Envelope = struct {
         try out.append(input[offset..end]);
     }
 };
+const Attribute = struct { name: []const u8, raw: []const u8 };
+const AttributeIterator = struct {
+    input: []const u8,
+    offset: usize = 0,
+    fn next(self: *AttributeIterator) ?Attribute {
+        const input = self.input;
+        while (self.offset < input.len) {
+            while (self.offset < input.len and (white(input[self.offset]) or input[self.offset] == '/')) self.offset += 1;
+            const start = self.offset;
+            while (self.offset < input.len and !white(input[self.offset]) and input[self.offset] != '=' and input[self.offset] != '/') self.offset += 1;
+            if (self.offset == start) {
+                if (self.offset < input.len) self.offset += 1;
+                continue;
+            }
+            const name = input[start..self.offset];
+            const name_end = self.offset;
+            while (self.offset < input.len and white(input[self.offset])) self.offset += 1;
+            if (self.offset == input.len or input[self.offset] != '=') return .{ .name = name, .raw = input[start..name_end] };
+            self.offset += 1;
+            while (self.offset < input.len and white(input[self.offset])) self.offset += 1;
+            if (self.offset < input.len and (input[self.offset] == '\'' or input[self.offset] == '"')) {
+                const quote = input[self.offset];
+                self.offset += 1;
+                while (self.offset < input.len and input[self.offset] != quote) self.offset += 1;
+                if (self.offset < input.len) self.offset += 1;
+            } else {
+                while (self.offset < input.len and !white(input[self.offset])) self.offset += 1;
+            }
+            return .{ .name = name, .raw = input[start..self.offset] };
+        }
+        return null;
+    }
+};
+fn seenAttribute(names: []const []const u8, name: []const u8) bool {
+    for (names) |existing| if (std.ascii.eqlIgnoreCase(existing, name)) return true;
+    return false;
+}
 const Tag = struct {
     span: Span,
     name: []const u8,
@@ -351,9 +428,12 @@ fn tagAt(input: []const u8, start: usize) !?Tag {
             brackets += 1;
         } else if (declaration and c == ']') {
             brackets -|= 1;
-        } else if (c == '<' and !declaration) {
-            return error.InvalidOriginalHtml;
         } else if (c == '>' and brackets == 0) {
+            // Once inside attribute text, an unquoted '<' is a recoverable
+            // attribute-name/value character, not a new tag boundary. Keep it
+            // literally: some generated mail contains <p style="..." <span>.
+            // https://html.spec.whatwg.org/multipage/parsing.html#attribute-name-state
+            // https://html.spec.whatwg.org/multipage/parsing.html#attribute-value-(unquoted)-state
             const attributes = std.mem.trimEnd(u8, input[attrs..i], " \t\r\n");
             return .{ .span = .{ .start = start, .end = i + 1 }, .name = name, .attributes = attributes, .closing = closing, .declaration = declaration, .self_closing = std.mem.endsWith(u8, attributes, "/") };
         }
@@ -387,7 +467,8 @@ fn rawEnd(input: []const u8, tag: Tag) !usize {
 
 /// Linear bounded envelope scan, not an HTML/CSS sanitizer or a browser DOM.
 /// Optional body/head/html end tags are repaired at known envelope boundaries;
-/// duplicate roots, trailing documents and ambiguous envelopes are refused.
+/// Repeated opening roots before the head/body are merged; trailing documents
+/// and ambiguous envelopes are refused.
 fn scan(input: []const u8) !Envelope {
     var result: Envelope = .{};
     var offset: usize = 0;
@@ -442,8 +523,12 @@ fn scan(input: []const u8) !Envelope {
                 }
                 result.html_close = tag.span;
             } else {
-                if (result.html_open != null or result.head_open != null or result.body_open != null or result.first_body != null or implicit_head_content) return error.InvalidOriginalHtml;
-                result.html_open = tag.span;
+                if (result.html_close != null or result.head_open != null or result.body_open != null or result.first_body != null or implicit_head_content) return error.InvalidOriginalHtml;
+                if (result.html_open != null) {
+                    if (result.extra_root_count == result.extra_roots.len) return error.OriginalHtmlUnavailable;
+                    result.extra_roots[result.extra_root_count] = tag.span;
+                    result.extra_root_count += 1;
+                } else result.html_open = tag.span;
             }
             continue;
         }
@@ -773,10 +858,82 @@ test "original mail: fragments optional envelope tags and raw text get one docum
     try std.testing.expect(std.mem.indexOf(u8, no_html.html, ">Original plain text.</div>") != null);
 }
 
+test "original mail: repeated opening roots retain namespaces language and original content inline" {
+    const original_body = "<table class='booking'><tr><td>Fictional booking summary</td></tr></table><img src='https://example.test/booking.png'><!--[if mso]><v:rect fill='true'></v:rect><![endif]-->";
+    const source = "\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n<!-- between opening roots -->" ++
+        "<html lang=\"de\"><head><meta name='viewport' content='width=device-width'><style>html:lang(de) .booking{color:#123456}body{background:#abcdef}</style></head>" ++
+        "<body id=\"body\" style=\"margin:0;padding:0\">" ++ original_body ++ "</body></html>";
+    const result = try prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source));
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.startsWith(u8, result.html, "\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" lang=\"de\">"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.html, "<html"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.html, "</html>"));
+    for ([_][]const u8{
+        "<!-- between opening roots -->",
+        "<meta name='viewport' content='width=device-width'>",
+        "<style>html:lang(de) .booking{color:#123456}body{background:#abcdef}</style>",
+        "<body id=\"body\" style=\"margin:0;padding:0\">" ++ fixture_note,
+    }) |preserved| try std.testing.expect(std.mem.indexOf(u8, result.html, preserved) != null);
+    try std.testing.expect(std.mem.endsWith(u8, result.html, original_body ++ "</body></html>"));
+    try std.testing.expectEqualStrings(logo_content_id, result.html[result.logoOffset..][0..logo_content_id.len]);
+    try validate(fixtureOriginal(source));
+    const assembled = try scan(result.html);
+    try std.testing.expectEqual(@as(usize, 0), assembled.extra_root_count);
+}
+
+test "original mail: repeated opening root attributes use the first value and preserve raw spelling" {
+    const source = "<HTML LANG = 'en' xmlns:o = 'urn:first' data-root='first > value' hidden>" ++
+        "<html lang='de' XMLNS:O='urn:second' data-added='A &amp; B' data-added='ignored' tabindex=0>" ++
+        "<html DIR=rtl lang=fr hidden='overwritten'><head></head><body>Original content</body></HTML>";
+    const result = try prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source));
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    const assembled = try scan(result.html);
+    const root = (try tagAt(result.html, assembled.html_open.?.start)).?;
+    try std.testing.expectEqualStrings("en", root.attribute("lang").?);
+    try std.testing.expectEqualStrings("urn:first", root.attribute("xmlns:o").?);
+    try std.testing.expectEqualStrings("first > value", root.attribute("data-root").?);
+    try std.testing.expectEqualStrings("", root.attribute("hidden").?);
+    try std.testing.expectEqualStrings("A &amp; B", root.attribute("data-added").?);
+    try std.testing.expectEqualStrings("0", root.attribute("tabindex").?);
+    try std.testing.expectEqualStrings("rtl", root.attribute("dir").?);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "LANG = 'en' xmlns:o = 'urn:first' data-root='first > value' hidden data-added='A &amp; B' tabindex=0 DIR=rtl>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "urn:second") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "overwritten") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "ignored") == null);
+}
+
+test "original mail: recoverable less-than attributes preserve body bytes and later CID resources" {
+    const original_body = "<p style=\"color:#123456\" <span>Fictional itinerary</span></p>" ++
+        "<p style=\"color:#654321\" <span>Fictional connection</span></p>" ++
+        "<p data-raw=left<right>Literal attribute value</p>" ++
+        "<img src='cid:picture@example.test'><p>After the image</p>";
+    const source = "<!DOCTYPE html><html><head><style>p{margin:0}</style></head><body class='booking'>" ++ original_body ++ "</body></html>";
+    const resources = [_]t.Attachment{
+        .{ .id = "ordinary", .filename = "document.pdf", .mimeType = "application/pdf", .contentId = "ordinary@example.test" },
+        .{ .id = "picture", .filename = "", .mimeType = "image/png", .contentId = "picture@example.test" },
+    };
+    var original = fixtureOriginal(source);
+    original.resources = &resources;
+    try validate(original);
+    try std.testing.expectEqual(@as(u64, 2), try resourceUsage(source, &resources));
+    const result = try prepare(std.testing.allocator, fixtureNote(), original);
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.endsWith(u8, result.html, original_body ++ "</body></html>"));
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "<body class='booking'>" ++ fixture_note) != null);
+    try std.testing.expectEqualStrings(logo_content_id, result.html[result.logoOffset..][0..logo_content_id.len]);
+    original.resources = resources[0..1];
+    try std.testing.expectError(error.OriginalResourceUnavailable, validate(original));
+}
+
 test "original mail: ambiguous malformed and excessive envelopes fail without partial results" {
     for ([_][]const u8{
         "<html><body>One</body></html><html><body>Two</body></html>",
         "<html><body>One<body>Two</body></html>",
+        "<html><head><title>One</title></head><html lang='de'><body>Another root after the head</body></html>",
+        "<html><body>One<html lang='de'>Another root inside the body</body></html>",
         "<p>Fragment</p><html><body>Another document</body></html>",
         "<style>p{color:red}</style><html><body>Another document</body></html>",
         "<html><body data-bad='unterminated>Body</body></html>",

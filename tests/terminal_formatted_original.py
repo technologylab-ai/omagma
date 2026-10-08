@@ -40,7 +40,7 @@ NAMELESS_CID = "nameless-picture@example.test"
 ORDINARY_CID = "ordinary-file@example.test"
 LOCATION = "https://assets.example.test/source/named.png"
 NOTE = "**Personal note** and [note link](https://example.test/note)."
-CASES = ("lifecycle", "refusals", "unknown", "quota")
+CASES = ("lifecycle", "refusals", "unknown", "quota", "html_template")
 
 
 def encoded(data: bytes) -> str:
@@ -514,6 +514,34 @@ def quota(binary, directory):
                     "oversized persisted original did not respect disk quota")
             require(client.request("draft.list")["drafts"] == prior, "quota refusal retained a partial original draft")
             require(client.request("cache.stats")["fixtureSends"] == 0, "quota refusal sent mail")
+    finished(client)
+
+
+def html_template(binary, directory):
+    fixture = FormattedFixture(directory)
+    account = ACCOUNTS[0]
+    original = source_html(account).replace(
+        '<html lang="en">',
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:o="urn:schemas-microsoft-com:office:office"><html lang="en">')
+    damaged_paragraph = '<p style="color:#123456" <span>Fictional itinerary</span></p>'
+    original = original.replace('<table id="source-table"', damaged_paragraph + '<table id="source-table"')
+    leaf = next(item for item in leaves(fixture.message()["payload"]) if item["mimeType"] == "text/html")
+    leaf["body"] = {"size": len(original.encode()), "data": encoded(original.encode())}
+    fixture.save()
+    with Client(binary, directory / "client", extra=fixture.options()) as client:
+        for command in ("mail.reply", "mail.forward"):
+            draft = client.request(command, messageId=SOURCE_ID, preserveFormatting=True, bodyFormat="markdown")
+            require(draft["original"]["bodyHtml"] == original, "template repair changed the saved original")
+            preview = client.request("draft.preview", draftId=draft["id"])
+            output = preview["bodyHtml"]
+            require(output.lower().count("<html") == 1 and 'lang="en"' in output
+                    and 'xmlns:o="urn:schemas-microsoft-com:office:office"' in output,
+                    "repeated root tags lost language or namespace attributes")
+            require(damaged_paragraph in output and '<style id="source-style">' in output,
+                    "repair changed original paragraph markup or styles")
+            require(len(draft["original"]["resources"]) == 3 and client.request("cache.stats")["fixtureSends"] == 0,
+                    "template repair lost embedded images or sent mail")
     finished(client)
 
 
