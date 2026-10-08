@@ -20,6 +20,9 @@ pub const Watch = struct {
     future: ?std.Io.Future(void) = null,
     context: *anyopaque = undefined,
     postFn: *const fn (*anyopaque) anyerror!bool = undefined,
+    // Optional lightweight UI wakeup piggybacks this existing finite wait;
+    // it does not add a polling task or hold the cache mutex.
+    idleFn: ?*const fn (*anyopaque) anyerror!void = null,
 
     fn read(self: *Watch, allocator: std.mem.Allocator, account: []const u8) !Activity {
         const request = try std.json.Stringify.valueAlloc(allocator, .{ .cmd = "cache.activity", .account = account }, .{});
@@ -64,6 +67,10 @@ pub const Watch = struct {
     fn run(self: *Watch) void {
         while (!self.stopping.load(.acquire)) {
             std.Io.sleep(self.io, .fromSeconds(1), .awake) catch return;
+            if (self.stopping.load(.acquire)) return;
+            if (self.idleFn) |idle| idle(self.context) catch |err| {
+                if (err == error.Canceled) return;
+            };
             for (self.accounts, 0..) |account, index| {
                 if (self.stopping.load(.acquire)) return;
                 if (account.len == 0) continue;

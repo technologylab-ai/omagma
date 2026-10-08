@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const html = @import("html_document.zig");
 const theme = @import("theme.zig");
 const reader_tools = @import("reader_tools.zig");
+const text_layout = @import("text_layout.zig");
 
 const max_lines = 16384;
 const max_runs = 65536;
@@ -198,7 +199,7 @@ pub const Prepared = struct {
             for (self.cached.runs[line.first .. line.first + line.count]) |run| {
                 var iterator = vaxis.unicode.graphemeIterator(run.text);
                 while (iterator.next()) |gr| {
-                    const glyph = gr.bytes(run.text);
+                    const glyph = text_layout.cellGrapheme(gr.bytes(run.text), self.method);
                     const columns = @max(vaxis.gwidth.gwidth(glyph, self.method), 1);
                     if (column +| columns <= win.width) win.writeCell(column, @intCast(absolute - offset), .{ .char = .{ .grapheme = glyph, .width = @intCast(@min(columns, 255)) }, .style = style(palette, mono, run.flags, run.role) });
                     column +|= columns;
@@ -257,7 +258,7 @@ pub const Prepared = struct {
             for (runs) |run| {
                 var iterator = vaxis.unicode.graphemeIterator(run.text);
                 while (iterator.next()) |gr| {
-                    const glyph = gr.bytes(run.text);
+                    const glyph = text_layout.cellGrapheme(gr.bytes(run.text), self.method);
                     const columns = @max(vaxis.gwidth.gwidth(glyph, self.method), 1);
                     const byte_offset = run_offset + gr.start;
                     while (match) |start| {
@@ -298,7 +299,8 @@ const Builder = struct {
     role: Role = .text,
     open: bool = false,
     pending_space: bool = false,
-    pending_footer: html.FooterStyle = .none,
+    pending_flags: html.Style = .{},
+    pending_role: Role = .text,
 
     fn add(self: *Builder, text: []const u8, columns: u16, flags: html.Style, role: Role) !void {
         if (text.len == 0) return;
@@ -312,7 +314,8 @@ const Builder = struct {
         self.marker = marker;
         self.role = role;
         self.pending_space = false;
-        self.pending_footer = .none;
+        self.pending_flags = .{};
+        self.pending_role = .text;
         try self.newLine(true);
     }
     fn newLine(self: *Builder, first: bool) !void {
@@ -365,14 +368,16 @@ const Builder = struct {
                 if (span.text[offset] == '\n') {
                     try self.newLine(false);
                     self.pending_space = false;
-                    self.pending_footer = .none;
+                    self.pending_flags = .{};
+                    self.pending_role = .text;
                     offset += 1;
                     continue;
                 }
                 if (span.text[offset] == ' ' or span.text[offset] == '\t') {
                     if (pre) try self.chunk(" ", flags, role) else {
                         self.pending_space = self.column > self.prefix_width;
-                        self.pending_footer = if (self.pending_space) flags.footer else .none;
+                        self.pending_flags = flags;
+                        self.pending_role = role;
                     }
                     offset += 1;
                     continue;
@@ -383,15 +388,14 @@ const Builder = struct {
                 const wanted = textWidth(word, self.method, self.width +| 1);
                 const gap: u16 = @intFromBool(self.pending_space and self.column > self.prefix_width);
                 if (!pre and self.column > self.prefix_width and self.column +| gap +| wanted > self.width) try self.newLine(false) else if (gap > 0) {
-                    // Only generated footer whitespace keeps its own role.
-                    // Ordinary/received HTML retains existing following-word
-                    // appearance; no CSS or general style ownership changes.
-                    const spacing_flags: html.Style = if (self.pending_footer == .none) flags else .{ .footer = self.pending_footer, .underline = self.pending_footer == .link };
-                    const spacing_role = if (self.pending_footer == .none) role else if (self.pending_footer == .link) Role.link else Role.text;
-                    try self.add(" ", 1, spacing_flags, spacing_role);
+                    // A separating space belongs to the span that supplied it.
+                    // Borrowing the next word's style underlines the gap before
+                    // a link, which looks like a stray leading underscore.
+                    try self.add(" ", 1, self.pending_flags, self.pending_role);
                 }
                 self.pending_space = false;
-                self.pending_footer = .none;
+                self.pending_flags = .{};
+                self.pending_role = .text;
                 try self.chunk(word, flags, role);
                 offset = end;
             }
@@ -591,6 +595,27 @@ fn expectWindowLines(win: vaxis.Window, expected: []const []const u8) !void {
         value.clearRetainingCapacity();
         for (0..win.width) |column| try value.appendSlice(allocator, win.screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
         try std.testing.expectEqualStrings(if (row < expected.len) expected[row] else "", std.mem.trimEnd(u8, value.items, " "));
+    }
+}
+
+test "reader polish: HTML zero width clusters render actual blank cells in normal and highlighted paths" {
+    const allocator = std.testing.allocator;
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 40, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 4, .screen = &screen };
+    var prepared = try Prepared.init(allocator, "<p>\u{034f} <b>A\u{301}</b> 👩‍💻</p>");
+    defer prepared.deinit();
+    try prepared.ensure(40, .unicode);
+    for ([_]bool{ false, true }) |highlight| {
+        win.fill(.{});
+        _ = if (highlight) prepared.drawHighlightedFolded(win, 0, 0, .{}, false, false, false, "A") else prepared.draw(win, 0, 0, .{}, false);
+        const first = screen.readCell(0, 0).?.char;
+        try std.testing.expectEqualStrings(" ", first.grapheme);
+        try std.testing.expectEqual(@as(u8, 1), first.width);
+        // The complete, meaningful Unicode clusters survive in their own
+        // cells, rather than replacing attached accents or ZWJ sequences.
+        try std.testing.expectEqualStrings("A\u{301}", screen.readCell(2, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("👩‍💻", screen.readCell(4, 0).?.char.grapheme);
     }
 }
 
@@ -835,4 +860,34 @@ test "local reader: native search highlighting spans style runs without altering
     try std.testing.expect(!vaxis.Color.eql(.{ .rgb = palette.yellow }, screen.readCell(0, 0).?.style.bg));
     try std.testing.expectEqualStrings("A", screen.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("c", screen.readCell(2, 0).?.char.grapheme);
+}
+
+test "reader polish: inline link underline excludes surrounding prose spaces and punctuation" {
+    const a = std.testing.allocator;
+    const palette: theme.Palette = .{};
+    var screen = try vaxis.Screen.init(a, .{ .cols = 40, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 4, .screen = &screen };
+    for ([_]bool{ false, true }) |generated| {
+        const input = "<p>Mail von <a href='https://example.test/'>Omagma</a>.</p>";
+        var prepared = if (generated) try Prepared.initGeneratedMarkdown(a, input) else try Prepared.init(a, input);
+        defer prepared.deinit();
+        try prepared.ensure(40, .unicode);
+        screen.clear();
+        _ = prepared.draw(win, 0, 0, palette, false);
+        try expectWindowLines(win, &.{"Mail von Omagma."});
+        try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(8, 0).?.style.ul_style);
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.foreground }, screen.readCell(8, 0).?.style.fg));
+        for (9..15) |col| try std.testing.expectEqual(vaxis.Style.Underline.single, screen.readCell(@intCast(col), 0).?.style.ul_style);
+        try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(15, 0).?.style.ul_style);
+    }
+    var spaced = try Prepared.init(a, "<p>Before <a href='https://example.test/'>two words</a> after</p>");
+    defer spaced.deinit();
+    try spaced.ensure(40, .unicode);
+    screen.clear();
+    _ = spaced.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{"Before two words after"});
+    try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(6, 0).?.style.ul_style);
+    try std.testing.expectEqual(vaxis.Style.Underline.single, screen.readCell(10, 0).?.style.ul_style);
+    try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(16, 0).?.style.ul_style);
 }

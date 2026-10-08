@@ -144,6 +144,13 @@ Item {
   }
 
   function openInbox() { request("open", { account: selected, kind: "inbox" }) }
+  function openTui() {
+    // Terminal access uses its own configured authorization. Keep the bar's
+    // read-only daemon and credentials separate from the terminal process.
+    if (!dryRunOpen)
+      Quickshell.execDetached(Model.tuiArgv(daemonPath || pluginPath("zig-out/bin/omagma"), selected, fixtures))
+    openCompleted(true)
+  }
   function openMessage(id) {
     if (fixtures && !dryRunOpen) {
       lastError = "Demo messages are synthetic. Open inbox to view this account in Gmail."

@@ -24,6 +24,7 @@ const slug = value => text(value).toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, ''
 const sourceFiles = [
   'README.md', 'AGENTS.md', 'EVIDENCE.md', 'LICENSES/README.md', 'skills/omagma-setup/SKILL.md',
   'docs/release-notes/0.2.5.md', 'docs/release-notes/0.2.6.md',
+  'docs/ROADMAP.md',
   ...['AGENT-CLI', 'AGENT-SETUP', 'BACKGROUND-REFRESH', 'DEVELOPMENT', 'DISTRIBUTION', 'FEATURES', 'INSTALL', 'MACOS', 'MEMORY', 'PRIVACY', 'PROTOCOL', 'README', 'RELEASING', 'SETUP', 'TERMINAL-BACKGROUND', 'TERMINAL-IMPLEMENTATION', 'TERMINAL-PROVIDER-DESIGN', 'TERMINAL-UI-DESIGN', 'TERMINAL-VERIFICATION', 'TERMINAL', 'TRANSPORT', 'TUI-CACHE', 'UI', 'VERIFICATION', 'ZIG017-WIKI-FOLLOWUP'].map(name => `docs/${name}.md`),
   ...['terminal-0.2.0', 'terminal-0.2.1', 'terminal-0.2.2', 'terminal-0.2.3-mouse', 'terminal-0.2.3', 'terminal-0.2.4', 'terminal-0.2.5', 'terminal-0.2.6', 'zig-0.17.0'].map(name => `docs/evidence/${name}.md`),
 ];
@@ -43,7 +44,7 @@ const navGroups = [
   ['Get started', [['docs/README.md', 'Overview'], ['docs/FEATURES.md', 'Features'], ['docs/AGENT-SETUP.md', 'Agent-guided setup'], ['docs/INSTALL.md', 'Linux install'], ['docs/MACOS.md', 'Mac install'], ['docs/SETUP.md', 'Google & accounts']]],
   ['Use Omagma', [['docs/UI.md', 'Bar'], ['docs/TERMINAL.md', 'Terminal'], ['docs/AGENT-CLI.md', 'Agent CLI'], ['docs/TUI-CACHE.md', 'Mail cache'], ['docs/BACKGROUND-REFRESH.md', 'Bar refresh'], ['docs/TERMINAL-BACKGROUND.md', 'Background cache']]],
   ['About', [['docs/PRIVACY.md', 'Privacy'], ['docs/MEMORY.md', 'Memory'], ['docs/DISTRIBUTION.md', 'Distribution'], ['LICENSES/README.md', 'Licenses']]],
-  ['Developers', [['docs/DEVELOPMENT.md', 'Development'], ['docs/TRANSPORT.md', 'Transport'], ['docs/PROTOCOL.md', 'Bar protocol'], ['docs/TERMINAL-IMPLEMENTATION.md', 'Terminal architecture'], ['docs/TERMINAL-UI-DESIGN.md', 'Terminal UI'], ['docs/TERMINAL-PROVIDER-DESIGN.md', 'Provider design'], ['docs/VERIFICATION.md', 'Bar verification'], ['docs/TERMINAL-VERIFICATION.md', 'Terminal verification'], ['docs/RELEASING.md', 'Releases'], ['docs/ZIG017-WIKI-FOLLOWUP.md', 'Zig findings']]],
+  ['Developers', [['docs/DEVELOPMENT.md', 'Development'], ['docs/ROADMAP.md', 'Next priorities'], ['docs/TRANSPORT.md', 'Transport'], ['docs/PROTOCOL.md', 'Bar protocol'], ['docs/TERMINAL-IMPLEMENTATION.md', 'Terminal architecture'], ['docs/TERMINAL-UI-DESIGN.md', 'Terminal UI'], ['docs/TERMINAL-PROVIDER-DESIGN.md', 'Provider design'], ['docs/VERIFICATION.md', 'Bar verification'], ['docs/TERMINAL-VERIFICATION.md', 'Terminal verification'], ['docs/RELEASING.md', 'Releases'], ['docs/ZIG017-WIKI-FOLLOWUP.md', 'Zig findings']]],
 ];
 const nav = active => navGroups.map(([label, entries]) => `<section class="nav-group"><h2>${label}</h2><ul>${entries.map(([source, name]) => `<li><a href="${base}${routes.get(source)}"${source === active ? ' aria-current="page" class="active"' : ''}>${name}</a></li>`).join('')}</ul></section>`).join('');
 const sectionFor = source => navGroups.find(([, entries]) => entries.some(([s]) => s === source))?.[0] ?? (source.includes('evidence') || source === 'EVIDENCE.md' ? 'Historical evidence' : 'Reference');

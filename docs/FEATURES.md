@@ -45,7 +45,8 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Full messages and chronological threads, with plaintext-first rendering and
   a native formatted view for HTML-only mail.
 - Reader beside or below the list, expanded reading, Vim-oriented keys and
-  mouse navigation using the Omarchy palette when available and a built-in palette otherwise.
+  mouse navigation, with a choice of Omagma volcano-orange colors or the
+  current Omarchy palette.
 - Cache-first startup and usable cached mail during refresh; bounded message
   count/byte retention evicts the oldest mail tail.
 - An optional Linux read-only five-minute cache timer keeps mail ready while the
@@ -98,6 +99,14 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 
 - `h`/`l` or Tab changes pane; `v` switches right/below; `z` expands the reader.
   With the reader focused, `J`/`K` changes mail and `j`/`k` scrolls its body.
+- Unread subjects are bold and marked `●`; read subjects use normal weight.
+  `⭐` stars stay visible independently of bulk selection. Reader headers show
+  the account's readable label names.
+- Search Help with `/` by shortcut, description or section; `n`/`N` visits
+  highlighted matches. Esc clears a query before leaving Help.
+- The bar's **Open TUI** button opens the selected account in a floating
+  terminal. An optional Omagma application launcher entry opens the TUI
+  directly; see [installation](INSTALL.md#application-launcher).
 - Mouse clicks choose accounts, mailboxes, messages and contacts. `--no-mouse`
   keeps mouse handling in the terminal, and the terminal's selection modifier
   remains available for selecting text.
@@ -184,12 +193,18 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Custom-label, Spam, All Mail and Unread views complement
   Inbox/Sent/local Drafts/Archive/Trash. The label chooser filters by name and
   has explicit Add/Remove actions.
+- Dialog controls support Tab/Shift+Tab and Enter, including label actions,
+  received attachment saving, contact editing and compose aliases. Submission
+  reviews begin on Back/Cancel; only a deliberately chosen action submits.
 - `q` goes back through reader, search, help and compose
   contexts before quitting; in text-entry fields it remains a normal character.
 - Account/mailbox/selected-message/reader-scroll context,
   split ratios and mailbox key remaps restore from private preferences.
   `:split`, `:bind` and `:unbind` provide lightweight personalization.
-- Ctrl+L reloads the Omarchy palette. `NO_COLOR` retains meaningful text states
+- `T`/`:theme` previews Omagma's volcano-orange palette or Follow Omarchy;
+  Apply saves privately and Cancel restores the previous choice. Follow
+  Omarchy updates with the desktop; missing themes use Omagma colors.
+  Ctrl+L reloads the selected mode. `NO_COLOR` retains meaningful text states
   and selected-item highlighting.
 - Configurable body prefetch accepts 0–64; zero disables it.
 

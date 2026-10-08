@@ -83,6 +83,10 @@ assert.equal(Model.parseLine("garbage"), null);
 assert.throws(() => Model.requestLine(9007199254740992, "hello"));
 assert.deepEqual(Model.daemonArgv("/binary path", "/config path", true, true),
   ["/binary path", "daemon", "--config", "/config path", "--fixtures", "--dry-run-open"]);
+assert.deepEqual(Model.tuiArgv("/plugin with spaces/bin/omagma", "work@example.test", false),
+  ["omarchy", "launch", "tui", "--app-id=TUI.float.omagma", "/plugin with spaces/bin/omagma", "tui", "--account", "work@example.test"]);
+assert.deepEqual(Model.tuiArgv("/binary", "", true),
+  ["omarchy", "launch", "tui", "--app-id=TUI.float.omagma", "/binary", "tui", "--fixtures"]);
 
 let accounts = init;
 for (let generation = 2; generation <= 1001; generation++) {

@@ -4,6 +4,11 @@ Click the magma icon to open the compact bar dropdown. The sidebar lists your co
 
 Rows show sender, subject and time. Select a row to see its plain-text snippet. **Refresh** updates the selected account. **Open inbox** and message activation open Gmail in that account’s configured Chrome profile. The bar fetches snippets and metadata; reading full messages and attachments happens in Gmail or the [terminal client](TERMINAL.md). The bar does not change read status or send mail.
 
+**Open TUI** opens the selected account in Omarchy's default terminal, in a
+centered floating window. The popup closes while the read-only bar backend
+keeps running. You can also add Omagma to the application launcher; see
+[installation](INSTALL.md#application-launcher).
+
 ## Status labels
 
 | Label | Meaning |

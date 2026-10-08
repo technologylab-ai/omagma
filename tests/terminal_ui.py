@@ -98,8 +98,9 @@ def preference(path, expected):
             "saved reader layout disagrees with rendered layout/schema")
     # Private working-context persistence now deliberately remembers account
     # and message IDs. It must remain bounded UI state, not mail or credentials.
-    require(set(data) == {"schema", "readerLayout", "listWidthPercent", "listHeightPercent",
+    require(set(data) == {"schema", "theme", "readerLayout", "listWidthPercent", "listHeightPercent",
                           "lastAccount", "contexts", "bindings"}, "UI preferences contain undocumented fields")
+    require(data["theme"] in {"follow_omarchy", "omagma"}, "unknown private theme choice")
     for field in ("listWidthPercent", "listHeightPercent"):
         require(type(data[field]) is int and 25 <= data[field] <= 75, "pane ratio exceeded its public bound")
     require(data["lastAccount"] in ("", *ACCOUNTS), "preferences retained an unconfigured account")

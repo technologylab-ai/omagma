@@ -43,9 +43,22 @@ Enter opens the full thread. `h`/`l` or Tab changes pane, `v` moves the reader b
 
 Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Use your terminal's selection modifier for text selection, or `--no-mouse` to retain ordinary terminal mouse behavior.
 
+Unread subjects are bold and marked `●`; read subjects use normal weight.
+Stars appear as `⭐` on the sender row, independently of unread or bulk
+selection marks. A highlighted row identifies your selection without changing
+its read status. The reader header shows read/starred state and readable label
+names for that account, including custom labels.
+
+In dialogs, Tab/Shift+Tab moves through fields, lists and action buttons;
+Enter activates the focused button. Lists retain their selected row when you
+move focus to an action. Send, Trash and invitation review start on Back or
+Cancel, so an unprompted Enter does not submit a change. Keyboard focus has a
+visible highlight, including the compose Alias, Add, attachment removal,
+format and preview controls.
+
 ## Reading HTML-only mail
 
-The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use the Omarchy palette when available, with a built-in fallback elsewhere. Narrow tables stack their cells; complex presentation tables flatten into reading order.
+The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use your chosen TUI palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
 
 Scripts, remote images and other resources never run or load. Images show `[Image: caption]` using alt text or a title, or `[Image]` when neither is available; explicitly empty alt text hides decorative images. Links use the theme's cyan and underline, including HTTP(S) URLs in plain-text mail. Human-written link labels stay intact. Long visible URLs are shortened to their host/path and an ellipsis; `L` retains the complete destinations, including query parameters. These display changes leave stored mail and CLI bodies intact.
 
@@ -61,6 +74,11 @@ The CLI exposes both modes through `omagma mail search --cached` / `--server`, o
 
 Error status lines include a short diagnostic code. `?` opens Help with that
 code and its explanation at the top; Escape/`q` returns to the current view.
+
+Within Help, `/` searches shortcut names, descriptions and section names,
+ignoring case. Matches highlight immediately. Enter keeps the query and
+`n`/`N` moves through matches. Esc clears the search before leaving Help;
+letters such as `q` remain text while entering a query.
 
 ## Compose, reply and forward
 
@@ -111,10 +129,11 @@ content; final styling follows the receiving email client.
 `e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
 
 Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review;
-only explicit `y` sends. Review shows the account, selected From alias,
+explicit `y` or Enter on the deliberately focused **Send** button sends.
+Review starts with **Back** focused. It shows the account, selected From alias,
 recipients, subject, format, rendered outgoing body, threading and attachments.
 Review the outgoing preview and plain alternative before confirming. Saving,
-switching format or preview, and pressing Enter on a control never submit mail.
+switching format or preview, and pressing Enter on composer controls never submit mail.
 If the provider result is uncertain, keep the draft, use `:receipt` to inspect
 its journal and check Sent mail before attempting another send.
 
@@ -129,7 +148,12 @@ Tab/Shift+Tab moves among popup controls and Ctrl+U clears the path. Completion
 excludes symlinks and special files. Shell expressions or variables are not
 expanded.
 
-`B`, `:attachments` or a file click opens the thread's attachment list. `s` or Enter chooses Save; `o` chooses Save & open. The popup suggests a sanitized, fresh name in XDG Downloads or `HOME/Downloads`; Ctrl+U replaces it and Ctrl+F completes paths. Saving creates a new private file and refuses overwrite or symlink traversal.
+`B`, `:attachments` or a file click opens the thread's attachment list.
+Tab/Shift+Tab chooses the list, Save, Save & open or Back; Enter activates the
+focused action. From the list, `s` or Enter chooses Save and `o` chooses
+Save & open. The popup suggests a sanitized, fresh name in XDG Downloads or
+`HOME/Downloads`; Ctrl+U replaces it and Ctrl+F completes paths. Saving creates
+a new private file and refuses overwrite or symlink traversal.
 
 Numeric `:save-attachment NUMBER /absolute/path` also saves a file directly. Paths with spaces are literal. If a completion list is visible, Escape hides it first; Escape again leaves the path prompt. Saving/opening a received file reports the explicit result while retaining its originating reader or draft.
 
@@ -137,9 +161,18 @@ Numeric `:save-attachment NUMBER /absolute/path` also saves a file directly. Pat
 
 ## Labels, bulk actions and contacts
 
-The sidebar includes Inbox, Sent, local Drafts, Archive, Trash, Spam, All Mail, Unread and cached custom labels. `m` opens the label chooser with `/` filtering, Enter/**Add** and `-`/**Remove**. Omagma does not create, rename or delete label definitions.
+The sidebar includes Inbox, Sent, local Drafts, Archive, Trash, Spam, All Mail,
+Unread and cached custom labels. `m` opens the label chooser with `/` filtering
+and `+`/`-` for Add/Remove. Tab/Shift+Tab chooses Filter, List, Add, Remove or
+Back; Enter activates the focused action. Omagma does not create, rename or
+delete label definitions.
 
-Space selects mail, Ctrl+A selects the window, and actions apply to that set or the focused message. Escape/`q` clears a selection first; Ctrl+Z or `:undo` reverses the last completed account action. Scope changes clear selection. Bulk actions can have partial outcomes; uncertain items are not replayed. `D` opens Trash review and requires explicit `y` confirmation.
+Space selects mail, Ctrl+A selects the window, and actions apply to that set or
+the focused message. Escape/`q` clears a selection first; Ctrl+Z or `:undo`
+reverses the last completed account action. Scope changes clear selection.
+Bulk actions can have partial outcomes; uncertain items are not replayed.
+`D` opens Trash review, initially focused on Cancel; `y` or Enter on the
+deliberately focused Confirm button submits the change.
 
 The CLI/API batch interface also supports `spam` and `unspam`
 actions; `unspam` removes Spam and restores Inbox membership. See
@@ -148,6 +181,11 @@ actions; `unspam` removes Spam and restores Inbox membership. See
 `a` opens this account's address book. Search with `/`, create with `n`, edit with `e`, and save a contact with Ctrl+S. Contacts require People API permissions. Version conflicts are reported so you can refresh before editing again. Contact deletion is not implemented.
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
+
+Invitation review also supports Tab/Shift+Tab across Accept, Tentative, Decline
+and Cancel, with Cancel focused initially. Enter submits only the deliberately
+focused reply action. The account and organizer identities remain visible
+before submission.
 
 A copied Teams/Zoom join link alone has no organizer/attendee scheduling identity. Such mail can be read and opened with `o`, but Omagma cannot invent a valid RSVP. This needs no Calendar API permission, calendar view or calendar editing; sending a response requires the account's existing terminal RSVP/send grant.
 
@@ -184,11 +222,23 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Space / Ctrl+A / Ctrl+Z | Select / select window / undo |
 | x / D / U / s / u / m | Archive / Trash review / restore / star / unread / labels |
 | a / I | Contacts / invitation reply |
+| T / :theme | Preview and choose the TUI theme |
 | Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit |
 
 `q` backs out of readers, search, contacts, help and draft review before quitting the mailbox. It remains text in insertion and path fields. `?` shows the full, scrollable help for the current interface.
 
-Reader layout, split proportions, key remaps and per-account mailbox/selected-mail/reader position live in private `omagma/ui.json`; `--ui-file FILE` selects another preferences file. `:split right 60` or `:split below 40` chooses a 25–75% split; `:bind n down`, `:bind p up` and `:unbind n` remap mailbox keys without intercepting text entry or confirmation. Ctrl+L reloads the Omarchy palette; desktop fonts/theme configuration stay with the terminal.
+Reader layout, split proportions, theme, key remaps and per-account mailbox/selected-mail/reader position live in private `omagma/ui.json`; `--ui-file FILE` selects another preferences file. `:split right 60` or `:split below 40` chooses a 25–75% split; `:bind n down`, `:bind p up` and `:unbind n` remap mailbox keys without intercepting text entry or confirmation.
+
+Press `T` on the mailbox screen, or enter `:theme`, to preview **Omagma**,
+the built-in volcano-orange palette used in project screenshots, or **Follow
+Omarchy**, the default. `j`/`k` previews the whole interface; Tab/Shift+Tab
+chooses the list, Apply or Cancel, and Enter activates the focused choice.
+Only Apply saves the choice; Escape/Cancel restores the saved theme. Follow
+Omarchy adopts local theme changes automatically. Ctrl+L redraws and reloads
+the chosen theme. Without an available Omarchy palette, it uses Omagma colors
+and says so in the picker. `NO_COLOR` retains text and focus indicators, and a
+theme choice remains available for later color sessions. This changes Omagma's
+appearance only; desktop themes and terminal fonts stay with your terminal.
 
 ## Live permissions
 

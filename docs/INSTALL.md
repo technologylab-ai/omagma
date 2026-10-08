@@ -95,6 +95,30 @@ mailbox changes or contacts, follow [terminal permissions](SETUP.md#full-tuicli-
 The TUI and CLI are experimental; [the terminal guide](TERMINAL.md) explains
 their workflows and controls.
 
+## Application launcher
+
+The bar popup's **Open TUI** button opens the selected account in a floating
+terminal. It uses Omarchy's default terminal and your existing terminal
+configuration. Terminal permissions remain separate from the read-only bar.
+
+After making `omagma` available on PATH, add it to Omarchy's application
+launcher with the supplied desktop entry and icon:
+
+```sh
+mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/256x256/apps"
+cp assets/omagma.desktop "$HOME/.local/share/applications/omagma.desktop"
+cp assets/omagma-logo.png "$HOME/.local/share/icons/hicolor/256x256/apps/omagma.png"
+update-desktop-database "$HOME/.local/share/applications"
+```
+
+Run these commands from the installed bundle folder. Search for **Omagma** in
+the launcher. It runs `omagma tui` using the `TUI.float.omagma` application ID;
+Omarchy's default TUI window rules provide a centered floating window. For a
+larger starting size, copy the rules in
+[examples/omagma-hyprland.lua](../examples/omagma-hyprland.lua) into your user
+Hyprland Lua configuration, then run `hyprctl reload` and check
+`hyprctl configerrors`.
+
 ## Optional demo
 
 To look around before connecting Gmail, run `omagma tui --fixtures`, or set

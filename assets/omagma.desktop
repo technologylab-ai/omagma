@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Omagma
+GenericName=Terminal email client
+Comment=Read and write Gmail in a fast terminal interface
+Exec=omarchy launch tui --app-id=TUI.float.omagma omagma tui
+TryExec=omagma
+Icon=omagma
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;gmail;terminal;tui;
+StartupNotify=false
+StartupWMClass=TUI.float.omagma

@@ -9,6 +9,7 @@ const input_loop = @import("input.zig");
 const fetch_progress = @import("progress.zig");
 const loading = @import("loading.zig");
 const layout = @import("layout.zig");
+const dialog_controls = @import("dialog_controls.zig");
 const theme = @import("theme.zig");
 const timezone = @import("timezone.zig");
 const cache_watch = @import("cache_watch.zig");
@@ -34,11 +35,11 @@ const Key = vaxis.Key;
 const max_cols = 240;
 const max_rows = 80;
 const response_limit = types.Limits.runtime_bytes / 2;
-const Event = union(enum) { fetch_progress, loading_tick, cache_changed, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, compose_idle, terminate };
+const Event = union(enum) { fetch_progress, loading_tick, cache_changed, theme_tick, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, compose_idle, terminate };
 const Loop = input_loop.Loop(Event);
 const FileFocus = enum { path, parent, home, hidden, listing, confirm, cancel };
 const ComposeView = enum { rendered, original, plain };
-const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, attachment };
+const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, attachment, theme };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const Focus = layout.Focus;
 const JobKind = enum { batch, undo, labels_list, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_operations, compose, autosave, identities, save, save_review, save_back, send, contacts, contact_write, mutation, invitation_inspect, invitation, open, attachment_save };
@@ -64,9 +65,21 @@ const StatusOwner = struct {
     overlay: ReaderOverlay = .none,
     labels: bool = false,
 };
+fn tabDirection(key: Key) ?bool {
+    if (key.matches(Key.tab, .{})) return false;
+    if (key.matches(Key.tab, .{ .shift = true })) return true;
+    return null;
+}
 fn mailRowCapacity(height: usize) usize {
     // Each card takes two rows; only the gaps between cards take a third.
     return @max((height +| 1) / 3, 1);
+}
+fn messageHasLabel(message: Value, identifier: []const u8) bool {
+    for (items(get(message, "labels"))) |label| if (same(text(label), identifier)) return true;
+    return false;
+}
+fn messageUnread(message: Value) bool {
+    return truth(get(message, "unread")) or messageHasLabel(message, "UNREAD");
 }
 fn fileDialogHeight(entries: usize, available: u16) u16 {
     // @min can infer a narrow backing integer. Widen its result before the
@@ -229,10 +242,10 @@ const help_rows = [_]HelpRow{
     .{ .section = "MAIL ACTIONS" },
     .{ .keys = "Space / Ctrl+A", .action = "Select a message / the current page" },
     .{ .keys = "Ctrl+Z / :undo", .action = "Undo the last completed action for this account" },
-    .{ .keys = "c / r / R · F", .action = "Compose, reply, reply-all or forward with files" },
+    .{ .keys = "c / r / R · f", .action = "Compose, reply, reply-all or forward with attachments" },
     .{ .keys = "x / D / U", .action = "Archive, review Trash or restore mail" },
     .{ .keys = "s / u", .action = "Toggle starred or unread" },
-    .{ .keys = "m", .action = "Choose a label; / filters, Enter adds, - removes" },
+    .{ .keys = "m", .action = "Choose labels; / filters, Tab chooses list or Add/Remove" },
     .{ .keys = "I", .action = "Review a calendar invitation reply" },
     .{ .keys = "Ctrl+R", .action = "Refresh mail" },
     .{ .keys = "Ctrl+L", .action = "Reload theme and redraw the screen" },
@@ -262,7 +275,13 @@ const help_rows = [_]HelpRow{
     .{ .action = "No editor save or paste sends mail." },
     .{ .action = "Autosave only saves locally; it never sends mail." },
     .{ .action = "In a text field, q is text." },
+    .{ .section = "HELP SEARCH" },
+    .{ .keys = "/ in help", .action = "Find keys, actions or section names, ignoring case" },
+    .{ .keys = "Enter · n / N", .action = "Keep the search; jump to the next or previous match" },
+    .{ .keys = "Esc in help", .action = "Clear the search first; Esc again returns to your view" },
+    .{ .action = "While typing a help search, q and other letters are text." },
     .{ .section = "PERSONALIZE" },
+    .{ .keys = "T / :theme", .action = "Preview Omagma orange or follow Omarchy theme colors; Apply saves the palette" },
     .{ .keys = ":split right 60", .action = "Use 60% of horizontal space for the mail list" },
     .{ .keys = ":split below 40", .action = "Use 40% of vertical space for the mail list" },
     .{ .keys = ":bind n down", .action = "Remap n in mailbox mode; :unbind n restores it" },
@@ -668,6 +687,7 @@ const App = struct {
     markup: []ReaderMarkup = &.{},
     html_stats: html_view.Stats = .{},
     mouse_hits: layout.HitMap = .{},
+    dialog_focus: dialog_controls.Focus = .{},
     contacts: []const Value = &.{},
     selected: usize = 0,
     top: usize = 0,
@@ -733,6 +753,13 @@ const App = struct {
     help_scroll: usize = 0,
     help_lines: usize = 0,
     help_height: usize = 0,
+    help_query: Field = .{},
+    help_searching: bool = false,
+    help_match: ?usize = null,
+    help_match_start: usize = 0,
+    help_match_end: usize = 0,
+    help_reveal_match: bool = false,
+    help_content_width: u16 = 0,
     contacts_selected: usize = 0,
     contacts_generation: u64 = 0,
     contacts_query: Field = .{},
@@ -895,9 +922,17 @@ const App = struct {
     ui_preferences: preferences.Preferences = .{},
     preferences_warning: bool = false,
     theme_warning: bool = false,
+    theme_choice: theme.Mode = .follow_omarchy,
+    theme_watch: theme.Watch = .{},
+    theme_following: std.atomic.Value(bool) = .init(false),
+    theme_tick_pending: std.atomic.Value(bool) = .init(false),
+    theme_tick_at: i64 = 0,
+    theme_save_failed: bool = false,
+    omarchy_theme_available: bool = false,
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        self.help_query.deinit(self.allocator);
         self.clearComposePreview();
         self.cache_watch.stop();
         self.recipient_account.deinit(self.allocator);
@@ -947,12 +982,26 @@ const App = struct {
         const self: *App = @ptrCast(@alignCast(context));
         return self.loop.tryPostEvent(.cache_changed);
     }
+    fn postThemeTick(context: *anyopaque) !void {
+        const self: *App = @ptrCast(@alignCast(context));
+        if (!self.theme_following.load(.acquire)) return;
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        if (now < self.theme_tick_at) return;
+        self.theme_tick_at = now +| 2000;
+        if (self.theme_tick_pending.swap(true, .acq_rel)) return;
+        const accepted = self.loop.tryPostEvent(.theme_tick) catch |err| {
+            self.theme_tick_pending.store(false, .release);
+            return err;
+        };
+        if (!accepted) self.theme_tick_pending.store(false, .release);
+    }
     fn startCacheWatch(self: *App) !void {
         self.cache_watch.io = self.io;
         self.cache_watch.allocator = self.allocator;
         self.cache_watch.client = self.client;
         self.cache_watch.context = self;
         self.cache_watch.postFn = postCacheChanged;
+        self.cache_watch.idleFn = postThemeTick;
         for (self.accounts, 0..) |account_value, index| {
             if (get(account_value, "enabled") != .null and !truth(get(account_value, "enabled"))) continue;
             self.cache_watch.accounts[index] = text(get(account_value, "address"));
@@ -1157,6 +1206,7 @@ const App = struct {
         self.label_choice = 0;
         self.label_filtering = false;
         self.label_picker = true;
+        self.dialog_focus.reset(.labels, 1);
         try self.prepareLabels();
         if (self.pending_labels) self.preemptReadOnly();
         try self.dispatchPending();
@@ -1168,41 +1218,73 @@ const App = struct {
         try self.batchMail("mark", null, null, if (remove) null else &label, if (remove) &label else null);
     }
     fn onLabelPickerKey(self: *App, key: Key) !void {
+        self.dialog_focus.ensure(.labels, 1);
         if (self.paste) {
-            if (self.label_filtering) if (key.text) |raw| try self.label_filter.insert(self.allocator, try safe(self.frame.allocator(), raw, false), 256);
-            return;
-        }
-        if (self.label_filtering) {
-            if (key.matches(Key.escape, .{}) or key.matches(Key.enter, .{})) self.label_filtering = false else try self.label_filter.handleKey(self.allocator, key, false, 256);
-            self.label_choice = 0;
+            if (self.dialog_focus.index == 0) if (key.text) |raw| try self.label_filter.insert(self.allocator, try safe(self.frame.allocator(), raw, false), 256);
             return;
         }
         const count = self.visibleLabelCount();
-        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) self.label_picker = false else if (key.matches('/', .{})) self.label_filtering = true else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.label_choice = @min(self.label_choice +| 1, count -| 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.label_choice -|= 1 else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.label_choice = 0 else if (key.matches(Key.end, .{})) self.label_choice = count -| 1 else if (key.matches(Key.enter, .{}) or key.matches('+', .{})) try self.chooseLabel(false) else if (key.matches('-', .{})) try self.chooseLabel(true);
+        if (tabDirection(key)) |backwards| {
+            self.dialog_focus.move(backwards, 5, if (count > 0) 0b11111 else 0b10011);
+            self.label_filtering = self.dialog_focus.index == 0;
+            return;
+        }
+        if (self.dialog_focus.index == 0) {
+            if (key.matches(Key.escape, .{}) or key.matches(Key.enter, .{})) {
+                self.dialog_focus.index = 1;
+                self.label_filtering = false;
+            } else {
+                try self.label_filter.handleKey(self.allocator, key, false, 256);
+                self.label_choice = 0;
+            }
+            return;
+        }
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) self.label_picker = false else if (key.matches('/', .{})) {
+            self.dialog_focus.index = 0;
+            self.label_filtering = true;
+        } else if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
+            self.dialog_focus.index = 1;
+            self.label_choice = @min(self.label_choice +| 1, count -| 1);
+        } else if (key.matches('k', .{}) or key.matches(Key.up, .{})) {
+            self.dialog_focus.index = 1;
+            self.label_choice -|= 1;
+        } else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.label_choice = 0 else if (key.matches(Key.end, .{})) self.label_choice = count -| 1 else if (key.matches(Key.enter, .{})) {
+            switch (self.dialog_focus.index) {
+                1, 2 => try self.chooseLabel(false),
+                3 => try self.chooseLabel(true),
+                4 => self.label_picker = false,
+                else => {},
+            }
+        } else if (key.matches('+', .{})) try self.chooseLabel(false) else if (key.matches('-', .{})) try self.chooseLabel(true);
     }
     fn drawLabelPicker(self: *App, win: vaxis.Window) !void {
         if (!self.label_picker) return;
+        self.dialog_focus.ensure(.labels, 1);
         const width = @min(win.width -| 2, 72);
         const height = @min(win.height -| 2, 24);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = self.panel(area, 0, width, " Choose label ", true);
         self.mouse_hits.clear();
-        try self.line(inner, 0, try std.fmt.allocPrint(self.frame.allocator(), "Filter: {s}{s}", .{ self.label_filter.value(), if (self.label_filtering) "▏" else "" }), if (self.label_filtering) .selected else .muted);
-        const rows: usize = inner.height -| 4;
+        const filtering = self.dialog_focus.index == 0;
+        try self.line(inner, 0, try std.fmt.allocPrint(self.frame.allocator(), "Filter: {s}{s}", .{ self.label_filter.value(), if (filtering) "▏" else "" }), if (filtering) .selected else .muted);
+        self.mouseRows(inner, 0, 1, .label_filter, 0);
+        const rows: usize = inner.height -| 5;
         const count = self.visibleLabelCount();
         self.label_choice = @min(self.label_choice, count -| 1);
+        if (count == 0 and (self.dialog_focus.index == 2 or self.dialog_focus.index == 3)) self.dialog_focus.index = 1;
         const first = if (self.label_choice >= rows and rows > 0) self.label_choice - rows + 1 else 0;
         if (count == 0) try self.line(inner, 2, if (self.pending_labels or (self.job.future != null and self.job.kind == .labels_list)) "Loading labels…" else "No matching labels", .muted);
         for (first..@min(count, first + rows)) |choice| {
             const index = self.visibleLabelIndex(choice) orelse continue;
-            try self.line(inner, choice - first + 2, text(get(self.labels[index], "name")), if (choice == self.label_choice) .selected else .text);
+            try self.line(inner, choice - first + 2, text(get(self.labels[index], "name")), if (choice == self.label_choice) (if (self.dialog_focus.index == 1) .selected else .subject) else .text);
             self.mouseRows(inner, choice - first + 2, 1, .label_choice, choice);
         }
         if (inner.height > 1) {
-            try self.line(inner, inner.height - 1, "[Add]  [Remove]  / Filter · Esc/q Back", .accent);
-            self.mouseArea(inner.child(.{ .y_off = @intCast(inner.height - 1), .width = @min(inner.width, 5), .height = 1 }), .label_add, 0);
-            if (inner.width > 7) self.mouseArea(inner.child(.{ .x_off = 7, .y_off = @intCast(inner.height - 1), .width = @min(inner.width - 7, 8), .height = 1 }), .label_remove, 0);
+            var x = try self.actionButton(inner, inner.height - 2, 0, "[Add]", self.dialog_focus.index == 2, count > 0, .label_add, 0);
+            x = try self.actionButton(inner, inner.height - 2, x, "[Remove]", self.dialog_focus.index == 3, count > 0, .label_remove, 0);
+            _ = try self.actionButton(inner, inner.height - 2, x, "[Back]", self.dialog_focus.index == 4, true, .label_back, 0);
+            try self.line(inner, inner.height - 1, "Tab Controls · Enter Choose · / Filter · Esc/q Back", .muted);
         }
     }
     fn onMailControls(self: *App, key: Key) !bool {
@@ -1242,6 +1324,7 @@ const App = struct {
         }
         if (key.matches('D', .{}) or key.matches('d', .{ .shift = true })) {
             self.mode = .trash_confirm;
+            self.dialog_focus.reset(.trash, 0);
             return true;
         }
         if (key.matches('U', .{}) or key.matches('u', .{ .shift = true })) {
@@ -1382,13 +1465,78 @@ const App = struct {
         self.diagnostic(@errorName(err));
     }
     fn reloadTheme(self: *App) void {
-        self.palette = theme.load(self.io, self.allocator, self.environ) catch |err| {
+        self.loadTheme(true);
+    }
+    fn activeTheme(self: *const App) theme.Mode {
+        return if (self.mode == .theme) self.theme_choice else self.ui_preferences.theme;
+    }
+    fn loadTheme(self: *App, announce_error: bool) void {
+        const chosen = self.activeTheme();
+        self.theme_following.store(chosen == .follow_omarchy, .release);
+        self.palette = theme.loadMode(self.io, self.allocator, self.environ, chosen) catch |err| {
             self.palette = .{};
+            self.omarchy_theme_available = false;
             self.theme_warning = true;
-            self.say(true, "Theme fallback · {s}", .{@errorName(err)});
+            if (announce_error) self.say(true, "Omarchy theme unavailable · using Omagma colors · {s}", .{@errorName(err)});
             return;
         };
+        if (chosen == .follow_omarchy) self.omarchy_theme_available = self.palette.from_omarchy;
+        // A machine without Omarchy uses the normal built-in palette; the
+        // picker labels that fallback without making every sync status warn.
         self.theme_warning = false;
+    }
+    fn pollTheme(self: *App) bool {
+        if (self.activeTheme() != .follow_omarchy) return false;
+        const changed = self.theme_watch.changed(self.io, Io.Timestamp.now(self.io, .awake).toMilliseconds()) catch return false;
+        if (changed) self.loadTheme(false);
+        return changed;
+    }
+    fn openThemePicker(self: *App) void {
+        if (self.ui_preferences.theme == .omagma) self.omarchy_theme_available = (theme.load(self.io, self.allocator, self.environ) catch theme.Palette{}).from_omarchy;
+        self.theme_choice = self.ui_preferences.theme;
+        self.theme_save_failed = false;
+        self.mode = .theme;
+        self.dialog_focus.reset(.theme, 0);
+    }
+    fn previewTheme(self: *App, chosen: theme.Mode) void {
+        if (chosen == self.theme_choice) return;
+        self.theme_choice = chosen;
+        self.theme_save_failed = false;
+        self.loadTheme(false);
+    }
+    fn cancelThemePicker(self: *App) void {
+        self.mode = .browse;
+        self.theme_save_failed = false;
+        self.loadTheme(false);
+    }
+    fn applyThemePicker(self: *App) void {
+        const saved = self.ui_preferences.theme;
+        if (self.theme_choice != saved) {
+            self.ui_preferences.theme = self.theme_choice;
+            self.saveUiPreferences();
+            if (self.preferences_warning) {
+                self.ui_preferences.theme = saved;
+                self.theme_save_failed = true;
+                return;
+            }
+        }
+        self.mode = .browse;
+        self.say(false, "Theme: {s}{s}", .{ theme.name(self.ui_preferences.theme), if (self.ui_preferences.theme == .follow_omarchy and !self.palette.from_omarchy) @as([]const u8, " · using Omagma colors") else "" });
+    }
+    fn onThemePickerKey(self: *App, key: Key) void {
+        self.dialog_focus.ensure(.theme, 0);
+        if (tabDirection(key)) |backwards| {
+            self.dialog_focus.move(backwards, 3, 0b111);
+        } else if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+            self.cancelThemePicker();
+        } else if (key.matches('l', .{ .ctrl = true })) {
+            self.loadTheme(false);
+            self.vx.queueRefresh();
+        } else if (key.matches(Key.enter, .{})) {
+            if (self.dialog_focus.index == 2) self.cancelThemePicker() else self.applyThemePicker();
+        } else if (self.dialog_focus.index == 0) {
+            if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.previewTheme(.follow_omarchy) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.previewTheme(.omagma);
+        }
     }
     fn loadPreferences(self: *App) void {
         const filename = preferences.path(self.allocator, self.environ, self.options.ui_file) catch |err| {
@@ -1580,6 +1728,7 @@ const App = struct {
             self.reader_links.truncated = self.reader_links.truncated or found.truncated;
         }
         self.reader_overlay = .links;
+        self.dialog_focus.reset(.links, 0);
         self.reader_choice = 0;
         self.say(false, "Choose a literal URL · Enter opens in this account's profile", .{});
     }
@@ -1599,6 +1748,7 @@ const App = struct {
     fn openReaderAttachments(self: *App) void {
         self.closeReaderOverlay();
         self.reader_overlay = .attachments;
+        self.dialog_focus.reset(.attachments, 0);
         self.say(false, "Received attachments · s Save · o Save & open · Esc Back", .{});
     }
     fn readerAttachmentPrompt(self: *App, open_after: bool) !void {
@@ -1645,27 +1795,41 @@ const App = struct {
             } else try self.onFileDialogKey(key, &self.reader_path, true);
             return true;
         }
-        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) {
+        const links = self.reader_overlay == .links;
+        self.dialog_focus.ensure(if (links) .links else .attachments, 0);
+        const count = if (links) self.reader_links.count else self.readerAttachmentCount();
+        if (tabDirection(key)) |backwards| {
+            self.dialog_focus.move(backwards, if (links) 3 else 4, if (count > 0) (if (links) @as(u8, 0b111) else 0b1111) else (if (links) @as(u8, 0b101) else 0b1001));
+            return true;
+        }
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == (if (links) @as(usize, 2) else 3))) {
             self.closeReaderOverlay();
             return true;
         }
-        const count = if (self.reader_overlay == .links) self.reader_links.count else self.readerAttachmentCount();
         if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) {
+            self.dialog_focus.index = 0;
             self.reader_choice = @min(self.reader_choice +| 10, count -| 1);
             return true;
         }
         if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) {
+            self.dialog_focus.index = 0;
             self.reader_choice -|= 10;
             return true;
         }
-        if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.reader_choice = @min(self.reader_choice +| 1, count -| 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.reader_choice -|= 1 else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.reader_choice = 0 else if (key.matches(Key.end, .{})) self.reader_choice = count -| 1 else if (self.reader_overlay == .links and key.matches(Key.enter, .{}) and count > 0) {
+        if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
+            self.dialog_focus.index = 0;
+            self.reader_choice = @min(self.reader_choice +| 1, count -| 1);
+        } else if (key.matches('k', .{}) or key.matches(Key.up, .{})) {
+            self.dialog_focus.index = 0;
+            self.reader_choice -|= 1;
+        } else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.reader_choice = 0 else if (key.matches(Key.end, .{})) self.reader_choice = count -| 1 else if (links and key.matches(Key.enter, .{}) and count > 0) {
             const url = self.reader_links.values[self.reader_choice];
             if (!reader_tools.safeUrl(url)) return error.InvalidBrowserUrl;
             self.preemptReaderAction();
             if (self.job.future != null) return error.OperationPending;
             try self.start(.open, .{ .cmd = "browser.open", .account = self.account(), .url = url });
             self.closeReaderOverlay();
-        } else if (self.reader_overlay == .attachments and (key.matches('s', .{}) or key.matches(Key.enter, .{}))) try self.readerAttachmentPrompt(false) else if (self.reader_overlay == .attachments and key.matches('o', .{})) try self.readerAttachmentPrompt(true);
+        } else if (!links and key.matches(Key.enter, .{})) try self.readerAttachmentPrompt(self.dialog_focus.index == 2) else if (!links and key.matches('s', .{})) try self.readerAttachmentPrompt(false) else if (!links and key.matches('o', .{})) try self.readerAttachmentPrompt(true);
         return true;
     }
     fn onReaderKey(self: *App, key: Key) !bool {
@@ -1730,61 +1894,66 @@ const App = struct {
             .reader_picker => {
                 const count = if (self.reader_overlay == .links) self.reader_links.count else self.readerAttachmentCount();
                 self.reader_choice = @min(hit.index, count -| 1);
+                self.dialog_focus.index = 0;
             },
-            .reader_picker_save => try self.readerAttachmentPrompt(false),
-            .reader_picker_open => try self.readerAttachmentPrompt(true),
+            .reader_picker_save => {
+                self.dialog_focus.ensure(.attachments, 0);
+                self.dialog_focus.index = 1;
+                try self.readerAttachmentPrompt(false);
+            },
+            .reader_picker_open => {
+                self.dialog_focus.ensure(.attachments, 0);
+                self.dialog_focus.index = 2;
+                try self.readerAttachmentPrompt(true);
+            },
+            .reader_picker_activate => {
+                self.dialog_focus.ensure(.links, 0);
+                self.dialog_focus.index = 1;
+                _ = try self.onReaderOverlayKey(.{ .codepoint = Key.enter });
+            },
+            .reader_picker_back => self.closeReaderOverlay(),
             else => return false,
         }
         return true;
     }
     fn drawReaderOverlay(self: *App, win: vaxis.Window) !void {
-        if (self.reader_overlay == .none) return;
-        if (self.reader_overlay == .save_attachment or self.reader_overlay == .open_attachment) return;
-        self.mouse_hits.clear(); // A modal never exposes underlying mail hits.
+        if (self.reader_overlay == .none or self.reader_overlay == .save_attachment or self.reader_overlay == .open_attachment) return;
+        const links = self.reader_overlay == .links;
+        self.dialog_focus.ensure(if (links) .links else .attachments, 0);
+        self.mouse_hits.clear();
         const width = @min(win.width -| 2, 100);
         const height = @min(win.height -| 2, 25);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
-        const inner = self.panel(area, 0, width, if (self.reader_overlay == .links) " Links · explicit browser open " else " Received attachments ", true);
+        const inner = self.panel(area, 0, width, if (links) " Links · explicit browser open " else " Received attachments ", true);
         if (inner.height < 4) return;
-        if (self.reader_overlay == .save_attachment or self.reader_overlay == .open_attachment) {
-            try self.line(inner, 0, self.reader_attachment_name.value(), .subject);
-            try self.line(inner, 2, if (self.reader_overlay == .open_attachment) "Save to a new absolute path, then open it:" else "Save to a new absolute path:", .accent);
-            try self.editLine(inner, 3, "Path", &self.reader_path, true, .selected);
-            try self.line(inner, inner.height - 1, "Ctrl+F Complete · Ctrl+U Clear · Enter Save · Esc Back", .muted);
-            try self.drawPathCandidates(inner, &self.reader_path, 5, inner.height -| 6);
-            return;
-        }
-        const count = if (self.reader_overlay == .links) self.reader_links.count else self.readerAttachmentCount();
+        const count = if (links) self.reader_links.count else self.readerAttachmentCount();
         const visible = inner.height - 3;
+        self.reader_choice = @min(self.reader_choice, count -| 1);
+        if (count == 0 and self.dialog_focus.index == 1) self.dialog_focus.index = 0;
+        if (count == 0 and !links and self.dialog_focus.index == 2) self.dialog_focus.index = 0;
         const top = self.reader_choice -| (visible - 1);
-        if (count == 0) try self.line(inner, 1, if (self.reader_overlay == .links) "No safe HTTP(S) URLs found" else "No received attachments in this view", .muted);
+        if (count == 0) try self.line(inner, 1, if (links) "No safe HTTP(S) URLs found" else "No received attachments in this view", .muted);
         var index = top;
         while (index < count and index - top < visible) : (index += 1) {
-            const label = if (self.reader_overlay == .links) self.reader_links.values[index] else blk: {
+            const label = if (links) self.reader_links.values[index] else blk: {
                 const attachment = self.readerAttachment(index).?.attachment;
                 const value = get(attachment, "size");
                 const size: u64 = if (value == .integer and value.integer >= 0) @intCast(value.integer) else 0;
                 break :blk try std.fmt.allocPrint(self.frame.allocator(), "{d}. {s} · {s}", .{ index + 1, text(get(attachment, "filename")), try attachmentSizeLabel(self.frame.allocator(), size) });
             };
-            try self.line(inner, index - top, try self.fitLine(inner, label, inner.width), if (index == self.reader_choice) .selected else .text);
+            try self.line(inner, index - top, try self.fitLine(inner, label, inner.width), if (index == self.reader_choice) (if (self.dialog_focus.index == 0) .selected else .subject) else .text);
             self.mouseRows(inner, index - top, 1, .reader_picker, index);
         }
-        if (self.reader_overlay == .links) {
-            try self.line(inner, inner.height - 2, "Enter Open in account profile · j/k · Esc/q Back", .accent);
-            if (self.reader_links.truncated) try self.line(inner, inner.height - 1, "First 128 safe destinations · chooser limit reached", .warning);
+        var x: u16 = 0;
+        if (links) {
+            x = try self.actionButton(inner, inner.height - 2, x, "[Open]", self.dialog_focus.index == 1, count > 0, .reader_picker_activate, 0);
         } else {
-            const save_width = @min(@as(u16, 16), inner.width);
-            const save = inner.child(.{ .y_off = inner.height - 2, .width = save_width, .height = 1 });
-            try self.line(save, 0, "[s Save]", .accent);
-            self.mouseArea(save, .reader_picker_save, 0);
-            if (inner.width > save_width) {
-                const open = inner.child(.{ .x_off = save_width, .y_off = inner.height - 2, .height = 1 });
-                try self.line(open, 0, "[o Save & open]", .accent);
-                self.mouseArea(open, .reader_picker_open, 0);
-            }
-            try self.line(inner, inner.height - 1, "j/k Choose · Enter Save · Esc/q Back", .muted);
+            x = try self.actionButton(inner, inner.height - 2, x, "[s Save]", self.dialog_focus.index == 1, count > 0, .reader_picker_save, 0);
+            x = try self.actionButton(inner, inner.height - 2, x, if (inner.width >= 32) "[o Save & open]" else "[o Open]", self.dialog_focus.index == 2, count > 0, .reader_picker_open, 0);
         }
+        _ = try self.actionButton(inner, inner.height - 2, x, "[Back]", self.dialog_focus.index == (if (links) @as(usize, 2) else 3), true, .reader_picker_back, 0);
+        try self.line(inner, inner.height - 1, if (links and self.reader_links.truncated) "First 128 safe destinations · Tab Controls · Esc/q Back" else "Tab Controls · Enter Activate · j/k Choose · Esc/q Back", if (links and self.reader_links.truncated) .warning else .muted);
     }
     fn syncFailed(self: *App, index: usize, code: []const u8) void {
         if (index >= self.sync.len) return;
@@ -1868,6 +2037,7 @@ const App = struct {
             .contacts => if (self.picker) "Choose recipient" else "Contacts",
             .contact_edit => "Edit contact",
             .help => "Help",
+            .theme => "Theme preview",
             .trash_confirm => "Review Trash",
             .invitation => "Review RSVP",
             .labels => "Choose label",
@@ -1892,6 +2062,7 @@ const App = struct {
             .trash_confirm => "Review Trash",
             .invitation => "Review RSVP",
             .labels => "Label",
+            .theme => "Theme preview",
             .command => "Command",
             .search => if (self.previous_mode == .contacts) "Contacts search" else if (self.input_query_scope == .cache) "Cache search" else "Gmail search",
         };
@@ -1967,7 +2138,7 @@ const App = struct {
         const views = try allocator.alloc(ReaderMarkup, messages.len);
         for (views, messages) |*view, message| {
             view.* = .{};
-            view.display_text = mail_display.repairMojibakeDisplay(allocator, text(get(message, "bodyText"))) catch null;
+            view.display_text = mail_display.preparePlainBodyDisplay(allocator, text(get(message, "bodyText"))) catch null;
         }
         return views;
     }
@@ -2991,6 +3162,7 @@ const App = struct {
                 try self.compose.id.set(self.allocator, text(get(result, "id")));
                 self.compose.saved_revision = self.autosave_revision;
                 self.mode = if (kind == .save_review) .review else if (kind == .save_back) .browse else .compose;
+                if (kind == .save_review) self.dialog_focus.reset(.send, 0);
                 if (kind == .save_back) self.compose_active = false;
                 if (kind == .save and self.editor_exit != null) {
                     const exit_code = self.editor_exit.?;
@@ -3013,6 +3185,7 @@ const App = struct {
                 self.invitation_scroll = 0;
                 self.invitation_confirm_ready = false;
                 self.mode = .invitation;
+                self.dialog_focus.reset(.invitation, 0);
                 self.say(false, "Review RSVP · a Accept · t Tentative · d Decline · Esc Cancel", .{});
             },
             .send, .invitation => {
@@ -3449,6 +3622,7 @@ const App = struct {
             self.compose_preview_full = true;
             self.compose.insert_mode = false;
             self.compose.attachment_focus = false;
+            self.dialog_focus.reset(.preview, 0);
             return;
         }
         self.compose_view = switch (self.compose_view) {
@@ -3482,14 +3656,12 @@ const App = struct {
     }
     fn composePreviewDraw(self: *App, win: vaxis.Window) !void {
         self.mouseArea(win, .compose_preview_scroll, 0);
-        const control = win.child(.{ .width = @min(@as(u16, 23), win.width), .height = 1 });
-        const control_focused = self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2;
-        try self.line(control, 0, switch (self.compose_view) {
-            .rendered => "[Preview p]",
-            .original => "[Original p]",
-            .plain => "[Plain p]",
-        }, if (control_focused) .selected else .accent);
-        self.mouseArea(control, .compose_preview_toggle, 0);
+        const narrow = self.compose_preview_full and self.vx.window().width < 90;
+        if (narrow) {
+            self.dialog_focus.ensure(.preview, 0);
+            const x = try self.actionButton(win, 0, 0, "[Preview p]", self.dialog_focus.index == 1, true, .compose_preview_toggle, 0);
+            _ = try self.actionButton(win, 0, x, "[Back]", self.dialog_focus.index == 2, true, .compose_preview_back, 0);
+        } else try self.line(win, 0, "p Next preview", .accent);
         const body = win.child(.{ .y_off = @min(@as(u16, 2), win.height) });
         if (self.compose_view == .original) return self.readerDraw(body);
         const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else &self.compose_preview_scroll;
@@ -3963,8 +4135,9 @@ const App = struct {
         const field = self.fileDialogField();
         try self.editLine(inner, 0, "Path", field, self.file_focus == .path, if (self.file_focus == .path) .selected else .text);
         self.mouseRows(inner, 0, 1, .file_location, 0);
-        try self.line(inner, 1, try self.fitLine(inner, try std.fmt.allocPrint(self.frame.allocator(), "Folder: {s}", .{self.file_browser.directory()}), inner.width), .muted);
-        const controls = [_]struct { label: []const u8, kind: layout.HitKind }{ .{ .label = "[Up] Ctrl+O", .kind = .file_parent }, .{ .label = "[Home] Ctrl+G", .kind = .file_home }, .{ .label = if (self.file_browser.show_hidden) "[Hidden on] Ctrl+T" else "[Hidden off] Ctrl+T", .kind = .file_hidden } };
+        try self.line(inner, 1, try self.fitLine(inner, try std.fmt.allocPrint(self.frame.allocator(), "Folder: {s}{s}", .{ self.file_browser.directory(), if (self.file_browser.show_hidden) @as([]const u8, " · Hidden on") else "" }), inner.width), .muted);
+        const compact = inner.width < 52;
+        const controls = [_]struct { label: []const u8, kind: layout.HitKind }{ .{ .label = if (compact) "[Up]" else "[Up] Ctrl+O", .kind = .file_parent }, .{ .label = if (compact) "[Home]" else "[Home] Ctrl+G", .kind = .file_home }, .{ .label = if (compact) (if (inner.width < 26) "[Hidden]" else if (self.file_browser.show_hidden) "[Hidden on]" else "[Hidden off]") else if (self.file_browser.show_hidden) "[Hidden on] Ctrl+T" else "[Hidden off] Ctrl+T", .kind = .file_hidden } };
         var column: u16 = 0;
         for (controls) |control| {
             const w: u16 = @intCast(control.label.len);
@@ -4015,7 +4188,7 @@ const App = struct {
             if (fragment.len <= file_dialog.max_filter) try self.file_browser.setFilter(self.io, self.allocator, fragment);
             if (self.file_browser.mode == .save and fragment.len > 0) self.file_browser.setFilename(fragment) catch {};
         }
-        if (result.matches == 0) self.say(false, "No matching regular files or directories", .{}) else self.say(false, "{d} path match{s} · Tab cycles · Enter accepts{s}", .{ result.matches, if (result.matches == 1) @as([]const u8, "") else "es", if (result.truncated) @as([]const u8, " · scan limit reached") else "" });
+        if (result.matches == 0) self.say(false, "No matching regular files or directories", .{}) else self.say(false, "{d} path match{s} · Ctrl+F cycles · Enter accepts{s}", .{ result.matches, if (result.matches == 1) @as([]const u8, "") else "es", if (result.truncated) @as([]const u8, " · scan limit reached") else "" });
     }
     fn drawPathCandidates(self: *App, win: vaxis.Window, field: *const Field, first_row: usize, available: usize) !void {
         if (!self.path_candidates.active(field.value()) or self.path_candidates.candidates.len <= 1 or first_row >= win.height or available == 0) return;
@@ -4040,7 +4213,7 @@ const App = struct {
     fn focusComposeAttachments(self: *App, cursor: usize) void {
         if (!self.compose.attachment_focus) self.compose.attachment_return_insert = self.compose.insert_mode;
         self.compose.attachment_focus = true;
-        self.compose.attachment_cursor = @min(cursor, self.compose.attachments.len + 2);
+        self.compose.attachment_cursor = @min(cursor, self.compose.attachments.len + 3);
         self.compose.insert_mode = false;
     }
     fn leaveComposeAttachments(self: *App, field: usize, restore_insert: bool) void {
@@ -4049,7 +4222,7 @@ const App = struct {
         self.compose.insert_mode = restore_insert and self.compose.attachment_return_insert;
     }
     fn onComposeAttachmentKey(self: *App, key: Key) !void {
-        const count = self.compose.attachments.len + 2;
+        const count = self.compose.attachments.len + 3;
         self.compose.attachment_cursor = @min(self.compose.attachment_cursor, count);
         if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.leaveComposeAttachments(4, false);
         if (key.matches(Key.tab, .{})) {
@@ -4060,7 +4233,7 @@ const App = struct {
             if (self.compose.attachment_cursor > 0) self.compose.attachment_cursor -= 1 else self.leaveComposeAttachments(4, true);
             return;
         }
-        if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('n', .{ .ctrl = true })) self.compose.attachment_cursor = @min(self.compose.attachment_cursor +| 1, count) else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('p', .{ .ctrl = true })) self.compose.attachment_cursor -|= 1 else if (key.matches('A', .{}) or key.matches('a', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == 0)) try self.promptAttachment() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 1) try self.toggleComposeFormat() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 2) self.cycleComposePreview() else if (self.compose.attachment_cursor > 0 and self.compose.attachment_cursor <= self.compose.attachments.len and (key.matches(Key.enter, .{}) or key.matches('x', .{}))) try self.detachAttachment(self.compose.attachment_cursor - 1);
+        if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('n', .{ .ctrl = true })) self.compose.attachment_cursor = @min(self.compose.attachment_cursor +| 1, count) else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('p', .{ .ctrl = true })) self.compose.attachment_cursor -|= 1 else if (key.matches('A', .{}) or key.matches('a', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == 0)) try self.promptAttachment() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 1) try self.toggleComposeFormat() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 2) self.cycleComposePreview() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 3) try self.cycleComposeIdentity() else if (self.compose.attachment_cursor > 0 and self.compose.attachment_cursor <= self.compose.attachments.len and (key.matches(Key.enter, .{}) or key.matches('x', .{}))) try self.detachAttachment(self.compose.attachment_cursor - 1);
     }
     fn detachAttachment(self: *App, index: usize) !void {
         if (!self.canEditAttachments()) return;
@@ -4476,19 +4649,53 @@ const App = struct {
             .left => null,
             else => return,
         };
+        if (self.mode == .theme) {
+            self.dialog_focus.ensure(.theme, 0);
+            if (wheel) |down| {
+                self.dialog_focus.index = 0;
+                self.previewTheme(if (down) .follow_omarchy else .omagma);
+            } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                if (hit.kind == .theme_choice) {
+                    self.dialog_focus.index = 0;
+                    self.previewTheme(if (hit.index == 0) .omagma else .follow_omarchy);
+                } else if (hit.kind == .theme_action) {
+                    self.dialog_focus.index = hit.index;
+                    self.onThemePickerKey(.{ .codepoint = Key.enter });
+                }
+            }
+            return;
+        }
         if (self.job.future != null and !readOnlyJob(self.job.kind)) return;
         if (self.fileDialogActive()) {
             self.onFileDialogMouse(mouse, wheel) catch |err| self.fileDialogFailure(err);
             return;
         }
         if (self.label_picker) {
+            self.dialog_focus.ensure(.labels, 1);
             if (wheel) |down| {
+                self.dialog_focus.index = 1;
+                self.label_filtering = false;
                 self.label_choice = if (down) @min(self.label_choice +| 3, self.visibleLabelCount() -| 1) else self.label_choice -| 3;
             } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
                 switch (hit.kind) {
-                    .label_choice => self.label_choice = hit.index,
-                    .label_add => try self.chooseLabel(false),
-                    .label_remove => try self.chooseLabel(true),
+                    .label_choice => {
+                        self.dialog_focus.index = 1;
+                        self.label_filtering = false;
+                        self.label_choice = hit.index;
+                    },
+                    .label_filter => {
+                        self.dialog_focus.index = 0;
+                        self.label_filtering = true;
+                    },
+                    .label_add => {
+                        self.dialog_focus.index = 2;
+                        try self.chooseLabel(false);
+                    },
+                    .label_remove => {
+                        self.dialog_focus.index = 3;
+                        try self.chooseLabel(true);
+                    },
+                    .label_back => self.label_picker = false,
                     else => {},
                 }
             }
@@ -4508,8 +4715,17 @@ const App = struct {
             if (wheel) |down| self.help_scroll = if (down) @min(self.help_scroll +| 3, self.help_lines -| self.help_height) else self.help_scroll -| 3;
             return;
         }
-        // Confirmation overlays and input prompts keep their explicit keys.
-        // A click can never submit, discard, trash, or leave a draft.
+        if (self.mode == .review or self.mode == .trash_confirm or self.mode == .invitation) {
+            if (wheel == null) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                if (hit.kind == .dialog_action) {
+                    self.dialog_focus.index = hit.index;
+                    try self.onConfirmationKey(.{ .codepoint = Key.enter });
+                }
+            };
+            return;
+        }
+        // Modal hit maps contain their own explicit controls only; clicking
+        // the obscured mailbox never submits or escapes a confirmation.
         if (self.mode != .browse and self.mode != .contacts and self.mode != .compose and self.mode != .contact_edit) return;
         const hit = self.mouse_hits.at(mouse.col, mouse.row) orelse return;
         // Wheel gestures belong to the pane under the pointer. Row gaps and
@@ -4530,11 +4746,12 @@ const App = struct {
         switch (hit.kind) {
             .mail_scroll => {},
             .file_row, .file_parent, .file_home, .file_hidden, .file_location, .file_confirm, .file_cancel => {},
-            .label_choice, .label_add, .label_remove => {},
+            .label_choice, .label_add, .label_remove, .label_filter, .label_back, .dialog_action => {},
+            .theme_choice, .theme_action => {},
             .custom_label => {
                 if (self.mode == .browse and wheel == null) try self.chooseCustomLabel(hit.index);
             },
-            .reader_thread, .reader_link, .reader_attachment, .reader_picker, .reader_picker_save, .reader_picker_open => {
+            .reader_thread, .reader_link, .reader_attachment, .reader_picker, .reader_picker_save, .reader_picker_open, .reader_picker_activate, .reader_picker_back => {
                 if (wheel == null) _ = try self.onReaderHit(hit);
             },
             .account, .folder, .contacts => {
@@ -4581,15 +4798,21 @@ const App = struct {
             },
             .compose_from => {
                 if (self.mode != .compose or wheel != null) return;
+                self.focusComposeAttachments(self.compose.attachments.len + 3);
                 try self.cycleComposeIdentity();
             },
             .compose_format => {
                 if (self.mode != .compose or self.compose.unknown_outcome or wheel != null) return;
+                self.focusComposeAttachments(self.compose.attachments.len + 1);
                 try self.toggleComposeFormat();
             },
             .compose_preview_toggle => {
                 if (self.mode != .compose or self.compose.unknown_outcome or wheel != null) return;
+                if (self.compose_preview_full and self.vx.window().width < 90) self.dialog_focus.index = 1 else self.focusComposeAttachments(self.compose.attachments.len + 2);
                 self.cycleComposePreview();
+            },
+            .compose_preview_back => {
+                if (self.mode == .compose and wheel == null) self.compose_preview_full = false;
             },
             .compose_preview_scroll => {
                 if (self.mode != .compose) return;
@@ -4608,6 +4831,7 @@ const App = struct {
             },
             .compose_attachment_add => {
                 if (self.mode != .compose or wheel != null) return;
+                self.focusComposeAttachments(0);
                 try self.promptAttachment();
             },
             .compose_attachment_remove => {
@@ -4623,6 +4847,11 @@ const App = struct {
             .contact_field => {
                 if (self.mode != .contact_edit or wheel != null or hit.index > 1) return;
                 self.contact_field = hit.index;
+            },
+            .contact_action => {
+                if (self.mode != .contact_edit or wheel != null or hit.index < 2 or hit.index > 3) return;
+                self.contact_field = hit.index;
+                if (hit.index == 2) try self.saveContact() else self.mode = backMode(.contact_edit, self.previous_mode, self.picker);
             },
         }
     }
@@ -4695,7 +4924,16 @@ const App = struct {
             return;
         }
         if (self.compose_preview_full and self.vx.window().width < 90) {
-            if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches(Key.tab, .{})) self.compose_preview_full = false else if (key.matches('p', .{})) self.cycleComposePreview() else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('d', .{ .ctrl = true })) self.scrollReader(true, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('u', .{ .ctrl = true })) self.scrollReader(false, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
+            self.dialog_focus.ensure(.preview, 0);
+            if (tabDirection(key)) |backwards| {
+                self.dialog_focus.move(backwards, 3, 0b111);
+            } else if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) self.compose_preview_full = false else if (key.matches('p', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) self.cycleComposePreview() else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('d', .{ .ctrl = true })) {
+                self.dialog_focus.index = 0;
+                self.scrollReader(true, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
+            } else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('u', .{ .ctrl = true })) {
+                self.dialog_focus.index = 0;
+                self.scrollReader(false, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
+            }
             return;
         }
         if (self.compose.attachment_focus) return self.onComposeAttachmentKey(key);
@@ -4734,7 +4972,7 @@ const App = struct {
         } else if (key.matches(Key.tab, .{})) {
             if (self.compose.selected == 4) self.focusComposeAttachments(0) else self.compose.selected += 1;
         } else if (key.matches(Key.tab, .{ .shift = true })) {
-            if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 2) else self.compose.selected -= 1;
+            if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 3) else self.compose.selected -= 1;
         } else if (self.compose.insert_mode) {
             const matches = self.composeCompletions();
             if (self.compose.selected < 3 and matches.len == 0 and (key.matches('n', .{ .ctrl = true }) or key.matches('p', .{ .ctrl = true }))) {
@@ -4768,10 +5006,63 @@ const App = struct {
             try self.input.set(self.allocator, "");
         }
     }
+    fn onConfirmationKey(self: *App, key: Key) !void {
+        const context: dialog_controls.Context = switch (self.mode) {
+            .review => .send,
+            .trash_confirm => .trash,
+            .invitation => .invitation,
+            else => return,
+        };
+        self.dialog_focus.ensure(context, 0);
+        if (self.mode == .invitation and self.job.future != null) return;
+        if (tabDirection(key)) |backwards| {
+            const enabled: u8 = if (self.mode == .invitation) (if (self.invitation_confirm_ready) 0b1111 else 0b0001) else if (self.job.future == null) 0b11 else 0b01;
+            self.dialog_focus.move(backwards, if (self.mode == .invitation) 4 else 2, enabled);
+            return;
+        }
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (self.mode != .invitation and key.matches('n', .{})) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 0)) {
+            self.mode = backMode(self.mode, self.previous_mode, self.picker);
+            return;
+        }
+        if (self.mode == .review) {
+            if ((key.matches('y', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) and self.job.future == null) try self.sendDraft() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.compose_preview_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.compose_preview_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.compose_preview_scroll +|= self.vx.window().height / 2 else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.compose_preview_scroll -|= self.vx.window().height / 2;
+            return;
+        }
+        if (self.mode == .trash_confirm) {
+            if ((key.matches('y', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) and self.job.future == null) {
+                try self.batchMail("trash", null, null, null, null);
+                self.mode = .browse;
+            }
+            return;
+        }
+        if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.invitation_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.invitation_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.invitation_scroll +|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.invitation_scroll -|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.invitation_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.invitation_scroll = self.invitation_lines -| self.invitation_height else {
+            const status = if (key.matches('a', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) "accepted" else if (key.matches('t', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) "tentative" else if (key.matches('d', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) "declined" else return;
+            if (!self.invitation_confirm_ready) {
+                self.say(true, "Resize to review RSVP identity before confirmation", .{});
+                return;
+            }
+            if (self.invitation_unknown and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value())) {
+                self.markUnknown(.invitation);
+                return;
+            }
+            const id = try self.operationId(self.allocator);
+            defer self.allocator.free(id);
+            try self.invitation_operation_id.set(self.allocator, id);
+            try self.invitation_operation_error.set(self.allocator, "");
+            try self.invitation_message_id.set(self.allocator, self.invitation_inspected_id.value());
+            try self.invitation_account.set(self.allocator, self.invitation_inspected_account.value());
+            self.invitation_unknown = false;
+            try self.start(.invitation, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.reply", .messageId = self.invitation_inspected_id.value(), .status = status, .operationId = id });
+        }
+    }
     fn onKey(self: *App, original_key: Key) !void {
         self.acknowledgeNewMail();
         self.action_notice = false;
         var key = original_key;
+        if (self.mode == .theme) {
+            if (!self.paste) self.onThemePickerKey(key);
+            return;
+        }
         if (self.label_picker) {
             try self.onLabelPickerKey(key);
             return;
@@ -4795,14 +5086,15 @@ const App = struct {
                 return;
             }
             const field: ?*Field = switch (self.mode) {
-                .compose => &self.compose.fields[self.compose.selected],
+                .compose => if (self.compose.attachment_focus) null else &self.compose.fields[self.compose.selected],
                 .search, .command, .labels, .attachment => &self.input,
-                .contact_edit => if (self.contact_field == 0) &self.contact_name else &self.contact_email,
+                .help => if (self.help_searching) &self.help_query else null,
+                .contact_edit => if (self.contact_field == 0) &self.contact_name else if (self.contact_field == 1) &self.contact_email else null,
                 else => null,
             };
             if (field) |input_field| {
                 const multiline = self.mode == .compose and self.compose.selected == 4;
-                const limit = if (multiline) types.Limits.body_bytes else 16 * 1024;
+                const limit: usize = if (multiline) types.Limits.body_bytes else if (self.mode == .help) 256 else 16 * 1024;
                 const before_len = input_field.value().len;
                 const lf = key.matches('j', .{ .ctrl = true }) or key.matches(0x0a, .{});
                 if (lf) {
@@ -4822,11 +5114,16 @@ const App = struct {
                     if (key.matches(Key.tab, .{})) try input_field.insert(self.allocator, if (multiline) "\t" else "    ", limit);
                 }
                 if (self.mode == .compose and input_field.value().len != before_len) try self.composerChanged();
+                if (self.mode == .help) self.resetHelpMatch();
             }
             return;
         }
         if (self.mode == .help) {
-            if (key.matches('q', .{}) or key.matches('?', .{}) or key.matches(Key.escape, .{})) self.mode = backMode(.help, self.previous_mode, self.picker) else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.help_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.help_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.help_scroll +|= @max(self.help_height / 2, 1) else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.help_scroll -|= @max(self.help_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.help_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.help_scroll = self.help_lines -| self.help_height;
+            try self.onHelpKey(key);
+            return;
+        }
+        if (self.mode == .browse and (key.matches('T', .{}) or key.matches('t', .{ .shift = true }))) {
+            self.openThemePicker();
             return;
         }
         if (key.matches('c', .{ .ctrl = true })) {
@@ -4855,54 +5152,20 @@ const App = struct {
             return;
         }
         if (key.matches('?', .{}) and (self.mode == .contacts or (self.mode == .compose and !self.compose.insert_mode))) {
-            self.previous_mode = self.mode;
-            self.mode = .help;
-            self.help_scroll = 0;
+            try self.openHelp();
             return;
         }
         if (self.mode == .compose) return self.onComposeKey(key);
-        if (self.mode == .review) {
-            if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches('n', .{})) self.mode = backMode(.review, self.previous_mode, self.picker) else if (key.matches('y', .{}) and self.job.future == null) try self.sendDraft() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.compose_preview_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.compose_preview_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.compose_preview_scroll +|= self.vx.window().height / 2 else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.compose_preview_scroll -|= self.vx.window().height / 2;
-            return;
-        }
-        if (self.mode == .trash_confirm) {
-            if (key.matches(Key.escape, .{}) or key.matches('n', .{}) or key.matches('q', .{})) self.mode = backMode(.trash_confirm, self.previous_mode, self.picker) else if (key.matches('y', .{})) {
-                try self.batchMail("trash", null, null, null, null);
-                self.mode = .browse;
-            }
-            return;
-        }
-        if (self.mode == .invitation) {
-            if (self.job.future != null) return;
-            if (key.matches(Key.escape, .{}) or key.matches('q', .{})) self.mode = backMode(.invitation, self.previous_mode, self.picker) else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.invitation_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.invitation_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.invitation_scroll +|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.invitation_scroll -|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.invitation_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.invitation_scroll = self.invitation_lines -| self.invitation_height else {
-                const status = if (key.matches('a', .{})) "accepted" else if (key.matches('t', .{})) "tentative" else if (key.matches('d', .{})) "declined" else return;
-                if (!self.invitation_confirm_ready) {
-                    self.say(true, "Resize to review RSVP identity before confirmation", .{});
-                    return;
-                }
-                if (self.invitation_unknown and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value())) {
-                    self.markUnknown(.invitation);
-                    return;
-                }
-                const id = try self.operationId(self.allocator);
-                defer self.allocator.free(id);
-                try self.invitation_operation_id.set(self.allocator, id);
-                try self.invitation_operation_error.set(self.allocator, "");
-                try self.invitation_message_id.set(self.allocator, self.invitation_inspected_id.value());
-                try self.invitation_account.set(self.allocator, self.invitation_inspected_account.value());
-                self.invitation_unknown = false;
-                try self.start(.invitation, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.reply", .messageId = self.invitation_inspected_id.value(), .status = status, .operationId = id });
-            }
-            return;
-        }
+        if (self.mode == .review or self.mode == .trash_confirm or self.mode == .invitation) return self.onConfirmationKey(key);
         if (self.mode == .contact_edit) {
             if (key.matches(Key.escape, .{})) {
                 self.mode = backMode(.contact_edit, self.previous_mode, self.picker);
                 return;
             }
             if (self.job.future != null and !readOnlyJob(self.job.kind)) return;
-            // Contact name/email fields are always text insertion: q is data.
-            if (key.matches('s', .{ .ctrl = true })) try self.saveContact() else if (key.matches(Key.tab, .{})) self.contact_field = 1 - self.contact_field else try (if (self.contact_field == 0) &self.contact_name else &self.contact_email).handleKey(self.allocator, key, false, 4096);
+            if (tabDirection(key)) |backwards| {
+                self.contact_field = (self.contact_field + if (backwards) @as(usize, 3) else 1) % 4;
+            } else if (key.matches('s', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.contact_field == 2)) try self.saveContact() else if (key.matches(Key.enter, .{}) and self.contact_field == 3) self.mode = backMode(.contact_edit, self.previous_mode, self.picker) else if (self.contact_field < 2) try (if (self.contact_field == 0) &self.contact_name else &self.contact_email).handleKey(self.allocator, key, false, 4096);
             return;
         }
         if (self.mode == .attachment and key.matches(Key.tab, .{})) return self.completePath(&self.input, false);
@@ -4921,7 +5184,9 @@ const App = struct {
                 if (self.mode == .attachment) {
                     try self.attachFile(self.input.value());
                 } else if (self.mode == .command) {
-                    if (same(self.input.value(), "undo") and previous_mode == .browse) {
+                    if (same(self.input.value(), "theme") and previous_mode == .browse) {
+                        self.openThemePicker();
+                    } else if (same(self.input.value(), "undo") and previous_mode == .browse) {
                         try self.undoMail();
                     } else if (try self.onReaderCommand(self.input.value())) {} else if (same(self.input.value(), "layout right")) {
                         self.setReaderLayout(.right);
@@ -4941,7 +5206,7 @@ const App = struct {
                             self.mode = .browse;
                             try self.browseBack();
                         }
-                    } else self.say(true, "Commands: :layout right|below; :save-attachment NUMBER /path; :send; :detach NUMBER; :q", .{});
+                    } else self.say(true, "Commands: :theme; :layout right|below; :save-attachment NUMBER /path; :send; :detach NUMBER; :q", .{});
                     if (self.mode == .command) self.mode = previous_mode;
                 } else if (self.mode == .labels) {
                     const raw_label = std.mem.trim(u8, self.input.value(), " \t");
@@ -5042,9 +5307,7 @@ const App = struct {
             self.expanded = !self.expanded;
             self.focus = .reader;
         } else if (key.matches('?', .{})) {
-            self.previous_mode = self.mode;
-            self.mode = .help;
-            self.help_scroll = 0;
+            try self.openHelp();
         } else if (key.matches('r', .{ .ctrl = true })) {
             if (self.cacheSearch()) try self.refreshMailbox() else try self.reload();
         } else if (key.matches('x', .{}) and self.messageId().len > 0) try self.start(.mutation, .{ .account = self.account(), .cmd = "mail.archive", .messageId = self.messageId() }) else if ((key.matches('D', .{}) or key.matches('d', .{ .shift = true })) and self.messageId().len > 0) self.mode = .trash_confirm else if (key.matches('U', .{}) or key.matches('u', .{ .shift = true })) try self.start(.mutation, .{ .account = self.account(), .cmd = "mail.restore", .messageId = self.messageId() }) else if (key.matches('s', .{}) and self.messageId().len > 0) {
@@ -5087,11 +5350,19 @@ const App = struct {
         if (row >= win.height or win.width == 0) return;
         const child = win.child(.{ .y_off = @intCast(row), .height = 1 });
         if (color == .selected) child.fill(.{ .style = self.style(.selected) });
-        _ = child.printSegment(.{ .text = try safe(self.frame.allocator(), raw, false), .style = self.style(color) }, .{ .wrap = .none });
+        _ = child.printSegment(.{ .text = try self.cellLine(win, try safe(self.frame.allocator(), raw, false)), .style = self.style(color) }, .{ .wrap = .none });
     }
     fn mouseArea(self: *App, win: vaxis.Window, kind: layout.HitKind, index: usize) void {
         if (win.x_off < 0 or win.y_off < 0) return;
         self.mouse_hits.add(.{ .x = @intCast(win.x_off), .y = @intCast(win.y_off), .width = win.width, .height = win.height }, kind, index);
+    }
+    fn actionButton(self: *App, win: vaxis.Window, row: usize, x: u16, label: []const u8, focused: bool, enabled: bool, kind: layout.HitKind, index: usize) !u16 {
+        if (row >= win.height or x >= win.width) return x;
+        const width: u16 = @intCast(@min(label.len, win.width - x));
+        const button = win.child(.{ .x_off = x, .y_off = @intCast(row), .width = width, .height = 1 });
+        try self.line(button, 0, label, if (!enabled) .muted else if (focused) .selected else .accent);
+        if (enabled) self.mouseArea(button, kind, index);
+        return x + width +| @as(u16, if (win.width < 26) 1 else 2);
     }
     fn mouseRows(self: *App, win: vaxis.Window, row: usize, height: u16, kind: layout.HitKind, index: usize) void {
         if (row >= win.height) return;
@@ -5122,9 +5393,25 @@ const App = struct {
         const area = win.child(.{ .x_off = rect.x, .y_off = rect.y, .width = rect.width, .height = rect.height });
         return self.panel(area, 0, rect.width, title, selected_panel);
     }
+    fn cellLine(self: *App, win: vaxis.Window, clean: []const u8) ![]const u8 {
+        var iterator = vaxis.unicode.graphemeIterator(clean);
+        var output: std.ArrayList(u8) = .empty;
+        var copied: usize = 0;
+        while (iterator.next()) |gr| {
+            const original = gr.bytes(clean);
+            const shown = text_layout.cellGrapheme(original, win.screen.width_method);
+            if (same(original, shown)) continue;
+            try output.appendSlice(self.frame.allocator(), clean[copied..gr.start]);
+            try output.appendSlice(self.frame.allocator(), shown);
+            copied = gr.start + gr.len;
+        }
+        if (copied == 0) return clean;
+        try output.appendSlice(self.frame.allocator(), clean[copied..]);
+        return output.items;
+    }
     fn fitLine(self: *App, win: vaxis.Window, raw: []const u8, columns: u16) ![]const u8 {
         if (columns == 0) return "";
-        const clean = try safe(self.frame.allocator(), raw, false);
+        const clean = try self.cellLine(win, try safe(self.frame.allocator(), raw, false));
         var iterator = vaxis.unicode.graphemeIterator(clean);
         var width: usize = 0;
         var end: usize = 0;
@@ -5229,15 +5516,25 @@ const App = struct {
         const subject_width = win.width -| date_width -| @as(u16, if (date_width > 0) 1 else 0);
         const raw_subject = text(get(value_in, "subject"));
         const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
-        const subject_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) "[x] " else if (truth(get(value_in, "unread"))) "● " else "  ", if (subject.len == 0) "(no subject)" else subject });
+        // Bulk selection, unread state and stars have independent positions;
+        // highlighting a read row must not make it look unread.
+        const gutter_width: u16 = @min(@as(u16, 3), win.width);
+        const gutter = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} ", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " " });
+        _ = item.child(.{ .height = 1, .width = gutter_width }).printSegment(.{ .text = gutter, .style = self.listStyle(.accent, selected) }, .{ .wrap = .none });
+        const subject_text = if (subject.len == 0) "(no subject)" else subject;
         var subject_style = self.listStyle(.subject, selected);
-        subject_style.bold = truth(get(value_in, "unread")) or (selected and self.focus == .list);
-        _ = item.child(.{ .height = 1, .width = subject_width }).printSegment(.{ .text = try self.fitLine(win, subject_text, subject_width), .style = subject_style }, .{ .wrap = .none });
+        subject_style.bold = messageUnread(value_in);
+        subject_style.italic = false;
+        _ = item.child(.{ .x_off = gutter_width, .height = 1, .width = subject_width -| gutter_width }).printSegment(.{ .text = try self.fitLine(win, subject_text, subject_width -| gutter_width), .style = subject_style }, .{ .wrap = .none });
         if (date_width > 0) _ = item.child(.{ .x_off = win.width - date_width, .height = 1, .width = date_width }).printSegment(.{ .text = compact, .style = self.listStyle(.muted, selected) }, .{ .wrap = .none });
         if (item.height < 2) return;
-        const sender_limit = @min(win.width / 2, 28);
+        const sender_limit = @min((win.width -| gutter_width) / 2, 28);
         const shown_sender = try self.fitLine(win, if (self.drafts_list) "Draft" else sender_text, sender_limit);
-        const sender_line = item.child(.{ .y_off = 1, .height = 1 });
+        if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) {
+            const star = if (item.gwidth("⭐") <= 2) "⭐" else "*";
+            _ = item.child(.{ .y_off = 1, .height = 1, .width = gutter_width }).printSegment(.{ .text = star, .style = self.listStyle(.accent, selected) }, .{ .wrap = .none });
+        }
+        const sender_line = item.child(.{ .x_off = gutter_width, .y_off = 1, .height = 1 });
         const printed = sender_line.printSegment(.{ .text = shown_sender, .style = self.listStyle(.sender, selected) }, .{ .wrap = .none });
         var excerpt = self.searchExcerpt(value_in);
         var waiting = selected and self.loadingActive() and (self.job.kind == .read or self.job.kind == .thread);
@@ -5461,6 +5758,40 @@ const App = struct {
         if (end <= first) return;
         self.mouseRows(win, first - self.reader_scroll, @intCast(end - first), kind, index);
     }
+    fn readerLabelName(self: *const App, identifier: []const u8) ?[]const u8 {
+        if (same(self.labels_account.value(), self.account())) for (self.labels) |label| {
+            if (same(text(get(label, "id")), identifier) and text(get(label, "name")).len > 0) return text(get(label, "name"));
+        };
+        for ([_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" }, [_][]const u8{ "Inbox", "Sent", "Drafts", "Trash", "Spam", "Important", "Personal", "Social", "Promotions", "Updates", "Forums" }) |id, name| if (same(id, identifier)) return name;
+        return null;
+    }
+    fn readerLabels(self: *App, message: Value) ![]const u8 {
+        var result: std.ArrayList(u8) = .empty;
+        const a = self.frame.allocator();
+        var unresolved: usize = 0;
+        for (items(get(message, "labels"))) |label| {
+            const id = text(label);
+            if (same(id, "UNREAD") or same(id, "STARRED") or id.len == 0) continue;
+            const name = self.readerLabelName(id) orelse {
+                unresolved += 1;
+                continue;
+            };
+            if (result.items.len == 0) try result.appendSlice(a, "Labels: ") else try result.appendSlice(a, " · ");
+            const clean = try safe(a, name, false);
+            var end = @min(clean.len, 256);
+            while (end > 0 and !std.unicode.utf8ValidateSlice(clean[0..end])) end -= 1;
+            try result.appendSlice(a, clean[0..end]);
+            if (result.items.len >= 1024) {
+                try result.appendSlice(a, " · …");
+                break;
+            }
+        }
+        if (unresolved > 0) {
+            if (result.items.len == 0) try result.appendSlice(a, "Labels: ") else try result.appendSlice(a, " · ");
+            try result.appendSlice(a, try std.fmt.allocPrint(a, "{d} awaiting names", .{unresolved}));
+        }
+        return result.items;
+    }
     fn readerBodyDraw(self: *App, win: vaxis.Window) !usize {
         var row: usize = 0;
         var attachment_number: usize = 0;
@@ -5498,6 +5829,10 @@ const App = struct {
                 const envelope = if (self.thread.len > 1) (if (cc.len > 0) try std.fmt.allocPrint(self.frame.allocator(), "To: {s}\nCc: {s}", .{ to, cc }) else try std.fmt.allocPrint(self.frame.allocator(), "To: {s}", .{to})) else try readerEnvelope(self.frame.allocator(), to, cc, stamp);
                 row = try self.flowTone(win, envelope, self.reader_scroll, row, .muted);
             }
+            const status = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (messageUnread(message)) @as([]const u8, "● Unread") else "Read", if (messageHasLabel(message, "STARRED") or truth(get(message, "starred"))) @as([]const u8, " · ⭐ Starred") else "" });
+            row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
+            const labels = try self.readerLabels(message);
+            if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
             row += 1;
             var rich_drawn = false;
             if (message_index < self.markup.len) {
@@ -5616,17 +5951,25 @@ const App = struct {
     }
     fn composeDraw(self: *App, win: vaxis.Window) !void {
         if (self.mode == .review) {
-            const inner = self.panel(win, 0, win.width, " Review send · y SEND · Esc Back ", true);
+            self.dialog_focus.ensure(.send, 0);
+            self.mouse_hits.clear();
+            const inner = self.panel(win, 0, win.width, " Review send · explicit confirmation ", true);
+            const content = inner.child(.{ .height = inner.height -| 2 });
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else "Plain text", self.compose.thread.value() });
-            var rows = try self.flow(inner, review, self.compose_preview_scroll, 0);
-            rows = try self.composeOutgoingDraw(inner, self.compose_preview_scroll, rows, false);
+            var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            rows = try self.composeOutgoingDraw(content, self.compose_preview_scroll, rows, false);
             for (self.compose.attachments, 0..) |attachment, index| {
                 const label = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} ({s})\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(self.frame.allocator(), attachment.size) });
-                rows = try self.flow(inner, label, self.compose_preview_scroll, rows);
+                rows = try self.flow(content, label, self.compose_preview_scroll, rows);
             }
             self.compose_preview_lines = rows;
-            self.compose_preview_height = inner.height;
-            self.compose_preview_scroll = @min(self.compose_preview_scroll, rows -| @as(usize, inner.height));
+            self.compose_preview_height = content.height;
+            self.compose_preview_scroll = @min(self.compose_preview_scroll, rows -| @as(usize, content.height));
+            if (inner.height > 1) {
+                const x = try self.actionButton(inner, inner.height - 2, 0, "[Back]", self.dialog_focus.index == 0, true, .dialog_action, 0);
+                _ = try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome, .dialog_action, 1);
+                try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · j/k Scroll · Esc/q Back", .muted);
+            }
             return;
         }
         const split = win.width >= 90;
@@ -5643,7 +5986,7 @@ const App = struct {
         const alias_x = left.width - alias_width;
         try self.line(left.child(.{ .width = alias_x -| 1 }), 0, try std.fmt.allocPrint(self.frame.allocator(), "From: {s}", .{if (self.compose.from.value().len > 0) self.compose.from.value() else self.account()}), .text);
         const alias_action = left.child(.{ .x_off = alias_x, .width = alias_width, .height = 1 });
-        try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else .accent);
+        try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
         if (!self.compose.unknown_outcome) self.mouseArea(alias_action, .compose_from, 0);
         if (self.compose.unknown_outcome) try self.line(left, 1, try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
         const header_row: usize = if (self.compose.unknown_outcome) 2 else 1;
@@ -5663,8 +6006,8 @@ const App = struct {
             const format_width: u16 = @min(@as(u16, 18), body_label.width -| preview_width);
             const format_area = body_label.child(.{ .x_off = body_label.width -| preview_width -| format_width, .width = format_width });
             const preview_area = body_label.child(.{ .x_off = body_label.width -| preview_width, .width = preview_width });
-            try self.line(format_area, 0, if (self.compose.body_format == .markdown) "[Plain Ctrl+T]" else "[Markdown Ctrl+T]", if (body_tone == .selected or (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 1)) .selected else .accent);
-            try self.line(preview_area, 0, "[Preview p]", if (body_tone == .selected or (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2)) .selected else .accent);
+            try self.line(format_area, 0, if (self.compose.body_format == .markdown) "[Plain Ctrl+T]" else "[Markdown Ctrl+T]", if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 1) .selected else .accent);
+            try self.line(preview_area, 0, "[Preview p]", if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2) .selected else .accent);
             self.mouseArea(format_area, .compose_format, 0);
             self.mouseArea(preview_area, .compose_preview_toggle, 0);
         }
@@ -5701,11 +6044,15 @@ const App = struct {
         const title = try std.fmt.allocPrint(self.frame.allocator(), " {s} · {d}/{d} ", .{ if (self.picker) @as([]const u8, "Choose recipient") else "Contacts", if (self.contacts.len != 0) @min(self.contacts_selected + 1, self.contacts.len) else 0, self.contacts.len });
         const inner = self.panel(win, 0, win.width, title, true);
         if (self.mode == .contact_edit) {
-            try self.line(inner, 1, try std.fmt.allocPrint(self.frame.allocator(), "Name: {s}▏", .{self.contact_name.value()}), if (self.contact_field == 0) .selected else .text);
-            try self.line(inner, 3, try std.fmt.allocPrint(self.frame.allocator(), "Email: {s}▏", .{self.contact_email.value()}), if (self.contact_field == 1) .selected else .text);
+            try self.editLine(inner, 1, "Name", &self.contact_name, self.contact_field == 0, if (self.contact_field == 0) .selected else .text);
+            try self.editLine(inner, 3, "Email", &self.contact_email, self.contact_field == 1, if (self.contact_field == 1) .selected else .text);
             self.mouseRows(inner, 1, 1, .contact_field, 0);
             self.mouseRows(inner, 3, 1, .contact_field, 1);
-            try self.line(inner, 6, "Tab Field · Ctrl+S Save · Esc Cancel", .accent);
+            const idle = self.job.future == null or readOnlyJob(self.job.kind);
+            const row = @min(@as(u16, 6), inner.height -| 2);
+            const x = try self.actionButton(inner, row, 0, "[Save]", self.contact_field == 2, idle, .contact_action, 2);
+            _ = try self.actionButton(inner, row, x, "[Cancel]", self.contact_field == 3, idle, .contact_action, 3);
+            try self.line(inner, row + 1, "Tab Controls · Enter Activate · Ctrl+S Save · Esc Cancel", .muted);
             return;
         }
         const phase = switch (self.contacts_state) {
@@ -5742,18 +6089,19 @@ const App = struct {
     }
     fn contextHints(self: *const App) []const u8 {
         if (self.reader_overlay == .save_attachment or self.reader_overlay == .open_attachment) return " Tab Controls · Ctrl+F Complete · Enter Save · Esc Attachments · Ctrl+U Clear · q is text";
-        if (self.reader_overlay == .attachments) return " j/k Choose  s Save  o Save & open  Esc/q Back";
+        if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
+        if (self.reader_overlay == .attachments) return " Tab Controls · Enter Activate · j/k Choose · s Save · o Save & open · Esc/q Back";
         if (self.reader_overlay == .links) return " j/k Choose URL  Enter Open in account profile  Esc/q Back";
         if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Page · Esc/q Source";
         if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · x Remove · A Add · Esc Body · Ctrl+S Review";
         return switch (self.mode) {
             .contacts => " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
-            .contact_edit => " Tab Field  Ctrl+S Save  Esc Contacts  q is text",
+            .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
             .compose => if (self.compose.unknown_outcome) " Protected recovery draft · :receipt Check · q Keep/back" else if (self.compose.insert_mode) (if (self.compose.selected < 3) " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+G Body top · Tab Field · Esc Normal · q is text") else " i Edit · Ctrl+G Body top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Tab Controls · Ctrl+S Review · q Save/back",
-            .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " y Explicit send  j/k Scroll  Esc/q Return to draft",
-            .help => " j/k Scroll  Ctrl+D/U Page  Ctrl+G Top  G Bottom  Esc/q Return",
-            .trash_confirm => " y Confirm Trash  n/Esc/q Cancel",
-            .invitation => " a Accept  t Tentative  d Decline  Esc/q Cancel",
+            .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
+            .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
+            .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
+            .invitation => " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel",
             .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  o Gmail  J/K Mail  I RSVP  L Links  B Files  z/q Shrink" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c Compose  o Gmail  J/K Mail  I RSVP  L Links  B Files  q List" else if (self.focus == .navigation) " j/k Navigate  Enter Choose  l/Esc/q Mail  ? Help" else if (self.cacheSearch()) " Cache subset · r Reply  f Forward  c Compose  / Cache  \\ Gmail  q Clear search" else if (self.query.value().len > 0) " Gmail search · r Reply  f Forward  c Compose  / Cache  \\ Gmail  q Clear search" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  o Gmail  / Cache  \\ Gmail  ? Help  q Quit",
             else => " Esc Back",
         };
@@ -5774,43 +6122,172 @@ const App = struct {
         if (self.mode == .compose and self.compose.insert_mode and width < 80) return " INSERT · Esc Normal · Tab Field · q is text";
         return self.contextHints();
     }
+    fn drawThemePicker(self: *App, win: vaxis.Window) !void {
+        if (self.mode != .theme) return;
+        self.dialog_focus.ensure(.theme, 0);
+        const width = @min(win.width -| 2, 44);
+        const height = @min(win.height -| 2, 10);
+        if (width < 10 or height < 8) return;
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " Theme ", true);
+        self.mouse_hits.clear();
+        for ([_]theme.Mode{ .omagma, .follow_omarchy }, 0..) |choice, index| {
+            const selected = choice == self.theme_choice;
+            const focused = selected and self.dialog_focus.index == 0;
+            const row = index * 3;
+            const option = inner.child(.{ .y_off = @intCast(row), .height = 2 });
+            option.fill(.{ .style = self.listStyle(.text, focused) });
+            self.mouseArea(option, .theme_choice, index);
+            _ = option.child(.{ .height = 1, .width = 2 }).printSegment(.{ .text = if (selected) "› " else "  ", .style = self.listStyle(.accent, focused) }, .{ .wrap = .none });
+            const saved = choice == self.ui_preferences.theme;
+            const saved_width: u16 = if (!saved) 0 else if (inner.width >= 23) 7 else 1;
+            var name_style = self.listStyle(.text, focused);
+            name_style.bold = selected;
+            const name_width = inner.width -| 2 -| saved_width -| @as(u16, if (saved) 1 else 0);
+            _ = option.child(.{ .x_off = 2, .height = 1, .width = name_width }).printSegment(.{ .text = try self.fitLine(option, theme.name(choice), name_width), .style = name_style }, .{ .wrap = .none });
+            if (saved) _ = option.child(.{ .x_off = inner.width - saved_width, .height = 1, .width = saved_width }).printSegment(.{ .text = if (saved_width > 1) "✓ saved" else "✓", .style = self.listStyle(.current, focused) }, .{ .wrap = .none });
+            const detail: []const u8 = if (choice == .omagma) "Built-in volcano orange" else if (self.omarchy_theme_available) "Current Omarchy palette" else "No theme · using Omagma";
+            const description = option.child(.{ .x_off = 2, .y_off = 1, .height = 1, .width = option.width -| 2 });
+            _ = description.printSegment(.{ .text = try self.fitLine(description, detail, description.width), .style = self.listStyle(.muted, focused) }, .{ .wrap = .none });
+        }
+        const row: usize = inner.height -| 2;
+        const x = try self.actionButton(inner, row, 2, "[Apply]", self.dialog_focus.index == 1, true, .theme_action, 1);
+        _ = try self.actionButton(inner, row, x, "[Cancel]", self.dialog_focus.index == 2, true, .theme_action, 2);
+        const hint: []const u8 = if (self.theme_save_failed) "Not saved · Esc Cancel" else if (self.mono) "NO_COLOR · Tab · Enter · Esc" else if (inner.width < 30) "Tab · Enter Apply · Esc" else "j/k Preview · Tab · Enter Apply · Esc";
+        try self.line(inner, inner.height - 1, try self.fitLine(inner, hint, inner.width), if (self.theme_save_failed) .warning else .muted);
+    }
     fn overlay(self: *App, win: vaxis.Window, title: []const u8, body: []const u8) !void {
+        self.dialog_focus.ensure(.trash, 0);
+        self.mouse_hits.clear();
         const width = @min(win.width, 78);
         const height = @min(win.height, 20);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
         const inner = self.panel(area, 0, width, title, true);
-        _ = try self.flow(inner, body, 0, 0);
+        _ = try self.flow(inner.child(.{ .height = inner.height -| 2 }), body, 0, 0);
+        if (inner.height > 1) {
+            const x = try self.actionButton(inner, inner.height - 2, 0, "[y Confirm]", self.dialog_focus.index == 1, self.job.future == null, .dialog_action, 1);
+            _ = try self.actionButton(inner, inner.height - 2, x, "[Cancel]", self.dialog_focus.index == 0, true, .dialog_action, 0);
+            try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · n/Esc/q Cancel", .muted);
+        }
+    }
+    fn openHelp(self: *App) !void {
+        self.previous_mode = self.mode;
+        self.mode = .help;
+        self.help_scroll = 0;
+        try self.help_query.set(self.allocator, "");
+        self.help_searching = false;
+        self.help_match = null;
+        self.help_reveal_match = false;
+    }
+    fn helpMatches(self: *const App, entry: HelpRow) bool {
+        const query = self.help_query.value();
+        return query.len > 0 and (cache_query.find(entry.keys, query) != null or cache_query.find(entry.action, query) != null or cache_query.find(entry.section, query) != null);
+    }
+    fn resetHelpMatch(self: *App) void {
+        self.help_match = null;
+        for (help_rows, 0..) |entry, index| if (self.helpMatches(entry)) {
+            self.help_match = index;
+            break;
+        };
+        self.help_reveal_match = self.help_match != null;
+    }
+    fn nextHelpMatch(self: *App, down: bool) void {
+        const selected_match = self.help_match orelse return;
+        var index = selected_match;
+        for (0..help_rows.len) |_| {
+            index = if (down) (index + 1) % help_rows.len else (index + help_rows.len - 1) % help_rows.len;
+            if (self.helpMatches(help_rows[index])) {
+                self.help_match = index;
+                self.help_reveal_match = true;
+                return;
+            }
+        }
+    }
+    fn onHelpKey(self: *App, key: Key) !void {
+        if (self.help_searching) {
+            if (key.matches(Key.escape, .{})) {
+                try self.help_query.set(self.allocator, "");
+                self.help_searching = false;
+                self.resetHelpMatch();
+            } else if (key.matches(Key.enter, .{})) {
+                self.help_searching = false;
+            } else {
+                var before: [256]u8 = undefined;
+                const before_len = self.help_query.value().len;
+                @memcpy(before[0..before_len], self.help_query.value());
+                self.help_query.handleKey(self.allocator, key, false, 256) catch |err| {
+                    if (err != error.InputTooLarge) return err;
+                };
+                if (!same(before[0..before_len], self.help_query.value())) self.resetHelpMatch();
+            }
+            return;
+        }
+        if (key.matches('/', .{})) {
+            try self.help_query.set(self.allocator, "");
+            self.help_searching = true;
+            self.resetHelpMatch();
+        } else if (key.matches(Key.escape, .{}) and self.help_query.value().len > 0) {
+            try self.help_query.set(self.allocator, "");
+            self.resetHelpMatch();
+        } else if (key.matches('n', .{})) self.nextHelpMatch(true) else if (key.matches('N', .{}) or key.matches('n', .{ .shift = true })) self.nextHelpMatch(false) else if (key.matches('q', .{}) or key.matches('?', .{}) or key.matches(Key.escape, .{})) self.mode = backMode(.help, self.previous_mode, self.picker) else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.help_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.help_scroll -|= 1 else if (key.matches(Key.page_down, .{})) self.help_scroll +|= self.help_height else if (key.matches(Key.page_up, .{})) self.help_scroll -|= self.help_height else if (key.matches('d', .{ .ctrl = true })) self.help_scroll +|= @max(self.help_height / 2, 1) else if (key.matches('u', .{ .ctrl = true })) self.help_scroll -|= @max(self.help_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.help_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.help_scroll = self.help_lines -| self.help_height;
+    }
+    fn helpFlow(self: *App, win: vaxis.Window, raw: []const u8, offset: usize, base_row: usize, tone: Tone, active_match: bool) !void {
+        const clean = try safe(self.frame.allocator(), raw, true);
+        const query = self.help_query.value();
+        var next_match = cache_query.find(clean, query);
+        var iterator = text_layout.Iterator.init(clean, win.width, win.screen.width_method, .{ .base_row = base_row });
+        while (iterator.next()) |glyph| {
+            while (next_match) |at| {
+                if (glyph.byte_offset < at + query.len) break;
+                const after = at + query.len;
+                next_match = if (cache_query.find(clean[after..], query)) |relative| after + relative else null;
+            }
+            if (glyph.position.row < offset or glyph.position.row - offset >= win.height or glyph.columns > win.width) continue;
+            var cell_style = self.style(if (active_match) .selected else tone);
+            if (next_match) |at| if (glyph.byte_offset >= at and glyph.byte_offset < at + query.len) {
+                cell_style.bold = true;
+                if (self.mono) cell_style.reverse = true else {
+                    cell_style.bg = .{ .rgb = self.palette.yellow };
+                    cell_style.fg = .{ .rgb = self.palette.background };
+                }
+            };
+            win.writeCell(glyph.position.column, @intCast(glyph.position.row - offset), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = cell_style });
+        }
     }
     fn helpContent(self: *App, win: vaxis.Window, offset: usize, paint: bool) !usize {
         if (win.width == 0) return 0;
         var row: usize = 0;
         const aligned = win.width >= 62;
         const keys_width: u16 = if (aligned) 26 else win.width;
-        for (help_rows) |entry| {
+        for (help_rows, 0..) |entry, index| {
+            const active_match = self.help_match == index;
+            if (active_match) self.help_match_start = row + @as(usize, if ((entry.section.len > 0 and row > 0) or (entry.section.len == 0 and entry.keys.len == 0)) 1 else 0);
             if (entry.section.len > 0) {
                 if (row > 0) row += 1;
-                if (paint) _ = try self.flowTone(win, entry.section, offset, row, .accent);
+                if (paint) try self.helpFlow(win, entry.section, offset, row, .accent, active_match);
                 row += positionAfter(win, entry.section).row + 1;
             } else if (entry.keys.len == 0) {
                 row += 1;
-                if (paint) _ = try self.flowTone(win, entry.action, offset, row, .muted);
+                if (paint) try self.helpFlow(win, entry.action, offset, row, .muted, active_match);
                 row += positionAfter(win, entry.action).row + 1;
             } else if (aligned) {
                 const keys = win.child(.{ .width = keys_width });
                 const action = win.child(.{ .x_off = keys_width + 2, .width = win.width - keys_width - 2 });
                 if (paint) {
-                    _ = try self.flowTone(keys, entry.keys, offset, row, .sender);
-                    _ = try self.flowTone(action, entry.action, offset, row, .text);
+                    try self.helpFlow(keys, entry.keys, offset, row, .sender, active_match);
+                    try self.helpFlow(action, entry.action, offset, row, .text, active_match);
                 }
                 row += @max(positionAfter(keys, entry.keys).row, positionAfter(action, entry.action).row) + 1;
             } else {
-                if (paint) _ = try self.flowTone(win, entry.keys, offset, row, .sender);
+                if (paint) try self.helpFlow(win, entry.keys, offset, row, .sender, active_match);
                 row += positionAfter(win, entry.keys).row + 1;
                 const action = win.child(.{ .x_off = 2, .width = win.width -| 2 });
-                if (paint) _ = try self.flowTone(action, entry.action, offset, row, .text);
+                if (paint) try self.helpFlow(action, entry.action, offset, row, .text, active_match);
                 row += positionAfter(action, entry.action).row + 1;
             }
+            if (active_match) self.help_match_end = row;
         }
         return row;
     }
@@ -5829,15 +6306,37 @@ const App = struct {
             diagnostic_rows = try self.flowTone(banner, try std.fmt.allocPrint(self.frame.allocator(), "Diagnostic: {s}", .{code}), 0, diagnostic_rows, .accent);
             diagnostic_rows = @min(diagnostic_rows + 1, banner.height);
         }
-        const content = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows), .width = inner.width - 2, .height = inner.height -| @as(u16, @intCast(diagnostic_rows)) -| 2 });
+        const search_line = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows), .width = inner.width - 2, .height = 1 });
+        if (self.help_searching or self.help_query.value().len > 0) {
+            var count: usize = 0;
+            var ordinal: usize = 0;
+            for (help_rows, 0..) |entry, index| if (self.helpMatches(entry)) {
+                count += 1;
+                if (self.help_match == index) ordinal = count;
+            };
+            const summary = if (self.help_query.value().len == 0) @as([]const u8, "Type to find") else if (count == 0) @as([]const u8, "No matches") else try std.fmt.allocPrint(self.frame.allocator(), "{d}/{d} matches", .{ ordinal, count });
+            const count_width: u16 = @intCast(@min(summary.len + 1, search_line.width));
+            const prompt = search_line.child(.{ .width = search_line.width -| count_width });
+            try self.editLine(prompt, 0, "Find", &self.help_query, self.help_searching, if (self.help_searching) .selected else .sender);
+            try self.line(search_line.child(.{ .x_off = search_line.width -| count_width }), 0, summary, if (count == 0 and self.help_query.value().len > 0) .warning else .accent);
+        } else try self.line(search_line, 0, "/ Search help · keys, actions, sections", .muted);
+        const content = inner.child(.{ .x_off = 1, .y_off = @intCast(diagnostic_rows + 1), .width = inner.width - 2, .height = inner.height -| @as(u16, @intCast(diagnostic_rows)) -| 3 });
+        if (self.help_content_width != content.width or self.help_height != content.height) self.help_reveal_match = self.help_match != null;
+        self.help_content_width = content.width;
         self.help_lines = try self.helpContent(content, 0, false);
         self.help_height = content.height;
+        if (self.help_reveal_match and content.height > 0) {
+            if (self.help_match_start < self.help_scroll or self.help_match_end -| self.help_match_start >= content.height) self.help_scroll = self.help_match_start else if (self.help_match_end > self.help_scroll +| content.height) self.help_scroll = self.help_match_end - content.height;
+            self.help_reveal_match = false;
+        }
         self.help_scroll = @min(self.help_scroll, self.help_lines -| self.help_height);
         _ = try self.helpContent(content, self.help_scroll, true);
-        const footer = try std.fmt.allocPrint(self.frame.allocator(), " j/k Scroll · Esc/q Back   {d}–{d}/{d}", .{ self.help_scroll + 1, @min(self.help_scroll + self.help_height, self.help_lines), self.help_lines });
+        const footer: []const u8 = if (self.help_searching) " Enter Keep · Esc Clear · q is text" else if (inner.width < 62) "/ Find · n/N Next · q Back" else if (self.help_query.value().len > 0) "/ Find · n/N Match · j/k Scroll · Esc Clear · q Back" else "/ Find · j/k Scroll · Ctrl+D/U Half · Esc/q Back";
         try self.line(inner, inner.height - 1, try self.fitLine(inner, footer, inner.width), .muted);
     }
     fn invitationDraw(self: *App, win: vaxis.Window) !void {
+        self.dialog_focus.ensure(.invitation, 0);
+        self.mouse_hits.clear();
         const width = @min(win.width -| 2, 100);
         const height = @min(win.height -| 2, 30);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
@@ -5850,7 +6349,9 @@ const App = struct {
         // for event details. A very small viewport cannot authorize an RSVP.
         if (inner.width < 48 or identity_rows + 4 > inner.height) {
             self.invitation_height = 0;
-            _ = try self.flow(inner, "Resize to review RSVP identity.\nNo RSVP can be submitted at this size.\n\nEsc Cancel", 0, 0);
+            _ = try self.flow(inner.child(.{ .height = inner.height -| 1 }), "Resize to review RSVP identity.\nNo RSVP can be submitted at this size.", 0, 0);
+            self.dialog_focus.index = 0;
+            _ = try self.actionButton(inner, inner.height -| 1, 0, "[Cancel]", true, self.job.future == null, .dialog_action, 0);
             return;
         }
         self.invitation_confirm_ready = true;
@@ -5862,8 +6363,13 @@ const App = struct {
         self.invitation_height = details.height;
         self.invitation_scroll = @min(self.invitation_scroll, self.invitation_lines -| self.invitation_height);
         _ = try self.flow(details, clean_review, self.invitation_scroll, 0);
-        try self.line(inner, inner.height - 2, "a Accept · t Tentative · d Decline · Esc Cancel", .accent);
-        try self.line(inner, inner.height - 1, "j/k Scroll · Ctrl+D/U Page · Ctrl+G Top · G Bottom", .muted);
+        const idle = self.job.future == null;
+        const enabled = idle and !(self.invitation_unknown and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value()));
+        var x = try self.actionButton(inner, inner.height - 2, 0, "[a Accept]", self.dialog_focus.index == 1, enabled, .dialog_action, 1);
+        x = try self.actionButton(inner, inner.height - 2, x, "[t Tentative]", self.dialog_focus.index == 2, enabled, .dialog_action, 2);
+        x = try self.actionButton(inner, inner.height - 2, x, "[d Decline]", self.dialog_focus.index == 3, enabled, .dialog_action, 3);
+        _ = try self.actionButton(inner, inner.height - 2, x, "[Cancel]", self.dialog_focus.index == 0, idle, .dialog_action, 0);
+        try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · j/k Scroll · Esc Cancel", .muted);
     }
     fn resize(self: *App, original: vaxis.Winsize) !void {
         var size = original;
@@ -5912,10 +6418,11 @@ const App = struct {
         try self.drawReaderOverlay(win);
         try self.drawFileDialog(win);
         try self.drawLabelPicker(win);
-        if (self.mode == .help) try self.helpDraw(win) else if (self.mode == .trash_confirm) try self.overlay(win, " Move selected mail to Trash? ", "This moves the selected message to Trash.\nIt does not permanently delete mail.\n\ny Confirm · n / Esc Cancel") else if (self.mode == .invitation) {
+        if (self.mode == .help) try self.helpDraw(win) else if (self.mode == .trash_confirm) try self.overlay(win, " Move selected mail to Trash? ", "This moves the selected message to Trash.\nIt does not permanently delete mail.") else if (self.mode == .invitation) {
             try self.invitationDraw(win);
         }
         try self.drawNewMail(win);
+        try self.drawThemePicker(win);
     }
 };
 
@@ -5966,8 +6473,10 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
         else => .{ .unavailable = true },
     };
     try app.boot();
-    app.reloadTheme();
     app.loadPreferences();
+    app.theme_watch.configure(environ) catch {};
+    _ = app.theme_watch.changed(io, Io.Timestamp.now(io, .awake).toMilliseconds()) catch false;
+    app.reloadTheme();
     try app.restoreInitialContext();
     try app.prepareLabels();
     const wake = try @import("../signal_wake.zig").Wake.init(io);
@@ -6007,15 +6516,26 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
     try setMouseReporting(&vx, tty.writer(), !options.no_mouse);
     try app.refreshMailbox();
-    while (!app.quit and received_signal.load(.acquire) == 0) {
+    main_loop: while (!app.quit and received_signal.load(.acquire) == 0) {
         app.finish() catch |err| app.sayError(@errorName(err));
         app.adoptBackgroundCache() catch {};
+        _ = app.pollTheme();
         try app.draw();
         try vx.render(tty.writer());
         try tty.writer().flush();
-        const event = loop.nextEvent() catch |err| switch (err) {
-            error.Closed, error.EndOfStream => break,
-            else => return err,
+        const event = next_input: while (true) {
+            const received = loop.nextEvent() catch |err| switch (err) {
+                error.Closed, error.EndOfStream => break :main_loop,
+                else => return err,
+            };
+            if (received == .theme_tick) {
+                app.theme_tick_pending.store(false, .release);
+                // An unchanged desktop theme needs one bounded stat check,
+                // not a redraw of cached mail. Other input/work events keep
+                // their ordinary owner, backpressure and shutdown behavior.
+                if (!app.pollTheme()) continue;
+            }
+            break :next_input received;
         };
         switch (event) {
             .key_press => |key| app.onKey(key) catch |err| app.sayError(@errorName(err)),
@@ -6036,6 +6556,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
                 app.hydrateArrivingMail() catch {};
             },
             .cache_changed => app.onCacheChanged() catch {},
+            .theme_tick => app.theme_tick_pending.store(false, .release),
             .loading_tick => {
                 app.loading_tick_pending.store(false, .release);
                 if (app.loadingActive()) {
@@ -7128,6 +7649,126 @@ test "local UI: help aligns colored bindings and keeps the last instructions rea
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+fn helpTestScreenText(a: Allocator, screen: *vaxis.Screen) ![]u8 {
+    var rendered: std.ArrayList(u8) = .empty;
+    errdefer rendered.deinit(a);
+    for (0..screen.height) |row| {
+        for (0..screen.width) |column| try rendered.appendSlice(a, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+        try rendered.append(a, '\n');
+    }
+    return rendered.toOwnedSlice(a);
+}
+
+test "local UI: help search matches actions keys and sections and cycles without touching mail" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.mode = .contacts;
+    app.sayError("AttachmentNotFound");
+    try app.openHelp();
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    try app.onHelpKey(.{ .codepoint = 'l', .text = "lAbElS" });
+    const label = app.help_match orelse return error.MissingHelpMatch;
+    try std.testing.expectEqualStrings("m", help_rows[label].keys);
+    try app.onHelpKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(!app.help_searching);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqual(label, app.help_match.?);
+
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    try app.onHelpKey(.{ .codepoint = 'c', .text = "ctrl+s" });
+    try app.onHelpKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
+
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    try app.onHelpKey(.{ .codepoint = 'p', .text = "personalize" });
+    try std.testing.expectEqualStrings("PERSONALIZE", help_rows[app.help_match.?].section);
+    try app.onHelpKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(Mode.help, app.mode);
+    try std.testing.expectEqualStrings("", app.help_query.value());
+    try std.testing.expectEqualStrings("AttachmentNotFound", app.status_error_code[0..app.status_error_len]);
+    try app.onHelpKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(Mode.contacts, app.mode);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: help search keeps typing literal bounded and no matches navigable" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    try app.openHelp();
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    for ([_]Key{ .{ .codepoint = 'q', .text = "q" }, .{ .codepoint = '?', .text = "?" }, .{ .codepoint = 'n', .text = "n" }, .{ .codepoint = 'N', .text = "N" } }) |key| try app.onHelpKey(key);
+    try std.testing.expectEqualStrings("q?nN", app.help_query.value());
+    try std.testing.expectEqual(Mode.help, app.mode);
+    try std.testing.expect(!app.quit);
+    try std.testing.expect(app.help_match == null);
+    try app.onHelpKey(.{ .codepoint = Key.enter });
+    try app.onHelpKey(.{ .codepoint = 'j', .text = "j" });
+    try std.testing.expectEqual(@as(usize, 1), app.help_scroll);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expect(app.help_match == null);
+    try app.onHelpKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(Mode.help, app.mode);
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    const full: [256]u8 = @splat('z');
+    try app.onHelpKey(.{ .codepoint = 'z', .text = &full });
+    try app.onHelpKey(.{ .codepoint = 'q', .text = "q" });
+    try std.testing.expectEqualSlices(u8, &full, app.help_query.value());
+    try app.onHelpKey(.{ .codepoint = Key.enter });
+    try app.onHelpKey(.{ .codepoint = 'q', .text = "q" });
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try std.testing.expect(!app.quit);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: help search reveals and highlights actual wrapped matches after resize" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    try app.openHelp();
+    try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
+    try app.onHelpKey(.{ .codepoint = 'l', .text = "lAbElS" });
+    try app.onHelpKey(.{ .codepoint = Key.enter });
+    var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    var win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 30, .screen = &screen };
+    try app.helpDraw(win);
+    const wide = try helpTestScreenText(a, &screen);
+    defer a.free(wide);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "1/1 matches") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "Choose labels") != null);
+    var highlighted: usize = 0;
+    for (0..screen.height) |row| for (0..screen.width) |column| {
+        const cell = screen.readCell(@intCast(column), @intCast(row)).?;
+        if (vaxis.Color.eql(cell.style.bg, .{ .rgb = app.palette.yellow })) highlighted += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 6), highlighted);
+    const wide_start = app.help_match_start;
+    win.width = 48;
+    win.height = 20;
+    screen.clear();
+    try app.helpDraw(win);
+    try std.testing.expect(app.help_match_start > wide_start);
+    try std.testing.expect(app.help_match_start >= app.help_scroll);
+    try std.testing.expect(app.help_match_end <= app.help_scroll + app.help_height);
+    const narrow = try helpTestScreenText(a, &screen);
+    defer a.free(narrow);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "Choose labels") != null);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "1/1 matches") != null);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "q Back") != null);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
 test "reader tail remains visible in the resize frame after reduced wrapping" {
     const allocator = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -7453,12 +8094,27 @@ test "composer polish: body focus From action and attachment spacing match real 
         for (0..screen.width) |column| try text_row.appendSlice(allocator, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
         if (std.mem.indexOf(u8, text_row.items, "Body:") != null) {
             body_selected = screen.readCell(2, @intCast(row)).?.style.bold;
-            try std.testing.expectEqualDeep(app.style(.selected).bg, screen.readCell(70, @intCast(row)).?.style.bg);
+            try std.testing.expectEqualDeep(app.style(.accent).bg, screen.readCell(70, @intCast(row)).?.style.bg); // Preview is not focused while Body is.
         }
         gap_seen = gap_seen or std.mem.indexOf(u8, text_row.items, "29 B [x]") != null;
         try std.testing.expect(std.mem.indexOf(u8, text_row.items, "i Insert") == null);
     }
     try std.testing.expect(body_selected and gap_seen);
+    for ([_]layout.HitKind{ .compose_format, .compose_preview_toggle }, 0..) |expected_kind, control| {
+        app.focusComposeAttachments(app.compose.attachments.len + 1 + control);
+        app.mouse_hits.clear();
+        screen.clear();
+        try app.composeDraw(win);
+        var expected_seen = false;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+            if (hit.kind != .compose_format and hit.kind != .compose_preview_toggle) continue;
+            const cell = screen.readCell(hit.rect.x, hit.rect.y).?;
+            try std.testing.expectEqualDeep(app.style(if (hit.kind == expected_kind) .selected else .accent).bg, cell.style.bg);
+            expected_seen = expected_seen or hit.kind == expected_kind;
+        }
+        try std.testing.expect(expected_seen);
+    }
+    app.leaveComposeAttachments(4, false);
     app.compose_view = .original; // Explicitly scroll the retained original context.
     app.reader_lines = 100;
     app.reader_height = 20;
@@ -7469,6 +8125,29 @@ test "composer polish: body focus From action and attachment spacing match real 
     try app.onComposeKey(.{ .codepoint = 'B', .text = "B" });
     try std.testing.expectEqualStrings("LB", app.compose.fields[4].value());
     try std.testing.expectEqual(ReaderOverlay.none, app.reader_overlay);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "reader polish: single line labels and subjects emit real cells for isolated zero width clusters" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var screen = try vaxis.Screen.init(a, .{ .cols = 32, .rows = 6, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 32, .height = 6, .screen = &screen };
+    const literal = "\u{034f}Title e\u{0301} 👩‍💻";
+    try app.line(win, 0, literal, .text);
+    try std.testing.expectEqualStrings(" ", screen.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("T", screen.readCell(1, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("e\u{0301}", screen.readCell(7, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("👩‍💻", screen.readCell(9, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("\u{034f}Title e\u{0301} 👩‍💻", literal);
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"padding\",\"subject\":\"\\u034fMessage\",\"from\":{\"name\":\"Alex\"}}]", .{}));
+    try app.drawMailRow(win, 2, 0);
+    try std.testing.expectEqualStrings(" ", screen.readCell(3, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("M", screen.readCell(4, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("e", screen.readCell(10, 2).?.char.grapheme);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -8546,4 +9225,207 @@ test "compose format control: body states current format and toggle names its de
     try std.testing.expect(std.mem.indexOf(u8, md, "[Plain Ctrl+T]") != null);
     try std.testing.expectEqualStrings("Unchanged source", app.compose.fields[4].value());
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "local UI: unread stars and bulk marks stay independent on focused narrow mail rows" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.messages = items(try std.json.parseFromSliceLeaky(Value, app.list_arena.allocator(), "[{\"id\":\"read\",\"subject\":\"Read subject\",\"from\":{\"name\":\"Alex\"},\"labels\":[\"STARRED\"]},{\"id\":\"unread\",\"subject\":\"Unread subject\",\"from\":{\"name\":\"Sam\"},\"labels\":[\"UNREAD\",\"STARRED\"]}]", .{}));
+    try app.mail_selection.toggle("unread");
+    for ([_]u16{ 70, 16 }) |width| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 6, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 6, .screen = &screen };
+        for (0..2) |index| {
+            app.selected = index;
+            try app.drawMailRow(win, index * 3, index);
+        }
+        try std.testing.expectEqualStrings(" ", screen.readCell(0, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings(" ", screen.readCell(1, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("⭐", screen.readCell(0, 1).?.char.grapheme);
+        try std.testing.expectEqualStrings("R", screen.readCell(3, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("A", screen.readCell(3, 1).?.char.grapheme);
+        try std.testing.expect(!screen.readCell(3, 0).?.style.bold);
+        try std.testing.expect(!screen.readCell(3, 0).?.style.italic);
+        try std.testing.expectEqualStrings("✓", screen.readCell(0, 3).?.char.grapheme);
+        try std.testing.expectEqualStrings("●", screen.readCell(1, 3).?.char.grapheme);
+        try std.testing.expectEqualStrings("⭐", screen.readCell(0, 4).?.char.grapheme);
+        try std.testing.expectEqualStrings("U", screen.readCell(3, 3).?.char.grapheme);
+        try std.testing.expectEqualStrings("S", screen.readCell(3, 4).?.char.grapheme);
+        try std.testing.expect(screen.readCell(3, 3).?.style.bold);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: reader labels use account names and show status without opaque IDs" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+    app.labels = items(try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), "[{\"id\":\"Label_private\",\"name\":\"Travel 🌋\"},{\"id\":\"Label_controls\",\"name\":\"A\\u0000B\"}]", .{}));
+    try app.labels_account.set(a, app.account());
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.read_arena.allocator(), "[{\"subject\":\"Fictional itinerary\",\"bodyText\":\"Clean readable body\",\"unread\":true,\"labels\":[\"INBOX\",\"STARRED\",\"UNREAD\",\"Label_private\",\"Label_controls\"]}]", .{}));
+    const labels = try app.readerLabels(app.thread[0]);
+    try std.testing.expect(std.mem.indexOf(u8, labels, "Inbox · Travel 🌋") != null);
+    try std.testing.expect(std.mem.indexOf(u8, labels, "Label_private") == null);
+    try std.testing.expect(std.mem.indexOf(u8, labels, "STARRED") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, labels, 0) == null);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(labels));
+    var screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = 24, .screen = &screen };
+    _ = try app.readerBodyDraw(win);
+    const rendered = try markdownTestScreenText(a, &screen);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "● Unread ·") != null);
+    try std.testing.expectEqualStrings("⭐", screen.readCell(11, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("S", screen.readCell(14, 2).?.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Labels: Inbox · Travel 🌋") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Clean readable body") != null);
+    app.account_index = 1;
+    try std.testing.expectEqualStrings("Labels: Inbox · 2 awaiting names", try app.readerLabels(app.thread[0]));
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "dialog UX: all modal controls have reverse focus, safe Enter and distinct action highlighting" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 36, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    const win = vx.window();
+    app.labels = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"id\":\"Label_demo\",\"name\":\"Projects\",\"type\":\"user\"}]", .{}));
+    app.label_picker = true;
+    app.dialog_focus.reset(.labels, 1);
+    try app.drawLabelPicker(win);
+    for ([_]layout.HitKind{ .label_filter, .label_choice, .label_add, .label_remove, .label_back }) |kind| {
+        var found = false;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| found = found or hit.kind == kind;
+        try std.testing.expect(found);
+    }
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // Add.
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // Remove.
+    try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try app.onLabelPickerKey(.{ .codepoint = 'q', .text = "q" });
+    try std.testing.expectEqualStrings("q", app.label_filter.value());
+    try std.testing.expect(app.label_picker); // q is text in Filter.
+    try app.onLabelPickerKey(.{ .codepoint = Key.escape });
+    try app.onLabelPickerKey(.{ .codepoint = Key.tab }); // No matches: disabled actions skipped.
+    try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
+    try app.onLabelPickerKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(!app.label_picker);
+    for ([_]Mode{ .review, .trash_confirm, .invitation }) |mode| {
+        app.mode = mode;
+        app.dialog_focus.reset(.none, 0);
+        app.invitation_confirm_ready = true;
+        try app.onConfirmationKey(.{ .codepoint = Key.tab });
+        try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+        try app.onConfirmationKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(@as(usize, 0), app.dialog_focus.index);
+        try app.onConfirmationKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(if (mode == .review) Mode.compose else Mode.browse, app.mode);
+        try std.testing.expect(app.job.future == null); // Initial/back Enter never submits.
+    }
+    app.mode = .invitation;
+    try app.invitationDraw(win);
+    for ([_]usize{ 1, 2, 3, 0 }) |wanted| {
+        var found = false;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| found = found or (hit.kind == .dialog_action and hit.index == wanted);
+        try std.testing.expect(found);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "dialog UX: contacts, composer Alias and narrow preview remain keyboard reachable without edits" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.mode = .contact_edit;
+    try app.contact_name.set(a, "Keep this name");
+    try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 3), app.contact_field);
+    try app.onKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(Mode.contacts, app.mode);
+    try std.testing.expectEqualStrings("Keep this name", app.contact_name.value());
+    app.mode = .compose;
+    app.compose.selected = 0;
+    try app.compose.fields[4].set(a, "Exact body");
+    try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expect(app.compose.attachment_focus);
+    try std.testing.expectEqual(app.compose.attachments.len + 3, app.compose.attachment_cursor);
+    try app.composeDraw(vx.window());
+    const alias_hit = blk: {
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .compose_from) break :blk hit;
+        return error.ExpectedVisibleAlias;
+    };
+    const alias_cell = vx.screen.readCell(alias_hit.rect.x, alias_hit.rect.y).?;
+    try std.testing.expect(std.meta.eql(alias_cell.style.bg, app.style(.selected).bg));
+    try app.onComposeKey(.{ .codepoint = Key.tab });
+    try std.testing.expect(!app.compose.attachment_focus and app.compose.selected == 0);
+    app.cycleComposePreview();
+    try std.testing.expect(app.compose_preview_full);
+    try app.onComposeKey(.{ .codepoint = Key.tab });
+    try std.testing.expect(app.compose_preview_full and app.dialog_focus.index == 1);
+    try app.onComposeKey(.{ .codepoint = Key.tab });
+    try std.testing.expect(app.dialog_focus.index == 2);
+    try app.onComposeKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(!app.compose_preview_full);
+    try std.testing.expectEqualStrings("Exact body", app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "dialog UX: link and received-file pickers expose action focus independently of their rows" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 30, .rows = 22, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.thread = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"id\":\"mail\",\"attachments\":[{\"id\":\"file\",\"filename\":\"report.pdf\",\"size\":491}]}]", .{}));
+    app.openReaderAttachments();
+    try app.drawReaderOverlay(vx.window());
+    for ([_]layout.HitKind{ .reader_picker_save, .reader_picker_open, .reader_picker_back }) |kind| {
+        var found = false;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == kind) {
+            found = true;
+            try std.testing.expectEqual(@as(u16, if (kind == .reader_picker_back) 6 else 8), hit.rect.width);
+        };
+        try std.testing.expect(found); // Complete captions fit even the minimum TUI width.
+    }
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(ReaderOverlay.none, app.reader_overlay);
+    app.reader_overlay = .links;
+    app.dialog_focus.reset(.links, 0);
+    app.reader_links.add("https://example.test/");
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    _ = try app.onReaderOverlayKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(ReaderOverlay.none, app.reader_overlay);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }

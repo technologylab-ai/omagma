@@ -1,6 +1,7 @@
 const std = @import("std");
 const files = @import("files.zig");
 const layout = @import("layout.zig");
+const theme = @import("theme.zig");
 const b = @import("../bounded.zig");
 
 pub const Action = enum { down, up, left, right, next_mail, previous_mail, compose, reply, reply_all, contacts, cache_search, server_search, layout, expand, help, thread_next, thread_previous, thread_fold, quote_fold, signature_fold, links, attachments };
@@ -8,6 +9,7 @@ pub const Context = struct { account: b.Text(254) = .{}, folder: u8 = 0, label: 
 pub const Binding = struct { key: b.Text(24) = .{}, action: Action };
 pub const Preferences = struct {
     schema: u8 = 1,
+    theme: theme.Mode = .follow_omarchy,
     readerLayout: layout.ReaderLayout = .right,
     listWidthPercent: u8 = 55,
     listHeightPercent: u8 = 40,
@@ -18,7 +20,7 @@ pub const Preferences = struct {
 const max_bytes = 16384;
 const ContextWire = struct { account: []const u8, folder: u8 = 0, label: []const u8 = "", message: []const u8 = "", selected: u32 = 0, readerScroll: u32 = 0 };
 const BindingWire = struct { key: []const u8, action: Action };
-const Wire = struct { schema: u8 = 1, readerLayout: layout.ReaderLayout = .right, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{} };
+const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, readerLayout: layout.ReaderLayout = .right, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{} };
 
 pub fn validKey(key: []const u8) bool {
     const character = if (std.mem.startsWith(u8, key, "Ctrl+")) key[5..] else key;
@@ -35,7 +37,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Preferences {
     const wire = parsed.value;
     if (wire.listWidthPercent < 25 or wire.listWidthPercent > 75 or wire.listHeightPercent < 25 or wire.listHeightPercent > 75) return error.InvalidPaneRatio;
     if (wire.contexts.len > 3 or wire.bindings.len > 24) return error.UiPreferencesTooManyEntries;
-    var result: Preferences = .{ .readerLayout = wire.readerLayout, .listWidthPercent = wire.listWidthPercent, .listHeightPercent = wire.listHeightPercent };
+    var result: Preferences = .{ .theme = wire.theme, .readerLayout = wire.readerLayout, .listWidthPercent = wire.listWidthPercent, .listHeightPercent = wire.listHeightPercent };
     if (wire.lastAccount.len > 0) try b.address(wire.lastAccount);
     try result.lastAccount.set(wire.lastAccount);
     for (wire.contexts, 0..) |entry, index| {
@@ -71,7 +73,7 @@ pub fn encode(allocator: std.mem.Allocator, value: *const Preferences) ![]const 
         bindings[binding_count] = .{ .key = binding.key.slice(), .action = binding.action };
         binding_count += 1;
     };
-    return std.json.Stringify.valueAlloc(allocator, Wire{ .readerLayout = value.readerLayout, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count] }, .{});
+    return std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .readerLayout = value.readerLayout, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count] }, .{});
 }
 
 pub fn path(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map, explicit: ?[]const u8) ![]const u8 {
@@ -133,6 +135,19 @@ test "reader preferences roundtrip only schema and validated layout" {
     try std.testing.expectError(error.UnsupportedUiPreferences, parse(allocator, "{\"schema\":2}"));
     try std.testing.expectError(error.InvalidEnumTag, parse(allocator, "{\"readerLayout\":\"overlay\"}"));
     try std.testing.expectError(error.UnknownField, parse(allocator, "{\"account\":\"personal@example.com\"}"));
+}
+
+test "local UI: theme choice survives private preference encoding and old settings follow Omarchy" {
+    const allocator = std.testing.allocator;
+    const old = try parse(allocator, "{\"schema\":1,\"readerLayout\":\"below\"}");
+    try std.testing.expectEqual(theme.Mode.follow_omarchy, old.theme);
+    const chosen = try parse(allocator, "{\"schema\":1,\"theme\":\"omagma\",\"listWidthPercent\":60}");
+    const encoded = try encode(allocator, &chosen);
+    defer allocator.free(encoded);
+    const restored = try parse(allocator, encoded);
+    try std.testing.expectEqual(theme.Mode.omagma, restored.theme);
+    try std.testing.expectEqual(@as(u8, 60), restored.listWidthPercent);
+    try std.testing.expectError(error.InvalidEnumTag, parse(allocator, "{\"theme\":\"not-a-theme\"}"));
 }
 
 test "local reader: working contexts and keys own parsed strings and preserve bounded ratios" {

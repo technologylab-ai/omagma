@@ -223,6 +223,151 @@ pub fn repairMojibakeDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
     return result;
 }
 
+const PaddingRun = struct { end: usize, newlines: usize, line_start: ?usize, remove: bool };
+fn newsletterPadding(raw: []const u8, start: usize) ?PaddingRun {
+    const first = rune(raw[start..]) orelse return null;
+    if (first.cp != 0x2007 and first.cp != 0x034f) return null;
+    var figures: usize = 0;
+    var joiners: usize = 0;
+    var newlines: usize = 0;
+    var line_start: ?usize = null;
+    var pos = start;
+    while (pos < raw.len) {
+        const value = rune(raw[pos..]) orelse break;
+        switch (value.cp) {
+            0x2007 => figures += 1,
+            0x034f => joiners += 1,
+            '\n' => {
+                // Do not consume padding used as a literal indented-code
+                // example on the following line.
+                const following = raw[pos + 1 ..];
+                if (std.mem.startsWith(u8, following, "    ") or std.mem.startsWith(u8, following, "\t")) break;
+                newlines += 1;
+                line_start = pos + 1;
+            },
+            ' ', '\t', '\r', 0xa0 => {},
+            else => break,
+        }
+        pos += value.consumed;
+    }
+    // Newsletter preview extenders alternate figure spaces and invisible
+    // grapheme joiners. A long whitespace-only run is strong evidence; ordinary
+    // spacing, Unicode prose and short intentional examples remain unchanged.
+    return .{ .end = pos, .newlines = @min(newlines, 2), .line_start = line_start, .remove = figures >= 8 and joiners >= 8 };
+}
+
+/// Strip only long invisible newsletter preview padding in a display copy.
+/// Preserve the provider's plaintext provenance, stored bytes and reply source.
+pub fn removeNewsletterPaddingDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
+    if (raw.len > max_bytes or !std.unicode.utf8ValidateSlice(raw)) return null;
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var copied: usize = 0;
+    var pos: usize = 0;
+    var line_start: usize = 0;
+    var recheck_line = true;
+    var code_line = false;
+    var fence: ?u8 = null;
+    while (pos < raw.len) {
+        if (recheck_line) {
+            recheck_line = false;
+            const end = std.mem.indexOfScalarPos(u8, raw, pos, '\n') orelse raw.len;
+            const line = raw[line_start..end];
+            const clean = std.mem.trimStart(u8, line, " \t\r");
+            const boundary: ?u8 = if (std.mem.startsWith(u8, clean, "```")) '`' else if (std.mem.startsWith(u8, clean, "~~~")) '~' else null;
+            code_line = fence != null or boundary != null or codeLine(line);
+            if (boundary) |kind| {
+                if (fence == null) fence = kind else if (fence.? == kind) fence = null;
+            }
+        }
+        if (!code_line) if (newsletterPadding(raw, pos)) |padding| {
+            if (padding.remove) {
+                try output.appendSlice(allocator, raw[copied..pos]);
+                for (0..padding.newlines) |_| try output.append(allocator, '\n');
+                if (padding.newlines == 0 and output.items.len > 0 and padding.end < raw.len and
+                    std.mem.indexOfScalar(u8, " \t\r\n", output.items[output.items.len - 1]) == null)
+                    try output.append(allocator, ' ');
+                copied = padding.end;
+            }
+            pos = padding.end;
+            // A removed run may span physical lines. Recheck the actual line
+            // containing the next visible character without losing fence state.
+            // Even a short/nonqualifying run is scanned once, preventing a
+            // quadratic lookahead for a large body made solely of padding.
+            if (padding.line_start) |start| {
+                line_start = start;
+                recheck_line = true;
+            }
+            continue;
+        };
+        const value = rune(raw[pos..]).?;
+        pos += value.consumed;
+        if (value.cp == '\n') {
+            line_start = pos;
+            recheck_line = true;
+        }
+    }
+    if (copied == 0) return null;
+    try output.appendSlice(allocator, raw[copied..]);
+    return try output.toOwnedSlice(allocator);
+}
+
+/// The reader owns a display-only snapshot; neither correction affects the
+/// body returned by the CLI or used for quoting/composing a reply.
+pub fn preparePlainBodyDisplay(allocator: Allocator, raw: []const u8) !?[]u8 {
+    const unpadded = try removeNewsletterPaddingDisplay(allocator, raw);
+    errdefer if (unpadded) |owned| allocator.free(owned);
+    if (try repairMojibakeDisplay(allocator, unpadded orelse raw)) |repaired| {
+        if (unpadded) |owned| allocator.free(owned);
+        return repaired;
+    }
+    return unpadded;
+}
+
+fn repeatedForTest(comptime value: []const u8, comptime count: usize) [value.len * count]u8 {
+    var output: [value.len * count]u8 = undefined;
+    for (0..count) |index| @memcpy(output[index * value.len ..][0..value.len], value);
+    return output;
+}
+
+test "mail display: repeated invisible newsletter padding disappears without rewriting visible prose" {
+    const allocator = std.testing.allocator;
+    const padding = &(comptime repeatedForTest("\u{2007} \u{034f} ", 20));
+    const raw = "Fictional release preview. " ++ padding ++ "\n" ++ padding ++
+        "\n\n\nHello from the team.\nRead: https://example.test/release\n";
+    const expected = "Fictional release preview. \n\nHello from the team.\nRead: https://example.test/release\n";
+    const display = (try preparePlainBodyDisplay(allocator, raw)).?;
+    defer allocator.free(display);
+    try std.testing.expectEqualStrings(expected, display);
+    try std.testing.expect(std.mem.indexOf(u8, raw, padding) != null);
+    // Apply the same two independent corrections once while retaining body
+    // bytes as the caller's authoritative source.
+    const mojibake = "F\u{c3}\u{a4}rben und gr\u{c3}\u{bc}nen. " ++ padding ++ "\n\nNext.";
+    const combined = (try preparePlainBodyDisplay(allocator, mojibake)).?;
+    defer allocator.free(combined);
+    try std.testing.expectEqualStrings("Färben und grünen. \n\nNext.", combined);
+    const inline_padding = (try preparePlainBodyDisplay(allocator, "Before" ++ padding ++ "after.")).?;
+    defer allocator.free(inline_padding);
+    try std.testing.expectEqualStrings("Before after.", inline_padding);
+}
+
+test "mail display: newsletter heuristic preserves short runs code combining scripts and literal markup" {
+    const allocator = std.testing.allocator;
+    const padding = &(comptime repeatedForTest("\u{2007} \u{034f} ", 8));
+    for ([_][]const u8{
+        "a\u{034f}\u{301} café 👩‍💻 text.",
+        &(comptime repeatedForTest("\u{2007} \u{034f} ", 7)),
+        &(comptime repeatedForTest("\u{2007}", 100)),
+        &(comptime repeatedForTest("\u{034f}", 100)),
+        "```text\n" ++ padding ++ "\n```\nLiteral example.",
+        "~~~\n" ++ padding ++ "\n~~~\nLiteral example.",
+        "    " ++ padding ++ "\nIndented code.",
+        "<p>literal markup</p> &amp; <team@example.test>",
+    }) |raw| try std.testing.expect((try removeNewsletterPaddingDisplay(allocator, raw)) == null);
+    const invalid = [_]u8{0xff};
+    try std.testing.expect((try preparePlainBodyDisplay(allocator, &invalid)) == null);
+}
+
 test "mail display: metadata apostrophe and numeric entities decode once without stripping tags" {
     const a = std.testing.allocator;
     const value = (try decodePreview(a, "We&#39;re &quot;ready&quot; &amp; &#x1f642; <b>ok</b> &amp;#39;")).?;

@@ -3,14 +3,14 @@
   "networkRequired": false,
   "displayLimitBytes": 64,
   "longUrl": "https://example.test/guides/2026/october/notes?campaign=fictional&tracking=fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-fictional-tail-marker",
-  "longDisplay": "https://example.test/guides/2026/october/notes…",
+  "longDisplay": "https://example.test/guides/2026/october/notes\u2026",
   "longPathUrl": "https://example.test/archive/fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-fictional-path-notes?campaign=fictional",
-  "longPathDisplay": "https://example.test/archive/fictional-path-fictional-path-fi…",
+  "longPathDisplay": "https://example.test/archive/fictional-path-fictional-path-fi\u2026",
   "variants": [
     {
       "name": "marketing-html",
       "mimeType": "text/html",
-      "bodyTemplate": "<!doctype html><html><head><style>.mso-card { filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0); }</style></head><body><h1>Fictional marketing bulletin</h1><p>Fictional {account}: café 👋.</p><p><a href=\"{longUrlHtml}\">Read the report</a></p><p>Visible destination: <a href=\"{longUrlHtml}\">{longUrlHtml}</a></p><p>Archive: <a href=\"{longPathHtml}\">{longPathHtml}</a></p><img src=\"{trackerUrl}/hero\" alt=\"Fictional mountain\"><img src=\"{trackerUrl}/unlabeled\"><img src=\"{trackerUrl}/decorative\" alt=\"\"><p>Fictional marketing tail.</p></body></html>",
+      "bodyTemplate": "<!doctype html><html><head><style>.mso-card { filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0); }</style></head><body><h1>Fictional marketing bulletin</h1><p>Fictional {account}: caf\u00e9 \ud83d\udc4b.</p><p><a href=\"{longUrlHtml}\">Read the report</a></p><p>Visible destination: <a href=\"{longUrlHtml}\">{longUrlHtml}</a></p><p>Archive: <a href=\"{longPathHtml}\">{longPathHtml}</a></p><img src=\"{trackerUrl}/hero\" alt=\"Fictional mountain\"><img src=\"{trackerUrl}/unlabeled\"><img src=\"{trackerUrl}/decorative\" alt=\"\"><p>Fictional marketing tail.</p></body></html>",
       "visible": [
         "Fictional marketing bulletin",
         "Read the report",
@@ -32,7 +32,7 @@
     {
       "name": "malformed-marketing-html",
       "mimeType": "text/html",
-      "bodyTemplate": "<!doctype html><html><head><!--[if mso]><xml>HIDDEN_MSO_LAYOUT</xml><![endif]--><style>HIDDEN_FILTER_STYLE .card { filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0); }</style></head><body><h1>Fictional imperfect letter</h1><p>Fictional {account}: café 👋.</p></style></div><table role=\"presentation\"><tr><td><div>Readable offer without tag debris</td><td><p>Useful second column</td></tr></table><p><a href=\"{longUrlHtml}\">Offer details</a></p><img src=\"{trackerUrl}/offer\" alt=\"Fictional offer artwork\"><p>Fictional imperfect tail.</body></html>",
+      "bodyTemplate": "<!doctype html><html><head><!--[if mso]><xml>HIDDEN_MSO_LAYOUT</xml><![endif]--><style>HIDDEN_FILTER_STYLE .card { filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0); }</style></head><body><h1>Fictional imperfect letter</h1><p>Fictional {account}: caf\u00e9 \ud83d\udc4b.</p></style></div><table role=\"presentation\"><tr><td><div>Readable offer without tag debris</td><td><p>Useful second column</td></tr></table><p><a href=\"{longUrlHtml}\">Offer details</a></p><img src=\"{trackerUrl}/offer\" alt=\"Fictional offer artwork\"><p>Fictional imperfect tail.</body></html>",
       "visible": [
         "Fictional imperfect letter",
         "Readable offer without tag debris",
@@ -57,7 +57,7 @@
     {
       "name": "plain-links-and-literals",
       "mimeType": "text/plain",
-      "bodyTemplate": "Fictional plain-link note\nFictional {account}: café 👋.\nRead: {longUrl}\nArchive: {longPathUrl}\nKeep this literal code example: <b>Hello</b> and x < y.\nKeep the address example: <team@example.org>.\nFictional plain tail.\n",
+      "bodyTemplate": "Fictional plain-link note\nFictional {account}: caf\u00e9 \ud83d\udc4b.\nRead: {longUrl}\nArchive: {longPathUrl}\nKeep this literal code example: <b>Hello</b> and x < y.\nKeep the address example: <team@example.org>.\nFictional plain tail.\n",
       "visible": [
         "Fictional plain-link note",
         "Keep this literal code example: <b>Hello</b> and x < y.",
@@ -66,6 +66,24 @@
       ],
       "absent": [],
       "styled": []
+    },
+    {
+      "name": "plain-newsletter-preview-padding",
+      "mimeType": "text/plain",
+      "bodyTemplate": "Fictional release preview.\nUpgrade to the next version. \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \u034f \u2007 \n\n\nReal newsletter body.\nFictional {account}: caf\u00e9 \ud83d\udc4b.\nRead: https://example.test/release\nFictional newsletter tail.\n",
+      "visible": [
+        "Fictional release preview.",
+        "Real newsletter body.",
+        "Fictional newsletter tail."
+      ],
+      "initialVisible": [
+        "Real newsletter body.",
+        "Fictional newsletter tail."
+      ],
+      "absent": [],
+      "styled": [
+        "https://example.test/release"
+      ]
     },
     {
       "name": "html-looking-plain",

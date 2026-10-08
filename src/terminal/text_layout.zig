@@ -22,6 +22,15 @@ pub const Position = struct {
 };
 pub const Options = struct { mode: Mode = .words, marker_at: ?usize = null, base_row: usize = 0 };
 pub const Glyph = struct { text: []const u8, columns: u16, position: Position, byte_offset: usize, marker: bool = false };
+/// A cell must advance the real terminal by its declared width. An isolated
+/// combining mark/joiner has zero width, so emitting it as a one-cell glyph
+/// desynchronizes libvaxis's cursor bookkeeping. Keep attached accents/emoji
+/// untouched and use an actual blank cell for an otherwise invisible cluster.
+pub fn cellGrapheme(raw: []const u8, method: vaxis.gwidth.Method) []const u8 {
+    if (raw.len > 128) return "�";
+    if (raw.len > 0 and vaxis.gwidth.gwidth(raw, method) == 0) return " ";
+    return raw;
+}
 fn standaloneAscii(input: []const u8, offset: usize) bool {
     // A following non-ASCII code point may join this ASCII character (combining
     // marks, variation selectors/keycaps or ZWJ). Keep those on the unchanged
@@ -150,7 +159,7 @@ pub const Iterator = struct {
                 const gr = graphemes.next() orelse return null;
                 break :blk gr.bytes(self.text[self.offset..]);
             };
-            const shown = if (raw.len > 128) "�" else raw;
+            const shown = if (raw.len == 1 and raw[0] >= 0x20 and raw[0] < 0x7f) raw else cellGrapheme(raw, self.method);
             const columns = if (raw.len == 1 and raw[0] >= 0x20 and raw[0] < 0x7f) 1 else @max(vaxis.gwidth.gwidth(shown, self.method), 1);
             self.position.wrap(columns, self.width);
             const position = self.position;
@@ -365,4 +374,28 @@ test "reader polish: long whitespace before an overwide token preserves every ce
     try std.testing.expectEqual(@as(usize, 1), markers);
     try std.testing.expectEqual(iterator.position, after(input, 16, .unicode, options));
     try std.testing.expectEqual(Position{ .row = marker_at / 16, .column = @intCast(marker_at % 16) }, caret(input, marker_at, 16, .unicode, .words));
+}
+
+test "reader polish: standalone zero width clusters occupy real blank cells without corrupting accents or emoji" {
+    const input = "\u{034f}\n\u{200c}\nA\u{301} 👩‍💻";
+    for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth, .no_zwj }) |method| {
+        var iterator = Iterator.init(input, 40, method, .{});
+        const joiner = iterator.next().?;
+        try std.testing.expectEqualStrings(" ", joiner.text);
+        try std.testing.expectEqual(@as(u16, 1), joiner.columns);
+        try std.testing.expectEqual(Position{ .row = 0, .column = 0 }, joiner.position);
+        const nonjoiner = iterator.next().?;
+        try std.testing.expectEqualStrings(" ", nonjoiner.text);
+        try std.testing.expectEqual(Position{ .row = 1, .column = 0 }, nonjoiner.position);
+        const accent = iterator.next().?;
+        try std.testing.expectEqualStrings("A\u{301}", accent.text);
+        try std.testing.expectEqual(Position{ .row = 2, .column = 0 }, accent.position);
+        _ = iterator.next(); // Literal space separating the complete graphemes.
+        const emoji = iterator.next().?;
+        try std.testing.expectEqualStrings("👩‍💻", emoji.text);
+        // Width methods differ for ZWJ sequences, but the literal glyph and
+        // its declared terminal width must agree for every method.
+        try std.testing.expectEqual(vaxis.gwidth.gwidth(emoji.text, method), emoji.columns);
+        try std.testing.expect(iterator.next() == null);
+    }
 }

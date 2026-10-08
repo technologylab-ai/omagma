@@ -99,7 +99,7 @@ def compose_case(binary, directory):
         body = terminal.screen.locate("Body: INSERT")
         from_row = terminal.screen.locate("From:")
         require(terminal.screen.styles[body["row"]][body["column"]][1] != terminal.screen.styles[from_row["row"]][from_row["column"]][1], "Body focus lacks the selected-row background")
-        require(terminal.screen.styles[body["row"]][70][1] == terminal.screen.styles[body["row"]][body["column"]][1], "Body highlight does not cover its full row")
+        require(terminal.screen.styles[body["row"]][70][1] != terminal.screen.styles[body["row"]][body["column"]][1], "Preview looks focused while Enter edits the body")
         require(terminal.screen.styles[from_row["row"]][from_row["column"]][2] is False, "From is styled like a focused field")
         require("Ctrl+S Review" not in panel_text(terminal, "Compose"), "composer has an extra in-pane shortcut footer")
         terminal.send(b"\x1b")

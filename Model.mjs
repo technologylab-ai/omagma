@@ -1,6 +1,14 @@
 // Presentation-only normalization. The Zig child remains the provider and
 // authority for account identity, bounded fetches and browser destinations.
 export const PLUGIN_ID = "io.github.technologylab_ai.omagma";
+export const TUI_APP_ID = "TUI.float.omagma";
+
+export function tuiArgv(binary, account, fixtures) {
+  const argv = ["omarchy", "launch", "tui", "--app-id=" + TUI_APP_ID, binary, "tui"];
+  if (account) argv.push("--account", account);
+  if (fixtures) argv.push("--fixtures");
+  return argv;
+}
 export const MAX_ROWS = 30;
 export const MAX_FRAME_BYTES = 512 * 1024;
 export const MAX_PENDING = 64;

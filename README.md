@@ -33,7 +33,7 @@ For manual Linux setup:
 
 ## Use the bar
 
-Click the magma icon, choose an account, and select a message to preview its snippet. Activate a message or choose **Open inbox** to open the matching Gmail page in that account’s Chrome profile. **Refresh** updates the selected account. Accounts have separate lists and counts; there is no combined Inbox.
+Click the magma icon, choose an account, and select a message to preview its snippet. Activate a message or choose **Open inbox** to open the matching Gmail page in that account’s Chrome profile. **Open TUI** opens that account in a floating terminal. **Refresh** updates the selected account. Accounts have separate lists and counts; there is no combined Inbox.
 
 Set `refreshIntervalSeconds` to `300` in your private account configuration to refresh every five minutes, including while the dropdown is closed. It defaults to `0`, which disables scheduled refresh. [Dropdown keys and states](docs/UI.md) · [Background refresh](docs/BACKGROUND-REFRESH.md).
 
@@ -44,6 +44,12 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 ![Omagma TUI with fictional mail, compact links and a new-mail card](docs/images/omagma-tui-arrivals.png)
 
 The running TUI adopts background cache updates, preserving your reading spot. A **New mail** card accumulates arrivals per account and clears on interaction. `gg` jumps to the first cached mail. Long links use compact colored labels with complete destinations available through `L`; HTML images use text placeholders. [0.2.6 release notes](docs/release-notes/0.2.6.md).
+
+`T` opens the theme picker: choose the orange **Omagma** palette or **Follow
+Omarchy**, with live preview and a saved preference. Unread subjects, stars and
+label names stay visible. Help is searchable with `/`; dialog buttons support
+Tab/Shift+Tab and Enter. See [all features](docs/FEATURES.md) and
+[next priorities](docs/ROADMAP.md).
 
 The v0.2.6 Linux x86_64 TUI settled at approximately **12 MB of RAM with three fictional accounts** in its 1,000-cycle workload. Markdown composition settled around **13 MB** in a separate lifecycle workload. These are complete Omagma processes, excluding the terminal emulator, editor and separately running bar; larger bodies have separate measurements. [Memory details](docs/MEMORY.md#published-terminal-workload-v026).
 

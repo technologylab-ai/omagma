@@ -44,6 +44,7 @@ BarWidget {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function refresh(): void { if (root.service) root.service.refresh() }
+    function tui(): void { if (root.service) root.service.openTui() }
     function state(): string {
       return JSON.stringify({ daemon: root.service ? root.service.daemonState : "missing", opened: root.opened,
         selected: root.service ? root.service.selected : "", rows: root.service ? root.service.retainedRows : 0,

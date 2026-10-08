@@ -82,7 +82,13 @@ class Screen:
             self.y = max(0, self.y - 1)
 
     def draw(self, char):
-        if char == "\u200d" or unicodedata.combining(char) or char in {"\ufe0e", "\ufe0f"} or self.join_next:
+        # Canonical combining class0 does not imply a printable cell: CGJ is
+        # Mn, and zero-width formatting characters also leave the real cursor
+        # in place. Treating them as width1 would reproduce the application's
+        # bug in this independent oracle and conceal damaged differential frames.
+        if unicodedata.category(char) in {"Mn", "Me"} or char in {
+            "\u00ad", "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"
+        } or self.join_next:
             if self.anchor:
                 y, x = self.anchor
                 self.cells[y][x] += char
@@ -193,6 +199,14 @@ if __name__ == "__main__":
             self.assertEqual(screen.cells[0][5], "👋")
             self.assertEqual(screen.cells[0][6], "")
             self.assertEqual(screen.locate("X"), {"row": 0, "column": 7})
+
+        def test_zero_width_combining_class_zero_and_formatters_do_not_advance_cursor(self):
+            screen = Screen(12, 3)
+            screen.feed("A\u034f\u200cB\u200b\ufeffC".encode())
+            self.assertEqual(screen.locate("B"), {"row": 0, "column": 1})
+            self.assertEqual(screen.locate("C"), {"row": 0, "column": 2})
+            self.assertEqual((screen.x, screen.y), (3, 0))
+            self.assertEqual(screen.cells[0][3:], [" "] * 9)
 
         def test_alternate_screen_restores_main(self):
             screen = Screen(12, 3)

@@ -97,6 +97,7 @@ ShellRoot {
     function refresh(): void { mailService.refresh() }
     function restart(): void { mailService.restart() }
     function inbox(): void { mailService.openInbox() }
+    function tui(): void { if (content.item) content.item.tuiButton.clicked() }
     function message(): void { if (mailService.currentAccount.messages.length) mailService.openMessage(mailService.currentAccount.messages[0].id) }
     function selectMessage(id: string): void { if (content.item) content.item.selectedMessageId = id }
     function moveSelection(delta: int): void { if (content.item) content.item.moveSelection(delta) }

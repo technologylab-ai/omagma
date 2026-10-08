@@ -84,6 +84,15 @@ def within_reader(terminal, text):
     return None
 
 
+def reader_projection(terminal):
+    """Current complete cells/styles, independent of a prior VT transcript."""
+    rectangle = reader_rectangle(terminal.screen)
+    require(rectangle is not None, "reader viewport missing during transition")
+    return [(terminal.screen.cells[row][rectangle["left"]:rectangle["right"]],
+             terminal.screen.styles[row][rectangle["left"]:rectangle["right"]])
+            for row in range(rectangle["top"], rectangle["bottom"])]
+
+
 def collect_reader(terminal, required=(), max_steps=100):
     observed = []
     for step in range(max_steps + 1):
@@ -336,7 +345,8 @@ def reader_ux_case(binary, directory):
         for variant in spec["variants"]:
             owned = directory / variant["name"]
             fixture, expected = reader_ux_fixture(owned, variant, spec, origin)
-            seed(binary, owned, fixture, bodies=(MANIFEST["htmlMessageId"],))
+            bodies = (MANIFEST["htmlMessageId"], MANIFEST["plainPreferredMessageId"]) if variant["name"] == "plain-newsletter-preview-padding" else (MANIFEST["htmlMessageId"],)
+            seed(binary, owned, fixture, bodies=bodies)
             saved = body_snapshot(owned)
             with Client(binary, owned, extra=fixture.options()) as client:
                 message = client.request("mail.read", messageId=MANIFEST["htmlMessageId"], cacheOnly=True)
@@ -356,6 +366,9 @@ def reader_ux_case(binary, directory):
                 terminal = start(binary, owned, fixture, path)
                 fixture.wait_entered(terminal.process, pump=terminal.pump)
                 terminal.until(lambda: reader_contains(terminal.screen, variant["visible"][0]))
+                for value in variant.get("initialVisible", ()):
+                    require(reader_contains(terminal.screen, substitute(value, ACCOUNTS[0])),
+                            "newsletter preview padding obscured the real body in the initial viewport")
                 terminal.send(b"l")
                 visible = [substitute(value, ACCOUNTS[0]) for value in variant["visible"]]
                 if variant["name"] in {"marketing-html", "plain-links-and-literals"}:
@@ -381,11 +394,32 @@ def reader_ux_case(binary, directory):
                             "long URL tracking tail still occupies the reading view")
                 require(b"\x1b]8;" not in terminal.output and b"\x1b]52;" not in terminal.output,
                         "reader UX emitted mail-authored terminal controls")
+                if variant["name"] == "plain-newsletter-preview-padding":
+                    require("\u034f".encode() not in terminal.output,
+                            "invisible newsletter padding escaped into terminal cursor bookkeeping")
+                    # The original zero-width bug also poisoned differential
+                    # rendering of the next, otherwise well-formed message.
+                    # Compare that transition with a new clean process at the
+                    # identical saved selection, rather than forcing a redraw.
+                    clean = substitute(MANIFEST["plainPreferredTemplate"], ACCOUNTS[0])
+                    terminal.send(b"hj")  # Reader → list → next cached message.
+                    terminal.until(lambda: reader_contains(terminal.screen, clean))
+                    projected = reader_projection(terminal)
+                    terminal.finish()
+                    terminal.close()
+                    terminal = None
+                    fixture.stage(ACCOUNTS[0], "baseline", held=True)
+                    terminal = start(binary, owned, fixture, owned / "transition-fresh-metrics.json")
+                    fixture.wait_entered(terminal.process, pump=terminal.pump)
+                    terminal.until(lambda: reader_contains(terminal.screen, clean))
+                    require(reader_projection(terminal) == projected,
+                            "padding-to-clean transition retained stale glyphs or styles versus a fresh reader")
                 terminal.finish()
                 require(body_snapshot(owned) == saved, "reader UX rewrote immutable source/body cache")
                 require(peer.requests == [], "reader UX fetched an image or marketing resource")
                 observations.append({"variant": variant["name"], "readableBody": True,
                     "compactStyledLinks": variant["name"] in {"marketing-html", "plain-links-and-literals"},
+                    "cleanTransitionMatchesFreshReader": variant["name"] == "plain-newsletter-preview-padding",
                     "literalSourcePreserved": True, "remoteResourcesRequested": 0})
             except Exception as failure:
                 wrapped = failed_view(failure, terminal, path)

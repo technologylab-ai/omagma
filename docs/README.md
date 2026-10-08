@@ -50,6 +50,7 @@ installation and account onboarding.
 
 | Reference | Purpose |
 | --- | --- |
+| [Next priorities](ROADMAP.md) | UX audit, safety follow-ups and useful TUI/CLI parity proposals |
 | [Agent development rules](../AGENTS.md#developing-omagma) | Compiler, ownership, privacy and local iteration rules |
 | [Backend transport](TRANSPORT.md) / [bar protocol](PROTOCOL.md) | Backend and UI integration contracts |
 | [Terminal implementation](TERMINAL-IMPLEMENTATION.md) | Module ownership and terminal runtime architecture |

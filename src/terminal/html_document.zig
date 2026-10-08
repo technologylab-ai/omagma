@@ -447,6 +447,12 @@ const Context = struct {
         var is_data = false;
         var next_ordinal: u32 = 1;
         if (!self.state.skip) {
+            // Keep deferred prose whitespace outside the new anchor, so it
+            // cannot turn into an underlined blank before the link label.
+            if (tag.is("a") and self.pending_space and (self.text_buffer.items.len != 0 or self.spans.items.len != 0)) {
+                self.pending_space = false;
+                try self.append(" ");
+            }
             if (tag.is("b") or tag.is("strong")) self.state.style.bold = true;
             if (tag.is("i") or tag.is("em")) self.state.style.italic = true;
             if (tag.is("u")) self.state.style.underline = true;

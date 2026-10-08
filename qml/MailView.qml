@@ -17,10 +17,13 @@ FocusScope {
   property real headingFontSize: 12
   property real layoutScale: 1
   function px(value) { return Math.max(1, Math.round(value * layoutScale)) }
+  property alias tuiButton: tuiOpen
   function layoutBounds() {
     const at = headerClose.mapToItem(root, 0, 0)
+    const tui = tuiOpen.mapToItem(root, 0, 0)
     return { width: root.width, height: root.height, closeX: at.x, closeY: at.y,
-      closeWidth: headerClose.width, closeHeight: headerClose.height }
+      closeWidth: headerClose.width, closeHeight: headerClose.height,
+      tuiX: tui.x, tuiY: tui.y, tuiWidth: tuiOpen.width, tuiHeight: tuiOpen.height }
   }
   property double nowMs: Date.now()
   property string selectedMessageId: ""
@@ -231,6 +234,17 @@ FocusScope {
             font.family: root.fontFamily
             font.pixelSize: root.headingFontSize
             font.bold: true
+          }
+          MailButton {
+            id: tuiOpen
+            objectName: "openTuiButton"
+            text: "Open TUI"
+            fontFamily: root.fontFamily
+            fontSize: root.bodyFontSize
+            layoutScale: root.layoutScale
+            foreground: root.foreground
+            accent: root.accent
+            onClicked: root.service.openTui()
           }
           MailButton {
             text: "Open inbox"
