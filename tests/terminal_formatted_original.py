@@ -535,9 +535,9 @@ def html_template(binary, directory):
             require(draft["original"]["bodyHtml"] == original, "template repair changed the saved original")
             preview = client.request("draft.preview", draftId=draft["id"])
             output = preview["bodyHtml"]
-            require(output.lower().count("<html") == 1 and 'lang="en"' in output
-                    and 'xmlns:o="urn:schemas-microsoft-com:office:office"' in output,
-                    "repeated root tags lost language or namespace attributes")
+            require('<html xmlns="http://www.w3.org/1999/xhtml" '
+                    'xmlns:o="urn:schemas-microsoft-com:office:office"><html lang="en">' in output,
+                    "source root tags or their attributes were changed")
             require(damaged_paragraph in output and '<style id="source-style">' in output,
                     "repair changed original paragraph markup or styles")
             require(len(draft["original"]["resources"]) == 3 and client.request("cache.stats")["fixtureSends"] == 0,

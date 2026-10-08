@@ -14,6 +14,8 @@ Use Zig **0.17.0 exactly**, the pin in `build.zig.zon`. An Omarchy system compil
 
 For local interface iterations, build into a separate development prefix, run focused checks for the changed behavior, and atomically replace the installed executable when the user requests a local update. Keep the application version unchanged. Do not run memory soaks, collect release evidence, or publish a release unless the task calls for qualification or publication. Release qualification remains a separate workflow.
 
+Keep the private feature journal under `.local-notes/daily-log/` updated after each completed improvement and release. Append dated entries with stable feature IDs and superseding references when behavior changes; consolidate the current view in `current-since-release.md` for release notes, social posts and videos. Record release versions and source commits so the baseline is explicit. Keep the journal uncommitted, generic and free of private mail, account details or credentials.
+
 Use **Ctrl** for modified application shortcuts, consistently across the TUI and bar; leave Alt available for desktop shortcuts. Keep Vim navigation and letter alternatives so workflows do not require laptop-dependent Home, End or Insert keys. Show the actual contextual shortcuts in buttons/help; printable letters remain data in text fields. Reserve Ctrl+B for Herdr/tmux prefixes. Buttons must be reachable with Tab/Shift+Tab and activated with Enter; file path completion uses Ctrl+F, not Tab.
 
 Use `zig build test -Doptimize=debug -Dtest-filter="local UI:"` for the account/help regressions, and `python3 tests/terminal_local_ui.py --binary /path/to/development/omagma` for the corresponding owned-PTY interactions. Omit the filter for full correctness qualification.

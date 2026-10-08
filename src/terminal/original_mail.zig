@@ -11,8 +11,8 @@ const logo_content_id = "omagma-logo@omagma.invalid";
 const max_tokens = 32768;
 const max_tag_bytes = 16384;
 const max_encoding_tags = 32;
-const max_extra_roots = 16;
 const max_root_attributes = 256;
+const max_scope_depth = 64;
 const utf8_meta = "<meta charset=\"utf-8\">";
 const Span = struct { start: usize, end: usize };
 
@@ -44,7 +44,7 @@ const Buffer = struct {
     }
 };
 
-/// Validates retained source text and its structural envelope. Resource bytes,
+/// Checks bounded source text and a safe insertion point, not HTML validity. Resource bytes,
 /// CID/header syntax and aggregate attachment quotas remain the MIME/backend's
 /// responsibility. This routine neither allocates nor changes the original.
 pub fn validate(original: t.Original) !void {
@@ -59,7 +59,6 @@ pub fn validate(original: t.Original) !void {
 pub fn resourceUsage(html: []const u8, resources: []const t.Attachment) !u64 {
     if (resources.len > 64) return error.TooManyAttachments;
     try bodyText(html);
-    _ = try scan(html);
     var used: u64 = 0;
     try scanReferences(html, resources, &used);
     return used;
@@ -84,61 +83,21 @@ pub fn prepare(a: std.mem.Allocator, note: Note, original: t.Original) !Prepared
     var html: Buffer = .{ .a = a };
     errdefer html.bytes.deinit(a);
     const input = original.bodyHtml;
-    const content_start = if (envelope.html_open) |root| root.end else if (envelope.doctype) |doctype| doctype.end else 0;
-    if (envelope.html_open) |root| {
-        try envelope.copy(&html, input, 0, root.start);
-        try envelope.appendRoot(&html, input);
-    } else {
-        if (envelope.doctype) |doctype| try envelope.copy(&html, input, 0, doctype.end) else try html.append("<!doctype html>");
-        try html.append("<html>");
-    }
-
-    var after_head: usize = undefined;
-    if (envelope.head_open) |head| {
-        try envelope.copy(&html, input, content_start, head.end);
-        try html.append(utf8_meta);
-        const end = if (envelope.head_close) |close| close.start else envelope.implicit_head_end orelse return error.InvalidOriginalHtml;
-        try envelope.copy(&html, input, head.end, end);
-        if (envelope.head_close) |close| {
-            try envelope.copy(&html, input, close.start, close.end);
-            after_head = close.end;
-        } else {
-            try html.append("</head>");
-            after_head = end;
-        }
-    } else {
-        const end = if (envelope.body_open) |body| body.start else envelope.first_body orelse if (envelope.html_close) |root| root.start else input.len;
-        try html.append("<head>");
-        try html.append(utf8_meta);
-        try envelope.copy(&html, input, content_start, end);
-        try html.append("</head>");
-        after_head = end;
-    }
-
-    const body_start = if (envelope.body_open) |body| body.end else after_head;
-    if (envelope.body_open) |body| try envelope.copy(&html, input, after_head, body.end) else try html.append("<body>");
+    // Splice into the received bytes, without appending a doctype or closing
+    // tags. The recipient retains the same quirks mode and recovery of tails,
+    // repeated envelopes and incomplete body markup that it already had.
+    try envelope.copy(&html, input, 0, envelope.meta_at);
+    try html.append(utf8_meta);
+    const body_start = envelope.note_at;
+    try envelope.copy(&html, input, envelope.meta_at, body_start);
     const logo_offset = html.bytes.items.len + note.logoOffset;
     try html.append(note.html);
     try htmlHeaders(&html, original);
-    const body_end = if (envelope.body_close) |body| body.start else if (envelope.html_close) |root| root.start else input.len;
     if (input.len == 0) {
         try html.append("<div style=\"white-space:pre-wrap;overflow-wrap:anywhere\">");
         try html.escaped(original.bodyText);
         try html.append("</div>");
-    } else try envelope.copy(&html, input, body_start, body_end);
-    const after_body = if (envelope.body_close) |body| blk: {
-        try envelope.copy(&html, input, body.start, body.end);
-        break :blk body.end;
-    } else blk: {
-        try html.append("</body>");
-        break :blk body_end;
-    };
-    if (envelope.html_close != null) {
-        try envelope.copy(&html, input, after_body, input.len);
-    } else {
-        try envelope.copy(&html, input, after_body, input.len);
-        try html.append("</html>");
-    }
+    } else try envelope.copy(&html, input, body_start, input.len);
     const plain_result = try plain.bytes.toOwnedSlice(a);
     errdefer a.free(plain_result);
     return .{ .html = try html.bytes.toOwnedSlice(a), .plain = plain_result, .logoOffset = logo_offset, .resources = original.resources };
@@ -240,58 +199,15 @@ fn htmlLabel(out: *Buffer, label: []const u8) !void {
 }
 
 const Envelope = struct {
-    html_open: ?Span = null,
-    html_close: ?Span = null,
-    head_open: ?Span = null,
-    head_close: ?Span = null,
-    body_open: ?Span = null,
-    body_close: ?Span = null,
-    doctype: ?Span = null,
-    first_body: ?usize = null,
-    implicit_head_end: ?usize = null,
+    meta_at: usize = 0,
+    note_at: usize = 0,
     encoding_tags: [max_encoding_tags]Span = undefined,
     encoding_count: usize = 0,
-    extra_roots: [max_extra_roots]Span = undefined,
-    extra_root_count: usize = 0,
-    fn appendRoot(self: *const Envelope, out: *Buffer, input: []const u8) !void {
-        const root = self.html_open orelse return error.InvalidOriginalHtml;
-        if (self.extra_root_count == 0) return out.append(input[root.start..root.end]);
-        const first_tag = try tagAt(input, root.start) orelse return error.InvalidOriginalHtml;
-        var names: [max_root_attributes][]const u8 = undefined;
-        var count: usize = 0;
-        var attributes: AttributeIterator = .{ .input = first_tag.attributes };
-        while (attributes.next()) |attribute| {
-            if (seenAttribute(names[0..count], attribute.name)) continue;
-            if (count == names.len) return error.OriginalHtmlUnavailable;
-            names[count] = attribute.name;
-            count += 1;
-        }
-        // Keep the first tag's spelling, spacing and values. Later opening
-        // roots only contribute absent attributes, matching HTML root repair.
-        try out.append(input[root.start .. root.end - 1]);
-        for (self.extra_roots[0..self.extra_root_count]) |extra| {
-            const tag = try tagAt(input, extra.start) orelse return error.InvalidOriginalHtml;
-            attributes = .{ .input = tag.attributes };
-            while (attributes.next()) |attribute| {
-                if (seenAttribute(names[0..count], attribute.name)) continue;
-                if (count == names.len) return error.OriginalHtmlUnavailable;
-                names[count] = attribute.name;
-                count += 1;
-                try out.append(" ");
-                try out.append(attribute.raw);
-            }
-        }
-        try out.append(">");
-    }
+
     fn copy(self: *const Envelope, out: *Buffer, input: []const u8, start: usize, end: usize) !void {
         if (start > end or end > input.len) return error.InvalidOriginalHtml;
         var offset = start;
-        var encoding_index: usize = 0;
-        var root_index: usize = 0;
-        while (encoding_index < self.encoding_count or root_index < self.extra_root_count) {
-            const take_root = root_index < self.extra_root_count and (encoding_index == self.encoding_count or self.extra_roots[root_index].start < self.encoding_tags[encoding_index].start);
-            const tag = if (take_root) self.extra_roots[root_index] else self.encoding_tags[encoding_index];
-            if (take_root) root_index += 1 else encoding_index += 1;
+        for (self.encoding_tags[0..self.encoding_count]) |tag| {
             if (tag.end <= start or tag.start >= end) continue;
             if (tag.start < offset or tag.end > end) return error.InvalidOriginalHtml;
             try out.append(input[offset..tag.start]);
@@ -300,43 +216,62 @@ const Envelope = struct {
         try out.append(input[offset..end]);
     }
 };
-const Attribute = struct { name: []const u8, raw: []const u8 };
+
+const Attribute = struct { name: []const u8, value: []const u8, raw: []const u8 };
+/// The same attribute states delimit tags, read URLs and recognize charset
+/// metadata. A quote starts a quoted value only immediately after '=' and
+/// optional whitespace; quotes/'<' in names or unquoted values stay literal.
+/// https://html.spec.whatwg.org/multipage/parsing.html#before-attribute-name-state
+/// https://html.spec.whatwg.org/multipage/parsing.html#attribute-value-(unquoted)-state
 const AttributeIterator = struct {
     input: []const u8,
     offset: usize = 0,
+    end: ?usize = null,
+    self_closing: bool = false,
+
     fn next(self: *AttributeIterator) ?Attribute {
         const input = self.input;
         while (self.offset < input.len) {
-            while (self.offset < input.len and (white(input[self.offset]) or input[self.offset] == '/')) self.offset += 1;
-            const start = self.offset;
-            while (self.offset < input.len and !white(input[self.offset]) and input[self.offset] != '=' and input[self.offset] != '/') self.offset += 1;
-            if (self.offset == start) {
-                if (self.offset < input.len) self.offset += 1;
+            while (self.offset < input.len and white(input[self.offset])) self.offset += 1;
+            if (self.offset == input.len) return null;
+            if (input[self.offset] == '>') {
+                self.offset += 1;
+                self.end = self.offset;
+                return null;
+            }
+            if (input[self.offset] == '/') {
+                self.offset += 1;
+                self.self_closing = self.offset < input.len and input[self.offset] == '>';
                 continue;
             }
+            const start = self.offset;
+            // An initial '=' is itself part of an erroneous attribute name.
+            if (input[self.offset] == '=') self.offset += 1;
+            while (self.offset < input.len and !white(input[self.offset]) and input[self.offset] != '=' and input[self.offset] != '/' and input[self.offset] != '>') self.offset += 1;
             const name = input[start..self.offset];
             const name_end = self.offset;
             while (self.offset < input.len and white(input[self.offset])) self.offset += 1;
-            if (self.offset == input.len or input[self.offset] != '=') return .{ .name = name, .raw = input[start..name_end] };
+            if (self.offset == input.len or input[self.offset] != '=') return .{ .name = name, .value = "", .raw = input[start..name_end] };
             self.offset += 1;
             while (self.offset < input.len and white(input[self.offset])) self.offset += 1;
+            var value: []const u8 = "";
             if (self.offset < input.len and (input[self.offset] == '\'' or input[self.offset] == '"')) {
                 const quote = input[self.offset];
                 self.offset += 1;
+                const value_start = self.offset;
                 while (self.offset < input.len and input[self.offset] != quote) self.offset += 1;
+                value = input[value_start..self.offset];
                 if (self.offset < input.len) self.offset += 1;
             } else {
-                while (self.offset < input.len and !white(input[self.offset])) self.offset += 1;
+                const value_start = self.offset;
+                while (self.offset < input.len and !white(input[self.offset]) and input[self.offset] != '>') self.offset += 1;
+                value = input[value_start..self.offset];
             }
-            return .{ .name = name, .raw = input[start..self.offset] };
+            return .{ .name = name, .value = value, .raw = input[start..self.offset] };
         }
         return null;
     }
 };
-fn seenAttribute(names: []const []const u8, name: []const u8) bool {
-    for (names) |existing| if (std.ascii.eqlIgnoreCase(existing, name)) return true;
-    return false;
-}
 const Tag = struct {
     span: Span,
     name: []const u8,
@@ -348,36 +283,9 @@ const Tag = struct {
         return std.ascii.eqlIgnoreCase(self.name, name);
     }
     fn attribute(self: Tag, name: []const u8) ?[]const u8 {
-        const attrs = self.attributes;
-        var i: usize = 0;
-        while (i < attrs.len) {
-            while (i < attrs.len and (white(attrs[i]) or attrs[i] == '/')) : (i += 1) {}
-            const start = i;
-            while (i < attrs.len and !white(attrs[i]) and attrs[i] != '=' and attrs[i] != '/') : (i += 1) {}
-            if (i == start) {
-                i += 1;
-                continue;
-            }
-            const key = attrs[start..i];
-            while (i < attrs.len and white(attrs[i])) : (i += 1) {}
-            var value: []const u8 = "";
-            if (i < attrs.len and attrs[i] == '=') {
-                i += 1;
-                while (i < attrs.len and white(attrs[i])) : (i += 1) {}
-                if (i < attrs.len and (attrs[i] == '\'' or attrs[i] == '"')) {
-                    const quote = attrs[i];
-                    i += 1;
-                    const value_start = i;
-                    while (i < attrs.len and attrs[i] != quote) : (i += 1) {}
-                    value = attrs[value_start..i];
-                    if (i < attrs.len) i += 1;
-                } else {
-                    const value_start = i;
-                    while (i < attrs.len and !white(attrs[i])) : (i += 1) {}
-                    value = attrs[value_start..i];
-                }
-            }
-            if (std.ascii.eqlIgnoreCase(key, name)) return value;
+        var attributes: AttributeIterator = .{ .input = self.attributes };
+        while (attributes.next()) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
         }
         return null;
     }
@@ -390,6 +298,9 @@ fn blank(value: []const u8) bool {
     return true;
 }
 fn commentEnd(input: []const u8, start: usize) !usize {
+    // These abrupt comment starts terminate in HTML's comment-start states.
+    if (std.mem.startsWith(u8, input[start..], "<!-->")) return start + 5;
+    if (std.mem.startsWith(u8, input[start..], "<!--->")) return start + 6;
     var i = start + 4;
     while (i < input.len) : (i += 1) {
         if (std.mem.startsWith(u8, input[i..], "-->")) return i + 3;
@@ -397,52 +308,54 @@ fn commentEnd(input: []const u8, start: usize) !usize {
     }
     return error.InvalidOriginalHtml;
 }
+fn declarationAt(input: []const u8, start: usize, doctype: bool) !Tag {
+    // Bogus comments and HTML doctypes terminate at '>', including a '>'
+    // encountered in an abruptly closed doctype identifier. XML DTD bracket
+    // nesting and ordinary attribute quoting do not apply to these tokens.
+    const limit = @min(input.len, start + max_tag_bytes);
+    const end = std.mem.indexOfScalarPos(u8, input[0..limit], start + 2, '>') orelse {
+        if (limit - start == max_tag_bytes) return error.OriginalHtmlUnavailable;
+        return error.InvalidOriginalHtml;
+    };
+    return .{ .span = .{ .start = start, .end = end + 1 }, .name = if (doctype) "doctype" else "", .declaration = true };
+}
 fn tagAt(input: []const u8, start: usize) !?Tag {
     var i = start + 1;
     if (i == input.len) return null;
+    if (input[i] == '!' or input[i] == '?') {
+        return try declarationAt(input, start, std.ascii.startsWithIgnoreCase(input[start..], "<!doctype"));
+    }
     var closing = false;
     if (input[i] == '/') {
         closing = true;
         i += 1;
     }
     if (i == input.len) return null;
-    const declaration = input[i] == '!' or input[i] == '?';
-    if (declaration) i += 1;
-    if (i == input.len) return error.InvalidOriginalHtml;
-    if (!declaration and !std.ascii.isAlphabetic(input[i])) return null;
-    const name_start = i;
-    while (i < input.len and (std.ascii.isAlphanumeric(input[i]) or input[i] == ':' or input[i] == '-' or input[i] == '_')) : (i += 1) {}
-    const name = input[name_start..i];
-    if (!declaration and i < input.len and !white(input[i]) and input[i] != '/' and input[i] != '>') return error.InvalidOriginalHtml;
-    const attrs = i;
-    var quote: u8 = 0;
-    var brackets: usize = 0;
-    while (i < input.len) : (i += 1) {
-        if (i - start >= max_tag_bytes) return error.OriginalHtmlUnavailable;
-        const c = input[i];
-        if (quote != 0) {
-            if (c == quote) quote = 0;
-        } else if (c == '\'' or c == '"') {
-            quote = c;
-        } else if (declaration and c == '[') {
-            brackets += 1;
-        } else if (declaration and c == ']') {
-            brackets -|= 1;
-        } else if (c == '>' and brackets == 0) {
-            // Once inside attribute text, an unquoted '<' is a recoverable
-            // attribute-name/value character, not a new tag boundary. Keep it
-            // literally: some generated mail contains <p style="..." <span>.
-            // https://html.spec.whatwg.org/multipage/parsing.html#attribute-name-state
-            // https://html.spec.whatwg.org/multipage/parsing.html#attribute-value-(unquoted)-state
-            const attributes = std.mem.trimEnd(u8, input[attrs..i], " \t\r\n");
-            return .{ .span = .{ .start = start, .end = i + 1 }, .name = name, .attributes = attributes, .closing = closing, .declaration = declaration, .self_closing = std.mem.endsWith(u8, attributes, "/") };
-        }
+    if (!std.ascii.isAlphabetic(input[i])) {
+        if (closing) return try declarationAt(input, start, false);
+        return null;
     }
-    return error.InvalidOriginalHtml;
+    const limit = @min(input.len, start + max_tag_bytes);
+    const name_start = i;
+    // Punctuation and non-ASCII bytes after an ASCII initial letter are tag
+    // name characters, not a new envelope or quote state (e.g. <body=broken>).
+    while (i < limit and !white(input[i]) and input[i] != '/' and input[i] != '>') i += 1;
+    const name = input[name_start..i];
+    var attributes: AttributeIterator = .{ .input = input[i..limit] };
+    var count: usize = 0;
+    while (attributes.next() != null) {
+        if (count == max_root_attributes) return error.OriginalHtmlUnavailable;
+        count += 1;
+    }
+    const end = attributes.end orelse {
+        if (limit - start == max_tag_bytes) return error.OriginalHtmlUnavailable;
+        return error.InvalidOriginalHtml;
+    };
+    return .{ .span = .{ .start = start, .end = i + end }, .name = name, .attributes = input[i .. i + end - 1], .closing = closing, .self_closing = attributes.self_closing };
 }
 fn headTag(tag: Tag) bool {
     if (tag.closing) return false;
-    for ([_][]const u8{ "meta", "base", "link", "style", "script", "title", "noscript" }) |name| if (tag.is(name)) return true;
+    for ([_][]const u8{ "meta", "base", "basefont", "bgsound", "link", "style", "script", "title", "noscript", "noframes", "template" }) |name| if (tag.is(name)) return true;
     return false;
 }
 fn rawTag(tag: Tag) bool {
@@ -450,120 +363,215 @@ fn rawTag(tag: Tag) bool {
     for ([_][]const u8{ "style", "script", "title", "textarea", "xmp", "iframe", "noembed", "noframes", "noscript" }) |name| if (tag.is(name)) return true;
     return false;
 }
-fn rawEnd(input: []const u8, tag: Tag) !usize {
+fn rawCloserAt(input: []const u8, start: usize, name: []const u8) !?Tag {
+    if (!std.mem.startsWith(u8, input[start..], "</")) return null;
+    const name_start = start + 2;
+    if (name.len > input.len - name_start or !std.ascii.eqlIgnoreCase(input[name_start..][0..name.len], name)) return null;
+    const end = name_start + name.len;
+    if (end < input.len and !white(input[end]) and input[end] != '/' and input[end] != '>') return null;
+    return try tagAt(input, start);
+}
+fn scriptClose(input: []const u8, tag: Tag) !Tag {
+    // Only HTML script-data escape states matter; JS strings/comments never
+    // decide HTML boundaries. No script is interpreted or executed here.
+    const State = enum { data, escaped, double_escaped };
+    var state: State = .data;
+    var i = tag.span.end;
+    while (i < input.len) {
+        if (state == .data and std.mem.startsWith(u8, input[i..], "<!--")) {
+            state = .escaped;
+            i += 4;
+        } else if (state != .data and std.mem.startsWith(u8, input[i..], "-->")) {
+            state = .data;
+            i += 3;
+        } else if (input[i] == '<') {
+            const closing_name = std.ascii.startsWithIgnoreCase(input[i..], "</script") and
+                (i + 8 == input.len or (i + 8 < input.len and (white(input[i + 8]) or input[i + 8] == '/' or input[i + 8] == '>')));
+            if (state == .double_escaped and closing_name) {
+                state = .escaped;
+                i += 8; // '</script' switches state; it is still source text.
+            } else if (try rawCloserAt(input, i, "script")) |closer| {
+                return closer;
+            } else if (state == .escaped and std.ascii.startsWithIgnoreCase(input[i..], "<script") and
+                i + 7 < input.len and (white(input[i + 7]) or input[i + 7] == '/' or input[i + 7] == '>'))
+            {
+                state = .double_escaped;
+                i += 7;
+            } else i += 1;
+        } else i += 1;
+    }
+    return error.InvalidOriginalHtml;
+}
+fn rawClose(input: []const u8, tag: Tag) !Tag {
+    if (tag.is("script")) return scriptClose(input, tag);
     var offset = tag.span.end;
     while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |start| {
         offset = start + 1;
-        if (offset == input.len or input[offset] != '/') continue;
-        const name_start = offset + 1;
-        if (tag.name.len > input.len - name_start or !std.ascii.eqlIgnoreCase(input[name_start..][0..tag.name.len], tag.name)) continue;
-        const end = name_start + tag.name.len;
-        if (end < input.len and !white(input[end]) and input[end] != '/' and input[end] != '>') continue;
-        const closer = try tagAt(input, start) orelse return error.InvalidOriginalHtml;
-        return closer.span.end;
+        if (try rawCloserAt(input, start, tag.name)) |closer| return closer;
+    }
+    return error.InvalidOriginalHtml;
+}
+fn rawEnd(input: []const u8, tag: Tag) !usize {
+    return (try rawClose(input, tag)).span.end;
+}
+fn cdataEnd(input: []const u8, start: usize) !usize {
+    const end = std.mem.indexOfPos(u8, input, start + 9, "]]>") orelse return error.InvalidOriginalHtml;
+    return end + 3;
+}
+fn countToken(count: *usize) !void {
+    if (count.* == max_tokens) return error.OriginalHtmlUnavailable;
+    count.* += 1;
+}
+fn templateEnd(input: []const u8, opener: Tag, tokens: *usize) !usize {
+    var depth: usize = 1;
+    var foreign_depth: usize = 0;
+    var offset = opener.span.end;
+    while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |start| {
+        try countToken(tokens);
+        if (std.mem.startsWith(u8, input[start..], "<!--")) {
+            offset = try commentEnd(input, start);
+            continue;
+        }
+        if (foreign_depth != 0 and std.mem.startsWith(u8, input[start..], "<![CDATA[")) {
+            offset = try cdataEnd(input, start);
+            continue;
+        }
+        const tag = try tagAt(input, start) orelse {
+            offset = start + 1;
+            continue;
+        };
+        offset = tag.span.end;
+        if (tag.declaration) continue;
+        if (tag.is("template")) {
+            if (tag.closing) {
+                depth -= 1;
+                if (depth == 0) return offset;
+            } else {
+                if (depth == max_scope_depth) return error.OriginalHtmlUnavailable;
+                depth += 1;
+            }
+        }
+        if (tag.is("svg") or tag.is("math")) {
+            if (tag.closing) foreign_depth -|= 1 else if (!tag.self_closing) {
+                if (foreign_depth == max_scope_depth) return error.OriginalHtmlUnavailable;
+                foreign_depth += 1;
+            }
+        }
+        if (tag.is("plaintext") and !tag.closing) return error.OriginalHtmlUnavailable;
+        if (foreign_depth == 0 and rawTag(tag)) offset = try rawEnd(input, tag);
     }
     return error.InvalidOriginalHtml;
 }
 
-/// Linear bounded envelope scan, not an HTML/CSS sanitizer or a browser DOM.
-/// Optional body/head/html end tags are repaired at known envelope boundaries;
-/// Repeated opening roots before the head/body are merged; trailing documents
-/// and ambiguous envelopes are refused.
+/// Find a safe note insertion boundary, not a conforming HTML document.
+/// Received envelopes and body bytes pass through; browser recovery still
+/// handles duplicate roots/bodies, omitted tags and content after their ends.
 fn scan(input: []const u8) !Envelope {
     var result: Envelope = .{};
-    var offset: usize = 0;
+    const Phase = enum { before_head, in_head, after_head, body };
+    var phase: Phase = .before_head;
+    var meta_at: ?usize = null;
+    var note_at: ?usize = null;
+    var offset: usize = if (std.mem.startsWith(u8, input, "\xef\xbb\xbf")) 3 else 0;
     var tokens: usize = 0;
-    var in_head = false;
-    var implicit_head_content = false;
+    var foreign_depth: usize = 0;
     while (offset < input.len) {
-        if (tokens == max_tokens) return error.OriginalHtmlUnavailable;
-        tokens += 1;
+        try countToken(&tokens);
         if (std.mem.startsWith(u8, input[offset..], "<!--")) {
-            offset = try commentEnd(input, offset);
+            offset = commentEnd(input, offset) catch |err| {
+                if (note_at != null and err == error.InvalidOriginalHtml) break;
+                return if (err == error.InvalidOriginalHtml) error.OriginalHtmlUnavailable else err;
+            };
+            continue;
+        }
+        if (foreign_depth != 0 and std.mem.startsWith(u8, input[offset..], "<![CDATA[")) {
+            offset = cdataEnd(input, offset) catch |err| {
+                if (note_at != null and err == error.InvalidOriginalHtml) break;
+                return if (err == error.InvalidOriginalHtml) error.OriginalHtmlUnavailable else err;
+            };
             continue;
         }
         if (input[offset] != '<') {
             const end = std.mem.indexOfScalarPos(u8, input, offset, '<') orelse input.len;
-            if (!blank(input[offset..end])) {
-                if (result.body_close != null or result.html_close != null) return error.InvalidOriginalHtml;
-                if (in_head) {
-                    result.implicit_head_end = offset;
-                    in_head = false;
-                }
-                if (result.body_open == null and result.first_body == null) result.first_body = offset;
+            if (note_at == null and !blank(input[offset..end])) {
+                note_at = offset;
+                if (meta_at == null) meta_at = offset;
+                phase = .body;
             }
             offset = end;
             continue;
         }
-        const tag = (try tagAt(input, offset)) orelse {
-            if (result.body_close != null or result.html_close != null) return error.InvalidOriginalHtml;
-            if (in_head) {
-                result.implicit_head_end = offset;
-                in_head = false;
+        const tag = (tagAt(input, offset) catch |err| {
+            if (note_at != null and err == error.InvalidOriginalHtml) break;
+            return if (err == error.InvalidOriginalHtml) error.OriginalHtmlUnavailable else err;
+        }) orelse {
+            if (note_at == null) {
+                note_at = offset;
+                if (meta_at == null) meta_at = offset;
+                phase = .body;
             }
-            if (result.body_open == null and result.first_body == null) result.first_body = offset;
             offset += 1;
             continue;
         };
         offset = tag.span.end;
-        if (tag.declaration) {
-            if (tag.is("doctype")) {
-                if (result.doctype != null or result.html_open != null or result.head_open != null or result.body_open != null or result.first_body != null) return error.InvalidOriginalHtml;
-                result.doctype = tag.span;
-            } else if (result.body_close != null or result.html_close != null) return error.InvalidOriginalHtml;
-            continue;
-        }
+        if (tag.declaration) continue;
         if (tag.is("html")) {
-            if (tag.self_closing) return error.InvalidOriginalHtml;
-            if (tag.closing) {
-                if (result.html_open == null or result.html_close != null) return error.InvalidOriginalHtml;
-                if (in_head) {
-                    result.implicit_head_end = tag.span.start;
-                    in_head = false;
-                }
-                result.html_close = tag.span;
-            } else {
-                if (result.html_close != null or result.head_open != null or result.body_open != null or result.first_body != null or implicit_head_content) return error.InvalidOriginalHtml;
-                if (result.html_open != null) {
-                    if (result.extra_root_count == result.extra_roots.len) return error.OriginalHtmlUnavailable;
-                    result.extra_roots[result.extra_root_count] = tag.span;
-                    result.extra_root_count += 1;
-                } else result.html_open = tag.span;
+            if (tag.closing and note_at == null) {
+                note_at = tag.span.start;
+                if (meta_at == null) meta_at = tag.span.start;
+                phase = .body;
             }
             continue;
         }
-        if (result.html_close != null) return error.InvalidOriginalHtml;
         if (tag.is("head")) {
-            if (tag.self_closing or result.body_open != null or result.first_body != null) return error.InvalidOriginalHtml;
-            if (tag.closing) {
-                if (result.head_open == null or !in_head or result.head_close != null) return error.InvalidOriginalHtml;
-                result.head_close = tag.span;
-                in_head = false;
-            } else {
-                if (result.head_open != null or implicit_head_content) return error.InvalidOriginalHtml;
-                result.head_open = tag.span;
-                in_head = true;
+            if (note_at == null) {
+                if (tag.closing) {
+                    if (meta_at == null) meta_at = tag.span.start;
+                    phase = .after_head;
+                } else if (phase == .before_head) {
+                    meta_at = tag.span.end;
+                    phase = .in_head;
+                }
             }
             continue;
         }
         if (tag.is("body")) {
-            if (tag.self_closing) return error.InvalidOriginalHtml;
-            if (tag.closing) {
-                if (result.body_open == null or result.body_close != null or in_head) return error.InvalidOriginalHtml;
-                result.body_close = tag.span;
-            } else {
-                if (result.body_open != null or result.first_body != null) return error.InvalidOriginalHtml;
-                if (in_head) {
-                    result.implicit_head_end = tag.span.start;
-                    in_head = false;
-                }
-                result.body_open = tag.span;
+            if (note_at == null) {
+                if (meta_at == null) meta_at = tag.span.start;
+                note_at = if (tag.closing) tag.span.start else tag.span.end;
+                phase = .body;
             }
             continue;
         }
-        if (result.body_close != null) return error.InvalidOriginalHtml;
         if (tag.is("plaintext") or tag.is("frameset") or tag.is("frame")) return error.OriginalHtmlUnavailable;
-        if (result.head_open == null and result.body_open == null and result.first_body == null and headTag(tag)) implicit_head_content = true;
+        if (note_at == null and !tag.closing) {
+            if (headTag(tag)) {
+                if (meta_at == null) meta_at = tag.span.start;
+                if (phase == .before_head) phase = .in_head;
+            } else {
+                if (meta_at == null) meta_at = tag.span.start;
+                note_at = tag.span.start;
+                phase = .body;
+            }
+        } else if (note_at == null and tag.is("br")) {
+            if (meta_at == null) meta_at = tag.span.start;
+            note_at = tag.span.start;
+            phase = .body;
+        }
+        if (tag.is("template") and !tag.closing) {
+            offset = templateEnd(input, tag, &tokens) catch |err| {
+                if (note_at != null and err == error.InvalidOriginalHtml) break;
+                return if (err == error.InvalidOriginalHtml) error.OriginalHtmlUnavailable else err;
+            };
+            continue;
+        }
+        if (tag.is("svg") or tag.is("math")) {
+            if (tag.closing) foreign_depth -|= 1 else if (!tag.self_closing) {
+                if (foreign_depth == max_scope_depth) return error.OriginalHtmlUnavailable;
+                foreign_depth += 1;
+            }
+        }
+        if (foreign_depth != 0) continue;
         if (tag.is("meta") and !tag.closing) {
             const http_equiv = tag.attribute("http-equiv") orelse "";
             if (tag.attribute("charset") != null or std.ascii.eqlIgnoreCase(std.mem.trim(u8, http_equiv, " \t\r\n"), "content-type")) {
@@ -572,15 +580,15 @@ fn scan(input: []const u8) !Envelope {
                 result.encoding_count += 1;
             }
         }
-        if (in_head and !headTag(tag)) {
-            result.implicit_head_end = tag.span.start;
-            in_head = false;
-            if (result.first_body == null) result.first_body = tag.span.start;
-        } else if (result.body_open == null and !in_head and result.first_body == null and
-            (result.head_close != null or !headTag(tag))) result.first_body = tag.span.start;
-        if (rawTag(tag)) offset = try rawEnd(input, tag);
+        if (rawTag(tag)) {
+            offset = rawEnd(input, tag) catch |err| {
+                if (note_at != null and err == error.InvalidOriginalHtml) break;
+                return if (err == error.InvalidOriginalHtml) error.OriginalHtmlUnavailable else err;
+            };
+        }
     }
-    if (in_head) result.implicit_head_end = input.len;
+    result.meta_at = meta_at orelse input.len;
+    result.note_at = note_at orelse input.len;
     return result;
 }
 
@@ -592,18 +600,41 @@ fn validateReferences(input: []const u8, resources: []const t.Attachment) !void 
 }
 fn scanReferences(input: []const u8, resources: []const t.Attachment, used: ?*u64) !void {
     var offset: usize = 0;
+    var tokens: usize = 0;
+    var foreign_depth: usize = 0;
     var decoded: [max_tag_bytes]u8 = undefined;
     while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |start| {
+        try countToken(&tokens);
         if (std.mem.startsWith(u8, input[start..], "<!--")) {
-            offset = try commentEnd(input, start);
+            offset = commentEnd(input, start) catch |err| {
+                if (err == error.InvalidOriginalHtml) break; // The remaining source is comment text.
+                return err;
+            };
             continue;
         }
-        const tag = try tagAt(input, start) orelse {
+        if (foreign_depth != 0 and std.mem.startsWith(u8, input[start..], "<![CDATA[")) {
+            offset = cdataEnd(input, start) catch |err| {
+                if (err == error.InvalidOriginalHtml) break;
+                return err;
+            };
+            continue;
+        }
+        const tag = (tagAt(input, start) catch |err| {
+            if (err == error.InvalidOriginalHtml) break; // An unfinished tag is not emitted by HTML.
+            return err;
+        }) orelse {
             offset = start + 1;
             continue;
         };
         offset = tag.span.end;
-        if (tag.closing or tag.declaration) continue;
+        if (tag.declaration) continue;
+        if (tag.is("svg") or tag.is("math")) {
+            if (tag.closing) foreign_depth -|= 1 else if (!tag.self_closing) {
+                if (foreign_depth == max_scope_depth) return error.OriginalHtmlUnavailable;
+                foreign_depth += 1;
+            }
+        }
+        if (tag.closing) continue;
         for ([_][]const u8{ "src", "href", "background", "poster", "data", "xlink:href", "lowsrc" }) |name| {
             if (tag.attribute(name)) |raw| try checkUrl(try htmlAttribute(raw, &decoded), resources, used);
         }
@@ -616,13 +647,14 @@ fn scanReferences(input: []const u8, resources: []const t.Attachment, used: ?*u6
             }
         }
         if (tag.attribute("style")) |raw| try cssReferences(try htmlAttribute(raw, &decoded), resources, used);
-        if (rawTag(tag)) {
-            const end = try rawEnd(input, tag);
-            if (tag.is("style")) {
-                const closer = std.mem.lastIndexOfScalar(u8, input[tag.span.end..end], '<') orelse return error.InvalidOriginalHtml;
-                try cssReferences(input[tag.span.end..][0..closer], resources, used);
-            }
-            offset = end;
+        if (foreign_depth == 0 and rawTag(tag)) {
+            const closer = rawClose(input, tag) catch |err| {
+                if (err != error.InvalidOriginalHtml) return err;
+                if (tag.is("style")) try cssReferences(input[tag.span.end..], resources, used);
+                break;
+            };
+            if (tag.is("style")) try cssReferences(input[tag.span.end..closer.span.start], resources, used);
+            offset = closer.span.end;
         }
     }
 }
@@ -706,15 +738,31 @@ fn htmlAttribute(input: []const u8, out: []u8) ![]const u8 {
     }
     return out[0..n];
 }
-fn cssStringEnd(input: []const u8, start: usize) !usize {
+const CssString = struct { end: usize, closed: bool };
+fn cssEscapeEnd(input: []const u8, start: usize) usize {
+    var i = start + 1;
+    if (i == input.len) return i;
+    if (hex(input[i]) != null) {
+        var count: usize = 0;
+        while (i < input.len and count < 6 and hex(input[i]) != null) : (count += 1) i += 1;
+        if (i < input.len and white(input[i])) {
+            if (input[i] == '\r' and i + 1 < input.len and input[i + 1] == '\n') i += 1;
+            i += 1;
+        }
+        return i;
+    }
+    if (input[i] == '\r' and i + 1 < input.len and input[i + 1] == '\n') i += 1;
+    return i + 1;
+}
+fn cssStringEnd(input: []const u8, start: usize) CssString {
     const quote = input[start];
     var i = start + 1;
     while (i < input.len) : (i += 1) {
         if (input[i] == '\\') {
-            if (i + 1 < input.len) i += 1;
-        } else if (input[i] == quote) return i + 1;
+            i = cssEscapeEnd(input, i) - 1;
+        } else if (input[i] == quote) return .{ .end = i + 1, .closed = true } else if (input[i] == '\n' or input[i] == '\r' or input[i] == 12) return .{ .end = i + 1, .closed = false };
     }
-    return error.OriginalHtmlUnavailable;
+    return .{ .end = input.len, .closed = false };
 }
 fn cssUrl(input: []const u8, out: []u8) ![]const u8 {
     var i: usize = 0;
@@ -749,25 +797,37 @@ fn cssUrl(input: []const u8, out: []u8) ![]const u8 {
             continue;
         }
         var encoded: [4]u8 = undefined;
-        if (cp > 0x10ffff) return error.OriginalResourceUnavailable;
-        const count = std.unicode.utf8Encode(@intCast(cp), &encoded) catch return error.OriginalResourceUnavailable;
+        // CSS replaces invalid escaped code points rather than invalidating HTML.
+        if (cp == 0 or cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff)) cp = 0xfffd;
+        const count = std.unicode.utf8Encode(@intCast(cp), &encoded) catch unreachable;
         if (count > out.len - n) return error.OriginalHtmlUnavailable;
         @memcpy(out[n..][0..count], encoded[0..count]);
         n += count;
     }
     return out[0..n];
 }
+fn badCssUrlEnd(input: []const u8, start: usize) usize {
+    var i = start;
+    while (i < input.len) : (i += 1) {
+        if (input[i] == ')') return i + 1;
+        if (input[i] == '\\' and i + 1 < input.len) i += 1;
+    }
+    return input.len;
+}
 fn cssReferences(input: []const u8, resources: []const t.Attachment, used: ?*u64) !void {
+    // CSS syntax errors are not HTML splice errors. Ignore discarded/unfinished
+    // CSS tokens, but require resources for recognized URLs. In particular, do
+    // not mark unrelated CID attachments as used merely because CSS is broken.
     var i: usize = 0;
     var decoded: [max_tag_bytes]u8 = undefined;
     while (i < input.len) {
         if (std.mem.startsWith(u8, input[i..], "/*")) {
-            const end = std.mem.indexOfPos(u8, input, i + 2, "*/") orelse return error.OriginalHtmlUnavailable;
+            const end = std.mem.indexOfPos(u8, input, i + 2, "*/") orelse return;
             i = end + 2;
             continue;
         }
         if (input[i] == '\'' or input[i] == '"') {
-            i = try cssStringEnd(input, i);
+            i = cssStringEnd(input, i).end;
             continue;
         }
         const before = i == 0 or (!std.ascii.isAlphanumeric(input[i - 1]) and input[i - 1] != '-' and input[i - 1] != '_');
@@ -783,24 +843,46 @@ fn cssReferences(input: []const u8, resources: []const t.Attachment, used: ?*u64
         }
         next += 1;
         while (next < input.len and white(input[next])) next += 1;
-        if (next == input.len) return error.OriginalHtmlUnavailable;
+        if (next == input.len) return;
         var value: []const u8 = undefined;
         if (input[next] == '\'' or input[next] == '"') {
-            const end = try cssStringEnd(input, next);
-            value = input[next + 1 .. end - 1];
-            next = end;
+            const string = cssStringEnd(input, next);
+            if (!string.closed) {
+                i = string.end;
+                continue;
+            }
+            value = input[next + 1 .. string.end - 1];
+            next = string.end;
             while (next < input.len and white(input[next])) next += 1;
-            if (next == input.len or input[next] != ')') return error.OriginalHtmlUnavailable;
+            if (next < input.len and input[next] != ')') {
+                i = badCssUrlEnd(input, next);
+                continue;
+            }
         } else {
             const start = next;
-            while (next < input.len and input[next] != ')') : (next += 1) if (input[next] == '\\' and next + 1 < input.len) {
-                next += 1;
-            };
-            if (next == input.len) return error.OriginalHtmlUnavailable;
+            var had_space = false;
+            var bad = false;
+            while (next < input.len and input[next] != ')') : (next += 1) {
+                const c = input[next];
+                if (white(c)) {
+                    had_space = true;
+                    continue;
+                }
+                if (had_space or c == '\'' or c == '"' or c == '(' or c < 32 or c == 127) bad = true;
+                if (c == '\\') {
+                    if (next + 1 == input.len or input[next + 1] == '\n' or input[next + 1] == '\r' or input[next + 1] == 12) {
+                        bad = true;
+                    } else next = cssEscapeEnd(input, next) - 1;
+                }
+            }
+            if (bad) {
+                i = if (next < input.len) next + 1 else input.len;
+                continue;
+            }
             value = std.mem.trimEnd(u8, input[start..next], " \t\r\n");
         }
         try checkUrl(try cssUrl(value, &decoded), resources, used);
-        i = next + 1;
+        i = if (next < input.len) next + 1 else input.len;
     }
 }
 
@@ -833,75 +915,66 @@ test "original mail: body prefix keeps attributes styles comments images and tru
     try std.testing.expect(std.mem.endsWith(u8, result.plain, "Original plain text."));
 }
 
-test "original mail: fragments optional envelope tags and raw text get one document" {
+test "original mail: fragments optional envelopes and raw text retain their receiver parsing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{
-        "<p>Fragment <img src='https://example.test/picture.png'></p>",
-        "<style>p{color:blue}</style><p>Fragment</p>",
-        "<html><head><title>A &lt;body&gt; title</title></head><p>Implicit body</p></html>",
-        "<html><head><style>p{color:blue}</style><body>Implicit head closer",
-        "<body class='original'><p>Body fragment</p></body>",
-        "<head><style>p{color:blue}</style></head><p>Head fragment</p>",
-        "<script>const fake = '<html><body>'; const other = '</body>';</script><p>After script</p>",
-        "<textarea>literal <html><body> text</textarea><p>After textarea</p>",
-    }) |source| {
-        const result = try prepare(a, fixtureNote(), fixtureOriginal(source));
-        const envelope = try scan(result.html);
-        try std.testing.expect(envelope.html_open != null and envelope.html_close != null);
-        try std.testing.expect(envelope.head_open != null and envelope.head_close != null);
-        try std.testing.expect(envelope.body_open != null and envelope.body_close != null);
+    const cases = .{
+        .{ "<p>Fragment <img src='https://example.test/picture.png'></p>", "<p>Fragment" },
+        .{ "<style>p{color:blue}</style><p>Fragment</p>", "<p>Fragment" },
+        .{ "<html><head><title>A &lt;body&gt; title</title></head><p>Implicit body</p></html>", "<p>Implicit body" },
+        .{ "<html><head><style>p{color:blue}</style><body>Implicit head closer", "Implicit head closer" },
+        .{ "<body class='original'><p>Body fragment</p></body>", "<p>Body fragment" },
+        .{ "<head><style>p{color:blue}</style></head><p>Head fragment</p>", "<p>Head fragment" },
+        .{ "<script>const fake = '<html><body>'; const other = '</body>';</script><p>After script</p>", "<p>After script" },
+        .{ "<textarea>literal <html><body> text</textarea><p>After textarea</p>", "<textarea>literal" },
+        .{ "<meta charset=ascii><style>p{color:blue}</style></head><p>Omitted starts</body></html>", "<p>Omitted starts" },
+        .{ "Fictional prefix<head><style>p{color:blue}</style></head><body>Later body</body></html>", "Fictional prefix" },
+        .{ "</head></body></body></html></html>", "</body>" },
+    };
+    inline for (cases) |case| {
+        const result = try prepare(a, fixtureNote(), fixtureOriginal(case[0]));
+        const note_at = std.mem.indexOf(u8, result.html, fixture_note).?;
+        try std.testing.expect(note_at < std.mem.indexOf(u8, result.html, case[1]).?);
         try std.testing.expectEqualStrings(logo_content_id, result.html[result.logoOffset..][0..logo_content_id.len]);
+        try std.testing.expect(std.mem.indexOf(u8, result.html, "<!doctype") == null);
     }
     const no_html = try prepare(a, fixtureNote(), fixtureOriginal(""));
     try std.testing.expect(std.mem.indexOf(u8, no_html.html, ">Original plain text.</div>") != null);
 }
 
-test "original mail: repeated opening roots retain namespaces language and original content inline" {
+test "original mail: repeated envelopes retain literal namespace language and attribute order" {
     const original_body = "<table class='booking'><tr><td>Fictional booking summary</td></tr></table><img src='https://example.test/booking.png'><!--[if mso]><v:rect fill='true'></v:rect><![endif]-->";
-    const source = "\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n<!-- between opening roots -->" ++
-        "<html lang=\"de\"><head><meta name='viewport' content='width=device-width'><style>html:lang(de) .booking{color:#123456}body{background:#abcdef}</style></head>" ++
+    const roots = "\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n<!-- between opening roots -->" ++
+        "<html lang=\"de\">";
+    const source = roots ++ "<head><meta name='viewport' content='width=device-width'><style>html:lang(de) .booking{color:#123456}body{background:#abcdef}</style></head>" ++
         "<body id=\"body\" style=\"margin:0;padding:0\">" ++ original_body ++ "</body></html>";
     const result = try prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source));
     defer std.testing.allocator.free(result.html);
     defer std.testing.allocator.free(result.plain);
-    try std.testing.expect(std.mem.startsWith(u8, result.html, "\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" lang=\"de\">"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.html, "<html"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.html, "</html>"));
+    try std.testing.expect(std.mem.startsWith(u8, result.html, roots ++ "<head>" ++ utf8_meta));
     for ([_][]const u8{
-        "<!-- between opening roots -->",
         "<meta name='viewport' content='width=device-width'>",
         "<style>html:lang(de) .booking{color:#123456}body{background:#abcdef}</style>",
         "<body id=\"body\" style=\"margin:0;padding:0\">" ++ fixture_note,
     }) |preserved| try std.testing.expect(std.mem.indexOf(u8, result.html, preserved) != null);
     try std.testing.expect(std.mem.endsWith(u8, result.html, original_body ++ "</body></html>"));
-    try std.testing.expectEqualStrings(logo_content_id, result.html[result.logoOffset..][0..logo_content_id.len]);
     try validate(fixtureOriginal(source));
-    const assembled = try scan(result.html);
-    try std.testing.expectEqual(@as(usize, 0), assembled.extra_root_count);
 }
 
-test "original mail: repeated opening root attributes use the first value and preserve raw spelling" {
-    const source = "<HTML LANG = 'en' xmlns:o = 'urn:first' data-root='first > value' hidden>" ++
-        "<html lang='de' XMLNS:O='urn:second' data-added='A &amp; B' data-added='ignored' tabindex=0>" ++
-        "<html DIR=rtl lang=fr hidden='overwritten'><head></head><body>Original content</body></HTML>";
-    const result = try prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source));
+test "original mail: late roots bodies tails and concatenated leaves stay in source order" {
+    const prefix = "\xef\xbb\xbf<!doctype html><HTML LANG = 'en' xmlns:o = 'urn:first'><head>";
+    const head = "<style>p{color:#123456}</style></head><body class='first'>";
+    const original_body = "<p>First content</p><html lang=de dir=rtl><body class=second data-late=yes>" ++
+        "<p>Second content</p></body><img src='https://example.test/pixel.png'></html>" ++
+        "<!doctype html><html lang=fr><head><style>.tail{color:blue}</style></head><body><p class=tail>Third content</p></body></html>Tail";
+    const result = try prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(prefix ++ head ++ original_body));
     defer std.testing.allocator.free(result.html);
     defer std.testing.allocator.free(result.plain);
-    const assembled = try scan(result.html);
-    const root = (try tagAt(result.html, assembled.html_open.?.start)).?;
-    try std.testing.expectEqualStrings("en", root.attribute("lang").?);
-    try std.testing.expectEqualStrings("urn:first", root.attribute("xmlns:o").?);
-    try std.testing.expectEqualStrings("first > value", root.attribute("data-root").?);
-    try std.testing.expectEqualStrings("", root.attribute("hidden").?);
-    try std.testing.expectEqualStrings("A &amp; B", root.attribute("data-added").?);
-    try std.testing.expectEqualStrings("0", root.attribute("tabindex").?);
-    try std.testing.expectEqualStrings("rtl", root.attribute("dir").?);
-    try std.testing.expect(std.mem.indexOf(u8, result.html, "LANG = 'en' xmlns:o = 'urn:first' data-root='first > value' hidden data-added='A &amp; B' tabindex=0 DIR=rtl>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.html, "urn:second") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.html, "overwritten") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.html, "ignored") == null);
+    try std.testing.expect(std.mem.startsWith(u8, result.html, prefix ++ utf8_meta ++ head ++ fixture_note));
+    try std.testing.expect(std.mem.endsWith(u8, result.html, original_body));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, result.html, "<!doctype html>"));
+    try std.testing.expectEqualStrings(logo_content_id, result.html[result.logoOffset..][0..logo_content_id.len]);
 }
 
 test "original mail: recoverable less-than attributes preserve body bytes and later CID resources" {
@@ -928,20 +1001,13 @@ test "original mail: recoverable less-than attributes preserve body bytes and la
     try std.testing.expectError(error.OriginalResourceUnavailable, validate(original));
 }
 
-test "original mail: ambiguous malformed and excessive envelopes fail without partial results" {
+test "original mail: unsafe head boundaries and quotas fail without partial results" {
     for ([_][]const u8{
-        "<html><body>One</body></html><html><body>Two</body></html>",
-        "<html><body>One<body>Two</body></html>",
-        "<html><head><title>One</title></head><html lang='de'><body>Another root after the head</body></html>",
-        "<html><body>One<html lang='de'>Another root inside the body</body></html>",
-        "<p>Fragment</p><html><body>Another document</body></html>",
-        "<style>p{color:red}</style><html><body>Another document</body></html>",
-        "<html><body data-bad='unterminated>Body</body></html>",
+        "<html><head data-bad='unterminated>Head",
         "<html><head><style>p{color:red}</head><body>Missing style closer</body></html>",
-        "<html><body>Body</body><p>Unexpected trailing content</p></html>",
         "<!-- unclosed <html><body>",
-        "</body></html>",
-    }) |source| try std.testing.expectError(error.InvalidOriginalHtml, prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source)));
+        "<head><template><body>Unclosed head template",
+    }) |source| try std.testing.expectError(error.OriginalHtmlUnavailable, prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source)));
     try std.testing.expectError(error.OriginalHtmlUnavailable, validate(fixtureOriginal("<plaintext>Body")));
     var invalid = fixtureOriginal("<p>Fine</p>");
     invalid.subject = "Subject\r\nFrom: forged@example.test";
@@ -949,6 +1015,25 @@ test "original mail: ambiguous malformed and excessive envelopes fail without pa
     var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = std.testing.allocator, .limit = 64 };
     try std.testing.expectError(error.OutOfMemory, prepare(cap.allocator(), fixtureNote(), fixtureOriginal("<p>Original</p>")));
     try std.testing.expectEqual(@as(usize, 0), cap.used);
+}
+
+test "original mail: incomplete body tails are preserved without appended closing bytes" {
+    const tails = .{
+        "<p data-value=\"unfinished>Discarded tag <img src='cid:fake@example.test'>",
+        "<!-- unfinished comment <body><img src='cid:fake@example.test'>",
+        "<style>p{color:red}/* unfinished CSS <img src='cid:fake@example.test'>",
+        "<script>const fake = '<body><img src=cid:fake@example.test>';",
+        "<template><body><p>Unclosed body template",
+    };
+    inline for (tails) |tail| {
+        const source = "<!doctype html><html><body><p>Visible original</p>" ++ tail;
+        const result = try prepare(std.testing.allocator, fixtureNote(), fixtureOriginal(source));
+        defer std.testing.allocator.free(result.html);
+        defer std.testing.allocator.free(result.plain);
+        try std.testing.expect(std.mem.endsWith(u8, result.html, "<p>Visible original</p>" ++ tail));
+        try std.testing.expect(std.mem.indexOf(u8, result.html, "<body>" ++ fixture_note) != null);
+        try std.testing.expectEqual(@as(u64, 0), try resourceUsage(source, &.{}));
+    }
 }
 
 test "original mail: related resources stay borrowed and aggregate output remains bounded" {
@@ -982,7 +1067,6 @@ test "original mail: real CID references resolve attributes percent entities CSS
         "<div style='background:url(cid:missing@example.test)'>Content</div>",
         "<style>div { background: url(cid:missing@example.test) }</style><div>Content</div>",
         "<img src='cid:bad%xx@example.test'>",
-        "<div style='background:url(\\FFFFFF)'>Content</div>",
     }) |source| try std.testing.expectError(error.OriginalResourceUnavailable, validate(fixtureOriginal(source)));
     try validate(fixtureOriginal("<!-- <img src='cid:unattached'> --><script>const image = '<img src=cid:missing>';</script><p>cid:unattached</p><img src='https://example.test/cid:unattached'>"));
 }
@@ -1016,5 +1100,73 @@ test "original mail: usage bitset is bounded and includes the final resource slo
     resources[63].contentId = "last@example.test";
     try std.testing.expectEqual(@as(u64, 1) << 63, try resourceUsage("<img src='cid:last@example.test'>", resources[0..64]));
     try std.testing.expectError(error.TooManyAttachments, resourceUsage("", &resources));
-    try std.testing.expectError(error.InvalidOriginalHtml, resourceUsage("<html><body>A</body></html><html><body>B</body></html>", &.{}));
+    try std.testing.expectEqual(@as(u64, 0), try resourceUsage("<html><body>A</body></html><html><body>B</body></html>", &.{}));
+}
+
+test "original mail: shared attribute states retain punctuation adjacent values and first URL" {
+    const body = "<p data-label=can't data-quote=left\"right data-odd'key=value data-mark=a<b=1>Literal attributes</p>" ++
+        "<body=broken>Not a body token</body=broken><a<b>Not an a token</a<b>" ++
+        "<img/alt='Fictional badge'src='cid:picture@example.test' src='cid:ignored@example.test'>";
+    const source = "<html/><head/><style>p{color:#123456}</style></head/><body/>" ++ body ++ "</body/></html/>";
+    const resources = [_]t.Attachment{.{ .id = "picture", .filename = "", .contentId = "picture@example.test" }};
+    var original = fixtureOriginal(source);
+    original.resources = &resources;
+    const result = try prepare(std.testing.allocator, fixtureNote(), original);
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.endsWith(u8, result.html, body ++ "</body/></html/>"));
+    try std.testing.expectEqual(@as(u64, 1), try resourceUsage(source, &resources));
+    try std.testing.expectError(error.OriginalResourceUnavailable, resourceUsage(source, &.{}));
+}
+
+test "original mail: head templates foreign CDATA and bogus declarations cannot supply fake boundaries" {
+    const template = "<template id='fixture'><html lang=de><head><body class=fake><p>Inert text</p>" ++
+        "<meta charset=ascii><template><body>Nested template</body></template></body></html></template>";
+    const source = "<?xml version='1.0'?><!doctype html><html lang=en><head><!--><!--->" ++ template ++
+        "<style>p{color:#123456}</style></head><body class=actual>" ++
+        "<svg><g><![CDATA[<body><img src='cid:fake@example.test'>]]></g></svg>" ++
+        "<!bogus ' > <p>Visible original</p><img src='cid:picture@example.test'></body></html>";
+    const resources = [_]t.Attachment{.{ .id = "picture", .filename = "", .contentId = "picture@example.test" }};
+    var original = fixtureOriginal(source);
+    original.resources = &resources;
+    const result = try prepare(std.testing.allocator, fixtureNote(), original);
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, template) != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "<body class=actual>" ++ fixture_note) != null);
+    try std.testing.expectEqual(@as(u64, 1), try resourceUsage(source, &resources));
+}
+
+test "original mail: double escaped script text keeps fake envelopes and CIDs opaque" {
+    const script = "<script><!--<script> const fake = '</script><body><img src=\"cid:fake@example.test\">'; --></script>";
+    const source = "<!doctype html><html><head>" ++ script ++ "</head><body><p>After script</p><img src='cid:picture@example.test'></body></html>";
+    const resources = [_]t.Attachment{.{ .id = "picture", .filename = "", .contentId = "picture@example.test" }};
+    var original = fixtureOriginal(source);
+    original.resources = &resources;
+    const result = try prepare(std.testing.allocator, fixtureNote(), original);
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, script) != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, "</head><body>" ++ fixture_note) != null);
+    try std.testing.expectEqual(@as(u64, 1), try resourceUsage(source, &resources));
+}
+
+test "original mail: malformed CSS preserves actual CID usage without absorbing ordinary attachments" {
+    const resources = [_]t.Attachment{
+        .{ .id = "ordinary", .filename = "document.pdf", .contentId = "ordinary@example.test", .disposition = "attachment" },
+        .{ .id = "picture", .filename = "", .contentId = "picture@example.test" },
+        .{ .id = "calendar", .filename = "event.ics", .contentId = "calendar@example.test", .disposition = "attachment" },
+    };
+    const source = "<style>.a{background:url(c\\69 d:picture%40example.test)}.b{color:red}/* unfinished cid:ordinary@example.test</style>" ++
+        "<p style='background:url(bad value);color:red;content:&quot;unfinished'>Original</p>" ++
+        "<div style='background:url(\\FFFFFF)'>Invalid escaped code point</div><img src='cid:picture@example.test'>";
+    var original = fixtureOriginal(source);
+    original.resources = &resources;
+    const result = try prepare(std.testing.allocator, fixtureNote(), original);
+    defer std.testing.allocator.free(result.html);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.indexOf(u8, result.html, ".b{color:red}/* unfinished cid:ordinary@example.test</style>") != null);
+    try std.testing.expectEqual(@as(u64, 2), try resourceUsage(source, &resources));
+    try std.testing.expectEqual(@as(u64, 0), try resourceUsage("<style>/* url(cid:ordinary@example.test)</style><p>Original</p>", &resources));
+    try std.testing.expectError(error.OriginalResourceUnavailable, resourceUsage("<style>.a{color:broken;background:url(cid:missing@example.test)}</style><p>Original</p>", &resources));
 }

@@ -76,6 +76,34 @@ recipient/invitation modules, and libvaxis TUI/editor. [Provider design](TERMINA
 [UI design](TERMINAL-UI-DESIGN.md) and [verification](TERMINAL-VERIFICATION.md) describe
 the contracts and remaining qualification boundaries.
 
+## Retaining received HTML
+
+Formatted replies and forwards treat the received HTML as mail data. The
+outbound assembler locates a safe body insertion point for the separately
+rendered note and source header; it does not validate the original against an
+HTML conformance checklist or serialize a replacement DOM. Ordinary malformed
+tags, repeated wrappers and trailing content belong to the recipient's HTML
+recovery rules. Keep original markup, styles, images and links in source order,
+including the absence of a doctype when the original uses quirks mode.
+
+Boundary detection still needs bounded token awareness: comments, quoted
+attributes, raw-text elements and template contents can contain literal body
+tags that are not insertion points. An incomplete tail after a known body
+boundary must not become an unrelated HTML validation failure. An unfinished
+head that leaves no safe place for the note can fail explicitly. Decoded text,
+token, tag, resource, rendering and storage limits remain enforced, and a
+recognized CID reference must have its retained image data. Unexpected CSS
+syntax does not justify dropping mail or treating every attachment as inline.
+
+[The synthetic compatibility corpus](../tests/fixtures/terminal/html-compatibility/README.md)
+records acceptance and boundary cases with primary references. Its independent
+Chromium oracle compares original content, root/body attributes, tables,
+images, links, styles and compatibility mode after excluding only the generated
+note/header. Run `python3 tests/terminal_html_compatibility.py --binary PATH`
+under the cooperative host reservation. The browser uses a fresh headless
+profile, isolated synthetic drafts and blocked external resources; it does not
+use private mail or the user's desktop/browser profile.
+
 ## Historical release checkpoints
 
 Version 0.2.0 expands the completed 0.1.1 release. Runtime source is

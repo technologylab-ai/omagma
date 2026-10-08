@@ -1,0 +1,1230 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "networkRequired": false,
+  "baselineCommit": "fb14c82",
+  "baselineMethod": "Source audit only; no native build or runtime test in fixture-author task.",
+  "original": {
+    "version": 1,
+    "sourceMessageId": "synthetic-html-compatibility",
+    "from": {
+      "address": "sender@example.test",
+      "name": "Fictional Sender"
+    },
+    "to": [
+      {
+        "address": "recipient@example.test"
+      }
+    ],
+    "cc": [],
+    "subject": "Fictional compatibility fixture",
+    "date": "Thu, 08 Oct 2026 12:00:00 +0000",
+    "bodyText": "Independent fictional plain body."
+  },
+  "resources": [
+    {
+      "id": "picture",
+      "filename": "fictional-picture.png",
+      "mimeType": "image/png",
+      "contentId": "picture@example.test",
+      "disposition": "inline",
+      "size": 68,
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4zwAAAgEBADK6K5IAAAAASUVORK5CYII"
+    }
+  ],
+  "cases": [
+    {
+      "id": "bom-envelope",
+      "features": [
+        "bom",
+        "document-envelope"
+      ],
+      "mustRetain": [
+        "<style>body{background:#f4f4f4}.bom-card{color:#123456}</style>",
+        "<p>Fictional BOM message.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional BOM picture\">"
+      ],
+      "rootAttributes": {
+        "lang": "en"
+      },
+      "bodyAttributes": {
+        "class": "bom-card"
+      },
+      "noteBefore": [
+        "Fictional BOM message."
+      ],
+      "rationale": "A UTF-8 BOM before doctype is an encoding signature, not body text that forbids the root.",
+      "file": "bom-envelope.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "omitted-all-opens",
+      "features": [
+        "omitted-html-open",
+        "omitted-head-open",
+        "omitted-body-open",
+        "encoding-replacement"
+      ],
+      "mustRetain": [
+        "<style>body{margin:0}.omitted-card{color:#123456}</style>",
+        "<p class=\"omitted-card\">Fictional omitted opens.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional omitted picture\">"
+      ],
+      "mustNotRetain": [
+        "windows-1252"
+      ],
+      "noteBefore": [
+        "Fictional omitted opens."
+      ],
+      "rationale": "Head, body and html can be implied; matching literal closing tokens do not make the preserved message ambiguous.",
+      "file": "omitted-all-opens.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "repeated-body",
+      "features": [
+        "repeated-body",
+        "first-value-wins",
+        "body-attribute-merge",
+        "body-css"
+      ],
+      "mustRetain": [
+        "<style>body.original{background:#f0f1f2}body[data-late=\"yes\"] .card{color:#246810}</style>",
+        "<p class=\"card\">Fictional repeated body first.</p>",
+        "<table><tr><td>Fictional repeated body cell.</td></tr></table>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional repeated body picture\">"
+      ],
+      "bodyAttributes": {
+        "class": "original",
+        "style": "margin:0;padding:0",
+        "data-late": "yes",
+        "bgcolor": "#f0f1f2"
+      },
+      "noteBefore": [
+        "Fictional repeated body first.",
+        "Fictional repeated body cell."
+      ],
+      "rationale": "A later body start in a single document contributes only attributes absent on the existing body; later style/class must not overwrite the first values.",
+      "file": "repeated-body.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "tail-after-body",
+      "features": [
+        "tail-after-body",
+        "tracking-image",
+        "footer"
+      ],
+      "mustRetain": [
+        "<style>body{margin:0}.footer{font-size:12px}</style>",
+        "<p>Fictional body before tail.</p>",
+        "<img src=\"cid:picture@example.test\" width=\"1\" height=\"1\" alt=\"Fictional tracking pixel\">",
+        "<p class=\"footer\">Fictional footer after body.</p>"
+      ],
+      "bodyAttributes": {
+        "id": "message"
+      },
+      "noteBefore": [
+        "Fictional body before tail.",
+        "Fictional footer after body."
+      ],
+      "rationale": "Ordinary content after the body close is reprocessed in body; the pixel and footer remain actual body nodes.",
+      "file": "tail-after-body.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "tail-after-html",
+      "features": [
+        "tail-after-html",
+        "tracking-image",
+        "footer"
+      ],
+      "mustRetain": [
+        "<style>.footer{color:#345678}</style>",
+        "<p>Fictional message before html tail.</p>",
+        "<img src=\"cid:picture@example.test\" width=\"1\" height=\"1\" alt=\"Fictional after-html pixel\">",
+        "<p class=\"footer\">Fictional footer after html.</p>"
+      ],
+      "noteBefore": [
+        "Fictional message before html tail.",
+        "Fictional footer after html."
+      ],
+      "rationale": "Ordinary content after the html close is reprocessed in body; do not silently discard the appended pixel or footer.",
+      "file": "tail-after-html.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "unquoted-apostrophe",
+      "features": [
+        "unquoted-attribute-apostrophe",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<p data-label=Fictional's>Fictional apostrophe attribute.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional later picture\">"
+      ],
+      "noteBefore": [
+        "Fictional apostrophe attribute."
+      ],
+      "rationale": "An apostrophe inside an already unquoted attribute value is a parse error consumed as a value character, not an opening quote.",
+      "file": "unquoted-apostrophe.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "unquoted-quote",
+      "features": [
+        "unquoted-attribute-quote",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<p data-label=left\"right>Fictional quote attribute.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional quote later picture\">"
+      ],
+      "noteBefore": [
+        "Fictional quote attribute."
+      ],
+      "rationale": "A quotation mark inside an already unquoted attribute value is consumed literally; it must not hide the later body close or image.",
+      "file": "unquoted-quote.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "fragment-before-head",
+      "features": [
+        "fragment-prefix",
+        "ignored-head-open",
+        "late-body",
+        "encoding-replacement"
+      ],
+      "mustRetain": [
+        "Fictional prefix before head.",
+        "<style>body{background:#fafafa}.after{color:#123456}</style>",
+        "<p class=\"after\">Fictional paragraph after ignored head.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional prefix picture\">"
+      ],
+      "mustNotRetain": [
+        "iso-8859-1"
+      ],
+      "bodyAttributes": {
+        "class": "late-body"
+      },
+      "noteBefore": [
+        "Fictional prefix before head.",
+        "Fictional paragraph after ignored head."
+      ],
+      "rationale": "Initial text implies the body. A late head opening is ignored while its style remains in body, and the later body start contributes absent attributes. Put the note before the initial text.",
+      "file": "fragment-before-head.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": []
+    },
+    {
+      "id": "omitted-all-closes",
+      "file": "omitted-all-closes.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "omitted-html-close",
+        "omitted-head-close",
+        "omitted-body-close"
+      ],
+      "mustRetain": [
+        "<style>body{margin:0}.implicit-card{color:#246810}</style>",
+        "<p>Fictional omitted closes.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional no closer picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Optional head/body/html closes are repaired at body start or EOF without changing original body bytes.",
+      "rootAttributes": {
+        "lang": "en"
+      },
+      "bodyAttributes": {
+        "class": "implicit-card"
+      },
+      "noteBefore": [
+        "Fictional omitted closes."
+      ]
+    },
+    {
+      "id": "omitted-html-open",
+      "file": "omitted-html-open.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "omitted-html-open"
+      ],
+      "mustRetain": [
+        "<style>.rootless{color:#123456}</style>",
+        "<p>Fictional omitted html open.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional rootless picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "An implicit html root may be closed by a literal html end tag.",
+      "bodyAttributes": {
+        "class": "rootless"
+      },
+      "noteBefore": [
+        "Fictional omitted html open."
+      ]
+    },
+    {
+      "id": "omitted-head-open",
+      "file": "omitted-head-open.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "omitted-head-open"
+      ],
+      "mustRetain": [
+        "<meta name=\"viewport\" content=\"width=device-width\">",
+        "<style>.headless{color:#246810}</style>",
+        "<p class=\"headless\">Fictional omitted head open.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Head is implied by meta/style, and its literal close is valid recovery.",
+      "noteBefore": [
+        "Fictional omitted head open."
+      ]
+    },
+    {
+      "id": "omitted-body-open",
+      "file": "omitted-body-open.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "omitted-body-open"
+      ],
+      "mustRetain": [
+        "<style>.bodyless{color:#123456}</style>",
+        "<p class=\"bodyless\">Fictional omitted body open.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Paragraph content implies body, and its literal close is valid recovery.",
+      "noteBefore": [
+        "Fictional omitted body open."
+      ]
+    },
+    {
+      "id": "whitespace-envelope",
+      "file": "whitespace-envelope.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "leading-whitespace",
+        "trailing-whitespace",
+        "mixed-case",
+        "attribute-whitespace"
+      ],
+      "mustRetain": [
+        "<HTML LANG = \"en\">",
+        "<style>body{margin:0}.spaced{color:#345678}</style>",
+        "<p>Fictional whitespace envelope.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "HTML whitespace surrounding a document does not create another envelope.",
+      "rootAttributes": {
+        "lang": "en"
+      },
+      "bodyAttributes": {
+        "class": "spaced"
+      },
+      "noteBefore": [
+        "Fictional whitespace envelope."
+      ]
+    },
+    {
+      "id": "mso-conditional-namespaces",
+      "file": "mso-conditional-namespaces.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "mso-hidden-conditional",
+        "mso-revealed-conditional",
+        "namespaces",
+        "opaque-comment-fake-envelope",
+        "encoding-replacement"
+      ],
+      "mustRetain": [
+        "<!--[if !mso]><!-->",
+        "<style>.conditional-card{color:#123456}</style>",
+        "<!--<![endif]-->",
+        "<!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->",
+        "<!--[if mso | IE]><table role=\"presentation\"><tr><td><body class=\"fake-mso-body\"><img src=\"cid:conditional-only@example.test\"><![endif]-->",
+        "<table role=\"presentation\"><tr><td>Fictional conditional message.</td></tr></table>",
+        "<!--[if mso | IE]></td></tr></table></body></html><![endif]-->"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "MJML-style hidden/revealed MSO conditionals and namespace attributes remain opaque exact source text. Fake envelope/CID tokens within hidden comments cannot affect envelope scan or required CID classification.",
+      "mustNotRetain": [
+        "windows-1252"
+      ],
+      "rootAttributes": {
+        "xmlns": "http://www.w3.org/1999/xhtml",
+        "xmlns:v": "urn:schemas-microsoft-com:vml",
+        "xmlns:o": "urn:schemas-microsoft-com:office:office",
+        "lang": "en"
+      },
+      "bodyAttributes": {
+        "class": "conditional-card",
+        "style": "margin:0"
+      },
+      "opaqueCidStrings": [
+        "conditional-only@example.test"
+      ],
+      "noteBefore": [
+        "Fictional conditional message."
+      ]
+    },
+    {
+      "id": "repeated-html-before-head",
+      "file": "repeated-html-before-head.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "repeated-html",
+        "first-value-wins",
+        "root-attribute-merge",
+        "namespaces"
+      ],
+      "mustRetain": [
+        "<style>html:lang(en) .root-card{color:#123456}html[dir=rtl] body{background:#fafafa}</style>",
+        "<p class=\"root-card\">Fictional repeated html before head.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Repeated opening roots contribute only absent attributes; first lang and raw spelling win.",
+      "rootAttributes": {
+        "lang": "en",
+        "xmlns:o": "urn:schemas-microsoft-com:office:office",
+        "xmlns:v": "urn:schemas-microsoft-com:vml",
+        "dir": "rtl"
+      },
+      "noteBefore": [
+        "Fictional repeated html before head."
+      ]
+    },
+    {
+      "id": "late-html-in-body",
+      "file": "late-html-in-body.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "late-html-in-body",
+        "first-value-wins",
+        "root-attribute-merge",
+        "namespaces"
+      ],
+      "mustRetain": [
+        "<style>html:lang(en) .late-root{color:#123456}html[dir=rtl] body{background:#fafafa}</style>",
+        "<p class=\"late-root\">Fictional content before late html.</p>",
+        "<table><tr><td>Fictional late html cell.</td></tr></table>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "A late html start in an existing body merges absent root attributes; it does not begin another full document.",
+      "rootAttributes": {
+        "lang": "en",
+        "dir": "rtl",
+        "xmlns:v": "urn:schemas-microsoft-com:vml"
+      },
+      "noteBefore": [
+        "Fictional content before late html.",
+        "Fictional late html cell."
+      ]
+    },
+    {
+      "id": "late-html-after-head",
+      "file": "late-html-after-head.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "late-html-after-head",
+        "root-attribute-merge",
+        "namespaces"
+      ],
+      "mustRetain": [
+        "<style>html[dir=rtl] .late-head-root{color:#123456}</style>",
+        "<p class=\"late-head-root\">Fictional root after head.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "An opening root after the completed head contributes absent root attributes.",
+      "rootAttributes": {
+        "lang": "en",
+        "dir": "rtl",
+        "xmlns:o": "urn:schemas-microsoft-com:office:office"
+      },
+      "noteBefore": [
+        "Fictional root after head."
+      ]
+    },
+    {
+      "id": "repeated-head",
+      "file": "repeated-head.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "repeated-head",
+        "ignored-head-attributes",
+        "head-style-preservation"
+      ],
+      "mustRetain": [
+        "<style>.first-style{color:#123456}</style>",
+        "<style>.second-style{font-weight:bold}</style>",
+        "<p class=\"second-style\">Fictional repeated head message.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Repeated head starts/ends are ignored; both style elements remain preserved in browser head recovery.",
+      "bodyAttributes": {
+        "class": "first-style"
+      },
+      "noteBefore": [
+        "Fictional repeated head message."
+      ]
+    },
+    {
+      "id": "repeated-closes",
+      "file": "repeated-closes.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "repeated-html-close",
+        "repeated-head-close",
+        "repeated-body-close"
+      ],
+      "mustRetain": [
+        "<style>.closed-card{color:#123456}</style>",
+        "<p class=\"closed-card\">Fictional repeated close message.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Repeated envelope closes are ignored or reprocessed under normal recovery without deleting preceding content.",
+      "noteBefore": [
+        "Fictional repeated close message."
+      ]
+    },
+    {
+      "id": "self-closing-envelope",
+      "file": "self-closing-envelope.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "nonvoid-self-closing-flag",
+        "html-head-body-self-closing"
+      ],
+      "mustRetain": [
+        "<style>.self-card{color:#123456}</style>",
+        "<p>Fictional self-closing envelope.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "A self-closing flag on nonvoid html/head/body elements is ignored in HTML parsing; it must not manufacture an empty original body.",
+      "rootAttributes": {
+        "lang": "en"
+      },
+      "bodyAttributes": {
+        "class": "self-card"
+      },
+      "noteBefore": [
+        "Fictional self-closing envelope."
+      ]
+    },
+    {
+      "id": "malformed-attribute-name",
+      "file": "malformed-attribute-name.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "attribute-name-quote",
+        "attribute-name-apostrophe",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<p data-odd\"key=value>Fictional quote in attribute name.</p>",
+        "<p data-other'key=value>Fictional apostrophe in attribute name.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional odd-name later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Quote characters inside attribute names are literal parse-error characters. They cannot open a value quote or consume subsequent images.",
+      "noteBefore": [
+        "Fictional quote in attribute name.",
+        "Fictional apostrophe in attribute name."
+      ]
+    },
+    {
+      "id": "attribute-solidus-delimiter",
+      "file": "attribute-solidus-delimiter.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "unexpected-solidus",
+        "attribute-delimiter",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<p/title=\"Fictional solidus title\">Fictional solidus delimiters.</p>",
+        "<img/src=\"cid:picture@example.test\" alt=\"Fictional solidus picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "An unexpected solidus re-enters before-attribute state; preserve the recoverable tokens and their image URL.",
+      "bodyAttributes": {
+        "class": "solidus-card",
+        "style": "margin:0"
+      },
+      "noteBefore": [
+        "Fictional solidus delimiters."
+      ]
+    },
+    {
+      "id": "invalid-tag-name-delimiter",
+      "file": "invalid-tag-name-delimiter.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "tag-name-equals",
+        "fake-body-name",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<p=broken>Fictional equals in tag name.</p=broken>",
+        "<body=broken data-value=\"literal\">Fictional fake body name.</body=broken>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional unusual-tag later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Equals is part of the unusual tag name in tag-name state. body=broken cannot be reconstructed as a real body boundary.",
+      "noteBefore": [
+        "Fictional equals in tag name.",
+        "Fictional fake body name."
+      ]
+    },
+    {
+      "id": "less-than-attributes",
+      "file": "less-than-attributes.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "attribute-name-less-than",
+        "attribute-value-less-than",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<style>p{margin:0}</style>",
+        "<p style=\"color:#123456\" <span>Fictional less-than attribute name.</span></p>",
+        "<p data-raw=left<right>Fictional less-than attribute value.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional less-than later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Recoverable less-than characters within attribute text must stay literal without dropping later content.",
+      "bodyAttributes": {
+        "class": "booking"
+      },
+      "noteBefore": [
+        "Fictional less-than attribute name.",
+        "Fictional less-than attribute value."
+      ]
+    },
+    {
+      "id": "rawtext-fake-envelope",
+      "file": "rawtext-fake-envelope.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "raw-style",
+        "raw-script",
+        "rcdata-title",
+        "rcdata-textarea",
+        "opaque-fake-envelope",
+        "opaque-fake-cid"
+      ],
+      "mustRetain": [
+        "<title>Fictional &lt;body&gt; title</title>",
+        "<style>body{margin:0}.fake:before{content:'<html><head><body><img src=\"cid:style-literal@example.test\"></body></html>'}</style>",
+        "<script>const sample = '<html><head><body><img src=\"cid:script-literal@example.test\"></body></html>'; const closer = '</body>';</script>",
+        "<textarea>Fictional raw textarea <html><body><img src=\"cid:textarea-literal@example.test\"></body></html></textarea>",
+        "<p>Fictional paragraph after raw text.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional raw-text later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Raw text and RCDATA fake envelope/CID strings are not structural markup or real URL references. Preserve them exactly and find the actual later image.",
+      "bodyAttributes": {
+        "class": "fake"
+      },
+      "opaqueCidStrings": [
+        "style-literal@example.test",
+        "script-literal@example.test",
+        "textarea-literal@example.test"
+      ],
+      "noteBefore": [
+        "Fictional raw textarea",
+        "Fictional paragraph after raw text."
+      ]
+    },
+    {
+      "id": "transitional-table-email",
+      "file": "transitional-table-email.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "html4-transitional-doctype",
+        "legacy-table-layout",
+        "legacy-body-attributes",
+        "encoding-replacement"
+      ],
+      "mustRetain": [
+        "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">",
+        "<style>body{margin:0}table.receipt td{padding:8px}</style>",
+        "<table class=\"receipt\" width=\"600\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr><td>Fictional legacy receipt.</td><td>EUR 3.50</td></tr><tr><td colspan=\"2\"><img src=\"cid:picture@example.test\" width=\"1\" height=\"1\" alt=\"Fictional legacy picture\"></td></tr></table>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Fictional old-style email retains its original doctype, presentation table, legacy body attributes, and image while replacing only stale encoding metadata.",
+      "mustNotRetain": [
+        "iso-8859-1"
+      ],
+      "bodyAttributes": {
+        "bgcolor": "#f4f4f4",
+        "marginwidth": "0",
+        "marginheight": "0"
+      },
+      "noteBefore": [
+        "Fictional legacy receipt."
+      ]
+    },
+    {
+      "id": "concatenated-complete-documents",
+      "file": "concatenated-complete-documents.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "two-complete-documents",
+        "one-html-mime-leaf",
+        "deterministic-browser-recovery",
+        "first-value-wins"
+      ],
+      "mustRetain": [
+        "<style>.first{color:#123456}</style>",
+        "<p class=\"first\">Fictional first complete document.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional first document picture\">",
+        "<style>.second{color:#654321}</style>",
+        "<p class=\"second\">Fictional second complete document.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Accepted product policy: concatenated full HTML envelopes within one MIME HTML leaf have deterministic browser recovery. Retain both message contents and styles, first root attributes win, and inject the note before both. Backend ambiguity between separate MIME presentation leaves remains a separate rejection.",
+      "rootAttributes": {
+        "lang": "en"
+      },
+      "noteBefore": [
+        "Fictional first complete document.",
+        "Fictional second complete document."
+      ]
+    },
+    {
+      "id": "pending-unterminated-quoted-attribute",
+      "file": "pending-unterminated-quoted-attribute.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "known-body-insertion-point",
+        "quoted-attribute-eof",
+        "raw-body-tail-preservation"
+      ],
+      "mustRetain": [
+        "<p data-value=\"unterminated>Fictional text swallowed by unfinished attribute.</p><img src=cid:picture@example.test></body></html>\n"
+      ],
+      "realResourceIds": [],
+      "fakeResourceIds": [],
+      "rationale": "Accepted boundary-finder policy: the explicit body insertion point is already known. Preserve the unfinished quoted tag and all following bytes verbatim to EOF; fake body/image tokens inside that value are not scanned as markup or required resources.",
+      "mustEndWith": "<p data-value=\"unterminated>Fictional text swallowed by unfinished attribute.</p><img src=cid:picture@example.test></body></html>\n",
+      "opaqueCidStrings": [
+        "picture@example.test"
+      ]
+    },
+    {
+      "id": "pending-unclosed-style",
+      "file": "pending-unclosed-style.html",
+      "expectedOutcome": "reject",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": false,
+      "features": [
+        "unknown-body-insertion-point",
+        "raw-style-eof-in-head",
+        "clear-boundary-refusal"
+      ],
+      "mustRetain": [
+        "Fictional unclosed style content."
+      ],
+      "realResourceIds": [],
+      "fakeResourceIds": [],
+      "rationale": "Refuse with OriginalHtmlUnavailable because an unclosed style in HEAD leaves no safe insertion point for the note outside head. Preserve the immutable original snapshot and report the boundary failure; do not discard raw content or guess a body start.",
+      "expectedError": "OriginalHtmlUnavailable",
+      "opaqueCidStrings": [
+        "picture@example.test"
+      ]
+    },
+    {
+      "id": "pending-script-double-escape",
+      "file": "pending-script-double-escape.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "script-double-escaped-state",
+        "tracked-raw-script-boundary",
+        "opaque-fake-envelope",
+        "opaque-fake-cid"
+      ],
+      "mustRetain": [
+        "<script><!--<script> const fake = '</script><body><img src=\"cid:script-literal@example.test\">'; --></script>",
+        "<p>Fictional content after double-escaped script.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional double-escape later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Accepted after tracked script escaped/double-escaped tokenization and independent Chromium confirmation. The first apparent closing script token remains raw text; fake body/CID strings do not create envelope or resource boundaries. Preserve the complete script bytes and the actual later body/image.",
+      "rootAttributes": {},
+      "bodyAttributes": {},
+      "opaqueCidStrings": [
+        "script-literal@example.test"
+      ],
+      "noteBefore": [
+        "Fictional content after double-escaped script."
+      ]
+    },
+    {
+      "id": "no-doctype-quirks-table",
+      "file": "no-doctype-quirks-table.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "no-doctype",
+        "quirks-mode",
+        "paragraph-table-nesting",
+        "css-probes"
+      ],
+      "mustRetain": [
+        "<style>#quirks-p{color:#123456}#quirks-table{border-spacing:3px}</style>",
+        "<p id=\"quirks-p\">Fictional quirks prefix.<table id=\"quirks-table\"><tr><td>Fictional quirks table cell.</td></tr></table>Fictional quirks suffix.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Adding a doctype changes quirks-mode paragraph/table recovery. Preserve absence of a doctype and recovered DOM/CSS while inserting the note.",
+      "bodyAttributes": {
+        "class": "quirks-message"
+      },
+      "compatMode": "BackCompat",
+      "styleProbeIds": [
+        "quirks-p",
+        "quirks-table"
+      ],
+      "noteBefore": [
+        "Fictional quirks prefix.",
+        "Fictional quirks table cell.",
+        "Fictional quirks suffix."
+      ]
+    },
+    {
+      "id": "doctype-standards-table",
+      "file": "doctype-standards-table.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "html5-doctype",
+        "standards-mode",
+        "paragraph-table-nesting",
+        "css-probes"
+      ],
+      "mustRetain": [
+        "<!doctype html>",
+        "<style>#standards-p{color:#123456}#standards-table{border-spacing:3px}</style>",
+        "<p id=\"standards-p\">Fictional standards prefix.<table id=\"standards-table\"><tr><td>Fictional standards table cell.</td></tr></table>Fictional standards suffix.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Keep an existing HTML5 doctype and its standards-mode paragraph/table recovery. This is the companion control to the no-doctype case.",
+      "bodyAttributes": {
+        "class": "standards-message"
+      },
+      "compatMode": "CSS1Compat",
+      "styleProbeIds": [
+        "standards-p",
+        "standards-table"
+      ],
+      "noteBefore": [
+        "Fictional standards prefix.",
+        "Fictional standards table cell.",
+        "Fictional standards suffix."
+      ]
+    },
+    {
+      "id": "template-envelope-tokens",
+      "file": "template-envelope-tokens.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "template",
+        "inert-envelope-tokens",
+        "root-body-attributes-must-not-merge",
+        "css-probes"
+      ],
+      "mustRetain": [
+        "<template id=\"fictional-template\"><html lang=\"de\" dir=\"rtl\"><head data-fake=\"yes\"><body class=\"fake-template-body\"><p>Fictional inert template text.</p><img src=\"cid:picture@example.test\" alt=\"Fictional template picture\"></body></html></template>",
+        "<p id=\"template-probe\">Fictional paragraph after inert template.</p>"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Html/head/body tokens in template content do not affect the outer root/body. Their bytes and template content must remain intact, and the actual paragraph/image stay in body.",
+      "rootAttributes": {
+        "lang": "en"
+      },
+      "bodyAttributes": {
+        "class": "original-template-body"
+      },
+      "styleProbeIds": [
+        "template-probe"
+      ],
+      "noteBefore": [
+        "Fictional paragraph after inert template."
+      ]
+    },
+    {
+      "id": "missing-attribute-whitespace",
+      "file": "missing-attribute-whitespace.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "missing-attribute-whitespace",
+        "link",
+        "later-image",
+        "css-probes"
+      ],
+      "mustRetain": [
+        "<p id=\"adjacent-probe\"data-first='one'data-second=\"two\">Fictional adjacent attributes.</p>",
+        "<a id=\"adjacent-link\"href=\"https://example.test/fictional\"title='Fictional adjacent link'>Fictional adjacent link.</a>",
+        "<img src=\"cid:picture@example.test\"alt=\"Fictional adjacent picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "After a quoted value, a following attribute with no whitespace re-enters before-attribute state and must still be recognized.",
+      "styleProbeIds": [
+        "adjacent-probe",
+        "adjacent-link"
+      ],
+      "noteBefore": [
+        "Fictional adjacent attributes.",
+        "Fictional adjacent link."
+      ]
+    },
+    {
+      "id": "less-than-tag-name",
+      "file": "less-than-tag-name.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "tag-name-less-than",
+        "fake-body-name",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<body<fake data-value=\"literal\">Fictional less-than fake body name.</body<fake>",
+        "<a<b href=\"https://example.test/fictional\">Fictional less-than tag name.</a<b>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional less-than tag later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "A less-than character reached within tag-name state remains part of that unusual name. It must not be repaired into a new nested body or link tag.",
+      "noteBefore": [
+        "Fictional less-than fake body name.",
+        "Fictional less-than tag name."
+      ]
+    },
+    {
+      "id": "unquoted-equals-backtick",
+      "file": "unquoted-equals-backtick.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "accept",
+      "browserEquivalent": true,
+      "features": [
+        "unquoted-attribute-equals",
+        "unquoted-attribute-backtick",
+        "later-image"
+      ],
+      "mustRetain": [
+        "<p data-equals=left=right data-backtick=left`right>Fictional equals and backtick values.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional unquoted later picture\">"
+      ],
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "rationale": "Equals and backtick inside an already unquoted value are consumed literally; this control guards against overstrict forbidden-character validation.",
+      "noteBefore": [
+        "Fictional equals and backtick values."
+      ]
+    },
+    {
+      "id": "body-tail-unclosed-comment",
+      "file": "body-tail-unclosed-comment.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "known-body-insertion-point",
+        "comment-eof-in-body",
+        "raw-body-tail-preservation",
+        "opaque-fake-envelope",
+        "opaque-fake-cid"
+      ],
+      "mustRetain": [
+        "<style>#body-comment-probe{color:#123456}</style>",
+        "<p id=\"body-comment-probe\">Fictional body before unfinished comment.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional before-comment picture\">",
+        "<!-- Fictional unfinished comment <body class=\"fake-comment-body\"><img src=\"cid:comment-literal@example.test\">\n"
+      ],
+      "mustEndWith": "<!-- Fictional unfinished comment <body class=\"fake-comment-body\"><img src=\"cid:comment-literal@example.test\">\n",
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "opaqueCidStrings": [
+        "comment-literal@example.test"
+      ],
+      "bodyAttributes": {
+        "class": "tail-comment"
+      },
+      "styleProbeIds": [
+        "body-comment-probe"
+      ],
+      "noteBefore": [
+        "Fictional body before unfinished comment."
+      ],
+      "rationale": "The explicit body insertion point precedes the unfinished comment. Accept and retain the complete remaining source tail to EOF; do not invent closers, inspect comment-literal image URLs, or treat fake body tokens as an envelope."
+    },
+    {
+      "id": "body-tail-unclosed-style",
+      "file": "body-tail-unclosed-style.html",
+      "expectedOutcome": "accept",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": true,
+      "features": [
+        "known-body-insertion-point",
+        "raw-style-eof-in-body",
+        "raw-body-tail-preservation",
+        "opaque-fake-envelope",
+        "opaque-fake-cid"
+      ],
+      "mustRetain": [
+        "<style>#body-style-probe{color:#123456}</style>",
+        "<p id=\"body-style-probe\">Fictional body before unfinished style.</p>",
+        "<img src=\"cid:picture@example.test\" alt=\"Fictional before-style picture\">",
+        "<style>.unfinished:before{content:'<body class=\"fake-style-body\"><img src=\"cid:style-literal@example.test\"></body>'}\n"
+      ],
+      "mustEndWith": "<style>.unfinished:before{content:'<body class=\"fake-style-body\"><img src=\"cid:style-literal@example.test\"></body>'}\n",
+      "realResourceIds": [
+        "picture"
+      ],
+      "fakeResourceIds": [],
+      "opaqueCidStrings": [
+        "style-literal@example.test"
+      ],
+      "bodyAttributes": {
+        "class": "tail-style"
+      },
+      "styleProbeIds": [
+        "body-style-probe"
+      ],
+      "noteBefore": [
+        "Fictional body before unfinished style."
+      ],
+      "rationale": "The explicit body insertion point is already known before the unfinished raw style. Accept and retain the complete remaining source tail to EOF; the CSS string fake body/image tokens are not structural markup or URL references."
+    },
+    {
+      "id": "head-unterminated-quoted-attribute",
+      "file": "head-unterminated-quoted-attribute.html",
+      "expectedOutcome": "reject",
+      "expectedError": "OriginalHtmlUnavailable",
+      "baselineOutcome": "InvalidOriginalHtml",
+      "browserEquivalent": false,
+      "features": [
+        "unknown-body-insertion-point",
+        "quoted-attribute-eof-in-head",
+        "clear-boundary-refusal"
+      ],
+      "mustRetain": [
+        "Fictional unfinished head attribute.",
+        "Fictional fake body after unfinished head attribute."
+      ],
+      "realResourceIds": [],
+      "fakeResourceIds": [],
+      "opaqueCidStrings": [
+        "picture@example.test"
+      ],
+      "rationale": "A genuinely unfinished quoted attribute begins while still in head. The later literal body/image text belongs to that unfinished token, so no safe note insertion point can be found. Refuse with OriginalHtmlUnavailable without changing the immutable original."
+    }
+  ],
+  "decisionNotes": {
+    "pendingPolicyCases": [],
+    "doctypePreservation": "An absent doctype must remain absent. DOM equivalence includes document.compatMode for no-doctype/table and standards/table controls.",
+    "opaqueText": "mustRetain is raw source preservation, except envelope repair and stale encoding meta removal. CID-like strings in comments/raw text are not actual resource references.",
+    "bodyInsertion": "The note and original header precede the first original body token even if literal body opens occur only later. A late head style stays in its browser-recovered parent.",
+    "concatenatedDocuments": "Accept browser-deterministic concatenated envelopes in one HTML leaf; this does not change backend rejection of multiple alternative MIME presentation bodies.",
+    "unfinishedBodyTails": "Accept unfinished quote/comment/raw-style tails after a safe body insertion point is known. Copy the exact tail to EOF; do not append guessed envelope closers inside it or classify fake body/image tokens as markup.",
+    "unfinishedHeadBoundaries": "Refuse OriginalHtmlUnavailable when unfinished quoted/raw head content prevents finding a safe insertion point outside head. The preserved original remains immutable; the error is a boundary availability failure, not general HTML validation.",
+    "historicalPendingNames": "The quote-EOF, head-style-EOF, and script-double-escape files retain their initial pending- prefixes, but expectedOutcome now records their final accept/reject policies. No pending case outcomes remain.",
+    "scriptDoubleEscape": "Accept with tracked script escaped/double-escaped states; independent Chromium candidate1 evidence confirmed zero errors and original browser DOM/CSS equivalence."
+  },
+  "sources": [
+    {
+      "title": "HTML Standard: parsing and tokenizer states",
+      "url": "https://html.spec.whatwg.org/multipage/parsing.html"
+    },
+    {
+      "title": "WPT tree construction: repeated bodies and late root attributes",
+      "url": "https://github.com/web-platform-tests/wpt/blob/master/html/syntax/parsing/resources/tests2.dat"
+    },
+    {
+      "title": "WPT tree construction: repeated heads and quirks paragraph/table parsing",
+      "url": "https://github.com/web-platform-tests/wpt/blob/master/html/syntax/parsing/resources/tests3.dat"
+    },
+    {
+      "title": "MJML production email skeleton",
+      "url": "https://github.com/mjmlio/mjml/blob/master/packages/mjml-core/src/helpers/skeleton.js"
+    },
+    {
+      "title": "RFC 2854: text/html media type",
+      "url": "https://www.rfc-editor.org/rfc/rfc2854.html"
+    }
+  ]
+}
