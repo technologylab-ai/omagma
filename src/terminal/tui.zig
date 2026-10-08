@@ -39,10 +39,11 @@ const Event = union(enum) { fetch_progress, loading_tick, cache_changed, theme_t
 const Loop = input_loop.Loop(Event);
 const FileFocus = enum { path, parent, home, hidden, listing, confirm, cancel };
 const ComposeView = enum { rendered, original, plain };
-const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, attachment, theme };
+const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, label_manager, attachment, theme };
+const LabelManagerPage = enum { list, create, rename, delete };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const Focus = layout.Focus;
-const JobKind = enum { batch, undo, labels_list, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_operations, compose, autosave, identities, save, save_review, save_back, send, contacts, contact_write, mutation, invitation_inspect, invitation, open, attachment_save };
+const JobKind = enum { batch, undo, labels_list, label_write, label_receipt, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_operations, compose, autosave, identities, save, save_review, save_back, send, contacts, contact_write, mutation, invitation_inspect, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -130,6 +131,13 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "MissingReplyRecipient", .label = "No external recipient to reply to" },
         .{ .code = "MissingMessageId", .label = "Mail has no valid reply identifier" },
         .{ .code = "InvalidAddress", .label = "Enter a valid email address" },
+        .{ .code = "InvalidLabelName", .label = "Enter a valid custom label name" },
+        .{ .code = "DuplicateLabelName", .label = "A label with this name already exists" },
+        .{ .code = "LabelNotFound", .label = "Label no longer exists · Ctrl+R refreshes labels" },
+        .{ .code = "InvalidLabelConfirmation", .label = "Label changed · review it again before deleting" },
+        .{ .code = "SystemLabelImmutable", .label = "Built-in mailbox labels cannot be edited" },
+        .{ .code = "TooManyLabels", .label = "Account label limit reached" },
+        .{ .code = "NotMailbox", .label = "Open label management from the mailbox" },
         .{ .code = "UnverifiedSender", .label = "Sending identity is not verified" },
         .{ .code = "UnknownOutcome", .label = "Outcome unknown · check before retrying" },
         .{ .code = "Timeout", .label = "Request timed out" },
@@ -248,6 +256,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "x / D / U", .action = "Archive, review Trash or restore mail" },
     .{ .keys = "s / u", .action = "Toggle starred or unread" },
     .{ .keys = "m", .action = "Choose labels; + adds, - removes; / filters; Tab controls" },
+    .{ .keys = ":labels · click LABELS", .action = "Manage custom label definitions; n New, r Rename, d Delete, o Open" },
+    .{ .keys = "Tab / Shift+Tab · Enter in label manager", .action = "Reach every label control; / filters; Ctrl+R refreshes or checks the receipt" },
     .{ .keys = "I", .action = "Review a calendar invitation reply" },
     .{ .keys = "Ctrl+R", .action = "Refresh mail" },
     .{ .keys = "Ctrl+L", .action = "Reload theme and redraw the screen" },
@@ -835,6 +845,17 @@ const App = struct {
     label_filter: Field = .{},
     label_target: Field = .{},
     label_choice: usize = 0,
+    label_manager_page: LabelManagerPage = .list,
+    label_manager_account: Field = .{},
+    label_manager_selected: Field = .{},
+    label_manager_id: Field = .{},
+    label_manager_name: Field = .{},
+    label_manager_input: Field = .{},
+    label_delete_ready: bool = false,
+    label_write_page: [3]LabelManagerPage = @splat(.list),
+    label_unknown: [3]bool = @splat(false),
+    label_operations: [3]Field = @splat(.{}),
+    label_errors: [3]Field = @splat(.{}),
     search_highlight: Field = .{},
     search_matches: []const Value = &.{},
     navigation: usize = 0,
@@ -974,6 +995,9 @@ const App = struct {
         self.labels_account.deinit(self.allocator);
         self.label_filter.deinit(self.allocator);
         self.label_target.deinit(self.allocator);
+        for ([_]*Field{ &self.label_manager_account, &self.label_manager_selected, &self.label_manager_id, &self.label_manager_name, &self.label_manager_input }) |field| field.deinit(self.allocator);
+        for (&self.label_operations) |*field| field.deinit(self.allocator);
+        for (&self.label_errors) |*field| field.deinit(self.allocator);
         self.search_highlight.deinit(self.allocator);
         if (self.label_arena) |*arena| arena.deinit();
         self.cancelAutosaveTimer();
@@ -1193,7 +1217,8 @@ const App = struct {
         try self.start(.undo, .{ .cmd = "mail.undo", .account = self.account(), .undoToken = self.undo_token.value() });
     }
     fn labelMatches(self: *App, label_value: Value) bool {
-        return cache_query.find(text(get(label_value, "name")), self.label_filter.value()) != null or self.label_filter.value().len == 0;
+        return same(text(get(label_value, "type")), "user") and
+            (cache_query.find(text(get(label_value, "name")), self.label_filter.value()) != null or self.label_filter.value().len == 0);
     }
     fn visibleLabelIndex(self: *App, selected: usize) ?usize {
         var found: usize = 0;
@@ -1219,6 +1244,7 @@ const App = struct {
         if (self.labels.len > 512) return error.LabelLimitExceeded;
         try self.labels_account.set(self.allocator, self.account());
         self.pending_labels = false;
+        if (self.mode == .label_manager or (self.mode == .help and self.previous_mode == .label_manager)) try self.restoreManagerLabel();
     }
     fn prepareLabels(self: *App) !void {
         if (same(self.labels_account.value(), self.account()) and self.labels.len > 0) return;
@@ -1318,6 +1344,327 @@ const App = struct {
             try self.line(inner, inner.height - 1, "Tab Controls · Enter Choose · / Filter · Esc/q Back", .muted);
         }
     }
+    fn canManageLabels(self: *const App) bool {
+        if (self.account_index >= self.accounts.len or self.label_unknown[self.account_index]) return false;
+        for (items(get(self.accounts[self.account_index], "capabilities"))) |capability| if (same(text(capability), "mail-modify")) return true;
+        return false;
+    }
+    fn labelManagerBusy(self: *const App) bool {
+        return self.job.future != null and !readOnlyJob(self.job.kind);
+    }
+    fn rememberManagerLabel(self: *App) !void {
+        const index = self.visibleLabelIndex(self.label_choice);
+        try self.label_manager_selected.set(self.allocator, if (index) |at| text(get(self.labels[at], "id")) else "");
+    }
+    fn restoreManagerLabel(self: *App) !void {
+        var visible: usize = 0;
+        for (self.labels) |label_value| if (self.labelMatches(label_value)) {
+            if (same(text(get(label_value, "id")), self.label_manager_selected.value())) {
+                self.label_choice = visible;
+                return;
+            }
+            visible += 1;
+        };
+        self.label_choice = @min(self.label_choice, visible -| 1);
+        try self.rememberManagerLabel();
+    }
+    fn openLabelManager(self: *App) !void {
+        self.label_picker = false;
+        self.label_manager_page = .list;
+        try self.label_manager_account.set(self.allocator, self.account());
+        try self.label_manager_selected.set(self.allocator, "");
+        try self.label_filter.set(self.allocator, "");
+        self.label_choice = 0;
+        self.mode = .label_manager;
+        self.dialog_focus.reset(.label_manager, 1);
+        try self.prepareLabels();
+        try self.rememberManagerLabel();
+        if (self.pending_labels) self.preemptReadOnly();
+        try self.dispatchPending();
+        if (self.label_unknown[self.account_index]) self.labelUnknownNotice() else if (!self.canManageLabels()) self.say(true, "Read-only labels · terminal access needs mail-modify", .{});
+    }
+    fn closeLabelManager(self: *App) void {
+        self.mode = .browse;
+        self.label_manager_page = .list;
+    }
+    fn labelUnknownNotice(self: *App) void {
+        self.say(true, "Label outcome unknown · Ctrl+R checks receipt · do not retry · {s}", .{self.label_operations[self.account_index].value()});
+        self.status_kind = .unknown;
+    }
+    fn editManagerLabel(self: *App, editor_page: LabelManagerPage) !void {
+        if (!self.canManageLabels() or self.labelManagerBusy()) return;
+        if (!same(self.label_manager_account.value(), self.account())) return error.WrongAccount;
+        if (editor_page == .create) {
+            try self.label_manager_id.set(self.allocator, "");
+            try self.label_manager_name.set(self.allocator, "");
+            try self.label_manager_input.set(self.allocator, "");
+        } else {
+            const index = self.visibleLabelIndex(self.label_choice) orelse return;
+            try self.label_manager_id.set(self.allocator, text(get(self.labels[index], "id")));
+            try self.label_manager_name.set(self.allocator, text(get(self.labels[index], "name")));
+            try self.label_manager_input.set(self.allocator, self.label_manager_name.value());
+        }
+        self.label_manager_page = editor_page;
+        self.label_delete_ready = false;
+        self.dialog_focus.reset(if (editor_page == .delete) .label_delete else .label_name, 0);
+    }
+    fn submitManagerLabel(self: *App) !void {
+        if (!self.canManageLabels() or self.labelManagerBusy()) return;
+        if (!same(self.label_manager_account.value(), self.account())) return error.WrongAccount;
+        const editor_page = self.label_manager_page;
+        if (editor_page == .list) return;
+        if (editor_page == .delete and !self.label_delete_ready) {
+            self.say(true, "Resize to review label deletion before confirming", .{});
+            return;
+        }
+        const name = std.mem.trim(u8, self.label_manager_input.value(), " \t\r\n");
+        if (editor_page != .delete and name.len == 0) {
+            self.say(true, "Enter a label name", .{});
+            self.dialog_focus.index = 0;
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        const id = try self.operationId(self.allocator);
+        defer self.allocator.free(id);
+        try self.label_operations[self.account_index].set(self.allocator, id);
+        try self.label_errors[self.account_index].set(self.allocator, "");
+        self.label_write_page[self.account_index] = editor_page;
+        if (editor_page == .create) try self.start(.label_write, .{ .cmd = "labels.create", .account = self.label_manager_account.value(), .name = name, .operationId = id }) else if (editor_page == .rename) try self.start(.label_write, .{ .cmd = "labels.rename", .account = self.label_manager_account.value(), .labelId = self.label_manager_id.value(), .name = name, .operationId = id }) else try self.start(.label_write, .{ .cmd = "labels.delete", .account = self.label_manager_account.value(), .labelId = self.label_manager_id.value(), .operationId = id, .confirmName = self.label_manager_name.value() });
+    }
+    fn managerListAction(self: *App, index: usize) !void {
+        switch (index) {
+            2 => try self.editManagerLabel(.create),
+            3 => try self.editManagerLabel(.rename),
+            4 => try self.editManagerLabel(.delete),
+            1, 5 => {
+                if (self.labelManagerBusy()) return;
+                const at = self.visibleLabelIndex(self.label_choice) orelse return;
+                self.closeLabelManager();
+                try self.chooseCustomLabel(at);
+            },
+            6 => self.closeLabelManager(),
+            else => {},
+        }
+    }
+    fn managerEnabled(self: *App) u8 {
+        const have_label = self.visibleLabelCount() > 0;
+        const can_write = self.canManageLabels() and !self.labelManagerBusy();
+        return @as(u8, 0b1000011) | (if (have_label and !self.labelManagerBusy()) @as(u8, 0b0100000) else 0) | (if (can_write) @as(u8, 0b0000100) else 0) | (if (can_write and have_label) @as(u8, 0b0011000) else 0);
+    }
+    fn onLabelManagerKey(self: *App, key: Key) !void {
+        if (!same(self.label_manager_account.value(), self.account())) {
+            self.closeLabelManager();
+            return;
+        }
+        if (self.paste) {
+            const field: ?*Field = if (self.label_manager_page == .list and self.dialog_focus.index == 0) &self.label_filter else if ((self.label_manager_page == .create or self.label_manager_page == .rename) and self.dialog_focus.index == 0 and !self.labelManagerBusy()) &self.label_manager_input else null;
+            if (field) |target| if (key.text) |raw| {
+                try target.insert(self.allocator, try safe(self.frame.allocator(), raw, false), 256);
+                if (self.label_manager_page == .list) {
+                    self.label_choice = 0;
+                    try self.rememberManagerLabel();
+                }
+            };
+            return;
+        }
+        if (key.matches('c', .{ .ctrl = true }) or key.matches('q', .{ .ctrl = true })) {
+            self.closeLabelManager();
+            return;
+        }
+        if (self.label_manager_page != .list) {
+            const deleting = self.label_manager_page == .delete;
+            if (tabDirection(key)) |backwards| {
+                self.dialog_focus.move(backwards, if (deleting) 2 else 3, if (self.labelManagerBusy()) (if (deleting) @as(u8, 0b01) else 0b100) else if (deleting) (if (self.label_delete_ready) @as(u8, 0b11) else 0b01) else 0b111);
+            } else if (key.matches(Key.escape, .{}) or (deleting and (key.matches('q', .{}) or key.matches('n', .{}))) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == (if (deleting) @as(usize, 0) else 2))) {
+                self.label_manager_page = .list;
+                self.dialog_focus.reset(.label_manager, 1);
+            } else if (self.labelManagerBusy()) return else if (deleting) {
+                if (key.matches('y', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) try self.submitManagerLabel();
+            } else if (key.matches('s', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) try self.submitManagerLabel() else if (self.dialog_focus.index == 0) {
+                // Enter in Name moves to Save; typing never invokes action letters.
+                if (key.matches(Key.enter, .{})) self.dialog_focus.index = 1 else try self.label_manager_input.handleKey(self.allocator, key, false, 256);
+            }
+            return;
+        }
+        if (tabDirection(key)) |backwards| {
+            self.dialog_focus.move(backwards, 7, self.managerEnabled());
+            return;
+        }
+        if (self.dialog_focus.index == 0) {
+            if (key.matches(Key.enter, .{}) or key.matches(Key.escape, .{})) self.dialog_focus.index = 1 else {
+                try self.label_filter.handleKey(self.allocator, key, false, 256);
+                self.label_choice = 0;
+                try self.rememberManagerLabel();
+            }
+            return;
+        }
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) self.closeLabelManager() else if (key.matches('/', .{})) self.dialog_focus.index = 0 else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('k', .{}) or key.matches(Key.up, .{})) {
+            self.dialog_focus.index = 1;
+            self.label_choice = if (key.matches('j', .{}) or key.matches(Key.down, .{})) @min(self.label_choice +| 1, self.visibleLabelCount() -| 1) else self.label_choice -| 1;
+            try self.rememberManagerLabel();
+        } else if (key.matches('g', .{ .ctrl = true })) {
+            self.label_choice = 0;
+            try self.rememberManagerLabel();
+        } else if (key.matches('n', .{})) try self.managerListAction(2) else if (key.matches('r', .{})) try self.managerListAction(3) else if (key.matches('d', .{})) try self.managerListAction(4) else if (key.matches('o', .{})) try self.managerListAction(5) else if (key.matches(Key.enter, .{})) try self.managerListAction(self.dialog_focus.index) else if (key.matches('r', .{ .ctrl = true })) {
+            if (self.label_unknown[self.account_index]) {
+                self.preemptReadOnly();
+                if (self.job.future == null) try self.start(.label_receipt, .{ .cmd = "operation.read", .account = self.account(), .operationId = self.label_operations[self.account_index].value() });
+            } else {
+                self.pending_labels = true;
+                self.preemptReadOnly();
+                try self.dispatchPending();
+            }
+        } else if (key.matches('?', .{})) try self.openHelp();
+    }
+    fn applyManagerLabel(self: *App, response: []const u8) !void {
+        const result = try self.data(self.job_arena.allocator(), response);
+        const index = self.job.account_index;
+        if (index != self.account_index) return;
+        const outcome = text(get(result, "outcome"));
+        const operation_id = text(get(result, "operationId"));
+        const raw_id = text(get(result, "id"));
+        if (operation_id.len > 0) try self.label_operations[index].set(self.allocator, operation_id) else if (raw_id.len > 0) try self.label_operations[index].set(self.allocator, raw_id);
+        if (same(outcome, "unknown")) {
+            self.label_unknown[index] = true;
+            try self.label_errors[index].set(self.allocator, text(get(result, "errorCode")));
+            self.label_manager_page = .list;
+            self.dialog_focus.reset(.label_manager, 1);
+            self.labelUnknownNotice();
+            return;
+        }
+        if (same(outcome, "rejected")) {
+            self.label_unknown[index] = false;
+            const code = text(get(result, "errorCode"));
+            try self.label_errors[index].set(self.allocator, code);
+            self.sayError(if (code.len > 0) code else "ProviderRejected");
+            return;
+        }
+        if (!same(outcome, "applied")) {
+            self.label_unknown[index] = true;
+            self.label_manager_page = .list;
+            self.dialog_focus.reset(.label_manager, 1);
+            self.labelUnknownNotice();
+            return;
+        }
+        self.label_unknown[index] = false;
+        const deleting = truth(get(result, "deleted"));
+        const label_id = text(get(result, "labelId"));
+        try self.label_manager_selected.set(self.allocator, if (deleting) "" else label_id);
+        if (self.label_write_page[index] == .create) try self.label_filter.set(self.allocator, "");
+        self.label_manager_page = .list;
+        self.dialog_focus.reset(.label_manager, 1);
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const cached_labels = self.cached(arena.allocator(), .{ .cmd = "labels.list", .account = self.account(), .cacheOnly = true }) catch null;
+        if (cached_labels) |labels_response| try self.replaceLabels(labels_response) else self.pending_labels = true;
+        if (deleting) {
+            const selected_message = try arena.allocator().dupe(u8, self.messageId());
+            if (same(self.custom_label.value(), label_id)) {
+                try self.custom_label.set(self.allocator, "");
+                self.folder = 0;
+                self.drafts_list = false;
+                self.query_scope = .cache;
+                try self.query.set(self.allocator, "");
+                self.selected = 0;
+                self.top = 0;
+            }
+            self.clearHistory();
+            try self.cursor.set(self.allocator, "");
+            self.generation +%= 1;
+            self.clearReader();
+            _ = self.loadCachedList(selected_message) catch |err| if (err == error.CacheBusy) false else return err;
+        }
+        self.sayAction(false, "Label {s} · emails kept", .{if (deleting) @as([]const u8, "deleted") else if (self.label_write_page[index] == .create) "created" else "renamed"});
+    }
+    fn labelManagerButtonRows(self: *App, win: vaxis.Window) usize {
+        _ = self;
+        const short = win.width < 58;
+        const labels = [_][]const u8{ "[n New]", if (short) "[r Ren]" else "[r Rename]", if (short) "[d Del]" else "[d Delete]", "[o Open]", "[q Back]" };
+        var rows: usize = 1;
+        var x: usize = 0;
+        for (labels) |label| {
+            if (x > 0 and x + label.len > win.width) {
+                rows += 1;
+                x = 0;
+            }
+            x += label.len + @as(usize, if (win.width < 26) 1 else 2);
+        }
+        return rows;
+    }
+    fn drawLabelManager(self: *App, win: vaxis.Window) !void {
+        if (self.mode != .label_manager) return;
+        const width = @min(win.width -| 2, 74);
+        const height = @min(win.height -| 2, if (self.label_manager_page == .list) @as(u16, 26) else if (self.label_manager_page == .delete) @as(u16, 20) else 11);
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const title = switch (self.label_manager_page) {
+            .list => " Manage labels ",
+            .create => " New label ",
+            .rename => " Rename label ",
+            .delete => " Delete label? ",
+        };
+        const inner = self.panel(area, 0, width, title, true);
+        self.mouse_hits.clear();
+        const account_line = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}", .{self.label_manager_account.value()});
+        if (self.label_manager_page == .list) {
+            try self.line(inner, 0, try self.fitLine(inner, account_line, inner.width), .muted);
+            try self.line(inner, 1, try std.fmt.allocPrint(self.frame.allocator(), "Filter: {s}{s}", .{ self.label_filter.value(), if (self.dialog_focus.index == 0) "▏" else "" }), if (self.dialog_focus.index == 0) .selected else .muted);
+            self.mouseRows(inner, 1, 1, .label_manager_filter, 0);
+            const button_rows = self.labelManagerButtonRows(inner);
+            const button_start = inner.height -| (button_rows + 1);
+            const rows = button_start -| 2;
+            const count = self.visibleLabelCount();
+            self.label_choice = @min(self.label_choice, count -| 1);
+            const first = if (self.label_choice >= rows and rows > 0) self.label_choice - rows + 1 else 0;
+            if (count == 0 and rows > 0) try self.line(inner, 2, if (self.pending_labels or (self.job.future != null and self.job.kind == .labels_list)) "Loading labels…" else if (self.label_filter.value().len > 0) "No matching labels" else "No custom labels · n New", .muted);
+            for (first..@min(count, first + rows)) |choice| {
+                const at = self.visibleLabelIndex(choice) orelse continue;
+                try self.line(inner, choice - first + 2, try self.fitLine(inner, try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (choice == self.label_choice) @as([]const u8, "> ") else "  ", text(get(self.labels[at], "name")) }), inner.width), if (choice == self.label_choice) (if (self.dialog_focus.index == 1) .selected else .subject) else .text);
+                self.mouseRows(inner, choice - first + 2, 1, .label_manager_choice, choice);
+            }
+            const short = inner.width < 58;
+            const labels = [_][]const u8{ "[n New]", if (short) "[r Ren]" else "[r Rename]", if (short) "[d Del]" else "[d Delete]", "[o Open]", "[q Back]" };
+            var x: u16 = 0;
+            var row: usize = button_start;
+            const enabled = self.managerEnabled();
+            for (labels, 0..) |label, offset| {
+                if (x > 0 and x + label.len > inner.width) {
+                    row += 1;
+                    x = 0;
+                }
+                const index = offset + 2;
+                x = try self.actionButton(inner, row, x, label, self.dialog_focus.index == index, enabled & (@as(u8, 1) << @intCast(index)) != 0, .label_manager_action, index);
+            }
+            try self.line(inner, inner.height -| 1, if (self.label_unknown[self.account_index]) "Unknown · Ctrl+R Receipt" else if (!self.canManageLabels()) "Read-only · mail-modify needed" else if (inner.width < 50) "/ Filter · Tab · Enter · Esc" else "Tab Controls · Enter Open · / Filter · Ctrl+R Refresh", .muted);
+            return;
+        }
+        if (self.label_manager_page == .delete) {
+            self.label_delete_ready = false;
+            const details = try std.fmt.allocPrint(self.frame.allocator(), "{s}\nLabel: {s}\n\nEmails are kept; this removes the label from all messages.", .{ account_line, self.label_manager_name.value() });
+            const clean = try safe(self.frame.allocator(), details, true);
+            const needed = positionAfter(inner, clean).row + 1;
+            if (needed <= inner.height -| 3) {
+                _ = try self.flow(inner, clean, 0, 0);
+                self.label_delete_ready = true;
+            } else {
+                _ = try self.flow(inner.child(.{ .height = inner.height -| 3 }), clean, 0, 0);
+                try self.line(inner, inner.height -| 3, "Resize to review deletion", .warning);
+            }
+            const x = try self.actionButton(inner, inner.height -| 2, 0, "[Cancel]", self.dialog_focus.index == 0, true, .label_manager_action, 0);
+            _ = try self.actionButton(inner, inner.height -| 2, x, "[y Delete]", self.dialog_focus.index == 1, self.label_delete_ready and !self.labelManagerBusy() and self.canManageLabels(), .label_manager_action, 1);
+            try self.line(inner, inner.height -| 1, "Tab · Enter · Esc Cancel", .muted);
+            return;
+        }
+        try self.line(inner, 0, try self.fitLine(inner, account_line, inner.width), .muted);
+        if (self.label_manager_page == .rename) try self.line(inner, 1, try self.fitLine(inner, try std.fmt.allocPrint(self.frame.allocator(), "Was: {s}", .{self.label_manager_name.value()}), inner.width), .muted);
+        const name_row: usize = if (self.label_manager_page == .rename) 2 else 1;
+        try self.editLine(inner, name_row, "Name", &self.label_manager_input, self.dialog_focus.index == 0, if (self.dialog_focus.index == 0) .selected else .text);
+        self.mouseRows(inner, name_row, 1, .label_manager_name, 0);
+        const x = try self.actionButton(inner, inner.height -| 2, 0, "[Save Ctrl+S]", self.dialog_focus.index == 1, !self.labelManagerBusy() and self.canManageLabels(), .label_manager_action, 1);
+        _ = try self.actionButton(inner, inner.height -| 2, x, "[Cancel]", self.dialog_focus.index == 2, true, .label_manager_action, 2);
+        try self.line(inner, inner.height -| 1, if (inner.width < 40) "Tab · Enter · Esc · q is text" else "Tab Controls · Enter Save · Esc Cancel · q is text", .muted);
+    }
     fn onMailControls(self: *App, key: Key) !bool {
         if (self.mode != .browse) return false;
         try self.ensureMailSelection();
@@ -1400,6 +1747,7 @@ const App = struct {
     }
     fn chooseCustomLabel(self: *App, index: usize) !void {
         if (index >= self.labels.len) return;
+        if (!same(text(get(self.labels[index], "type")), "user")) return;
         self.rememberWorkingContext();
         try self.custom_label.set(self.allocator, text(get(self.labels[index], "id")));
         self.folder = 6;
@@ -1425,7 +1773,7 @@ const App = struct {
         };
         const value_in = if (writer.buffered().len != 0) writer.buffered() else "Status unavailable";
         if (self.action_notice and !warning) return;
-        if (self.status_kind == .unknown and (self.compose.unknown_outcome or self.invitation_unknown) and !warning) return;
+        if (self.status_kind == .unknown and (self.compose.unknown_outcome or self.invitation_unknown or self.label_unknown[self.account_index]) and !warning) return;
         if (warning) self.action_notice = false;
         const shortened = overflow or value_in.len > self.status.len;
         var end = @min(value_in.len, self.status.len - @as(usize, if (shortened) 3 else 0));
@@ -1456,7 +1804,7 @@ const App = struct {
         // picker, explicit actions/retry results and changed contexts retain
         // normal status behavior; errors never become globally sticky.
         const background = kind == .recipient_cache or kind == .recipient_refresh or kind == .identities or (kind == .labels_list and !self.label_picker);
-        return background and self.status_kind == .failure and std.meta.eql(self.statusContext(), self.status_owner);
+        return background and (self.status_kind == .failure or self.status_kind == .unknown) and std.meta.eql(self.statusContext(), self.status_owner);
     }
     fn diagnostic(self: *App, code: []const u8) void {
         self.status_error_len = 0;
@@ -1686,6 +2034,11 @@ const App = struct {
         return key;
     }
     fn onReaderCommand(self: *App, command: []const u8) !bool {
+        if (same(command, "labels")) {
+            if (self.mode != .browse and !(self.mode == .command and self.previous_mode == .browse)) return error.NotMailbox;
+            try self.openLabelManager();
+            return true;
+        }
         if (std.mem.startsWith(u8, command, "split ")) {
             var parts = std.mem.tokenizeScalar(u8, command[6..], ' ');
             const orientation = parts.next() orelse return error.InvalidPaneRatio;
@@ -1922,6 +2275,12 @@ const App = struct {
             .reader_link => {
                 try self.openReaderLinks();
             },
+            .reader_invitation => {
+                if (self.mode != .browse or self.readerInvitationIndex() != hit.index) return true;
+                self.reader_card = hit.index;
+                self.focus = .reader;
+                try self.reviewInvitation();
+            },
             .reader_picker => {
                 const count = if (self.reader_overlay == .links) self.reader_links.count else self.readerAttachmentCount();
                 self.reader_choice = @min(hit.index, count -| 1);
@@ -2072,6 +2431,7 @@ const App = struct {
             .trash_confirm => "Review Trash",
             .invitation => "Review RSVP",
             .labels => "Choose label",
+            .label_manager => "Manage labels",
             .command => if (self.previous_mode == .compose) "Compose · Command" else "Mail · Command",
             .search => if (self.previous_mode == .contacts) "Contacts · Search" else if (self.input_query_scope == .cache) "Cache search" else "Gmail search",
             .browse => try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} · {s}", .{ self.mailboxTitle(), if (self.cacheSearch()) " / Cache search" else if (self.query.value().len > 0) " / Gmail search" else "", if (self.expanded) @as([]const u8, "Reader expanded") else if (self.reader_layout == .right) "Reader right" else "Reader below" }),
@@ -2093,6 +2453,7 @@ const App = struct {
             .trash_confirm => "Review Trash",
             .invitation => "Review RSVP",
             .labels => "Label",
+            .label_manager => "Labels",
             .theme => "Theme preview",
             .command => "Command",
             .search => if (self.previous_mode == .contacts) "Contacts search" else if (self.input_query_scope == .cache) "Cache search" else "Gmail search",
@@ -2947,7 +3308,15 @@ const App = struct {
             if (self.page_loading and self.page_loading_account == self.job.account_index and self.page_loading_generation == self.job.generation) self.completePageLoad();
         } else if (self.job.failure) |err| {
             if (self.pageLoadCurrent() and self.page_loading_generation == self.job.generation) self.rollbackPageLoad();
-            if (self.job.kind == .send or self.job.kind == .invitation) {
+            if (self.job.kind == .label_write) {
+                self.label_unknown[self.job.account_index] = true;
+                self.label_errors[self.job.account_index].set(self.allocator, @errorName(err)) catch {};
+                self.label_manager_page = .list;
+                self.dialog_focus.reset(.label_manager, 1);
+                self.labelUnknownNotice();
+            } else if (self.job.kind == .label_receipt) {
+                self.sayFailure("Label receipt lookup failed · do not retry the write", @errorName(err));
+            } else if (self.job.kind == .send or self.job.kind == .invitation) {
                 (if (self.job.kind == .send) &self.compose.operation_error else &self.invitation_operation_error).set(self.allocator, @errorName(err)) catch {};
                 self.markUnknown(self.job.kind);
             } else if (self.job.kind == .draft_operations) self.say(true, "Receipt lookup failed · draft remains protected", .{}) else if (err != error.Canceled) {
@@ -2987,7 +3356,7 @@ const App = struct {
         // next intent waiting for an event that will never arrive.
         for (0..6) |_| {
             if (self.job.future != null) return;
-            if (self.label_picker and self.pending_labels) {
+            if ((self.label_picker or self.mode == .label_manager) and self.pending_labels) {
                 self.pending_labels = false;
                 try self.start(.labels_list, .{ .cmd = "labels.list", .account = self.account() });
             } else if (self.pending_contacts) {
@@ -3051,6 +3420,12 @@ const App = struct {
                 if (kind == .send or kind == .invitation) self.markUnknown(kind);
                 if (kind == .list) self.syncFailed(self.job.account_index, self.status_error_code[0..self.status_error_len]);
                 if (kind == .contacts) self.contacts_state = if (same(self.status_error_code[0..self.status_error_len], "PermissionDenied")) .denied else .failed;
+                if (kind == .label_write and same(self.status_error_code[0..self.status_error_len], "UnknownOutcome")) {
+                    self.label_unknown[self.job.account_index] = true;
+                    self.label_manager_page = .list;
+                    self.dialog_focus.reset(.label_manager, 1);
+                    self.labelUnknownNotice();
+                }
                 return;
             }
             return err;
@@ -3060,6 +3435,7 @@ const App = struct {
                 try self.replaceLabels(response);
                 if (!self.keepBackgroundDiagnostic(.labels_list)) self.say(false, "{s}", .{if (self.label_picker) "Choose label · Enter Add · - Remove" else "Ready"});
             },
+            .label_write, .label_receipt => try self.applyManagerLabel(response),
             .batch, .undo => {
                 const result_value = try self.data(self.job_arena.allocator(), response);
                 if (kind == .batch and text(get(result_value, "undoToken")).len > 0) {
@@ -4511,7 +4887,7 @@ const App = struct {
     }
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
-            .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .contacts, .invitation_inspect, .identities, .autosave, .labels_list => true,
+            .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt => true,
             else => false,
         };
     }
@@ -4610,7 +4986,7 @@ const App = struct {
         if (self.focus == .reader) {
             self.scrollReader(down, amount);
         } else if (self.focus == .navigation) {
-            const total = self.accounts.len + folders.len + 1 + self.userLabelCount();
+            const total = self.accounts.len + folders.len + 2 + self.userLabelCount();
             self.navigation = if (down) @min(self.navigation +| amount, total - 1) else self.navigation -| amount;
         } else {
             if (self.pageLoadCurrent()) {
@@ -4665,7 +5041,9 @@ const App = struct {
             } else if (self.navigation == self.accounts.len + folders.len) {
                 self.picker = false;
                 try self.loadContacts("");
-            } else if (self.userLabelIndex(self.navigation - self.accounts.len - folders.len - 1)) |index| {
+            } else if (self.navigation == self.accounts.len + folders.len + 1) {
+                try self.openLabelManager();
+            } else if (self.userLabelIndex(self.navigation - self.accounts.len - folders.len - 2)) |index| {
                 try self.chooseCustomLabel(index);
             }
         } else if (self.drafts_list) {
@@ -4716,6 +5094,30 @@ const App = struct {
                 } else if (hit.kind == .theme_action) {
                     self.dialog_focus.index = hit.index;
                     self.onThemePickerKey(.{ .codepoint = Key.enter });
+                }
+            }
+            return;
+        }
+        if (self.mode == .label_manager) {
+            if (wheel) |down| {
+                if (self.label_manager_page == .list) {
+                    self.dialog_focus.index = 1;
+                    self.label_choice = if (down) @min(self.label_choice +| 3, self.visibleLabelCount() -| 1) else self.label_choice -| 3;
+                    try self.rememberManagerLabel();
+                }
+            } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                switch (hit.kind) {
+                    .label_manager_choice => {
+                        self.dialog_focus.index = 1;
+                        self.label_choice = hit.index;
+                        try self.rememberManagerLabel();
+                    },
+                    .label_manager_filter, .label_manager_name => self.dialog_focus.index = 0,
+                    .label_manager_action => {
+                        self.dialog_focus.index = hit.index;
+                        try self.onLabelManagerKey(.{ .codepoint = Key.enter });
+                    },
+                    else => {},
                 }
             }
             return;
@@ -4791,7 +5193,7 @@ const App = struct {
                 self.focus = .list;
                 return self.move(down, 3);
             },
-            .reader, .reader_thread, .reader_link, .reader_attachment => {
+            .reader, .reader_thread, .reader_link, .reader_attachment, .reader_invitation => {
                 if (self.mode == .browse) self.focus = .reader else if (self.mode != .compose) return;
                 self.scrollReader(down, 3);
                 return;
@@ -4801,13 +5203,16 @@ const App = struct {
         switch (hit.kind) {
             .mail_scroll => {},
             .file_row, .file_parent, .file_home, .file_hidden, .file_location, .file_confirm, .file_cancel => {},
-            .label_choice, .label_add, .label_remove, .label_filter, .label_back, .dialog_action => {},
+            .label_choice, .label_add, .label_remove, .label_filter, .label_back, .dialog_action, .label_manager_choice, .label_manager_filter, .label_manager_name, .label_manager_action => {},
             .theme_choice, .theme_action => {},
             .custom_label => {
                 if (self.mode == .browse and wheel == null) try self.chooseCustomLabel(hit.index);
             },
-            .reader_thread, .reader_link, .reader_attachment, .reader_picker, .reader_picker_save, .reader_picker_open, .reader_picker_activate, .reader_picker_back => {
+            .reader_thread, .reader_link, .reader_attachment, .reader_invitation, .reader_picker, .reader_picker_save, .reader_picker_open, .reader_picker_activate, .reader_picker_back => {
                 if (wheel == null) _ = try self.onReaderHit(hit);
+            },
+            .labels_header => {
+                if (self.mode == .browse and wheel == null) try self.openLabelManager();
             },
             .account, .folder, .contacts => {
                 if (self.mode != .browse or wheel != null) return;
@@ -5114,6 +5519,10 @@ const App = struct {
         self.acknowledgeNewMail();
         self.action_notice = false;
         var key = original_key;
+        if (self.mode == .label_manager) {
+            try self.onLabelManagerKey(key);
+            return;
+        }
         if (self.mode == .theme) {
             if (!self.paste) self.onThemePickerKey(key);
             return;
@@ -5187,7 +5596,12 @@ const App = struct {
                 const index = self.job.account_index;
                 const contacts_waiting = self.mode == .contacts and self.pending_contacts;
                 self.cancelJob();
-                if (kind == .send or kind == .invitation) self.markUnknown(kind) else {
+                if (kind == .label_write) {
+                    self.label_unknown[index] = true;
+                    self.label_manager_page = .list;
+                    self.dialog_focus.reset(.label_manager, 1);
+                    self.labelUnknownNotice();
+                } else if (kind == .send or kind == .invitation) self.markUnknown(kind) else {
                     if (kind == .refresh) {
                         self.sync[index].state = if (self.sync[index].cache_ready) .cached else .failed;
                         self.sync[index].error_len = 0;
@@ -5530,10 +5944,11 @@ const App = struct {
             self.mouse_hits.count = navigation_hit_start;
             label_row = 0;
         }
-        if (label_row < win.height and self.userLabelCount() > 0) {
-            try self.line(win, label_row, "LABELS", .muted);
+        if (label_row < win.height) {
+            try self.line(win, label_row, "LABELS ›", if (self.focus == .navigation and self.navigation == self.accounts.len + folders.len + 1) .selected else .accent);
+            self.mouseRows(win, label_row, 1, .labels_header, 0);
             const visible: usize = win.height - label_row - 1;
-            const navigation_start = self.accounts.len + folders.len + 1;
+            const navigation_start = self.accounts.len + folders.len + 2;
             const focused_label = self.navigation -| navigation_start;
             const first = if (focused_label >= visible and visible > 0) focused_label - visible + 1 else 0;
             for (first..@min(first + visible, self.userLabelCount())) |choice| {
@@ -5734,6 +6149,54 @@ const App = struct {
         }
         return iterator.position.row + 1;
     }
+    fn readerInvitationIndex(self: *App) ?usize {
+        if (self.mode != .browse or !same(self.reader_account.value(), self.account())) return null;
+        const target = self.readerReplyId();
+        for (self.thread, 0..) |message, index| {
+            if (!same(text(get(message, "id")), target)) continue;
+            if (get(message, "invitation") != .null) return index;
+            for (items(get(message, "attachments"))) |part| {
+                if (mime.isCalendarPart(text(get(part, "mimeType")), text(get(part, "filename")))) return index;
+            }
+            return null;
+        }
+        return null;
+    }
+    fn readerInvitationDraw(self: *App, win: vaxis.Window, message_index: usize) !void {
+        var card_style = self.style(.text);
+        card_style.bold = true;
+        if (!self.mono) card_style.bg = .{ .rgb = self.palette.selection };
+        win.fill(.{ .style = card_style });
+        var edge_style = card_style;
+        if (!self.mono) edge_style.fg = .{ .rgb = self.palette.accent };
+        for (0..win.height) |row| win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (self.mono) "┃" else "▌", .width = 1 }, .style = edge_style });
+        const content = win.child(.{ .x_off = 2, .width = win.width -| 3 });
+        if (!self.mono and content.width >= 16) {
+            // Always reserve two icon cells, even when the terminal reports
+            // this emoji as one; its width never shifts the text or edge.
+            _ = content.child(.{ .width = 2, .height = 1 }).printSegment(.{ .text = "📅", .style = card_style }, .{ .wrap = .none });
+        }
+        const icon_width: u16 = if (!self.mono and content.width >= 16) 3 else 0;
+        const title_win = content.child(.{ .x_off = icon_width, .width = content.width -| icon_width, .height = 1 });
+        const title = if (win.height > 1) "Meeting invitation" else if (self.mono and title_win.width >= 20) "Invite · I · Respond" else "I · Respond";
+        _ = title_win.printSegment(.{ .text = try self.fitLine(title_win, title, title_win.width), .style = card_style }, .{ .wrap = .none });
+        if (self.mono and win.height == 1) {
+            var shortcut_style = card_style;
+            shortcut_style.reverse = true;
+            title_win.writeCell(if (title_win.width >= 20) 8 else 0, 0, .{ .char = .{ .grapheme = "I", .width = 1 }, .style = shortcut_style });
+        }
+        if (win.height > 1) {
+            const actions = content.child(.{ .y_off = 1, .height = 1 });
+            const label = if (actions.width >= 43) "I · Respond · accept / tentative / decline" else "I · Respond";
+            _ = actions.printSegment(.{ .text = try self.fitLine(actions, label, actions.width), .style = card_style }, .{ .wrap = .none });
+            if (self.mono) {
+                var shortcut_style = card_style;
+                shortcut_style.reverse = true;
+                actions.writeCell(0, 0, .{ .char = .{ .grapheme = "I", .width = 1 }, .style = shortcut_style });
+            }
+        }
+        self.mouseArea(win, .reader_invitation, message_index);
+    }
     fn readerDraw(self: *App, outer: vaxis.Window) !void {
         self.mouseArea(outer, .reader, 0);
         const browsing = self.mode == .browse or (self.mode == .help and self.previous_mode == .browse) or (self.mode == .command and self.previous_mode == .browse);
@@ -5742,7 +6205,13 @@ const App = struct {
         if (toolbar_rows > 0) try self.line(outer, 0, try self.fitLine(outer, "l Focus reader · o Gmail · L Links · B Files", outer.width), .accent);
         const partial_rows: u16 = if (self.reader_partial and outer.height >= 14) 1 else 0;
         if (partial_rows > 0) try self.line(outer, toolbar_rows + summary_rows, "Cached thread · partial", .muted);
-        const header_rows = toolbar_rows + summary_rows + partial_rows;
+        const invitation_index = self.readerInvitationIndex();
+        // The invitation lives outside the body's scroll viewport. Its filled
+        // surface and accent edge remain distinct from highlighted labels.
+        const invitation_rows: u16 = if (invitation_index != null and outer.height >= 3 and outer.width >= 16) (if (outer.height >= 12 and outer.width >= 30) 2 else 1) else 0;
+        const invitation_gap: u16 = if (invitation_rows > 0 and outer.height >= 6) 1 else 0;
+        const header_rows = toolbar_rows + summary_rows + partial_rows + invitation_rows + invitation_gap;
+        if (invitation_rows > 0) try self.readerInvitationDraw(outer.child(.{ .y_off = toolbar_rows + summary_rows + partial_rows, .height = invitation_rows }), invitation_index.?);
         const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows });
         self.reader_height = win.height;
         // Measure the new body before clamping a restored scroll position.
@@ -5931,9 +6400,6 @@ const App = struct {
                 row = try self.flowTone(win, value_in, self.reader_scroll, row, .sender);
                 self.readerMouseRows(win, block_start, row - block_start, .reader_attachment, attachment_number - 1);
             }
-            var calendar_file = false;
-            for (items(get(message, "attachments"))) |part| calendar_file = calendar_file or mime.isCalendarPart(text(get(part, "mimeType")), text(get(part, "filename")));
-            if (get(message, "invitation") != .null or calendar_file) row = try self.flowTone(win, "Invitation · I Accept / Tentative / Decline\n", self.reader_scroll, row, .accent);
             row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
         }
         return row;
@@ -6151,6 +6617,7 @@ const App = struct {
         if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · x Remove · A Add · Esc Body · Ctrl+S Review";
         return switch (self.mode) {
             .contacts => " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
+            .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
             .compose => if (self.compose.unknown_outcome) " Protected recovery draft · :receipt Check · q Keep/back" else if (self.compose.insert_mode) (if (self.compose.selected < 3) " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
@@ -6481,6 +6948,7 @@ const App = struct {
         try self.drawReaderOverlay(win);
         try self.drawFileDialog(win);
         try self.drawLabelPicker(win);
+        try self.drawLabelManager(win);
         if (self.mode == .help) try self.helpDraw(win) else if (self.mode == .trash_confirm) try self.overlay(win, " Move selected mail to Trash? ", "This moves the selected message to Trash.\nIt does not permanently delete mail.") else if (self.mode == .invitation) {
             try self.invitationDraw(win);
         }
@@ -6710,6 +7178,63 @@ test "invitation UX: browser and RSVP target the focused thread card in its acco
     try std.testing.expectEqualStrings("thread-focused", text(get(inspected.value, "messageId")));
     try std.testing.expectEqualStrings("work@example.com", text(get(inspected.value, "account")));
     try std.testing.expectEqualStrings("thread-focused", app.invitation_inspected_id.value());
+}
+
+test "invitation UX: sticky callout follows actual reply target, survives scroll and stays out of compose" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"plain\"},{\"id\":\"meeting\"}]}}");
+    try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"plain\",\"bodyText\":\"Ordinary note\"},{\"id\":\"meeting\",\"subject\":\"Fictional meeting\",\"bodyText\":\"First body line\\nSecond body line\\nThird body line\\nFourth body line\\nFifth body line\\nLast body line\",\"attachments\":[{\"mimeType\":\"application/octet-stream\",\"filename\":\"invite.ics\"}]}]}}", true);
+    app.focus = .list;
+    try std.testing.expect(app.readerInvitationIndex() == null);
+    app.focus = .reader;
+    app.reader_card = 1;
+    app.reader_cards[1] = true;
+    try std.testing.expectEqual(@as(?usize, 1), app.readerInvitationIndex());
+    for ([_]bool{ false, true }) |mono| for ([_]u16{ 30, 48, 80 }) |width| for ([_]u16{ 5, 10, 24 }) |height| {
+        app.mono = mono;
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        app.reader_scroll = 0;
+        app.reader_anchor_card = false;
+        app.reader_card_pinned = false;
+        app.mouse_hits.clear();
+        try app.readerDraw(win);
+        const first = try markdownTestScreenText(a, &screen);
+        defer a.free(first);
+        try std.testing.expect(std.mem.indexOf(u8, first, "I · Respond") != null);
+        const edge_row: u16 = if (height >= 6) 1 else 0;
+        try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, edge_row).?.char.grapheme);
+        if (mono) {
+            var reversed_shortcut = false;
+            for (edge_row..@min(height, edge_row + 2)) |row| for (0..width) |column| {
+                const cell = screen.readCell(@intCast(column), @intCast(row)).?;
+                reversed_shortcut = reversed_shortcut or (cell.style.reverse and same(cell.char.grapheme, "I"));
+            };
+            try std.testing.expect(reversed_shortcut);
+        } else try std.testing.expectEqual(vaxis.Color{ .rgb = app.palette.selection }, screen.readCell(5, edge_row).?.style.bg);
+        const hit = app.mouse_hits.at(5, @intCast(edge_row)).?;
+        try std.testing.expectEqual(layout.HitKind.reader_invitation, hit.kind);
+        try std.testing.expectEqual(@as(usize, 1), hit.index);
+        app.scrollReader(true, 1000);
+        win.fill(.{ .style = app.style(.text) });
+        app.mouse_hits.clear();
+        try app.readerDraw(win);
+        const last = try markdownTestScreenText(a, &screen);
+        defer a.free(last);
+        try std.testing.expect(std.mem.indexOf(u8, last, "I · Respond") != null);
+        try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, edge_row).?.char.grapheme);
+    };
+    app.mode = .compose;
+    try std.testing.expect(app.readerInvitationIndex() == null);
+    app.mode = .browse;
+    app.account_index = 1;
+    try std.testing.expect(app.readerInvitationIndex() == null);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
 test "plain fallback sanitizer uses one input-sized reservation" {
@@ -7737,6 +8262,8 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = Key.enter });
     try std.testing.expect(!app.help_searching);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings(":labels · click LABELS", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqual(label, app.help_match.?);
 
     try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
@@ -7816,7 +8343,7 @@ test "local UI: help search reveals and highlights actual wrapped matches after 
     try app.helpDraw(win);
     const wide = try helpTestScreenText(a, &screen);
     defer a.free(wide);
-    try std.testing.expect(std.mem.indexOf(u8, wide, "1/1 matches") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "1/2 matches") != null);
     try std.testing.expect(std.mem.indexOf(u8, wide, "Choose labels") != null);
     var highlighted: usize = 0;
     for (0..screen.height) |row| for (0..screen.width) |column| {
@@ -7835,7 +8362,7 @@ test "local UI: help search reveals and highlights actual wrapped matches after 
     const narrow = try helpTestScreenText(a, &screen);
     defer a.free(narrow);
     try std.testing.expect(std.mem.indexOf(u8, narrow, "Choose labels") != null);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "1/1 matches") != null);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "1/2 matches") != null);
     try std.testing.expect(std.mem.indexOf(u8, narrow, "q Back") != null);
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
@@ -9498,5 +10025,93 @@ test "dialog UX: link and received-file pickers expose action focus independentl
     try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
     _ = try app.onReaderOverlayKey(.{ .codepoint = Key.enter });
     try std.testing.expectEqual(ReaderOverlay.none, app.reader_overlay);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "label manager: custom-only collection focus, literal names and selection survive metadata refresh" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\",\"capabilities\":[\"mail-modify\"]}]", .{}));
+    app.mode = .label_manager;
+    try app.label_manager_account.set(a, app.account());
+    try app.replaceLabels("{\"ok\":true,\"data\":{\"labels\":[{\"id\":\"INBOX\",\"name\":\"Inbox\",\"type\":\"system\"},{\"id\":\"Label_a\",\"name\":\"Projects\",\"type\":\"user\"},{\"id\":\"Label_b\",\"name\":\"Trips\",\"type\":\"user\"}]}}");
+    app.mode = .command;
+    app.previous_mode = .browse;
+    try std.testing.expect(try app.onReaderCommand("labels"));
+    try std.testing.expectEqual(Mode.label_manager, app.mode);
+    try std.testing.expectEqual(@as(usize, 2), app.visibleLabelCount());
+    app.dialog_focus.reset(.label_manager, 1);
+    for ([_]usize{ 2, 3, 4, 5, 6, 0, 1 }) |expected| {
+        try app.onLabelManagerKey(.{ .codepoint = Key.tab });
+        try std.testing.expectEqual(expected, app.dialog_focus.index);
+    }
+    try app.onLabelManagerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 0), app.dialog_focus.index);
+    try app.onLabelManagerKey(.{ .codepoint = 'q', .text = "q" });
+    try std.testing.expectEqualStrings("q", app.label_filter.value());
+    try std.testing.expect(!app.quit);
+    try app.label_filter.set(a, "");
+    app.dialog_focus.index = 1;
+    try app.onLabelManagerKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqualStrings("Label_b", app.label_manager_selected.value());
+    try app.replaceLabels("{\"ok\":true,\"data\":{\"labels\":[{\"id\":\"Label_b\",\"name\":\"Trips renamed\",\"type\":\"user\"},{\"id\":\"Label_a\",\"name\":\"Projects\",\"type\":\"user\"}]}}");
+    try std.testing.expectEqual(@as(usize, 0), app.label_choice);
+    try std.testing.expectEqualStrings("Label_b", app.label_manager_selected.value());
+    try app.onLabelManagerKey(.{ .codepoint = 'n' });
+    try std.testing.expectEqual(LabelManagerPage.create, app.label_manager_page);
+    try app.onLabelManagerKey(.{ .codepoint = 'q', .text = "qjk" });
+    try std.testing.expectEqualStrings("qjk", app.label_manager_input.value());
+    try app.onLabelManagerKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 2), app.dialog_focus.index);
+    try app.onLabelManagerKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(LabelManagerPage.list, app.label_manager_page);
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "label manager: delete defaults cancel, small reviews disable writes and unknown guards are account scoped" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\",\"capabilities\":[\"mail-modify\"]},{\"address\":\"work@example.com\",\"capabilities\":[\"mail-modify\"]},{\"address\":\"readonly@example.com\",\"capabilities\":[\"mail-read\"]}]", .{}));
+    app.mode = .label_manager;
+    try app.label_manager_account.set(a, app.account());
+    try app.replaceLabels("{\"ok\":true,\"data\":{\"labels\":[{\"id\":\"Label_a\",\"name\":\"Projects\",\"type\":\"user\"}]}}");
+    try app.editManagerLabel(.delete);
+    try std.testing.expectEqual(@as(usize, 0), app.dialog_focus.index);
+    try std.testing.expectEqualStrings("personal@example.com", app.label_manager_account.value());
+    try std.testing.expectEqualStrings("Label_a", app.label_manager_id.value());
+    try std.testing.expectEqualStrings("Projects", app.label_manager_name.value());
+    try app.onLabelManagerKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(LabelManagerPage.list, app.label_manager_page);
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 30, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    try app.editManagerLabel(.delete);
+    try app.drawLabelManager(vx.window());
+    try std.testing.expect(!app.label_delete_ready);
+    try app.onLabelManagerKey(.{ .codepoint = 'y' });
+    try std.testing.expect(app.job.future == null);
+    try app.onLabelManagerKey(.{ .codepoint = Key.escape });
+    try app.drawLabelManager(vx.window());
+    for ([_]usize{ 2, 3, 4, 5, 6 }) |wanted| {
+        var found = false;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| found = found or (hit.kind == .label_manager_action and hit.index == wanted);
+        try std.testing.expect(found);
+    }
+    app.job.account_index = 0;
+    try app.applyManagerLabel("{\"ok\":true,\"data\":{\"outcome\":\"unknown\",\"operationId\":\"fictional-operation\",\"errorCode\":\"Timeout\"}}");
+    try std.testing.expect(app.label_unknown[0]);
+    try std.testing.expect(!app.canManageLabels());
+    try app.onLabelManagerKey(.{ .codepoint = 'n' });
+    try std.testing.expectEqual(LabelManagerPage.list, app.label_manager_page);
+    app.account_index = 1;
+    try std.testing.expect(app.canManageLabels());
+    app.account_index = 2;
+    try std.testing.expect(!app.canManageLabels());
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }

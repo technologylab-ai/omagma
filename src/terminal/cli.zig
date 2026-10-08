@@ -100,6 +100,9 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
         } else if (eq(arg, "--account")) {
             options.account = v;
             try req.object.put(sa, "account", .{ .string = v });
+        } else if (eq(arg, "--name") or eq(arg, "--label-id") or eq(arg, "--confirm-name")) {
+            const key = if (eq(arg, "--label-id")) "labelId" else if (eq(arg, "--confirm-name")) "confirmName" else "name";
+            try req.object.put(sa, key, .{ .string = v });
         } else if (eq(arg, "--action") or eq(arg, "--undo-token") or eq(arg, "--url") or eq(arg, "--path")) {
             const key = if (eq(arg, "--action")) "action" else if (eq(arg, "--undo-token")) "undoToken" else arg[2..];
             try req.object.put(sa, key, .{ .string = v });
@@ -237,6 +240,7 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
         .{ .name = "mail", .verbs = &.{ "list", "search", "read", "thread", "attachment", "open", "sync", "refresh", "recipients", "reply", "forward", "send", "archive", "trash", "restore", "mark", "batch", "undo", "prefetch", "drafts", "compose", "labels", "identities", "open-link", "open-attachment" } },
         .{ .name = "draft", .verbs = &.{ "list", "read", "create", "update", "preview", "recovery-save", "send", "discard" } },
         .{ .name = "contacts", .verbs = &.{ "list", "search", "upsert" } },
+        .{ .name = "labels", .verbs = &.{ "list", "create", "rename", "delete" } },
         .{ .name = "invitations", .verbs = &.{ "inspect", "reply" } },
         .{ .name = "cache", .verbs = &.{ "stats", "clear", "activity", "refresh-status" } },
         .{ .name = "operation", .verbs = &.{ "list", "read" } },
@@ -252,14 +256,17 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
 // a value so an unknown final flag stays UnknownOption rather than ValueRequired.
 fn valueOption(arg: []const u8) bool {
     for ([_][]const u8{
-        "--config", "--metrics-file", "--grant-file", "--client-file", "--capabilities",
-        "--fixture-root", "--fixture-scenario", "--cache-dir", "--ui-file", "--editor-mode",
-        "--metadata-limit", "--cache-messages", "--prefetch-bodies", "--disk-limit-bytes", "--cache-bytes",
-        "--account", "--action", "--undo-token", "--url", "--path", "--message-ids", "--message-id", "--id",
-        "--before-message-id", "--after-message-id", "--boundary-received-at", "--format", "--from",
-        "--limit", "--cursor", "--query", "--label", "--thread-id", "--draft-id", "--attachment-id",
-        "--operation-id", "--status", "--to", "--cc", "--bcc", "--subject", "--body", "--attach-file",
-        "--body-file", "--draft-file", "--contact-file", "--expected-etag", "--add-label", "--remove-label",
+        "--config",               "--metrics-file",     "--grant-file",      "--client-file",       "--capabilities",
+        "--fixture-root",         "--fixture-scenario", "--cache-dir",       "--ui-file",           "--editor-mode",
+        "--metadata-limit",       "--cache-messages",   "--prefetch-bodies", "--disk-limit-bytes",  "--cache-bytes",
+        "--account",              "--action",           "--undo-token",      "--url",               "--path",
+        "--message-ids",          "--message-id",       "--id",              "--before-message-id", "--after-message-id",
+        "--boundary-received-at", "--format",           "--from",            "--limit",             "--cursor",
+        "--query",                "--label",            "--thread-id",       "--draft-id",          "--attachment-id",
+        "--operation-id",         "--status",           "--to",              "--cc",                "--bcc",
+        "--subject",              "--body",             "--attach-file",     "--name",              "--label-id",
+        "--confirm-name",         "--body-file",        "--draft-file",      "--contact-file",      "--expected-etag",
+        "--add-label",            "--remove-label",
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }
@@ -289,5 +296,6 @@ pub fn help(io: std.Io) !void {
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|mark|batch|undo|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN.\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
     try w.interface.writeAll("Outgoing bodies: --format markdown|plain (default plain) on compose/create/update/send/reply/forward.\nDraft source stays in bodyText; JSONL uses draft.bodyFormat (reply/forward: bodyFormat).\nReview rendered alternatives with draft preview --draft-id ID, or --body-file FILE --format markdown.\n");
+    try w.interface.writeAll("Label collection: omagma labels list|create|rename|delete --account ADDRESS\n  create --name NAME --operation-id ID\n  rename --label-id ID --name NAME --operation-id ID\n  delete --label-id ID --confirm-name NAME --operation-id ID\nLabel deletion removes the custom label and its associations, never messages. System labels are protected.\nCollection writes need mail-modify; keep each operation ID stable and never retry an unknown outcome automatically.\n");
     try w.interface.flush();
 }

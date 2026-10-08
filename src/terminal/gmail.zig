@@ -10,6 +10,7 @@ const j = @import("json.zig");
 const mime = @import("mime.zig");
 const recipients = @import("recipients.zig");
 const invitation = @import("invitation.zig");
+const label_collection = @import("labels.zig");
 
 /// Tests inject this transport and fictional identity/capabilities. Production
 /// execute constructs it only after token and Gmail account verification.
@@ -39,7 +40,7 @@ const Network = struct {
     fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         const self: *Network = @ptrCast(@alignCast(ctx));
         const json_body = if (body) |v| try std.json.Stringify.valueAlloc(a, v, .{}) else null;
-        const mutating = method == .POST or method == .PATCH;
+        const mutating = method == .POST or method == .PATCH or method == .PUT or method == .DELETE;
         var response = self.client.requestTerminal(url, method, self.access, json_body, self.response) catch |err| {
             if (mutating and !localRequestError(err)) return error.UnknownOutcome;
             return err;
@@ -56,27 +57,57 @@ const Network = struct {
                 return err;
             };
         }
-        switch (response.status) {
-            200...299 => {},
-            400 => {
-                if (method == .PATCH and std.mem.indexOf(u8, url, ":updateContact?") != null and contactPrecondition(a, response.body)) return error.ContactConflict;
-                return error.ProviderRejected;
-            },
-            401 => return error.NotConnected,
-            403 => return error.PermissionDenied,
-            404 => return error.MessageNotFound,
-            409, 412 => return error.ContactConflict,
-            429 => return error.RateLimited,
-            500...599 => if (mutating) return error.UnknownOutcome else return error.TransientFailure,
-            else => return error.ProviderRejected,
-        }
-        if (response.body.len == 0) return if (mutating) error.UnknownOutcome else .null;
-        b.preflight(response.body) catch |err| return if (mutating) error.UnknownOutcome else err;
-        return std.json.parseFromSliceLeaky(j.Value, a, response.body, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = types.Limits.request_bytes }) catch |err| return if (mutating) error.UnknownOutcome else err;
+        return decodeResponse(a, method, url, response.status, response.body);
     }
 };
+fn decodeResponse(a: std.mem.Allocator, method: std.http.Method, url: []const u8, status: u16, bytes: []const u8) !j.Value {
+    const mutating = method == .POST or method == .PATCH or method == .PUT or method == .DELETE;
+    switch (status) {
+        200...299 => {},
+        400 => {
+            if (method == .PATCH and std.mem.indexOf(u8, url, ":updateContact?") != null and contactPrecondition(a, bytes)) return error.ContactConflict;
+            return error.ProviderRejected;
+        },
+        401 => return error.NotConnected,
+        403 => return error.PermissionDenied,
+        404 => return error.MessageNotFound,
+        409, 412 => return error.ContactConflict,
+        429 => return error.RateLimited,
+        500...599 => if (mutating) return error.UnknownOutcome else return error.TransientFailure,
+        else => return error.ProviderRejected,
+    }
+    // Gmail label DELETE has no result body on a 204. Do not broaden empty
+    // success handling to sends, contacts, or other mutation methods.
+    if (status == 204 and method == .DELETE and std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels/") and bytes.len == 0) return .null;
+    if (bytes.len == 0) return if (mutating) error.UnknownOutcome else .null;
+    b.preflight(bytes) catch |err| return if (mutating) error.UnknownOutcome else err;
+    return std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = types.Limits.request_bytes }) catch |err| return if (mutating) error.UnknownOutcome else err;
+}
 fn localRequestError(err: anyerror) bool {
     return err == error.FormTooLarge or err == error.InvalidToken or err == error.InvalidUrl or err == error.InvalidHost or err == error.InsecureUrl or err == error.UrlTooLarge or err == error.ResponseBufferTooLarge;
+}
+/// Credential-free loopback regression for the actual terminal wire and Gmail
+/// response boundary. The request body/token are fixed by the HTTP probe.
+pub fn probeLabelHttp(io: std.Io, a: std.mem.Allocator, method: std.http.Method, url: []const u8) !j.Value {
+    var client = try http.Client.init(io);
+    defer client.deinit();
+    const output = try a.alloc(u8, types.Limits.request_bytes);
+    var status: u16 = 0;
+    var body_bytes: usize = 0;
+    var failure: []const u8 = "";
+    const response: ?http.Response = client.requestLoopbackLabelProbe(url, method, output) catch |err| failed: {
+        failure = if (localRequestError(err) or err == error.InvalidProbeMethod) @errorName(err) else "UnknownOutcome";
+        break :failed null;
+    };
+    if (response) |value| {
+        status = value.status;
+        body_bytes = value.body.len;
+        _ = decodeResponse(a, method, "https://gmail.googleapis.com/gmail/v1/users/me/labels/Label_fixture", value.status, value.body) catch |err| failed: {
+            failure = @errorName(err);
+            break :failed .null;
+        };
+    }
+    return j.value(a, .{ .ok = failure.len == 0, .status = status, .bodyBytes = body_bytes, .errorCode = failure });
 }
 fn contactPrecondition(a: std.mem.Allocator, bytes: []const u8) bool {
     b.preflight(bytes) catch return false;
@@ -231,6 +262,7 @@ fn downloadAttachment(a: std.mem.Allocator, transport: Transport, message_id: []
 }
 
 fn requiredCapability(cmd: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete")) return "mail-modify";
     if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) return "mail-send";
     if (std.mem.eql(u8, cmd, "invitation.reply")) return "calendar-rsvp";
     if (std.mem.eql(u8, cmd, "contacts.upsert")) return "contacts-write";
@@ -671,6 +703,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     try recipients.validateAddress(account);
     const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
     if (!permits(capabilities, capability)) return error.PermissionDenied;
+    if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete")) return manageLabels(a, transport, cmd, request);
     if (std.mem.eql(u8, cmd, "mail.refresh")) return refreshPlan(io, a, account, capabilities, transport, request);
     if (std.mem.eql(u8, cmd, "mail.read")) {
         transport.progress(.bodies, 0, 1);
@@ -828,6 +861,44 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     }
     const updated = read(a, transport, id) catch return error.UnknownOutcome;
     return j.value(a, updated) catch return error.UnknownOutcome;
+}
+
+fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {
+    const creating = std.mem.eql(u8, cmd, "labels.create");
+    const deleting = std.mem.eql(u8, cmd, "labels.delete");
+    const id = if (creating) "" else try j.required(request, "labelId");
+    const name = if (deleting) "" else try j.required(request, "name");
+    if (!creating) try label_collection.validateId(id);
+    if (!deleting) try label_collection.validateName(name);
+    const confirmation = if (deleting) try j.required(request, "confirmName") else "";
+    if (confirmation.len > 512) return error.InvalidLabelConfirmation;
+    try recipients.validateHeader(confirmation);
+    const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", null);
+    const definitions = try j.decode([]@import("store.zig").Label, a, j.get(response, "labels") orelse return error.InvalidProviderResponse);
+    if (definitions.len > 512) return error.TooManyLabels;
+    for (definitions) |label| {
+        try b.identifier(label.id);
+        if (label.name.len > 512 or !std.unicode.utf8ValidateSlice(label.name)) return error.InvalidProviderResponse;
+        try recipients.validateHeader(label.name);
+    }
+    const old = if (!creating) try label_collection.custom(definitions, id) else @import("store.zig").Label{ .id = "", .name = "" };
+    if (deleting) {
+        if (!std.mem.eql(u8, old.name, confirmation)) return error.InvalidLabelConfirmation;
+    } else {
+        try label_collection.unique(definitions, name, id);
+        if (creating and definitions.len == 512) return error.TooManyLabels;
+    }
+    const url = if (creating) "https://gmail.googleapis.com/gmail/v1/users/me/labels" else try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/labels/{s}", .{id});
+    const body: ?j.Value = if (deleting) null else try j.value(a, .{ .name = name });
+    const receipt = try transport.request(a, if (creating) .POST else if (deleting) .DELETE else .PATCH, url, body);
+    if (deleting) {
+        if (receipt != .null and (receipt != .object or receipt.object.count() != 0)) return error.UnknownOutcome;
+        return j.value(a, .{ .deleted = true, .labelId = id }) catch return error.UnknownOutcome;
+    }
+    const label = j.decode(@import("store.zig").Label, a, receipt) catch return error.UnknownOutcome;
+    label_collection.validateId(label.id) catch return error.UnknownOutcome;
+    if (!std.mem.eql(u8, label.name, name) or !std.ascii.eqlIgnoreCase(label.type, "user") or (!creating and !std.mem.eql(u8, label.id, id))) return error.UnknownOutcome;
+    return j.value(a, .{ .label = label }) catch return error.UnknownOutcome;
 }
 
 fn contact(a: std.mem.Allocator, value: j.Value) !types.Contact {
@@ -1410,6 +1481,77 @@ test "wishlist: labels minimal snapshot and exact modify wire" {
     const changed = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "mail.modify-labels", request);
     try std.testing.expectEqualStrings("TRASH", try j.string((try array(changed, "labels"))[1]));
     try std.testing.expectEqual(@as(usize, 3), oracle.calls);
+}
+
+test "label collection: independent create rename delete wire and protected labels" {
+    const Oracle = struct {
+        calls: usize = 0,
+        writes: usize = 0,
+        expected: std.http.Method = .POST,
+        malformed: bool = false,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (method == .GET) {
+                try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", url);
+                try std.testing.expect(body == null);
+                return std.json.parseFromSliceLeaky(j.Value, a, "{\"labels\":[{\"id\":\"Label_42\",\"name\":\"Project\",\"type\":\"user\"},{\"id\":\"INBOX\",\"name\":\"INBOX\",\"type\":\"system\"},{\"id\":\"Provider_reserved\",\"name\":\"Provider system\",\"type\":\"system\"}]}", .{});
+            }
+            self.writes += 1;
+            try std.testing.expectEqual(self.expected, method);
+            if (method == .DELETE) {
+                try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels/Label_42", url);
+                try std.testing.expect(body == null);
+                return .null;
+            }
+            try std.testing.expectEqualStrings(if (method == .POST) "https://gmail.googleapis.com/gmail/v1/users/me/labels" else "https://gmail.googleapis.com/gmail/v1/users/me/labels/Label_42", url);
+            try std.testing.expectEqualStrings("{\"name\":\"Travel/Österreich 🌋\"}", try std.json.Stringify.valueAlloc(a, body orelse return error.MissingField, .{}));
+            return std.json.parseFromSliceLeaky(j.Value, a, if (self.malformed) "{\"id\":\"INBOX\",\"name\":\"Travel/Österreich 🌋\",\"type\":\"system\"}" else if (method == .POST) "{\"id\":\"Label_99\",\"name\":\"Travel/Österreich 🌋\",\"type\":\"user\"}" else "{\"id\":\"Label_42\",\"name\":\"Travel/Österreich 🌋\",\"type\":\"user\"}", .{});
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request };
+    const create = try j.value(a, .{ .name = "Travel/Österreich 🌋" });
+    try std.testing.expectError(error.PermissionDenied, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "labels.create", create));
+    try std.testing.expectEqual(@as(usize, 0), oracle.calls);
+    try std.testing.expectError(error.SystemLabelImmutable, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.delete", try j.value(a, .{ .labelId = "INBOX", .confirmName = "INBOX" })));
+    try std.testing.expectEqual(@as(usize, 0), oracle.calls);
+    try std.testing.expectError(error.SystemLabelImmutable, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.rename", try j.value(a, .{ .labelId = "Provider_reserved", .name = "Custom" })));
+    try std.testing.expectError(error.DuplicateLabelName, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.create", try j.value(a, .{ .name = "project" })));
+    try std.testing.expectEqual(@as(usize, 0), oracle.writes);
+    const created = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.create", create);
+    try std.testing.expectEqualStrings("Label_99", j.text(j.get(created, "label").?, "id"));
+    oracle.expected = .PATCH;
+    const renamed = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.rename", try j.value(a, .{ .labelId = "Label_42", .name = "Travel/Österreich 🌋" }));
+    try std.testing.expectEqualStrings("Label_42", j.text(j.get(renamed, "label").?, "id"));
+    try std.testing.expectError(error.InvalidLabelConfirmation, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.delete", try j.value(a, .{ .labelId = "Label_42", .confirmName = "project" })));
+    try std.testing.expectEqual(@as(usize, 2), oracle.writes);
+    oracle.expected = .DELETE;
+    const deleted = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.delete", try j.value(a, .{ .labelId = "Label_42", .confirmName = "Project" }));
+    try std.testing.expect(try j.boolean(deleted, "deleted", false));
+    try std.testing.expectEqualStrings("Label_42", j.text(deleted, "labelId"));
+    oracle.expected = .POST;
+    oracle.malformed = true;
+    try std.testing.expectError(error.UnknownOutcome, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.create", create));
+}
+
+test "label collection: DELETE 204 body and unknown mutation response boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const url = "https://gmail.googleapis.com/gmail/v1/users/me/labels/Label_42";
+    try std.testing.expect((try decodeResponse(a, .DELETE, url, 204, "")) == .null);
+    try std.testing.expect((try decodeResponse(a, .DELETE, url, 200, "{}")) == .object);
+    try std.testing.expectError(error.UnknownOutcome, decodeResponse(a, .DELETE, url, 200, ""));
+    try std.testing.expectError(error.UnknownOutcome, decodeResponse(a, .POST, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", 204, ""));
+    try std.testing.expectError(error.UnknownOutcome, decodeResponse(a, .DELETE, url, 503, ""));
+    try std.testing.expectError(error.UnknownOutcome, decodeResponse(a, .DELETE, url, 200, "{malformed}"));
+    try std.testing.expectError(error.PermissionDenied, decodeResponse(a, .DELETE, url, 403, "{}"));
+    const deep = "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[";
+    try std.testing.expectError(error.UnknownOutcome, decodeResponse(a, .DELETE, url, 200, deep));
 }
 
 test "fetch progress: metadata fraction uses actual provider IDs not requested maximum" {

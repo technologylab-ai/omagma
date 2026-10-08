@@ -247,16 +247,17 @@ cache is memory-only. Accounts, credentials, message IDs and profile routing
 remain separate. [Privacy details](PRIVACY.md).
 
 Current limitations: no unified Inbox/unread total, calendar views, permanent
-mail deletion, contact deletion, or label creation/renaming/deletion. Drafts
+mail deletion or contact deletion. Drafts
 are local rather than synchronized Gmail drafts. The external editor uses a
 full-terminal takeover; there is no embedded editor pane. See
 [CLI/TUI coverage](AGENT-CLI.md#cli-and-tui-coverage) and
 [terminal bounds](TERMINAL.md#bounds-and-recovery).
 
-## Planned label management
+## Label assignment and collection management
 
-Future work will extend label assignment and add label collection management:
-create labels with arbitrary names and edit, rename or delete existing labels.
-The TUI and CLI will share these operations. Existing-label assignment/removal
-is available today; label collection management is planned. The current
-`gmail.modify` permission already covers the required Gmail APIs.
+`m` assigns or removes an existing custom label on mail. The sidebar's **LABELS**
+heading opens collection management: create, rename or delete a custom label.
+The TUI and CLI share these operations, with system labels protected and
+deletion explicitly reviewed. Deleting a definition keeps its emails. Clicking
+a label name browses its mail; Inbox or another mailbox leaves that label view.
+The existing `gmail.modify` permission covers the Gmail APIs.

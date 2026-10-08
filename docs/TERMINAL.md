@@ -167,10 +167,28 @@ Numeric `:save-attachment NUMBER /absolute/path` also saves a file directly. Pat
 ## Labels, bulk actions and contacts
 
 The sidebar includes Inbox, Sent, local Drafts, Archive, Trash, Spam, All Mail,
-Unread and cached custom labels. `m` opens the label chooser with `/` filtering
-and `+`/`-` for Add/Remove. Tab/Shift+Tab chooses Filter, List, Add, Remove or
-Back; Enter activates the focused action. Omagma does not create, rename or
-delete label definitions.
+Unread and cached custom labels. Clicking a **label name** shows mail carrying
+that label. To leave the label view, click **Inbox** or another mailbox; this
+changes your view without removing labels from any messages. The sidebar shows
+the portion of the custom-label collection that fits its height.
+
+`m` opens **Choose label**, which assigns or removes an existing custom label
+on the current mail or selected group. `/` filters the list and `+`/`-` applies
+Add/Remove. Tab/Shift+Tab chooses Filter, List, Add, Remove or Back; Enter
+activates the focused action. Gmail's system labels are hidden here: mailbox
+and read/star actions have their own controls.
+
+Click the **LABELS heading**, or use `:labels`, to open **Manage labels**, for the
+account's label collection. Use `n` New, `r` Rename, `d` Delete or `o` Open;
+Tab/Shift+Tab and Enter reach the same buttons, and `/` filters the collection.
+Create a label, rename one or review its deletion; these operations
+are separate from assigning labels to mail. Deleting a label removes that label
+from messages while keeping the emails themselves. System labels cannot be
+created, renamed or deleted through this manager. Label collection changes use
+the terminal account's existing `mail-modify` capability. Delete review starts
+on Cancel and names the account and label. `y` or Enter on the deliberately
+focused Delete button confirms; `d` does not confirm. Ctrl+R refreshes definitions
+or checks the recorded receipt when an operation's outcome is uncertain.
 
 Space selects mail, Ctrl+A selects the window, and actions apply to that set or
 the focused message. Escape/`q` clears a selection first; Ctrl+Z or `:undo`
@@ -186,6 +204,11 @@ actions; `unspam` removes Spam and restores Inbox membership. See
 `a` opens this account's address book. Search with `/`, create with `n`, edit with `e`, and save a contact with Ctrl+S. Contacts require People API permissions. Version conflicts are reported so you can refresh before editing again. Contact deletion is not implemented.
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
+
+Invitations show a distinct callout at the top of the reader, with a calendar
+icon and **I · Respond** cue. It remains visible while the body scrolls, so a
+long message cannot hide the response action. Click the callout or press `I`
+to review a response; neither action sends a reply by itself.
 
 Invitation review also supports Tab/Shift+Tab across Accept, Tentative, Decline
 and Cancel, with Cancel focused initially. Enter submits only the deliberately

@@ -13,7 +13,7 @@ Fixture accounts expose mock send, mailbox-change, contact and RSVP capabilities
 The JSONL agent CLI and TUI share the same backend operations, terminal grant,
 account checks, cache and mutation receipts. Reading full messages/threads,
 cache/server search, reply/reply-all, forwarding, sending attachments,
-archive/Trash/restore, stars/read state, label assignment, bulk actions/undo,
+archive/Trash/restore, stars/read state, label assignment and collection management, bulk actions/undo,
 contact list/search/create/update and invitation replies are available to both.
 The [complete permission setup](SETUP.md#full-tuicli-permissions) enables both
 interfaces for the authorized account.
@@ -29,9 +29,10 @@ screen, and can request up to 100 messages per page rather than the TUI's
 The command table below is the backend contract. One-shot commands
 cover common operations; JSONL supplies arrays and structured fields for richer
 requests. Drafts are local in both interfaces. Neither currently offers
-permanent mail deletion, contact deletion, label creation/renaming/deletion or
-calendar views. Label support means listing and assigning/removing existing
-labels. Calendar support means invitation replies by email.
+permanent mail deletion, contact deletion or calendar views. Label support
+includes listing, assigning/removing existing labels and creating, renaming
+or deleting custom label definitions. Calendar support means invitation replies
+by email.
 
 ## Protocol
 
@@ -64,6 +65,9 @@ Send lines such as:
 | accounts.list | accounts with address, enabled, capabilities, configured senderName/signature |
 | accounts.identities | verified send-as identities with address,name,signature,isDefault; cacheOnly supports cached identities plus configured primary fallback |
 | labels.list | bounded Gmail label id,name,type list; cacheOnly uses the downloaded account list |
+| labels.create | name, operationId; creates a custom label and returns its stable label ID |
+| labels.rename | labelId, name, operationId; renames a custom label while retaining its ID and memberships |
+| labels.delete | labelId, confirmName, operationId; deletes the custom label, keeping its emails; confirmName must match the current name |
 | mail.list / search / sync | limit 1..100, query, label, cursor; returns one message page and nextCursor; search selects local cache with cacheOnly:true or Gmail with false/default; sync is a list-operation alias, not a history refresh |
 | mail.refresh | optional limit/query/label/prefetchLimit; applies a bounded history update or recent resync to the account cache |
 | mail.prefetch | limit 0..64; refreshes and fills a bounded recent body head within existing cache quotas |
@@ -131,6 +135,25 @@ Reads do not mark read. Use mail.mark explicitly if requested. There is no perma
 ```
 
 Attachments are `{id:"",filename:"safe-basename.txt",mimeType:"text/plain",size:DECODED_BYTES,data:"BASE64URL_NO_PADDING"}` in draft.attachments. `size` stays an exact integer byte count in CLI responses; the TUI's kB/MB display does not change it. Body plus encoded attachments must fit the 3 MiB request. One-shot compose/send accept repeated `--attach-file FILE`, using application/octet-stream. Both JSONL `mail.attachment` and one-shot `omagma mail attachment` return JSON/base64url on stdout; they do not write a downloaded file, and there is no `--output-file` option. The TUI offers an interactive save picker. A CLI caller decodes `data` and writes it through its own tool to an explicitly chosen private path, refusing overwrite and treating filenames as untrusted.
+
+## Label collection management
+
+`labels list` returns the account's definitions; `mail labels` remains a list
+alias. Create, rename and delete affect the collection, while `mail mark` and
+`mail batch` add/remove memberships on selected messages. System definitions
+are protected. Writes require `mail-modify` and an explicit operation ID.
+
+```sh
+omagma labels list --account personal@example.com --cached
+omagma labels create --account personal@example.com --name 'Projects/Volcano' --operation-id label-create-001
+omagma labels rename --account personal@example.com --label-id RETURNED_ID --name 'Projects/Magma' --operation-id label-rename-001
+omagma labels delete --account personal@example.com --label-id RETURNED_ID --confirm-name 'Projects/Magma' --operation-id label-delete-001
+```
+
+Deleting a label removes its associations, keeping the messages and their
+bodies. It is distinct from removing that label from one message. Keep the
+operation ID to inspect or replay its recorded result; an uncertain remote
+outcome must be checked rather than submitted again under a new ID.
 
 ## Markdown drafts and preview
 
@@ -208,7 +231,7 @@ Configurable body prefetch defaults to the smaller of the display page and 32. `
 
 ## One-shot interface
 
-One-shot command families are `mail`, `draft`, `contacts`, `invitations`,
+One-shot command families are `mail`, `labels`, `draft`, `contacts`, `invitations`,
 `cache`, `operation` and `terminal-auth`. Common names map to the shared API:
 `mail compose` creates a local draft and `mail drafts` lists them.
 `mail labels` lists existing labels, and `mail identities`
@@ -259,7 +282,8 @@ For contact creation, the contact file supplies `name` and `emails`. To edit,
 include its returned `resourceName` and pass `--expected-etag RETURNED_ETAG`
 (or include the returned contact etag). This supports contact create/update,
 not deletion. Label assignment uses existing label IDs or the supported name
-resolver; it does not create label definitions. Invitation replies send email,
+resolver. Collection management uses `labels create|rename|delete`, with
+explicit operation IDs and a reviewed name for deletion. Invitation replies send email,
 not Calendar changes.
 
 JSONL carries every structured operation, including multi-ID arrays, local raw
@@ -283,6 +307,7 @@ The CLI does not launch the TUI's editor, autocomplete or styled renderer.
 | `--attach-file FILE` (repeatable), `--draft-file FILE` | Regular outgoing files or a structured draft JSON object |
 | `--all` / `--reply-all` | Plan a reply-all draft |
 | `--unread` / `--read`, `--starred` / `--unstarred`, `--add-label LABEL`, `--remove-label LABEL` | Explicit mail.mark changes; label flags may repeat |
+| `--name NAME`, `--label-id ID`, `--confirm-name NAME` | Label collection create/rename/delete; combine writes with --operation-id |
 | `--contact-file FILE`, `--expected-etag ETAG` | Create/edit contact object and version precondition |
 | `--status accepted\|tentative\|declined` | Invitation reply, with message and operation IDs |
 | `--client-file FILE`, `--capabilities CSV` | terminal-auth authorize; follow [account setup](SETUP.md#full-tuicli-permissions) |

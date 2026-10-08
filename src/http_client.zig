@@ -109,6 +109,16 @@ pub const Client = struct {
         const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
         return try platform.deadline(self.io, duration, requestInner, .{ self, url, .POST, @as(?[]const u8, "synthetic-omagma-bearer"), @as(?[]const u8, json_body), out, true, true });
     }
+    /// Label transport regression only: fixed synthetic content/credential,
+    /// POST/PATCH/DELETE, and the same terminal policy restricted to loopback.
+    pub fn requestLoopbackLabelProbe(self: *Client, url: []const u8, method: std.http.Method, out: []u8) !Response {
+        if (method != .POST and method != .PATCH and method != .DELETE) return error.InvalidProbeMethod;
+        const remaining = self.job_deadline.durationFromNow(self.io);
+        if (remaining.raw.toNanoseconds() <= 0) return error.Timeout;
+        const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
+        const body: ?[]const u8 = if (method == .DELETE) null else "{\"name\":\"Fixture 🌋\"}";
+        return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-bearer"), body, out, true, true });
+    }
     fn requestInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool) anyerror!Response {
         if (out.len > (if (terminal) @as(usize, 3 * limits.MiB) else limits.response)) return error.ResponseBufferTooLarge;
         if (url.len > 4096) return error.UrlTooLarge;

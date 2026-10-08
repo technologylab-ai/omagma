@@ -53,8 +53,10 @@ incomplete recipient text. Such drafts require a validated update before send.
 Verified same-account aliases and configured signatures are explicit draft
 state. Bulk triage handles at most 100 IDs with per-message outcomes and bounded
 selective undo; it never batches sends or retries uncertain mutations automatically.
-Labels can be listed, filtered and applied/removed; label creation, renaming and
-deletion are not implemented. Contacts support read/search/create/update, not
+Labels can be listed, filtered and applied/removed. Account-scoped custom label
+creation, renaming and reviewed deletion share the executor and operation
+journal, separately from message assignment; system definitions are protected.
+Contacts support read/search/create/update, not
 deletion. Calendar views are unsupported; invitations use reviewed RSVP email.
 
 Sending and RSVP require an operation identity. An uncertain remote outcome is

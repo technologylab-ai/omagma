@@ -121,7 +121,7 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
-    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "mail") or std.mem.eql(u8, mode, "contacts") or std.mem.eql(u8, mode, "invitations") or std.mem.eql(u8, mode, "draft") or std.mem.eql(u8, mode, "cache") or std.mem.eql(u8, mode, "operation") or std.mem.eql(u8, mode, "terminal-auth")) {
+    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "mail") or std.mem.eql(u8, mode, "contacts") or std.mem.eql(u8, mode, "labels") or std.mem.eql(u8, mode, "invitations") or std.mem.eql(u8, mode, "draft") or std.mem.eql(u8, mode, "cache") or std.mem.eql(u8, mode, "operation") or std.mem.eql(u8, mode, "terminal-auth")) {
         try @import("terminal/cli.zig").run(init, io, mode, &args);
         return;
     }
@@ -133,6 +133,20 @@ fn app(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, mode, "help") or std.mem.eql(u8, mode, "--help") or std.mem.eql(u8, mode, "-h")) return printHelp(io);
+    if (std.mem.eql(u8, mode, "probe-label-http")) {
+        const method = std.meta.stringToEnum(std.http.Method, args.next() orelse return error.InvalidProbeMethod) orelse return error.InvalidProbeMethod;
+        const url = args.next() orelse return error.UrlRequired;
+        if (args.next() != null) return error.Args;
+        var arena = std.heap.ArenaAllocator.init(init.gpa);
+        defer arena.deinit();
+        const value = try @import("terminal/gmail.zig").probeLabelHttp(io, arena.allocator(), method, url);
+        var buffer: [4096]u8 = undefined;
+        var writer = std.Io.File.stdout().writer(io, &buffer);
+        try std.json.Stringify.value(value, .{}, &writer.interface);
+        try writer.interface.writeByte('\n');
+        try writer.interface.flush();
+        return;
+    }
     if (std.mem.eql(u8, mode, "probe-keyring") or std.mem.eql(u8, mode, "probe-callback")) {
         if (std.mem.eql(u8, mode, "probe-keyring")) {
             try @import("keyring.zig").syntheticProbe(io);

@@ -8,6 +8,7 @@ const cache_query = @import("cache_query.zig");
 const triage = @import("triage.zig");
 const batch = @import("batch.zig");
 const markdown_mail = @import("markdown_mail.zig");
+const label_collection = @import("labels.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
 const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
@@ -18,11 +19,12 @@ fn canonicalLabel(text: []const u8, definitions: []const storage.Label) []const 
 }
 fn fixtureLabel(source: Value, text: []const u8) ![]const u8 {
     try recipients.validateHeader(text);
+    if (text.len == 0) return "";
     for (system_labels) |system| if (std.ascii.eqlIgnoreCase(text, system)) return system;
     if (j.get(source, "labels")) |value| {
         for (try valueArray(value)) |item| if (std.mem.eql(u8, text, j.text(item, "id")) or std.mem.eql(u8, text, j.text(item, "name"))) return j.required(item, "id");
     } else if (std.mem.eql(u8, text, "Projects")) return "Label_demo";
-    return text;
+    return error.LabelNotFound;
 }
 fn fixtureLabelDefinitions(a: std.mem.Allocator, source: Value) !Value {
     if (j.get(source, "labels")) |value| return value;
@@ -35,7 +37,7 @@ fn cachedLabel(store: *storage.Store, text: []const u8) []const u8 {
     const resolved = canonicalLabel(text, store.state.labels);
     if (!std.mem.eql(u8, resolved, text)) return resolved;
     for (store.state.views) |view| if (std.mem.eql(u8, text, view.label) and view.labelId.len != 0) return view.labelId;
-    if (store.options.fixtures and std.mem.eql(u8, text, "Projects")) return "Label_demo";
+    if (store.options.fixtures and !store.state.fixtureLabelsReady and std.mem.eql(u8, text, "Projects")) return "Label_demo";
     return resolved;
 }
 
@@ -184,7 +186,7 @@ pub const Session = struct {
         }
         const account = j.text(req, "account");
         const id = j.get(req, "id") orelse .null;
-        for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId", "beforeMessageId", "afterMessageId", "action", "undoToken", "url", "path" }) |key| if (j.get(req, key)) |field| {
+        for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId", "beforeMessageId", "afterMessageId", "action", "undoToken", "url", "path", "labelId", "name", "confirmName" }) |key| if (j.get(req, key)) |field| {
             if (field != .string) return failure(out_allocator, id, account, "InvalidRequest", "Expected string command fields");
         };
         if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
@@ -211,7 +213,7 @@ pub const Session = struct {
     }
     fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, fixtures: bool, data: Value) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
-            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "invitation.reply" }) |mutation| {
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "invitation.reply", "labels.create", "labels.rename", "labels.delete" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -279,6 +281,7 @@ pub const Session = struct {
         var store = try storage.Store.open(s.io, a, s.cache_root, address, s.options);
         defer store.close();
         if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, false);
+        if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete")) return s.manageLabels(a, &store, req);
         if (std.mem.eql(u8, cmd, "accounts.identities")) return s.identities(a, &store, req, false);
         if (std.mem.eql(u8, cmd, "cache.stats")) return s.cacheStats(a, &store);
         if (std.mem.eql(u8, cmd, "cache.clear")) {
@@ -520,8 +523,7 @@ pub const Session = struct {
                 try s.reopenBody(a, store);
                 store.state.labels = try j.decode([]storage.Label, a, j.get(response, "labels") orelse return error.InvalidProviderResponse);
             } else {
-                const source = try s.fixture(a, store.state.account);
-                store.state.labels = try j.decode([]storage.Label, a, try fixtureLabelDefinitions(a, source));
+                try s.ensureFixtureLabels(a, store, try s.fixture(a, store.state.account));
             }
             if (store.state.labels.len > 512) return error.TooManyLabels;
             for (store.state.labels) |label| {
@@ -532,6 +534,165 @@ pub const Session = struct {
             try store.save();
         }
         return j.value(a, .{ .labels = store.state.labels, .cached = cached });
+    }
+
+    fn ensureFixtureLabels(_: *Session, a: std.mem.Allocator, store: *storage.Store, source: Value) !void {
+        if (store.state.fixtureLabelsReady) return;
+        store.state.labels = try j.decode([]storage.Label, a, try fixtureLabelDefinitions(a, source));
+        if (store.state.labels.len > 512) return error.TooManyLabels;
+        for (store.state.labels) |label| {
+            try @import("../bounded.zig").identifier(label.id);
+            if (label.name.len > 512 or !std.unicode.utf8ValidateSlice(label.name)) return error.InvalidLabel;
+            try recipients.validateHeader(label.name);
+        }
+    }
+
+    fn labelReceipt(a: std.mem.Allocator, operation: storage.Operation) !Value {
+        return j.value(a, .{ .outcome = operation.outcome, .operationId = operation.id, .labelId = operation.labelId, .label = if (operation.label) |label| try j.value(a, label) else @as(Value, .null), .deleted = operation.deleted, .errorCode = operation.errorCode });
+    }
+
+    fn manageLabels(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        try s.capability(a, store.state.account, req, "mail-modify");
+        const cmd = j.text(req, "cmd");
+        const create = std.mem.eql(u8, cmd, "labels.create");
+        const deleting = std.mem.eql(u8, cmd, "labels.delete");
+        const operation_id = try j.required(req, "operationId");
+        if (operation_id.len > 256) return error.InvalidOperationId;
+        try recipients.validateHeader(operation_id);
+        const id = if (create) "" else try j.required(req, "labelId");
+        const name = if (deleting) "" else try j.required(req, "name");
+        const confirmation = if (deleting) try j.required(req, "confirmName") else "";
+        if (!create) try label_collection.validateId(id);
+        if (!deleting) try label_collection.validateName(name);
+        if (confirmation.len > 512) return error.InvalidLabelConfirmation;
+        try recipients.validateHeader(confirmation);
+        const payload = try std.json.Stringify.valueAlloc(a, .{ .cmd = cmd, .account = store.state.account, .labelId = id, .name = name, .confirmName = confirmation }, .{});
+        const digest = storage.Store.hash(payload);
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+            if (!std.mem.eql(u8, operation.hash, &digest) or !std.mem.eql(u8, operation.kind, cmd)) return error.OperationConflict;
+            return labelReceipt(a, operation);
+        };
+        // An uncertain collection mutation must be reconciled explicitly; a
+        // fresh identity must not silently cause a second provider request.
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and std.mem.startsWith(u8, operation.kind, "labels.")) {
+            if (std.mem.eql(u8, operation.hash, &digest) or (!create and std.mem.eql(u8, operation.labelId, id))) return labelReceipt(a, operation);
+        };
+        if (store.state.operations.len == 1000) return error.OperationJournalFull;
+        _ = try s.loadLabels(a, store, req, false);
+        // The live list temporarily releases the store; another client may
+        // have journaled this identity while the GET was in progress.
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+            if (!std.mem.eql(u8, operation.hash, &digest) or !std.mem.eql(u8, operation.kind, cmd)) return error.OperationConflict;
+            return labelReceipt(a, operation);
+        };
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and std.mem.startsWith(u8, operation.kind, "labels.")) {
+            if (std.mem.eql(u8, operation.hash, &digest) or (!create and std.mem.eql(u8, operation.labelId, id))) return labelReceipt(a, operation);
+        };
+        if (store.state.operations.len == 1000) return error.OperationJournalFull;
+        const old = if (!create) try label_collection.custom(store.state.labels, id) else storage.Label{ .id = "", .name = "" };
+        if (deleting) {
+            if (!std.mem.eql(u8, confirmation, old.name)) return error.InvalidLabelConfirmation;
+            if (s.options.fixtures and store.state.fixtureDeletedLabels.len == 512) return error.TooManyDeletedLabels;
+        } else {
+            try label_collection.unique(store.state.labels, name, id);
+            if (create and store.state.labels.len == 512) return error.TooManyLabels;
+        }
+        var operations: std.ArrayList(storage.Operation) = .empty;
+        try operations.appendSlice(a, store.state.operations);
+        try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .kind = cmd, .labelId = id });
+        store.state.operations = operations.items;
+        if (s.options.fixtures) store.state.fixtureLabelsReady = true;
+        // Commit intent before entering the transport. Crashes leave an unknown
+        // receipt, rather than a replayable operation with no journal entry.
+        try store.save();
+        const result: Value = if (!s.options.fixtures) remote: {
+            const account = store.state.account;
+            store.release();
+            const remote_result = s.remote(a, account, cmd, req) catch |err| {
+                s.reopenBody(a, store) catch return error.UnknownOutcome;
+                for (store.state.operations) |*operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+                    operation.errorCode = @errorName(err);
+                    operation.outcome = switch (err) {
+                        error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.LabelNotFound, error.MessageNotFound, error.SystemLabelImmutable, error.InvalidLabelName, error.InvalidLabelConfirmation, error.DuplicateLabelName, error.TooManyLabels, error.InvalidIdentifier => "rejected",
+                        else => "unknown",
+                    };
+                    store.save() catch return error.UnknownOutcome;
+                    return labelReceipt(a, operation.*);
+                };
+                return error.UnknownOutcome;
+            };
+            s.reopenBody(a, store) catch return error.UnknownOutcome;
+            break :remote remote_result;
+        } else fixture_result: {
+            store.state.fixtureCalls += 1;
+            if (s.scenario("rejected-mutation") or s.scenario("unknown-send")) {
+                const operation = &store.state.operations[store.state.operations.len - 1];
+                operation.outcome = if (s.scenario("rejected-mutation")) "rejected" else "unknown";
+                operation.errorCode = if (s.scenario("rejected-mutation")) "ProviderRejected" else "UnknownOutcome";
+                try store.save();
+                return labelReceipt(a, operation.*);
+            }
+            if (deleting) {
+                // Overlay all raw provider messages too, including messages
+                // beyond the retained cache tail, so refresh cannot resurrect
+                // deleted label memberships.
+                const source = try s.fixtureProviderSource(a, store);
+                for (try array(source, "messages")) |raw| {
+                    var ids: std.ArrayList([]const u8) = .empty;
+                    var changed = false;
+                    for (try fixtureLabels(a, raw)) |label_id| {
+                        if (std.mem.eql(u8, label_id, id)) changed = true else try ids.append(a, label_id);
+                    }
+                    if (changed) try store.setFixtureRecord(j.text(raw, "id"), ids.items, fixtureCheckpoint(source), false);
+                }
+                break :fixture_result try j.value(a, .{ .deleted = true, .labelId = id });
+            }
+            break :fixture_result try j.value(a, .{ .label = storage.Label{ .id = if (create) try store.nextId("Label") else id, .name = name, .type = "user" } });
+        };
+        return s.commitLabelResult(a, store, operation_id, create, deleting, id, name, old.name, result) catch return error.UnknownOutcome;
+    }
+
+    fn commitLabelResult(s: *Session, a: std.mem.Allocator, store: *storage.Store, operation_id: []const u8, create: bool, deleting: bool, id: []const u8, name: []const u8, old_name: []const u8, result: Value) !Value {
+        var operation_ptr: ?*storage.Operation = null;
+        for (store.state.operations) |*operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+            operation_ptr = operation;
+            break;
+        };
+        const operation = operation_ptr orelse return error.UnknownOutcome;
+        if (deleting) {
+            if (!try j.boolean(result, "deleted", false) or !std.mem.eql(u8, j.text(result, "labelId"), id)) return error.UnknownOutcome;
+            var kept: usize = 0;
+            for (store.state.labels) |label| if (!std.mem.eql(u8, label.id, id)) {
+                store.state.labels[kept] = label;
+                kept += 1;
+            };
+            store.state.labels = store.state.labels[0..kept];
+            try store.labelCollectionChanged(id, old_name, null);
+            operation.deleted = true;
+        } else {
+            const label = try j.decode(storage.Label, a, j.get(result, "label") orelse return error.UnknownOutcome);
+            label_collection.validateId(label.id) catch return error.UnknownOutcome;
+            if (!std.mem.eql(u8, label.name, name) or !std.ascii.eqlIgnoreCase(label.type, "user") or (!create and !std.mem.eql(u8, label.id, id))) return error.UnknownOutcome;
+            if (create) {
+                var definitions: std.ArrayList(storage.Label) = .empty;
+                try definitions.appendSlice(a, store.state.labels);
+                for (definitions.items) |known| if (std.mem.eql(u8, known.id, label.id)) return error.UnknownOutcome;
+                try definitions.append(a, label);
+                store.state.labels = definitions.items;
+            } else for (store.state.labels) |*definition| if (std.mem.eql(u8, definition.id, id)) {
+                definition.* = label;
+                break;
+            };
+            try store.labelCollectionChanged(label.id, old_name, name);
+            operation.label = label;
+            operation.labelId = label.id;
+        }
+        operation.outcome = if (s.options.fixtures and s.scenario("applied-lost")) "unknown" else "applied";
+        store.save() catch {
+            operation.outcome = "unknown";
+            return error.UnknownOutcome;
+        };
+        return labelReceipt(a, operation.*);
     }
     fn identities(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, cached: bool) !Value {
         try s.capability(a, store.state.account, req, "mail-read");
@@ -633,6 +794,10 @@ pub const Session = struct {
         for ([_][]const []const u8{ delta.add, delta.remove }, 0..) |values, list_index| {
             const resolved = try a.alloc([]const u8, values.len);
             for (values, resolved) |label, *id| {
+                if (s.options.fixtures) {
+                    id.* = try fixtureLabel(batch_remote.source, label);
+                    continue;
+                }
                 id.* = label;
                 for ([_][]const u8{ "INBOX", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT" }) |system| if (std.ascii.eqlIgnoreCase(label, system)) {
                     id.* = system;
@@ -1517,8 +1682,9 @@ pub const Session = struct {
         return changed;
     }
     fn overlayFixtureSource(a: std.mem.Allocator, store: *storage.Store, source: Value) !Value {
-        if (store.state.fixtureProvider.len == 0) return source;
+        if (store.state.fixtureProvider.len == 0 and !store.state.fixtureLabelsReady) return source;
         var out = try j.copyObject(a, source);
+        if (store.state.fixtureLabelsReady) try out.object.put(a, "labels", try j.value(a, store.state.labels));
         var messages: Value = .{ .array = .init(a) };
         for (try array(source, "messages")) |raw| {
             var message = raw;
@@ -1527,6 +1693,19 @@ pub const Session = struct {
                 message = try j.copyObject(a, raw);
                 try message.object.put(a, "labelIds", try j.value(a, record.labels));
             }
+            if (store.state.fixtureDeletedLabels.len != 0) {
+                var retained: std.ArrayList([]const u8) = .empty;
+                var changed = false;
+                for (try fixtureLabels(a, message)) |id| {
+                    var deleted = false;
+                    for (store.state.fixtureDeletedLabels) |removed| deleted = deleted or std.mem.eql(u8, id, removed);
+                    if (deleted) changed = true else try retained.append(a, id);
+                }
+                if (changed) {
+                    message = try j.copyObject(a, message);
+                    try message.object.put(a, "labelIds", try j.value(a, retained.items));
+                }
+            }
             try messages.array.append(message);
         }
         try out.object.put(a, "messages", messages);
@@ -1534,6 +1713,7 @@ pub const Session = struct {
     }
     fn fixtureProviderSource(s: *Session, a: std.mem.Allocator, store: *storage.Store) !Value {
         const source = try s.fixture(a, store.state.account);
+        try s.ensureFixtureLabels(a, store, source);
         if (try reconcileFixtureSource(a, store, source)) {
             store.state.generation += 1;
             for (store.state.views) |*view| view.stale = true;

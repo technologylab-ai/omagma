@@ -120,7 +120,7 @@ pub fn cacheStamp(io: std.Io, root: []const u8, account: []const u8, options: t.
     return .{ .inode = @intCast(stat.inode), .size = stat.size, .mtime_ns = stat.mtime.toNanoseconds() };
 }
 
-pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "" };
+pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "", kind: []const u8 = "", label: ?Label = null, labelId: []const u8 = "", deleted: bool = false };
 pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
 pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
 pub const FixtureProviderRecord = struct { id: []const u8, labels: []const []const u8 = &.{}, deleted: bool = false, sourceHistoryId: []const u8 = "1" };
@@ -141,6 +141,10 @@ pub const State = struct {
     contacts: []t.Contact = &.{},
     contactsReady: bool = false,
     labels: []Label = &.{},
+    /// Fixtures own one persistent provider collection after their first write.
+    /// Baseline source files must not resurrect renamed or deleted labels.
+    fixtureLabelsReady: bool = false,
+    fixtureDeletedLabels: []const []const u8 = &.{},
     identities: []Identity = &.{},
     undo: []Undo = &.{},
     operations: []Operation = &.{},
@@ -198,8 +202,13 @@ pub const Store = struct {
             // on every short refresh commit; escaped strings still allocate.
             state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_if_needed });
             if (state.schema != 1 or !std.mem.eql(u8, state.account, account)) return error.CacheIdentityMismatch;
-            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024 or state.labels.len > 512 or state.identities.len > 32 or state.undo.len > 16) return error.CacheLimitExceeded;
+            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024 or state.labels.len > 512 or state.fixtureDeletedLabels.len > 512 or state.identities.len > 32 or state.undo.len > 16) return error.CacheLimitExceeded;
             for (state.labels) |label| if (label.id.len > 256 or label.name.len > 512) return error.CacheLimitExceeded;
+            for (state.fixtureDeletedLabels) |id| if (id.len == 0 or id.len > 256) return error.CacheLimitExceeded;
+            for (state.operations) |operation| {
+                if (operation.kind.len > 64 or operation.labelId.len > 256) return error.CacheLimitExceeded;
+                if (operation.label) |label| if (label.id.len > 256 or label.name.len > 512 or label.type.len > 16) return error.CacheLimitExceeded;
+            }
             for (state.identities) |identity| if (identity.address.len > 320 or identity.name.len > 256 or identity.signature.len > 8192) return error.CacheLimitExceeded;
             for (state.undo) |receipt| {
                 if (receipt.token.len > 256 or receipt.items.len > 100) return error.CacheLimitExceeded;
@@ -222,7 +231,7 @@ pub const Store = struct {
         var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = resolved, .entriesStorage = state.entries };
         if (state.views.len > 16 or state.historyId.len > 32) return error.CacheLimitExceeded;
         for (state.views) |view| if (view.ids.len > t.Limits.metadata_hard or view.query.len > 4096 or view.label.len > 256 or view.remoteCursor.len > 4096) return error.CacheLimitExceeded;
-        if (!options.fixtures and state.fixtureProvider.len != 0) return error.CacheIdentityMismatch;
+        if (!options.fixtures and (state.fixtureProvider.len != 0 or state.fixtureLabelsReady or state.fixtureDeletedLabels.len != 0)) return error.CacheIdentityMismatch;
         for (state.fixtureProvider) |record| try validateFixtureRecord(record);
         // Persisted indexes already have this order. Keep the legacy fallback
         // without heap-sorting thousands of rows on every cached/body read.
@@ -694,7 +703,59 @@ pub const Store = struct {
             entry.message.unread = true;
         };
     }
+
+    /// Collection changes invalidate membership queries without touching any
+    /// immutable message/body/draft records. Renames retain provider IDs.
+    pub fn labelCollectionChanged(s: *Store, id: []const u8, old_name: []const u8, new_name: ?[]const u8) !void {
+        const a = s.allocator;
+        for (s.state.views) |*view| {
+            view.stale = true;
+            view.remoteCursor = "";
+            if (view.query.len != 0) view.ids = &.{};
+            if ((id.len != 0 and (std.mem.eql(u8, view.labelId, id) or std.mem.eql(u8, view.label, id))) or (old_name.len != 0 and std.mem.eql(u8, view.label, old_name))) {
+                if (new_name) |name| {
+                    if (std.mem.eql(u8, view.label, old_name)) view.label = name;
+                    const key = try viewKey(a, s.state.account, view.query, view.label);
+                    view.key = try a.dupe(u8, &key);
+                } else {
+                    // Keep an empty view scoped to its deleted identity. An
+                    // empty labelId would turn the old key into All Mail.
+                    view.labelId = id;
+                    view.ids = &.{};
+                }
+            }
+        }
+        if (new_name == null) {
+            if (s.options.fixtures) {
+                var deleted: std.ArrayList([]const u8) = .empty;
+                try deleted.appendSlice(a, s.state.fixtureDeletedLabels);
+                var present = false;
+                for (deleted.items) |known| present = present or std.mem.eql(u8, known, id);
+                if (!present) {
+                    if (deleted.items.len == 512) return error.TooManyDeletedLabels;
+                    try deleted.append(a, id);
+                }
+                s.state.fixtureDeletedLabels = deleted.items;
+            }
+            for (s.state.entries) |*entry| entry.message.labels = try withoutLabel(a, entry.message.labels, id);
+            for (s.state.outbox) |*message| message.labels = try withoutLabel(a, message.labels, id);
+            for (s.state.fixtureProvider) |*record| record.labels = try withoutLabel(a, record.labels, id);
+            for (s.state.undo) |*receipt| for (receipt.items) |*item| {
+                item.addLabels = try withoutLabel(a, item.addLabels, id);
+                item.removeLabels = try withoutLabel(a, item.removeLabels, id);
+            };
+        }
+        s.state.generation += 1;
+    }
 };
+fn withoutLabel(a: std.mem.Allocator, ids: []const []const u8, removed: []const u8) ![]const []const u8 {
+    var found = false;
+    for (ids) |id| found = found or std.mem.eql(u8, id, removed);
+    if (!found) return ids;
+    var list: std.ArrayList([]const u8) = .empty;
+    for (ids) |id| if (!std.mem.eql(u8, id, removed)) try list.append(a, id);
+    return list.items;
+}
 fn validateFixtureRecord(record: FixtureProviderRecord) !void {
     try @import("../bounded.zig").identifier(record.id);
     if (record.labels.len > 64 or record.sourceHistoryId.len == 0 or record.sourceHistoryId.len > 32) return error.InvalidFixtureProviderState;
@@ -963,6 +1024,50 @@ test "body repair preserves valid immutable bytes and rejects wrong-account data
     try std.testing.expectError(error.CacheIdentityMismatch, store.read("m"));
     try std.testing.expect(!try store.putBody(.{ .id = "absent", .threadId = "t", .bodyText = "Never insert" }));
     try std.testing.expect(store.find("absent") == null);
+}
+
+test "label collection: deletion preserves immutable bodies drafts outbox and independent labels" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/label-collection", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer store.close();
+    const message: t.Message = .{ .id = "retained", .threadId = "thread", .bodyText = "Immutable café body 🌋", .labels = &.{ "INBOX", "UNREAD", "Label_7", "Label_other" }, .unread = true };
+    try store.put(message, true);
+    try store.putOutbox(.{ .id = "outgoing", .threadId = "outgoing-thread", .bodyText = "Immutable outgoing body", .labels = &.{ "SENT", "Label_7" } });
+    const draft = try store.putDraft(.{ .bodyText = "Keep this draft" }, null);
+    try store.setFixtureRecord("remote-only", &.{ "INBOX", "Label_7", "STARRED" }, "1", false);
+    const undo_items = try a.dupe(UndoItem, &.{.{ .messageId = "retained", .addLabels = &.{ "Label_7", "UNREAD" }, .removeLabels = &.{ "Label_7", "STARRED" }, .outcome = "applied" }});
+    store.state.undo = try a.dupe(Undo, &.{.{ .token = "undo", .items = undo_items }});
+    try store.recordView("", "Project", "Label_7", &.{message}, "opaque-remote-cursor", false);
+    const body_hash = try a.dupe(u8, store.find("retained").?.bodyHash);
+    const body_bytes = store.find("retained").?.bytes;
+    try store.labelCollectionChanged("Label_7", "Project", "Renamed");
+    try std.testing.expectEqualStrings("Label_7", store.find("retained").?.message.labels[2]);
+    try std.testing.expectEqualStrings("Renamed", store.state.views[0].label);
+    try std.testing.expectEqualStrings("Label_7", store.state.views[0].labelId);
+    try store.labelCollectionChanged("Label_7", "Renamed", null);
+    try std.testing.expectEqual(@as(usize, 1), store.state.entries.len);
+    try std.testing.expectEqualStrings(body_hash, store.find("retained").?.bodyHash);
+    try std.testing.expectEqual(body_bytes, store.find("retained").?.bytes);
+    try std.testing.expectEqualStrings("Immutable café body 🌋", (try store.read("retained")).?.bodyText);
+    try std.testing.expectEqualStrings("Keep this draft", (try store.draft(draft.id)).bodyText);
+    try std.testing.expectEqualStrings("Immutable outgoing body", (try store.readOutbox("outgoing")).?.bodyText);
+    try std.testing.expectEqual(@as(usize, 3), store.find("retained").?.message.labels.len);
+    try std.testing.expectEqualStrings("Label_other", store.find("retained").?.message.labels[2]);
+    try std.testing.expect(store.find("retained").?.message.unread);
+    try std.testing.expectEqual(@as(usize, 1), store.state.outbox[0].labels.len);
+    try std.testing.expectEqualStrings("SENT", store.state.outbox[0].labels[0]);
+    try std.testing.expectEqual(@as(usize, 2), store.fixtureRecord("remote-only").?.labels.len);
+    try std.testing.expectEqualStrings("STARRED", store.fixtureRecord("remote-only").?.labels[1]);
+    try std.testing.expectEqualStrings("UNREAD", store.state.undo[0].items[0].addLabels[0]);
+    try std.testing.expectEqualStrings("STARRED", store.state.undo[0].items[0].removeLabels[0]);
+    try std.testing.expectEqualStrings("Label_7", store.state.fixtureDeletedLabels[0]);
+    try std.testing.expect(store.state.views[0].stale and store.state.views[0].ids.len == 0 and store.state.views[0].remoteCursor.len == 0);
+    try store.save();
 }
 test "quota refuses oversized writes and protected oldest replacement before destructive eviction" {
     var tmp = std.testing.tmpDir(.{});

@@ -34,8 +34,9 @@ proposals, not promises that every item is implemented.
 - **Expose existing actions in the TUI.** The CLI already supports local draft
   discard and Spam/Not spam. Add clear TUI actions and confirmations; the Spam
   view should restore with Not spam rather than the Trash restore action.
-- **Manage custom labels.** Add create, rename, colour and delete, then staged
-  assignment of several labels in one Apply action. Stable IDs and shared
+- **Extend custom labels.** Add colour selection and staged assignment of
+  several labels in one Apply action. Create, rename and reviewed deletion now
+  share the TUI/CLI executor. Stable IDs and shared
   executor operations should keep TUI and CLI behavior consistent. The
   existing `gmail.modify` scope supports label creation and updating;
   additional consent is unnecessary for those operations.
