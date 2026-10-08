@@ -148,6 +148,11 @@ Tab/Shift+Tab moves among popup controls and Ctrl+U clears the path. Completion
 excludes symlinks and special files. Shell expressions or variables are not
 expanded.
 
+Ctrl+S confirms the current file choice, whether attaching, saving or saving
+and opening. Ctrl+N/P browses file rows. In a narrow popup, the hint follows the
+focused path, folder control or action button; searchable Help contains the
+complete file-browser shortcuts, including reverse completion.
+
 `B`, `:attachments` or a file click opens the thread's attachment list.
 Tab/Shift+Tab chooses the list, Save, Save & open or Back; Enter activates the
 focused action. From the list, `s` or Enter chooses Save and `o` chooses
@@ -226,6 +231,13 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit |
 
 `q` backs out of readers, search, contacts, help and draft review before quitting the mailbox. It remains text in insertion and path fields. `?` shows the full, scrollable help for the current interface.
+
+The mailbox footer exposes labels and themes alongside the main mail actions.
+Normal compose shows `e` for `$EDITOR`; the original-message preview shows its
+`L`/`B` link and attachment actions when space permits. Help also covers text
+editing (`Ctrl+A/E` for line start/end), list navigation and review controls.
+Shortcuts are scoped to their view: printable letters remain data during text
+entry, and preview scrolling uses normal compose mode.
 
 Reader layout, split proportions, theme, key remaps and per-account mailbox/selected-mail/reader position live in private `omagma/ui.json`; `--ui-file FILE` selects another preferences file. `:split right 60` or `:split below 40` chooses a 25–75% split; `:bind n down`, `:bind p up` and `:unbind n` remap mailbox keys without intercepting text entry or confirmation.
 

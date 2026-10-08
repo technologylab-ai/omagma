@@ -118,7 +118,7 @@ def contacts_alias_and_send(binary, directory):
         terminal.send(b"a")
         terminal.until(lambda: "Contacts ·" in terminal.text() and "Alex Personal Fixture" in terminal.text())
         terminal.send(b"n")
-        terminal.until(lambda: "Name:" in terminal.text() and "[Save]" in terminal.text())
+        terminal.until(lambda: "Name:" in terminal.text() and "[Save Ctrl+S]" in terminal.text())
         terminal.send(b"Unsent Contact")
         focus(terminal, BACKTAB, "[Cancel]")
         terminal.send(ENTER)
@@ -126,7 +126,7 @@ def contacts_alias_and_send(binary, directory):
         terminal.send(b"n")
         terminal.until(lambda: "Name:" in terminal.text())
         terminal.send(b"Keyboard Contact\tnew-contact@example.test")
-        focus(terminal, TAB, "[Save]")
+        focus(terminal, TAB, "[Save Ctrl+S]")
         terminal.send(ENTER)
         terminal.until(lambda: "Contact saved" in terminal.text() and "Name:" not in terminal.text())
         with Client(binary, directory, extra=extra) as client:

@@ -217,12 +217,14 @@ const help_rows = [_]HelpRow{
     .{ .keys = "j / k · arrows", .action = "Move through the focused pane" },
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
     .{ .keys = "Enter", .action = "Open mail or choose the focused item" },
+    .{ .keys = ":", .action = "Open the command prompt; Enter runs, Esc cancels" },
     .{ .keys = "gg", .action = "First mail in the entire cached mailbox; expanded reader starts at top" },
     .{ .keys = "gg / G", .action = "Go to the start/end; Home/End are optional aliases" },
     .{ .keys = "Ctrl+D / Ctrl+U", .action = "Half a visible mail page down or up" },
     .{ .keys = "PageDown / PageUp", .action = "Full visible mail page down or up" },
     .{ .keys = "[ / ]", .action = "Previous or next page of mail" },
     .{ .keys = "1 / 2 / 3", .action = "Switch account" },
+    .{ .keys = "Ctrl+1 / Ctrl+2 / Ctrl+3", .action = "Alternative mailbox account-switch shortcuts" },
     .{ .keys = "Click · wheel", .action = "Choose an item or scroll the pointed pane" },
     .{ .keys = "Esc / q", .action = "Go back one view; quit from the mailbox" },
     .{ .keys = "?", .action = "Open or close this help" },
@@ -262,23 +264,52 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+G", .action = "Compose: jump to the top of the body" },
     .{ .keys = "p · Preview button", .action = "Compose: outgoing HTML, original message, plain alternative" },
     .{ .keys = "Ctrl+D / Ctrl+U", .action = "Compose: independently scroll the chosen preview" },
+    .{ .keys = "PageDown / PageUp in normal compose", .action = "Also scroll half of the chosen preview" },
     .{ .keys = "a", .action = "Choose a recipient from contacts" },
     .{ .keys = "Ctrl+N / Ctrl+P · Enter", .action = "Choose a cached recipient suggestion while typing" },
     .{ .keys = "f · click From", .action = "Cycle verified sending aliases in normal mode" },
     .{ .keys = "A · click Add", .action = "Attach a file using its literal path" },
     .{ .keys = ":detach N · click [x]", .action = "Remove attachment N; wheel scrolls the list" },
+    .{ .keys = "x in compose buttons", .action = "Remove the focused outgoing file; Enter also activates its removal" },
+    .{ .keys = "Ctrl+N / Ctrl+P in compose buttons", .action = "Move through attachment, format, preview and alias controls" },
     .{ .keys = "Ctrl+S / :send", .action = "Save the draft and review before sending" },
     .{ .keys = "y in send review", .action = "Explicitly send; Esc / q returns to the draft" },
+    .{ .keys = "n in send or Trash review", .action = "Cancel the review without submitting" },
+    .{ .keys = "o in normal reply/forward", .action = "Open the original mail in this account's browser profile" },
+    .{ .keys = "L / B in Original preview", .action = "Normal compose: choose original links or received files" },
+    .{ .keys = ":receipt", .action = "Inspect the current draft's operation receipts" },
     .{ .keys = "Esc / q in normal mode", .action = "Save the draft and go back" },
     .{ .keys = "Ctrl+C", .action = "Cancel work; idle drafts save/back, mailbox quits" },
     .{ .action = "Draft changes autosave locally after a short pause." },
     .{ .action = "No editor save or paste sends mail." },
     .{ .action = "Autosave only saves locally; it never sends mail." },
     .{ .action = "In a text field, q is text." },
+    .{ .section = "FILE BROWSER" },
+    .{ .keys = "Ctrl+F / Ctrl+Shift+F", .action = "Complete a literal path; cycle matches forward or backward" },
+    .{ .keys = "Ctrl+U", .action = "Clear the file path; printable letters remain filename text" },
+    .{ .keys = "Ctrl+O / Ctrl+G / Ctrl+T", .action = "Parent folder, Home or toggle hidden files" },
+    .{ .keys = "Ctrl+N / Ctrl+P · arrows", .action = "Choose next or previous file; j/k also works in the file list" },
+    .{ .keys = "Ctrl+S", .action = "Confirm the file: attach, save or save and open" },
+    .{ .keys = "Tab / Shift+Tab · Enter", .action = "Focus file controls; activate a button or enter a directory" },
+    .{ .keys = "PageDown / PageUp", .action = "Move eight file entries down or up" },
+    .{ .keys = "Esc / Ctrl+C", .action = "Hide completion choices first, then leave the file browser" },
+    .{ .section = "LINKS & RECEIVED FILES" },
+    .{ .keys = "Tab / Shift+Tab · Enter", .action = "Choose the list, Open/Save actions or Back" },
+    .{ .keys = "s / o in received files", .action = "Save a file or save and open it" },
+    .{ .keys = "Ctrl+D / Ctrl+U", .action = "Move ten URL or attachment entries down or up" },
+    .{ .keys = "Ctrl+G / Home · End", .action = "First or last entry in link, attachment and contact lists" },
+    .{ .keys = "Esc / q", .action = "Close the link or received-file chooser" },
+    .{ .section = "TEXT EDITING" },
+    .{ .keys = "Ctrl+A / Ctrl+E", .action = "In text fields, move to the start or end of the line" },
+    .{ .keys = "Arrows · Backspace / Delete", .action = "Move or remove a complete character; body Up/Down changes line" },
+    .{ .section = "REVIEW & CONTACT NAVIGATION" },
+    .{ .keys = "Ctrl+D / Ctrl+U · PageDown / PageUp", .action = "Scroll send/RSVP review; move eight contacts in the address book" },
+    .{ .keys = "Ctrl+G / G in RSVP review", .action = "Start or end of invitation details; Home/End also work" },
     .{ .section = "HELP SEARCH" },
     .{ .keys = "/ in help", .action = "Find keys, actions or section names, ignoring case" },
     .{ .keys = "Enter · n / N", .action = "Keep the search; jump to the next or previous match" },
     .{ .keys = "Esc in help", .action = "Clear the search first; Esc again returns to your view" },
+    .{ .keys = "Ctrl+G / G in help", .action = "Start or end of Help; Home/End also work" },
     .{ .action = "While typing a help search, q and other letters are text." },
     .{ .section = "PERSONALIZE" },
     .{ .keys = "T / :theme", .action = "Preview Omagma orange or follow Omarchy theme colors; Apply saves the palette" },
@@ -3661,7 +3692,7 @@ const App = struct {
             self.dialog_focus.ensure(.preview, 0);
             const x = try self.actionButton(win, 0, 0, "[Preview p]", self.dialog_focus.index == 1, true, .compose_preview_toggle, 0);
             _ = try self.actionButton(win, 0, x, "[Back]", self.dialog_focus.index == 2, true, .compose_preview_back, 0);
-        } else try self.line(win, 0, "p Next preview", .accent);
+        } else try self.line(win, 0, if (self.compose.insert_mode or self.compose.attachment_focus) "Preview · Esc returns to normal controls" else if (self.compose_view == .original and win.width >= 48) "p Preview · Ctrl+D/U Scroll · L Links · B Files" else if (win.width >= 34) "p Next preview · Ctrl+D/U Scroll" else "p Next preview", .accent);
         const body = win.child(.{ .y_off = @min(@as(u16, 2), win.height) });
         if (self.compose_view == .original) return self.readerDraw(body);
         const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else &self.compose_preview_scroll;
@@ -4172,7 +4203,31 @@ const App = struct {
         const cancel = inner.child(.{ .x_off = button_width + 2, .y_off = inner.height - 2, .width = 8, .height = 1 });
         try self.line(cancel, 0, "[Cancel]", if (self.file_focus == .cancel) .selected else .muted);
         if (!pending) self.mouseArea(cancel, .file_cancel, 0);
-        try self.line(inner, inner.height - 1, try self.fitLine(inner, "Tab Controls · Ctrl+F Complete · Enter Choose · Esc Back", inner.width), .muted);
+        try self.line(inner, inner.height - 1, try self.fitLine(inner, self.fileDialogHints(inner.width), inner.width), .muted);
+    }
+    fn fileDialogHints(self: *const App, width: u16) []const u8 {
+        if (width < 40) return switch (self.file_focus) {
+            .path => "Ctrl+F Match · Esc Back",
+            .parent => "Ctrl+O Up · Enter Up",
+            .home => "Ctrl+G Home · Esc Back",
+            .hidden => "Ctrl+T Hidden · Enter",
+            .listing => "j/k Move · Enter Choose",
+            .confirm => "Ctrl+S Choose · Esc Back",
+            .cancel => "Enter Cancel · Esc Back",
+        };
+        if (width < 60) return switch (self.file_focus) {
+            .path => "Ctrl+F Complete · Ctrl+U Clear · Tab",
+            .parent => "Ctrl+O Up · Tab Controls · Enter Up",
+            .home => "Ctrl+G Home · Tab Controls · Enter Home",
+            .hidden => "Ctrl+T Hidden · Tab Controls · Enter",
+            .listing => "Ctrl+N/P Rows · Enter Choose · Tab",
+            .confirm => "Ctrl+S Confirm · Tab Controls · Esc Back",
+            .cancel => "Tab Controls · Enter Cancel · Esc Back",
+        };
+        return if (self.file_focus == .path)
+            "Ctrl+F Complete · Ctrl+Shift+F Prev · Ctrl+U Clear · Tab"
+        else
+            "Ctrl+S Confirm · Ctrl+N/P Rows · Tab · Enter Choose · Esc";
     }
     fn completePath(self: *App, field: *Field, backwards: bool) !void {
         const result = if (backwards) try self.path_candidates.shiftTab(self.io, self.allocator, field.value()) else try self.path_candidates.tab(self.io, self.allocator, field.value());
@@ -6050,7 +6105,7 @@ const App = struct {
             self.mouseRows(inner, 3, 1, .contact_field, 1);
             const idle = self.job.future == null or readOnlyJob(self.job.kind);
             const row = @min(@as(u16, 6), inner.height -| 2);
-            const x = try self.actionButton(inner, row, 0, "[Save]", self.contact_field == 2, idle, .contact_action, 2);
+            const x = try self.actionButton(inner, row, 0, "[Save Ctrl+S]", self.contact_field == 2, idle, .contact_action, 2);
             _ = try self.actionButton(inner, row, x, "[Cancel]", self.contact_field == 3, idle, .contact_action, 3);
             try self.line(inner, row + 1, "Tab Controls · Enter Activate · Ctrl+S Save · Esc Cancel", .muted);
             return;
@@ -6092,32 +6147,40 @@ const App = struct {
         if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
         if (self.reader_overlay == .attachments) return " Tab Controls · Enter Activate · j/k Choose · s Save · o Save & open · Esc/q Back";
         if (self.reader_overlay == .links) return " j/k Choose URL  Enter Open in account profile  Esc/q Back";
-        if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Page · Esc/q Source";
+        if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Half · Esc/q Source";
         if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · x Remove · A Add · Esc Body · Ctrl+S Review";
         return switch (self.mode) {
             .contacts => " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.unknown_outcome) " Protected recovery draft · :receipt Check · q Keep/back" else if (self.compose.insert_mode) (if (self.compose.selected < 3) " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+G Body top · Tab Field · Esc Normal · q is text") else " i Edit · Ctrl+G Body top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Tab Controls · Ctrl+S Review · q Save/back",
+            .compose => if (self.compose.unknown_outcome) " Protected recovery draft · :receipt Check · q Keep/back" else if (self.compose.insert_mode) (if (self.compose.selected < 3) " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
             .invitation => " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel",
-            .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  o Gmail  J/K Mail  I RSVP  L Links  B Files  z/q Shrink" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c Compose  o Gmail  J/K Mail  I RSVP  L Links  B Files  q List" else if (self.focus == .navigation) " j/k Navigate  Enter Choose  l/Esc/q Mail  ? Help" else if (self.cacheSearch()) " Cache subset · r Reply  f Forward  c Compose  / Cache  \\ Gmail  q Clear search" else if (self.query.value().len > 0) " Gmail search · r Reply  f Forward  c Compose  / Cache  \\ Gmail  q Clear search" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  o Gmail  / Cache  \\ Gmail  ? Help  q Quit",
+            .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  z/q Shrink  ? Help" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  q List  ? Help" else if (self.focus == .navigation) " j/k Navigate  Enter Choose  1–3 Accounts  a Contacts  T Theme  l/Esc/q Mail  ? Help" else if (self.cacheSearch()) " Cache subset · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else if (self.query.value().len > 0) " Gmail search · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  m Labels  s Star  u Unread  x Archive  D Trash  a Contacts  T Theme  / Cache  \\ Gmail  ? Help  q Quit",
             else => " Esc Back",
         };
     }
     fn fittedHints(self: *const App, width: u16) []const u8 {
+        if (self.fileDialogActive()) return self.fileDialogHints(width);
+        if (self.label_picker and width < 60) return "+ Add  - Remove  Esc/q Back";
+        if (self.mode == .contacts and width < 60) return "n New  e Edit  ? Help  q Back";
+        if (self.mode == .help and width < 80) return if (self.help_searching) "Enter Keep Esc Clear q is text" else "/ Find n/N Match Esc/q Back";
         if (self.mode == .browse and self.reader_overlay == .none and !self.label_picker and self.focus != .navigation and self.query.value().len == 0) {
-            if (width < 60) return if (self.focus == .reader or self.expanded) " j/k Scroll  r Reply  f Forward  c New  q Back" else " j/k Mail  r Reply  f Forward  c New  ? Help";
-            if (width < 100) return if (self.focus == .reader or self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  o Gmail  q Back  ? Help" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  ? Help  q Quit";
+            if (width < 48) return if (self.focus == .reader or self.expanded) " j/k Scroll  m Labels  ? Help" else " m Labels  T Theme  ? Help";
+            if (width < 80) return if (self.focus == .reader or self.expanded) " r Reply  f Forward  m Labels  q Back  ? Help" else " j/k Mail  f Forward  m Labels  T Theme  ? Help";
+            if (width < 110) return if (self.focus == .reader or self.expanded) " j/k Scroll  r/R Reply  f Forward  m Labels  L Links  B Files  q Back  ? Help" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  T Theme  ? Help  q Quit";
+            if (width < 160) return if (self.focus == .reader or self.expanded) " j/k Scroll  J/K Mail  r/R Reply  f Forward  m Labels  L Links  B Files  o Gmail  z View  ? Help  q Back" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  T Theme  / Cache  \\ Gmail  ? Help  q Quit";
         }
+        if (self.mode == .browse and self.focus == .navigation and width < 60) return " j/k Move  a Contacts  ? Help";
         if (self.mode == .attachment) return " Tab Controls · Ctrl+F Complete · Enter Attach · Esc Back · Ctrl+U Clear";
-        if (self.mode == .compose and self.compose_preview_full and width < 90) return " p Next preview · j/k Scroll · Ctrl+D/U Page · Esc/q Source";
+        if (self.mode == .compose and self.compose_preview_full and width < 90) return if (width < 44) "p Preview j/k Scroll q Back" else if (width < 64) "p Preview · Ctrl+D/U Half · Esc/q Back" else "p Preview · Ctrl+D/U Half · Tab Controls · Esc/q Back";
         if (self.mode == .compose and self.compose.attachment_focus) return if (width < 90) " Tab Buttons · Enter Activate · x Remove · A Add · Esc Body" else self.contextHints();
         if (self.mode == .compose and !self.compose.insert_mode and !self.compose.unknown_outcome) {
-            if (width < 60) return " i Edit · A Files · p Preview · Ctrl+T Format · Ctrl+S Review · q Back";
-            if (width < 90) return " i Edit · A Files · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
-            if (width < 130) return " i Edit · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
+            if (width < 50) return "e Editor Ctrl+S Review ? Help";
+            if (width < 80) return " e Editor  A Files  Ctrl+S Review  q Back  ? Help";
+            if (width < 100) return " i Edit · e $EDITOR · A Files · p Preview · Ctrl+S Review · q Back · ? Help";
+            if (width < 145) return " i Edit · e $EDITOR · A Attach · p Preview · Ctrl+T Format · Ctrl+S Review · q Back · Tab Controls";
         }
         if (self.mode == .compose and self.compose.insert_mode and width < 80) return " INSERT · Esc Normal · Tab Field · q is text";
         return self.contextHints();
@@ -7683,7 +7746,15 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("Ctrl+F / Ctrl+Shift+F", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("Ctrl+S", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings("Ctrl+S", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings("Ctrl+F / Ctrl+Shift+F", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
 
