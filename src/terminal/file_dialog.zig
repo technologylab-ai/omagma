@@ -370,7 +370,14 @@ test "file dialog: owned Unicode snapshot sorts directories first and hides unsa
     defer temporary.cleanup();
     for ([_][]const u8{ "旅行", "adir", "zdir" }) |name| try temporary.dir.createDir(io, name, .fromMode(0o700));
     for ([_][]const u8{ "éclair.txt", "zeta.md", "Alpha report.txt", ".secret", "bad\nname", "\xffbad", "invoice\u{202e}fdp" }) |name| {
-        const file = try temporary.dir.createFile(io, name, .{});
+        try std.testing.expect(validName(name) == (std.mem.eql(u8, name, "éclair.txt") or std.mem.eql(u8, name, "zeta.md") or std.mem.eql(u8, name, "Alpha report.txt") or std.mem.eql(u8, name, ".secret")));
+        const file = temporary.dir.createFile(io, name, .{}) catch |err| {
+            // APFS rejects invalid UTF-8 at creation. Keep the pure filter
+            // assertion above, and exercise enumeration where the filesystem
+            // can represent this deliberately unsafe fixture name.
+            if (@import("builtin").os.tag == .macos and err == error.BadPathName and !std.unicode.utf8ValidateSlice(name)) continue;
+            return err;
+        };
         defer file.close(io);
         if (std.mem.eql(u8, name, "Alpha report.txt")) try file.writeStreamingAll(io, "hello");
     }

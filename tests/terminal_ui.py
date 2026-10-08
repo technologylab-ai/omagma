@@ -147,8 +147,8 @@ def title_bold(terminal, text):
 
 def quit_key(terminal):
     terminal.until(lambda: mailbox_visible(terminal) and any(
-        hint in terminal.text().splitlines()[-2] for hint in ("q Quit", "Esc/q List")))
-    if "Esc/q List" in terminal.text().splitlines()[-2]:
+        hint in terminal.text().splitlines()[-2] for hint in ("q Quit", "q List")))
+    if "q List" in terminal.text().splitlines()[-2]:
         terminal.send(b"q")
         terminal.until(lambda: "q Quit" in terminal.text().splitlines()[-2])
         require(terminal.process.poll() is None, "reader q skipped the restored list")
@@ -176,7 +176,7 @@ def search(terminal, source, query):
 
 
 def search_back(terminal):
-    if "Esc/q List" in terminal.text().splitlines()[-2]:
+    if "q List" in terminal.text().splitlines()[-2]:
         terminal.send(b"q")
         terminal.until(lambda: "q Clear" in terminal.text().splitlines()[-2])
         require(terminal.process.poll() is None, "reader Back exited instead of returning to the search list")
@@ -323,35 +323,45 @@ def run_case(binary, directory, name):
                           explicitUiFileSeparate=True, preferenceRefusals=refused)
         elif name == "reader-cached-next-previous":
             terminal = start(binary, directory, fixture)
+            terminal.ui_stage = "reader-held-startup-body-96"
             fixture.wait_entered(terminal.process, pump=terminal.pump)
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.send(b"l")
             terminal.gap()
             terminal.send(b"J")
+            terminal.ui_stage = "reader-next-body-95"
             terminal.until(lambda: contains_body(terminal, 95))
             needle = f"Synthetic {ACCOUNTS[0]} message 095."
             before = terminal.screen.locate(needle)
             require(before is not None, "reader navigation body oracle not rendered")
             terminal.send(b"j")
+            terminal.ui_stage = "reader-scroll-body-95"
             terminal.until(lambda: terminal.screen.locate(needle) is not None and terminal.screen.locate(needle)["row"] == before["row"] - 1)
             require(contains_body(terminal, 95), "lowercase body scroll selected another mail")
             terminal.send(b"k")
             terminal.until(lambda: terminal.screen.locate(needle) == before)
             terminal.send(b"K")
+            terminal.ui_stage = "reader-previous-body-96"
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.send(b"z")
+            terminal.ui_stage = "reader-expanded-body-96"
             terminal.until(lambda: pane_coordinates(terminal)[0] is None and contains_body(terminal, 96))
             terminal.send(b"J")
+            terminal.ui_stage = "reader-expanded-next-body-95"
             terminal.until(lambda: contains_body(terminal, 95))
             terminal.send(b"K")
+            terminal.ui_stage = "reader-expanded-previous-body-96"
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.send(b"]")
+            terminal.ui_stage = "reader-cached-next-page-body-64"
             terminal.until(lambda: contains_body(terminal, 64))
             terminal.send(b"[")
+            terminal.ui_stage = "reader-cached-previous-page-body-96"
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.send(b"z")
             layout(terminal, "right")
             terminal.send(b"a")
+            terminal.ui_stage = "reader-cached-contacts"
             terminal.until(lambda: "Contacts" in terminal.text() and contact_name in terminal.text())
             require(fixture.is_held(), "contacts opened only after refresh completed")
             terminal.send(b"?")
@@ -363,20 +373,24 @@ def run_case(binary, directory, name):
             terminal.send(b"\x1b")
             terminal.gap()
             terminal.until(lambda: contains_body(terminal, 96))
+            terminal.ui_stage = "reader-cache-search"
             search(terminal, "cache", "subject:Synthetic personal thread 031")
             terminal.until(lambda: "Synthetic personal thread 031" in terminal.text() and "Synthetic personal thread 030" not in terminal.text())
             terminal.send(b"q")
             terminal.until(lambda: "Synthetic personal thread 030" in terminal.text())
             require(terminal.process.poll() is None, "q quit rather than returning from active search")
             require(fixture.is_held(), "cached next/previous/page test completed after remote")
-            terminal.until(lambda: "Esc/q List" in terminal.text() and contains_body(terminal, 96))
+            terminal.ui_stage = "reader-restored-focus-body-96"
+            terminal.until(lambda: "q List" in terminal.text().splitlines()[-2] and contains_body(terminal, 96))
             terminal.send(b"q")
+            terminal.ui_stage = "reader-back-to-list"
             terminal.until(lambda: "q Quit" in terminal.text())
             require(terminal.process.poll() is None, "q from restored reader skipped the list")
             result.update(nextPreviousBodiesBeforeRemote=True, lowercaseScrollPreservedMessage=True,
                           expandedNextPrevious=True, existingPageKeysPreserved=True, deliveredHeadersPreviewed=96,
                           contactsOpenedBeforeRemote=True, contactsHelpAndEscapeUsable=True, queryQReturnedToInbox=True,
                           searchRestoredReaderFocus=True, readerQReturnedToList=True)
+            terminal.ui_stage = "reader-default-inbox-quit"
             result.update(quit_key(terminal), defaultInboxQQuit=True)
             terminal.close()
             terminal = None
@@ -390,6 +404,7 @@ def run_case(binary, directory, name):
             seed(binary, denied, denied_fixture)
             denied_fixture.stage(ACCOUNTS[0], "baseline", held=True)
             terminal = start(binary, denied, denied_fixture, extra=("--fixture-scenario", "readonly"))
+            terminal.ui_stage = "reader-held-denied-contacts"
             denied_fixture.wait_entered(terminal.process, pump=terminal.pump)
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.send(b"a")
