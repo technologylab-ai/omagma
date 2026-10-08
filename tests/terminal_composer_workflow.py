@@ -50,8 +50,12 @@ def start(binary, directory, extra, body):
     return terminal
 
 
-def composer(terminal, key=b"c"):
+def composer(terminal, key=b"c", choice=None):
     terminal.send(key)
+    if choice is not None:
+        terminal.until(lambda: "[Keep formatting k]" in terminal.text()
+                       and "[Text quote t]" in terminal.text())
+        terminal.send(choice)
     terminal.until(lambda: "Subject:" in terminal.text() and "[f Alias]" in terminal.text()
                    and "Attachments " in terminal.text() and "Ctrl+S Review" in terminal.text())
     # Current-cell reconstruction may observe the upper half of a VT frame
@@ -190,7 +194,7 @@ def forward_files(binary, directory):
     require(len(body["attachments"]) == 1, "forward fixture lacks its known original attachment")
     terminal = start(binary, directory, extra, body)
     try:
-        composer(terminal, b"F")
+        composer(terminal, b"F", choice=b"t")
         require("Attachments 1" in terminal.text(), "forward omitted original attachment")
         terminal.send(b"ialex@example.org\x1b")
         terminal.gap(.06)

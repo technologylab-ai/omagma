@@ -82,16 +82,41 @@ letters such as `q` remain text while entering a query.
 
 ## Compose, reply and forward
 
-Use `c` for a new message, `r` for reply and `R` for reply-all. `f`/`F` forwards, and a reply from the reader targets its focused thread card. Forwarding creates an unaddressed draft with the original attachments; choose recipients before sending.
+Use `c` for a new message, `r` for reply and `R` for reply-all. `f`/`F` forwards, and a reply from the reader targets its focused thread card. All forwarding modes create an unaddressed draft; choose recipients before sending.
 
-New reply, reply-all and forward bodies place the caret above quoted mail,
-ready for writing at the top. Ctrl+G focuses the body and jumps to its start
+When the original contains HTML, reply, reply-all and forward open a mode
+chooser. **Keep formatting** (`k`) is selected initially: write your own note
+above the original HTML, retaining its tables, styling and embedded images.
+**Text quote** (`t`) puts a plain-text quotation in the editable body.
+Forward also offers **Attach original (.eml)** (`e`), which attaches the
+complete original message and leaves the body ready for your note.
+Tab/Shift+Tab selects a choice, Enter or a click activates it, and Escape/`q`
+returns to reading. Mail without HTML keeps the direct text-quote workflow.
+
+In **Keep formatting**, only your note is editable. Its usual Markdown
+rendering and Omagma footer appear above a read-only original. Switching your
+note to Plain leaves the original HTML intact. The draft owns that original
+and its embedded image data, so they survive saving, restarting and eviction
+of the source mail from the cache. Outgoing preview and send review include
+the retained original, with the same content used for sending. Received
+regular attachments accompany Keep formatting and Text quote forwards.
+
+**Attach original (.eml)** includes the original headers and contained
+attachments; those contained files are not duplicated as separate outgoing
+attachments. The recipient opens the attached message to see the original.
+Your note uses the usual Markdown/Plain controls. In either mode, remote images
+still depend on the recipient's settings and the image server, and final
+styling follows the receiving email client.
+
+New replies and forwards place the caret at the top of your note or above
+the editable text quote. Ctrl+G focuses the body and jumps to its start
 without changing the text. Reopening an existing draft keeps its usual editing
 behavior; Ctrl+G is available there too.
 
 New messages, replies, reply-all and forwards start
 in **Markdown**. Existing drafts keep their saved format; older drafts remain
-**Plain**. Ctrl+T toggles Markdown/Plain without rewriting the editable source.
+**Plain**. Ctrl+T toggles Markdown/Plain without rewriting the editable source
+or changing a retained formatted original.
 The Body label shows the current format (MD or Plain); the Ctrl+T button
 names the format that pressing it switches to.
 
@@ -123,10 +148,11 @@ HTML and a readable plain-text alternative. Raw HTML is escaped and remote
 Markdown images stay inert as alt text or safe links. A small footer reads **[logo] Sent with omagma 🌋**: the approved tiny logo
 comes first, “Sent with” stays grey, and only “omagma” is an orange, underlined
 link to the project website. The volcano finishes the line. Rendering fetches no resources.
-Plain mode sends the source literally. The native preview shows the outgoing
-content; final styling follows the receiving email client.
+Plain mode sends the editable source literally; a Keep formatting draft still
+includes its retained original HTML below that note. The native preview shows
+the outgoing content; final styling follows the receiving email client.
 
-`e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
+`e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. In a Keep formatting draft, the editor receives only your note; the retained original and embedded images remain read-only. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
 
 Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review;
 explicit `y` or Enter on the deliberately focused **Send** button sends.
@@ -242,7 +268,8 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | {/}, t, Q/S | Reader: thread card, fold body, quotes/signature |
 | c / r / R | Compose / reply / reply-all |
 | f / F in mailbox | Forward |
-| Ctrl+T in compose | Toggle Markdown/Plain without changing source |
+| k / t / e in reply/forward chooser | Keep formatting / Text quote / Attach original (.eml; `e` is forward-only) |
+| Ctrl+T in compose | Toggle note Markdown/Plain; retained original stays unchanged |
 | p in normal compose | Outgoing preview / original context / plain alternative |
 | Tab/Shift+Tab, Enter in normal compose | Focus fields/controls; edit a field or activate a control |
 | Ctrl+S / :send in compose | Open outgoing send review |
@@ -297,13 +324,18 @@ You can use your own accounts after consent, including sending a first message t
 | Loaded thread | 100 messages |
 | Message body / draft source / each rendered alternative | 2 MiB |
 | Outgoing attachments | 16 files, 2 MiB combined decoded bytes |
+| Original email (.eml) source | 2 MiB; encoded draft must also fit the request limit |
 | Incoming attachments | 32 per message |
 | Outgoing recipients | 32 across To/Cc/Bcc |
 | Local drafts / undo receipts | 128 / 16 per account |
 | Cached contacts / operation journal | 1,024 / 1,000 per account |
 | Serialized request | 3 MiB, including encoded attachment data |
 
-Encoded bodies and attachments must also fit the request limit; an oversized or unavailable file fails explicitly instead of being silently omitted. Old mail is evicted under cache pressure; local drafts and operation receipts are preserved. `cache.clear` removes cached mail without removing drafts, contacts or receipts.
+Encoded bodies, retained originals and attachments must also fit the request
+limit. Oversized or unavailable content fails explicitly before saving a
+partial draft or sending mail. Old mail is evicted under cache pressure;
+local drafts, their retained originals and operation receipts are preserved.
+`cache.clear` removes cached mail without removing drafts, contacts or receipts.
 
 Every send or RSVP has an operation identity and a recorded outcome: applied, rejected or unknown. Applied means provider acceptance, not delivery. An unknown receipt protects its recovery draft; inspect the provider before deciding what to do next. Local duplicate guards do not guarantee server-side idempotency.
 

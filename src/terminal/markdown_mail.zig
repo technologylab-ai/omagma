@@ -4,17 +4,25 @@
 const std = @import("std");
 const t = @import("types.zig");
 const highlight = @import("markdown_highlight.zig");
+const original_mail = @import("original_mail.zig");
 pub const max_lines = 32768;
 pub const max_depth = 12;
 pub const max_table_columns = 32;
 pub const logo_content_id = "omagma-logo@omagma.invalid";
-pub const Rendered = struct { plain: []const u8, html: []const u8 };
-pub const Prepared = struct { plain: []const u8, html: ?[]const u8 = null };
+pub const Rendered = struct { plain: []const u8, html: []const u8, logoOffset: usize };
+pub const Prepared = struct { plain: []const u8, html: ?[]const u8 = null, logoOffset: ?usize = null, resources: []const t.Attachment = &.{} };
 pub fn prepare(a: std.mem.Allocator, draft: t.Draft) !Prepared {
     const source = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText;
+    if (draft.original) |original| {
+        const note = try renderNote(a, source, draft.bodyFormat);
+        defer a.free(note.plain);
+        defer a.free(note.html);
+        const assembled = try original_mail.prepare(a, .{ .html = note.html, .plain = note.plain, .logoOffset = note.logoOffset }, original);
+        return .{ .plain = assembled.plain, .html = assembled.html, .logoOffset = assembled.logoOffset, .resources = assembled.resources };
+    }
     if (draft.bodyFormat == .plain) return .{ .plain = source };
     const rendered = try render(a, source);
-    return .{ .plain = rendered.plain, .html = rendered.html };
+    return .{ .plain = rendered.plain, .html = rendered.html, .logoOffset = rendered.logoOffset };
 }
 
 const Buffer = struct {
@@ -480,28 +488,160 @@ const Context = struct {
     }
 };
 
+const document_prefix = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body style=\"margin:0;padding:0;background:#ffffff;color:#262626\">";
+const note_prefix = "<div style=\"max-width:680px;margin:0 auto;padding:24px;font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Arial,sans-serif;font-size:16px;line-height:1.65;overflow-wrap:anywhere\">";
+const footer_prefix = "<div class=\"omagma-footer\" style=\"margin-top:24px;padding-top:14px;border-top:1px solid #e4e4e7;font-size:12px;line-height:1.5;color:#71717a\"><img src=\"cid:";
+const footer_suffix = "\" width=\"16\" height=\"16\" alt=\"\" style=\"width:16px;height:16px;vertical-align:-3px;border:0;margin-right:5px\">Sent with <a class=\"omagma-footer-link\" href=\"https://technologylab-ai.github.io/omagma/\" style=\"color:#b84a10;text-decoration:underline\">omagma</a> 🌋</div></div>";
+
 pub fn render(a: std.mem.Allocator, source: []const u8) !Rendered {
+    return renderSource(a, source, .markdown, true);
+}
+
+/// Owns both returned strings. This is a trusted, generated fragment; received
+/// HTML must never pass through protectNote or acquire generated-Markdown trust.
+pub fn renderNote(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat) !Rendered {
+    const rendered = try renderSource(a, source, format, false);
+    defer a.free(rendered.html);
+    errdefer a.free(rendered.plain);
+    const html = try protectNote(a, rendered.html);
+    errdefer a.free(html);
+    const logo_marker = "src=\"cid:" ++ logo_content_id ++ "\"";
+    // Only our escaped renderer's output is searched. Original mail, including
+    // older Omagma footers, is appended later and cannot influence this offset.
+    const logo = std.mem.indexOf(u8, html, logo_marker) orelse return error.MissingLogoReference;
+    return .{ .html = html, .plain = rendered.plain, .logoOffset = logo + "src=\"cid:".len };
+}
+
+fn renderSource(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, standalone: bool) !Rendered {
     if (source.len > t.Limits.body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidUtf8;
     for (source) |c| if ((c < 0x20 and c != '\n' and c != '\r' and c != '\t') or c == 0x7f) return error.InvalidBody;
     var lines: std.ArrayList(Line) = .empty;
     defer lines.deinit(a);
-    var iterator = std.mem.splitScalar(u8, source, '\n');
-    while (iterator.next()) |raw| {
-        if (lines.items.len == max_lines) return error.MarkdownTooComplex;
-        try lines.append(a, .{ .text = std.mem.trimEnd(u8, raw, "\r") });
+    if (format == .markdown) {
+        var iterator = std.mem.splitScalar(u8, source, '\n');
+        while (iterator.next()) |raw| {
+            if (lines.items.len == max_lines) return error.MarkdownTooComplex;
+            try lines.append(a, .{ .text = std.mem.trimEnd(u8, raw, "\r") });
+        }
     }
     var context: Context = .{ .a = a, .html = .{ .allocator = a }, .plain = .{ .allocator = a }, .search_budget = @max(4096, source.len * 32) };
     errdefer context.html.bytes.deinit(a);
     errdefer context.plain.bytes.deinit(a);
-    try context.html.append("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body style=\"margin:0;padding:0;background:#ffffff;color:#262626\"><div style=\"max-width:680px;margin:0 auto;padding:24px;font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Arial,sans-serif;font-size:16px;line-height:1.65;overflow-wrap:anywhere\">");
-    try context.blocks(lines.items, 0, false, false);
-    try context.html.append("<div class=\"omagma-footer\" style=\"margin-top:24px;padding-top:14px;border-top:1px solid #e4e4e7;font-size:12px;line-height:1.5;color:#71717a\"><img src=\"cid:omagma-logo@omagma.invalid\" width=\"16\" height=\"16\" alt=\"\" style=\"width:16px;height:16px;vertical-align:-3px;border:0;margin-right:5px\">Sent with <a class=\"omagma-footer-link\" href=\"https://technologylab-ai.github.io/omagma/\" style=\"color:#b84a10;text-decoration:underline\">omagma</a> 🌋</div></div></body></html>");
+    if (standalone) try context.html.append(document_prefix);
+    try context.html.append(note_prefix);
+    if (format == .markdown) {
+        try context.blocks(lines.items, 0, false, false);
+    } else {
+        try context.html.append("<div style=\"white-space:pre-wrap;overflow-wrap:anywhere\">");
+        try context.literalText(source);
+        try context.html.append("</div>");
+    }
+    try context.html.append(footer_prefix);
+    const logo_offset = context.html.bytes.items.len;
+    try context.html.append(logo_content_id);
+    try context.html.append(footer_suffix);
+    if (standalone) try context.html.append("</body></html>");
     try context.plain.newline(2);
     try context.plain.append("Sent with omagma — https://technologylab-ai.github.io/omagma/ 🌋");
     const plain = try context.plain.bytes.toOwnedSlice(a);
     errdefer a.free(plain);
-    return .{ .plain = plain, .html = try context.html.bytes.toOwnedSlice(a) };
+    return .{ .plain = plain, .html = try context.html.bytes.toOwnedSlice(a), .logoOffset = logo_offset };
+}
+
+/// Add local resets and important declarations only to generated tags. CSS in
+/// the original document remains opaque. Email clients can still impose their
+/// own styles; this prevents ordinary original selectors from restyling a note.
+fn protectNote(a: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var out: Buffer = .{ .allocator = a };
+    errdefer out.bytes.deinit(a);
+    var offset: usize = 0;
+    var first = true;
+    var first_content = true;
+    while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |start| {
+        try out.append(input[offset..start]);
+        var end = start + 1;
+        var quote: u8 = 0;
+        while (end < input.len) : (end += 1) {
+            const c = input[end];
+            if (quote != 0) {
+                if (c == quote) quote = 0;
+            } else if (c == '"' or c == '\'') {
+                quote = c;
+            } else if (c == '>') break;
+        }
+        if (end == input.len) return error.InvalidGeneratedHtml;
+        end += 1;
+        const tag = input[start..end];
+        offset = end;
+        if (tag.len < 3 or !std.ascii.isAlphabetic(tag[1])) {
+            try out.append(tag);
+            continue;
+        }
+        var name_end: usize = 1;
+        while (name_end < tag.len and std.ascii.isAlphanumeric(tag[name_end])) name_end += 1;
+        const name = tag[1..name_end];
+        // The generated root supplies the card's padding. Only a heading that
+        // is its first content block needs its additional top margin removed.
+        const leading_heading = !first and first_content and name.len == 2 and name[0] == 'h' and name[1] >= '1' and name[1] <= '6';
+        const style_at = std.mem.indexOf(u8, tag, " style=\"");
+        try out.append(tag[0 .. style_at orelse name_end]);
+        try out.append(" style=\"box-sizing:border-box!important;position:static!important;float:none!important;visibility:visible!important;opacity:1!important;max-width:100%!important;margin:0!important;padding:0!important;border:0!important;font-family:inherit!important;font-size:inherit!important;font-weight:inherit!important;font-style:inherit!important;line-height:inherit!important;color:inherit!important;letter-spacing:normal!important;text-transform:none!important;text-indent:0!important;");
+        try out.append(if (first) "background:#ffffff!important;color:#262626!important;" else "background:transparent!important;");
+        try out.append("display:");
+        try out.append(displayFor(name));
+        try out.append("!important;");
+        if (std.mem.eql(u8, name, "strong")) try out.append("font-weight:bold!important;");
+        if (std.mem.eql(u8, name, "em")) try out.append("font-style:italic!important;");
+        if (std.mem.eql(u8, name, "del")) try out.append("text-decoration:line-through!important;");
+        if (std.mem.eql(u8, name, "ul")) try out.append("list-style-type:disc!important;");
+        if (std.mem.eql(u8, name, "ol")) try out.append("list-style-type:decimal!important;");
+        if (style_at) |at| {
+            const value_at = at + " style=\"".len;
+            const close = std.mem.indexOfScalarPos(u8, tag, value_at, '"') orelse return error.InvalidGeneratedHtml;
+            try importantStyles(&out, tag[value_at..close]);
+            if (leading_heading) try out.append("margin-top:0!important;");
+            try out.append(tag[close..]);
+        } else {
+            if (leading_heading) try out.append("margin-top:0!important;");
+            try out.append("\"");
+            try out.append(tag[name_end..]);
+        }
+        if (!first) first_content = false;
+        first = false;
+    }
+    try out.append(input[offset..]);
+    return out.bytes.toOwnedSlice(a);
+}
+fn displayFor(name: []const u8) []const u8 {
+    for ([_][]const u8{ "a", "strong", "em", "del", "code", "span", "br" }) |inline_tag| if (std.mem.eql(u8, name, inline_tag)) return "inline";
+    if (std.mem.eql(u8, name, "img")) return "inline-block";
+    if (std.mem.eql(u8, name, "table")) return "table";
+    if (std.mem.eql(u8, name, "thead")) return "table-header-group";
+    if (std.mem.eql(u8, name, "tbody")) return "table-row-group";
+    if (std.mem.eql(u8, name, "tr")) return "table-row";
+    if (std.mem.eql(u8, name, "td") or std.mem.eql(u8, name, "th")) return "table-cell";
+    if (std.mem.eql(u8, name, "li")) return "list-item";
+    return "block";
+}
+fn importantStyles(out: *Buffer, value: []const u8) !void {
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= value.len) : (i += 1) {
+        // Renderer-authored font names contain &#39;; its semicolon belongs to
+        // an HTML entity, not to the surrounding CSS declaration.
+        if (i < value.len and value[i] == '&') {
+            i = std.mem.indexOfScalarPos(u8, value, i, ';') orelse return error.InvalidGeneratedHtml;
+            continue;
+        }
+        if (i == value.len or value[i] == ';') {
+            if (i > start) {
+                try out.append(value[start..i]);
+                try out.append("!important;");
+            }
+            start = i + 1;
+        }
+    }
 }
 /// Original mail is literal evidence, even when its lines happen to contain
 /// Markdown metacharacters. Replies/forwards quote this escaped source.
@@ -722,4 +862,57 @@ test "markdown mail: footer has approved image first gray prose orange omagma li
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footer, "<a "));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footer, "<img "));
     try std.testing.expect(std.mem.endsWith(u8, rendered.plain, "Sent with omagma — https://technologylab-ai.github.io/omagma/ 🌋"));
+}
+
+test "original mail: Markdown preparation retains original HTML and limits trusted styling to note" {
+    const original_html = "<!doctype html><html><head><style>p,div{color:blue!important}</style></head><body class=\"original\"><p style=\"color:red\">Original <b>formatting</b></p><img src=\"cid:omagma-logo@omagma.invalid\"></body></html>";
+    const resources = [_]t.Attachment{.{ .id = "old-logo", .filename = "old-logo.png", .mimeType = "image/png", .contentId = logo_content_id, .data = "YWJj", .size = 3 }};
+    const draft: t.Draft = .{ .bodyText = "# Note\n\n**New** [link](https://example.test/note). Literal cid:omagma-logo@omagma.invalid.\n\n`<img src=\"cid:omagma-logo@omagma.invalid\">`\n\n## Later heading\n\n- Later list item", .bodyFormat = .markdown, .original = .{ .sourceMessageId = "original", .from = .{ .address = "sender@example.test" }, .subject = "Original subject", .bodyText = "Original formatting", .bodyHtml = original_html, .resources = &resources } };
+    const result = try prepare(std.testing.allocator, draft);
+    defer std.testing.allocator.free(result.html.?);
+    defer std.testing.allocator.free(result.plain);
+    const html = result.html.?;
+    const original_at = std.mem.indexOf(u8, html, "<p style=\"color:red\">Original <b>formatting</b></p>").?;
+    try std.testing.expect(result.logoOffset.? < original_at);
+    try std.testing.expectEqualStrings(logo_content_id, html[result.logoOffset.?..][0..logo_content_id.len]);
+    try std.testing.expectEqualStrings("src=\"cid:", html[result.logoOffset.? - "src=\"cid:".len .. result.logoOffset.?]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, html, "<html>"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, html, "<body class=\"original\">"));
+    try std.testing.expect(std.mem.indexOf(u8, html, "<style>p,div{color:blue!important}</style>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html[0..original_at], "color:#b84a10!important;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html[0..original_at], "font-weight:bold!important;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html[0..original_at], "font-family:-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Arial,sans-serif!important;") != null);
+    const first_heading = std.mem.indexOf(u8, html, "<h1 ").?;
+    const first_heading_end = std.mem.indexOfScalarPos(u8, html, first_heading, '>').?;
+    try std.testing.expect(std.mem.indexOf(u8, html[first_heading..first_heading_end], "margin-top:0!important;") != null);
+    const later_heading = std.mem.indexOf(u8, html, "<h2 ").?;
+    const later_heading_end = std.mem.indexOfScalarPos(u8, html, later_heading, '>').?;
+    try std.testing.expect(std.mem.indexOf(u8, html[later_heading..later_heading_end], "margin-top:0!important;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html[later_heading..later_heading_end], "margin:24px 0 12px!important;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "margin:0 0 16px!important;padding-left:") != null);
+    try std.testing.expect(result.resources.ptr == resources[0..].ptr);
+    try std.testing.expect(std.mem.startsWith(u8, result.plain, "Note\n\nNew link"));
+    try std.testing.expect(std.mem.endsWith(u8, result.plain, "Original formatting"));
+}
+
+test "original mail: plain and recovery notes stay literal inside branded HTML" {
+    const draft: t.Draft = .{ .bodyText = "**Literal** <script>alert(1)</script>\nSecond line.", .original = .{ .from = .{ .address = "sender@example.test" }, .subject = "Subject", .bodyText = "Original <literal> & plain", .bodyHtml = "" } };
+    const result = try prepare(std.testing.allocator, draft);
+    defer std.testing.allocator.free(result.html.?);
+    defer std.testing.allocator.free(result.plain);
+    try std.testing.expect(std.mem.indexOf(u8, result.html.?, "**Literal** &lt;script&gt;alert(1)&lt;/script&gt;\nSecond line.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html.?, "white-space:pre-wrap!important;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html.?, "<script>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html.?, "Original &lt;literal&gt; &amp; plain") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.html.?, "Sent with ") != null);
+    try std.testing.expect(std.mem.startsWith(u8, result.plain, draft.bodyText));
+    var recovery = draft;
+    recovery.recoveryFields = &.{ "unfinished address", "", "", "Subject", "Recovery **literal**" };
+    const recovered = try prepare(std.testing.allocator, recovery);
+    defer std.testing.allocator.free(recovered.html.?);
+    defer std.testing.allocator.free(recovered.plain);
+    try std.testing.expect(std.mem.startsWith(u8, recovered.plain, "Recovery **literal**"));
+    const legacy = try prepare(std.testing.allocator, .{ .bodyText = "**Literal**" });
+    try std.testing.expect(legacy.html == null and legacy.logoOffset == null and legacy.resources.len == 0);
+    try std.testing.expectEqualStrings("**Literal**", legacy.plain);
 }

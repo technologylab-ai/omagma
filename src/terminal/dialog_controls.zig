@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Context = enum { none, labels, label_manager, label_name, label_delete, links, attachments, send, trash, invitation, preview, theme };
+pub const Context = enum { none, labels, label_manager, label_name, label_delete, links, attachments, send, trash, invitation, preview, theme, compose_format };
 
 /// Modal action focus is independent of the selected row and editor caret.
 /// A new review starts on its supplied safe default, never on an old action.

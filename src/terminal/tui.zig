@@ -53,6 +53,7 @@ const SyncStatus = struct {
     error_len: usize = 0,
 };
 const PendingCompose = enum { none, new, reply, reply_all, forward };
+const ComposeSourceMode = enum { choose, text, formatted, attached };
 const ReaderMarkup = struct { prepared: ?html_view.Prepared = null, fallback: bool = false, attempted: bool = false, display_text: ?[]const u8 = null };
 const ContactsState = enum { loading, cached, current, denied, failed, busy };
 const QueryScope = enum { cache, server };
@@ -127,8 +128,15 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "TooManyAttachments", .label = "Too many attached files for this draft" },
         .{ .code = "InvalidAttachment", .label = "An attachment could not be prepared" },
         .{ .code = "AmbiguousAttachment", .label = "Attachment reference changed; several files match" },
+        .{ .code = "OriginalHtmlUnavailable", .label = "Original HTML unavailable · choose Text quote" },
+        .{ .code = "InvalidOriginalHtml", .label = "Original HTML cannot be preserved · choose Text quote or .eml" },
+        .{ .code = "OriginalResourceUnavailable", .label = "An embedded image is missing · choose Text quote or .eml" },
+        .{ .code = "AmbiguousOriginalHtml", .label = "Several original HTML bodies · choose Text quote or .eml" },
+        .{ .code = "AmbiguousContentId", .label = "Conflicting embedded images · choose Text quote or .eml" },
+        .{ .code = "RenderedBodyTooLarge", .label = "Note and original exceed the supported size" },
         .{ .code = "DiskQuotaExceeded", .label = "Local cache limit reached" },
         .{ .code = "MissingReplyRecipient", .label = "No external recipient to reply to" },
+        .{ .code = "MissingRecipient", .label = "Add a recipient in To, Cc or Bcc" },
         .{ .code = "MissingMessageId", .label = "Mail has no valid reply identifier" },
         .{ .code = "InvalidAddress", .label = "Enter a valid email address" },
         .{ .code = "InvalidLabelName", .label = "Enter a valid custom label name" },
@@ -556,6 +564,9 @@ const Compose = struct {
     from_name: Field = .{},
     attachments: []const types.Attachment = &.{},
     attachment_arena: ?std.heap.ArenaAllocator = null,
+    original: ?types.Original = null,
+    original_arena: ?std.heap.ArenaAllocator = null,
+    original_digest: [32]u8 = @splat(0),
     selected: usize = 0,
     body_scroll: usize = 0,
     attachment_scroll: usize = 0,
@@ -585,6 +596,9 @@ const Compose = struct {
         if (self.attachment_arena) |*arena| arena.deinit();
         self.attachment_arena = null;
         self.attachments = &.{};
+        if (self.original_arena) |*arena| arena.deinit();
+        self.original_arena = null;
+        self.original = null;
     }
     fn mailboxes(allocator: Allocator, value: Value) ![]const u8 {
         var out: std.ArrayList(u8) = .empty;
@@ -625,7 +639,16 @@ const Compose = struct {
         if (attachments != .null) {
             if (attachments != .array or attachments.array.items.len > 16) return error.TooManyAttachments;
             self.attachment_arena = .init(allocator);
-            self.attachments = try std.json.parseFromValueLeaky([]const types.Attachment, self.attachment_arena.?.allocator(), attachments, .{});
+            self.attachments = try std.json.parseFromValueLeaky([]const types.Attachment, self.attachment_arena.?.allocator(), attachments, .{ .allocate = .alloc_always });
+        }
+        const original = get(value_in, "original");
+        if (original != .null) {
+            self.original_arena = .init(allocator);
+            const owned = self.original_arena.?.allocator();
+            self.original = try std.json.parseFromValueLeaky(types.Original, owned, original, .{ .allocate = .alloc_always });
+            const identity = try std.json.Stringify.valueAlloc(allocator, self.original.?, .{});
+            defer allocator.free(identity);
+            std.crypto.hash.sha2.Sha256.hash(identity, &self.original_digest, .{});
         }
     }
     fn addresses(allocator: Allocator, raw: []const u8) ![]types.Address {
@@ -652,6 +675,7 @@ const Compose = struct {
             .inReplyTo = self.reply.value(),
             .references = self.references.value(),
             .attachments = self.attachments,
+            .original = self.original,
             .from = if (self.from.value().len == 0) null else .{ .address = self.from.value(), .name = self.from_name.value() },
         };
     }
@@ -664,6 +688,7 @@ const Compose = struct {
             .inReplyTo = self.reply.value(),
             .references = self.references.value(),
             .attachments = self.attachments,
+            .original = self.original,
             .recoveryFields = fields,
             .bodyFormat = self.body_format,
         };
@@ -679,6 +704,9 @@ const Compose = struct {
             .mimeType = try arena.allocator().dupe(u8, item.mimeType),
             .size = item.size,
             .data = try arena.allocator().dupe(u8, item.data),
+            .contentId = if (item.contentId) |value| try arena.allocator().dupe(u8, value) else null,
+            .disposition = if (item.disposition) |value| try arena.allocator().dupe(u8, value) else null,
+            .contentLocation = if (item.contentLocation) |value| try arena.allocator().dupe(u8, value) else null,
         };
         if (self.attachment_arena) |*previous| previous.deinit();
         self.attachment_arena = arena;
@@ -816,14 +844,23 @@ const App = struct {
     pending_recipient_refresh: bool = false,
     recipient_refreshed: [3]bool = @splat(false),
     compose_original: bool = false,
+    compose_choice: bool = false,
+    compose_source_mode: ComposeSourceMode = .choose,
+    compose_source_ready: bool = false,
+    compose_source_html: bool = false,
+    compose_source_probe: bool = false,
+    compose_source_subject: Field = .{},
+    compose_source_resources: usize = 0,
     compose_view: ComposeView = .rendered,
     compose_preview_full: bool = false,
     compose_preview_scroll: usize = 0,
     compose_plain_scroll: usize = 0,
+    compose_snapshot_scroll: usize = 0,
     compose_preview_lines: usize = 0,
     compose_preview_height: usize = 0,
     compose_preview_arena: ?std.heap.ArenaAllocator = null,
     compose_preview: ?html_view.Prepared = null,
+    compose_original_preview: ?html_view.Prepared = null,
     compose_preview_plain: []const u8 = "",
     compose_preview_digest: ?[32]u8 = null,
     compose_preview_format: types.BodyFormat = .plain,
@@ -987,6 +1024,7 @@ const App = struct {
     fn deinit(self: *App) void {
         self.help_query.deinit(self.allocator);
         self.clearComposePreview();
+        self.compose_source_subject.deinit(self.allocator);
         self.cache_watch.stop();
         self.recipient_account.deinit(self.allocator);
         if (self.recipient_arena) |*arena| arena.deinit();
@@ -1115,7 +1153,7 @@ const App = struct {
         }
     }
     fn mainScreenNotice(self: *const App) bool {
-        return self.mode == .browse and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0 and self.new_mail.visible();
+        return self.mode == .browse and !self.compose_choice and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0 and self.new_mail.visible();
     }
     fn acknowledgeNewMail(self: *App) void {
         self.last_interaction_at = Io.Timestamp.now(self.io, .real).toMilliseconds();
@@ -3159,6 +3197,8 @@ const App = struct {
         self.pending_window_provider = false;
         self.rollbackPageLoad();
         self.pending_compose = .none;
+        self.compose_choice = false;
+        self.compose_source_probe = false;
     }
     fn reload(self: *App) !void {
         if (self.job.future != null and self.job.kind == .cached_search and (!self.cacheSearch() or !cache_query.needsBody(self.query.value()))) self.preemptReadOnly();
@@ -3300,6 +3340,25 @@ const App = struct {
                 if (same(failure_code, "ExternalRefreshWaitTimedOut") or same(failure_code, "ExternalRefreshStatusUnavailable")) self.sync[index].state = .cached;
                 if (index == self.account_index and !self.compose_active) self.sayFailure("Refresh failed · cached mail retained", failure_code);
             }
+        } else if (self.compose_source_probe and self.job.kind == .read) {
+            self.compose_source_probe = false;
+            if (self.pending_compose != .none and self.job.account_index == self.account_index and same(self.account(), self.pending_compose_account[0..self.pending_compose_account_len])) {
+                if (self.job.failure) |err| {
+                    self.pending_compose = .none;
+                    self.sayError(@errorName(err));
+                } else if (self.job.response) |response| {
+                    const result = self.data(self.job_arena.allocator(), response) catch |err| {
+                        self.pending_compose = .none;
+                        if (err != error.OperationRejected) return err;
+                        return;
+                    };
+                    self.inspectComposeSource(result) catch |err| {
+                        self.pending_compose = .none;
+                        return err;
+                    };
+                    if (same(self.messageId(), self.pending_compose_id[0..self.pending_compose_id_len])) try self.replaceReader(false, response, false);
+                }
+            }
         } else if (((self.job.kind == .identities or self.job.kind == .labels_list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh) and self.job.account_index != self.account_index) or
             (self.job.kind == .contacts and (self.job.contacts_generation != self.contacts_generation or !self.contactsOpen() or self.job.account_index != self.account_index)) or
             (self.job.generation != self.generation and (self.job.kind == .list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh or self.job.kind == .drafts or self.job.kind == .read or self.job.kind == .thread or self.job.kind == .contacts or self.job.kind == .invitation_inspect)) or
@@ -3351,6 +3410,7 @@ const App = struct {
         }
     }
     fn dispatchPending(self: *App) !void {
+        if (self.compose_choice) return;
         if (try self.dispatchComposer()) return;
         // At most six coalesced flags exist. Local cache hits may complete
         // without starting a future, so drain them rather than leaving the
@@ -3378,23 +3438,8 @@ const App = struct {
                 try self.cursor.set(self.allocator, "");
                 try self.fetchMailboxPage();
             } else if (self.pending_compose != .none) {
-                const pending = self.pending_compose;
-                self.pending_compose = .none;
-                self.pending_read = false;
-                self.pending_thread = false;
-                if (!same(self.account(), self.pending_compose_account[0..self.pending_compose_account_len])) {
-                    self.say(false, "Queued draft discarded after account change", .{});
-                } else if (pending == .new) try self.composeNew(null) else {
-                    // The user can move the cursor while a read is finishing.
-                    // Reply to the captured identity, never the later selection.
-                    var retained_original = same(self.reader_account.value(), self.account());
-                    if (retained_original) {
-                        retained_original = false;
-                        for (self.thread) |message| retained_original = retained_original or same(text(get(message, "id")), self.pending_compose_id[0..self.pending_compose_id_len]);
-                    }
-                    if (!retained_original) self.clearReader();
-                    if (pending == .forward) try self.start(.compose, .{ .account = self.account(), .cmd = "mail.forward", .messageId = self.pending_compose_id[0..self.pending_compose_id_len], .bodyFormat = "markdown" }) else try self.start(.compose, .{ .account = self.account(), .cmd = "mail.reply", .messageId = self.pending_compose_id[0..self.pending_compose_id_len], .all = pending == .reply_all, .bodyFormat = "markdown" });
-                }
+                try self.dispatchConversationCompose();
+                if (self.compose_choice) return;
             } else if (self.pending_read) {
                 self.pending_read = false;
                 const full_thread = self.pending_thread;
@@ -3497,6 +3542,7 @@ const App = struct {
                 self.compose_preview_full = false;
                 self.compose_preview_scroll = 0;
                 self.compose_plain_scroll = 0;
+                self.compose_snapshot_scroll = 0;
                 self.compose.new_draft = kind == .compose;
                 if (kind == .compose) self.positionReplyBody();
                 if (self.compose.from.value().len == 0) {
@@ -3507,9 +3553,24 @@ const App = struct {
                 self.mode = .compose;
                 self.pending_read = false;
                 self.pending_thread = false;
-                if (kind == .draft_read or !self.compose_original) {
+                if (self.compose.original != null) {
+                    self.compose_original = true;
+                    self.compose_source_mode = .formatted;
+                    if (kind == .draft_read) self.compose_intent = if (self.compose.thread.value().len == 0) .forward else .reply;
+                    self.clearReader();
+                } else if (kind == .draft_read or !self.compose_original) {
                     self.compose_original = false;
                     self.clearReader();
+                }
+                if (kind == .draft_read and self.compose.original == null) {
+                    self.compose_source_mode = .text;
+                    for (self.compose.attachments) |attachment| {
+                        if (std.mem.endsWith(u8, attachment.filename, ".eml") and (same(attachment.mimeType, "message/rfc822") or same(attachment.mimeType, "message/global"))) {
+                            self.compose_source_mode = .attached;
+                            self.compose_intent = .forward;
+                            break;
+                        }
+                    }
                 }
                 self.composeCachedContacts();
                 self.pending_identities = true;
@@ -3667,6 +3728,8 @@ const App = struct {
         self.pending_contacts = false;
         self.pending_cached_contacts = false;
         self.pending_compose = .none;
+        self.compose_choice = false;
+        self.compose_source_probe = false;
         self.selected = self.account_positions[index];
         self.generation +%= 1;
         self.clearHistory();
@@ -3919,42 +3982,164 @@ const App = struct {
         if (self.page_loading) self.say(false, "Loading {s} mail page…", .{if (forward) "next" else "previous"});
     }
     fn composeNew(self: *App, reply_all: ?bool) !void {
-        self.compose_intent = if (reply_all) |all| if (all) .reply_all else .reply else .new;
-        self.compose_original = reply_all != null;
-        if (reply_all == null and self.job.future != null and readOnlyJob(self.job.kind)) self.preemptReadOnly();
-        const target_id = self.readerReplyId();
+        if (reply_all) |all| return self.requestConversationCompose(if (all) .reply_all else .reply);
+        self.compose_intent = .new;
+        self.compose_original = false;
+        self.compose_choice = false;
+        self.compose_source_mode = .text;
+        if (self.job.future != null and readOnlyJob(self.job.kind)) self.preemptReadOnly();
         if (self.job.future != null) {
-            if (reply_all != null and target_id.len == 0) return;
-            if (self.account().len > self.pending_compose_account.len or target_id.len > self.pending_compose_id.len) return error.InvalidIdentity;
-            @memcpy(self.pending_compose_account[0..self.account().len], self.account());
-            self.pending_compose_account_len = self.account().len;
-            @memcpy(self.pending_compose_id[0..target_id.len], target_id);
-            self.pending_compose_id_len = target_id.len;
-            self.pending_compose = if (reply_all) |all| (if (all) .reply_all else .reply) else .new;
-            self.say(false, "Draft requested · waiting for the current read", .{});
+            try self.pinComposeTarget(.new, "");
+            self.say(false, "Draft requested · waiting for the current operation", .{});
             return;
         }
-        if (reply_all) |all| {
-            if (target_id.len == 0) return;
-            try self.start(.compose, .{ .account = self.account(), .cmd = "mail.reply", .messageId = target_id, .all = all, .bodyFormat = "markdown" });
-        } else try self.start(.compose, .{ .account = self.account(), .cmd = "draft.create", .draft = types.Draft{ .bodyFormat = .markdown } });
+        try self.start(.compose, .{ .account = self.account(), .cmd = "draft.create", .draft = types.Draft{ .bodyFormat = .markdown } });
     }
     fn composeForward(self: *App) !void {
-        self.compose_intent = .forward;
-        self.compose_original = true;
-        const target_id = self.readerReplyId();
-        if (target_id.len == 0) return;
-        if (self.job.future != null) {
-            if (self.account().len > self.pending_compose_account.len or target_id.len > self.pending_compose_id.len) return error.InvalidIdentity;
-            @memcpy(self.pending_compose_account[0..self.account().len], self.account());
-            self.pending_compose_account_len = self.account().len;
-            @memcpy(self.pending_compose_id[0..target_id.len], target_id);
-            self.pending_compose_id_len = target_id.len;
-            self.pending_compose = .forward;
-            self.say(false, "Forward requested · waiting for the current read", .{});
+        return self.requestConversationCompose(.forward);
+    }
+    fn pinComposeTarget(self: *App, intent: PendingCompose, id: []const u8) !void {
+        if (self.account().len > self.pending_compose_account.len or id.len > self.pending_compose_id.len) return error.InvalidIdentity;
+        @memcpy(self.pending_compose_account[0..self.account().len], self.account());
+        self.pending_compose_account_len = self.account().len;
+        @memcpy(self.pending_compose_id[0..id.len], id);
+        self.pending_compose_id_len = id.len;
+        self.pending_compose = intent;
+    }
+    fn inspectComposeSource(self: *App, message: Value) !void {
+        if (!same(text(get(message, "id")), self.pending_compose_id[0..self.pending_compose_id_len])) return error.InvalidIdentity;
+        self.compose_source_html = text(get(message, "bodyHtml")).len != 0;
+        self.compose_source_resources = 0;
+        for (items(get(message, "attachments"))) |attachment| {
+            if (get(attachment, "contentId") != .null or get(attachment, "contentLocation") != .null) self.compose_source_resources += 1;
+        }
+        try self.compose_source_subject.set(self.allocator, text(get(message, "subject")));
+        self.compose_source_ready = true;
+    }
+    fn requestConversationCompose(self: *App, intent: PendingCompose) !void {
+        const target = self.readerReplyId();
+        if (target.len == 0) return;
+        if (self.pending_compose != .none or self.compose_source_probe) {
+            self.say(false, "Draft source already selected · waiting for its read", .{});
             return;
         }
-        try self.start(.compose, .{ .account = self.account(), .cmd = "mail.forward", .messageId = target_id, .bodyFormat = "markdown" });
+        try self.pinComposeTarget(intent, target);
+        self.compose_intent = intent;
+        self.compose_original = true;
+        self.compose_source_mode = .choose;
+        self.compose_source_ready = false;
+        if (same(self.reader_account.value(), self.account())) for (self.thread) |message| {
+            if (same(text(get(message, "id")), target)) {
+                try self.inspectComposeSource(message);
+                break;
+            }
+        };
+        // The identity is copied before a worker or cache merge can replace
+        // the reader. An uncached original gets a pinned read before choosing.
+        if (self.job.future == null) try self.dispatchConversationCompose() else self.say(false, "Draft requested · waiting for the current read", .{});
+    }
+    fn dispatchConversationCompose(self: *App) !void {
+        if (self.job.future != null or self.compose_choice or self.pending_compose == .none) return;
+        if (!same(self.account(), self.pending_compose_account[0..self.pending_compose_account_len])) {
+            self.pending_compose = .none;
+            self.say(false, "Queued draft discarded after account change", .{});
+            return;
+        }
+        if (self.pending_compose == .new) {
+            self.pending_compose = .none;
+            return self.start(.compose, .{ .account = self.account(), .cmd = "draft.create", .draft = types.Draft{ .bodyFormat = .markdown } });
+        }
+        self.pending_read = false;
+        self.pending_thread = false;
+        if (self.compose_source_mode == .choose) {
+            if (!self.compose_source_ready) {
+                // A previous worker may just have supplied the pinned body.
+                if (same(self.reader_account.value(), self.account())) for (self.thread) |message| {
+                    if (same(text(get(message, "id")), self.pending_compose_id[0..self.pending_compose_id_len])) {
+                        try self.inspectComposeSource(message);
+                        break;
+                    }
+                };
+            }
+            if (!self.compose_source_ready) {
+                self.compose_source_probe = true;
+                self.start(.read, .{ .account = self.pending_compose_account[0..self.pending_compose_account_len], .cmd = "mail.read", .messageId = self.pending_compose_id[0..self.pending_compose_id_len] }) catch |err| {
+                    self.compose_source_probe = false;
+                    self.pending_compose = .none;
+                    return err;
+                };
+                return;
+            }
+            if (self.compose_source_html) {
+                self.compose_choice = true;
+                self.dialog_focus.reset(.compose_format, 0);
+                self.say(false, "Choose original format · Tab controls · Enter chooses · Esc Back", .{});
+                return;
+            }
+            self.compose_source_mode = .text;
+        }
+        const intent = self.pending_compose;
+        self.pending_compose = .none;
+        const pinned_account = self.pending_compose_account[0..self.pending_compose_account_len];
+        const id = self.pending_compose_id[0..self.pending_compose_id_len];
+        if (intent == .forward) {
+            try self.start(.compose, .{ .account = pinned_account, .cmd = "mail.forward", .messageId = id, .bodyFormat = "markdown", .preserveFormatting = self.compose_source_mode == .formatted, .original = self.compose_source_mode == .attached });
+        } else try self.start(.compose, .{ .account = pinned_account, .cmd = "mail.reply", .messageId = id, .all = intent == .reply_all, .bodyFormat = "markdown", .preserveFormatting = self.compose_source_mode == .formatted });
+    }
+    fn onComposeChoiceKey(self: *App, key: Key) !void {
+        if (self.paste) return;
+        const forward = self.compose_intent == .forward;
+        const count: usize = if (forward) 4 else 3;
+        self.dialog_focus.ensure(.compose_format, 0);
+        if (tabDirection(key)) |backwards| {
+            self.dialog_focus.move(backwards, count, if (forward) 0b1111 else 0b111);
+            return;
+        }
+        const back = key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches('c', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == count - 1);
+        if (back) {
+            self.compose_choice = false;
+            self.pending_compose = .none;
+            self.say(false, "Draft canceled · no local draft created", .{});
+            return;
+        }
+        const selected: ?ComposeSourceMode = if (key.matches('k', .{})) .formatted else if (key.matches('t', .{})) .text else if (forward and key.matches('e', .{})) .attached else if (key.matches(Key.enter, .{})) switch (self.dialog_focus.index) {
+            0 => .formatted,
+            1 => .text,
+            2 => if (forward) .attached else null,
+            else => null,
+        } else null;
+        if (selected) |choice| {
+            self.compose_source_mode = choice;
+            self.compose_choice = false;
+            try self.dispatchConversationCompose();
+        }
+    }
+    fn drawComposeChoice(self: *App, win: vaxis.Window) !void {
+        if (!self.compose_choice) return;
+        self.mouse_hits.clear();
+        const width = @min(win.width -| 2, @as(u16, 70));
+        const height = @min(win.height -| 2, @as(u16, 12));
+        const outer = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - height) / 2, .width = width, .height = height });
+        outer.fill(.{ .style = self.style(.text) });
+        const title = try std.fmt.allocPrint(self.frame.allocator(), " {s} · original format ", .{self.composeIntentLabel()});
+        const inner = self.panel(outer, 0, width, title, true);
+        inner.fill(.{ .style = self.style(.text) });
+        const forward = self.compose_intent == .forward;
+        const count: usize = if (forward) 4 else 3;
+        self.dialog_focus.ensure(.compose_format, 0);
+        // One action per row keeps every choice reachable even at 30 columns.
+        const first: usize = if (inner.height >= count + 3) 2 else 0;
+        if (first != 0) {
+            try self.line(inner, 0, try self.fitLine(inner, self.compose_source_subject.value(), inner.width), .subject);
+            try self.line(inner, 1, try std.fmt.allocPrint(self.frame.allocator(), "HTML · {d} embedded resources", .{self.compose_source_resources}), .muted);
+        }
+        for (0..count) |index| {
+            const label: []const u8 = if (index == 0) "[Keep formatting k]" else if (index == 1) "[Text quote t]" else if (forward and index == 2) "[Attach original .eml e]" else "[Back Esc/q]";
+            _ = try self.actionButton(inner, @intCast(first + index), 0, label, self.dialog_focus.index == index, true, .dialog_action, index);
+        }
+        const explanation: []const u8 = if (self.dialog_focus.index == 0) "Original HTML below your Omagma-styled note" else if (self.dialog_focus.index == 1) "Editable text copy of the original" else if (forward and self.dialog_focus.index == 2) "Recipient opens the attached email" else "Return without creating a draft";
+        if (first + count < inner.height) try self.line(inner, first + count, try self.fitLine(inner, explanation, inner.width), .muted);
+        if (first + count + 1 < inner.height) try self.line(inner, first + count + 1, "Tab / Shift+Tab · Enter", .muted);
     }
     fn composeIntentLabel(self: *const App) []const u8 {
         return switch (self.compose_intent) {
@@ -3974,6 +4159,8 @@ const App = struct {
     fn clearComposePreview(self: *App) void {
         if (self.compose_preview) |*prepared| prepared.deinit();
         self.compose_preview = null;
+        if (self.compose_original_preview) |*prepared| prepared.deinit();
+        self.compose_original_preview = null;
         if (self.compose_preview_arena) |*arena| arena.deinit();
         self.compose_preview_arena = null;
         self.compose_preview_plain = "";
@@ -3983,7 +4170,11 @@ const App = struct {
     fn ensureComposePreview(self: *App) !void {
         const source = self.compose.fields[4].value();
         var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
+        var identity = std.crypto.hash.sha2.Sha256.init(.{});
+        identity.update(source);
+        identity.update(if (self.compose.original != null) "\x00original\x00" else "\x00no-original\x00");
+        if (self.compose.original != null) identity.update(&self.compose.original_digest);
+        identity.final(&digest);
         if (self.compose_preview_digest) |previous| {
             if (self.compose_preview_format == self.compose.body_format and std.mem.eql(u8, &previous, &digest)) {
                 if (self.compose_preview_error) |err| return err;
@@ -4005,11 +4196,18 @@ const App = struct {
     fn buildComposePreview(self: *App, source: []const u8) !void {
         self.compose_preview_arena = .init(self.allocator);
         const owned = self.compose_preview_arena.?.allocator();
-        const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source });
+        const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source, .original = self.compose.original });
         // Plain prepare borrows the editable field. Own it here so a later
         // field reallocation can never invalidate a retained preview.
         self.compose_preview_plain = try owned.dupe(u8, output.plain);
-        if (output.html) |html| self.compose_preview = try html_view.Prepared.initGeneratedMarkdown(self.allocator, html);
+        if (self.compose.original) |original| {
+            const note = try markdown_mail.renderNote(owned, source, self.compose.body_format);
+            self.compose_preview = try html_view.Prepared.initGeneratedMarkdown(self.allocator, note.html);
+            // Received markup never acquires trusted generated-Markdown token
+            // classes. Rendering failure changes only this inert preview;
+            // the retained original and validated outgoing HTML stay intact.
+            self.compose_original_preview = html_view.Prepared.init(self.allocator, original.bodyHtml) catch null;
+        } else if (output.html) |html| self.compose_preview = try html_view.Prepared.initGeneratedMarkdown(self.allocator, html);
     }
     fn requireComposePreview(self: *App) !void {
         try self.ensureComposePreview();
@@ -4022,7 +4220,7 @@ const App = struct {
         if (self.compose.unknown_outcome) return;
         self.compose.body_format = if (self.compose.body_format == .markdown) .plain else .markdown;
         try self.composerChanged();
-        self.say(false, "{s} · source unchanged · Ctrl+S reviews outgoing mail", .{if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else "Plain text"});
+        if (self.compose.original != null) self.say(false, "Note: {s} · original unchanged", .{if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text"}) else self.say(false, "{s} · source unchanged · Ctrl+S reviews outgoing mail", .{if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else "Plain text"});
     }
     fn cycleComposePreview(self: *App) void {
         const narrow = self.vx.window().width < 90;
@@ -4034,7 +4232,7 @@ const App = struct {
             return;
         }
         self.compose_view = switch (self.compose_view) {
-            .rendered => if (self.compose_original and self.thread.len > 0) .original else .plain,
+            .rendered => if (self.compose.original != null or (self.compose_original and self.thread.len > 0)) .original else .plain,
             .original => .plain,
             .plain => .rendered,
         };
@@ -4042,8 +4240,8 @@ const App = struct {
     }
     fn composePreviewTitle(self: *const App) []const u8 {
         return switch (self.compose_view) {
-            .rendered => if (self.compose.body_format == .markdown) " Outgoing preview · HTML + plain text " else " Draft preview · plain text ",
-            .original => " Original message ",
+            .rendered => if (self.compose.original != null or self.compose.body_format == .markdown) " Outgoing preview · HTML + plain text " else " Draft preview · plain text ",
+            .original => if (self.compose.original != null) " Original message · saved snapshot " else " Original message ",
             .plain => " Plain-text alternative ",
         };
     }
@@ -4058,9 +4256,27 @@ const App = struct {
                 self.compose_preview_error = err;
                 return self.flowTone(win, try std.fmt.allocPrint(self.frame.allocator(), "Preview unavailable: {s}\nSource retained · Ctrl+T chooses plain text.", .{@errorName(err)}), offset, base_row, .warning);
             };
-            return prepared.draw(win, offset, base_row, self.palette, self.mono);
+            const rows = prepared.draw(win, offset, base_row, self.palette, self.mono);
+            return if (self.compose.original != null) self.composeOriginalDraw(win, offset, rows) else rows;
         };
         return self.flow(win, self.compose_preview_plain, offset, base_row);
+    }
+    fn composeOriginalDraw(self: *App, win: vaxis.Window, offset: usize, base_row: usize) !usize {
+        const original = self.compose.original orelse return base_row;
+        const header = try std.fmt.allocPrint(self.frame.allocator(), "\n── Original message · protected ──\nFrom: {s} <{s}>\nDate: {s}\nSubject: {s}\nEmbedded resources: {d} · saved snapshot\n", .{ original.from.name, original.from.address, original.date, original.subject, original.resources.len });
+        var rows = try self.flowTone(win, header, offset, base_row, .muted);
+        for (original.resources) |resource| {
+            rows = try self.flowTone(win, try std.fmt.allocPrint(self.frame.allocator(), "▣ {s} · embedded\n", .{resource.filename}), offset, rows, .muted);
+        }
+        if (self.compose_original_preview) |*prepared| {
+            if (win.width != 0) {
+                prepared.ensure(@min(win.width, max_cols), win.screen.width_method) catch {
+                    return self.flow(win, original.bodyText, offset, rows);
+                };
+                return prepared.draw(win, offset, rows, self.palette, self.mono);
+            }
+        }
+        return self.flow(win, original.bodyText, offset, rows);
     }
     fn composePreviewDraw(self: *App, win: vaxis.Window) !void {
         self.mouseArea(win, .compose_preview_scroll, 0);
@@ -4069,17 +4285,18 @@ const App = struct {
             self.dialog_focus.ensure(.preview, 0);
             const x = try self.actionButton(win, 0, 0, "[Preview p]", self.dialog_focus.index == 1, true, .compose_preview_toggle, 0);
             _ = try self.actionButton(win, 0, x, "[Back]", self.dialog_focus.index == 2, true, .compose_preview_back, 0);
-        } else try self.line(win, 0, if (self.compose.insert_mode or self.compose.attachment_focus) "Preview · Esc returns to normal controls" else if (self.compose_view == .original and win.width >= 48) "p Preview · Ctrl+D/U Scroll · L Links · B Files" else if (win.width >= 34) "p Next preview · Ctrl+D/U Scroll" else "p Next preview", .accent);
+        } else try self.line(win, 0, if (self.compose.insert_mode or self.compose.attachment_focus) "Preview · Esc returns to normal controls" else if (self.compose_view == .original and self.compose.original == null and win.width >= 48) "p Preview · Ctrl+D/U Scroll · L Links · B Files" else if (win.width >= 34) "p Next preview · Ctrl+D/U Scroll" else "p Next preview", .accent);
         const body = win.child(.{ .y_off = @min(@as(u16, 2), win.height) });
-        if (self.compose_view == .original) return self.readerDraw(body);
-        const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else &self.compose_preview_scroll;
+        if (self.compose_view == .original and self.compose.original == null) return self.readerDraw(body);
+        const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else if (self.compose_view == .original) &self.compose_snapshot_scroll else &self.compose_preview_scroll;
         self.compose_preview_height = body.height;
         const painted_scroll = scroll.*;
-        self.compose_preview_lines = try self.composeOutgoingDraw(body, scroll.*, 0, self.compose_view == .plain);
+        if (self.compose_view == .original) try self.ensureComposePreview();
+        self.compose_preview_lines = if (self.compose_view == .original) try self.composeOriginalDraw(body, scroll.*, 0) else try self.composeOutgoingDraw(body, scroll.*, 0, self.compose_view == .plain);
         scroll.* = @min(scroll.*, readerEnd(self.compose_preview_lines, self.compose_preview_height));
         if (scroll.* != painted_scroll) {
             body.fill(.{ .style = self.style(.text) });
-            _ = try self.composeOutgoingDraw(body, scroll.*, 0, self.compose_view == .plain);
+            _ = if (self.compose_view == .original) try self.composeOriginalDraw(body, scroll.*, 0) else try self.composeOutgoingDraw(body, scroll.*, 0, self.compose_view == .plain);
         }
     }
     fn cancelAutosaveTimer(self: *App) void {
@@ -4281,6 +4498,20 @@ const App = struct {
         }
         return false;
     }
+    fn validateComposeSend(self: *App) !void {
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const draft = try self.compose.draft(arena.allocator());
+        @import("core.zig").validateDraft(draft, true) catch |err| {
+            if (err == error.MissingRecipient) {
+                self.mode = .compose;
+                self.compose.selected = 0;
+                self.compose.attachment_focus = false;
+                self.compose.insert_mode = true;
+            }
+            return err;
+        };
+    }
     fn saveDraft(self: *App, kind: JobKind) !void {
         if (self.compose.unknown_outcome) {
             if (kind == .save_back) {
@@ -4291,7 +4522,10 @@ const App = struct {
             } else self.markUnknown(.send);
             return;
         }
-        if (kind == .save_review) try self.requireComposePreview();
+        if (kind == .save_review) {
+            try self.validateComposeSend();
+            try self.requireComposePreview();
+        }
         self.preemptReadOnly();
         self.cancelAutosaveTimer();
         self.autosave_due = false;
@@ -4684,12 +4918,15 @@ const App = struct {
     }
     fn attachFile(self: *App, path: []const u8) !void {
         if (!self.canEditAttachments()) return;
-        if (self.compose.attachments.len >= 16) return error.TooManyAttachments;
+        if (self.compose.attachments.len + (if (self.compose.original) |original| original.resources.len else 0) >= 16) return error.TooManyAttachments;
         const filename = std.fs.path.basename(path);
         if (filename.len == 0 or filename.len > 256 or same(filename, ".") or same(filename, "..") or std.mem.indexOfAny(u8, filename, "/\\") != null) return error.InvalidAttachment;
         try recipients.validateHeader(filename);
         var combined: usize = 0;
         for (self.compose.attachments) |item| combined = try std.math.add(usize, combined, item.size);
+        if (self.compose.original) |original| for (original.resources) |item| {
+            combined = try std.math.add(usize, combined, item.size);
+        };
         if (combined > types.Limits.body_bytes) return error.BodyTooLarge;
         const file = try files.openRegular(self.io, self.allocator, Io.Dir.cwd(), path);
         defer file.close(self.io);
@@ -4755,6 +4992,7 @@ const App = struct {
             self.markUnknown(.send);
             return;
         }
+        try self.validateComposeSend();
         try self.requireComposePreview();
         const id = try self.operationId(self.allocator);
         defer self.allocator.free(id);
@@ -4796,7 +5034,7 @@ const App = struct {
         try self.start(.invitation_inspect, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.inspect", .messageId = self.invitation_inspected_id.value() });
     }
     fn openCurrentMail(self: *App) !void {
-        const id = if (self.mode == .compose and self.compose_original and self.reader_card < self.thread.len) text(get(self.thread[self.reader_card], "id")) else self.readerReplyId();
+        const id = if (self.mode == .compose and self.compose.original != null) self.compose.original.?.sourceMessageId else if (self.mode == .compose and self.compose_original and self.reader_card < self.thread.len) text(get(self.thread[self.reader_card], "id")) else self.readerReplyId();
         const target = try self.allocator.dupe(u8, id);
         defer self.allocator.free(target);
         if (target.len == 0) {
@@ -5083,6 +5321,15 @@ const App = struct {
             .left => null,
             else => return,
         };
+        if (self.compose_choice) {
+            if (wheel == null) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                if (hit.kind == .dialog_action) {
+                    self.dialog_focus.index = hit.index;
+                    try self.onComposeChoiceKey(.{ .codepoint = Key.enter });
+                }
+            };
+            return;
+        }
         if (self.mode == .theme) {
             self.dialog_focus.ensure(.theme, 0);
             if (wheel) |down| {
@@ -5277,7 +5524,7 @@ const App = struct {
             },
             .compose_preview_scroll => {
                 if (self.mode != .compose) return;
-                if (wheel) |down| self.scrollReader(down, 3);
+                if (wheel) |down| self.scrollReader(down, 3) else if (self.compose.original != null) self.say(false, "Original is protected · only your note is editable", .{});
             },
             .compose_completion => {
                 if (self.mode != .compose or !self.canEditAttachments() or wheel != null) return;
@@ -5404,14 +5651,18 @@ const App = struct {
                 return;
             }
             if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) {
-                self.scrollReader(true, @max((if (self.compose_view == .original) self.reader_height else self.compose_preview_height) / 2, 1));
+                self.scrollReader(true, @max((if (self.compose_view == .original and self.compose.original == null) self.reader_height else self.compose_preview_height) / 2, 1));
                 return;
             }
             if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) {
-                self.scrollReader(false, @max((if (self.compose_view == .original) self.reader_height else self.compose_preview_height) / 2, 1));
+                self.scrollReader(false, @max((if (self.compose_view == .original and self.compose.original == null) self.reader_height else self.compose_preview_height) / 2, 1));
                 return;
             }
             if (key.matches('L', .{}) or key.matches('l', .{ .shift = true })) {
+                if (self.compose.original != null) {
+                    self.say(false, "Saved original is protected · o opens its source in Gmail", .{});
+                    return;
+                }
                 if (self.compose_view != .original) {
                     self.say(false, "p selects Original before opening its links", .{});
                     return;
@@ -5420,6 +5671,10 @@ const App = struct {
                 return;
             }
             if (key.matches('B', .{}) or key.matches('b', .{ .shift = true })) {
+                if (self.compose.original != null) {
+                    self.say(false, "Embedded resources stay with the original · ordinary files are below your note", .{});
+                    return;
+                }
                 if (self.compose_view != .original) {
                     self.say(false, "p selects Original before saving its files", .{});
                     return;
@@ -5520,6 +5775,7 @@ const App = struct {
         self.acknowledgeNewMail();
         self.action_notice = false;
         var key = original_key;
+        if (self.compose_choice) return self.onComposeChoiceKey(key);
         if (self.mode == .label_manager) {
             try self.onLabelManagerKey(key);
             return;
@@ -6271,8 +6527,8 @@ const App = struct {
         return if (self.reader_card_pinned and self.reader_card < self.thread.len) @max(end, self.reader_card_rows[self.reader_card]) else end;
     }
     fn scrollReader(self: *App, down: bool, amount: usize) void {
-        if (self.mode == .compose and self.compose_view != .original) {
-            const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else &self.compose_preview_scroll;
+        if (self.mode == .compose and (self.compose_view != .original or self.compose.original != null)) {
+            const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else if (self.compose_view == .original) &self.compose_snapshot_scroll else &self.compose_preview_scroll;
             scroll.* = if (down) @min(scroll.* +| amount, readerEnd(self.compose_preview_lines, self.compose_preview_height)) else scroll.* -| amount;
             return;
         }
@@ -6475,7 +6731,8 @@ const App = struct {
         if (self.compose.attachment_focus) return;
         const matches = self.composeCompletions();
         if (win.width < 20) return;
-        const row = self.compose.selected + 2;
+        const header_row: usize = if (self.compose.unknown_outcome or self.compose.original != null or self.compose_source_mode == .attached) 2 else 1;
+        const row = self.compose.selected + header_row + 1;
         if (matches.len == 0) {
             if (!self.compose.insert_mode or self.compose.selected >= 3 or matches.range.query.len == 0) return;
             recipients.validateAddress(matches.range.query) catch {
@@ -6502,8 +6759,14 @@ const App = struct {
             self.mouse_hits.clear();
             const inner = self.panel(win, 0, win.width, " Review send · explicit confirmation ", true);
             const content = inner.child(.{ .height = inner.height -| 2 });
-            const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else "Plain text", self.compose.thread.value() });
+            const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
             var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            if (self.compose.original) |original| {
+                const detail = try std.fmt.allocPrint(self.frame.allocator(), "Your note: {s} · branded\nOriginal: HTML retained · {d} embedded resources\nAttachments: {d} ordinary files\nMail apps may display the original differently.\n\n", .{ if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text", original.resources.len, self.compose.attachments.len });
+                rows = try self.flowTone(content, detail, self.compose_preview_scroll, rows, .muted);
+            } else if (self.compose_source_mode == .attached) {
+                rows = try self.flowTone(content, "Original attached as .eml · opens in the recipient's mail app.\n\n", self.compose_preview_scroll, rows, .muted);
+            }
             rows = try self.composeOutgoingDraw(content, self.compose_preview_scroll, rows, false);
             for (self.compose.attachments, 0..) |attachment, index| {
                 const label = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} ({s})\n", .{ index + 1, attachment.filename, try attachmentSizeLabel(self.frame.allocator(), attachment.size) });
@@ -6526,8 +6789,9 @@ const App = struct {
             return;
         }
         const left_width = if (split) win.width * 3 / 5 else win.width;
-        const state_title = if (self.compose.unknown_outcome) " Compose · protected recovery draft " else if (self.job.future != null and self.job.kind == .autosave) " Compose · saving locally… " else if (self.compose.revision != self.compose.saved_revision) " Compose · autosave pending " else " Compose · saved locally · not sent ";
-        const title = try std.fmt.allocPrint(self.frame.allocator(), "{s}· {s} ", .{ state_title, self.composeIntentLabel() });
+        const state_title = if (self.compose.unknown_outcome) "protected recovery draft" else if (self.job.future != null and self.job.kind == .autosave) "saving locally…" else if (self.compose.revision != self.compose.saved_revision) "autosave pending" else "saved locally · not sent";
+        const original_title: []const u8 = if (self.compose.original != null) " · formatted original" else if (self.compose_source_mode == .attached) " · original attached" else "";
+        const title = try std.fmt.allocPrint(self.frame.allocator(), " Compose · {s}{s} · {s} ", .{ self.composeIntentLabel(), original_title, state_title });
         const left = self.panel(win, 0, left_width, title, true);
         const alias_width: u16 = @min(@as(u16, 9), left.width);
         const alias_x = left.width - alias_width;
@@ -6536,7 +6800,9 @@ const App = struct {
         try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
         if (!self.compose.unknown_outcome) self.mouseArea(alias_action, .compose_from, 0);
         if (self.compose.unknown_outcome) try self.line(left, 1, try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
-        const header_row: usize = if (self.compose.unknown_outcome) 2 else 1;
+        const original_note = self.compose.original != null or self.compose_source_mode == .attached;
+        if (original_note and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", .muted);
+        const header_row: usize = if (self.compose.unknown_outcome or original_note) 2 else 1;
         for ([_][]const u8{ "To", "Cc", "Bcc", "Subject" }, 0..) |name, index| {
             const field = &self.compose.fields[index];
             const editing = self.compose.selected == index and self.compose.insert_mode;
@@ -6655,6 +6921,7 @@ const App = struct {
         };
     }
     fn fittedHints(self: *const App, width: u16) []const u8 {
+        if (self.compose_choice) return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         if (self.fileDialogActive()) return self.fileDialogHints(width);
         if (self.label_picker and width < 60) return "+ Add  - Remove  Esc/q Back";
         if (self.mode == .contacts and width < 60) return "n New  e Edit  ? Help  q Back";
@@ -6980,6 +7247,7 @@ const App = struct {
         }
         try self.drawNewMail(win);
         try self.drawThemePicker(win);
+        try self.drawComposeChoice(win);
     }
 };
 
@@ -9645,6 +9913,7 @@ test "markdown composer: preview refusal keeps source blocks dispatch and caches
     const over_limit = try a.alloc(u8, (markdown_mail.max_lines + 1) * 2);
     defer a.free(over_limit);
     for (0..markdown_mail.max_lines + 1) |i| @memcpy(over_limit[i * 2 ..][0..2], "x\n");
+    try app.compose.fields[0].set(a, "recipient@example.test");
     try app.compose.fields[4].set(a, over_limit);
     app.compose.body_format = .markdown;
     try std.testing.expectError(error.MarkdownTooComplex, app.requireComposePreview());
@@ -9779,6 +10048,29 @@ test "forward UX: all mailbox reader and search footers expose Forward before tr
         try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(100), "f Forward") != null);
     }
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "compose preflight: missing recipients remain editable without a submission or operation" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose.selected = 4;
+    try app.compose.fields[4].set(a, "A retained personal note.");
+    try std.testing.expectError(error.MissingRecipient, app.saveDraft(.save_review));
+    try std.testing.expectEqual(@as(usize, 0), app.compose.selected);
+    try std.testing.expect(app.compose.insert_mode);
+    try std.testing.expectError(error.MissingRecipient, app.sendDraft());
+    try std.testing.expect(!app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings("", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("A retained personal note.", app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    for ([_]usize{ 1, 2 }) |field| {
+        try app.compose.fields[field].set(a, "recipient@example.test");
+        try app.validateComposeSend();
+        try app.compose.fields[field].set(a, "");
+    }
 }
 
 test "reply caret: fresh reply all and forward insert above citation while existing drafts stay unchanged" {
@@ -10148,4 +10440,119 @@ test "label manager: delete defaults cancel, small reviews disable writes and un
     app.account_index = 2;
     try std.testing.expect(!app.canManageLabels());
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "formatted composer: source ownership survives worker arena and attachment replacement" {
+    const a = std.testing.allocator;
+    var compose: Compose = .{};
+    defer compose.deinit(a);
+    {
+        var source: std.heap.ArenaAllocator = .init(a);
+        defer source.deinit();
+        const raw = try std.json.Stringify.valueAlloc(source.allocator(), types.Draft{
+            .bodyText = "Only my note",
+            .bodyFormat = .markdown,
+            .threadId = "source-thread",
+            .to = &.{.{ .address = "peer@example.test" }},
+            .original = .{ .sourceMessageId = "source", .bodyText = "Original fallback", .bodyHtml = "<p>Original <b>layout</b><img src=\"cid:picture@example.test\"></p>", .resources = &.{.{ .id = "image", .filename = "picture.png", .mimeType = "image/png", .size = 1, .data = "AA", .contentId = "picture@example.test", .disposition = "inline" }} },
+            .attachments = &.{.{ .id = "file", .filename = "ordinary.bin", .size = 1, .data = "AA", .contentLocation = "https://example.test/file" }},
+        }, .{});
+        try compose.load(a, try std.json.parseFromSliceLeaky(Value, source.allocator(), raw, .{ .allocate = .alloc_always }));
+    }
+    try std.testing.expectEqualStrings("Original fallback", compose.original.?.bodyText);
+    try std.testing.expectEqualStrings("AA", compose.original.?.resources[0].data);
+    try compose.replaceAttachments(a, compose.attachments);
+    try std.testing.expectEqualStrings("https://example.test/file", compose.attachments[0].contentLocation.?);
+    try compose.replaceAttachments(a, &.{});
+    try std.testing.expectEqualStrings("picture@example.test", compose.original.?.resources[0].contentId.?);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const saved = try compose.draft(arena.allocator());
+    try std.testing.expectEqualStrings("Only my note", saved.bodyText);
+    try std.testing.expectEqualStrings("source-thread", saved.threadId);
+    try std.testing.expect(saved.original != null and saved.attachments.len == 0);
+    var fields: [5][]const u8 = undefined;
+    const recovery = compose.recovery(&fields);
+    try std.testing.expectEqualStrings("source", recovery.original.?.sourceMessageId);
+    try std.testing.expectEqualStrings("Only my note", recovery.recoveryFields.?[4]);
+}
+
+test "formatted composer: received classes stay untrusted and snapshot preview survives empty reader" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    const raw = try std.json.Stringify.valueAlloc(app.frame.allocator(), types.Draft{
+        .bodyText = "```zig\nconst note = 42;\n```",
+        .bodyFormat = .markdown,
+        .original = .{ .sourceMessageId = "source", .bodyText = "Original fallback", .bodyHtml = "<pre><code><span class='omagma-syntax-keyword'>Received token</span></code></pre><p class='omagma-footer'>Received footer</p>" },
+    }, .{});
+    try app.compose.load(a, try std.json.parseFromSliceLeaky(Value, app.frame.allocator(), raw, .{}));
+    app.mode = .compose;
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 160, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    try app.ensureComposePreview();
+    var trusted_keyword = false;
+    for (app.compose_preview.?.document.blocks) |block| for (block.spans) |span| {
+        trusted_keyword = trusted_keyword or span.style.code_token == .keyword;
+    };
+    try std.testing.expect(trusted_keyword);
+    for (app.compose_original_preview.?.document.blocks) |block| for (block.spans) |span| {
+        try std.testing.expectEqual(@import("html_document.zig").CodeToken.none, span.style.code_token);
+        try std.testing.expectEqual(@import("html_document.zig").FooterStyle.none, span.style.footer);
+    };
+    try std.testing.expectEqual(@as(usize, 0), app.thread.len);
+    app.cycleComposePreview();
+    try std.testing.expectEqual(ComposeView.original, app.compose_view);
+    try app.composePreviewDraw(vx.window());
+    const displayed = try markdownTestScreenText(a, &vx.screen);
+    defer a.free(displayed);
+    try std.testing.expect(std.mem.indexOf(u8, displayed, "Original message · protected") != null);
+    try std.testing.expect(std.mem.indexOf(u8, displayed, "Received token") != null);
+    try app.toggleComposeFormat();
+    try app.requireComposePreview();
+    try std.testing.expectEqualStrings("Original fallback", app.compose.original.?.bodyText);
+    try std.testing.expectEqual(@as(usize, 2), app.compose_preview_builds);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "formatted chooser: every action fits narrow modal and reverse Back creates no draft" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    for ([_]u16{ 30, 80 }) |width| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 10, .screen = &screen };
+        for ([_]PendingCompose{ .reply, .reply_all, .forward }) |intent| {
+            app.compose_intent = intent;
+            app.compose_choice = true;
+            app.pending_compose = intent;
+            app.dialog_focus.reset(.compose_format, 0);
+            win.fill(.{ .char = .{ .grapheme = "X", .width = 1 } });
+            try app.drawComposeChoice(win);
+            const displayed = try markdownTestScreenText(a, &screen);
+            defer a.free(displayed);
+            try std.testing.expect(std.mem.indexOf(u8, displayed, "│ [Keep formatting k]") != null);
+            const count: usize = if (intent == .forward) 4 else 3;
+            var hits: usize = 0;
+            for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .dialog_action) {
+                try std.testing.expect(hit.index < count);
+                try std.testing.expect(hit.rect.width >= 12);
+                try std.testing.expect(hit.rect.y + hit.rect.height <= win.height);
+                hits += 1;
+            };
+            try std.testing.expectEqual(count, hits);
+            try app.onComposeChoiceKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expectEqual(count - 1, app.dialog_focus.index);
+            try app.onComposeChoiceKey(.{ .codepoint = Key.enter });
+            try std.testing.expect(!app.compose_choice and app.pending_compose == .none);
+            try std.testing.expect(app.job.future == null);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }

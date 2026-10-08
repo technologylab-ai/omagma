@@ -218,6 +218,79 @@ pub fn executeAttachment(io: std.Io, a: std.mem.Allocator, config: *const Config
     return attachmentAuthorized(a, account, session.capabilities, transport, try j.required(request, "messageId"), attachment);
 }
 
+/// On-demand original source for forwarding. It shares the ordinary read
+/// grant and verified account session; no raw message is added to the cache.
+pub fn executeRawMessage(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) ![]const u8 {
+    var session: NetworkSession = undefined;
+    try session.init(io, a, config, account, "mail.read", request);
+    defer session.close();
+    var transport = session.transport();
+    transport.progress_sink = progress_sink;
+    return readAuthorizedRawMessage(a, account, session.capabilities, transport, try j.required(request, "messageId"));
+}
+
+/// Fixture sources use this exact decoder too. RAW has no parsed payload, so
+/// fidelity does not depend on our semantic reader accepting the MIME body.
+pub fn decodeRawMessage(a: std.mem.Allocator, value: j.Value, message_id: []const u8) ![]const u8 {
+    try b.identifier(message_id);
+    if (!std.mem.eql(u8, j.text(value, "id"), message_id)) return error.MessageIdentityMismatch;
+    return mime.decodeBase64Url(try j.required(value, "raw"), a);
+}
+
+pub fn readAuthorizedRawMessage(a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, message_id: []const u8) ![]const u8 {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
+    transport.progress(.bodies, 0, 1);
+    const value = try transport.request(a, .GET, try messageUrl(a, message_id, "?format=raw&fields=id,raw"), null);
+    const raw = try decodeRawMessage(a, value, message_id);
+    transport.progress(.bodies, 1, 1);
+    return raw;
+}
+
+test "original mail: raw GET preserves bytes and rejects capability identity encoding and size" {
+    const Oracle = struct {
+        calls: usize = 0,
+        response_id: []const u8 = "original-fixture",
+        bytes: []const u8 = "Subject: Exact original\r\nContent-Type: application/octet-stream\r\n\r\n\x00\xff\r\n\r\n",
+        encoded_override: ?[]const u8 = null,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/original-fixture?format=raw&fields=id,raw", url);
+            try std.testing.expect(body == null);
+            const encoded = if (self.encoded_override) |value| value else blk: {
+                const buffer = try a.alloc(u8, std.base64.url_safe.Encoder.calcSize(self.bytes.len));
+                break :blk std.base64.url_safe.Encoder.encode(buffer, self.bytes);
+            };
+            return j.value(a, .{ .id = self.response_id, .raw = encoded });
+        }
+        fn transport(self: *@This()) Transport {
+            return .{ .context = self, .requestFn = request };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    try std.testing.expectError(error.PermissionDenied, readAuthorizedRawMessage(a, "self@example.test", &.{}, oracle.transport(), "original-fixture"));
+    try std.testing.expectEqual(@as(usize, 0), oracle.calls);
+    const raw = try readAuthorizedRawMessage(a, "self@example.test", &.{"mail-read"}, oracle.transport(), "original-fixture");
+    try std.testing.expectEqualSlices(u8, oracle.bytes, raw);
+    oracle.response_id = "another-original";
+    try std.testing.expectError(error.MessageIdentityMismatch, readAuthorizedRawMessage(a, "self@example.test", &.{"mail-read"}, oracle.transport(), "original-fixture"));
+    oracle.response_id = "original-fixture";
+    oracle.encoded_override = "%%%%";
+    try std.testing.expectError(error.InvalidBase64, readAuthorizedRawMessage(a, "self@example.test", &.{"mail-read"}, oracle.transport(), "original-fixture"));
+    const oversized = try a.alloc(u8, types.Limits.body_bytes + 1);
+    @memset(oversized, 'x');
+    oracle.bytes = oversized;
+    oracle.encoded_override = null;
+    try std.testing.expectError(error.BodyTooLarge, readAuthorizedRawMessage(a, "self@example.test", &.{"mail-read"}, oracle.transport(), "original-fixture"));
+    try std.testing.expectError(error.InvalidIdentifier, readAuthorizedRawMessage(a, "self@example.test", &.{"mail-read"}, oracle.transport(), "../../wrong"));
+    try std.testing.expectEqual(@as(usize, 4), oracle.calls);
+}
+
 /// Gmail may rotate opaque attachment IDs between FULL reads of an immutable
 /// message. Download the known token first; refreshing the message before that
 /// GET would discard the only identity the caller actually selected.
@@ -238,6 +311,8 @@ pub fn attachmentAuthorized(a: std.mem.Allocator, account: []const u8, capabilit
             for (fresh.attachments) |candidate| {
                 if (!std.mem.eql(u8, candidate.filename, expected.filename) or
                     !std.mem.eql(u8, candidate.mimeType, expected.mimeType) or candidate.size != expected.size) continue;
+                if (expected.contentId) |id| if (candidate.contentId == null or !std.mem.eql(u8, id, candidate.contentId.?)) continue;
+                if (expected.contentLocation) |location| if (candidate.contentLocation == null or !std.mem.eql(u8, location, candidate.contentLocation.?)) continue;
                 if (resolved != null) return error.AmbiguousAttachment;
                 resolved = candidate;
             }
@@ -453,7 +528,7 @@ fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transp
     const bytes = try a.alloc(u8, types.Limits.request_bytes);
     const attachments = try mime.composeAttachments(draft.attachments, a);
     const prepared = try @import("markdown_mail.zig").prepare(a, draft);
-    const raw = try mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments }, bytes);
+    const raw = try mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments }, bytes);
     const encoded_size = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
     if (encoded_size > types.Limits.request_bytes - 1024) return error.FormTooLarge;
     const encoded = try a.alloc(u8, encoded_size);

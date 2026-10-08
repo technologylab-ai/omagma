@@ -231,6 +231,15 @@ pub const Session = struct {
     }
     fn dispatch(s: *Session, a: std.mem.Allocator, req: Value) !Value {
         const cmd = try j.required(req, "cmd");
+        if (j.get(req, "original") != null) {
+            _ = try j.boolean(req, "original", false);
+            if (!std.mem.eql(u8, cmd, "mail.forward")) return error.OriginalRequiresForward;
+        }
+        if (j.get(req, "preserveFormatting") != null) {
+            _ = try j.boolean(req, "preserveFormatting", false);
+            if (!std.mem.eql(u8, cmd, "mail.forward") and !std.mem.eql(u8, cmd, "mail.reply")) return error.PreserveFormattingRequiresReplyOrForward;
+        }
+        if (try j.boolean(req, "original", false) and try j.boolean(req, "preserveFormatting", false)) return error.ConflictingForwardModes;
         if (std.mem.eql(u8, cmd, "accounts.list")) {
             const Account = struct { address: []const u8, enabled: bool, capabilities: []const []const u8, senderName: []const u8 = "", signature: []const u8 = "" };
             var list: std.ArrayList(Account) = .empty;
@@ -316,6 +325,7 @@ pub const Session = struct {
             try clean.object.put(a, "bodyText", .{ .string = fields[4] });
             var draft = try decodeDraft(a, clean);
             if (j.get(input, "bodyFormat") == null and j.text(req, "draftId").len != 0) draft.bodyFormat = (try store.draft(j.text(req, "draftId"))).bodyFormat;
+            if (j.get(input, "original") == null and j.text(req, "draftId").len != 0) draft.original = (try store.draft(j.text(req, "draftId"))).original;
             try validateDraft(draft, false);
             draft.recoveryFields = fields;
             // The recovery body lives in the raw fields once, while the index
@@ -331,6 +341,7 @@ pub const Session = struct {
             const input = j.get(req, "draft") orelse return error.MissingField;
             var draft = try decodeDraft(a, input);
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "bodyFormat") == null) draft.bodyFormat = (try store.draft(try j.required(req, "draftId"))).bodyFormat;
+            if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "original") == null) draft.original = (try store.draft(try j.required(req, "draftId"))).original;
             try validateDraft(draft, false);
             return j.value(a, try store.putDraft(draft, if (std.mem.eql(u8, cmd, "draft.update")) try j.required(req, "draftId") else null));
         }
@@ -340,18 +351,25 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "mail.reply")) {
             const format = try requestBodyFormat(req);
-            const message = try s.read(a, &store, try j.required(req, "messageId"), req);
+            const preserve = try j.boolean(req, "preserveFormatting", false);
+            // Legacy immutable caches predate CID metadata. A formatted draft
+            // always captures the provider's current FULL source read-only.
+            const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
+            const original: ?t.Original = if (preserve) try s.captureOriginal(a, &store, req, message) else null;
             const threading = try @import("mime.zig").threading(message.messageId, message.references, message.inReplyTo, a);
             var envelope: recipients.Envelope = .{};
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
             try recipients.replyIncoming(a, address, aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), try j.boolean(req, "all", false), &envelope);
-            const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = try quote(a, if (format == .markdown) try markdown_mail.escapeSource(a, message.bodyText) else message.bodyText), .bodyFormat = format, .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references };
+            const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = if (preserve) "" else try quote(a, if (format == .markdown) try markdown_mail.escapeSource(a, message.bodyText) else message.bodyText), .bodyFormat = format, .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references, .original = original };
             try validateDraft(d, false);
+            if (preserve) _ = try markdown_mail.prepare(a, d);
             return j.value(a, try store.putDraft(d, null));
         }
         if (std.mem.eql(u8, cmd, "mail.forward")) {
             const format = try requestBodyFormat(req);
-            const message = try s.read(a, &store, try j.required(req, "messageId"), req);
+            if (try j.boolean(req, "original", false)) return s.forwardRaw(a, &store, req, format);
+            const preserve = try j.boolean(req, "preserveFormatting", false);
+            const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
             if (message.attachments.len > 16) return error.TooManyAttachments;
             var total: usize = 0;
             for (message.attachments) |attachment| total = std.math.add(usize, total, attachment.size) catch return error.AttachmentsTooLarge;
@@ -362,6 +380,26 @@ pub const Session = struct {
                 try request.object.put(a, "attachmentId", .{ .string = attachment.id });
                 attachment.* = try s.fetchKnownAttachment(a, &store, request, message);
             };
+            if (preserve) {
+                var hydrated = message;
+                hydrated.attachments = attachments;
+                const snapshot = try s.captureOriginal(a, &store, req, hydrated);
+                var files: std.ArrayList(t.Attachment) = .empty;
+                for (attachments) |attachment| {
+                    var related = false;
+                    for (snapshot.resources) |resource| related = related or std.mem.eql(u8, attachment.id, resource.id);
+                    if (!related) try files.append(a, attachment);
+                }
+                const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}), .bodyFormat = format, .attachments = files.items, .original = snapshot };
+                try validateDraft(draft, false);
+                _ = try markdown_mail.prepare(a, draft);
+                return j.value(a, try store.putDraft(draft, null));
+            }
+            for (attachments) |*attachment| {
+                attachment.contentId = null;
+                attachment.disposition = null;
+                attachment.contentLocation = null;
+            }
             // A forward is a new conversation, not a reply to the old thread.
             const original = try std.fmt.allocPrint(a, "---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, message.bodyText });
             const body = if (format == .markdown) try quote(a, try markdown_mail.escapeSource(a, original)) else try std.fmt.allocPrint(a, "\n\n{s}", .{original});
@@ -1728,6 +1766,59 @@ pub const Session = struct {
     fn read(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value) !t.Message {
         return s.readMessage(a, store, id, req, true);
     }
+    fn captureOriginal(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, message: t.Message) !t.Original {
+        const html = message.bodyHtml orelse return error.OriginalHtmlUnavailable;
+        if (html.len == 0) return error.OriginalHtmlUnavailable;
+        if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
+        const usage = try @import("original_mail.zig").resourceUsage(html, message.attachments);
+        var resources: std.ArrayList(t.Attachment) = .empty;
+        var bytes: usize = 0;
+        for (message.attachments, 0..) |attachment, index| {
+            const is_file = if (attachment.disposition) |value| std.ascii.eqlIgnoreCase(value, "attachment") else false;
+            const referenced = usage & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
+            const has_identity = attachment.contentId != null or attachment.contentLocation != null;
+            if (!has_identity or (is_file and !referenced and attachment.contentLocation == null)) continue;
+            if (resources.items.len == 16) return error.TooManyAttachments;
+            bytes = std.math.add(usize, bytes, attachment.size) catch return error.AttachmentsTooLarge;
+            if (bytes > t.Limits.body_bytes) return error.AttachmentsTooLarge;
+            if (attachment.contentId) |id| {
+                _ = try @import("mime.zig").contentId(id);
+                for (resources.items) |previous| if (previous.contentId) |other| if (std.mem.eql(u8, id, other)) return error.AmbiguousContentId;
+            }
+            try resources.append(a, attachment);
+        }
+        for (resources.items) |*attachment| if (attachment.data.len == 0 and attachment.size != 0) {
+            var request = try j.copyObject(a, req);
+            try request.object.put(a, "attachmentId", .{ .string = attachment.id });
+            attachment.* = try s.fetchKnownAttachment(a, store, request, message);
+        };
+        const snapshot: t.Original = .{ .sourceMessageId = message.id, .from = message.from, .to = message.to, .cc = message.cc, .subject = message.subject, .date = message.sentDate orelse "", .bodyText = message.bodyText, .bodyHtml = html, .resources = resources.items };
+        try @import("original_mail.zig").validate(snapshot);
+        return snapshot;
+    }
+    fn forwardRaw(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, format: t.BodyFormat) !Value {
+        try s.capability(a, store.state.account, req, "mail-read");
+        const id = try j.required(req, "messageId");
+        const raw = if (s.options.fixtures) blk: {
+            const source = try s.fixtureProviderSource(a, store);
+            for (try array(source, "messages")) |message| if (std.mem.eql(u8, j.text(message, "id"), id)) {
+                const bytes = try @import("gmail.zig").decodeRawMessage(a, message, id);
+                store.state.fixtureCalls += 1;
+                break :blk bytes;
+            };
+            return error.MessageNotFound;
+        } else blk: {
+            const account = store.state.account;
+            store.release();
+            const bytes = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeRawMessage, .{ s.io, a, &s.config, account, req, s.progress_sink });
+            try s.reopenBody(a, store);
+            break :blk bytes;
+        };
+        const source = try @import("mime.zig").originalSource(a, raw);
+        const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(source.subject, "Fwd:")) source.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{source.subject}), .bodyFormat = format, .attachments = &.{source.attachment} };
+        try validateDraft(draft, false);
+        return j.value(a, try store.putDraft(draft, null));
+    }
     fn fetchKnownAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, known_message: ?t.Message) !t.Attachment {
         try s.capability(a, store.state.account, req, "mail-read");
         const message_id = try j.required(req, "messageId");
@@ -2020,6 +2111,7 @@ pub const Session = struct {
         try operations.appendSlice(a, store.state.operations);
         const wire_identity = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ store.state.account, operation_id });
         const wire_hash = storage.Store.hash(wire_identity);
+        var fixture_raw: ?[]const u8 = null;
         {
             var from: recipients.Mailbox = .{};
             const sender = draft.from orelse t.Address{ .address = store.state.account };
@@ -2044,9 +2136,13 @@ pub const Session = struct {
             };
             const mime = @import("mime.zig");
             const wire = try a.alloc(u8, mime.max_raw_bytes);
-            const raw = mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = "Mon, 05 Oct 2026 12:00:00 +0000", .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = try mime.composeAttachments(draft.attachments, a) }, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
+            const raw = mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = "Mon, 05 Oct 2026 12:00:00 +0000", .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = try mime.composeAttachments(draft.attachments, a) }, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
             // Gmail's outer JSON base64url envelope shares the request quota.
             if (std.base64.url_safe_no_pad.Encoder.calcSize(raw.len) > t.Limits.request_bytes - 1024) return error.FormTooLarge;
+            if (s.options.fixtures) {
+                const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
+                fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+            }
         }
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
         const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
@@ -2083,7 +2179,10 @@ pub const Session = struct {
             store.state.fixtureSends += 1;
             operation.messageId = try store.nextId("sent");
             operation.outcome = if (s.scenario("applied-lost")) "unknown" else "applied";
-            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(prepared.plain, 240), .bodyText = prepared.plain, .bodyHtml = prepared.html, .bodySource = .plain, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = draft.attachments, .invitation = calendar };
+            var sent_attachments: std.ArrayList(t.Attachment) = .empty;
+            try sent_attachments.appendSlice(a, prepared.resources);
+            try sent_attachments.appendSlice(a, draft.attachments);
+            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(prepared.plain, 240), .bodyText = prepared.plain, .bodyHtml = prepared.html, .bodySource = .plain, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = sent_attachments.items, .invitation = calendar, .fixtureRaw = fixture_raw };
             // Copy the receipt first: put() can grow the entries slice, never operations.
             store.putOutbox(sent) catch {
                 operation.outcome = "unknown";
@@ -2150,7 +2249,11 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
         if (draft.recoveryFields.?.len != 5) return error.InvalidRecovery;
     };
     draft.attachments = if (j.get(v, "attachments")) |x| try j.decode([]const t.Attachment, a, x) else &.{};
+    if (j.get(v, "original")) |original| {
+        if (original != .null) draft.original = try j.decode(t.Original, a, original);
+    }
     _ = try @import("mime.zig").composeAttachments(draft.attachments, a);
+    if (draft.original) |original| _ = try @import("mime.zig").composeAttachments(original.resources, a);
     return draft;
 }
 fn requestBodyFormat(v: Value) !t.BodyFormat {
@@ -2169,9 +2272,11 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (send and d.to.len + d.cc.len + d.bcc.len == 0) return error.MissingRecipient;
     if (d.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(d.bodyText)) return error.InvalidUtf8;
-    if (d.attachments.len > 16) return error.TooManyAttachments;
+    const related = if (d.original) |original| original.resources else &.{};
+    if (d.attachments.len + related.len > 16) return error.TooManyAttachments;
+    if (d.original) |original| try @import("original_mail.zig").validate(original);
     var attachment_bytes: usize = 0;
-    for (d.attachments) |attachment| {
+    for ([_][]const t.Attachment{ d.attachments, related }) |list| for (list) |attachment| {
         if (attachment.filename.len == 0 or attachment.filename.len > 256 or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
         try recipients.validateHeader(attachment.filename);
         try recipients.validateHeader(attachment.mimeType);
@@ -2181,6 +2286,21 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
         if (attachment_bytes > t.Limits.body_bytes or n != attachment.size) return error.InvalidAttachment;
         // Validate every encoded byte without allocating a second binary copy.
         for (attachment.data) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return error.InvalidAttachment;
+        try @import("mime.zig").validateAttachment(attachment.filename, attachment.mimeType);
+        if (attachment.contentId) |id| _ = try @import("mime.zig").contentId(id);
+        if (attachment.disposition) |value| if (!std.mem.eql(u8, value, "inline") and !std.mem.eql(u8, value, "attachment")) return error.InvalidDisposition;
+        if (attachment.contentLocation) |value| {
+            try recipients.validateHeader(value);
+            if (value.len == 0 or value.len > 2048) return error.InvalidContentLocation;
+        }
+    };
+    for (related, 0..) |resource, index| {
+        if (std.ascii.startsWithIgnoreCase(resource.mimeType, "message/")) return error.UnsupportedRelatedType;
+        if (resource.contentId == null and resource.contentLocation == null) return error.MissingRelatedIdentity;
+        for (related[0..index]) |previous| {
+            if (resource.contentId) |id| if (previous.contentId) |other| if (std.mem.eql(u8, id, other)) return error.AmbiguousContentId;
+            if (resource.contentLocation) |location| if (previous.contentLocation) |other| if (std.mem.eql(u8, location, other)) return error.AmbiguousContentId;
+        }
     }
     try recipients.validateHeader(d.subject);
     try recipients.validateHeader(d.inReplyTo);

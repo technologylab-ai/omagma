@@ -385,6 +385,7 @@ pub const Store = struct {
         metadata.replyTo = &.{};
         metadata.attachments = &.{};
         metadata.invitation = null;
+        metadata.fixtureRaw = null;
         var existing: ?usize = null;
         for (s.state.entries, 0..) |entry, i| if (std.mem.eql(u8, entry.message.id, message.id)) {
             existing = i;
@@ -519,6 +520,7 @@ pub const Store = struct {
         metadata.bodySource = .unknown;
         metadata.attachments = &.{};
         metadata.invitation = null;
+        metadata.fixtureRaw = null;
         try list.append(s.allocator, metadata);
         s.state.outbox = list.items;
         try s.save();
@@ -590,6 +592,7 @@ pub const Store = struct {
         preview.bodyText = "";
         preview.attachments = &.{};
         preview.recoveryFields = null;
+        preview.original = null;
         if (index) |i| s.state.drafts[i] = preview else {
             var list: std.ArrayList(t.Draft) = .empty;
             try list.appendSlice(s.allocator, s.state.drafts);

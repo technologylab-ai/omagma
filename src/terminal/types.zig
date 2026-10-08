@@ -77,7 +77,16 @@ pub const Client = struct {
     }
 };
 pub const Address = struct { address: []const u8, name: []const u8 = "" };
-pub const Attachment = struct { id: []const u8, filename: []const u8, mimeType: []const u8 = "application/octet-stream", size: usize = 0, data: []const u8 = "" };
+pub const Attachment = struct {
+    id: []const u8,
+    filename: []const u8,
+    mimeType: []const u8 = "application/octet-stream",
+    size: usize = 0,
+    data: []const u8 = "",
+    contentId: ?[]const u8 = null,
+    disposition: ?[]const u8 = null,
+    contentLocation: ?[]const u8 = null,
+};
 pub const BodySource = enum { unknown, plain, html };
 /// bodyText stays the editable source. Legacy drafts and omitted CLI fields
 /// retain their literal meaning; fresh TUI composers opt into Markdown.
@@ -93,17 +102,36 @@ pub const Message = struct {
     snippet: []const u8 = "",
     bodyText: []const u8 = "",
     bodyHtml: ?[]const u8 = null,
+    bodyHtmlAmbiguous: bool = false,
     bodySource: BodySource = .unknown,
     messageId: []const u8 = "",
     references: []const u8 = "",
     inReplyTo: []const u8 = "",
     labels: []const []const u8 = &.{},
     receivedAt: i64 = 0,
+    sentDate: ?[]const u8 = null,
     unread: bool = false,
     bodyCached: bool = false,
     bodyCacheError: []const u8 = "",
     attachments: []const Attachment = &.{},
     invitation: ?[]const u8 = null,
+    /// Independent wire oracle for synthetic fixture sends only. Production
+    /// messages never populate or persist raw MIME through this field.
+    fixtureRaw: ?[]const u8 = null,
+};
+/// Frozen source for an inline formatted reply/forward. bodyText in the draft
+/// remains the separately editable personal note.
+pub const Original = struct {
+    version: u8 = 1,
+    sourceMessageId: []const u8 = "",
+    from: Address = .{ .address = "" },
+    to: []const Address = &.{},
+    cc: []const Address = &.{},
+    subject: []const u8 = "",
+    date: []const u8 = "",
+    bodyText: []const u8 = "",
+    bodyHtml: []const u8 = "",
+    resources: []const Attachment = &.{},
 };
 pub const Draft = struct {
     id: []const u8 = "",
@@ -121,5 +149,6 @@ pub const Draft = struct {
     inReplyTo: []const u8 = "",
     references: []const u8 = "",
     attachments: []const Attachment = &.{},
+    original: ?Original = null,
 };
 pub const Contact = struct { resourceName: []const u8 = "", etag: []const u8 = "", name: []const u8 = "", emails: []const Address = &.{} };

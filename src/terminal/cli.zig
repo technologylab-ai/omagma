@@ -61,6 +61,17 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             continue;
         }
         if (eq(arg, "--json")) continue;
+        if (eq(arg, "--original")) {
+            if (interactive or jsonl or !eq(j.text(req, "cmd"), "mail.forward")) return error.OriginalRequiresForward;
+            try req.object.put(sa, "original", .{ .bool = true });
+            continue;
+        }
+        if (eq(arg, "--preserve-formatting")) {
+            const command = j.text(req, "cmd");
+            if (interactive or jsonl or (!eq(command, "mail.reply") and !eq(command, "mail.forward"))) return error.PreserveFormattingRequiresReplyOrForward;
+            try req.object.put(sa, "preserveFormatting", .{ .bool = true });
+            continue;
+        }
         if (eq(arg, "--all") or eq(arg, "--reply-all")) {
             try req.object.put(sa, "all", .{ .bool = true });
             continue;
@@ -162,6 +173,7 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             try req.object.put(sa, key, values);
         } else return error.UnknownOption;
     }
+    if (try j.boolean(req, "original", false) and try j.boolean(req, "preserveFormatting", false)) return error.ConflictingForwardModes;
     if (has_draft) {
         if (req.object.get("draft") != null) return error.ConflictingDraftOptions;
         try req.object.put(sa, "draft", draft);
@@ -296,6 +308,7 @@ pub fn help(io: std.Io) !void {
     var w = std.Io.File.stdout().writer(io, &buf);
     try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|mark|batch|undo|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN.\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
     try w.interface.writeAll("Outgoing bodies: --format markdown|plain (default plain) on compose/create/update/send/reply/forward.\nDraft source stays in bodyText; JSONL uses draft.bodyFormat (reply/forward: bodyFormat).\nReview rendered alternatives with draft preview --draft-id ID, or --body-file FILE --format markdown.\n");
+    try w.interface.writeAll("Reply/forward: --preserve-formatting retains original HTML and embedded images inline; bodyText is your separate note.\nForward: --original encloses the exact original as a separate .eml file. These modes cannot be combined.\nJSONL uses preserveFormatting:true on mail.reply/mail.forward, or original:true on mail.forward.\n");
     try w.interface.writeAll("Label collection: omagma labels list|create|rename|delete --account ADDRESS\n  create --name NAME --operation-id ID\n  rename --label-id ID --name NAME --operation-id ID\n  delete --label-id ID --confirm-name NAME --operation-id ID\nLabel deletion removes the custom label and its associations, never messages. System labels are protected.\nCollection writes need mail-modify; keep each operation ID stable and never retry an unknown outcome automatically.\n");
     try w.interface.flush();
 }

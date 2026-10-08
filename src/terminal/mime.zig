@@ -17,7 +17,7 @@ pub const max_calendar_bytes = 128 * 1024;
 /// Last millisecond of year 9999, within the terminal timestamp formatter's range.
 pub const max_received_at_ms: i64 = 253402300799999;
 pub const Header = struct { name: []const u8, value: []const u8 };
-pub const Attachment = struct { id: []const u8 = "", filename: []const u8, mime_type: []const u8, content_id: []const u8 = "", size: usize = 0, data: []const u8 };
+pub const Attachment = struct { id: []const u8 = "", filename: []const u8, mime_type: []const u8, content_id: []const u8 = "", disposition: []const u8 = "", content_location: []const u8 = "", size: usize = 0, data: []const u8 };
 pub const ParsedMessage = struct {
     headers: []const Header = &.{},
     from: []const recipients.IncomingMailbox = &.{},
@@ -32,6 +32,7 @@ pub const ParsedMessage = struct {
     references: []const u8 = "",
     body_text: []const u8 = "",
     body_html: []const u8 = "",
+    html_documents: usize = 0,
     body_source: types.BodySource = .unknown,
     calendar: ?[]const u8 = null,
     attachments: []const Attachment = &.{},
@@ -93,6 +94,11 @@ pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, exter
             .mimeType = item.mime_type,
             .size = item.size,
             .data = std.base64.url_safe_no_pad.Encoder.encode(encoded, item.data),
+            // Ordinary reading need not refuse a message for a malformed CID
+            // it previously ignored. Formatted capture validates this field.
+            .contentId = if (item.content_id.len == 0) null else contentId(item.content_id) catch item.content_id,
+            .disposition = if (item.disposition.len == 0) null else item.disposition,
+            .contentLocation = if (item.content_location.len == 0) null else item.content_location,
         };
     }
     return .{
@@ -106,12 +112,14 @@ pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, exter
         .snippet = try sanitizeText(if (b.optional(value, "snippet")) |v| try b.string(v) else "", allocator),
         .bodyText = parsed.body_text,
         .bodyHtml = if (parsed.body_html.len == 0) null else parsed.body_html,
+        .bodyHtmlAmbiguous = parsed.html_documents > 1,
         .bodySource = parsed.body_source,
         .messageId = parsed.message_id,
         .references = parsed.references,
         .inReplyTo = parsed.in_reply_to,
         .labels = labels,
         .receivedAt = received,
+        .sentDate = if (parsed.date.len == 0) null else parsed.date,
         .unread = unread,
         .attachments = attachments,
         .invitation = parsed.calendar,
@@ -162,6 +170,42 @@ fn splitEntity(raw: []const u8, allocator: std.mem.Allocator) !Entity {
         try list.append(allocator, .{ .name = try allocator.dupe(u8, line[0..colon]), .value = try allocator.dupe(u8, value) });
     }
     return .{ .headers = try list.toOwnedSlice(allocator), .body = raw[split + separator ..] };
+}
+
+pub const OriginalSource = struct { subject: []const u8, attachment: types.Attachment };
+/// Only inspect headers: arbitrary MIME bodies need not be understood by the
+/// terminal reader before the original can be enclosed without alteration.
+pub fn originalSource(a: std.mem.Allocator, raw: []const u8) !OriginalSource {
+    if (raw.len > max_body_bytes) return error.BodyTooLarge;
+    const entity = try splitEntity(raw, a);
+    if ((try header(entity.headers, "Subject")).len == 0 and (try header(entity.headers, "From")).len == 0 and (try header(entity.headers, "Date")).len == 0) return error.InvalidHeaders;
+    const decoded = decodeHeader(try header(entity.headers, "Subject"), a) catch |err| switch (err) {
+        error.InvalidUtf8, error.InvalidEncodedWord, error.InvalidBase64, error.UnsupportedCharset, error.InvalidCharsetData => "Original message",
+        else => return err,
+    };
+    const subject = if (decoded.len == 0 or decoded.len > 4000) "Original message" else decoded;
+    var ascii = true;
+    for (raw) |c| ascii = ascii and c < 128;
+    const headers_utf8 = std.unicode.utf8ValidateSlice(raw[0 .. raw.len - entity.body.len]);
+    const mime_type: []const u8 = if (!identityEncodingSafe(raw) or !headers_utf8) "application/octet-stream" else if (ascii) "message/rfc822" else "message/global";
+    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
+    return .{ .subject = subject, .attachment = .{ .id = "", .filename = "original.eml", .mimeType = mime_type, .size = raw.len, .data = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw) } };
+}
+fn identityEncodingSafe(raw: []const u8) bool {
+    var line: usize = 0;
+    for (raw, 0..) |c, index| {
+        if (c == 0) return false;
+        if (c == '\r') {
+            if (index + 1 >= raw.len or raw[index + 1] != '\n') return false;
+        } else if (c == '\n') {
+            if (index == 0 or raw[index - 1] != '\r') return false;
+            line = 0;
+        } else {
+            line += 1;
+            if (line > 998) return false;
+        }
+    }
+    return true;
 }
 
 fn gmailHeaders(payload: std.json.Value, allocator: std.mem.Allocator) ![]const Header {
@@ -244,6 +288,20 @@ fn isAttached(headers: []const Header, filename: []const u8) !bool {
     const disposition = try header(headers, "Content-Disposition");
     return filename.len > 0 or std.ascii.startsWithIgnoreCase(disposition, "attachment");
 }
+/// Shared DTO IDs omit RFC angle brackets. Refuse values that cannot safely be
+/// emitted as Content-ID or matched against a literal cid: reference.
+pub fn contentId(value: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    const id = if (trimmed.len >= 2 and trimmed[0] == '<' and trimmed[trimmed.len - 1] == '>') trimmed[1 .. trimmed.len - 1] else trimmed;
+    if (id.len == 0 or id.len > 512) return error.InvalidContentId;
+    for (id) |c| if (c <= 32 or c >= 127 or c == '<' or c == '>' or c == '"' or c == '\\') return error.InvalidContentId;
+    return id;
+}
+fn dispositionToken(headers: []const Header) ![]const u8 {
+    const value = try header(headers, "Content-Disposition");
+    const token = std.mem.trim(u8, value[0 .. std.mem.indexOfScalar(u8, value, ';') orelse value.len], " \t");
+    return if (std.ascii.eqlIgnoreCase(token, "inline")) "inline" else if (std.ascii.eqlIgnoreCase(token, "attachment")) "attachment" else "";
+}
 
 /// Some Outlook exports carry the calendar as a named binary .ics attachment.
 /// Only explicit calendar MIME types or .ics octet-stream files qualify; a
@@ -314,6 +372,7 @@ const Context = struct {
     decoded: usize = 0,
     plain: std.ArrayList(u8) = .empty,
     html: std.ArrayList(u8) = .empty,
+    html_documents: usize = 0,
     calendar: ?[]const u8 = null,
     attachments: std.ArrayList(Attachment) = .empty,
     external_bodies: ?std.json.Value = null,
@@ -350,12 +409,13 @@ const Context = struct {
         }
         if (attached or (!std.ascii.eqlIgnoreCase(mime_type, "text/plain") and !std.ascii.eqlIgnoreCase(mime_type, "text/html") and !std.ascii.eqlIgnoreCase(mime_type, "text/calendar"))) {
             if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
-            try self.attachments.append(self.allocator, .{ .filename = decoded_filename, .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .size = data.len, .data = data });
+            try self.attachments.append(self.allocator, .{ .filename = decoded_filename, .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .disposition = try dispositionToken(headers), .content_location = try self.allocator.dupe(u8, try header(headers, "Content-Location")), .size = data.len, .data = data });
         }
         if (attached) return;
         if (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) {
             const text = try convertCharset(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator);
             const target = if (std.ascii.eqlIgnoreCase(mime_type, "text/plain")) &self.plain else &self.html;
+            if (std.ascii.eqlIgnoreCase(mime_type, "text/html")) self.html_documents += 1;
             if (text.len + @intFromBool(target.items.len != 0) > max_body_bytes - target.items.len) return error.BodyTooLarge;
             if (target.items.len != 0) try target.append(self.allocator, '\n');
             try target.appendSlice(self.allocator, text);
@@ -381,7 +441,11 @@ const Context = struct {
                     const suffix = line[prefix.len..];
                     if (suffix.len == 0 or std.mem.eql(u8, suffix, "--")) {
                         if (start) |begin| {
-                            const part = std.mem.trimEnd(u8, entity.body[begin..offset], "\r\n");
+                            // Exactly one newline belongs to the delimiter.
+                            // Further trailing newlines belong to an enclosed
+                            // original message and must survive byte-for-byte.
+                            const end_at = if (offset >= begin + 2 and std.mem.eql(u8, entity.body[offset - 2 .. offset], "\r\n")) offset - 2 else if (offset > begin and entity.body[offset - 1] == '\n') offset - 1 else offset;
+                            const part = entity.body[begin..end_at];
                             try self.rawPart(try splitEntity(part, self.allocator), depth + 1);
                         }
                         if (suffix.len != 0) {
@@ -431,7 +495,7 @@ const Context = struct {
                 if (external_data == null) {
                     if (isCalendarPart(mime_type, filename) or (filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")))) return error.ExternalBodyRequired;
                     if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
-                    try self.attachments.append(self.allocator, .{ .id = try self.allocator.dupe(u8, text), .filename = try decodeHeader(filename, self.allocator), .mime_type = try self.allocator.dupe(u8, mime_type), .size = @intCast(declared), .data = "" });
+                    try self.attachments.append(self.allocator, .{ .id = try self.allocator.dupe(u8, text), .filename = try decodeHeader(filename, self.allocator), .mime_type = try self.allocator.dupe(u8, mime_type), .content_id = try self.allocator.dupe(u8, try header(headers, "Content-ID")), .disposition = try dispositionToken(headers), .content_location = try self.allocator.dupe(u8, try header(headers, "Content-Location")), .size = @intCast(declared), .data = "" });
                     return;
                 }
             }
@@ -461,6 +525,7 @@ const Context = struct {
     }
     fn finish(self: *Context, result: *ParsedMessage) !void {
         result.body_html = try self.html.toOwnedSlice(self.allocator);
+        result.html_documents = self.html_documents;
         result.body_source = if (self.plain.items.len > 0) .plain else if (result.body_html.len > 0) .html else .unknown;
         // htmlToText already returns owned sanitized text. A second sanitize
         // retained another full body in arena callers without changing bytes.
@@ -830,12 +895,16 @@ pub const Compose = struct {
     html: ?[]const u8 = null,
     /// Fixed public branding image, independent of the user's attachment quota.
     inline_logo: bool = false,
+    /// First byte of the trusted generated branding CID value. Imported HTML
+    /// can contain its own Omagma footer, so it must never be searched/rebound.
+    logo_offset: ?usize = null,
     calendar: ?[]const u8 = null,
     message_id: []const u8,
     date: []const u8,
     in_reply_to: []const u8 = "",
     references: []const u8 = "",
     attachments: []const Attachment = &.{},
+    related: []const Attachment = &.{},
 };
 
 fn encodedWords(writer: *std.Io.Writer, value: []const u8) !void {
@@ -962,12 +1031,15 @@ pub fn composeAttachments(input: []const types.Attachment, a: std.mem.Allocator)
         if (item.size != decoded_size) return error.BodySizeMismatch;
         const data = try decodeBase64Url(item.data, a);
         total += data.len;
-        dest.* = .{ .filename = item.filename, .mime_type = item.mimeType, .size = data.len, .data = data };
+        dest.* = .{ .filename = item.filename, .mime_type = item.mimeType, .content_id = if (item.contentId) |id| try contentId(id) else "", .disposition = item.disposition orelse "", .content_location = item.contentLocation orelse "", .size = data.len, .data = data };
     }
     return attachments;
 }
-fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment) !void {
-    try writer.print("Content-Type: {s}\r\nContent-Disposition: attachment;\r\n filename*0*=UTF-8''", .{attachment.mime_type});
+fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment, related: bool) !void {
+    // Related resources must display in the HTML even when the source client
+    // tagged a referenced image as an attachment. The frozen snapshot keeps
+    // that source disposition separately.
+    try writer.print("Content-Type: {s}\r\nContent-Disposition: {s};\r\n filename*0*=UTF-8''", .{ attachment.mime_type, if (related) @as([]const u8, "inline") else "attachment" });
     const hex = "0123456789ABCDEF";
     var col: usize = 0;
     var segment: usize = 0;
@@ -982,7 +1054,20 @@ fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment) !void {
         col += length;
         if (literal) try writer.writeByte(c) else try writer.writeAll(&.{ '%', hex[c >> 4], hex[c & 15] });
     }
-    try writer.writeAll("\r\nContent-Transfer-Encoding: base64\r\n\r\n");
+    try writer.writeAll("\r\n");
+    if (related and attachment.content_id.len > 0) try writer.print("Content-ID: <{s}>\r\n", .{try contentId(attachment.content_id)});
+    if (related and attachment.content_location.len > 0) {
+        try recipients.validateHeader(attachment.content_location);
+        try writer.print("Content-Location: {s}\r\n", .{attachment.content_location});
+    }
+    if (std.ascii.eqlIgnoreCase(attachment.mime_type, "message/rfc822") or std.ascii.eqlIgnoreCase(attachment.mime_type, "message/global")) {
+        if (!identityEncodingSafe(attachment.data)) return error.UnsupportedOriginalEncoding;
+        try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n\r\n");
+        try writer.writeAll(attachment.data);
+        try writer.writeAll("\r\n");
+        return;
+    }
+    try writer.writeAll("Content-Transfer-Encoding: base64\r\n\r\n");
     var offset: usize = 0;
     while (offset < attachment.data.len) {
         const end = @min(offset + 57, attachment.data.len);
@@ -999,22 +1084,34 @@ pub fn logoContentId(message_id: []const u8, out: []u8) ![]const u8 {
     std.crypto.hash.sha2.Sha256.hash(message_id, &digest, .{});
     return std.fmt.bufPrint(out, "omagma-logo.{s}@omagma.invalid", .{std.fmt.bytesToHex(digest, .lower)});
 }
-fn htmlPart(writer: *std.Io.Writer, html: []const u8, inline_logo: bool, message_id: []const u8) !void {
-    if (!inline_logo) return textPart(writer, "text/html", html);
+fn htmlPart(writer: *std.Io.Writer, html: []const u8, inline_logo: bool, logo_offset: ?usize, message_id: []const u8, related: []const Attachment) !void {
+    if (!inline_logo and related.len == 0) return textPart(writer, "text/html", html);
     const needle = "<img src=\"cid:omagma-logo@omagma.invalid\"";
-    const found = std.mem.indexOf(u8, html, needle) orelse return error.MissingLogoReference;
-    if (std.mem.indexOf(u8, html[found + needle.len ..], needle) != null) return error.AmbiguousLogoReference;
+    const value_at: usize = if (!inline_logo) 0 else if (logo_offset) |offset| blk: {
+        if (offset > html.len or markdown_logo.content_id.len > html.len - offset or !std.mem.eql(u8, html[offset..][0..markdown_logo.content_id.len], markdown_logo.content_id)) return error.MissingLogoReference;
+        break :blk offset;
+    } else blk: {
+        const found = std.mem.indexOf(u8, html, needle) orelse return error.MissingLogoReference;
+        if (std.mem.indexOf(u8, html[found + needle.len ..], needle) != null) return error.AmbiguousLogoReference;
+        break :blk found + "<img src=\"cid:".len;
+    };
     var cid_buffer: [128]u8 = undefined;
     const cid = try logoContentId(message_id, &cid_buffer);
-    const value_at = found + "<img src=\"cid:".len;
+    for (related) |resource| if (inline_logo and std.mem.eql(u8, resource.content_id, cid)) return error.AmbiguousContentId;
     try writer.writeAll("Content-Type: multipart/related; type=\"text/html\"; boundary=\"omagma-v1-related\"\r\n\r\n--omagma-v1-related\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n");
-    try emitTextParts(writer, &.{ html[0..value_at], cid, html[value_at + markdown_logo.content_id.len ..] });
-    try writer.print("--omagma-v1-related\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=\"omagma-logo.png\"\r\nContent-ID: <{s}>\r\nContent-Transfer-Encoding: base64\r\n\r\n", .{cid});
-    var offset: usize = 0;
-    while (offset < markdown_logo.png.len) {
-        const end = @min(offset + 57, markdown_logo.png.len);
-        try emitBase64Line(writer, markdown_logo.png[offset..end]);
-        offset = end;
+    if (inline_logo) {
+        try emitTextParts(writer, &.{ html[0..value_at], cid, html[value_at + markdown_logo.content_id.len ..] });
+        try writer.print("--omagma-v1-related\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=\"omagma-logo.png\"\r\nContent-ID: <{s}>\r\nContent-Transfer-Encoding: base64\r\n\r\n", .{cid});
+        var offset: usize = 0;
+        while (offset < markdown_logo.png.len) {
+            const end = @min(offset + 57, markdown_logo.png.len);
+            try emitBase64Line(writer, markdown_logo.png[offset..end]);
+            offset = end;
+        }
+    } else try emitText(writer, html);
+    for (related) |resource| {
+        try writer.writeAll("--omagma-v1-related\r\n");
+        try attachmentPart(writer, resource, true);
     }
     try writer.writeAll("--omagma-v1-related--\r\n");
 }
@@ -1032,15 +1129,28 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
     if (compose.html) |html| try validateBody(html);
     if (compose.calendar) |calendar| try validateBody(calendar);
     if (compose.html != null and compose.calendar != null) return error.UnsupportedComposeParts;
-    if (compose.inline_logo and compose.html == null) return error.UnsupportedComposeParts;
-    if (compose.attachments.len > 16) return error.TooManyAttachments;
+    if ((compose.inline_logo or compose.related.len > 0) and compose.html == null) return error.UnsupportedComposeParts;
+    if (compose.attachments.len + compose.related.len > 16) return error.TooManyAttachments;
     var attachment_bytes: usize = 0;
-    for (compose.attachments) |attachment| {
+    for ([_][]const Attachment{ compose.attachments, compose.related }) |list| for (list) |attachment| {
         try validateAttachment(attachment.filename, attachment.mime_type);
         if (attachment.data.len > max_body_bytes - attachment_bytes) return error.AttachmentsTooLarge;
         attachment_bytes += attachment.data.len;
         if (attachment.size != 0 and attachment.size != attachment.data.len) return error.BodySizeMismatch;
+    };
+    for (compose.related, 0..) |resource, index| {
+        if (std.ascii.startsWithIgnoreCase(resource.mime_type, "message/")) return error.UnsupportedRelatedType;
+        if (resource.content_id.len == 0 and resource.content_location.len == 0) return error.MissingRelatedIdentity;
+        if (resource.content_id.len > 0) _ = try contentId(resource.content_id);
+        try recipients.validateHeader(resource.content_location);
+        for (compose.related[0..index]) |previous| if ((resource.content_id.len > 0 and std.mem.eql(u8, resource.content_id, previous.content_id)) or (resource.content_location.len > 0 and std.mem.eql(u8, resource.content_location, previous.content_location))) return error.AmbiguousContentId;
     }
+    var boundary_buffer: [70]u8 = undefined;
+    const boundary = try outerBoundary(compose, &boundary_buffer);
+    var eight_bit = false;
+    for (compose.attachments) |attachment| if (std.ascii.eqlIgnoreCase(attachment.mime_type, "message/rfc822") or std.ascii.eqlIgnoreCase(attachment.mime_type, "message/global")) {
+        for (attachment.data) |c| eight_bit = eight_bit or c >= 128;
+    };
     var writer = std.Io.Writer.fixed(out);
     try writer.writeAll("From: ");
     try writeMailbox(&writer, &compose.from);
@@ -1055,28 +1165,111 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
     try writeReferences(&writer, compose.references);
     if (compose.html != null or compose.calendar != null or compose.attachments.len > 0) {
         const mixed = compose.calendar != null or compose.attachments.len > 0;
-        try writer.print("Content-Type: multipart/{s}; boundary=\"omagma-v1-part\"\r\n\r\n--omagma-v1-part\r\n", .{if (mixed) @as([]const u8, "mixed") else "alternative"});
+        try writer.print("Content-Type: multipart/{s}; boundary=\"{s}\"\r\n", .{ if (mixed) @as([]const u8, "mixed") else "alternative", boundary });
+        if (eight_bit) try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n");
+        try writer.print("\r\n--{s}\r\n", .{boundary});
         if (compose.html != null and mixed) {
             try writer.writeAll("Content-Type: multipart/alternative; boundary=\"omagma-v1-alt\"\r\n\r\n--omagma-v1-alt\r\n");
             try textPart(&writer, "text/plain", compose.body);
             try writer.writeAll("--omagma-v1-alt\r\n");
-            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.message_id);
+            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.logo_offset, compose.message_id, compose.related);
             try writer.writeAll("--omagma-v1-alt--\r\n");
         } else try textPart(&writer, "text/plain", compose.body);
         if (compose.calendar) |ics| {
-            try writer.writeAll("--omagma-v1-part\r\n");
+            try writer.print("--{s}\r\n", .{boundary});
             try textPart(&writer, "text/calendar; method=REPLY", ics);
         } else if (compose.html != null and !mixed) {
-            try writer.writeAll("--omagma-v1-part\r\n");
-            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.message_id);
+            try writer.print("--{s}\r\n", .{boundary});
+            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.logo_offset, compose.message_id, compose.related);
         }
         for (compose.attachments) |attachment| {
-            try writer.writeAll("--omagma-v1-part\r\n");
-            try attachmentPart(&writer, attachment);
+            try writer.print("--{s}\r\n", .{boundary});
+            try attachmentPart(&writer, attachment, false);
         }
-        try writer.writeAll("--omagma-v1-part--\r\n");
+        try writer.print("--{s}--\r\n", .{boundary});
     } else try textPart(&writer, "text/plain", compose.body);
     return writer.buffered();
+}
+
+test "original mail: exact message attachment and collision-safe outer MIME delimiter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = "From: source@example.test\r\nSubject: Original\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"omagma-v1-part\"\r\n\r\n--omagma-v1-part\r\nContent-Type: text/html\r\n\r\n<p><img src=\"cid:image@example.test\"></p>\r\n--omagma-v1-part--\r\n\r\n";
+    const source = try originalSource(a, original);
+    try std.testing.expectEqualStrings("message/rfc822", source.attachment.mimeType);
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("self@example.test");
+    var envelope_out: recipients.Envelope = .{};
+    var peer: recipients.Mailbox = .{};
+    try peer.address.set("peer@example.test");
+    try envelope_out.to.append(peer);
+    const output = try a.alloc(u8, max_raw_bytes);
+    const raw = try encode(.{ .from = sender, .envelope = &envelope_out, .subject = "Fwd: Original", .body = "My note", .message_id = "<forward@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000", .attachments = try composeAttachments(&.{source.attachment}, a) }, output);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "boundary=\"omagma-v1-part.") != null);
+    const marker = "Content-Type: message/rfc822\r\n";
+    const part_at = std.mem.indexOf(u8, raw, marker).?;
+    const body_at = (std.mem.indexOfPos(u8, raw, part_at, "\r\n\r\n") orelse return error.MissingOriginalPart) + 4;
+    try std.testing.expectEqualSlices(u8, original, raw[body_at..][0..original.len]);
+    try std.testing.expect(std.mem.indexOf(u8, raw[part_at..body_at], "Content-Transfer-Encoding: 8bit") != null);
+    const parsed = try parse(raw, a);
+    try std.testing.expectEqualSlices(u8, original, parsed.attachments[0].data);
+    const utf8 = try originalSource(a, "Subject: Original 🌋\r\n\r\n<p>Original</p>\r\n");
+    try std.testing.expectEqualStrings("message/global", utf8.attachment.mimeType);
+    const binary = try originalSource(a, "Subject: Binary\r\n\r\n\x00\xff\r\n");
+    try std.testing.expectEqualStrings("application/octet-stream", binary.attachment.mimeType);
+}
+
+test "original mail: related resources keep original CID and only trusted logo offset is rebound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rendered = try @import("markdown_mail.zig").render(a, "**My note**");
+    const html = try std.fmt.allocPrint(a, "{s}<img src=\"cid:omagma-logo@omagma.invalid\" alt=\"Original footer\">", .{rendered.html});
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("self@example.test");
+    var envelope_out: recipients.Envelope = .{};
+    var peer: recipients.Mailbox = .{};
+    try peer.address.set("peer@example.test");
+    try envelope_out.to.append(peer);
+    const bytes = [_]u8{ 0, 255, 128, 13, 10 };
+    const related = [_]Attachment{.{ .filename = "original-footer.png", .mime_type = "image/png", .content_id = "omagma-logo@omagma.invalid", .data = &bytes, .size = bytes.len }};
+    const output = try a.alloc(u8, max_raw_bytes);
+    const raw = try encode(.{ .from = sender, .envelope = &envelope_out, .subject = "Inline original", .body = rendered.plain, .html = html, .inline_logo = true, .logo_offset = rendered.logoOffset, .related = &related, .message_id = "<inline-original@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000" }, output);
+    const parsed = try parse(raw, a);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.body_html, "cid:omagma-logo@omagma.invalid\" alt=\"Original footer\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), parsed.attachments.len);
+    try std.testing.expectEqualStrings("<omagma-logo@omagma.invalid>", parsed.attachments[1].content_id);
+    try std.testing.expectEqualSlices(u8, &bytes, parsed.attachments[1].data);
+}
+fn boundaryClashes(raw: []const u8, boundary: []const u8) bool {
+    var buffer: [74]u8 = undefined;
+    const marker = std.fmt.bufPrint(&buffer, "--{s}", .{boundary}) catch return true;
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    while (lines.next()) |line| if (std.mem.startsWith(u8, line, marker)) return true;
+    return false;
+}
+fn outerBoundary(compose: Compose, buffer: []u8) ![]const u8 {
+    const fixed = "omagma-v1-part";
+    var collision = false;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(compose.message_id);
+    for (compose.attachments) |attachment| {
+        hasher.update(attachment.data);
+        collision = collision or boundaryClashes(attachment.data, fixed);
+    }
+    if (!collision) return fixed;
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const prefix: [16]u8 = digest[0..16].*;
+    const hex = std.fmt.bytesToHex(prefix, .lower);
+    for (0..128) |attempt| {
+        const candidate = try std.fmt.bufPrint(buffer, "omagma-v1-part.{s}.{d}", .{ hex, attempt });
+        var valid = true;
+        for (compose.attachments) |attachment| valid = valid and !boundaryClashes(attachment.data, candidate);
+        if (valid) return candidate;
+    }
+    return error.MimeBoundaryCollision;
 }
 
 pub fn base64Url(raw: []const u8, out: []u8) ![]const u8 {
