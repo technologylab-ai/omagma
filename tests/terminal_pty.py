@@ -523,8 +523,14 @@ def exercise(terminal, action):
         return result
     if action == "save-incoming-attachment":
         terminal.until(lambda: "Ready" in terminal.text())
+        # The body renderer shows the decoded MIME alternative, not the
+        # synthetic metadata snippet. At this width that snippet is clipped
+        # before its message number. Wait on the actual selected body instead.
+        with Client(terminal.binary, terminal.directory) as client:
+            incoming = client.request("mail.read", messageId="shared-msg-003")
+        opening = incoming["bodyText"].splitlines()[0]
         gmail_search(terminal, "Synthetic personal message 003")
-        terminal.until(lambda: "Synthetic personal message 003" in terminal.text() and "Ready" in terminal.text()
+        terminal.until(lambda: opening in terminal.text() and "Ready" in terminal.text()
                        and "Gmail \\ Synthetic personal message 003" not in terminal.text())
         terminal.until(lambda: "Attachment 1:" in terminal.text() and "Ready" in terminal.text())
         destination = terminal.directory / "received fixture binary.bin"
@@ -553,7 +559,9 @@ def exercise(terminal, action):
                       literalPathWithSpaces=True, privateMode=True, overwriteRefused=True, relativePathRefused=True)
         return result
     if action == "attach-detach":
-        open_composer(terminal)
+        # Review correctly refuses an unaddressed draft. Use the same valid
+        # fictional recipient/subject/body as the other review workflows.
+        compose_fixture(terminal)
         data = b"Synthetic PTY attachment.\x00\x7f\x80\xff\n"
         path = terminal.directory / "fixture attachment.bin"
         path.write_bytes(data)
@@ -661,7 +669,7 @@ def exercise(terminal, action):
     if action == "rsvp-cancel":
         terminal.until(lambda: "Ready" in terminal.text())
         gmail_search(terminal, "subject:Synthetic personal thread 002")
-        terminal.until(lambda: "Invitation" in terminal.text() and "Ready" in terminal.text())
+        terminal.until(lambda: "I · Respond" in terminal.text() and "Ready" in terminal.text())
         terminal.send(b"I")
         terminal.until(lambda: "Review RSVP" in terminal.text() and "UID:" in terminal.text())
         for expected in ["personal@example.com", "organizer@example.org", "fixture-meeting@example.org"]:
@@ -675,7 +683,7 @@ def exercise(terminal, action):
     if action == "long-rsvp-review":
         terminal.until(lambda: "Ready" in terminal.text())
         gmail_search(terminal, "subject:Synthetic personal thread 002")
-        terminal.until(lambda: "Invitation" in terminal.text() and "Ready" in terminal.text())
+        terminal.until(lambda: "I · Respond" in terminal.text() and "Ready" in terminal.text())
         terminal.send(b"I")
         terminal.until(lambda: "Review RSVP" in terminal.text() and "Attendee:" in terminal.text())
 
@@ -689,7 +697,7 @@ def exercise(terminal, action):
                     "long RSVP detail clipped response/cancellation controls")
 
         identities_visible()
-        terminal.send(b"\x1b[F")
+        terminal.send(b"G")
         terminal.until(lambda: "UID-END@example.org" in terminal.text())
         identities_visible()
         require("20261107T100000Z" in terminal.text(), "scrolled RSVP review omitted its recurring instance")
