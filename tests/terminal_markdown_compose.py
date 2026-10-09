@@ -21,7 +21,7 @@ from terminal_cache import ProviderFixture
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import start
 from terminal_polish_compose import panel_text
-from terminal_file_dialog import capture
+from terminal_file_dialog import capture, rectangle
 from terminal_pty import wait_saved_compose
 
 ORIGINAL = "ORIGINAL-MARKDOWN-MARKER\nLiteral **stars** and [unsafe](javascript:alert(1)).\nSecond original line.\n"
@@ -81,6 +81,28 @@ def normal(terminal):
 
 def wait_compose(terminal):
     terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text() and "Body:" in terminal.text())
+
+
+def resize_compose(terminal, columns, rows):
+    terminal.resize(columns, rows)
+    clears = terminal.screen.full_physical_clears
+    def ready():
+        current = terminal.text()
+        bounds = rectangle(terminal, "Compose ·", required=False)
+        if (terminal.screen.full_physical_clears <= clears
+                or bounds is None or bounds[0] != 0 or bounds[2:] != (2, terminal.rows - 3)
+                or "Compose" not in terminal.screen.lines()[0]
+                or "Subject:" not in current or "Body:" not in current
+                or "Ctrl+S Review" not in terminal.screen.lines()[-2]):
+            return False
+        # Physical resize preserves old cells. The previous Compose/Body text
+        # alone cannot prove the app has switched its width-dependent p action.
+        if terminal.columns < 90:
+            return bounds[1] == terminal.columns - 1
+        return any(rectangle(terminal, title, required=False)
+                   == (bounds[1] + 1, terminal.columns - 1, 2, terminal.rows - 3)
+                   for title in ("Outgoing preview", "Draft preview", "Original message", "Plain-text alternative"))
+    terminal.until(ready)
 
 
 def rendered(terminal, literal):
@@ -164,16 +186,14 @@ def new_case(binary, directory, capture_dir=None):
             capture(terminal, capture_dir, "new-source-and-outgoing-wide")
             # At narrow width, the actual preview is a temporary full pane.
             # Returning preserves the source field and insertion point.
-            terminal.resize(80, 28)
-            terminal.until(lambda: "Compose" in terminal.text() and "Body:" in terminal.text())
+            resize_compose(terminal, 80, 28)
             terminal.send(b"p")
             rendered(terminal, "Bold new")
             capture(terminal, capture_dir, "new-outgoing-narrow")
             terminal.send(b"jk")
             normal(terminal)
             wait_compose(terminal)
-            terminal.resize(160, 42)
-            wait_compose(terminal)
+            resize_compose(terminal, 160, 42)
             terminal.send(b"i typed")
             terminal.until(lambda: "Literal p typed" in terminal.text())
             normal(terminal)

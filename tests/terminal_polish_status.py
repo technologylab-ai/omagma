@@ -96,9 +96,9 @@ def mail_page_navigation(binary, directory):
         terminal.until(lambda:terminal.screen.locate('Scroll fixture personal 096') is not None)
         # Independent viewport expectations include full and stacked readers,
         # resizes, odd card counts, and the smallest two-card pane.
-        for columns,rows,layout,count,half in ((160,42,'right',12,6),
-                (100,30,'right',8,4),(160,42,'below',4,2),
-                (100,30,'below',3,1),(48,20,'below',2,1)):
+        for columns,rows,layout,height,count,half in ((160,42,'right',36,12,6),
+                (100,30,'right',24,8,4),(160,42,'below',13,4,2),
+                (100,30,'below',8,3,1),(48,20,'below',5,2,1)):
             terminal.resize(columns,rows)
             terminal.send(f':layout {layout}\r'.encode())
             terminal.gap(.05)
@@ -109,7 +109,8 @@ def mail_page_navigation(binary, directory):
                 if title is None or subject is None:return False
                 panel=next((p for p in panel_interiors(terminal.screen)
                     if p[0]<=title['column']<p[1] and p[2]-1==title['row']),None)
-                return panel is not None and subject['row']==panel[2] and 'Fixture Sender' in terminal.screen.lines()[subject['row']+1]
+                return (panel is not None and panel[3]-panel[2]==height
+                        and subject['row']==panel[2] and 'Fixture Sender' in terminal.screen.lines()[subject['row']+1])
             terminal.until(lambda:at(1,0) and terminal.screen.locate(f'Scroll fixture personal {97-count:03}') is not None)
             terminal.send(b'\x04')
             terminal.until(lambda:at(half+1,half))

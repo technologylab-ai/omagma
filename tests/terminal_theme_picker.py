@@ -222,7 +222,9 @@ def follow_case(binary, directory, capture_dir):
         terminal.send(ENTER)
         terminal.until(lambda: not opened(terminal))
         terminal.resize(48, 20)
-        terminal.until(lambda: "Mail ·" in terminal.text())
+        clears = terminal.screen.full_physical_clears
+        terminal.until(lambda: terminal.screen.full_physical_clears > clears and "Mail ·" in terminal.text()
+                       and "j/k Mail  f Forward  m Labels  T Theme  ? Help" in terminal.screen.lines()[-2])
         terminal.send(b"T")
         terminal.until(lambda: opened(terminal))
         omagma = terminal.screen.locate("Omagma")
