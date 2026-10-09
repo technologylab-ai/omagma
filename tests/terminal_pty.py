@@ -565,14 +565,27 @@ def exercise(terminal, action):
         data = b"Synthetic PTY attachment.\x00\x7f\x80\xff\n"
         path = terminal.directory / "fixture attachment.bin"
         path.write_bytes(data)
+
+        def saved_compose(count):
+            current = terminal.text()
+            return (''.join(terminal.screen.cells[1]).strip() == "Local draft · no mail sent"
+                    and "saved locally · not sent" in ''.join(terminal.screen.cells[2])
+                    and "Ctrl+S Review" in ''.join(terminal.screen.cells[-2])
+                    and "Attach file · local draft" not in current and "Path:" not in current
+                    and f"Attachments {count}" in current)
+
         terminal.send(b"A")
         terminal.until(lambda: "Attach file · local draft" in terminal.text() and "Path:" in terminal.text()
                        and "[Attach]" in terminal.text())
         terminal.send(str(path).encode() + b"\r")
         # Autosave may replace the attachment-success notice. The durable row
         # and its source byte size are the user-visible result of attaching.
-        terminal.until(lambda: "Attachments 1" in terminal.text() and any(
+        terminal.until(lambda: saved_compose(1) and any(
             path.name in line and f"{len(data)} B" in line for line in terminal.text().splitlines()))
+        # Import and its following local save temporarily fence editing. Wait
+        # for the complete saved compose frame, then drain the remaining VT
+        # cells before issuing a separate, deliberate review action.
+        terminal.gap(.05)
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text() and "Attachment 1: fixture attachment.bin" in terminal.text())
         with Client(terminal.binary, terminal.directory) as client:
@@ -581,14 +594,19 @@ def exercise(terminal, action):
             attachments = client.request("draft.read", draftId=drafts[0]["id"])["attachments"]
             require(len(attachments) == 1 and attachments[0]["filename"] == path.name and attachments[0]["size"] == len(data),
                     "attachment review/save lost file metadata")
-            encoded = attachments[0]["data"]
-            decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+            # TUI file imports are immutable account-scoped handles, including
+            # small files. The shared oracle reads only this owned fixture
+            # cache and verifies private permissions and the handle digest;
+            # it also retains compatibility with inline attachment data.
+            from terminal_ux_batch_files_contacts import attachment_bytes
+            decoded = attachment_bytes(terminal.directory, attachments[0])
             require(decoded == data and hashlib.sha256(decoded).digest() == hashlib.sha256(data).digest(),
                     "attachment review/save changed binary bytes")
         terminal.send(b"n")
         terminal.until(lambda: "Compose" in terminal.text())
         terminal.send(b":detach 1\r")
-        terminal.until(lambda: "Attachments 0" in terminal.text() and path.name not in terminal.text())
+        terminal.until(lambda: saved_compose(0) and path.name not in terminal.text())
+        terminal.gap(.05)
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text())
         require("fixture attachment.bin" not in terminal.text(), "detached attachment remained in send review")

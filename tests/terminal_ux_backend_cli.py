@@ -23,7 +23,10 @@ def main():
     binary = args.binary.resolve()
     build = read_build_info(binary)
     with tempfile.TemporaryDirectory(prefix="omagma-ux-cli-") as temporary:
-        root = Path(temporary)
+        # Darwin spells its temporary root through /var, a system symlink.
+        # Use this owned directory's real spelling for the attachment saver,
+        # whose directory walker deliberately refuses symlink components.
+        root = Path(temporary).resolve()
         environment = os.environ.copy()
         environment.update(HOME=str(root / "home"), XDG_CONFIG_HOME=str(root / "config"),
                            XDG_CACHE_HOME=str(root / "xdg-cache"), XDG_DATA_HOME=str(root / "data"))
