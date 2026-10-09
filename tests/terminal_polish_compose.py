@@ -156,7 +156,8 @@ def compose_case(binary, directory):
         terminal.until(lambda: SAVE_TITLE in terminal.text() and "[Save]" in terminal.text() and "Path:" in terminal.text())
         received = directory / "home/Downloads/preview-one.txt"
         terminal.send(b"\r")
-        terminal.until(lambda: received.exists() and "Subject:" in terminal.text() and "Received attachments" not in terminal.text())
+        terminal.until(lambda: received.exists() and SAVE_TITLE not in terminal.text()
+                       and "Subject:" in terminal.text() and "Received attachments" not in terminal.text())
         require(received.read_bytes() == FIRST, "compose preview saved the wrong received file")
         terminal.polish_stage="outgoing-review-recipients"
         wait_saved_compose(terminal, 2)
@@ -213,7 +214,7 @@ def incoming_case(binary, directory):
         terminal.until(lambda: SAVE_TITLE in terminal.text() and "preview-one (2).txt" in terminal.text() and "[Save]" in terminal.text())
         terminal.send(b"\r")
         fresh = downloads / "preview-one (2).txt"
-        terminal.until(lambda: fresh.exists())
+        terminal.until(lambda: fresh.exists() and SAVE_TITLE not in terminal.text())
         require(fresh.read_bytes() == FIRST and existing.read_bytes() == b"KEEP EXISTING", "default collision overwrote an existing file")
         require(fresh.stat().st_mode & 0o077 == 0, "saved default file is not private")
         terminal.send(b"Bjs")
@@ -222,7 +223,7 @@ def incoming_case(binary, directory):
         terminal.until(lambda: "nested folder/" in terminal.text())
         terminal.send(b"received explicit.txt\r")
         explicit = alternative / "received explicit.txt"
-        terminal.until(lambda: explicit.exists())
+        terminal.until(lambda: explicit.exists() and SAVE_TITLE not in terminal.text())
         require(explicit.read_bytes() == SECOND, "completed literal save directory targeted another file")
         terminal.send(b"Bjs")
         terminal.until(lambda: SAVE_TITLE in terminal.text() and "Path:" in terminal.text())

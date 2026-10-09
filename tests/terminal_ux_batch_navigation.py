@@ -15,6 +15,7 @@ import re
 import shutil
 
 from terminal_cache import ProviderFixture
+from terminal_dialog_controls import filter_label_picker, wait_label_picker
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_ux_batch_support import (TAB, BACKTAB, ENTER, ESC, activate_button,
     capture, command, diagnose, focus_button, no_writes, read_mail, run_cases, start,
@@ -187,8 +188,7 @@ def labels(binary, directory, capture_dir=None):
     terminal = start(binary, directory, source.options(), MARKER)
     try:
         terminal.send(b"  m")  # Each selection advances: select96, select95.
-        terminal.until(lambda: "Projects" in terminal.text() and "[Apply 0]" in terminal.text()
-                       and "[Cancel]" in terminal.text())
+        wait_label_picker(terminal, "Projects")
         terminal.until(lambda: "[-]" in terminal.text() and "[x]" in terminal.text()
                        and "Reading current labels" not in terminal.text())
         text = terminal.text()
@@ -203,9 +203,10 @@ def labels(binary, directory, capture_dir=None):
         terminal.until(lambda: "[Cancel]" not in terminal.text())
         no_writes(binary, directory, source.options())
         terminal.send(b"m")
-        terminal.until(lambda: "[Apply 0]" in terminal.text())
+        wait_label_picker(terminal)
         terminal.until(lambda: "[-]" in terminal.text() and "Reading current labels" not in terminal.text())
-        terminal.send(b"/Projects" + ENTER + b" ")
+        filter_label_picker(terminal, "Projects", "[-]")
+        terminal.send(b" ")
         terminal.until(lambda: "[x]" in terminal.text() and "Projects" in terminal.text())
         terminal.resize(40, 12)
         terminal.until(lambda: "[Apply 1]" in terminal.text() and "[Cancel]" in terminal.text())

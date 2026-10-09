@@ -6,7 +6,8 @@ from pathlib import Path
 import sys
 import tempfile
 
-from terminal_dialog_controls import focused, focus, TAB, BACKTAB, ENTER
+from terminal_dialog_controls import (focused, focus, filter_label_picker,
+                                      wait_label_picker, TAB, BACKTAB, ENTER)
 from terminal_file_dialog import capture, fixture_setup, start_ready
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, start
@@ -75,7 +76,7 @@ def collection(binary, directory, capture_dir=None):
         terminal.send(ENTER)
         terminal.until(lambda: "Manage labels" not in terminal.text())
         terminal.send(b"m")
-        terminal.until(lambda: "Labels · staged changes" in terminal.text() and "Projects" in terminal.text())
+        wait_label_picker(terminal, "Projects")
         require("CATEGORY_UPDATES" not in terminal.text(), "system state leaked into membership picker")
         terminal.send(b"\x1b")
         terminal.until(lambda: "Labels · staged changes" not in terminal.text())
@@ -100,8 +101,9 @@ def collection(binary, directory, capture_dir=None):
         require(renamed["name"] == "qjk Renamed", "rename changed the wrong label or lost stable ID")
         terminal.send(b"q")
         terminal.until(lambda: "Manage labels" not in terminal.text())
-        terminal.send(b"m/qjk Renamed\r")
-        terminal.until(lambda: "[ ]" in terminal.text() and "qjk Renamed" in terminal.text())
+        terminal.send(b"m")
+        wait_label_picker(terminal, "qjk Renamed")
+        filter_label_picker(terminal, "qjk Renamed", "[ ]")
         terminal.send(b" \x13")
         terminal.until(lambda: "Mail action: 1 applied" in terminal.text() and "Labels · staged changes" not in terminal.text())
         with Client(binary, directory, extra=source.options()) as client:

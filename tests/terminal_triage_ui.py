@@ -5,7 +5,7 @@ from pathlib import Path
 from terminal_integration import Client, require
 from terminal_mouse import MouseTerminal, click
 from terminal_mouse_screen import MouseScreen
-from terminal_dialog_controls import activate, reach
+from terminal_dialog_controls import activate, filter_label_picker, reach, wait_label_picker
 
 
 def sidebar_point(terminal, literal):
@@ -44,9 +44,8 @@ def check(binary, directory):
             restored = {m['id']: set(m['labels']) for m in client.request('mail.list', cacheOnly=True, limit=100)['messages']}
             require(all(restored[m] == before[m] for m in changed), 'TUI undo did not restore exact previous labels')
         terminal.send(b'm')
-        terminal.until(lambda: 'Labels · staged changes' in terminal.text() and 'Projects' in terminal.text())
-        terminal.send(b'/Projects\r')
-        terminal.until(lambda: 'Filter: Projects' in terminal.text())
+        wait_label_picker(terminal, '[ ]  Projects')
+        filter_label_picker(terminal, 'Projects', '[ ]')
         terminal.send(b'\r')
         terminal.until(lambda: '[Apply 1]' in terminal.text())
         with Client(binary, directory) as client:

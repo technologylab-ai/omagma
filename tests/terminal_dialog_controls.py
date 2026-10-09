@@ -36,6 +36,24 @@ def focus(terminal, keys, label):
     terminal.until(lambda: focused(terminal, label))
 
 
+def wait_label_picker(terminal, *content):
+    # Definitions may render before mail.label-state returns. This footer is
+    # shown only after the pinned messages' memberships are ready to stage.
+    terminal.until(lambda: all(value in terminal.text() for value in
+                               ("Labels · staged changes", "[Apply 0]", "[Cancel]",
+                                "Space Toggle · +/- Stage · Ctrl+S Apply · Esc Cancel", *content)))
+
+
+def filter_label_picker(terminal, name, marker):
+    terminal.send(b"/")
+    terminal.until(lambda: focused(terminal, "Filter: ▏"))
+    terminal.send(name.encode())
+    terminal.until(lambda: focused(terminal, f"Filter: {name}▏"))
+    terminal.send(ENTER)
+    terminal.until(lambda: f"Filter: {name}▏" not in terminal.text()
+                   and focused(terminal, f"{marker}  {name}"))
+
+
 def reach(terminal, label, backwards=False):
     for _ in range(32):
         if focused(terminal, label):
@@ -66,7 +84,7 @@ def labels_and_files(binary, directory):
     terminal = start_ready(binary, directory, source)
     try:
         terminal.send(b"m")
-        terminal.until(lambda: "Labels · staged changes" in terminal.text() and "Projects" in terminal.text())
+        wait_label_picker(terminal, "Projects")
         reach(terminal, "[+ Add]")
         reach(terminal, "[- Remove]")
         reach(terminal, "[+ Add]", backwards=True)
@@ -79,7 +97,7 @@ def labels_and_files(binary, directory):
         terminal.until(lambda: "Labels · staged changes" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
         require("Label_demo" in message(binary, directory, source)["labels"], "focused Add did not apply the chosen label")
         terminal.send(b"m")
-        terminal.until(lambda: "Labels · staged changes" in terminal.text())
+        wait_label_picker(terminal)
         reach(terminal, "[- Remove]")
         activate(terminal)
         terminal.until(lambda: "[Apply 1]" in terminal.text())
@@ -90,7 +108,7 @@ def labels_and_files(binary, directory):
         terminal.until(lambda: "Labels · staged changes" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
         require("Label_demo" not in message(binary, directory, source)["labels"], "focused Remove did not remove the chosen label")
         terminal.send(b"m")
-        terminal.until(lambda: "Labels · staged changes" in terminal.text())
+        wait_label_picker(terminal)
         terminal.send(BACKTAB + b"q-not-a-label")
         terminal.until(lambda: "q-not-a-label" in terminal.text() and "No matching labels" in terminal.text())
         require(terminal.process.poll() is None, "q in the label filter quit instead of entering text")

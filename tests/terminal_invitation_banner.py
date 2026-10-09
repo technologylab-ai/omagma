@@ -14,6 +14,7 @@ from terminal_file_dialog import b64, capture
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_invitations import identity, invitation, part
 from terminal_mouse import click, report, start
+from terminal_pty import wait_saved_compose
 from terminal_reader import reader_contains, reader_rectangle, reader_rows
 
 
@@ -178,6 +179,8 @@ def run(binary, directory, capture_dir=None, mono=False):
         # New compose must not show an invitation hint for unrelated original mail.
         terminal.send(b"c")
         terminal.until(lambda: "Compose" in terminal.screen.lines()[0])
+        wait_saved_compose(terminal)
+        terminal.until(lambda: "I · Respond" not in terminal.text())
         require("I · Respond" not in terminal.text(), "composer displayed inactive RSVP action")
         terminal.send(b"\x1b")
         terminal.gap(.12)

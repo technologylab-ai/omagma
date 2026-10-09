@@ -88,18 +88,22 @@ def reader_case(binary, directory):
         terminal.send(b"\r")
         terminal.until(lambda: "Mock browser target validated" in terminal.text())
         terminal.send(b"B")
-        terminal.until(lambda: "Received attachments" in terminal.text() and "reader-two.txt" in terminal.text())
+        terminal.until(lambda: all(value in terminal.text() for value in
+                                   ("Received attachments", "reader-two.txt", "[s Save]",
+                                    "[o Save & open]", "[Back]",
+                                    "Tab Controls · Enter Activate · j/k Choose")))
         destination = directory / "second received attachment.txt"
         click(terminal, *point(terminal, "reader-two.txt"))
         click(terminal, *point(terminal, "[s Save]"))
         terminal.until(lambda: "Save attachment · new file" in terminal.text() and "Path:" in terminal.text()
                        and "[Save]" in terminal.text())
         terminal.send(b"\x15" + str(destination).encode() + b"\r")
-        terminal.until(lambda: destination.exists())
+        terminal.until(lambda: destination.exists() and "Save attachment · new file" not in terminal.text())
         require(destination.read_bytes() == SECOND, "click Save targeted the wrong received attachment")
         require(destination.stat().st_mode & 0o077 == 0, "received attachment permissions are not owner-only")
         terminal.send(b"B")
-        terminal.until(lambda: "Received attachments" in terminal.text())
+        terminal.until(lambda: "Received attachments" in terminal.text()
+                       and "[s Save]" in terminal.text() and "[o Save & open]" in terminal.text())
         terminal.send(b"jo")
         terminal.until(lambda: "Save attachment · new file" in terminal.text() and "Path:" in terminal.text()
                        and "[Save & open]" in terminal.text())
