@@ -119,7 +119,8 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Ctrl+U/D moves the mail list by half a visible page; PageUp/PageDown moves
   a full visible page, using the current layout and pane height.
 - Unread subjects are bold and marked `●`; read subjects use normal weight.
-  `⭐` stars stay visible independently of bulk selection. Reader headers show
+  `⭐` stars stay visible independently of bulk selection; `📎` marks known
+  attachments beside the subject. Reader headers show
   the account's readable label names.
 - Calendar invitations show a tinted card with an orange edge, calendar icon,
   friendly time/duration and response cue below the labels. It

@@ -45,7 +45,8 @@ Mouse support is enabled by default. Click accounts, mailboxes, messages and con
 
 Unread subjects are bold and marked `●`; read subjects use normal weight.
 Stars appear as `⭐` on the sender row, independently of unread or bulk
-selection marks. A highlighted row identifies your selection without changing
+selection marks. Messages with known attachments show `📎` beside the subject.
+A highlighted row identifies your selection without changing
 its read status. The reader header shows read/starred state and readable label
 names for that account, including custom labels.
 
@@ -182,7 +183,8 @@ the current sender. Account `senderName` and plaintext `signature` settings
 remain in effect; changing From does not change the account's grant.
 
 Ctrl+Z/Ctrl+Y undo/redo native text edits with their caret positions. Undo in
-compose does not undo mailbox changes. The bounded text history stays in memory
+compose does not undo mailbox changes. Each paste and `$EDITOR` return is grouped
+into one Undo step within the bounded history. The text history stays in memory
 and is not recovered after restart; it does not rewrite the protected
 original or provide an attachment/sender undo stack.
 
@@ -284,9 +286,10 @@ including files too large for a JSON/base64 response. Direct saves refuse an
 existing destination. `:save-all DIRECTORY` saves all files of the focused
 message into an existing absolute directory. `:save-all` without a directory
 opens the folder/file chooser, where Space selects which files to save. Batch
-collisions get fresh names; individual failures are reported without
-overwriting existing content or silently discarding successful saves. Saving
-files never sends mail.
+collisions get fresh names. A batch stops at the first failure and reports the
+saved count and failed file; successful saves remain in place. Fix the cause
+and explicitly choose the remaining files to retry. Failed saves are never
+retried automatically. Saving files never sends mail.
 
 `L` opens the link chooser; Enter opens the selected literal HTTP(S) destination in this account's Chrome profile. `o` opens the selected mail in Gmail; with a thread message focused, it opens that exact message. In normal reply/forward mode it opens the original context. Each action uses the current account's configured Chrome profile. Rendering mail never launches anything automatically.
 
