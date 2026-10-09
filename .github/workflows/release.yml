@@ -20,6 +20,8 @@ jobs:
       needed: ${{ steps.version.outputs.needed || steps.branch.outputs.needed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Qualification and manual promotion policy checks
+        run: python3 tests/qualification.py
       - name: Check package version
         if: github.ref == 'refs/heads/main'
         id: version
@@ -38,6 +40,7 @@ jobs:
           PY
 
   build:
+    name: Linux ${{ matrix.arch }} qualification
     needs: version
     if: needs.version.outputs.needed == 'true'
     strategy:
@@ -229,7 +232,7 @@ jobs:
           name: release-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
       - name: Preserve synthetic verification receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -240,6 +243,7 @@ jobs:
           retention-days: 30
 
   macos-build:
+    name: macOS ${{ matrix.arch }} qualification
     needs: version
     if: needs.version.outputs.needed == 'true'
     strategy:
@@ -409,7 +413,7 @@ jobs:
           name: release-macos-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
       - name: Safe native Markdown preview allocation lifecycle
         env:
           RELEASE_ARCH: ${{ matrix.arch }}
@@ -425,36 +429,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  publish:
+  qualified:
+    name: Ready for approval
     needs: [version, build, macos-build]
     if: github.ref == 'refs/heads/main' && needs.version.outputs.needed == 'true'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: release-*
-          merge-multiple: true
-          path: dist
-      - name: Combine and verify checksums
-        working-directory: dist
-        run: |
-          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 SHA256SUMS-macos-x86_64 SHA256SUMS-macos-arm64 > SHA256SUMS
-          sha256sum LICENSES.txt >> SHA256SUMS
-          sha256sum --check SHA256SUMS
-      - name: Publish new version
+      - name: Record the verified candidate
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.version.outputs.version }}
-        run: python3 scripts/publish_release.py
-
-  homebrew:
-    needs: [version, publish]
-    if: github.ref == 'refs/heads/main' && needs.version.outputs.needed == 'true'
-    uses: ./.github/workflows/homebrew.yml
-    with:
-      version: ${{ needs.version.outputs.version }}
-    secrets:
-      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          QUALIFIED_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          repo, run, commit = (os.environ[name] for name in ('GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_SHA'))
+          version = os.environ['QUALIFIED_VERSION']
+          summary = f"## Candidate {version} qualified\n\nAll four native platform checks passed. No release has been published.\n\nCommit: `{commit}`\n\nQualification run: [{run}](https://github.com/{repo}/actions/runs/{run})\n\nAfter explicit approval, run **Publish qualified release** with this run ID. The verified artifacts are retained for 30 days; a changed revision needs fresh qualification.\n"
+          Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary)
+          PY

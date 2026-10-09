@@ -177,5 +177,7 @@ secret. [GitHub's Pages workflow requirements](https://docs.github.com/en/pages/
 
 Website publication is separate from application releases. An unchanged
 already-published package version makes the existing release workflow skip
-building/publishing new app assets; a documentation push never retargets that
-version's release. Keep dated evidence and published downloads immutable.
+qualifying new app assets; a documentation push never retargets that version's
+release. New candidates can qualify while the user tests locally; publication
+requires an explicit go-ahead and [manual promotion](RELEASING.md) of the exact
+successful run's artifacts. Keep dated evidence and published downloads immutable.

@@ -1,0 +1,109 @@
+name: Publish qualified release
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: Successful Release qualification run for this exact main commit
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: omagma-publish-qualified
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run_id: ${{ steps.qualification.outputs.run_id }}
+      head_sha: ${{ steps.qualification.outputs.head_sha }}
+      run_attempt: ${{ steps.qualification.outputs.run_attempt }}
+      artifact_ids: ${{ steps.qualification.outputs.artifact_ids }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify qualification policy oracles
+        run: python3 tests/qualification.py
+      - name: Verify the exact successful qualification and artifacts
+        id: qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+        run: python3 .github/verify_qualification.py --run-id "$QUALIFICATION_RUN_ID"
+      - name: Read the qualified package version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          version = subprocess.check_output(['python3', 'scripts/release.py', '--print-version'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.verify.outputs.head_sha }}
+          persist-credentials: false
+      - name: Recheck qualification before downloading
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ needs.verify.outputs.run_id }}
+          QUALIFICATION_ATTEMPT: ${{ needs.verify.outputs.run_attempt }}
+          QUALIFICATION_ARTIFACT_IDS: ${{ needs.verify.outputs.artifact_ids }}
+        run: |
+          python3 .github/verify_qualification.py --run-id "$QUALIFICATION_RUN_ID" \
+            --expected-attempt "$QUALIFICATION_ATTEMPT" --expected-artifact-ids "$QUALIFICATION_ARTIFACT_IDS"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact_ids }}
+          run-id: ${{ needs.verify.outputs.run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          merge-multiple: true
+          path: dist
+      - name: Combine and verify the qualified checksums
+        working-directory: dist
+        run: |
+          cat SHA256SUMS-x86_64 SHA256SUMS-arm64 SHA256SUMS-macos-x86_64 SHA256SUMS-macos-arm64 > SHA256SUMS
+          sha256sum LICENSES.txt >> SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Publish the verified package without replacing a release or tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          QUALIFIED_HEAD_SHA: ${{ needs.verify.outputs.head_sha }}
+          QUALIFICATION_RUN_ID: ${{ needs.verify.outputs.run_id }}
+          QUALIFICATION_ATTEMPT: ${{ needs.verify.outputs.run_attempt }}
+          QUALIFICATION_ARTIFACT_IDS: ${{ needs.verify.outputs.artifact_ids }}
+        run: |
+          test "$GITHUB_SHA" = "$QUALIFIED_HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$QUALIFIED_HEAD_SHA"
+          python3 .github/verify_qualification.py --run-id "$QUALIFICATION_RUN_ID" \
+            --expected-attempt "$QUALIFICATION_ATTEMPT" --expected-artifact-ids "$QUALIFICATION_ARTIFACT_IDS"
+          python3 scripts/publish_release.py
+
+  homebrew:
+    needs: [verify, publish]
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+    secrets:
+      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}

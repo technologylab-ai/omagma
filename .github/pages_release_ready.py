@@ -46,7 +46,7 @@ def main():
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"ready={str(ready).lower()}\n")
     print("Installable version assets are available." if ready else
-          "Site built; deployment resumes after the version's release workflow succeeds.")
+          "Site built; deployment resumes after the version's approved release is published.")
 
 
 if __name__ == "__main__":
