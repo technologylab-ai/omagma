@@ -223,6 +223,21 @@ def open_composer(terminal):
     terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
 
 
+def saved_compose_frame(terminal, attachment_count=None):
+    """Observable saved/available compose state, including the complete footer."""
+    current = terminal.text()
+    return (''.join(terminal.screen.cells[1]).strip() == "Local draft · no mail sent"
+            and "saved locally · not sent" in ''.join(terminal.screen.cells[2])
+            and "Ctrl+S Review" in ''.join(terminal.screen.cells[-2])
+            and "Attach file · local draft" not in current and "Path:" not in current
+            and (attachment_count is None or f"Attachments {attachment_count}" in current))
+
+
+def wait_saved_compose(terminal, attachment_count=None):
+    terminal.until(lambda: saved_compose_frame(terminal, attachment_count))
+    terminal.gap(.05)  # Drain the rest of this VT frame, not an application delay.
+
+
 def body_bounds(terminal):
     label = terminal.screen.locate("Body:")
     if label is None:
@@ -566,21 +581,13 @@ def exercise(terminal, action):
         path = terminal.directory / "fixture attachment.bin"
         path.write_bytes(data)
 
-        def saved_compose(count):
-            current = terminal.text()
-            return (''.join(terminal.screen.cells[1]).strip() == "Local draft · no mail sent"
-                    and "saved locally · not sent" in ''.join(terminal.screen.cells[2])
-                    and "Ctrl+S Review" in ''.join(terminal.screen.cells[-2])
-                    and "Attach file · local draft" not in current and "Path:" not in current
-                    and f"Attachments {count}" in current)
-
         terminal.send(b"A")
         terminal.until(lambda: "Attach file · local draft" in terminal.text() and "Path:" in terminal.text()
                        and "[Attach]" in terminal.text())
         terminal.send(str(path).encode() + b"\r")
         # Autosave may replace the attachment-success notice. The durable row
         # and its source byte size are the user-visible result of attaching.
-        terminal.until(lambda: saved_compose(1) and any(
+        terminal.until(lambda: saved_compose_frame(terminal, 1) and any(
             path.name in line and f"{len(data)} B" in line for line in terminal.text().splitlines()))
         # Import and its following local save temporarily fence editing. Wait
         # for the complete saved compose frame, then drain the remaining VT
@@ -605,7 +612,7 @@ def exercise(terminal, action):
         terminal.send(b"n")
         terminal.until(lambda: "Compose" in terminal.text())
         terminal.send(b":detach 1\r")
-        terminal.until(lambda: saved_compose(0) and path.name not in terminal.text())
+        terminal.until(lambda: saved_compose_frame(terminal, 0) and path.name not in terminal.text())
         terminal.gap(.05)
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text())

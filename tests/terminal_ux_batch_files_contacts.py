@@ -14,6 +14,8 @@ from terminal_composer_workflow import setup as composer_setup
 from terminal_file_dialog import FIRST, SECOND, fixture_setup
 from terminal_integration import ACCOUNTS, Client, FIXTURES, require
 from terminal_mouse import click, point
+from terminal_pty import wait_saved_compose
+from terminal_reader import reader_contains
 from terminal_ux_batch_support import (TAB, ENTER, ESC, activate_button, capture,
     command, compose, diagnose, no_writes, read_draft, run_cases, start)
 
@@ -100,6 +102,7 @@ def multi_select(binary, directory, capture_dir=None):
         label = action_label(terminal, "Attach")
         activate_button(terminal, label)
         terminal.until(lambda: "Attachments 2" in terminal.text() and "Path:" not in terminal.text())
+        wait_saved_compose(terminal, 2)
         terminal.send(b"\x13")
         terminal.until(lambda: "Review send" in terminal.text())
         retained = read_draft(binary, directory, source.options())
@@ -184,7 +187,10 @@ def incoming_large(binary, directory, capture_dir=None):
         terminal.until(lambda: terminal.screen.locate("Sent") is not None
                        and terminal.screen.mouse_tracking_mode == 1002)
         click(terminal, *point(terminal, "Sent"))
-        terminal.until(lambda: "Large immutable report ready to save." in terminal.text())
+        terminal.until(lambda: reader_contains(terminal.screen, "Large immutable report ready to save.")
+                       and reader_contains(terminal.screen, attachment["filename"])
+                       and reader_contains(terminal.screen, "Attachment 1:")
+                       and ''.join(terminal.screen.cells[1]).strip().startswith("Up to date"))
         direct = directory / "saved large literal $report.bin"
         command(terminal, "save-attachment 1 " + str(direct))
         terminal.until(lambda: direct.exists() and "Saved attachment" in terminal.text())

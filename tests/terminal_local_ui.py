@@ -98,7 +98,8 @@ def help_case(binary, directory, config, capture_dir=None):
     try:
         terminal.until(lambda: terminal.screen.locate("Contacts") is not None)
         terminal.send(b"?")
-        terminal.until(lambda: terminal.screen.locate("NAVIGATION") is not None)
+        terminal.until(lambda: terminal.screen.locate("Keyboard & mouse") is not None)
+        visible_section(terminal, "Open mail or choose the focused item")
         # At wide sizes section headings and key/action columns are distinct.
         heading = terminal.screen.locate("NAVIGATION")
         require(terminal.screen.styles[heading["row"]][heading["column"]][2], "help section heading is not emphasized")
@@ -116,10 +117,12 @@ def help_case(binary, directory, config, capture_dir=None):
         for literal in ("SEARCH & READING", "MAIL ACTIONS", "CONTACTS", "COMPOSE & SEND", "$EDITOR", "Ctrl+S / :send"):
             visible_section(terminal, literal)
         terminal.send(b"\x1b[H")
-        terminal.until(lambda: terminal.screen.locate("NAVIGATION") is not None)
+        terminal.gap(.05)
+        visible_section(terminal, "NAVIGATION")
         # Small terminals must wrap the same instructions instead of clipping.
         terminal.resize(48, 20)
-        terminal.until(lambda: terminal.screen.locate("NAVIGATION") is not None)
+        terminal.until(lambda: terminal.screen.locate("Keyboard & mouse") is not None)
+        visible_section(terminal, "NAVIGATION")
         capture(terminal, capture_dir, "help-narrow")
         for literal in ("SEARCH & READING", "MAIL ACTIONS", "CONTACTS", "COMPOSE & SEND", "$EDITOR", "Ctrl+S / :send"):
             visible_section(terminal, literal)
@@ -127,7 +130,7 @@ def help_case(binary, directory, config, capture_dir=None):
         terminal.gap(.1)
         require("Back" in terminal.text() or "Return" in terminal.text(), "help back hint lost at narrow tail")
         terminal.send(b"q")
-        terminal.until(lambda: terminal.screen.locate("NAVIGATION") is None)
+        terminal.until(lambda: terminal.screen.locate("Keyboard & mouse") is None)
         require(terminal.process.poll() is None, "q from help exited the TUI")
         terminal.finish()
         print("PASS help: styled sections, wide/narrow complete scrolling, q returns")

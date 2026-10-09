@@ -23,6 +23,7 @@ from terminal_html import screen_capture
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, point, report, start
 from terminal_reader import reader_contains, reader_rectangle
+from terminal_pty import wait_saved_compose
 
 CASES = ("attach-new", "attach-reply", "attach-all", "attach-forward",
          "save", "missing-downloads", "browser-thread", "keyboard", "tab-buttons")
@@ -215,6 +216,7 @@ def start_ready(binary, directory, source):
 def assert_composer(terminal, count):
     terminal.until(lambda: terminal.screen.locate("Attach file ·") is None
                    and "Subject:" in terminal.text() and f"Attachments {count}" in terminal.text())
+    wait_saved_compose(terminal, count)
 
 
 def attach_case(binary, directory, key, captures):
@@ -316,7 +318,8 @@ def attach_case(binary, directory, key, captures):
         require([item["filename"] for item in retained["attachments"][-2:]] == list(PAYLOADS),
                 "mouse/Tab selected different outgoing files")
         for item in retained["attachments"][-2:]:
-            raw = base64.urlsafe_b64decode(item["data"] + "=" * (-len(item["data"]) % 4))
+            from terminal_ux_batch_files_contacts import attachment_bytes
+            raw = attachment_bytes(directory, item)
             require(raw == PAYLOADS[item["filename"]], "attachment bytes changed through dialog/review")
         require(retained["to"] == original["to"] and retained["bodyText"] == original["bodyText"],
                 "file dialog changed recipients/body")

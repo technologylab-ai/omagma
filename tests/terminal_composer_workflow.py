@@ -13,6 +13,7 @@ import tempfile
 from terminal_integration import ACCOUNTS, FIXTURES, MANIFEST, ROOT, Client, require
 from terminal_mouse import MouseTerminal, click, point
 from terminal_mouse_screen import MouseScreen
+from terminal_pty import wait_saved_compose
 
 
 def setup(binary, directory, forward=False):
@@ -92,6 +93,7 @@ def add_files(terminal, directory, existing=0):
         terminal.until(lambda: f"Attachments {existing + number}" in terminal.text()
                        and f"added-{number}.txt" in terminal.text()
                        and "Path:" not in terminal.text())
+        wait_saved_compose(terminal, existing + number)
 
 
 def open_retained(terminal, subject):

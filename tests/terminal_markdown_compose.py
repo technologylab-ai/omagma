@@ -22,9 +22,21 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import start
 from terminal_polish_compose import panel_text
 from terminal_file_dialog import capture
+from terminal_pty import wait_saved_compose
 
 ORIGINAL = "ORIGINAL-MARKDOWN-MARKER\nLiteral **stars** and [unsafe](javascript:alert(1)).\nSecond original line.\n"
 FILE_BYTES = b"\x00\xff\x80\r\n"
+
+
+def direct_send_settings(directory):
+    # These established cases verify the explicit rendered submission itself.
+    # Separate grace cases retain the real ten-second default and cancellation.
+    path = directory / "fixture-ui.json"
+    path.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}) + "\n")
+    path.chmod(0o600)
+    return ("--ui-file", str(path))
+
+
 NEW_BODY = "# New heading 🌋\n\n**Bold new** body.\n\n- first\n  - child\n- second\n\n| Key | Value |\n| :--- | ---: |\n| Alpha | 42 |\n\n```zig\nconst count = 42; // <literal>\n```\n\nLiteral "
 
 
@@ -108,7 +120,9 @@ def confirm_and_check(terminal, client, expected_source, original, kind, expecte
     require(len(sent["attachments"]) == (1 if expected_file else 0), "submission changed genuine user attachment count")
     if expected_file:
         file = sent["attachments"][0]
-        require(file["filename"] == expected_file and base64.urlsafe_b64decode(file["data"] + "===") == FILE_BYTES, "outgoing binary attachment changed filename or bytes")
+        from terminal_ux_batch_files_contacts import attachment_bytes
+        require(file["filename"] == expected_file and attachment_bytes(terminal.directory, file) == FILE_BYTES,
+                "outgoing binary attachment changed filename or bytes")
     if kind == "reply":
         require(sent["threadId"] == original["threadId"] and sent["inReplyTo"] == original["messageId"], "reply submission lost original conversation headers")
     elif kind == "forward":
@@ -121,7 +135,7 @@ def new_case(binary, directory, capture_dir=None):
     fixture, original = fixture_setup(binary, directory)
     attachment = directory / "new-fixture.bin"
     attachment.write_bytes(FILE_BYTES)
-    terminal = start(binary, directory, fixture, columns=160, rows=42)
+    terminal = start(binary, directory, fixture, extra=direct_send_settings(directory), columns=160, rows=42)
     try:
         terminal.until(lambda: "ORIGINAL-MARKDOWN-MARKER" in terminal.text())
         terminal.send(b"c")
@@ -167,6 +181,7 @@ def new_case(binary, directory, capture_dir=None):
             terminal.until(lambda: "Attach file · local draft" in terminal.text() and "Path:" in terminal.text())
             terminal.send(str(attachment).encode() + b"\r")
             terminal.until(lambda: "Attachments 1" in terminal.text())
+            wait_saved_compose(terminal, 1)
             result = confirm_and_check(terminal, client, NEW_BODY + "p typed", original, "new", attachment.name, capture_dir)
         return result
     except Exception:
@@ -178,7 +193,7 @@ def new_case(binary, directory, capture_dir=None):
 
 def conversation_case(binary, directory, kind, capture_dir=None):
     fixture, original = fixture_setup(binary, directory)
-    terminal = start(binary, directory, fixture, columns=160, rows=42)
+    terminal = start(binary, directory, fixture, extra=direct_send_settings(directory), columns=160, rows=42)
     try:
         terminal.until(lambda: "ORIGINAL-MARKDOWN-MARKER" in terminal.text())
         terminal.send(b"r" if kind == "reply" else b"f")

@@ -10,6 +10,7 @@ import tempfile
 from terminal_cache import ProviderFixture
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import start
+from terminal_pty import wait_saved_compose
 
 FIRST = b"First received preview file\n"
 SECOND = b"Second received preview file\n"
@@ -119,10 +120,10 @@ def compose_case(binary, directory):
         terminal.send(b"\x15")
         terminal.until(lambda: "PREVIEW LINE 000" in panel_text(terminal, "Original message"))
         terminal.send(b"?")
-        terminal.until(lambda: "NAVIGATION" in terminal.text())
+        terminal.until(lambda: "Keyboard & mouse" in terminal.text())
         terminal.send(b"\x1b")
         terminal.gap(.05)
-        terminal.until(lambda: "NAVIGATION" not in terminal.text() and "Subject:" in terminal.text())
+        terminal.until(lambda: "Keyboard & mouse" not in terminal.text() and "Subject:" in terminal.text())
         terminal.send(b"L")
         terminal.until(lambda: "Links · explicit browser open" in terminal.text() and URI in terminal.text())
         terminal.send(b"\x1b")
@@ -145,6 +146,7 @@ def compose_case(binary, directory):
             terminal.until(lambda expected=expected: prompt_contains(terminal, expected))
             terminal.send(b"\r")
             terminal.until(lambda number=number: f"Attachments {number}" in terminal.text())
+            wait_saved_compose(terminal, number)
         require("B [x]" in terminal.text(), "attachment size/remove controls run together")
         # Save a received file from the preview while the outgoing draft is
         # dirty. It must return to compose and retain body/files/account/id.
@@ -157,6 +159,7 @@ def compose_case(binary, directory):
         terminal.until(lambda: received.exists() and "Subject:" in terminal.text() and "Received attachments" not in terminal.text())
         require(received.read_bytes() == FIRST, "compose preview saved the wrong received file")
         terminal.polish_stage="outgoing-review-recipients"
+        wait_saved_compose(terminal, 2)
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text() and "Review send" in terminal.text()
                        and "personal@example.com" in terminal.text() and "alex@example.test" in terminal.text())
@@ -178,7 +181,8 @@ def compose_case(binary, directory):
         require(retained["to"][0]["address"] == "alex@example.test", "preview/picker changed recipients")
         require([file["filename"] for file in retained["attachments"]] == list(payloads), "preview/picker lost outgoing files")
         for file in retained["attachments"]:
-            data = base64.urlsafe_b64decode(file["data"] + "=" * (-len(file["data"]) % 4))
+            from terminal_ux_batch_files_contacts import attachment_bytes
+            data = attachment_bytes(directory, file)
             require(data == payloads[file["filename"]], "Ctrl+F selected another outgoing file")
         terminal.finish()
         print("PASS polish compose:Body/From focus, one hints footer, explicit Original preview, top-of-quote insert, Tab controls/Ctrl+F files, received Save preserves draft")

@@ -42,9 +42,10 @@ def exercise(binary, directory):
                        and "An attachment could not be retrieved" in terminal.text())
         require("An attachment could not be retrieved" in terminal.text(), "forward error lacks readable explanation")
         terminal.send(b"?")
-        terminal.until(lambda: "Diagnostic: AttachmentNotFound" in terminal.text() and "NAVIGATION" in terminal.text())
+        terminal.until(lambda: "Diagnostic: AttachmentNotFound" in terminal.text() and "Keyboard & mouse" in terminal.text())
         code = terminal.screen.locate("Diagnostic: AttachmentNotFound")
-        help_heading = terminal.screen.locate("NAVIGATION")
+        help_heading = terminal.screen.locate("/ Search help")
+        require(help_heading is not None, "help search instructions are missing")
         require(code["row"] < help_heading["row"], "diagnostic remains hidden below Help instructions")
         terminal.forward_stage="help-return-original-body"
         terminal.send(b"\x1b")

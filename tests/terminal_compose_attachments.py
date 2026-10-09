@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Focused multiple-file composer/reply PTY checks; fixtures only."""
-import argparse, base64, hashlib, tempfile
+import argparse, hashlib, tempfile
 from pathlib import Path
 from terminal_integration import Client, require
 from terminal_mouse import MouseTerminal, click, point
 from terminal_mouse_screen import MouseScreen
+from terminal_pty import wait_saved_compose
 
 
 def run(binary, directory, key):
@@ -21,6 +22,11 @@ def run(binary, directory, key):
         terminal.until(lambda: 'Subject:' in terminal.text() and 'Attachments 0' in terminal.text()
                        and 'A Attach' in terminal.text() and '[Add A]' in terminal.text())
         require('A Attach' in terminal.text() and '[Add A]' in terminal.text(), 'attachment shortcut hidden in composer')
+        if key == b'c':
+            # Send review validates addressing; a new draft starts with no To.
+            terminal.send(b'irecipient@example.test\t\t\tMultiple file fixture\tReviewed fixture files.\x1b')
+            terminal.until(lambda: 'Reviewed fixture files.' in terminal.text())
+            wait_saved_compose(terminal, 0)
         payloads = {name: value for name, value in [('first.txt', b'One\n'), ('second.bin', bytes(range(128))), ('third.pdf', b'%PDF-synthetic\n')]}
         for index, (name, contents) in enumerate(payloads.items()):
             path = directory / name
@@ -34,6 +40,7 @@ def run(binary, directory, key):
             attached_at = terminal.screen.locate(name)
             require(f'{len(contents)} B' in ''.join(terminal.screen.cells[attached_at['row']]),
                     'visible small-file attachment row has the wrong source byte size')
+            wait_saved_compose(terminal, index + 1)
         terminal.gap(.1)
         # Remove only the first file with its explicitly rendered local control.
         at = terminal.screen.locate('first.txt')
@@ -43,6 +50,7 @@ def run(binary, directory, key):
         click(terminal, remove_column + 1, at['row'])
         terminal.until(lambda: 'Attachments 2' in terminal.text() and terminal.screen.locate('first.txt') is None)
         require('first.txt' not in ''.join(terminal.screen.cells[at['row']]), 'removed file remains in composer list')
+        wait_saved_compose(terminal, 2)
         terminal.send(b'\x13')
         terminal.until(lambda: 'Sending account:' in terminal.text() and 'Attachment 2: third.pdf' in terminal.text())
         with Client(binary, directory) as client:
@@ -52,8 +60,8 @@ def run(binary, directory, key):
             require(draft['bodyFormat']=='markdown','attachment edit changed the new composition format')
             require([f['filename'] for f in draft['attachments']] == ['second.bin', 'third.pdf'], 'multiple files not retained after review/save')
             for attachment in draft['attachments']:
-                raw = attachment['data']
-                decoded = base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4))
+                from terminal_ux_batch_files_contacts import attachment_bytes
+                decoded = attachment_bytes(directory, attachment)
                 expected = payloads[attachment['filename']]
                 require(decoded == expected and attachment['size'] == len(expected), 'attachment bytes or stored size changed')
                 require(hashlib.sha256(decoded).digest() == hashlib.sha256(expected).digest(), 'stored attachment hash differs from source payload')

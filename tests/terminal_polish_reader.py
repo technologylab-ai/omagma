@@ -95,9 +95,22 @@ def compact(binary, directory):
         terminal.until(lambda: reader_contains(terminal.screen, "Hi Alex,"))
         terminal.gap(.08)
         rows = [text for _, text in reader_rows(terminal.screen)]
-        require(any("onboarding instructions" in text for text in rows), "small reader does not expose body paragraph")
+        require(contains(terminal, 96) and reader_contains(terminal.screen, "Hi Alex,"),
+                "small reader does not expose actual body text below its status/labels")
         require(not any("J/K Mail" in text for text in rows), "small focused reader wastes a repeated toolbar row")
         require("↑2 earlier" in terminal.text(), "anchored thread hides earlier cards without a cue")
+        # The visible read status and labels add envelope rows. A short reader
+        # must expose body immediately and let ordinary scrolling reach its
+        # first substantive paragraph without changing the focused message.
+        for _ in range(4):
+            if reader_contains(terminal.screen, "The onboarding instructions are ready for this preview build."):
+                break
+            terminal.send(b"j")
+            terminal.gap(.03)
+        require(reader_contains(terminal.screen, "The onboarding instructions are ready for this preview build."),
+                "small reader cannot reach its complete body paragraph by scrolling")
+        rows = [text for _, text in reader_rows(terminal.screen)]
+        require("3/3 mails" in terminal.text(), "compact body scrolling changed its focused thread message")
         # A word may move whole to another row; neither fragment should appear.
         require(not any("onboard" in text and "onboarding" not in text for text in rows), "plain reader splits onboarding inside the word")
         finish(terminal)

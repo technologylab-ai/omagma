@@ -71,12 +71,27 @@ class ChildStatus:
 
 
 class DarwinTerminal(Terminal):
+    controllers = {}
+
     def __init__(self, binary, directory, extra=(), history_limit=None, *,
                  columns=140, rows=34, screen_type=None, environment=None):
         directory = Path(directory).resolve()
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.guardian_state = directory / "guardian-state.json"
         self.guardian_release = directory / "guardian-release"
+        previous = self.controllers.get(directory)
+        if previous is not None:
+            require(previous.poll() is not None, "previous owned guardian must exit before directory reuse")
+            previous.wait(timeout=0)
+        if self.guardian_state.exists():
+            prior = json.loads(self.guardian_state.read_text())
+            # The controller writes this final status only after child.wait().
+            require(prior.get("exitCode") is not None,
+                    "previous owned TUI must be reaped before directory reuse")
+        # Only these session-control markers belong to the launcher. Cached
+        # mail, working context and UI preferences survive the fresh process.
+        self.guardian_state.unlink(missing_ok=True)
+        self.guardian_release.unlink(missing_ok=True)
         launcher = directory / "guardian-launcher"
         launcher.write_text(f"#!{sys.executable}\nimport sys\nsys.path.insert(0,{str(Path(__file__).resolve().parent)!r})\nfrom terminal_macos import guardian\nguardian()\n")
         launcher.chmod(0o700)
@@ -87,6 +102,7 @@ class DarwinTerminal(Terminal):
         super().__init__(launcher, directory, extra=extra, history_limit=history_limit,
                          columns=columns, rows=rows, environment=settings, **options)
         self.guardian_process = self.process
+        self.controllers[directory] = self.guardian_process
         self.process = ChildStatus(self.guardian_process, self.guardian_state)
         self.binary = binary
 
@@ -158,6 +174,32 @@ def tui_case(binary, directory, terminate=False, terminate_editor=False):
         terminal.close()
 
 
+def same_directory_restart(binary, directory):
+    first = DarwinTerminal(binary, directory)
+    try:
+        first.until(lambda: reader_contains(first.screen, "Synthetic personal@example.com message 096."))
+        first.send(b"j")
+        first.until(lambda: reader_contains(first.screen, "Synthetic personal@example.com message 095."))
+        require(first.finish()["termiosRestored"], "first owned session did not restore its terminal")
+    finally:
+        first.close()
+    second = DarwinTerminal(binary, directory)
+    try:
+        # The saved selection proves this is a restart using the same cache;
+        # new input and a normal exit prove the prior exit status was not read.
+        second.until(lambda: reader_contains(second.screen, "Synthetic personal@example.com message 095."))
+        require(second.process.poll() is None, "second owned session inherited the previous exit status")
+        second.send(b"k")
+        second.until(lambda: reader_contains(second.screen, "Synthetic personal@example.com message 096."))
+        require(second.finish()["termiosRestored"], "second owned session did not restore its terminal")
+    except Exception:
+        print(second.text())
+        raise
+    finally:
+        second.close()
+    print("PASS guardian restart: same owned directory/cache, fresh live child, keyboard navigation and both restored terminals")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
@@ -169,6 +211,7 @@ def main():
         tui_case(args.binary.resolve(), root / "tui")
         tui_case(args.binary.resolve(), root / "signal", terminate=True)
         tui_case(args.binary.resolve(), root / "editor-signal", terminate_editor=True)
+        same_directory_restart(args.binary.resolve(), root / "same-directory-restart")
 
 
 if __name__ == "__main__":

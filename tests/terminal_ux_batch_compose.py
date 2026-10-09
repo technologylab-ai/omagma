@@ -14,6 +14,7 @@ import shutil
 
 from terminal_composer_workflow import setup
 from terminal_integration import ACCOUNTS, FIXTURES, ROOT, Client, require
+from terminal_pty import wait_saved_compose
 from terminal_ux_batch_support import (TAB, ENTER, ESC, activate_button, capture,
     command, compose, diagnose, focused, focus_button, no_writes, read_draft, run_cases,
     start, stats)
@@ -140,6 +141,7 @@ def attachment_reminder(binary, directory, capture_dir=None):
         terminal.until(lambda: "Path:" in terminal.text() and "[Attach]" in terminal.text())
         terminal.send(b"\x15" + str(path).encode() + ENTER)
         terminal.until(lambda: "Attachments 1" in terminal.text() and "report.txt" in terminal.text())
+        wait_saved_compose(terminal, 1)
         send_review(terminal)
         retained = read_draft(binary, directory, extra)
         require([a["filename"] for a in retained["attachments"]] == [path.name],
