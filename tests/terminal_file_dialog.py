@@ -148,7 +148,10 @@ def selected_listing_entry(terminal, title, name):
     ordinary_background = terminal.screen.styles[top + 2][left + 1][1]
     for row in range(top + 5, bottom):
         value = "".join(terminal.screen.cells[row][left + 1:right])
-        if value.strip().startswith(name):
+        label = value.strip()
+        if label.startswith(("[ ] ", "[x] ")):
+            label = label[4:]
+        if label == name or label.startswith(name + " "):
             offset = value.index(name)
             return terminal.screen.styles[row][left + 1 + offset][1] != ordinary_background
     return False
@@ -543,8 +546,8 @@ def tab_buttons_case(binary, directory, captures):
         require(retained["id"] == original["id"], "button focus changed draft identity")
         require([v["filename"] for v in retained["attachments"]] == [first.name],
                 "Tab/Enter removed another attachment")
-        raw = retained["attachments"][0]["data"]
-        require(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)) == first.read_bytes(),
+        from terminal_ux_batch_files_contacts import attachment_bytes
+        require(attachment_bytes(directory, retained["attachments"][0]) == first.read_bytes(),
                 "button removal changed the remaining file bytes")
         require(retained["to"] == original["to"] and retained["bodyText"] == original["bodyText"],
                 "button navigation changed recipients or body")
