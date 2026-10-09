@@ -671,10 +671,13 @@ def exercise(terminal, action):
         gmail_search(terminal, "subject:Synthetic personal thread 002")
         terminal.until(lambda: "I · Respond" in terminal.text() and "Ready" in terminal.text())
         terminal.send(b"I")
-        terminal.until(lambda: "Review RSVP" in terminal.text() and "UID:" in terminal.text())
+        terminal.until(lambda: "Review RSVP" in terminal.text() and "[v Details]" in terminal.text())
+        require("UID:" not in terminal.text(), "friendly RSVP summary exposed protocol-only identifiers")
+        terminal.send(b"v")
+        terminal.until(lambda: "UID:" in terminal.text() and "Sequence:" in terminal.text())
         for expected in ["personal@example.com", "organizer@example.org", "fixture-meeting@example.org"]:
             require(expected in terminal.text(), "RSVP review omitted identity or destination")
-        terminal.send(b"\x1b")
+        terminal.send(b"\r")  # Details preserves the safe initial Cancel focus.
         terminal.gap()
         result = terminal.finish()
         result["rsvpReviewShown"] = True
@@ -697,6 +700,8 @@ def exercise(terminal, action):
                     "long RSVP detail clipped response/cancellation controls")
 
         identities_visible()
+        terminal.send(b"v")
+        terminal.until(lambda: "[v Less]" in terminal.text())
         terminal.send(b"G")
         terminal.until(lambda: "UID-END@example.org" in terminal.text())
         identities_visible()
@@ -798,7 +803,16 @@ def main():
                 extra = ("--fixture-scenario", "unknown-send") if name == "unknown-send-reopen" else ()
                 if name == "long-rsvp-review":
                     extra = ("--fixture-root", str(long_invitation_fixture(Path(directory))))
-                terminal = Terminal(binary, Path(directory) / name, extra=extra,
+                owned = Path(directory) / name
+                owned.mkdir(mode=0o700)
+                # These older cases verify submission/receipts directly. New
+                # countdown cases use the real default ten-second preference.
+                # Runtime fixture mode itself retains the production default.
+                preferences = owned / "fixture-ui.json"
+                preferences.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}) + "\n")
+                preferences.chmod(0o600)
+                extra += ("--ui-file", str(preferences))
+                terminal = Terminal(binary, owned, extra=extra,
                                     screen_type=CursorScreen if name in {"long-field-caret", "column-zero-caret"} else Screen)
                 receipt.update(exercise(terminal, name), passed=True)
             except Exception as error:

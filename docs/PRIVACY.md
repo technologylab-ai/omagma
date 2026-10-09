@@ -45,6 +45,15 @@ The reader’s link chooser opens only an explicitly selected HTTP(S) URL in the
 
 Fixture providers make no Gmail API or keyring requests. You can try fictional mail with `omagma tui --fixtures`; this is optional and does not grant live permissions.
 
+## Release checks
+
+The TUI's daily release check contacts the official public GitHub release API.
+A detected Homebrew install also checks the public tap formula. These requests
+contain no Google credentials or account/mail data and require no account grant.
+Automatic checking can be turned off in Updates or with `omagma updates
+automatic off`. A bounded private status file stores release versions, check
+times, retry delays, dismissal and this preference; see [updates](UPDATES.md).
+
 ## Disconnect or remove
 
 Removing the Linux widget, uninstalling Homebrew’s `omagma` formula, or removing a manually installed executable leaves your private configuration, cache and keyring credentials available for later use. The bar protocol’s `disconnect` command removes its local account token and clears its memory cache. `omagma terminal-auth revoke --account ACCOUNT` removes the terminal token and registry entry; use your usual `--config` and `--grant-file` options when you selected non-default paths.

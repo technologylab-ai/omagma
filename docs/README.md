@@ -28,6 +28,7 @@ smaller reading, composition, organization and agent workflow details.
 | [Bar dropdown](UI.md) | Account switching, mail links and refresh status |
 | [Terminal mail](TERMINAL.md) | Reading, search, compose/reply, contacts, attachments, labels and keyboard/mouse controls |
 | [Agent CLI](AGENT-CLI.md) | Structured commands, account selection, cache/server search, drafts, receipts and CLI/TUI coverage |
+| [Updates](UPDATES.md) | Daily release notices, dismissal and installation-specific Omarchy/Homebrew/manual upgrade guidance |
 | [Bar background refresh](BACKGROUND-REFRESH.md) | Configure periodic checking while the dropdown is closed |
 | [Terminal background cache](TERMINAL-BACKGROUND.md) | Optional five-minute cache fetching while the TUI is closed |
 | [Terminal cache](TUI-CACHE.md) | Startup, loading states, retention, cached search and clearing mail |

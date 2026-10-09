@@ -36,6 +36,21 @@ def focus(terminal, keys, label):
     terminal.until(lambda: focused(terminal, label))
 
 
+def reach(terminal, label, backwards=False):
+    for _ in range(32):
+        if focused(terminal, label):
+            return
+        terminal.send(BACKTAB if backwards else TAB)
+        terminal.gap(.04)
+    require(False, f"dialog action is not keyboard reachable: {label}")
+
+
+def activate(terminal):
+    # A deliberate activation, separate from a held key at dialog entry.
+    terminal.gap(.26)
+    terminal.send(ENTER)
+
+
 def message(binary, directory, source, message_id="shared-msg-096"):
     with Client(binary, directory, extra=source.options()) as client:
         return client.request("mail.read", messageId=message_id, cacheOnly=True)
@@ -51,37 +66,47 @@ def labels_and_files(binary, directory):
     terminal = start_ready(binary, directory, source)
     try:
         terminal.send(b"m")
-        terminal.until(lambda: "Choose label" in terminal.text() and "Projects" in terminal.text())
-        focus(terminal, TAB, "[+ Add]")
-        focus(terminal, TAB, "[- Remove]")
-        focus(terminal, BACKTAB, "[+ Add]")
-        terminal.send(ENTER)
-        terminal.until(lambda: "Choose label" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
+        terminal.until(lambda: "Labels · staged changes" in terminal.text() and "Projects" in terminal.text())
+        reach(terminal, "[+ Add]")
+        reach(terminal, "[- Remove]")
+        reach(terminal, "[+ Add]", backwards=True)
+        activate(terminal)
+        terminal.until(lambda: "[Apply 1]" in terminal.text())
+        require("Label_demo" not in message(binary, directory, source)["labels"],
+                "focused Add mutated the provider before Apply")
+        reach(terminal, "[Apply 1]")
+        activate(terminal)
+        terminal.until(lambda: "Labels · staged changes" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
         require("Label_demo" in message(binary, directory, source)["labels"], "focused Add did not apply the chosen label")
         terminal.send(b"m")
-        terminal.until(lambda: "Choose label" in terminal.text())
-        focus(terminal, TAB + TAB, "[- Remove]")
-        terminal.send(ENTER)
-        terminal.until(lambda: "Choose label" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
+        terminal.until(lambda: "Labels · staged changes" in terminal.text())
+        reach(terminal, "[- Remove]")
+        activate(terminal)
+        terminal.until(lambda: "[Apply 1]" in terminal.text())
+        require("Label_demo" in message(binary, directory, source)["labels"],
+                "focused Remove mutated the provider before Apply")
+        reach(terminal, "[Apply 1]")
+        activate(terminal)
+        terminal.until(lambda: "Labels · staged changes" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
         require("Label_demo" not in message(binary, directory, source)["labels"], "focused Remove did not remove the chosen label")
         terminal.send(b"m")
-        terminal.until(lambda: "Choose label" in terminal.text())
+        terminal.until(lambda: "Labels · staged changes" in terminal.text())
         terminal.send(BACKTAB + b"q-not-a-label")
         terminal.until(lambda: "q-not-a-label" in terminal.text() and "No matching labels" in terminal.text())
         require(terminal.process.poll() is None, "q in the label filter quit instead of entering text")
         terminal.send(ENTER)
-        focus(terminal, TAB, "[Back]")  # Disabled Add/Remove are skipped.
-        terminal.send(ENTER)
-        terminal.until(lambda: "Choose label" not in terminal.text())
+        reach(terminal, "[Cancel]")  # Disabled Add/Remove/Apply are skipped.
+        activate(terminal)
+        terminal.until(lambda: "Labels · staged changes" not in terminal.text())
         terminal.send(b"B")
         terminal.until(lambda: "Received attachments" in terminal.text())
-        focus(terminal, TAB, "[s Save]")
+        reach(terminal, "[s Save]")
         terminal.send(ENTER)
         title = open_popup(terminal, received=True)
         require("[Save]" in popup_text(terminal, title), "Save button did not open the save-file dialog")
         terminal.send(b"\x1b")
         terminal.until(lambda: "Received attachments" in terminal.text() and "Save attachment ·" not in terminal.text())
-        focus(terminal, TAB, "[o Save & open]")
+        reach(terminal, "[o Save & open]")
         terminal.send(ENTER)
         title = open_popup(terminal, received=True)
         require("[Save & open]" in popup_text(terminal, title), "Open button lost save-and-open intent")
@@ -89,7 +114,7 @@ def labels_and_files(binary, directory):
         terminal.until(lambda: "Received attachments" in terminal.text() and "Save attachment ·" not in terminal.text())
         terminal.resize(30, 22)
         terminal.until(lambda: "[s Save]" in terminal.text() and "[o Open]" in terminal.text() and "[Back]" in terminal.text())
-        focus(terminal, TAB, "[Back]")
+        reach(terminal, "[Back]")
         terminal.send(ENTER)
         terminal.until(lambda: "Received attachments" not in terminal.text())
         terminal.resize(160, 42)
@@ -101,7 +126,7 @@ def labels_and_files(binary, directory):
         terminal.send(ENTER)
         terminal.until(lambda: "Links · explicit browser open" not in terminal.text())
         terminal.finish()
-        print("PASS dialog controls: label Add/Remove/filter, reverse focus, received Save/Open and Links, narrow buttons")
+        print("PASS dialog controls: staged label Add/Remove/Apply/Cancel, filter/reverse focus, received Save/Open and Links, narrow buttons")
     except Exception:
         print(terminal.text(), file=sys.stderr)
         raise
@@ -111,7 +136,12 @@ def labels_and_files(binary, directory):
 
 def contacts_alias_and_send(binary, directory):
     extra, body = composer_setup(binary, directory)
-    terminal = MouseTerminal(binary, directory, extra=extra, columns=160, rows=40,
+    # This older case verifies explicit Send itself; separate new cases cover
+    # the production default countdown, cancellation and paused recovery.
+    preferences = directory / "fixture-ui.json"
+    preferences.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}) + "\n")
+    preferences.chmod(0o600)
+    terminal = MouseTerminal(binary, directory, extra=(*extra, "--ui-file", str(preferences)), columns=160, rows=40,
                              screen_type=MouseScreen, environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     terminal.until(lambda: body["bodyText"].splitlines()[0] in terminal.text())
     try:
@@ -139,7 +169,12 @@ def contacts_alias_and_send(binary, directory):
         terminal.until(lambda: "Subject:" in terminal.text() and "[f Alias]" in terminal.text())
         focus(terminal, BACKTAB, "[f Alias]")
         terminal.send(ENTER)
-        terminal.until(lambda: "From: alias@example.test" in terminal.text())
+        terminal.until(lambda: "Choose sender" in terminal.text() and "Verified sending identity" in terminal.text())
+        terminal.send(b"alias@example.test")
+        terminal.until(lambda: "Filter: alias@example.test" in terminal.text())
+        reach(terminal, "[Use]")
+        activate(terminal)
+        terminal.until(lambda: "From: alias@example.test" in terminal.text() and "Choose sender" not in terminal.text())
         terminal.send(TAB + b"irecipient@example.test\t\t\tKeyboard-only send\tThis is a fixture body.")
         terminal.send(b"\x1b")
         terminal.gap(.06)
@@ -164,7 +199,7 @@ def contacts_alias_and_send(binary, directory):
         focus(terminal, TAB, "[y Send]")
         focus(terminal, BACKTAB, "[Back]")
         focus(terminal, TAB, "[y Send]")
-        terminal.send(ENTER)
+        activate(terminal)
         terminal.until(lambda: "Saved by mock provider" in terminal.text() and "Review send" not in terminal.text())
         with Client(binary, directory, extra=extra) as client:
             require(client.request("cache.stats")["fixtureSends"] == 1, "focused review Enter did not send exactly once")
@@ -188,10 +223,10 @@ def trash_review(binary, directory):
         require("TRASH" not in message(binary, directory, source)["labels"], "default Cancel Enter trashed mail")
         terminal.send(b"D")
         terminal.until(lambda: "Move selected mail to Trash?" in terminal.text())
-        focus(terminal, TAB, "[y Confirm]")
-        focus(terminal, BACKTAB, "[Cancel]")
-        focus(terminal, TAB, "[y Confirm]")
-        terminal.send(ENTER)
+        reach(terminal, "[y Confirm]")
+        reach(terminal, "[Cancel]", backwards=True)
+        reach(terminal, "[y Confirm]")
+        activate(terminal)
         terminal.until(lambda: "Move selected mail to Trash?" not in terminal.text() and "Mail action: 1 applied" in terminal.text())
         require("TRASH" in message(binary, directory, source)["labels"], "explicit focused confirmation did not move mail to Trash")
         terminal.finish()
@@ -220,19 +255,19 @@ def invitation_review(binary, directory):
         terminal.send(b'/subject:"Fictional named-calendar"\r')
         terminal.until(lambda: "Fictional named-calendar" in terminal.text())
         terminal.send(b"I")
-        terminal.until(lambda: "Review invitation reply" in terminal.text() and focused(terminal, "[Cancel]"))
+        terminal.until(lambda: "Meeting · review reply" in terminal.text() and focused(terminal, "[Cancel]"))
         terminal.send(ENTER)
-        terminal.until(lambda: "Review invitation reply" not in terminal.text())
+        terminal.until(lambda: "Meeting · review reply" not in terminal.text())
         with Client(binary, directory, extra=source.options()) as client:
             require(client.request("cache.stats")["fixtureSends"] == 0, "default RSVP Enter sent a response")
         terminal.send(b"I")
-        terminal.until(lambda: "Review invitation reply" in terminal.text())
-        focus(terminal, TAB, "[a Accept]")
-        focus(terminal, TAB, "[t Tentative]")
-        focus(terminal, TAB, "[d Decline]")
-        focus(terminal, BACKTAB, "[t Tentative]")
-        terminal.send(ENTER)
-        terminal.until(lambda: "Saved by mock provider" in terminal.text() and "Review invitation reply" not in terminal.text())
+        terminal.until(lambda: "Meeting · review reply" in terminal.text())
+        reach(terminal, "[a Accept]")
+        reach(terminal, "[t Tentative]")
+        reach(terminal, "[d Decline]")
+        reach(terminal, "[t Tentative]", backwards=True)
+        activate(terminal)
+        terminal.until(lambda: "Saved by mock provider" in terminal.text() and "Meeting · review reply" not in terminal.text())
         with Client(binary, directory, extra=source.options()) as client:
             operations = client.request("operation.list")["operations"]
             require(len(operations) == 1 and "PARTSTAT=TENTATIVE" in operations[0]["icalendar"], "focused Tentative changed reviewed RSVP choice")

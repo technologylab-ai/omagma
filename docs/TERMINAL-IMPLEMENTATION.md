@@ -3,9 +3,8 @@
 Developer reference for the current source tree. Start with [development](DEVELOPMENT.md)
 for local builds and focused checks; ordinary use is covered by [the terminal guide](TERMINAL.md)
 and [account setup](SETUP.md#full-tuicli-permissions). The TUI and CLI remain experimental.
-Current source is newer than the published v0.2.3 checkpoint; a new release
-qualifies its own candidate and does not replace that checkpoint. Dated results
-below identify their own artifacts and do not qualify every current change.
+Dated results below identify their own artifacts and do not qualify every
+current change.
 
 ## Current implementation
 
@@ -24,14 +23,14 @@ the TUI afterward. New TUI compositions opt into Markdown; saved drafts retain
 their interpretation. A shared native renderer derives bounded HTML and plain
 alternatives from exact draft source for preview and send review. Ctrl+T changes
 format, normal compose `p` selects outgoing/original/plain context, and only
-explicit `y` in review submits. The CLI defaults to Plain and supports explicit
+explicit confirmation in review starts the configured send countdown. The CLI defaults to Plain and supports explicit
 format selection and local `draft.preview`. No tmux is required. The upstream embedded VT widget has
 process lifecycle and parser issues described in [the UI reference](TERMINAL-UI-DESIGN.md#external-editor);
 embedded arbitrary-editor panes are not implemented.
 
 `omagma cli` (also `omagma agent`) reads JSON requests, one per line. Every mail
-operation explicitly names its account. One-shot `mail`, `contacts` and
-`invitations` commands use the same executor. Local drafts and cache are private,
+operation explicitly names its account. One-shot `mail`, `contacts`,
+`invitations`, `attachment`, `draft` and `queue` commands use the same executor. Local drafts and cache are private,
 account-scoped files. Defaults are the newest 2,000 metadata entries and 256 MiB of disk per
 account, with hard limits of 10,000 and 1 GiB. One response page contains at most
 100 messages; the TUI replaces 32-row windows. Missing recent bodies are prefetched
@@ -53,17 +52,52 @@ incomplete recipient text. Such drafts require a validated update before send.
 Verified same-account aliases and configured signatures are explicit draft
 state. Bulk triage handles at most 100 IDs with per-message outcomes and bounded
 selective undo; it never batches sends or retries uncertain mutations automatically.
-Labels can be listed, filtered and applied/removed. Account-scoped custom label
-creation, renaming and reviewed deletion share the executor and operation
+Labels expose complete counts over pinned targets; the TUI stages checked/mixed
+membership changes until Apply. Account-scoped custom label
+creation, renaming, colors and reviewed deletion share the executor and operation
 journal, separately from message assignment; system definitions are protected.
 Contacts support read/search/create/update, not
 deletion. Calendar views are unsupported; invitations use reviewed RSVP email.
+
+The contextual action palette, rendered-message find and saved/history query
+lists stay local and bounded. Unread navigation uses cache predicates and
+explicit anchored target selection, including worker-owned body-query pages;
+it never implicitly marks mail read. Conversation actions resolve a complete
+bounded ID set before reviewed mutation. Native edit undo, verified sender
+choice and named recipient insertion share the existing draft model. Contacts
+retain all supported addresses and provider version metadata through edits.
+
+Outgoing files use immutable account storage and bounded MIME spooling;
+received saves stream into private no-clobber destinations. Multi-file
+selection and Save All/selected use explicit file lists. A private sandboxed
+browser preview renders outgoing styles and verified inline raster resources
+without scripts or remote fetching. The [terminal guide](TERMINAL.md#bounds-and-recovery)
+defines current size/count limits.
+
+Sending defaults to a ten-second local cancellation period, configurable from
+zero to thirty seconds. A durable queued intent records the operation and
+exact draft/account. Explicit processing claims it before submission;
+submitting/unknown states never retry automatically. Restart leaves queued
+intents paused, with Resume/Cancel available only for the matching open draft.
+Normal countdown cancellation retains the draft. The CLI shares these queue
+operations; scheduled/background delivery remains a separate feature.
 
 Sending and RSVP require an operation identity. An uncertain remote outcome is
 recorded and never automatically retried. Contact writes compare versions.
 Trash is reversible; permanent deletion is unsupported. Reading does not mark
 mail read. Mail is data: no terminal controls, remote HTML content or shell
 commands are executed.
+
+Public release discovery uses `terminal/updates.zig` with the existing owned
+worker and HTTP slab, after pending mail work. Its fixed GitHub endpoints have
+a separate credential-free request policy, 64 KiB response cap and five-second
+deadline per request. A bounded private state file records daily attempts,
+last successful metadata, server retry delays, automatic/manual preference and
+exact-release dismissal. Checks persist the attempt before waiting and retain
+external preference changes on completion. Stable semantic versions and proven
+installation ownership determine actionable notices; Homebrew lag and pins
+are respected. The guide and `omagma updates` share this state independently
+of Gmail configuration and grants. See [updates](UPDATES.md).
 
 The mock provider supports all workflows before permission upgrades. Live send,
 mail modification and People access require a separately scoped grant, preserving

@@ -7,7 +7,7 @@ configured accounts separate and open Gmail in each account's Chrome profile.
 The bar runs on Linux Omarchy. The TUI and CLI run natively on Linux and macOS;
 [Homebrew is preferred on Mac](MACOS.md).
 
-This catalogue describes Omagma’s current features. Detailed controls and
+This catalogue describes Omagma's current features. Detailed controls and
 examples live in the linked guides.
 
 ## At a glance
@@ -56,16 +56,27 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - `gg` reaches the first mail across cached windows without scrolling back manually.
 - Separate cache search and explicit Gmail search; explicit page navigation
   fetches beyond the bar's recent-mail limit.
+- A searchable action palette, find within the focused message, cached unread
+  navigation, account-specific search history and named searches.
 - Local drafts, compose/reply/reply-all, outgoing attachments and explicit
   sending review. `$EDITOR` can take over the terminal and return afterward;
   no tmux dependency.
 - Markdown source with an outgoing rendered
   preview, plain alternative and retained reply/forward context. New TUI
   compositions default to Markdown; existing drafts retain their format.
-- Contact list/search, create/edit, and account-scoped archive, Trash/restore,
-  star/unread and existing-label assignment.
+- Contacts with multiple addresses, sender-to-contact prefill, and
+  account-scoped archive, Trash/restore, Spam/Not spam, star/unread and staged
+  multi-label assignment. The custom-label manager also sets label colors.
+- Deliberate message/conversation action scope, with exact reviewed target IDs,
+  per-item outcomes and undo for confirmed touched-label changes.
+- A cancellable local send countdown after explicit review, paused pending-send
+  recovery after restart, and reviewed local draft discard.
 - Inspect calendar invitations and send accept/tentative/decline RSVP emails.
   There are no calendar views.
+- Daily background release checks, a dismissible main-screen upgrade card and
+  installation-specific instructions, with an optional agent handoff. Check
+  timing and per-release dismissal survive restart; automatic checks can be
+  switched off. [Update guide](UPDATES.md).
 
 - Forward with original files, choose sender identities/signatures, use
   autocomplete and recover drafts automatically. Bulk selection/undo,
@@ -81,15 +92,21 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   same account-scoped executor as the TUI.
 - Up to 100 messages per requested page, explicit continuation cursors and
   cache-only versus server search.
-- Decoded body/envelope/thread/attachment data, drafts, replies, sending,
+- Decoded body/envelope/thread/attachment data, immutable account-local file
+  handles and streamed private attachment saving, drafts, replies, sending,
   mailbox changes, contacts and invitation replies.
 - Explicit Markdown/Plain draft formats and local rendered `draft.preview`;
   CLI source defaults to Plain.
 - Explicit account identity, locally checked capabilities and durable
   operation receipts. Unknown send outcomes are not automatically retried.
+- Complete bounded conversation target resolution, label membership counts and
+  color updates, private browser preview, and an inspectable local send queue
+  with explicit process/cancel/resume operations.
 - Forward planning, verified sender discovery, bulk per-item
   outcomes/undo, richer cached-body search, relative cache-window anchors and
   incomplete-draft recovery commands.
+- Account-independent update status/check/guide/dismiss commands and persistent
+  automatic-check preference, with structured installation guidance.
 
 [CLI contract and examples](AGENT-CLI.md) · [CLI/TUI coverage differences](AGENT-CLI.md#cli-and-tui-coverage)
 
@@ -104,11 +121,13 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Unread subjects are bold and marked `●`; read subjects use normal weight.
   `⭐` stars stay visible independently of bulk selection. Reader headers show
   the account's readable label names.
-- Calendar invitations show a tinted card with an orange edge, calendar icon
-  and response cue below the labels, with spacing when the pane permits. It
+- Calendar invitations show a tinted card with an orange edge, calendar icon,
+  friendly time/duration and response cue below the labels. It
   pins to the reader's top as the header scrolls away. Click it or press `I`
   for the keyboard-accessible Accept/Tentative/Decline review; Cancel is
-  initially focused. [Invitation replies](TERMINAL.md#labels-bulk-actions-and-contacts).
+  initially focused. Details adds recurrence/UID information, and Join opens
+  an available safe meeting URL explicitly. Local/TZID/all-day presentation
+  keeps unsupported timezone data labeled. [Invitation replies](TERMINAL.md#labels-bulk-actions-and-contacts).
 - Search Help with `/` by shortcut, description or section; `n`/`N` visits
   highlighted matches. Esc clears a query before leaving Help.
 - The bar's **Open TUI** button opens the selected account in a floating
@@ -146,6 +165,15 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   search restores the prior selected mail, focus and scroll.
 - `\` explicitly searches Gmail; `/` searches cached metadata and downloaded
   bodies without a network request.
+- Ctrl+P or `:actions` discovers actions for the current view and account;
+  opening or filtering the palette performs no action.
+- `:find TEXT` highlights literal matches in the focused message's displayed
+  subject/body. A persistent Find counter and `n`/`N` identify the current match;
+  Escape ends finding. `:next-unread` and `:previous-unread` stay within cached
+  mail in the current view and do not mark it read.
+- Recent queries and named searches retain account and Cache/Gmail scope.
+  Cache search includes filename and local date predicates; unsupported named
+  operators produce an error instead of approximating a Gmail query.
 
 [Reading](TERMINAL.md#read-and-navigate) · [Search](TERMINAL.md#search) · [Cache behavior](TUI-CACHE.md)
 
@@ -174,19 +202,30 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   code, rendered HTML and meaningful plain text. Raw HTML and remote images
   stay inert. The tiny approved footer logo is embedded, with no remote fetch.
 - Multiple outgoing attachments survive local saves and `$EDITOR` return.
-  Limits are explicit: up to 16 files and 2 MiB of aggregate decoded outgoing
-  attachments, with a separate 2 MiB body limit and 3 MiB request limit.
-- `A` adds files repeatedly and `:detach NUMBER` removes one. The direct
-  `:save-attachment NUMBER /absolute/path` command saves a received file.
+  Ordinary files have a 16-file/25 MiB decoded limit, retained inline resources
+  a separate 32-resource/2 MiB limit, and outgoing MIME a 35 MiB cap. Bodies stay
+  limited to 2 MiB and JSON requests to 3 MiB; larger ordinary files use private
+  immutable account storage.
+- In the outgoing browser, Listing Space or checkbox clicks selects files
+  across folders; Attach imports the complete checked set. `:detach NUMBER`
+  removes one. Received Save/Save & open and `:save-all DIRECTORY` stream files
+  into new private destinations and preserve existing files.
 - `$EDITOR`, then `$VISUAL`, then an available nvim/vi/nano supplies external
   editing; fixed quoted arguments are supported without invoking a shell.
 - Debounced local recovery preserves unfinished addresses,
   body and files. Autosave, paste, editor save and leaving compose never send.
 - Ctrl+N/P and Enter choose account-local cached correspondents and saved
   contacts in the selected address field. Regular correspondents need not be
-  saved contacts; name/address matching remains local during background refresh.
-- `f` or the alias action cycles verified sender identities;
-  configured sender names and plaintext signatures are retained.
+  saved contacts; completion inserts a safely quoted `Name <address>` and keeps
+  names and addresses when sending. Matching remains local during refresh.
+- `f` or `:sender` opens a verified From chooser with deliberate Use/Back;
+  configured sender names and plaintext signatures remain in effect.
+- Ctrl+Z/Y restores bounded native text and cursor history. A conservative
+  attachment-promise warning examines the new note in send review and can be
+  overridden through explicit send confirmation.
+- `:preview-browser` opens the saved outgoing content in a private sandbox,
+  retaining styles and verified inline raster images while blocking scripts,
+  forms and remote loads. It sends no mail and uploads no Gmail draft.
 - Sizes and individual `[x]` controls stay visible, and the
   wheel reaches longer outgoing file lists.
 - In file popups, Tab/Shift+Tab focuses the path, folder controls, rows and
@@ -201,7 +240,8 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Ctrl+D/U or PageUp/PageDown scrolls the selected preview in
   normal compose mode; preview link/file actions retain the outgoing draft.
 - The contact's name and address share selection highlighting.
-  Local autocomplete and contact pickers remain account-specific.
+  Multiple addresses survive editing; compose offers an address choice and
+  `:add-contact` prefills an editable sender contact. Pickers stay account-specific.
 
 [Compose, replies and files](TERMINAL.md) · [Contact commands](AGENT-CLI.md#commands)
 
@@ -213,8 +253,17 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   Bulk actions return per-message results; Ctrl+Z/`:undo` reverses confirmed
   successful touched-label changes, preserving unrelated changes.
 - Custom-label, Spam, All Mail and Unread views complement
-  Inbox/Sent/local Drafts/Archive/Trash. The label chooser filters by name and
-  has explicit Add/Remove actions.
+  Inbox/Sent/local Drafts/Archive/Trash. The label checklist shows applied/mixed
+  states, keeps several staged changes through filtering, and commits only on
+  Apply. Color is an account-scoped definition action in Manage labels.
+- `:scope message|thread` makes conversation changes deliberate, pinning up to
+  100 complete resolved targets and reviewing the actual account/count.
+- `:spam`/`:unspam` expose shared mailbox actions, and `:discard-draft` reviews
+  removal of a local draft and recovery copies without changing Gmail.
+- Send confirmation starts a default ten-second local countdown. Ctrl+Z,
+  Enter or Undo cancels before submission. `:send-grace 0..30` controls the
+  delay; pending sends recovered after restart require explicit resume/cancel.
+  Submitting and uncertain sends are never offered as reversible mailbox undo.
 - Dialog controls support Tab/Shift+Tab and Enter, including label actions,
   received attachment saving, contact editing and compose aliases. Submission
   reviews begin on Back/Cancel; only a deliberately chosen action submits.
@@ -240,10 +289,10 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   uncertain submission retains its recovery draft; automatic resend is avoided.
 - Contact updates use etag preconditions instead of silently overwriting a
   changed contact.
-- JSONL `mail.attachment` and one-shot `omagma mail attachment` return
-  attachment bytes as base64url; callers save them with their own file tools.
-  There is no `--output-file` option. The interactive save/path picker is a
-  TUI convenience.
+- `mail.attachment` returns inline base64url or an immutable account blob
+  descriptor for larger content. `mail.attachment-save` streams into an
+  explicitly chosen new private path; `attachment.import`/`discard` manage
+  unattached local handles. There is no `--output-file` option.
 - JSONL `draft.bodyFormat` and one-shot `--format markdown|plain` select the
   outgoing interpretation. `draft.preview` returns unchanged source, generated
   HTML and its plain alternative without sending or saving the supplied body.
@@ -252,6 +301,11 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   support agent-controlled workflows.
 - CLI/API batches can mark selected mail as spam or restore it
   from Spam to Inbox, with the same per-item outcomes and undo rules.
+- `mail.triage-scope` returns complete pinned message/conversation IDs and
+  `mail.label-state` reports current membership counts before changes.
+- `draft.queue` and queue list/read/process/cancel/resume expose durable local
+  send intents. CLI `--send-delay` explicitly uses the queue; unknown outcomes
+  retain their receipt and are not automatically retried.
 
 [Commands, data and limits](AGENT-CLI.md) · [Receipts and recovery](TERMINAL.md)
 
@@ -277,9 +331,9 @@ full-terminal takeover; there is no embedded editor pane. See
 
 ## Label assignment and collection management
 
-`m` assigns or removes an existing custom label on mail. The sidebar's **LABELS**
-heading opens collection management: create, rename or delete a custom label.
-The TUI and CLI share these operations, with system labels protected and
-deletion explicitly reviewed. Deleting a definition keeps its emails. Clicking
-a label name browses its mail; Inbox or another mailbox leaves that label view.
-The existing `gmail.modify` permission covers the Gmail APIs.
+`m` stages custom-label membership changes and commits them with Apply. The
+sidebar's **LABELS** heading opens definition management: create, rename, color
+or delete a label. The TUI and CLI share these operations, with system labels
+protected and deletion explicitly reviewed. Deleting a definition keeps its
+emails. Clicking a label name browses its mail; Inbox or another mailbox leaves
+that view. The existing `gmail.modify` permission covers the Gmail APIs.

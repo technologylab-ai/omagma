@@ -122,9 +122,15 @@ qualification.
 
 ## Upgrade, remove and background fetching
 
+The TUI checks for releases daily and opens a guide from **Upgrade available**
+or `:updates`. Homebrew notices wait for the tap's package and respect pinned
+installs. Save work and close Omagma before upgrading, then verify the version
+and reopen. [Updates](UPDATES.md) covers dismissal, manual checks and the CLI.
+
 ```sh
 brew update
-brew upgrade omagma
+brew upgrade renerocksai/tap/omagma
+omagma --version
 ```
 
 For a manual installation, verify a new versioned bundle first, then update the

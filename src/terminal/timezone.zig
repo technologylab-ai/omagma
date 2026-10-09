@@ -306,6 +306,63 @@ pub const Zone = struct {
         if (std.mem.eql(u8, resolved.name.value(), "-00")) return error.TimezoneRangeUnavailable;
         return resolved;
     }
+    /// Metadata predicates use the same per-instant timezone as the reader.
+    /// Unlike display formatting, filtering must report an unavailable zone.
+    pub fn offsetSeconds(self: *const Zone, seconds: i64) !i32 {
+        return (try self.offset(seconds)).seconds;
+    }
+    pub fn localDay(self: *const Zone, milliseconds: i64) !i64 {
+        const seconds = @divFloor(milliseconds, 1000);
+        if (seconds < -62135596800 or seconds > max_seconds) return error.TimezoneRangeUnavailable;
+        return @divFloor(seconds + try self.offsetSeconds(seconds), 86400);
+    }
+    /// Resolve a wall-clock timestamp without choosing an arbitrary side of a
+    /// daylight-saving transition. Ambiguous/nonexistent times are explicit.
+    /// The result uses the repository's UTC millisecond timestamp convention.
+    pub fn fromLocal(self: *const Zone, date: CivilTime) !i64 {
+        const wall = try date.seconds();
+        var candidates: [259]i32 = undefined;
+        var count: usize = 0;
+        if (self.unavailable) return error.TimezoneUnavailable;
+        if (self.table) |*table| {
+            for (0..table.records.len / 6) |index| {
+                const offset_value = table.offset(index) catch continue;
+                candidates[count] = offset_value.seconds;
+                count += 1;
+            }
+            if (table.footer) |footer| {
+                candidates[count] = footer.standard.seconds;
+                count += 1;
+                if (footer.daylight) |daylight| {
+                    candidates[count] = daylight.seconds;
+                    count += 1;
+                }
+            }
+        } else if (self.rules) |rules| {
+            candidates[count] = rules.standard.seconds;
+            count += 1;
+            if (rules.daylight) |daylight| {
+                candidates[count] = daylight.seconds;
+                count += 1;
+            }
+        } else {
+            candidates[0] = 0;
+            count = 1;
+        }
+        var result: ?i64 = null;
+        var resolved_any = false;
+        for (candidates[0..count]) |offset_value| {
+            const instant = wall - offset_value;
+            const actual = self.offsetSeconds(instant) catch continue;
+            resolved_any = true;
+            if (actual != offset_value) continue;
+            if (result) |previous| {
+                if (previous != instant) return error.AmbiguousLocalTime;
+            } else result = instant;
+        }
+        if (!resolved_any) return error.TimezoneRangeUnavailable;
+        return (result orelse return error.NonexistentLocalTime) * 1000;
+    }
     pub fn format(self: *const Zone, allocator: Allocator, milliseconds: i64) ![]const u8 {
         if (milliseconds <= 0 or milliseconds > max_seconds * 1000 + 999) return "";
         const seconds = @divTrunc(milliseconds, 1000);
@@ -326,6 +383,38 @@ pub const Zone = struct {
         return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} {s}{s}", .{ @as(u16, @intCast(date.year)), date.month, date.day, @as(u8, @intCast(@divTrunc(day_seconds, 3600))), @as(u8, @intCast(@divTrunc(@mod(day_seconds, 3600), 60))), resolved.name.value(), if (fallback) " (TZ unavailable)" else "" });
     }
 };
+pub const CivilTime = struct {
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8 = 0,
+    minute: u8 = 0,
+    second: u8 = 0,
+    pub fn seconds(self: CivilTime) !i64 {
+        if (self.year == 0 or self.year > 9999 or self.month == 0 or self.month > 12 or self.day == 0 or self.day > monthDays(self.year, self.month) or self.hour > 23 or self.minute > 59 or self.second > 59) return error.InvalidCivilTime;
+        return civilDays(self.year, self.month, self.day) * 86400 + @as(i64, self.hour) * 3600 + @as(i64, self.minute) * 60 + self.second;
+    }
+};
+/// Strict ISO and Gmail-style dates share one Gregorian validation path.
+pub fn parseDate(raw: []const u8) !CivilTime {
+    if (raw.len != 10 or (raw[4] != '-' and raw[4] != '/') or raw[7] != raw[4]) return error.InvalidCivilTime;
+    for (raw, 0..) |byte, index| if (index != 4 and index != 7 and !std.ascii.isDigit(byte)) return error.InvalidCivilTime;
+    const result: CivilTime = .{ .year = try std.fmt.parseInt(u16, raw[0..4], 10), .month = try std.fmt.parseInt(u8, raw[5..7], 10), .day = try std.fmt.parseInt(u8, raw[8..10], 10) };
+    _ = try result.seconds();
+    return result;
+}
+pub fn dateDay(raw: []const u8) !i64 {
+    return @divFloor(try (try parseDate(raw)).seconds(), 86400);
+}
+/// A calendar TZID is a zoneinfo identifier, never an arbitrary file path.
+pub fn loadNamed(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map, identifier: []const u8) !Zone {
+    if (!zoneIdentifier(identifier) or identifier.len > 512) return error.InvalidTimezoneName;
+    const directory = environ.get("TZDIR") orelse "/usr/share/zoneinfo";
+    if (directory.len == 0 or directory[0] != '/' or directory.len > 4096) return error.InvalidTimezoneDirectory;
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ directory, identifier });
+    defer allocator.free(path);
+    return loadFile(io, allocator, path);
+}
 pub fn load(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map) !Zone {
     const selected = environ.get("TZ") orelse return loadFile(io, allocator, "/etc/localtime");
     if (selected.len == 0) return .{}; // POSIX explicitly empty TZ means UTC.
@@ -405,6 +494,15 @@ fn expectStamp(zone: *const Zone, milliseconds: i64, expected: []const u8) !void
     const rendered = try zone.format(std.testing.allocator, milliseconds);
     defer std.testing.allocator.free(rendered);
     try std.testing.expectEqualStrings(expected, rendered);
+}
+test "timezone: local date predicates and wall times honor DST folds and gaps" {
+    const zone = try Zone.fromPosix("CET-1CEST,M3.5.0,M10.5.0/3");
+    try std.testing.expectEqual(try dateDay("2026-06-08"), try zone.localDay(1780871400000)); // June 7, 22:30 UTC.
+    try std.testing.expectEqual(@as(i64, 1780835640000), try zone.fromLocal(.{ .year = 2026, .month = 6, .day = 7, .hour = 14, .minute = 34 }));
+    try std.testing.expectError(error.NonexistentLocalTime, zone.fromLocal(.{ .year = 2026, .month = 3, .day = 29, .hour = 2, .minute = 30 }));
+    try std.testing.expectError(error.AmbiguousLocalTime, zone.fromLocal(.{ .year = 2026, .month = 10, .day = 25, .hour = 2, .minute = 30 }));
+    try std.testing.expectError(error.InvalidCivilTime, dateDay("2026-02-29"));
+    try std.testing.expectEqual(try dateDay("2024-02-29"), try dateDay("2024/02/29"));
 }
 test "timezone: POSIX DST transitions use the message instant and future footer rules" {
     const zone = try Zone.fromPosix("CET-1CEST,M3.5.0,M10.5.0/3");

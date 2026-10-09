@@ -147,7 +147,18 @@ pub fn undo(ctx: Context, a: std.mem.Allocator, request: j.Value) !j.Value {
         defer store.close();
         break :snapshot try j.decode(storage.Undo, a, try j.value(a, (try find(&store, token)).*));
     };
+    const selected = if (j.get(request, "messageIds") != null) try triage.pinned(a, request) else null;
+    if (selected) |ids| for (ids) |id| {
+        var found = false;
+        for (receipt.items) |item| found = found or std.mem.eql(u8, item.messageId, id);
+        if (!found) return error.UndoMessageNotFound;
+    };
     for (receipt.items, 0..) |item, index| {
+        if (selected) |ids| {
+            var selected_item = false;
+            for (ids) |id| selected_item = selected_item or std.mem.eql(u8, item.messageId, id);
+            if (!selected_item) continue;
+        }
         if (!std.mem.eql(u8, item.outcome, "applied") or item.restored or std.mem.eql(u8, item.errorCode, "UnknownOutcome")) continue;
         try modify(ctx, token, index, item.messageId, .{ .add = item.addLabels, .remove = item.removeLabels }, true);
     }

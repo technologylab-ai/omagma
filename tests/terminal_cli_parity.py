@@ -283,8 +283,52 @@ def search_labels(binary, directory):
         one_shot(client, "mail", "mark", ["--message-id", "shared-msg-096", "--remove-label", "Projects"])
         require("Label_demo" not in client.request("mail.read", messageId="shared-msg-096")["labels"],
                 "one-shot remove-label did not use canonical ID")
-        require(client.request("labels.create", name="Invented-Label", ok=False)["code"] == "UnsupportedCommand",
-                "CLI silently added unsupported label definition creation")
+        other_labels = client.request("labels.list", account=ACCOUNTS[1])["labels"]
+        name, renamed_name = "CLI parity/Research 🌋", "CLI parity/Reviewed 🌋"
+        create_flags = ["--name", name, "--operation-id", "cli-parity-label-create"]
+        created = one_shot(client, "labels", "create", create_flags)
+        label_id = created["labelId"]
+        require(created["outcome"] == "applied" and created["label"]["id"] == label_id
+                and created["label"]["name"] == name, "one-shot label creation lost provider identity/name")
+        before_replay = client.request("cache.stats")["fixtureCalls"]
+        require(client.request("labels.create", name=name, operationId="cli-parity-label-create") == created,
+                "JSONL did not reuse the one-shot create receipt")
+        require(client.request("cache.stats")["fixtureCalls"] == before_replay,
+                "mixed-interface create replay reached the provider")
+        one_shot(client, "mail", "mark", ["--message-id", "shared-msg-096", "--add-label", name])
+        renamed = client.request("labels.rename", labelId=label_id, name=renamed_name,
+                                 operationId="cli-parity-label-rename")
+        before_replay = client.request("cache.stats")["fixtureCalls"]
+        require(one_shot(client, "labels", "rename", ["--label-id", label_id, "--name", renamed_name,
+                         "--operation-id", "cli-parity-label-rename"]) == renamed,
+                "one-shot did not reuse the JSONL rename receipt")
+        require(client.request("cache.stats")["fixtureCalls"] == before_replay,
+                "mixed-interface rename replay reached the provider")
+        collection = one_shot(client, "labels", "list", ["--cached"])
+        require(collection == client.request("labels.list", cacheOnly=True)
+                and any(label["id"] == label_id and label["name"] == renamed_name for label in collection["labels"]),
+                "renamed label identity differed between shared collection interfaces")
+        require(label_id in client.request("mail.read", messageId="shared-msg-096")["labels"],
+                "renaming a label lost the selected message membership")
+        one_shot(client, "labels", "delete", ["--label-id", label_id, "--confirm-name", name,
+                 "--operation-id", "cli-parity-label-stale-delete"], error="InvalidLabelConfirmation")
+        deleted = one_shot(client, "labels", "delete", ["--label-id", label_id, "--confirm-name", renamed_name,
+                          "--operation-id", "cli-parity-label-delete"])
+        require(deleted["outcome"] == "applied" and deleted["deleted"] and deleted["labelId"] == label_id,
+                "one-shot label deletion lost its explicit receipt")
+        before_replay = client.request("cache.stats")["fixtureCalls"]
+        require(client.request("labels.delete", labelId=label_id, confirmName=renamed_name,
+                               operationId="cli-parity-label-delete") == deleted,
+                "JSONL did not reuse the one-shot deletion receipt")
+        require(client.request("cache.stats")["fixtureCalls"] == before_replay,
+                "mixed-interface delete replay reached the provider")
+        require(not any(label["id"] == label_id for label in one_shot(client, "labels", "list", ["--cached"])["labels"]),
+                "deleted label remained in the shared cached collection")
+        retained = client.request("mail.read", messageId="shared-msg-096")
+        require(label_id not in retained["labels"] and retained["bodyText"] == marked["bodyText"],
+                "label deletion lost the message or retained its deleted membership")
+        require(client.request("labels.list", account=ACCOUNTS[1])["labels"] == other_labels,
+                "one-shot label CRUD changed another account's collection")
         require(client.request("cache.stats")["fixtureSends"] == 0, "search/label assignment submitted mail")
     finished(client)
 

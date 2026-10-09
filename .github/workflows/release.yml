@@ -81,6 +81,7 @@ jobs:
           .verification-debug/bin/auth_probe callback
           .verification-debug/bin/callback_budget
           .verification-debug/bin/transport_probe
+          python3 tests/terminal_attachment_streams.py --probe .verification-debug/bin/terminal_stream_probe
           node tests/ui_model.mjs
           python3 tests/terminal_fixture_check.py
           python3 tests/terminal_screen.py
@@ -118,7 +119,13 @@ jobs:
             terminal_editor_notice \
             terminal_file_dialog terminal_invitations terminal_cli_parity \
             terminal_cli_usage terminal_forward_ux \
-            terminal_markdown_mail terminal_markdown_compose
+            terminal_markdown_mail terminal_markdown_compose \
+            terminal_label_management terminal_label_transport terminal_label_manager \
+            terminal_help_search terminal_dialog_controls terminal_theme_picker \
+            terminal_forward_original terminal_invitation_banner \
+            terminal_ux_backend_cli terminal_ux_batch_navigation \
+            terminal_ux_batch_compose terminal_ux_batch_files_contacts \
+            terminal_ux_helpers_ui terminal_ux_adversarial updates terminal_updates
           do
             python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
           done
@@ -129,6 +136,7 @@ jobs:
           .verification-safe/bin/auth_probe callback
           .verification-safe/bin/callback_budget
           .verification-safe/bin/transport_probe
+          python3 tests/terminal_attachment_streams.py --probe .verification-safe/bin/terminal_stream_probe
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
@@ -184,7 +192,13 @@ jobs:
             terminal_editor_notice \
             terminal_file_dialog terminal_invitations terminal_cli_parity \
             terminal_cli_usage terminal_forward_ux \
-            terminal_markdown_mail terminal_markdown_compose
+            terminal_markdown_mail terminal_markdown_compose \
+            terminal_label_management terminal_label_transport terminal_label_manager \
+            terminal_help_search terminal_dialog_controls terminal_theme_picker \
+            terminal_forward_original terminal_invitation_banner \
+            terminal_ux_backend_cli terminal_ux_batch_navigation \
+            terminal_ux_batch_compose terminal_ux_batch_files_contacts \
+            terminal_ux_helpers_ui terminal_ux_adversarial updates terminal_updates
           do
             python3 "tests/$suite.py" --binary "dist/omagma-linux-$RELEASE_ARCH"
           done
@@ -285,11 +299,17 @@ jobs:
           python3 tests/terminal_wishlist_backend.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_cache_windows.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
+          python3 tests/terminal_attachment_streams.py --probe .verification-macos-debug/bin/terminal_stream_probe
       - name: Debug portable Markdown, invitation and command acceptance
         run: |
           python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
           python3 tests/terminal_cli_parity.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-cli-parity.json
           python3 tests/terminal_markdown_mail.py --binary .verification-macos-debug/bin/omagma --receipt tests/results/macos-debug-markdown.json
+          python3 tests/terminal_forward_original.py --binary .verification-macos-debug/bin/omagma --receipt tests/results/macos-debug-forward-original.json
+          python3 tests/terminal_label_management.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_label_transport.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_ux_backend_cli.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/updates.py --binary .verification-macos-debug/bin/omagma
       - name: Debug native terminal, Keychain and detached lifecycle
         run: |
           # This guardian keeps the owned Darwin PTY alive for termios checks.
@@ -297,6 +317,7 @@ jobs:
           # the Linux job; these checks do not establish a macOS memory baseline.
           python3 tests/terminal_macos.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_macos_features.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-features.json
+          python3 tests/terminal_ux_macos.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-ux.json
           python3 tests/launch_macos.py --binary .verification-macos-debug/bin/omagma
           .verification-macos-debug/bin/omagma probe-keyring
           .verification-macos-debug/bin/auth_probe keyring
@@ -311,6 +332,7 @@ jobs:
           .verification-macos-safe/bin/auth_probe launch
           .verification-macos-safe/bin/auth_probe callback
           .verification-macos-safe/bin/callback_budget
+          python3 tests/terminal_attachment_streams.py --probe .verification-macos-safe/bin/terminal_stream_probe
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
@@ -329,6 +351,7 @@ jobs:
           python3 tests/terminal_transport.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-transport.json
           python3 tests/terminal_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_macos_features.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-features.json
+          python3 tests/terminal_ux_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-ux.json
           python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} probe-keyring
       - name: Safe portable Markdown, invitation and command acceptance
@@ -338,6 +361,11 @@ jobs:
           python3 tests/terminal_cli_usage.py --binary dist/omagma-macos-$RELEASE_ARCH --build-mode safe --receipt tests/results/macos-safe-usage.json
           python3 tests/terminal_cli_parity.py --binary dist/omagma-macos-$RELEASE_ARCH --build-mode safe --receipt tests/results/macos-safe-cli-parity.json
           python3 tests/terminal_markdown_mail.py --binary dist/omagma-macos-$RELEASE_ARCH --receipt tests/results/macos-safe-markdown.json
+          python3 tests/terminal_forward_original.py --binary dist/omagma-macos-$RELEASE_ARCH --receipt tests/results/macos-safe-forward-original.json
+          python3 tests/terminal_label_management.py --binary dist/omagma-macos-$RELEASE_ARCH
+          python3 tests/terminal_label_transport.py --binary dist/omagma-macos-$RELEASE_ARCH
+          python3 tests/terminal_ux_backend_cli.py --binary dist/omagma-macos-$RELEASE_ARCH
+          python3 tests/updates.py --binary dist/omagma-macos-$RELEASE_ARCH
       - name: Native Keychain survives the packaged binary upgrade
         run: |
           python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}

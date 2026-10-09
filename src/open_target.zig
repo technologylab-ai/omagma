@@ -79,6 +79,33 @@ pub fn makeUrl(account: *const model.Account, raw: []const u8) !Target {
     return target;
 }
 
+/// Only the preview writer's canonical private account artifact reaches this
+/// adapter. General reader links remain HTTP(S)-only in makeUrl.
+pub fn makePreview(account: *const model.Account, path: []const u8) !Target {
+    try b.address(account.address.slice());
+    try b.profile(account.profile.slice());
+    if (!std.fs.path.isAbsolute(path) or path.len > 4096 or !std.unicode.utf8ValidateSlice(path) or !std.mem.eql(u8, std.fs.path.basename(path), "preview.html")) return error.InvalidPreviewPath;
+    for (path) |byte| if (byte < 32 or byte == 127 or byte == '\\') return error.InvalidPreviewPath;
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidPreviewPath;
+    const account_dir = std.fs.path.dirname(path) orelse return error.InvalidPreviewPath;
+    const namespace = std.fs.path.dirname(account_dir) orelse return error.InvalidPreviewPath;
+    if (!std.mem.eql(u8, std.fs.path.basename(namespace), "live") and !std.mem.eql(u8, std.fs.path.basename(namespace), "fixtures")) return error.InvalidPreviewPath;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(account.address.slice(), &digest, .{});
+    if (!std.mem.eql(u8, std.fs.path.basename(account_dir), &std.fmt.bytesToHex(digest, .lower))) return error.InvalidPreviewPath;
+    var target: Target = .{};
+    var writer = std.Io.Writer.fixed(&target.url.bytes);
+    try writer.writeAll("file://");
+    for (path) |byte| {
+        if (byte == '/') try writer.writeByte('/') else try encode(&writer, &.{byte});
+    }
+    target.url.len = @intCast(writer.buffered().len);
+    const profile_argument = try std.fmt.bufPrint(&target.profile_arg.bytes, "--profile-directory={s}", .{account.profile.slice()});
+    target.profile_arg.len = @intCast(profile_argument.len);
+    return target;
+}
+
 /// The caller chose this saved file explicitly. Do not delegate executable or
 /// active-document types to desktop associations from the mail reader.
 pub fn openSavedAttachment(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -106,6 +133,23 @@ test "reader links retain account profile and reject active schemes credentials 
     for ([_][]const u8{ "javascript:alert(1)", "file:///tmp/file", "https://user:password@example.org/", "https:///empty-host", "https://example.org/\n", "https://example.org\\evil", "https://example%40other.org/" }) |url| {
         try std.testing.expectError(error.InvalidTarget, makeUrl(&account, url));
     }
+}
+test "UX backend: private preview target keeps account profile and encodes filename path" {
+    var account: model.Account = .{};
+    try account.address.set("work@example.test");
+    try account.profile.set("Profile 2");
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(account.address.slice(), &digest, .{});
+    const path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/synthetic cache #/fixtures/{s}/preview.html", .{std.fmt.bytesToHex(digest, .lower)});
+    defer std.testing.allocator.free(path);
+    const target = try makePreview(&account, path);
+    try std.testing.expect(std.mem.startsWith(u8, target.url.slice(), "file:///tmp/synthetic%20cache%20%23/fixtures/"));
+    try std.testing.expectEqualStrings("--profile-directory=Profile 2", target.profile_arg.slice());
+    try std.testing.expectError(error.InvalidPreviewPath, makePreview(&account, "/tmp/preview.html"));
+    try std.testing.expectError(error.InvalidPreviewPath, makePreview(&account, "relative/preview.html"));
+    try std.testing.expectError(error.InvalidTarget, makeUrl(&account, target.url.slice()));
+    try account.address.set("other@example.test");
+    try std.testing.expectError(error.InvalidPreviewPath, makePreview(&account, path));
 }
 test "account-specific Chrome argv and Message-ID fallback" {
     var a: model.Account = .{};

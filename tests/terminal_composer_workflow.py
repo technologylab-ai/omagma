@@ -44,7 +44,8 @@ def setup(binary, directory, forward=False):
 
 
 def start(binary, directory, extra, body):
-    terminal = MouseTerminal(binary, directory, extra=extra, columns=160, rows=40, screen_type=MouseScreen)
+    terminal = MouseTerminal(binary, directory, extra=extra, columns=160, rows=40, screen_type=MouseScreen,
+                             environment={"COLORTERM": "truecolor", "NO_COLOR": None})
     first_line = body["bodyText"].splitlines()[0]
     terminal.until(lambda: first_line in terminal.text() and terminal.screen.mouse_modes == {1002, 1004, 1006})
     return terminal
@@ -89,7 +90,8 @@ def add_files(terminal, directory, existing=0):
                        and "[Attach]" in terminal.text())
         terminal.send(str(path).encode() + b"\r")
         terminal.until(lambda: f"Attachments {existing + number}" in terminal.text()
-                       and f"Attached added-{number}.txt" in terminal.text())
+                       and f"added-{number}.txt" in terminal.text()
+                       and "Path:" not in terminal.text())
 
 
 def open_retained(terminal, subject):
@@ -117,12 +119,21 @@ def completion_aliases(binary, directory):
         # Recent mail participants now precede saved-only contacts. Select the
         # saved contact explicitly; retaining it is the behavior under test.
         terminal.send(b"\x0e\r")
-        terminal.until(lambda: "To: alex-personal@example.org" in terminal.text())
+        terminal.until(lambda: "To: Alex Personal Fixture <alex-personal@example.org>" in terminal.text())
         # Tab keeps its field behavior while editing; type a useful subject.
         terminal.send(b"\t" * 3 + b"Composer workflow fixture\tTyped reply text.")
         terminal.send(b"\x1b")
         terminal.gap(.06)
         terminal.send(b"f")
+        terminal.until(lambda: "Choose sender" in terminal.text() and "Verified sending identity" in terminal.text())
+        terminal.send(b"alias@example.test")
+        terminal.until(lambda: "Filter: alias@example.test" in terminal.text())
+        # Sender selection is an explicit choice, not a blind cycle. Keep this
+        # local import below module initialization to avoid the shared fixture
+        # setup import cycle with the dialog acceptance harness.
+        from terminal_dialog_controls import activate, reach
+        reach(terminal, "[Use]")
+        activate(terminal)
         terminal.until(lambda: "From: alias@example.test" in terminal.text() and "Alias fixture signature" in terminal.text())
         add_files(terminal, directory)
         terminal.send(b"\x13")
@@ -131,8 +142,9 @@ def completion_aliases(binary, directory):
         require(retained.get("recoveryFields") is None, "validated review retained unfinished fields")
         require(retained["from"]["address"] == "alias@example.test", "alias disappeared during review")
         require(retained["to"][0]["address"] == "alex-personal@example.org", "completion inserted wrong recipient")
+        require(retained["to"][0]["name"] == "Alex Personal Fixture", "completion lost the contact's display name")
         require(retained["bodyText"].startswith("Typed reply text."), "signature moved above typed text")
-        require("Primary fixture signature" not in retained["bodyText"], "alias cycling duplicated the old signature")
+        require("Primary fixture signature" not in retained["bodyText"], "sender selection duplicated the old signature")
         require(retained["bodyText"].count("Alias fixture signature") == 1, "alias signature duplicated")
         require([item["filename"] for item in retained["attachments"]] == ["added-1.txt", "added-2.txt"], "multiple files lost during review")
         terminal.finish()

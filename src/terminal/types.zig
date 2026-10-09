@@ -3,6 +3,10 @@ pub const Limits = struct {
     pub const runtime_bytes: usize = 64 * 1024 * 1024;
     pub const request_bytes: usize = 3 * 1024 * 1024;
     pub const body_bytes: usize = 2 * 1024 * 1024;
+    pub const attachments: usize = 16;
+    pub const related_resources: usize = 32;
+    pub const attachment_bytes: usize = 25 * 1024 * 1024;
+    pub const mime_upload_bytes: usize = 35 * 1024 * 1024;
     pub const page: usize = 100;
     pub const recipients: usize = 32;
     pub const metadata: usize = 2000;
@@ -83,6 +87,9 @@ pub const Attachment = struct {
     mimeType: []const u8 = "application/octet-stream",
     size: usize = 0,
     data: []const u8 = "",
+    /// Immutable account-scoped local content handle. The sender opens it
+    /// through the account store, never as an arbitrary filesystem path.
+    blobId: ?[]const u8 = null,
     contentId: ?[]const u8 = null,
     disposition: ?[]const u8 = null,
     contentLocation: ?[]const u8 = null,
@@ -151,4 +158,14 @@ pub const Draft = struct {
     attachments: []const Attachment = &.{},
     original: ?Original = null,
 };
-pub const Contact = struct { resourceName: []const u8 = "", etag: []const u8 = "", name: []const u8 = "", emails: []const Address = &.{} };
+pub const LabelColor = struct { backgroundColor: []const u8, textColor: []const u8 };
+pub const Contact = struct {
+    resourceName: []const u8 = "",
+    etag: []const u8 = "",
+    name: []const u8 = "",
+    emails: []const Address = &.{},
+    /// Bounded People names, emailAddresses and metadata. The provider merges
+    /// updates against its current version; this preserves descriptive fields
+    /// for offline inspection without trusting them as a write precondition.
+    provider: ?std.json.Value = null,
+};

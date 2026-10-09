@@ -99,8 +99,12 @@ def preference(path, expected):
     # Private working-context persistence now deliberately remembers account
     # and message IDs. It must remain bounded UI state, not mail or credentials.
     require(set(data) == {"schema", "theme", "readerLayout", "listWidthPercent", "listHeightPercent",
-                          "lastAccount", "contexts", "bindings"}, "UI preferences contain undocumented fields")
+                          "lastAccount", "contexts", "bindings", "sendGraceSeconds",
+                          "searchHistory", "savedSearches"}, "UI preferences contain undocumented fields")
     require(data["theme"] in {"follow_omarchy", "omagma"}, "unknown private theme choice")
+    require(type(data["sendGraceSeconds"]) is int and 0 <= data["sendGraceSeconds"] <= 30,
+            "send grace exceeded its explicit zero-to-thirty-second bound")
+    require(info.st_size <= 256 * 1024, "private UI preferences exceeded their byte bound")
     for field in ("listWidthPercent", "listHeightPercent"):
         require(type(data[field]) is int and 25 <= data[field] <= 75, "pane ratio exceeded its public bound")
     require(data["lastAccount"] in ("", *ACCOUNTS), "preferences retained an unconfigured account")
@@ -125,6 +129,27 @@ def preference(path, expected):
         require(set(binding) == {"key", "action"} and isinstance(binding["key"], str)
                 and len(binding["key"].encode()) <= 24 and isinstance(binding["action"], str),
                 "key binding contains undocumented/private fields")
+    for collection in ("searchHistory", "savedSearches"):
+        entries = data[collection]
+        require(isinstance(entries, list) and len(entries) <= 24,
+                "search preferences exceeded their global entry bound")
+        counts, names = {}, set()
+        for entry in entries:
+            require(set(entry) == {"account", "name", "query", "mode"},
+                    "search preference contains undocumented fields")
+            require(entry["account"] in ACCOUNTS and entry["mode"] in {"cache", "server"},
+                    "search preference crossed configured accounts or erased query scope")
+            require(isinstance(entry["query"], str) and 0 < len(entry["query"].encode()) <= 4096,
+                    "retained search query exceeded its byte bound")
+            require(isinstance(entry["name"], str) and len(entry["name"].encode()) <= 96,
+                    "saved-search name exceeded its byte bound")
+            counts[entry["account"]] = counts.get(entry["account"], 0) + 1
+            require(counts[entry["account"]] <= 8, "search preferences exceeded eight entries for one account")
+            if collection == "savedSearches":
+                identity = (entry["account"], entry["name"])
+                require(entry["name"] and identity not in names,
+                        "saved search has no name or duplicates an account-local name")
+                names.add(identity)
     return data
 
 

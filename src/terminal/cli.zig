@@ -16,12 +16,18 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     var setup = std.heap.ArenaAllocator.init(a);
     defer setup.deinit();
     const sa = setup.allocator();
+    // Release status and upgrade guidance never initialize the mail session or
+    // require account configuration, OAuth grants or keyring access.
+    if (eq(mode, "updates")) return runUpdates(io, sa, init.environ_map, args);
     var options: t.Options = .{};
     var metrics_file: ?[]const u8 = null;
     var req = j.object(sa);
     var draft = j.object(sa);
     var has_draft = false;
     var source_format: ?[]const u8 = null;
+    var attachment_paths: std.ArrayList([]const u8) = .empty;
+    var send_delay: ?i64 = null;
+    var browser_preview = false;
     const interactive = std.mem.eql(u8, mode, "tui");
     const jsonl = std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent");
     if (!interactive and !jsonl) {
@@ -61,6 +67,16 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             continue;
         }
         if (eq(arg, "--json")) continue;
+        if (eq(arg, "--browser")) {
+            if (interactive or jsonl) return error.BrowserRequiresPreview;
+            browser_preview = true;
+            continue;
+        }
+        if (eq(arg, "--wait")) {
+            if (interactive or jsonl or !eq(j.text(req, "cmd"), "queue.process")) return error.WaitRequiresQueueProcess;
+            try req.object.put(sa, "wait", .{ .bool = true });
+            continue;
+        }
         if (eq(arg, "--original")) {
             if (interactive or jsonl or !eq(j.text(req, "cmd"), "mail.forward")) return error.OriginalRequiresForward;
             try req.object.put(sa, "original", .{ .bool = true });
@@ -114,6 +130,22 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
         } else if (eq(arg, "--name") or eq(arg, "--label-id") or eq(arg, "--confirm-name")) {
             const key = if (eq(arg, "--label-id")) "labelId" else if (eq(arg, "--confirm-name")) "confirmName" else "name";
             try req.object.put(sa, key, .{ .string = v });
+        } else if (eq(arg, "--background-color") or eq(arg, "--text-color")) {
+            var color = j.get(req, "color") orelse j.object(sa);
+            try color.object.put(sa, if (eq(arg, "--background-color")) "backgroundColor" else "textColor", .{ .string = v });
+            try req.object.put(sa, "color", color);
+        } else if (eq(arg, "--queue-id") or eq(arg, "--blob-id") or eq(arg, "--mime-type") or eq(arg, "--scope")) {
+            const key = if (eq(arg, "--queue-id")) "queueId" else if (eq(arg, "--blob-id")) "blobId" else if (eq(arg, "--mime-type")) "mimeType" else "scope";
+            if (eq(arg, "--scope") and !eq(v, "message") and !eq(v, "conversation")) return error.InvalidTriageScope;
+            try req.object.put(sa, key, .{ .string = v });
+        } else if (eq(arg, "--send-delay") or eq(arg, "--delay-seconds")) {
+            if (interactive or jsonl) return error.SendDelayRequiresSend;
+            const seconds = std.fmt.parseInt(i64, v, 10) catch return error.InvalidSendDelay;
+            if (seconds < 0 or seconds > 30) return error.InvalidSendDelay;
+            const command = j.text(req, "cmd");
+            if (eq(command, "draft.queue") or eq(command, "queue.resume")) {
+                try req.object.put(sa, "delaySeconds", .{ .integer = seconds });
+            } else if (eq(arg, "--send-delay") and (eq(command, "mail.send") or eq(command, "draft.send"))) send_delay = seconds else return error.SendDelayRequiresSend;
         } else if (eq(arg, "--action") or eq(arg, "--undo-token") or eq(arg, "--url") or eq(arg, "--path")) {
             const key = if (eq(arg, "--action")) "action" else if (eq(arg, "--undo-token")) "undoToken" else arg[2..];
             try req.object.put(sa, key, .{ .string = v });
@@ -147,15 +179,9 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
             try draft.object.put(sa, "bodyText", .{ .string = v });
             has_draft = true;
         } else if (eq(arg, "--attach-file")) {
-            var attachments = draft.object.get("attachments") orelse j.Value{ .array = .init(sa) };
-            if (attachments.array.items.len == 16) return error.TooManyAttachments;
-            var used: usize = 0;
-            for (attachments.array.items) |attachment| used += @intCast(try j.integer(attachment, "size", 0));
-            const raw = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.body_bytes - used);
-            const data = try sa.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
-            _ = std.base64.url_safe_no_pad.Encoder.encode(data, raw);
-            try attachments.array.append(try j.value(sa, t.Attachment{ .id = "", .filename = std.fs.path.basename(v), .size = raw.len, .data = data }));
-            try draft.object.put(sa, "attachments", attachments);
+            if (interactive or jsonl) return error.AttachmentsRequireDraftSource;
+            if (attachment_paths.items.len == 16) return error.TooManyAttachments;
+            try attachment_paths.append(sa, v);
             has_draft = true;
         } else if (eq(arg, "--body-file")) {
             const body = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.body_bytes);
@@ -208,8 +234,7 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     var output_buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(io, &output_buffer);
     if (!jsonl) {
-        const raw = try std.json.Stringify.valueAlloc(sa, req, .{});
-        const reply = try session.execute(sa, raw);
+        const reply = try @import("cli_plan.zig").execute(io, sa, session.client(), req, .{ .attachments = attachment_paths.items, .send_delay = send_delay, .browser = browser_preview });
         try output.interface.writeAll(reply);
         try output.interface.writeByte('\n');
         try output.interface.flush();
@@ -249,10 +274,12 @@ fn eq(a: []const u8, b: []const u8) bool {
 // credentials. JSONL command frames retain the shared executor's error contract.
 fn knownVerb(mode: []const u8, verb: []const u8) bool {
     const families = [_]struct { name: []const u8, verbs: []const []const u8 }{
-        .{ .name = "mail", .verbs = &.{ "list", "search", "read", "thread", "attachment", "open", "sync", "refresh", "recipients", "reply", "forward", "send", "archive", "trash", "restore", "mark", "batch", "undo", "prefetch", "drafts", "compose", "labels", "identities", "open-link", "open-attachment" } },
-        .{ .name = "draft", .verbs = &.{ "list", "read", "create", "update", "preview", "recovery-save", "send", "discard" } },
+        .{ .name = "mail", .verbs = &.{ "list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients", "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch", "drafts", "compose", "labels", "identities", "open-link", "open-attachment" } },
+        .{ .name = "draft", .verbs = &.{ "list", "read", "create", "update", "preview", "open-preview", "recovery-save", "send", "queue", "discard" } },
+        .{ .name = "queue", .verbs = &.{ "list", "read", "cancel", "resume", "process" } },
+        .{ .name = "attachment", .verbs = &.{ "import", "discard", "open" } },
         .{ .name = "contacts", .verbs = &.{ "list", "search", "upsert" } },
-        .{ .name = "labels", .verbs = &.{ "list", "create", "rename", "delete" } },
+        .{ .name = "labels", .verbs = &.{ "list", "create", "rename", "delete", "color", "palette" } },
         .{ .name = "invitations", .verbs = &.{ "inspect", "reply" } },
         .{ .name = "cache", .verbs = &.{ "stats", "clear", "activity", "refresh-status" } },
         .{ .name = "operation", .verbs = &.{ "list", "read" } },
@@ -268,17 +295,18 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
 // a value so an unknown final flag stays UnknownOption rather than ValueRequired.
 fn valueOption(arg: []const u8) bool {
     for ([_][]const u8{
-        "--config",               "--metrics-file",     "--grant-file",      "--client-file",       "--capabilities",
-        "--fixture-root",         "--fixture-scenario", "--cache-dir",       "--ui-file",           "--editor-mode",
-        "--metadata-limit",       "--cache-messages",   "--prefetch-bodies", "--disk-limit-bytes",  "--cache-bytes",
-        "--account",              "--action",           "--undo-token",      "--url",               "--path",
-        "--message-ids",          "--message-id",       "--id",              "--before-message-id", "--after-message-id",
-        "--boundary-received-at", "--format",           "--from",            "--limit",             "--cursor",
-        "--query",                "--label",            "--thread-id",       "--draft-id",          "--attachment-id",
-        "--operation-id",         "--status",           "--to",              "--cc",                "--bcc",
-        "--subject",              "--body",             "--attach-file",     "--name",              "--label-id",
-        "--confirm-name",         "--body-file",        "--draft-file",      "--contact-file",      "--expected-etag",
-        "--add-label",            "--remove-label",
+        "--config",               "--metrics-file",     "--grant-file",       "--client-file",       "--capabilities",
+        "--fixture-root",         "--fixture-scenario", "--cache-dir",        "--ui-file",           "--editor-mode",
+        "--metadata-limit",       "--cache-messages",   "--prefetch-bodies",  "--disk-limit-bytes",  "--cache-bytes",
+        "--account",              "--action",           "--undo-token",       "--url",               "--path",
+        "--message-ids",          "--message-id",       "--id",               "--before-message-id", "--after-message-id",
+        "--boundary-received-at", "--format",           "--from",             "--limit",             "--cursor",
+        "--query",                "--label",            "--thread-id",        "--draft-id",          "--attachment-id",
+        "--operation-id",         "--status",           "--to",               "--cc",                "--bcc",
+        "--subject",              "--body",             "--attach-file",      "--name",              "--label-id",
+        "--confirm-name",         "--body-file",        "--draft-file",       "--contact-file",      "--expected-etag",
+        "--add-label",            "--remove-label",     "--background-color", "--text-color",        "--queue-id",
+        "--blob-id",              "--mime-type",        "--scope",            "--send-delay",        "--delay-seconds",
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }
@@ -306,9 +334,64 @@ fn readStdin(io: std.Io, a: std.mem.Allocator, limit: usize) ![]const u8 {
 pub fn help(io: std.Io) !void {
     var buf: [2048]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
-    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|mark|batch|undo|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|create|update|send|discard --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN.\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 2MiB combined, 3MiB request limit).\nLocal cache and drafts are private. No permanent-delete command exists.\n");
+    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|attachment-save|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|spam|unspam|mark|batch|undo|triage-scope|label-state|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|open-preview|create|update|send|queue|discard --account ADDRESS ...\n  omagma queue list|read|cancel|resume|process --account ADDRESS [--queue-id ID]\n  omagma attachment import|discard|open --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|spam|unspam|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN [--message-ids ID,ID].\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 25MiB decoded total, 35MiB MIME). Larger files use private account handles; JSON stays bounded to3MiB.\nLocal cache and drafts are private. No permanent-delete command exists.\n");
+    try w.interface.writeAll("Updates (no account/OAuth required): omagma updates status|check|guide|dismiss [--json]\n  status reads cached metadata; check requests official stable release metadata.\n  guide shows instructions for the running installation, never installs files.\n  omagma updates automatic on|off controls the daily TUI background check.\n");
     try w.interface.writeAll("Outgoing bodies: --format markdown|plain (default plain) on compose/create/update/send/reply/forward.\nDraft source stays in bodyText; JSONL uses draft.bodyFormat (reply/forward: bodyFormat).\nReview rendered alternatives with draft preview --draft-id ID, or --body-file FILE --format markdown.\n");
     try w.interface.writeAll("Reply/forward: --preserve-formatting retains original HTML and embedded images inline; bodyText is your separate note.\nForward: --original encloses the exact original as a separate .eml file. These modes cannot be combined.\nJSONL uses preserveFormatting:true on mail.reply/mail.forward, or original:true on mail.forward.\n");
-    try w.interface.writeAll("Label collection: omagma labels list|create|rename|delete --account ADDRESS\n  create --name NAME --operation-id ID\n  rename --label-id ID --name NAME --operation-id ID\n  delete --label-id ID --confirm-name NAME --operation-id ID\nLabel deletion removes the custom label and its associations, never messages. System labels are protected.\nCollection writes need mail-modify; keep each operation ID stable and never retry an unknown outcome automatically.\n");
+    try w.interface.writeAll("Label collection: omagma labels list|create|rename|delete|color|palette --account ADDRESS\n  create --name NAME --operation-id ID [--background-color HEX --text-color HEX]\n  rename --label-id ID --name NAME --operation-id ID\n  color --label-id ID --background-color HEX --text-color HEX --operation-id ID\n  delete --label-id ID --confirm-name NAME --operation-id ID\nLabel deletion removes the custom label and its associations, never messages. System labels are protected.\nCollection writes need mail-modify; keep each operation ID stable and never retry an unknown outcome automatically.\n");
+    try w.interface.writeAll(
+        \\Scope: mail triage-scope --message-id ID --scope message|conversation lists every pinned target (max100).
+        \\Use --scope message|conversation with archive/trash/restore/spam/unspam/mark/batch and one --message-id ID.
+        \\Incomplete or oversized conversations are refused. Explicit mail batch --message-ids ID,ID applies only those IDs.
+        \\Label membership: mail label-state --message-ids ID,ID (or mail labels with those IDs); use --add-label/--remove-label in a batch to apply reviewed changes.
+        \\Grace: draft queue --draft-id ID --operation-id ID [--delay-seconds 0..30], then queue process --queue-id ID --wait.
+        \\queue cancel keeps the draft unsent; queue resume --queue-id ID [--delay-seconds N] explicitly restarts a queued countdown.
+        \\queue list/read inspect durable status. Restarted processes never send a queued entry automatically.
+        \\mail send or draft send --send-delay 0..30 stages and waits through the same queue. Unknown/submitting entries are never retried.
+        \\Attachments: attachment import --path FILE [--mime-type TYPE] returns an account blobId; attachment discard --blob-id ID refuses referenced content.
+        \\Save received content: mail attachment-save --message-id ID --attachment-id ID --path NEW_FILE (private, no overwrite).
+        \\Browser preview: draft open-preview --draft-id ID, or draft preview --draft-id ID --browser, opens the private preview in the account Chrome profile.
+        \\
+    );
     try w.interface.flush();
+}
+
+fn runUpdates(io: std.Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, args: *std.process.Args.Iterator) !void {
+    const updates = @import("updates.zig");
+    const verb = args.next() orelse "status";
+    if (eq(verb, "--help") or eq(verb, "-h")) return help(io);
+    if (!eq(verb, "status") and !eq(verb, "check") and !eq(verb, "guide") and !eq(verb, "dismiss") and !eq(verb, "automatic")) return error.UnknownCommand;
+    var automatic: ?bool = null;
+    if (eq(verb, "automatic")) {
+        const choice = args.next() orelse return error.ValueRequired;
+        automatic = if (eq(choice, "on")) true else if (eq(choice, "off")) false else return error.InvalidUpdatePreference;
+    }
+    var fixtures = false;
+    var json = false;
+    while (args.next()) |arg| {
+        if (eq(arg, "--help") or eq(arg, "-h")) return help(io);
+        if (eq(arg, "--fixtures")) fixtures = true else if (eq(arg, "--json")) json = true else return error.UnknownOption;
+    }
+    var snapshot = try updates.init(io, a, environ, fixtures);
+    if (eq(verb, "check")) try updates.check(io, a, environ, &snapshot);
+    if (eq(verb, "dismiss")) try updates.dismiss(io, a, environ, &snapshot);
+    if (automatic) |value| {
+        snapshot.state.manualOnly = !value;
+        try updates.save(io, a, environ, &snapshot);
+    }
+    var buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writer(io, &buffer);
+    if (json) {
+        const encoded = try updates.encode(a, &snapshot);
+        try output.interface.writeAll(encoded);
+    } else if (eq(verb, "guide")) {
+        try output.interface.writeAll(try updates.guide(a, &snapshot));
+    } else {
+        try output.interface.print("Omagma {s}\nInstallation: {s}\nLatest stable: {s}\n", .{ @import("build_options").version, updates.methodName(snapshot.install.method), if (snapshot.state.latest.len == 0) "Not checked yet" else snapshot.state.latest.slice() });
+        if (snapshot.state.errorMessage.len != 0) try output.interface.print("Check: {s}\n", .{snapshot.state.errorMessage.slice()});
+        if (updates.available(&snapshot, @import("build_options").version)) try output.interface.writeAll("Upgrade available. Run omagma updates guide for installation-specific instructions.\n") else if (snapshot.state.latest.len != 0) try output.interface.writeAll("No actionable upgrade for this installation.\n");
+        try output.interface.print("Automatic checks: {s}\n", .{if (snapshot.state.manualOnly) "off" else "daily"});
+    }
+    try output.interface.writeByte('\n');
+    try output.interface.flush();
 }

@@ -55,6 +55,11 @@ fn field(value: Value, name: []const u8) Value {
 fn text(value: Value) []const u8 {
     return if (value == .string) value.string else "";
 }
+fn safeName(raw: []const u8) []const u8 {
+    if (raw.len > 256) return "";
+    recipients.validateHeader(raw) catch return "";
+    return raw;
+}
 fn includes(raw: []const u8, query: []const u8) bool {
     if (query.len > raw.len) return false;
     for (0..raw.len - query.len + 1) |index| if (std.ascii.eqlIgnoreCase(raw[index..][0..query.len], query)) return true;
@@ -64,7 +69,7 @@ pub fn collect(contacts: []const Value, raw: []const u8, cursor: usize) Matches 
     var out: Matches = .{ .range = token(raw, cursor) };
     if (out.range.query.len == 0 or out.range.query.len > 254) return out;
     for (contacts) |contact| {
-        const name = text(field(contact, "name"));
+        const name = safeName(text(field(contact, "name")));
         const emails = field(contact, "emails");
         if (emails != .array) continue;
         for (emails.array.items) |mailbox| {
@@ -89,7 +94,7 @@ pub fn collectKnown(known: []const Value, contacts: []const Value, self_address:
     for ([_]u8{ 3, 2, 1 }) |wanted_quality| {
         for (known) |value| {
             const address = text(field(value, "address"));
-            const name = text(field(value, "name"));
+            const name = safeName(text(field(value, "name")));
             recipients.validateAddress(address) catch continue;
             if (std.ascii.eqlIgnoreCase(address, self_address) or std.ascii.eqlIgnoreCase(address, out.range.query) or matchQuality(name, address, out.range.query) != wanted_quality) continue;
             var duplicate = false;
@@ -123,9 +128,30 @@ fn matchQuality(name: []const u8, address: []const u8, query: []const u8) u8 {
     return if (includes(address, query)) 1 else 0;
 }
 pub fn replace(allocator: std.mem.Allocator, raw: []const u8, range: Range, address: []const u8) ![]u8 {
-    try recipients.validateAddress(address);
+    return replaceCandidate(allocator, raw, range, .{ .address = address, .name = "" });
+}
+/// Replace only the current mailbox token. Existing comma/semicolon separators
+/// and recipients after the cursor are retained exactly, without appending a
+/// second separator. Cursor after insertion = result.len - (raw.len-range.end).
+pub fn replaceCandidate(allocator: std.mem.Allocator, raw: []const u8, range: Range, candidate: Candidate) ![]u8 {
     if (range.start > range.end or range.end > raw.len) return error.InvalidCompletionRange;
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ raw[0..range.start], address, raw[range.end..] });
+    const mailbox = try recipients.formatDisplay(allocator, candidate.address, candidate.name);
+    defer allocator.free(mailbox);
+    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ raw[0..range.start], mailbox, raw[range.end..] });
+}
+
+test "composer completion: full mailbox preserves Unicode commas quotes and later separators" {
+    const allocator = std.testing.allocator;
+    const raw = "first@example.test, Jö, last@example.test";
+    const range = token(raw, "first@example.test, Jö".len);
+    const result = try replaceCandidate(allocator, raw, range, .{ .address = "jo@example.test", .name = "Jörg, \"Jo\" \\ Example" });
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("first@example.test, \"Jörg, \\\"Jo\\\" \\\\ Example\" <jo@example.test>, last@example.test", result);
+    var parsed: recipients.List = .{};
+    try recipients.parse(result, &parsed);
+    try std.testing.expectEqual(@as(u8, 3), parsed.count);
+    try std.testing.expectEqualStrings("Jörg, \"Jo\" \\ Example", parsed.items[1].name.slice());
+    try std.testing.expectError(error.HeaderInjection, replaceCandidate(allocator, "Jo", token("Jo", 2), .{ .address = "jo@example.test", .name = "Jo\nBcc: bad@example.test" }));
 }
 
 test "composer completion: quoted commas and later recipients survive replacement" {

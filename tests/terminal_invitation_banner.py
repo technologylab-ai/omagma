@@ -69,7 +69,8 @@ def banner(terminal, mono=False):
     require(area["left"] <= where["column"] < area["right"]
             and area["top"] <= where["row"] < area["bottom"],
             "invitation action is outside the visible reader")
-    edge_row = where["row"] - (1 if terminal.screen.locate("Meeting invitation") else 0)
+    # The friendly event title and Respond share the card's first row.
+    edge_row = where["row"]
     expected_edge = "┃" if mono else "▌"
     edge = next((column for column in range(area["left"], min(area["left"] + 3, area["right"]))
                  if terminal.screen.cells[edge_row][column] == expected_edge), None)
@@ -84,20 +85,23 @@ def banner(terminal, mono=False):
         require(style[1] == ("rgb", 57, 43, 48), "callout does not use theme's tinted surface")
         require(style[0] != ("rgb", 255, 158, 97), "callout action blends into orange label text")
         body_row = next(row for row, _ in reader_rows(terminal.screen)
-                        if not edge_row <= row <= where["row"])
+                        if not any(terminal.screen.cells[row][column] == expected_edge
+                                   for column in range(area["left"], min(area["left"] + 3, area["right"]))))
         body_style = terminal.screen.styles[body_row][area["left"] + 3]
         require(style[1] != body_style[1], "callout surface blends into the body")
     return where
 
 
 def review(terminal, account, case):
-    terminal.until(lambda: "Review invitation reply" in terminal.text()
-                   and identity(case, account)["uid"] in terminal.text())
+    terminal.until(lambda: "Meeting · review reply" in terminal.text() and "[v Details]" in terminal.text())
     text = terminal.text()
     require(f"Account: {account}" in text and identity(case, account)["organizer"] in text,
             "RSVP callout reviewed a different message or account")
+    require("UID:" not in text, "friendly meeting summary exposed protocol-only identifiers")
+    terminal.send(b"v")
+    terminal.until(lambda: identity(case, account)["uid"] in terminal.text() and "Sequence:" in terminal.text())
     terminal.send(b"\r")  # Existing review defaults to Cancel, never Accept.
-    terminal.until(lambda: "Review invitation reply" not in terminal.text())
+    terminal.until(lambda: "Meeting · review reply" not in terminal.text())
 
 
 def run(binary, directory, capture_dir=None, mono=False):
@@ -110,7 +114,7 @@ def run(binary, directory, capture_dir=None, mono=False):
         first = banner(terminal, mono)
         require("Labels:" in "\n".join(text for _, text in reader_rows(terminal.screen)),
                 "busy label header missing from visual contrast fixture")
-        edge_row = first["row"] - 1
+        edge_row = first["row"]
         before = "".join("".join(text.split()) for row, text in reader_rows(terminal.screen) if row < edge_row)
         require(before.endswith("Product/launchplanning9"),
                 "invitation callout is not after the full label header")
@@ -136,7 +140,7 @@ def run(binary, directory, capture_dir=None, mono=False):
         current = banner(terminal, mono)
         report(terminal, current["column"], current["row"], button=64)
         terminal.gap(.08)
-        require("Review invitation reply" not in terminal.text(), "wheel on banner opened review")
+        require("Meeting · review reply" not in terminal.text(), "wheel on banner opened review")
         banner(terminal, mono)
         terminal.send(b"I")
         review(terminal, ACCOUNTS[0], "first")
@@ -164,12 +168,12 @@ def run(binary, directory, capture_dir=None, mono=False):
         banner(terminal, mono)
         terminal.resize(30, 10)
         terminal.until(lambda: "I · Respond" in terminal.text()
-                       and "Meeting invitation" not in terminal.text()
+                       and "Fictional calendar meeting" not in terminal.text()
                        and reader_rectangle(terminal.screen) is not None)
         banner(terminal, mono)
         capture(terminal, capture_dir, "invitation-narrow-mono" if mono else "invitation-narrow")
         terminal.resize(160, 42)
-        terminal.until(lambda: "Meeting invitation" in terminal.text()
+        terminal.until(lambda: "Fictional calendar meeting" in terminal.text()
                        and reader_rectangle(terminal.screen) is not None)
         # New compose must not show an invitation hint for unrelated original mail.
         terminal.send(b"c")

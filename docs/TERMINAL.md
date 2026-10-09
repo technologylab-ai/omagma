@@ -56,6 +56,22 @@ Cancel, so an unprompted Enter does not submit a change. Keyboard focus has a
 visible highlight, including the compose Alias, Add, attachment removal,
 format and preview controls.
 
+Ctrl+P on the mailbox screen, or `:actions`, opens a searchable action palette
+for this account and view. Type an action name, use Ctrl+N/P or the result list
+to choose it, and deliberately activate Run/Enter. Tab/Shift+Tab also reaches
+the controls. Opening, filtering and Back do not perform an action.
+
+## Software updates
+
+The TUI checks for newer stable releases every 24 hours after mail work,
+remembering the interval across restarts. **Upgrade available** appears on the
+main mailbox screen with **Dismiss** and **How to update**; it stays hidden
+while composing or using other views/dialogs. Dismiss remembers that release.
+Use Ctrl+P **Updates** or `:updates` to reopen the guide, check again, or switch
+automatic checking off. All controls support Tab/Shift+Tab, Enter and mouse.
+The guide follows your actual Omarchy, Homebrew, source or manual installation.
+See [updating Omagma](UPDATES.md) for the procedures and shared CLI commands.
+
 ## Reading HTML-only mail
 
 The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use your chosen TUI palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
@@ -66,9 +82,32 @@ Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted line
 
 ## Search
 
-`/` searches this account's retained metadata and downloaded plaintext without fetching missing bodies. It supports quoted phrases, AND terms, negative terms, and the `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `is:unread|read|starred` and `has:attachment` predicates.
+`/` searches this account's retained metadata and downloaded plaintext without fetching missing bodies. It supports quoted phrases, AND terms, negative terms, and `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `filename:`, `is:unread|read|starred|important` and `has:attachment` predicates. `after:` (inclusive), `before:` (exclusive) and `on:` compare local calendar dates written as `YYYY-MM-DD` or `YYYY/MM/DD`; `newer:`/`older:` are absolute-date aliases. Unsupported named operators and invalid values produce a diagnostic. Use Gmail search for its full query language.
 
 `\` explicitly searches Gmail using Google's query syntax. That can reach mail outside the cache and may take network time. `q` leaves search results and restores the original mailbox, selected message and reader position where still cached.
+
+`:search-history` lists recent queries for this account, keeping Cache/Gmail
+scope visible. `:save-search NAME` saves the current query and its scope;
+`:saved-searches` reopens a named query. Deliberately choosing Open/Enter on an
+entry runs that query with its retained scope; merely opening or filtering the
+list does not search. History and named searches each keep at most eight
+entries per account in private UI preferences. Saving an existing name replaces
+that account's named entry with the current query and scope.
+
+`:find TEXT` searches literal text in the focused message's displayed
+subject/body and visible link labels, including the native HTML view. It
+matches ASCII case-insensitively and other Unicode literally, including soft
+wraps; folded quotes/signatures, other headers/messages and hidden URLs are
+excluded. It highlights matches and keeps a
+**Find 1/3** style counter visible. `n`/`N` visits the next/previous match;
+Escape ends finding. This is separate from mailbox search and makes no server
+request. The message needs a loaded body.
+
+`:next-unread` and `:previous-unread` select adjacent unread cached mail in the
+current mailbox, label or cache search, crossing cached windows as needed.
+They keep mail unread, stay in this account and do not fetch older pages.
+They are unavailable in explicit Gmail-search results; return to a cached view
+first.
 
 The CLI exposes both modes through `omagma mail search --cached` / `--server`, or JSONL `cacheOnly:true` / `false`. See [the CLI guide](AGENT-CLI.md) and [cache behavior](TUI-CACHE.md).
 
@@ -128,7 +167,24 @@ selected field has a row highlight, and the body follows its caret.
 
 Body receives a full selection row, From has a separate explicit alias action, and one footer keeps the relevant shortcuts visible.
 
-`a` opens the contact picker. Recipient insertion offers Ctrl+N/P and Enter for account-local cached suggestions; normal compose `f` or the alias action selects a verified identity; account `senderName` and plaintext `signature` settings override primary defaults. Alias selection does not change the sending account's grant. Recipient suggestions match names and addresses from retained From/To/Cc metadata, including Sent mail, so regular correspondents need not be saved contacts. Matching stays local while one bounded Sent-head metadata refresh runs in the background; it uses the existing mail permission. Primary self and duplicates are excluded.
+`a` opens the contact picker. A contact with several addresses offers an
+explicit address choice. Ctrl+N/P and Enter choose account-local recipient
+suggestions; insertion keeps the display name as `Name <address>` and quotes
+commas or quotation marks correctly. Suggestions match retained From/To/Cc
+metadata, including Sent mail, as well as saved contacts, so regular
+correspondents need not be saved contacts. Matching stays local while one
+bounded Sent-head metadata refresh runs in the background. Primary self and
+duplicates are excluded.
+
+Normal compose `f`, `:sender` or the From control opens a chooser of verified
+identities rather than cycling blindly. Choose a row and Use, or Back to keep
+the current sender. Account `senderName` and plaintext `signature` settings
+remain in effect; changing From does not change the account's grant.
+
+Ctrl+Z/Ctrl+Y undo/redo native text edits with their caret positions. Undo in
+compose does not undo mailbox changes. The bounded text history stays in memory
+and is not recovered after restart; it does not rewrite the protected
+original or provide an attachment/sender undo stack.
 
 Changes save locally after a pause, including unfinished addresses. An unfinished recovery draft must be corrected before review and sending. Drafts appear under **Drafts** and survive restart; they are local Omagma drafts, not Gmail's web draft folder.
 
@@ -152,20 +208,55 @@ Plain mode sends the editable source literally; a Keep formatting draft still
 includes its retained original HTML below that note. The native preview shows
 the outgoing content; final styling follows the receiving email client.
 
+`:preview-browser` saves the current draft and explicitly opens its outgoing
+HTML in the account's Chrome profile. The private preview keeps tables, styles
+and verified inline raster images inside an isolated sandbox. Scripts, forms,
+remote fetches and source navigation are blocked; remote pictures remain
+absent. This does not send or upload a Gmail draft. One private preview file per
+account is replaced on reuse and removed by local draft discard.
+
 `e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. In a Keep formatting draft, the editor receives only your note; the retained original and embedded images remain read-only. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
 
 Escape/`q` saves and leaves normal compose. Ctrl+S or `:send` opens review;
-explicit `y` or Enter on the deliberately focused **Send** button sends.
+explicit `y` or Enter on the deliberately focused **Send** button starts the
+local send countdown.
 Review starts with **Back** focused. It shows the account, selected From alias,
 recipients, subject, format, rendered outgoing body, threading and attachments.
 Review the outgoing preview and plain alternative before confirming. Saving,
 switching format or preview, and pressing Enter on composer controls never submit mail.
-If the provider result is uncertain, keep the draft, use `:receipt` to inspect
-its journal and check Sent mail before attempting another send.
+Review warns when your newly authored note promises an attachment but no files
+are attached. Back returns to add files; the warning does not submit mail or
+invent missing files. Quoted history, fenced code and standard signatures do
+not trigger this advisory.
+
+The default cancellation period is ten seconds. `:send-grace 0..30` changes it;
+zero deliberately selects immediate submission after review. While **Sending
+in … · nothing sent yet** is visible, Ctrl+Z, Enter, Escape/`q` or clicking the
+Undo control cancels and returns to the editable draft. Normal close cancels
+an unsent countdown. Once submission starts there is no send recall or Undo.
+
+After an interrupted process, a pending send remains paused. Reopen its local
+draft and use `:resume-send` to start a fresh countdown or `:cancel-send` to
+keep it unsent. Queue status is checked before allowing changes. Submitting
+or unknown outcomes stay protected; restarting never automatically sends or
+retries them. Use `:receipt` and inspect Sent mail when the outcome is uncertain.
 
 ## Attachments and links
 
-`A` or **Add A** attaches another outgoing file. `:detach NUMBER` or its **[x]** removes one. Filenames and sizes stay visible, and the wheel scrolls the attachment list. You can attach up to 16 regular files, within the limits below; files remain attached through saving and editor return.
+`A` or **Add A** opens the outgoing file browser. In the Listing, Space or a
+checkbox click marks files; marks remain when you visit another folder. Attach
+imports the complete selected set, or the focused file if none is marked.
+Space in Path remains filename text. Tab/Shift+Tab reaches the controls and
+Enter activates them; Ctrl+O goes to the parent folder, Ctrl+G to Home and
+Ctrl+T toggles hidden files. Oversized sets are refused before partially
+attaching them so you can correct the choice.
+
+`:detach NUMBER` or its **[x]** removes a file. The list shows selected count,
+individual sizes and the combined 25 MiB budget. Up to 16 ordinary files remain
+attached through saving, restart and editor return. Selected content is copied
+to private account storage; later changes to the original path do not silently
+change the saved attachment. The outgoing MIME must also fit 35 MiB. Oversized
+content gets an explicit error; no file is silently truncated.
 
 Attachment paths are literal and direct paths with spaces need no quoting.
 Ctrl+F completes files/directories; Ctrl+Shift+F cycles matches backward.
@@ -188,6 +279,15 @@ a new private file and refuses overwrite or symlink traversal.
 
 Numeric `:save-attachment NUMBER /absolute/path` also saves a file directly. Paths with spaces are literal. If a completion list is visible, Escape hides it first; Escape again leaves the path prompt. Saving/opening a received file reports the explicit result while retaining its originating reader or draft.
 
+Received saves stream supported attachment content to a new private file,
+including files too large for a JSON/base64 response. Direct saves refuse an
+existing destination. `:save-all DIRECTORY` saves all files of the focused
+message into an existing absolute directory. `:save-all` without a directory
+opens the folder/file chooser, where Space selects which files to save. Batch
+collisions get fresh names; individual failures are reported without
+overwriting existing content or silently discarding successful saves. Saving
+files never sends mail.
+
 `L` opens the link chooser; Enter opens the selected literal HTTP(S) destination in this account's Chrome profile. `o` opens the selected mail in Gmail; with a thread message focused, it opens that exact message. In normal reply/forward mode it opens the original context. Each action uses the current account's configured Chrome profile. Rendering mail never launches anything automatically.
 
 ## Labels, bulk actions and contacts
@@ -198,14 +298,18 @@ that label. To leave the label view, click **Inbox** or another mailbox; this
 changes your view without removing labels from any messages. The sidebar shows
 the portion of the custom-label collection that fits its height.
 
-`m` opens **Choose label**, which assigns or removes an existing custom label
-on the current mail or selected group. `/` filters the list and `+`/`-` applies
-Add/Remove. Tab/Shift+Tab chooses Filter, List, Add, Remove or Back; Enter
-activates the focused action. Gmail's system labels are hidden here: mailbox
-and read/star actions have their own controls.
+`m` opens the staged label checklist for the focused message or selected group.
+`[x]` means present on all targets, `[-]` mixed membership and `[ ]` absent.
+Space or Enter on a row toggles a planned change; `+`/`-` stages Add/Remove.
+A `*` marks a change, and filtering keeps hidden staged choices. Apply or
+Ctrl+S commits the changes; Cancel writes nothing. Tab/Shift+Tab reaches Filter,
+List, Add, Remove, counted Apply and Cancel, including compact screens.
+The account and target count stay visible, and editing is disabled while the
+initial membership snapshot loads. System labels stay with mailbox/read/star
+controls rather than this custom-label checklist.
 
 Click the **LABELS heading**, or use `:labels`, to open **Manage labels**, for the
-account's label collection. Use `n` New, `r` Rename, `d` Delete or `o` Open;
+account's label collection. Use `n` New, `r` Rename, `c` Color, `d` Delete or `o` Open;
 Tab/Shift+Tab and Enter reach the same buttons, and `/` filters the collection.
 Create a label, rename one or review its deletion; these operations
 are separate from assigning labels to mail. Deleting a label removes that label
@@ -216,18 +320,42 @@ on Cancel and names the account and label. `y` or Enter on the deliberately
 focused Delete button confirms; `d` does not confirm. Ctrl+R refreshes definitions
 or checks the recorded receipt when an operation's outcome is uncertain.
 
+Color opens a Back-first list of named Gmail-compatible colors with their
+exact hex values and current marker. Save color deliberately updates that
+definition; ordinary membership stays unchanged. Color choices require the
+same `mail-modify` capability and remain separate from assigning labels.
+
 Space selects mail, Ctrl+A selects the window, and actions apply to that set or
 the focused message. Escape/`q` clears a selection first; Ctrl+Z or `:undo`
-reverses the last completed account action. Scope changes clear selection.
+reverses the last completed account action. Changing mailbox/search context
+clears its previous selection.
 Bulk actions can have partial outcomes; uncertain items are not replayed.
+`:scope message` selects the normal single-message scope. `:scope thread`
+deliberately resolves the complete conversation before its review; targets
+are pinned to this account and capped at 100, with incomplete or oversized
+resolution refused. The review states the actual count, and later arrivals or
+selection changes do not retarget it. An explicit Space selection takes
+precedence and applies only to those selected messages.
 `D` opens Trash review, initially focused on Cancel; `y` or Enter on the
 deliberately focused Confirm button submits the change.
 
-The CLI/API batch interface also supports `spam` and `unspam`
-actions; `unspam` removes Spam and restores Inbox membership. See
+`:spam` and `:unspam` expose the same mailbox actions in the TUI; `unspam`
+removes Spam and restores Inbox membership. They honor the current explicit
+scope and return per-message outcomes with mailbox undo. The CLI/API batch
+interface shares these actions. See
 [batch commands](AGENT-CLI.md#commands).
 
-`a` opens this account's address book. Search with `/`, create with `n`, edit with `e`, and save a contact with Ctrl+S. Contacts require People API permissions. Version conflicts are reported so you can refresh before editing again. Contact deletion is not implemented.
+`a` opens this account's address book. Search with `/`, create with `n`, edit
+with `e`, and save with Ctrl+S. The editor keeps all supported addresses rather
+than replacing a contact with its first one; name-only edits preserve the
+address array and provider metadata. `:add-contact` opens editable name/address
+fields prefilled from the focused sender; only Save writes a contact. Contacts
+require the existing People API permission and retain etag conflict checks.
+Contact deletion is not implemented.
+
+`:discard-draft` deliberately reviews removal of the current local draft and
+its recovery/preview copies. Cancel is the safe default. It does not delete a
+Gmail draft or message, and pending/unknown submissions remain protected.
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
 
@@ -239,14 +367,26 @@ message cannot hide the response
 action. Click the callout or press `I`
 to review a response; neither action sends a reply by itself.
 
-Invitation review also supports Tab/Shift+Tab across Accept, Tentative, Decline
-and Cancel, with Cancel focused initially. Enter submits only the deliberately
-focused reply action. The account and organizer identities remain visible
-before submission.
+The card shows the meeting title and friendly start/duration where available.
+Invitation review keeps account, attendee and organizer identities visible,
+with local start/end, duration, location and stated response. UTC and supported
+TZID times use local zoneinfo; embedded, custom or unavailable timezone data
+keeps its stated wall time and label. All-day end dates are explicitly
+exclusive, and ambiguous/nonexistent local times stay labeled.
+
+Tab/Shift+Tab reaches Cancel, Accept, Tentative, Decline, Details and Join;
+Cancel starts focused. `v`/Details toggles UID, sequence and recurrence details.
+`o`/Join explicitly opens a safe HTTP(S) meeting URL in the inspected account's
+Chrome profile. Enter submits only a deliberately focused reply action.
 
 A copied Teams/Zoom join link alone has no organizer/attendee scheduling identity. Such mail can be read and opened with `o`, but Omagma cannot invent a valid RSVP. This needs no Calendar API permission, calendar view or calendar editing; sending a response requires the account's existing terminal RSVP/send grant.
 
-File operations use a compact popup over the current draft or reader. `A` opens the attachment browser; `B` in the reader chooses received files and offers Save or Save & open. Arrows and the mouse wheel browse, clicking a row selects it, and the explicit Attach/Save button or Enter performs the action. Enter on a directory navigates into it. Tab/Shift+Tab move through the path, folder controls, file list and action buttons; Enter activates the focused control. Ctrl+F completes a literal path, Ctrl+U clears it, and Esc returns to the same draft or attachment picker. Printable `q`, `j` and `k` remain filename text. Ctrl+O goes to the parent folder, Ctrl+G goes Home, Ctrl+T toggles hidden files, and Ctrl+N/P browse entries; the buttons show these shortcuts. In the composer, Tab continues from Body to Add and then each attachment’s `[x]`; Shift+Tab goes backwards, and Enter activates Add or removes the focused file. `x` also removes the focused file, while Esc returns to Body. Multiple outgoing files are added with repeated `A`; the composer shows their combined size against its 2 MiB limit. Attachment sizes use rounded decimal kB/MB consistently, with bytes for very small files; the underlying byte limits are unchanged.
+File popups keep the current draft or reader underneath. Printable `q`, `j`,
+`k` and Space remain filename text while Path has focus; the Listing has its
+own selection controls. In the composer, Tab continues from Body to Add and
+each file's `[x]`; Enter activates Add/removal, `x` removes the focused file,
+and Esc returns to Body. Sizes use decimal kB/MB in the display; the byte limits
+below use MiB. [Attachment controls](#attachments-and-links).
 
 Save creates a new file. An existing filename produces an inline error and retains the entered path, so you can choose another name; no overwrite is implicit. Popup clicks stay inside the popup. Saving or attaching does not send mail.
 
@@ -263,6 +403,11 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | h/l, Tab/Shift+Tab, Enter | Change pane or open selected item |
 | 1/2/3 | Switch account |
 | / / \ | Search cache / Gmail |
+| Ctrl+P in mailbox / :actions | Discover account/view actions |
+| :updates / Ctrl+P Updates | Release status, upgrade guide and daily/manual checks |
+| :find TEXT, n/N, Escape | Current-message find, next/previous match, done |
+| :next-unread / :previous-unread | Adjacent unread cached mail in the current view |
+| :search-history / :saved-searches / :save-search NAME | Reuse or save account-specific queries |
 | v / z | Reader layout / expand |
 | J/K | Reader: adjacent mail |
 | {/}, t, Q/S | Reader: thread card, fold body, quotes/signature |
@@ -270,15 +415,27 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | f / F in mailbox | Forward |
 | k / t / e in reply/forward chooser | Keep formatting / Text quote / Attach original (.eml; `e` is forward-only) |
 | Ctrl+T in compose | Toggle note Markdown/Plain; retained original stays unchanged |
+| Ctrl+Z / Ctrl+Y in compose | Native text undo / redo |
+| f / :sender in compose | Verified From chooser |
 | p in normal compose | Outgoing preview / original context / plain alternative |
+| :preview-browser in compose | Save and explicitly open the sandboxed outgoing browser preview |
 | Tab/Shift+Tab, Enter in normal compose | Focus fields/controls; edit a field or activate a control |
 | Ctrl+S / :send in compose | Open outgoing send review |
-| y in send review | Explicitly submit the reviewed draft |
+| y in send review | Confirm the reviewed draft and start the local send countdown |
+| :send-grace 0..30 | Cancellation period in seconds; default 10, explicit 0 means immediate |
+| Ctrl+Z / Enter / Undo during countdown | Cancel before submission and return to editing |
+| :resume-send / :cancel-send | Explicitly handle a recovered paused send |
 | A in normal compose | Add outgoing attachment |
 | L / B | Links / received-file picker |
 | o | Open selected mail in Gmail |
 | Space / Ctrl+A / Ctrl+Z | Select / select window / undo |
 | x / D / U / s / u / m | Archive / Trash review / restore / star / unread / labels |
+| Space / +/- / Ctrl+S in labels | Toggle/stage membership / Apply; Cancel writes nothing |
+| c in Manage labels | Choose a custom label color |
+| :scope message\|thread | Choose single-message or reviewed conversation targets |
+| :spam / :unspam | Shared Spam / Not spam actions |
+| :add-contact / :discard-draft | Prefill sender contact / review local draft removal |
+| :save-all DIRECTORY | Save focused-message files to a new private destination set |
 | a / I | Contacts / invitation reply |
 | T / :theme | Preview and choose the TUI theme |
 | Ctrl+R / Ctrl+L / ? / q | Refresh / colors / help / back or quit |
@@ -292,7 +449,13 @@ editing (`Ctrl+A/E` for line start/end), list navigation and review controls.
 Shortcuts are scoped to their view: printable letters remain data during text
 entry, and preview scrolling uses normal compose mode.
 
-Reader layout, split proportions, theme, key remaps and per-account mailbox/selected-mail/reader position live in private `omagma/ui.json`; `--ui-file FILE` selects another preferences file. `:split right 60` or `:split below 40` chooses a 25–75% split; `:bind n down`, `:bind p up` and `:unbind n` remap mailbox keys without intercepting text entry or confirmation.
+Reader layout, split proportions, theme, key remaps, search history/named
+searches, send grace and per-account mailbox/selected-mail/reader position live
+in private `omagma/ui.json`; `--ui-file FILE` chooses another file.
+`:split right 60` or `:split below 40` chooses a 25–75% split;
+`:bind w down`, `:bind p up` and `:unbind w` remap mailbox keys without
+intercepting text entry or confirmation. Ctrl+B is reserved for terminal/tmux
+prefixes and cannot be rebound by Omagma.
 
 Press `T` on the mailbox screen, or enter `:theme`, to preview **Omagma**,
 the built-in volcano-orange palette used in project screenshots, or **Follow
@@ -323,16 +486,24 @@ You can use your own accounts after consent, including sending a first message t
 | Display/result window | 32 in the TUI; up to 100 per CLI page |
 | Loaded thread | 100 messages |
 | Message body / draft source / each rendered alternative | 2 MiB |
-| Outgoing attachments | 16 files, 2 MiB combined decoded bytes |
+| Ordinary outgoing attachments | 16 files, 25 MiB combined decoded bytes |
+| Retained original inline resources | 32 resources, 2 MiB combined decoded bytes, separate from ordinary files |
 | Original email (.eml) source | 2 MiB; encoded draft must also fit the request limit |
-| Incoming attachments | 32 per message |
+| Parsed incoming file/resource descriptors | 49 per message, within 128 MIME parts; streamed file content up to 25 MiB each and account disk quota |
 | Outgoing recipients | 32 across To/Cc/Bcc |
 | Local drafts / undo receipts | 128 / 16 per account |
 | Cached contacts / operation journal | 1,024 / 1,000 per account |
-| Serialized request | 3 MiB, including encoded attachment data |
+| Addresses per contact | 32; preserved through supported edits |
+| Serialized JSON request | 3 MiB; larger ordinary file bytes use account handles |
+| Complete outgoing MIME | 35 MiB, including body, resources and encoded ordinary files |
+| Find query / matches / scanned display text | 256 bytes / 256 / 2 MiB; a + marks a capped count |
+| Search history / named searches | 8 each per account; 4,096-byte queries and 96-byte names |
+| Browser preview / UI preferences | One preview per account, at most 16 MiB / at most 256 KiB private preferences |
+| Queued send intents | 32 active, 128 retained records per account; delay 0–30 seconds |
 
-Encoded bodies, retained originals and attachments must also fit the request
-limit. Oversized or unavailable content fails explicitly before saving a
+Inline JSON body/resource data must fit the request limit. Ordinary file
+handles avoid embedding large file bytes in that frame; the final encoded MIME
+still has its separate cap. Oversized or unavailable content fails before saving a
 partial draft or sending mail. Old mail is evicted under cache pressure;
 local drafts, their retained originals and operation receipts are preserved.
 `cache.clear` removes cached mail without removing drafts, contacts or receipts.
@@ -341,4 +512,8 @@ Every send or RSVP has an operation identity and a recorded outcome: applied, re
 
 Cache files and drafts contain plaintext protected by owner-only filesystem permissions, not encryption at rest. Keep private configuration, credentials, cache files and real-mail captures outside Git. See [cache behavior](TUI-CACHE.md), [agent CLI](AGENT-CLI.md) and [developer references](DEVELOPMENT.md) for the deeper contracts.
 
-Omagma uses Ctrl for modified app commands. Letter shortcuts cover file navigation; `i` enters compose editing, `gg`/`G` navigate mail, and Ctrl+A/E move to the start/end of a text line. Home/End and arrow keys remain optional aliases. Ctrl+1/2/3 also switches accounts from the mailbox, matching the bar popup.
+Omagma uses Ctrl for modified app commands and reserves Ctrl+B. Letter
+alternatives, Tab/Shift+Tab and Enter keep flows usable without Home, End,
+Insert or Alt. `i` enters editing, `gg`/`G` navigate mail, and Ctrl+A/E move to
+line start/end. Arrow and Home/End keys remain optional aliases; Ctrl+1/2/3
+switches accounts from the mailbox, matching the bar popup.

@@ -50,6 +50,11 @@ ln -s "$omagma_release_dir/omagma" "$HOME/.config/omarchy/plugins/io.github.tech
 
 If that plugin path already exists, inspect it before changing it. For an upgrade, prepare and verify a new versioned directory first, then point the existing plugin symlink at it. Preserve private account configuration and keyring credentials. Keep the linked folder available while the plugin is enabled.
 
+The TUI's **Upgrade available** card opens installation-specific instructions.
+See [updates](UPDATES.md) for release bundles versus Git plugins, daily checking
+and the CLI guide. `omarchy plugin update` updates a Git checkout's source;
+release bundles use the verified directory/link procedure above.
+
 The plugin installation also adds the `omagma` command and an **Omagma**
 application launcher entry that opens the TUI in Omarchy's floating terminal. Inspect any existing `omagma`
 command or `omagma.desktop` entry first; do not overwrite an unrelated one.

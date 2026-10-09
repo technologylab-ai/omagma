@@ -43,15 +43,15 @@ def collection(binary, directory, capture_dir=None):
         terminal.until(lambda: "Manage labels" in terminal.text() and "Projects" in terminal.text())
         require("CATEGORY_UPDATES" not in terminal.text(), "system label leaked into collection dialog")
         capture(terminal, capture_dir, "label-manager-wide")
-        for label in ("[n New]", "[r Rename]", "[d Delete]", "[o Open]", "[q Back]"):
+        for label in ("[n New]", "[r Rename]", "[c Color]", "[d Delete]", "[o Open]", "[q Back]"):
             focus(terminal, TAB, label)
         terminal.send(ENTER)
         terminal.until(lambda: "Manage labels" not in terminal.text())
         terminal.send(b"m")
-        terminal.until(lambda: "Choose label" in terminal.text() and "Projects" in terminal.text())
+        terminal.until(lambda: "Labels · staged changes" in terminal.text() and "Projects" in terminal.text())
         require("CATEGORY_UPDATES" not in terminal.text(), "system state leaked into membership picker")
         terminal.send(b"\x1b")
-        terminal.until(lambda: "Choose label" not in terminal.text())
+        terminal.until(lambda: "Labels · staged changes" not in terminal.text())
         open_manager(terminal)
         terminal.send(b"n")
         terminal.until(lambda: "New label" in terminal.text() and "Name:" in terminal.text())
@@ -73,8 +73,10 @@ def collection(binary, directory, capture_dir=None):
         require(renamed["name"] == "qjk Renamed", "rename changed the wrong label or lost stable ID")
         terminal.send(b"q")
         terminal.until(lambda: "Manage labels" not in terminal.text())
-        terminal.send(b"m/qjk Renamed\r\r")
-        terminal.until(lambda: "Mail action: 1 applied" in terminal.text() and "Choose label" not in terminal.text())
+        terminal.send(b"m/qjk Renamed\r")
+        terminal.until(lambda: "[ ]" in terminal.text() and "qjk Renamed" in terminal.text())
+        terminal.send(b" \x13")
+        terminal.until(lambda: "Mail action: 1 applied" in terminal.text() and "Labels · staged changes" not in terminal.text())
         with Client(binary, directory, extra=source.options()) as client:
             require(created_id in client.request("mail.read", messageId="shared-msg-096", cacheOnly=True)["labels"],
                     "new definition could not be assigned through normal m picker")
@@ -122,7 +124,7 @@ def collection(binary, directory, capture_dir=None):
         terminal.until(lambda: "Projects" in terminal.text() and "qjk Renamed" not in terminal.text())
         terminal.resize(30, 10)
         terminal.until(lambda: all(label in terminal.text() for label in
-                                 ("[n New]", "[r Ren]", "[d Del]", "[o Open]", "[q Back]")))
+                                 ("[n New]", "[r Ren]", "[c Col]", "[d Del]", "[o Op]", "[q Back]")))
         capture(terminal, capture_dir, "label-manager-narrow")
         terminal.send(b"q")
         terminal.until(lambda: "Manage labels" not in terminal.text())
@@ -191,7 +193,7 @@ def readonly(binary, directory, capture_dir=None):
         open_manager(terminal)
         terminal.until(lambda: "Read-only" in terminal.text())
         capture(terminal, capture_dir, "label-manager-readonly")
-        terminal.send(b"nrd")
+        terminal.send(b"nrdc")
         require("New label" not in terminal.text() and "Rename label" not in terminal.text()
                 and "Delete label?" not in terminal.text(), "read-only account offered collection mutations")
         focus(terminal, TAB, "[o Open]")
@@ -209,14 +211,73 @@ def readonly(binary, directory, capture_dir=None):
         terminal.close()
 
 
+def colors(binary, directory, capture_dir=None):
+    source = fixture_setup(binary, directory)
+    for account in ACCOUNTS:
+        source.data[account]["baseline"]["labels"] = [
+            {"id": "INBOX", "name": "Inbox", "type": "system"},
+            {"id": "Label_demo", "name": "Projects", "type": "user",
+             "color": {"backgroundColor": "#4a86e8", "textColor": "#ffffff"}}]
+        source.stage(account, "baseline")
+    with Client(binary, directory, extra=source.options()) as client:
+        for account in ACCOUNTS:
+            client.request("labels.list", account=account)
+        before = client.request("mail.read", messageId="shared-msg-096", cacheOnly=True)
+    terminal = start_ready(binary, directory, source)
+    try:
+        open_manager(terminal)
+        focus(terminal, TAB, "[n New]")
+        focus(terminal, TAB, "[r Rename]")
+        focus(terminal, TAB, "[c Color]")
+        terminal.send(ENTER)
+        terminal.until(lambda: "Color · Projects" in terminal.text() and "· current" in terminal.text()
+                       and "[Save color]" in terminal.text() and focused(terminal, "[Back]"))
+        capture(terminal, capture_dir, "label-color-safe-default")
+        terminal.send(ENTER)
+        terminal.until(lambda: "Color · Projects" not in terminal.text() and "Manage labels" in terminal.text())
+        with Client(binary, directory, extra=source.options()) as client:
+            require(client.request("operation.list")["operations"] == [],
+                    "opening color management/default Back changed a label")
+        terminal.send(b"c")
+        terminal.until(lambda: "Color · Projects" in terminal.text())
+        terminal.send(TAB + b"#a479e2")
+        terminal.until(lambda: "Purple #a479e2" in terminal.text())
+        terminal.resize(40, 12)
+        terminal.until(lambda: "[Save color]" in terminal.text() and "[Back]" in terminal.text())
+        capture(terminal, capture_dir, "label-color-narrow")
+        focus(terminal, TAB + TAB, "[Save color]")
+        terminal.send(ENTER)
+        terminal.until(lambda: "Label color: applied" in terminal.text())
+        labels = label_data(binary, directory, source)
+        changed = next(label for label in labels if label["id"] == "Label_demo")
+        require(changed["name"] == "Projects" and changed["color"] == {
+            "backgroundColor": "#a479e2", "textColor": "#000000"},
+            "color chooser lost definition identity or its valid readable color pair")
+        with Client(binary, directory, extra=source.options()) as client:
+            other = client.request("labels.list", account=ACCOUNTS[1], cacheOnly=True)["labels"]
+            untouched = next(label for label in other if label["id"] == "Label_demo")
+            require(untouched["color"]["backgroundColor"] == "#4a86e8", "label color crossed account boundaries")
+            after = client.request("mail.read", messageId="shared-msg-096", cacheOnly=True)
+            require(after["labels"] == before["labels"] and after["bodyText"] == before["bodyText"],
+                    "definition color update changed message membership/content")
+            require(client.request("cache.stats")["fixtureSends"] == 0, "color management sent mail")
+        terminal.finish()
+        print("PASS label color: Tab/Enter, safe Back, named valid color, narrow controls, readable text pair, account and membership isolation")
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
-    parser.add_argument("--case", choices=("collection", "empty-drafts", "readonly"), action="append")
+    parser.add_argument("--case", choices=("collection", "empty-drafts", "readonly", "colors"), action="append")
     parser.add_argument("--capture-dir", type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="omagma-label-manager-") as temporary:
-        for name, run in (("collection", collection), ("empty-drafts", empty_and_drafts), ("readonly", readonly)):
+        for name, run in (("collection", collection), ("empty-drafts", empty_and_drafts), ("readonly", readonly), ("colors", colors)):
             if not args.case or name in args.case:
                 run(args.binary.resolve(), Path(temporary) / name, args.capture_dir)
     return 0

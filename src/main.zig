@@ -39,6 +39,15 @@ fn usageError(err: anyerror) bool {
         error.UnknownCommand,
         error.CommandRequired,
         error.ValueRequired,
+        error.BrowserRequiresPreview,
+        error.BrowserPreviewRequiresSavedDraft,
+        error.WaitRequiresQueueProcess,
+        error.SendDelayRequiresSend,
+        error.InvalidSendDelay,
+        error.InvalidTriageScope,
+        error.ScopeRequiresTriageCommand,
+        error.ScopeRequiresSingleMessage,
+        error.AttachmentsRequireDraftSource,
         error.InvalidArgv,
         error.Args,
         error.AccountRequired,
@@ -121,7 +130,7 @@ fn app(init: std.process.Init) !void {
         try writer.interface.flush();
         return;
     }
-    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "mail") or std.mem.eql(u8, mode, "contacts") or std.mem.eql(u8, mode, "labels") or std.mem.eql(u8, mode, "invitations") or std.mem.eql(u8, mode, "draft") or std.mem.eql(u8, mode, "cache") or std.mem.eql(u8, mode, "operation") or std.mem.eql(u8, mode, "terminal-auth")) {
+    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "mail") or std.mem.eql(u8, mode, "contacts") or std.mem.eql(u8, mode, "labels") or std.mem.eql(u8, mode, "invitations") or std.mem.eql(u8, mode, "draft") or std.mem.eql(u8, mode, "queue") or std.mem.eql(u8, mode, "attachment") or std.mem.eql(u8, mode, "cache") or std.mem.eql(u8, mode, "operation") or std.mem.eql(u8, mode, "terminal-auth") or std.mem.eql(u8, mode, "updates")) {
         try @import("terminal/cli.zig").run(init, io, mode, &args);
         return;
     }
@@ -252,6 +261,7 @@ test {
     std.testing.refAllDecls(@import("terminal/theme.zig"));
     std.testing.refAllDecls(@import("terminal/timezone.zig"));
     std.testing.refAllDecls(@import("terminal/preferences.zig"));
+    std.testing.refAllDecls(@import("terminal/updates.zig"));
     std.testing.refAllDecls(@import("terminal/background.zig"));
     std.testing.refAllDecls(@import("platform.zig"));
     std.testing.refAllDecls(@import("bounded.zig"));
@@ -265,6 +275,7 @@ test {
     std.testing.refAllDecls(@import("keyring.zig"));
     std.testing.refAllDecls(@import("terminal/capped_allocator.zig"));
     std.testing.refAllDecls(@import("terminal/core.zig"));
+    std.testing.refAllDecls(@import("terminal/cli_plan.zig"));
     std.testing.refAllDecls(@import("terminal/mime.zig"));
     std.testing.refAllDecls(@import("terminal/recipients.zig"));
     std.testing.refAllDecls(@import("terminal/invitation.zig"));

@@ -12,7 +12,8 @@ const max_runs = 65536;
 const blanks: [240]u8 = @splat(' ');
 pub const Role = enum { text, heading, quote, marker, border, link, code, table_header };
 pub const Run = struct { text: []const u8, columns: u16, flags: html.Style = .{}, role: Role = .text };
-pub const Line = struct { first: usize, count: usize, columns: u16 };
+pub const LineJoin = enum { separate, space, none };
+pub const Line = struct { first: usize, count: usize, columns: u16, join: LineJoin = .separate, prefix_bytes: usize = 0 };
 pub const Layout = struct { lines: []const Line, runs: []const Run };
 pub const Stats = struct { htmlDocumentBuilds: u64 = 0, htmlLayoutBuilds: u64 = 0, htmlFallbacks: u64 = 0 };
 
@@ -296,6 +297,8 @@ const Builder = struct {
     indent: u16 = 0,
     marker: []const u8 = "",
     prefix_width: u16 = 0,
+    prefix_bytes: usize = 0,
+    join: LineJoin = .separate,
     role: Role = .text,
     open: bool = false,
     pending_space: bool = false,
@@ -316,12 +319,13 @@ const Builder = struct {
         self.pending_space = false;
         self.pending_flags = .{};
         self.pending_role = .text;
-        try self.newLine(true);
+        try self.newLine(true, .separate);
     }
-    fn newLine(self: *Builder, first: bool) !void {
+    fn newLine(self: *Builder, first: bool, join: LineJoin) !void {
         if (self.open) try self.finishLine();
         self.first = self.runs.items.len;
         self.column = 0;
+        self.join = join;
         self.open = true;
         if (self.indent > 0) try self.add(blanks[0..self.indent], self.indent, .{}, .text);
         const marker_width = textWidth(self.marker, self.method, self.width);
@@ -329,11 +333,13 @@ const Builder = struct {
         if (used != marker_width) return error.HtmlLayoutUnavailable;
         if (used > 0) try self.add(if (first) self.marker else blanks[0..used], used, .{}, if (self.role == .quote) .quote else .marker);
         self.prefix_width = self.column;
+        self.prefix_bytes = 0;
+        for (self.runs.items[self.first..]) |run| self.prefix_bytes += run.text.len;
     }
     fn finishLine(self: *Builder) !void {
         if (!self.open) return;
         if (self.lines.items.len == max_lines) return error.HtmlLayoutUnavailable;
-        try self.lines.append(self.allocator, .{ .first = self.first, .count = self.runs.items.len - self.first, .columns = self.column });
+        try self.lines.append(self.allocator, .{ .first = self.first, .count = self.runs.items.len - self.first, .columns = self.column, .join = self.join, .prefix_bytes = self.prefix_bytes });
         self.open = false;
     }
     fn blank(self: *Builder) !void {
@@ -350,7 +356,7 @@ const Builder = struct {
             if (columns > self.width -| self.prefix_width) return error.HtmlLayoutUnavailable;
             if (self.column +| width +| columns > self.width) {
                 try self.add(bytes[start..gr.start], width, flags, role);
-                try self.newLine(false);
+                try self.newLine(false, .none);
                 start = gr.start;
                 width = 0;
             }
@@ -366,7 +372,7 @@ const Builder = struct {
             var offset: usize = 0;
             while (offset < span.text.len) {
                 if (span.text[offset] == '\n') {
-                    try self.newLine(false);
+                    try self.newLine(false, .separate);
                     self.pending_space = false;
                     self.pending_flags = .{};
                     self.pending_role = .text;
@@ -387,7 +393,7 @@ const Builder = struct {
                 const word = span.text[offset..end];
                 const wanted = textWidth(word, self.method, self.width +| 1);
                 const gap: u16 = @intFromBool(self.pending_space and self.column > self.prefix_width);
-                if (!pre and self.column > self.prefix_width and self.column +| gap +| wanted > self.width) try self.newLine(false) else if (gap > 0) {
+                if (!pre and self.column > self.prefix_width and self.column +| gap +| wanted > self.width) try self.newLine(false, if (gap > 0) .space else .none) else if (gap > 0) {
                     // A separating space belongs to the span that supplied it.
                     // Borrowing the next word's style underlines the gap before
                     // a link, which looks like a stray leading underscore.
@@ -860,6 +866,27 @@ test "local reader: native search highlighting spans style runs without altering
     try std.testing.expect(!vaxis.Color.eql(.{ .rgb = palette.yellow }, screen.readCell(0, 0).?.style.bg));
     try std.testing.expectEqualStrings("A", screen.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("c", screen.readCell(2, 0).?.char.grapheme);
+}
+
+test "reader find: HTML layout labels soft wraps split words and explicit breaks" {
+    const a = std.testing.allocator;
+    var prepared = try Prepared.init(a, "<ul><li>Before meeting notes</li></ul><pre>abcdefghijklmnop\nnext line</pre>");
+    defer prepared.deinit();
+    try prepared.ensure(12, .unicode);
+    var soft = false;
+    var split = false;
+    var explicit = false;
+    for (prepared.cached.lines) |line| {
+        if (line.join == .space) {
+            soft = true;
+            try std.testing.expect(line.prefix_bytes > 0);
+        }
+        split = split or line.join == .none;
+        for (prepared.cached.runs[line.first..][0..line.count]) |run| if (std.mem.indexOf(u8, run.text, "next") != null) {
+            explicit = line.join == .separate;
+        };
+    }
+    try std.testing.expect(soft and split and explicit);
 }
 
 test "reader polish: inline link underline excludes surrounding prose spaces and punctuation" {

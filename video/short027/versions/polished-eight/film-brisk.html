@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Omagma v0.2.7 — focused feature film</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#080605;overflow:hidden}
+#screen{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0}
+iframe{display:block;width:1920px;height:1080px;border:0}
+</style>
+</head>
+<body><div id="screen"><iframe id="picture" src="film.html" title="Omagma feature scenes"></iframe></div>
+<script>
+(() => {
+  'use strict';
+  const frame = document.getElementById('picture');
+  const loaded = new Promise(resolve => frame.addEventListener('load', resolve, {once:true}));
+  let plan, music, child, sourceRender, sourceQa, cues;
+  const clamp = v => Math.max(0, Math.min(1, v));
+  const smooth = v => v * v * (3 - 2 * v);
+  function at(t) {
+    const seconds = Math.max(0, Math.min(plan.duration, Number(t) || 0));
+    const number = Math.min(plan.frameCount - 1, seconds * plan.fps);
+    const part = plan.parts.find(p => number < p.frameOut) || plan.parts.at(-1);
+    const progress = clamp((number - part.frameIn) / (part.frameOut - part.frameIn));
+    return {t:seconds, part, sourceTime:part.sourceIn + progress * (part.sourceOut - part.sourceIn),
+      elapsed:seconds - part.frameIn / plan.fps};
+  }
+  function bodyAlpha(state) {
+    // Old content must not continue behind the following chapter introduction.
+    // On the next state, fade the actual screenshot back in with its modal.
+    if (state.part.titleLead) return 1 - smooth(clamp(state.elapsed / .12));
+    const index = plan.parts.indexOf(state.part);
+    return index > 0 && plan.parts[index - 1].titleLead ? smooth(clamp(state.elapsed / .14)) : 1;
+  }
+  function pulse(t, cue, tail) {
+    const distance = t - cue;
+    return distance < 0 || distance >= tail ? 0 : 1 - smooth(distance / tail);
+  }
+  window.render = t => {
+    if (!child) return false;
+    const state = at(t);
+    sourceRender(state.sourceTime);
+    child.document.getElementById('shots').style.opacity = bodyAlpha(state);
+    // Picture and audio have separate clocks. Decorative accents follow the
+    // original-tempo soundtrack instead of the compressed source picture.
+    let accent = 0;
+    for (const cue of cues) accent = Math.max(accent, pulse(state.t, cue.film, .55));
+    const glow = child.document.getElementById('glow');
+    glow.style.opacity = .44 + .16 * accent;
+    glow.style.transform = 'scale(' + (1 + .08 * accent) + ')';
+    child.document.getElementById('flash').style.opacity = .10 * Math.max(
+      pulse(state.t, music.mappedMusicLandmarks.find(x=>x.name==='drop').film, .45),
+      pulse(state.t, music.mappedMusicLandmarks.find(x=>x.name==='stop').film, .45));
+    return true;
+  };
+  window.qa = t => {
+    const state = at(t), base = sourceQa(state.sourceTime);
+    return {...base, t:state.t, frame:Math.min(plan.frameCount-1,Math.round(state.t*plan.fps)),
+      phase:state.part.name, sourceTime:state.sourceTime, bodyOpacity:bodyAlpha(state),
+      visibleAssets:bodyAlpha(state)<.01?[]:base.visibleAssets};
+  };
+  window.READY = Promise.all([
+    fetch('brisk.json').then(r=>{if(!r.ok)throw Error('Missing brisk timeline');return r.json();}),
+    fetch('soundtrack-brisk.json').then(r=>{if(!r.ok)throw Error('Missing brisk soundtrack');return r.json();}),
+    loaded
+  ]).then(async ([p,m]) => {
+    plan=p;music=m;child=frame.contentWindow;
+    const ready=await child.READY;
+    if(plan.frameCount!==music.frameCount||plan.fps!==music.fps)throw Error('Picture/music timing mismatch');
+    sourceRender=child.render;sourceQa=child.qa;
+    cues=music.mappedMusicLandmarks.filter(x=>x.name!=='opening'&&x.name!=='naturalEnd');
+    window.FILM={width:1920,height:1080,fps:plan.fps,frameCount:plan.frameCount,duration:plan.duration,parts:plan.parts};
+    window.FILM_MUSIC=music;
+    window.render(0);
+    return {ok:true,...window.FILM,warnings:ready.warnings||[]};
+  });
+  const fit=()=>document.getElementById('screen').style.transform='scale('+Math.min(innerWidth/1920,innerHeight/1080)+')';
+  addEventListener('resize',fit);fit();
+})();
+</script></body></html>

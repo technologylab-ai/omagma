@@ -1,0 +1,29 @@
+import {mkdirSync,writeFileSync,existsSync,readdirSync,rmSync,readFileSync} from 'node:fs';
+import {resolve,join} from 'node:path';
+import {parseArgs} from 'node:util';
+import {browser,reservation,root} from './cdp.mjs';
+const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},plan:{type:'string'},film:{type:'string',default:'film.html'}}});
+if(!['film.html','film-brisk.html','film-nine.html'].includes(o.film))throw Error('unknown film source');
+await reservation();
+const plan=JSON.parse(readFileSync(resolve(o.plan||join(root,'video/short027/soundtrack.json')),'utf8'));
+const expectedFrames=Number(plan.frameCount);
+const out=resolve(o.out||join(root,'video/cache/short027/calm-frames')), allowed=[join(root,'video/cache/short027'),join(root,'video/out/short027')];
+if(!allowed.some(a=>out.startsWith(a+'/')))throw Error('output must be owned short027 cache/out subdirectory');
+if(existsSync(out)&&readdirSync(out).length&&!existsSync(join(out,'.short027-render')))throw Error('refuse to replace unowned directory');
+if(!o.stills&&existsSync(out))rmSync(out,{recursive:true,force:true});mkdirSync(out,{recursive:true});writeFileSync(join(out,'.short027-render'),'owned media output\n');
+const scale=Number(o.scale),workers=Number(o.workers),step=Number(o.step);
+if(!(scale>=.1&&scale<=2&&Number.isInteger(workers)&&workers>=1&&workers<=6&&Number.isInteger(step)&&step>=1))throw Error('bad render options');
+const b=await browser();
+try{
+  const pages=await Promise.all(Array.from({length:workers},()=>b.page('video/short027/'+o.film,{scale})));
+  const film=await pages[0].evaluate('window.FILM');if(!film||film.fps!==plan.fps||film.width!==1920||film.height!==1080||Math.round(film.duration*film.fps)!==expectedFrames)throw Error('film dimensions/timing differ from explicit soundtrack plan');
+  const start=o.from===undefined?0:Number(o.from),end=o.to===undefined?film.duration:Number(o.to);
+  if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>film.duration+1e-6||end<=start)throw Error('bad render time range');
+  const first=Math.ceil(start*film.fps),last=Math.min(expectedFrames,Math.ceil(end*film.fps));
+  const jobs=o.stills?o.stills.split(',').map(Number):Array.from({length:Math.ceil((last-first)/step)},(_,i)=>(first+i*step)/film.fps);
+  if(!jobs.length||jobs.some(t=>!Number.isFinite(t)||t<0||t>=film.duration))throw Error('invalid frame times');
+  let done=0;
+  await Promise.all(pages.map(async(p,w)=>{for(let i=w;i<jobs.length;i+=workers){const t=jobs[i];await p.evaluate('window.render('+t+');new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))');const data=await p.screenshot(o.stills?'png':'jpeg');writeFileSync(join(out,o.stills?'t'+t.toFixed(2).padStart(6,'0')+'.png':String(i).padStart(5,'0')+'.jpg'),data);if(++done%150===0)console.log(done+'/'+jobs.length+' frames');}}));
+  writeFileSync(join(out,'render.json'),JSON.stringify({film,count:jobs.length,scale,step,workers,from:start,to:end,sampleFps:film.fps/step,revision:plan.revision,pictureSource:o.film},null,2));
+  console.log('rendered '+jobs.length+' frames/stills');
+}finally{await b.close();}

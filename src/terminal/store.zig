@@ -2,6 +2,11 @@ const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
 pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "", bodyError: []const u8 = "" };
+fn attachmentMetadata(a: std.mem.Allocator, attachments: []const t.Attachment) ![]const t.Attachment {
+    const result = try a.dupe(t.Attachment, attachments);
+    for (result) |*attachment| attachment.data = "";
+    return result;
+}
 // Address count alone allows tens of KiB per broad inbound header. Bound the
 // compact To/Cc index independently; immutable full messages retain all data.
 const participant_bytes = 4096;
@@ -39,6 +44,26 @@ fn openPrivateLock(dir: std.Io.Dir, io: std.Io) !std.Io.File {
     const stat = try lock.stat(io);
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
     return lock;
+}
+fn scratchName(name: []const u8) bool {
+    const prefix: []const u8 = if (std.mem.startsWith(u8, name, "send-spool-")) "send-spool-" else if (std.mem.startsWith(u8, name, "download-spool-")) "download-spool-" else return false;
+    const suffix: []const u8 = if (std.mem.eql(u8, prefix, "send-spool-")) ".mime" else ".bin";
+    if (name.len != prefix.len + 32 + suffix.len or !std.mem.endsWith(u8, name, suffix)) return false;
+    for (name[prefix.len..][0..32]) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
+}
+fn cleanupScratch(dir: std.Io.Dir, io: std.Io, a: std.mem.Allocator) !void {
+    var entries = dir.iterate();
+    while (try entries.next(io)) |entry| if (scratchName(entry.name)) {
+        const file = try @import("../native_file.zig").openAt(io, dir, try a.dupeSentinel(u8, entry.name, 0), .{ .read_write = true });
+        defer file.close(io);
+        const stat = try file.stat(io);
+        if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
+        if (try file.tryLock(io, .exclusive)) {
+            defer file.unlock(io);
+            try dir.deleteFile(io, entry.name);
+        }
+    };
 }
 fn openAccountDirectory(io: std.Io, root: []const u8, account: []const u8, options: t.Options, create: bool) !std.Io.Dir {
     if (create) _ = try std.Io.Dir.cwd().createDirPathStatus(io, root, .fromMode(0o700));
@@ -124,12 +149,23 @@ pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []cons
 pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
 pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
 pub const FixtureProviderRecord = struct { id: []const u8, labels: []const []const u8 = &.{}, deleted: bool = false, sourceHistoryId: []const u8 = "1" };
-pub const Label = struct { id: []const u8, name: []const u8, type: []const u8 = "user" };
+pub const Label = struct { id: []const u8, name: []const u8, type: []const u8 = "user", color: ?t.LabelColor = null };
 pub const Identity = struct { address: []const u8, name: []const u8 = "", signature: []const u8 = "", isDefault: bool = false };
 /// Undo records only labels changed by this action. Other concurrent labels
 /// survive undo. An unconfirmed mutation is never replayed automatically.
 pub const UndoItem = struct { messageId: []const u8, addLabels: []const []const u8 = &.{}, removeLabels: []const []const u8 = &.{}, outcome: []const u8 = "pending", errorCode: []const u8 = "", restored: bool = false };
 pub const Undo = struct { token: []const u8, items: []UndoItem = &.{} };
+pub const SendState = enum { queued, canceled, submitting, applied, rejected, unknown };
+pub const QueuedSend = struct {
+    queueId: []const u8,
+    draftId: []const u8,
+    operationId: []const u8,
+    hash: []const u8,
+    state: SendState = .queued,
+    createdAtMs: i64,
+    dueAtMs: i64,
+    errorCode: []const u8 = "",
+};
 pub const State = struct {
     schema: u8 = 1,
     account: []const u8,
@@ -148,6 +184,7 @@ pub const State = struct {
     identities: []Identity = &.{},
     undo: []Undo = &.{},
     operations: []Operation = &.{},
+    sendQueue: []QueuedSend = &.{},
     fixtureCalls: u64 = 0,
     fixtureSends: u64 = 0,
     fixtureProvider: []FixtureProviderRecord = &.{},
@@ -194,6 +231,7 @@ pub const Store = struct {
             if (deadline.durationFromNow(io).raw.toNanoseconds() <= 0) return error.CacheBusy;
             try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(io);
         }
+        if (!readonly) try cleanupScratch(dir, io, a);
         var state: State = .{ .account = account };
         const raw = readPrivate(dir, io, a, "index.json", 16 * 1024 * 1024) catch |err| if (err == error.FileNotFound) null else return err;
         if (raw) |bytes| {
@@ -202,7 +240,10 @@ pub const Store = struct {
             // on every short refresh commit; escaped strings still allocate.
             state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_if_needed });
             if (state.schema != 1 or !std.mem.eql(u8, state.account, account)) return error.CacheIdentityMismatch;
-            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.fixtureProvider.len > 1024 or state.labels.len > 512 or state.fixtureDeletedLabels.len > 512 or state.identities.len > 32 or state.undo.len > 16) return error.CacheLimitExceeded;
+            if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.sendQueue.len > 128 or state.fixtureProvider.len > 1024 or state.labels.len > 512 or state.fixtureDeletedLabels.len > 512 or state.identities.len > 32 or state.undo.len > 16) return error.CacheLimitExceeded;
+            for (state.sendQueue) |entry| {
+                if (entry.queueId.len == 0 or entry.queueId.len > 256 or entry.draftId.len == 0 or entry.draftId.len > 256 or entry.operationId.len == 0 or entry.operationId.len > 256 or entry.hash.len != 64 or entry.errorCode.len > 128 or entry.dueAtMs < entry.createdAtMs or entry.dueAtMs - entry.createdAtMs > 30000) return error.CacheLimitExceeded;
+            }
             for (state.labels) |label| if (label.id.len > 256 or label.name.len > 512) return error.CacheLimitExceeded;
             for (state.fixtureDeletedLabels) |id| if (id.len == 0 or id.len > 256) return error.CacheLimitExceeded;
             for (state.operations) |operation| {
@@ -347,6 +388,15 @@ pub const Store = struct {
             used -= @min(removed, used);
         }
     }
+    pub fn reserveBytes(s: *Store, count: usize) !void {
+        try s.makeRoom(count, "");
+    }
+    pub fn blobReferenced(s: *const Store, id: []const u8) bool {
+        for (s.state.drafts) |draft_value| for (draft_value.attachments) |attachment| if (attachment.blobId) |blob| if (std.mem.eql(u8, blob, id)) return true;
+        for (s.state.outbox) |message| for (message.attachments) |attachment| if (attachment.blobId) |blob| if (std.mem.eql(u8, blob, id)) return true;
+        for (s.state.entries) |entry| for (entry.message.attachments) |attachment| if (attachment.blobId) |blob| if (std.mem.eql(u8, blob, id)) return true;
+        return false;
+    }
 
     fn evict(s: *Store, i: usize) !void {
         const name = try s.fileName("mail", s.state.entries[i].message.id);
@@ -383,12 +433,15 @@ pub const Store = struct {
         metadata.to = participantPrefix(message.to, &participant_budget);
         metadata.cc = participantPrefix(message.cc, &participant_budget);
         metadata.replyTo = &.{};
-        metadata.attachments = &.{};
+        metadata.attachments = try attachmentMetadata(s.allocator, message.attachments);
         metadata.invitation = null;
         metadata.fixtureRaw = null;
         var existing: ?usize = null;
         for (s.state.entries, 0..) |entry, i| if (std.mem.eql(u8, entry.message.id, message.id)) {
             existing = i;
+            // Gmail's metadata projection omits MIME parts. A label/header
+            // refresh must retain the descriptors from the immutable body.
+            if (!full and metadata.attachments.len == 0) metadata.attachments = entry.message.attachments;
             break;
         };
         if (existing == null) {
@@ -450,6 +503,7 @@ pub const Store = struct {
         try s.write(name, raw);
         e.bodyError = "";
         e.bytes = raw.len;
+        e.message.attachments = try attachmentMetadata(s.allocator, message.attachments);
         const digest = hash(raw);
         e.bodyHash = try s.allocator.dupe(u8, &digest);
         return true;
@@ -518,7 +572,7 @@ pub const Store = struct {
         metadata.bodyText = "";
         metadata.bodyHtml = null;
         metadata.bodySource = .unknown;
-        metadata.attachments = &.{};
+        metadata.attachments = try attachmentMetadata(s.allocator, message.attachments);
         metadata.invitation = null;
         metadata.fixtureRaw = null;
         try list.append(s.allocator, metadata);
@@ -563,6 +617,10 @@ pub const Store = struct {
         if (input.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
         if (!std.unicode.utf8ValidateSlice(input.bodyText)) return error.InvalidUtf8;
         var d = input;
+        for (d.attachments) |attachment| if (attachment.blobId) |blob_id| {
+            const file = try @import("attachment_blob.zig").open(s, blob_id, attachment.size);
+            file.close(s.io);
+        };
         if (d.from) |sender| if (sender.name.len == 0 and std.ascii.eqlIgnoreCase(sender.address, s.state.account)) {
             d.from = null;
         };
@@ -583,6 +641,7 @@ pub const Store = struct {
         if (previous) |old| for (s.state.operations) |operation| {
             if (std.mem.eql(u8, operation.draftId, d.id) and std.mem.eql(u8, operation.outcome, "unknown") and !std.mem.eql(u8, old, raw)) return error.UnknownOutcome;
         };
+        if (previous) |old| if (!std.mem.eql(u8, old, raw)) try s.cancelDraftQueue(d.id);
         try s.makeRoom(raw.len, name);
         try s.write(name, raw);
         errdefer {
@@ -590,7 +649,7 @@ pub const Store = struct {
         }
         var preview = d;
         preview.bodyText = "";
-        preview.attachments = &.{};
+        preview.attachments = try attachmentMetadata(s.allocator, d.attachments);
         preview.recoveryFields = null;
         preview.original = null;
         if (index) |i| s.state.drafts[i] = preview else {
@@ -605,6 +664,10 @@ pub const Store = struct {
     pub fn discardDraft(s: *Store, id: []const u8) !void {
         for (s.state.operations) |operation| if (std.mem.eql(u8, operation.draftId, id) and std.mem.eql(u8, operation.outcome, "unknown")) return error.UnknownOutcome;
         for (s.state.drafts, 0..) |draft_value, i| if (std.mem.eql(u8, draft_value.id, id)) {
+            try s.cancelDraftQueue(id);
+            // The account has one regenerable browser artifact. Removing a
+            // draft must also remove any rendered copy of discarded content.
+            s.dir.deleteFile(s.io, "preview.html") catch |err| if (err != error.FileNotFound) return err;
             std.mem.copyForwards(t.Draft, s.state.drafts[i .. s.state.drafts.len - 1], s.state.drafts[i + 1 ..]);
             s.state.drafts = s.state.drafts[0 .. s.state.drafts.len - 1];
             try s.save();
@@ -612,6 +675,13 @@ pub const Store = struct {
             return;
         };
         return error.DraftNotFound;
+    }
+    fn cancelDraftQueue(s: *Store, id: []const u8) !void {
+        for (s.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, id) and (entry.state == .submitting or entry.state == .unknown)) return error.UnknownOutcome;
+        for (s.state.sendQueue) |*entry| if (std.mem.eql(u8, entry.draftId, id) and entry.state == .queued) {
+            entry.state = .canceled;
+            entry.errorCode = "DraftChanged";
+        };
     }
     pub fn clearMail(s: *Store) !void {
         while (s.state.entries.len > 0) try s.evict(0);

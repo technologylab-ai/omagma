@@ -118,7 +118,20 @@ Contacts upsert accepts `expectedEtag`, falling back to the contact DTO's etag. 
 
 Registry writes use atomic 0600 replacement. Reads reject final symlinks, nonregular files, group/other permissions and files larger than 64 KiB; they recheck the opened descriptor before bounded streaming parsing. The metadata contains client paths and capability choices even though tokens remain in Secret Service. Existing live configuration is not changed by validation.
 
-Google HTTP JSON request/response storage is caller-owned and capped at 3 MiB. Decoded normalized message DTOs can be larger because they contain both HTML and its plain fallback; those CLI/TUI results are separate from the Google wire response and remain within the 64 MiB terminal heap budget. The TUI accepts response frames up to 32 MiB. The bar's 32 KiB form/512 KiB response policy remains intact. Decoded MIME bodies are capped at 2 MiB, complete RFC messages at 3 MiB, MIME nesting at 16, parts at 128, incoming attachments at 32, outgoing attachments at 16 with a combined 2 MiB decoded cap, outgoing recipients at 32, and calendar data at 128 KiB. Compose attachment DTOs contain base64url bytes, explicit sizes and validated basename/MIME fields; `mime.composeAttachments` converts them to raw MIME parts. The encoder preserves binary octets and emits RFC 2231 UTF-8 filename continuations. Request JSON expansion can make a large outgoing draft exceed the 3 MiB transport cap; that is an explicit pre-submission failure. The fixed HTTP workspace remains 8 MiB and no terminal buffer is added to the bar's static reservation.
+Google HTTP JSON request/response storage is caller-owned and capped at 3 MiB. Decoded normalized message DTOs can be larger because they contain both HTML and its plain fallback; those CLI/TUI results remain within the 64 MiB terminal heap budget. The TUI accepts response frames up to 32 MiB. The bar's 32 KiB form/512 KiB response policy remains intact. Decoded MIME bodies are capped at 2 MiB, complete received RFC messages at 3 MiB, MIME nesting at 16, parts at 128, parsed incoming file/resource descriptors at 49, outgoing recipients at 32, and calendar data at 128 KiB.
+
+Ordinary outgoing attachments allow 16 files and 25 MiB combined decoded bytes;
+retained original inline resources allow 32 and a separate 2 MiB. Small file
+DTOs use base64url bytes; larger files use immutable account-scoped handles.
+The encoder preserves binary octets and emits RFC 2231 UTF-8 filename
+continuations. Larger sends spool MIME privately, then stream a bounded
+multipart upload with its thread metadata. Complete outgoing MIME is limited to
+35 MiB and the outer HTTP upload/download stream to 36 MiB. Received file saves
+decode incrementally into private, atomic, no-clobber destinations, with a
+25 MiB decoded file bound and account disk quotas. Explicit JSON requests still
+fit 3 MiB; unsupported sizes fail rather than truncating. The fixed HTTP
+workspace remains 8 MiB and no terminal buffer is added to the bar's static
+reservation.
 
 Incoming address lists use caller-owned heap slices capped at 1,024 participants per header, with no fixed stack array added. Address-header parsing is bounded at 16 KiB; MIME headers allow at most 256 fields within 32 KiB per entity/part header block, and individual header values are at most 8 KiB. Mailbox addresses remain bounded at 254 bytes and decoded display names at 256 bytes. Encoded display names are parsed structurally before RFC 2047 decoding, so raw encoded words may exceed the decoded-name limit without failing prematurely. Overflow is explicit; no list or identity is silently truncated. The parser supports its existing quoted phrases, comments, groups and empty groups; SMTPUTF8 addresses and unsupported charsets remain explicit errors, and complete obsolete RFC 5322 grammar is not claimed.
 
@@ -140,8 +153,11 @@ the journal records the actual prior label delta; undo changes only touched
 labels, preserving unrelated subsequent state. Unknown outcomes are not retried
 automatically, and batching never includes sending mail.
 
-Forwarding creates a local quoted draft and copies existing attachments under
-the outgoing 16-file/2 MiB cap. A refused or failed attachment aborts explicitly
+Forwarding creates a local draft in the chosen original-content mode and copies
+existing ordinary attachments under the 16-file/25 MiB decoded and 35 MiB
+complete MIME limits. Large files use immutable account handles and streaming;
+retained original inline resources have a separate 32-resource/2 MiB cap.
+A refused or failed attachment aborts explicitly
 rather than silently dropping files. Send-as discovery reads Gmail's configured
 identities; only the primary or verified aliases from that same account are
 accepted, with live alias verification repeated at actual submission. Provider

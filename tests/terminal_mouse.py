@@ -227,7 +227,7 @@ def run_case(binary,directory,name):
             # during that save, so await its truthful sync row and saved title
             # within the original condition deadline before testing the click.
             terminal.until(lambda: ''.join(terminal.screen.cells[1]).strip() == 'Local draft · no mail sent'
-                and 'Compose · saved locally · not sent' in terminal.text()
+                and 'saved locally · not sent' in ''.join(terminal.screen.cells[2])
                 and 'Fictional mouse editor body.' in terminal.text()
                 and 'Editor returned · draft retained' in terminal.text()
                 and terminal.screen.mouse_tracking_mode == 1002)

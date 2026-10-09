@@ -84,7 +84,7 @@ fn decodeResponse(a: std.mem.Allocator, method: std.http.Method, url: []const u8
     return std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = types.Limits.request_bytes }) catch |err| return if (mutating) error.UnknownOutcome else err;
 }
 fn localRequestError(err: anyerror) bool {
-    return err == error.FormTooLarge or err == error.InvalidToken or err == error.InvalidUrl or err == error.InvalidHost or err == error.InsecureUrl or err == error.UrlTooLarge or err == error.ResponseBufferTooLarge;
+    return err == error.FormTooLarge or err == error.InvalidToken or err == error.InvalidUrl or err == error.InvalidHost or err == error.InsecureUrl or err == error.UrlTooLarge or err == error.ResponseBufferTooLarge or err == error.InvalidStreamMethod or err == error.InvalidContentType;
 }
 /// Credential-free loopback regression for the actual terminal wire and Gmail
 /// response boundary. The request body/token are fixed by the HTTP probe.
@@ -218,6 +218,54 @@ pub fn executeAttachment(io: std.Io, a: std.mem.Allocator, config: *const Config
     return attachmentAuthorized(a, account, session.capabilities, transport, try j.required(request, "messageId"), attachment);
 }
 
+pub fn executeAttachmentToWriter(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+    try mime.validateAttachment(expected.filename, expected.mimeType);
+    if (expected.id.len == 0 or expected.id.len > 1024) return error.InvalidAttachmentId;
+    if (expected.size > types.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+    const message_id = try j.required(request, "messageId");
+    try b.identifier(message_id);
+    var session: NetworkSession = undefined;
+    try session.init(io, a, config, account, "mail.attachment", request);
+    defer session.close();
+    const transport = session.transport();
+    return downloadToWriter(&session, a, message_id, expected, writer) catch |err| switch (err) {
+        error.MessageNotFound, error.ProviderRejected => {
+            const fresh = try read(a, transport, message_id);
+            var resolved: ?types.Attachment = null;
+            for (fresh.attachments) |candidate| {
+                if (!std.mem.eql(u8, candidate.filename, expected.filename) or !std.mem.eql(u8, candidate.mimeType, expected.mimeType) or candidate.size != expected.size) continue;
+                if (expected.contentId) |id| if (candidate.contentId == null or !std.mem.eql(u8, id, candidate.contentId.?)) continue;
+                if (expected.contentLocation) |location| if (candidate.contentLocation == null or !std.mem.eql(u8, location, candidate.contentLocation.?)) continue;
+                if (resolved != null) return error.AmbiguousAttachment;
+                resolved = candidate;
+            }
+            const selected = resolved orelse return error.AttachmentNotFound;
+            if (selected.data.len != 0) {
+                const decoded = try mime.decodeBase64Url(selected.data, a);
+                if (decoded.len != expected.size) return error.BodySizeMismatch;
+                try writer.writeAll(decoded);
+                return selected;
+            }
+            return downloadToWriter(&session, a, message_id, selected, writer);
+        },
+        else => return err,
+    };
+}
+fn downloadToWriter(session: *NetworkSession, a: std.mem.Allocator, message_id: []const u8, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+    var decoder = try @import("attachment_json.zig").Decoder.init(writer, expected.size);
+    const url = try std.fmt.allocPrint(a, "{s}/attachments/{s}?fields=size,data", .{ try messageUrl(a, message_id, ""), try escaped(a, expected.id) });
+    var response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, 36 * 1024 * 1024, session.response) catch |err| return decoder.failure orelse err;
+    if (response.status == 401 and !session.network.refreshed_401) {
+        session.network.refreshed_401 = true;
+        const token = try oauth.refreshScoped(session.io, &session.client, &session.desktop, session.refresh_token, session.access, session.scopes);
+        session.network.access = token.access_token;
+        response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, 36 * 1024 * 1024, session.response) catch |err| return decoder.failure orelse err;
+    }
+    if (response.status < 200 or response.status >= 300) _ = try decodeResponse(a, .GET, url, response.status, response.body);
+    try decoder.finish();
+    return expected;
+}
+
 /// On-demand original source for forwarding. It shares the ordinary read
 /// grant and verified account session; no raw message is added to the cache.
 pub fn executeRawMessage(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) ![]const u8 {
@@ -337,13 +385,13 @@ fn downloadAttachment(a: std.mem.Allocator, transport: Transport, message_id: []
 }
 
 fn requiredCapability(cmd: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete")) return "mail-modify";
+    if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete") or std.mem.eql(u8, cmd, "labels.color")) return "mail-modify";
     if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) return "mail-send";
     if (std.mem.eql(u8, cmd, "invitation.reply")) return "calendar-rsvp";
     if (std.mem.eql(u8, cmd, "contacts.upsert")) return "contacts-write";
     if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search")) return "contacts-read";
     if (std.mem.eql(u8, cmd, "mail.modify-labels") or std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) return "mail-modify";
-    if (std.mem.eql(u8, cmd, "labels.list") or std.mem.eql(u8, cmd, "mail.labels") or std.mem.eql(u8, cmd, "accounts.identities")) return "mail-read";
+    if (std.mem.eql(u8, cmd, "labels.list") or std.mem.eql(u8, cmd, "mail.labels") or std.mem.eql(u8, cmd, "mail.triage-scope") or std.mem.eql(u8, cmd, "accounts.identities")) return "mail-read";
     if (std.mem.eql(u8, cmd, "mail.refresh") or std.mem.eql(u8, cmd, "mail.read") or std.mem.eql(u8, cmd, "mail.thread") or std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync") or std.mem.eql(u8, cmd, "mail.attachment") or std.mem.eql(u8, cmd, "accounts.aliases")) return "mail-read";
     return null;
 }
@@ -376,7 +424,7 @@ const LabelResolver = struct {
         if (text.len == 0 or text.len > 256) return error.InvalidLabel;
         for ([_][]const u8{ "INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT", "SENT", "DRAFT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" }) |system| if (std.ascii.eqlIgnoreCase(text, system)) return system;
         if (self.entries == null) {
-            const value = try self.transport.request(self.a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", null);
+            const value = try self.transport.request(self.a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", null);
             self.entries = try array(value, "labels");
             if (self.entries.?.len > 10000) return error.TooManyLabels;
         }
@@ -479,7 +527,7 @@ fn appendAddresses(list: *recipients.List, addresses: []const types.Address) !vo
         try list.append(mailbox);
     }
 }
-fn date(io: std.Io, a: std.mem.Allocator, calendar: bool) ![]const u8 {
+pub fn date(io: std.Io, a: std.mem.Allocator, calendar: bool) ![]const u8 {
     const now = std.Io.Timestamp.now(io, .real).toSeconds();
     if (now < 0) return error.InvalidDate;
     const seconds: std.time.epoch.EpochSeconds = .{ .secs = @intCast(now) };
@@ -491,6 +539,116 @@ fn date(io: std.Io, a: std.mem.Allocator, calendar: bool) ![]const u8 {
     const weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     return try std.fmt.allocPrint(a, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{ weekdays[(day.day + 4) % 7], month_day.day_index + 1, months[@backingInt(month_day.month) - 1], year_day.year, time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() });
+}
+
+const MultipartSource = struct {
+    io: std.Io,
+    file: std.Io.File,
+    size: usize,
+    expected: []const u8,
+    prefix: []const u8,
+    suffix: []const u8,
+    prefix_offset: usize = 0,
+    file_offset: u64 = 0,
+    suffix_offset: usize = 0,
+    verified: bool = false,
+    hash: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
+    fn read(ctx: *anyopaque, buffer: []u8) !usize {
+        const self: *MultipartSource = @ptrCast(@alignCast(ctx));
+        if (self.prefix_offset < self.prefix.len) {
+            const count = @min(buffer.len, self.prefix.len - self.prefix_offset);
+            @memcpy(buffer[0..count], self.prefix[self.prefix_offset..][0..count]);
+            self.prefix_offset += count;
+            return count;
+        }
+        if (self.file_offset < self.size) {
+            const count = try self.file.readPositional(self.io, &.{buffer[0..@min(buffer.len, self.size - self.file_offset)]}, self.file_offset);
+            if (count == 0) return error.AttachmentChanged;
+            self.file_offset += count;
+            self.hash.update(buffer[0..count]);
+            return count;
+        }
+        if (!self.verified) {
+            var extra: [1]u8 = undefined;
+            if (try self.file.readPositional(self.io, &.{&extra}, self.file_offset) != 0) return error.AttachmentChanged;
+            var digest: [32]u8 = undefined;
+            self.hash.final(&digest);
+            if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), self.expected)) return error.AttachmentChanged;
+            self.verified = true;
+        }
+        const count = @min(buffer.len, self.suffix.len - self.suffix_offset);
+        @memcpy(buffer[0..count], self.suffix[self.suffix_offset..][0..count]);
+        self.suffix_offset += count;
+        return count;
+    }
+};
+
+test "UX backend: media multipart keeps thread metadata and exact RFC822 bytes in bounded reads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = "Message-ID: <fixture@example.test>\r\nIn-Reply-To: <parent@example.test>\r\n\r\nExact bytes\r\n";
+    const file = try tmp.dir.createFile(std.testing.io, "mail.mime", .{ .read = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, raw);
+    const digest = @import("store.zig").Store.hash(raw);
+    const prefix = "--fixture\r\nContent-Type: application/json\r\n\r\n{\"threadId\":\"thread-123\"}\r\n--fixture\r\nContent-Type: message/rfc822\r\n\r\n";
+    const suffix = "\r\n--fixture--\r\n";
+    var source: MultipartSource = .{ .io = std.testing.io, .file = file, .size = raw.len, .expected = &digest, .prefix = prefix, .suffix = suffix };
+    var result: [prefix.len + raw.len + suffix.len]u8 = undefined;
+    var offset: usize = 0;
+    var chunk: [7]u8 = undefined;
+    while (true) {
+        const count = try MultipartSource.read(&source, &chunk);
+        if (count == 0) break;
+        try std.testing.expect(offset + count <= result.len);
+        @memcpy(result[offset..][0..count], chunk[0..count]);
+        offset += count;
+    }
+    try std.testing.expectEqual(result.len, offset);
+    try std.testing.expectEqualStrings(prefix ++ raw ++ suffix, &result);
+    try file.setLength(std.testing.io, raw.len - 1);
+    source = .{ .io = std.testing.io, .file = file, .size = raw.len, .expected = &digest, .prefix = "", .suffix = "" };
+    while (MultipartSource.read(&source, &chunk)) |count| {
+        try std.testing.expect(count != 0);
+    } else |err| try std.testing.expectEqual(error.AttachmentChanged, err);
+}
+
+/// A fully validated private MIME spool is supplied positionally by core.
+/// Thread metadata belongs to the outer media multipart, outside RFC822 data.
+pub fn executeSpool(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, draft: types.Draft, spool: *const @import("send_spool.zig").Spool, rfc_id: []const u8) !j.Value {
+    var session: NetworkSession = undefined;
+    try session.init(io, a, config, account, "mail.send", request);
+    defer session.close();
+    const transport = session.transport();
+    if (draft.from) |identity| if (!std.ascii.eqlIgnoreCase(identity.address, account)) {
+        var verified = false;
+        for (try aliases(a, transport)) |alias| verified = verified or std.ascii.eqlIgnoreCase(identity.address, alias);
+        if (!verified) return error.UnverifiedSender;
+    };
+    if (draft.threadId.len > 0) {
+        try b.identifier(draft.threadId);
+        if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
+    }
+    const boundary = try std.fmt.allocPrint(a, "omagma-upload-{s}", .{spool.hash});
+    const metadata = try std.json.Stringify.valueAlloc(a, .{ .threadId = if (draft.threadId.len > 0) draft.threadId else @as(?[]const u8, null) }, .{ .emit_null_optional_fields = false });
+    const prefix = try std.fmt.allocPrint(a, "--{s}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{s}\r\n--{s}\r\nContent-Type: message/rfc822\r\n\r\n", .{ boundary, metadata, boundary });
+    const suffix = try std.fmt.allocPrint(a, "\r\n--{s}--\r\n", .{boundary});
+    const content_type = try std.fmt.allocPrint(a, "multipart/related; boundary=\"{s}\"", .{boundary});
+    const url = "https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=multipart&fields=id,threadId";
+    const original: MultipartSource = .{ .io = io, .file = spool.file, .size = spool.size, .expected = &spool.hash, .prefix = prefix, .suffix = suffix };
+    var source = original;
+    var response = session.client.requestTerminalFile(url, .POST, session.network.access, content_type, .{ .ctx = &source, .readFn = MultipartSource.read }, prefix.len + spool.size + suffix.len, session.response) catch |err| return if (localRequestError(err)) err else error.UnknownOutcome;
+    if (response.status == 401 and !session.network.refreshed_401) {
+        session.network.refreshed_401 = true;
+        const token = try oauth.refreshScoped(io, &session.client, &session.desktop, session.refresh_token, session.access, session.scopes);
+        session.network.access = token.access_token;
+        source = original;
+        response = session.client.requestTerminalFile(url, .POST, session.network.access, content_type, .{ .ctx = &source, .readFn = MultipartSource.read }, prefix.len + spool.size + suffix.len, session.response) catch |err| return if (localRequestError(err)) err else error.UnknownOutcome;
+    }
+    const value = try decodeResponse(a, .POST, url, response.status, response.body);
+    const id = j.required(value, "id") catch return error.UnknownOutcome;
+    b.identifier(id) catch return error.UnknownOutcome;
+    return j.value(a, .{ .outcome = "applied", .messageId = id, .threadId = j.text(value, "threadId"), .rfcMessageId = rfc_id }) catch return error.UnknownOutcome;
 }
 fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transport, request: j.Value, draft: types.Draft, calendar: ?[]const u8, sender: ?[]const u8) !j.Value {
     const operation = try j.required(request, "operationId");
@@ -778,7 +936,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     try recipients.validateAddress(account);
     const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
     if (!permits(capabilities, capability)) return error.PermissionDenied;
-    if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete")) return manageLabels(a, transport, cmd, request);
+    if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete") or std.mem.eql(u8, cmd, "labels.color")) return manageLabels(a, transport, cmd, request);
     if (std.mem.eql(u8, cmd, "mail.refresh")) return refreshPlan(io, a, account, capabilities, transport, request);
     if (std.mem.eql(u8, cmd, "mail.read")) {
         transport.progress(.bodies, 0, 1);
@@ -789,8 +947,34 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     }
     if (std.mem.eql(u8, cmd, "accounts.aliases")) return j.value(a, .{ .aliases = try aliases(a, transport) });
     if (std.mem.eql(u8, cmd, "accounts.identities")) return j.value(a, .{ .identities = try identities(a, transport) });
+    if (std.mem.eql(u8, cmd, "mail.triage-scope")) {
+        const scope = try @import("triage.zig").scope(request);
+        const message_id = try j.required(request, "messageId");
+        const message = try transport.request(a, .GET, try messageUrl(a, message_id, "?format=minimal&fields=id,threadId"), null);
+        if (!std.mem.eql(u8, j.text(message, "id"), message_id)) return error.MessageIdentityMismatch;
+        const thread_id = try j.required(message, "threadId");
+        try b.identifier(thread_id);
+        var ids: std.ArrayList([]const u8) = .empty;
+        if (scope == .message) try ids.append(a, message_id) else {
+            const response = try transport.request(a, .GET, try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/threads/{s}?format=minimal&fields=id,messages(id,threadId)", .{thread_id}), null);
+            if (!std.mem.eql(u8, j.text(response, "id"), thread_id)) return error.MessageIdentityMismatch;
+            const messages = try array(response, "messages");
+            if (messages.len > 100) return error.ThreadTooLarge;
+            var includes_target = false;
+            for (messages) |entry| {
+                if (!std.mem.eql(u8, j.text(entry, "threadId"), thread_id)) return error.MessageIdentityMismatch;
+                const id = try j.required(entry, "id");
+                try b.identifier(id);
+                for (ids.items) |previous| if (std.mem.eql(u8, previous, id)) return error.DuplicateMessage;
+                includes_target = includes_target or std.mem.eql(u8, id, message_id);
+                try ids.append(a, id);
+            }
+            if (!includes_target) return error.IncompleteTriageScope;
+        }
+        return j.value(a, .{ .scope = scope, .threadId = thread_id, .messageIds = ids.items, .count = ids.items.len, .complete = true });
+    }
     if (std.mem.eql(u8, cmd, "labels.list")) {
-        const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", null);
+        const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", null);
         const entries = try array(response, "labels");
         if (entries.len > 512) return error.TooManyLabels;
         const labels = try a.alloc(@import("store.zig").Label, entries.len);
@@ -799,7 +983,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
             const name = try j.required(entry, "name");
             try b.identifier(id);
             if (name.len > 512) return error.InvalidLabel;
-            label.* = .{ .id = id, .name = try mime.sanitizeText(name, a), .type = j.text(entry, "type") };
+            label.* = .{ .id = id, .name = try mime.sanitizeText(name, a), .type = j.text(entry, "type"), .color = try label_collection.requestColor(a, entry) };
         }
         return j.value(a, .{ .labels = labels });
     }
@@ -941,14 +1125,18 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
 fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {
     const creating = std.mem.eql(u8, cmd, "labels.create");
     const deleting = std.mem.eql(u8, cmd, "labels.delete");
+    const coloring = std.mem.eql(u8, cmd, "labels.color");
+    const color = try label_collection.requestColor(a, request);
+    if (coloring and color == null) return error.InvalidLabelColor;
+    if (deleting and color != null) return error.InvalidLabelColor;
     const id = if (creating) "" else try j.required(request, "labelId");
-    const name = if (deleting) "" else try j.required(request, "name");
+    const name = if (deleting or coloring) "" else try j.required(request, "name");
     if (!creating) try label_collection.validateId(id);
-    if (!deleting) try label_collection.validateName(name);
+    if (!deleting and !coloring) try label_collection.validateName(name);
     const confirmation = if (deleting) try j.required(request, "confirmName") else "";
     if (confirmation.len > 512) return error.InvalidLabelConfirmation;
     try recipients.validateHeader(confirmation);
-    const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", null);
+    const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", null);
     const definitions = try j.decode([]@import("store.zig").Label, a, j.get(response, "labels") orelse return error.InvalidProviderResponse);
     if (definitions.len > 512) return error.TooManyLabels;
     for (definitions) |label| {
@@ -957,14 +1145,16 @@ fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, req
         try recipients.validateHeader(label.name);
     }
     const old = if (!creating) try label_collection.custom(definitions, id) else @import("store.zig").Label{ .id = "", .name = "" };
+    const final_name = if (coloring) old.name else name;
     if (deleting) {
         if (!std.mem.eql(u8, old.name, confirmation)) return error.InvalidLabelConfirmation;
     } else {
-        try label_collection.unique(definitions, name, id);
+        try label_collection.unique(definitions, final_name, id);
         if (creating and definitions.len == 512) return error.TooManyLabels;
     }
     const url = if (creating) "https://gmail.googleapis.com/gmail/v1/users/me/labels" else try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/labels/{s}", .{id});
-    const body: ?j.Value = if (deleting) null else try j.value(a, .{ .name = name });
+    var body: ?j.Value = if (deleting) null else if (coloring) j.object(a) else try j.value(a, .{ .name = name });
+    if (color) |value| try body.?.object.put(a, "color", try j.value(a, value));
     const receipt = try transport.request(a, if (creating) .POST else if (deleting) .DELETE else .PATCH, url, body);
     if (deleting) {
         if (receipt != .null and (receipt != .object or receipt.object.count() != 0)) return error.UnknownOutcome;
@@ -972,65 +1162,41 @@ fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, req
     }
     const label = j.decode(@import("store.zig").Label, a, receipt) catch return error.UnknownOutcome;
     label_collection.validateId(label.id) catch return error.UnknownOutcome;
-    if (!std.mem.eql(u8, label.name, name) or !std.ascii.eqlIgnoreCase(label.type, "user") or (!creating and !std.mem.eql(u8, label.id, id))) return error.UnknownOutcome;
+    if (!std.mem.eql(u8, label.name, final_name) or !std.ascii.eqlIgnoreCase(label.type, "user") or (!creating and !std.mem.eql(u8, label.id, id))) return error.UnknownOutcome;
+    if (color != null and !label_collection.sameColor(color, label.color)) return error.UnknownOutcome;
     return j.value(a, .{ .label = label }) catch return error.UnknownOutcome;
 }
 
 fn contact(a: std.mem.Allocator, value: j.Value) !types.Contact {
-    const name_entries = try array(value, "names");
-    const email_entries = try array(value, "emailAddresses");
-    if (name_entries.len > 32 or email_entries.len > 32) return error.ContactTooLarge;
-    const emails = try a.alloc(types.Address, email_entries.len);
-    for (email_entries, emails) |entry, *dest| {
-        const address = try j.required(entry, "value");
-        try recipients.validateAddress(address);
-        dest.* = .{ .address = address };
-    }
-    var etag: []const u8 = "";
-    if (j.get(value, "metadata")) |metadata| for (try array(metadata, "sources")) |source| if (std.mem.eql(u8, j.text(source, "type"), "CONTACT")) {
-        etag = j.text(source, "etag");
-    };
-    const resource_name = try j.required(value, "resourceName");
-    if (!std.mem.startsWith(u8, resource_name, "people/")) return error.InvalidContactIdentity;
-    try b.identifier(resource_name[7..]);
-    var name: []const u8 = "";
-    for (name_entries) |entry| {
-        if (name.len == 0) name = j.text(entry, "displayName");
-        if (j.get(entry, "metadata")) |metadata| if (j.boolean(metadata, "primary", false) catch false) {
-            name = j.text(entry, "displayName");
-            break;
-        };
-    }
-    if (name.len > 512 or etag.len > 4096) return error.ContactTooLarge;
-    name = try mime.sanitizeText(name, a);
-    return .{ .resourceName = resource_name, .etag = etag, .name = name, .emails = emails };
+    return @import("contact_record.zig").normalize(a, value);
 }
 fn contacts(a: std.mem.Allocator, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {
     if (std.mem.eql(u8, cmd, "contacts.upsert")) {
-        const input = try j.decode(types.Contact, a, j.get(request, "contact") orelse return error.MissingField);
-        try recipients.validateHeader(input.name);
-        if (input.name.len > 256 or input.emails.len == 0 or input.emails.len > 32) return error.InvalidContact;
-        const Email = struct { value: []const u8 };
-        const emails = try a.alloc(Email, input.emails.len);
-        for (input.emails, emails) |email, *dest| {
-            try recipients.validateAddress(email.address);
-            dest.* = .{ .value = email.address };
-        }
-        var body = try j.value(a, .{ .names = .{.{ .unstructuredName = input.name }}, .emailAddresses = emails });
+        const records = @import("contact_record.zig");
+        const input_value = j.get(request, "contact") orelse return error.MissingField;
+        const resource_name = j.text(input_value, "resourceName");
+        var current: ?types.Contact = null;
         var method: std.http.Method = .POST;
         var url: []const u8 = "https://people.googleapis.com/v1/people:createContact?personFields=names,emailAddresses,metadata";
-        if (input.resourceName.len > 0) {
-            if (!std.mem.startsWith(u8, input.resourceName, "people/")) return error.InvalidContactIdentity;
-            try b.identifier(input.resourceName[7..]);
-            url = try std.fmt.allocPrint(a, "https://people.googleapis.com/v1/{s}?personFields=names,emailAddresses,metadata", .{input.resourceName});
-            const current = try transport.request(a, .GET, url, null);
-            const normalized = try contact(a, current);
-            const expected = if (j.get(request, "expectedEtag")) |v| try j.string(v) else input.etag;
-            if (expected.len == 0 or !std.mem.eql(u8, normalized.etag, expected)) return error.ContactConflict;
-            try body.object.put(a, "metadata", j.get(current, "metadata") orelse return error.InvalidContactIdentity);
-            try body.object.put(a, "resourceName", .{ .string = input.resourceName });
+        if (resource_name.len > 0) {
+            if (!std.mem.startsWith(u8, resource_name, "people/")) return error.InvalidContactIdentity;
+            try b.identifier(resource_name[7..]);
+            url = try std.fmt.allocPrint(a, "https://people.googleapis.com/v1/{s}?personFields=names,emailAddresses,metadata", .{resource_name});
+            current = try contact(a, try transport.request(a, .GET, url, null));
+            const expected = if (j.get(request, "expectedEtag")) |v| try j.string(v) else j.text(input_value, "etag");
+            if (expected.len == 0 or !std.mem.eql(u8, current.?.etag, expected)) return error.ContactConflict;
+        }
+        const input = try records.mergeInput(a, input_value, current);
+        var body = try records.providerBody(a, input, current);
+        if (current) |old| {
+            const name_changed = !std.mem.eql(u8, input.name, old.name);
+            const emails_changed = !records.emailsEqual(input.emails, old.emails);
+            if (!name_changed and !emails_changed) return j.value(a, old);
+            const mask = if (name_changed and emails_changed) "names,emailAddresses" else if (name_changed) "names" else "emailAddresses";
+            if (j.get(body, "metadata") == null) return error.InvalidContactIdentity;
+            try body.object.put(a, "resourceName", .{ .string = resource_name });
             method = .PATCH;
-            url = try std.fmt.allocPrint(a, "https://people.googleapis.com/v1/{s}:updateContact?updatePersonFields=names,emailAddresses&personFields=names,emailAddresses,metadata", .{input.resourceName});
+            url = try std.fmt.allocPrint(a, "https://people.googleapis.com/v1/{s}:updateContact?updatePersonFields={s}&personFields=names,emailAddresses,metadata", .{ resource_name, mask });
         }
         const response = try transport.request(a, method, url, body);
         const updated = contact(a, response) catch return error.UnknownOutcome;
@@ -1064,7 +1230,7 @@ test "user label names resolve exact provider IDs once and system IDs need no re
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.calls += 1;
             try std.testing.expectEqual(std.http.Method.GET, method);
-            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", url);
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", url);
             try std.testing.expect(body == null);
             return j.value(a, .{ .labels = .{ .{ .id = "Label_42", .name = "Follow Up", .type = "user" }, .{ .id = "Label_43", .name = "Travel/2026", .type = "user" } } });
         }
@@ -1524,7 +1690,7 @@ test "wishlist: labels minimal snapshot and exact modify wire" {
         fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.calls += 1;
-            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)")) {
+            if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)")) {
                 try std.testing.expectEqual(std.http.Method.GET, method);
                 try std.testing.expect(body == null);
                 return std.json.parseFromSliceLeaky(j.Value, a, "{\"labels\":[{\"id\":\"Label_42\",\"name\":\"Project\",\"type\":\"user\"}]}", .{});
@@ -1568,7 +1734,7 @@ test "label collection: independent create rename delete wire and protected labe
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.calls += 1;
             if (method == .GET) {
-                try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", url);
+                try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", url);
                 try std.testing.expect(body == null);
                 return std.json.parseFromSliceLeaky(j.Value, a, "{\"labels\":[{\"id\":\"Label_42\",\"name\":\"Project\",\"type\":\"user\"},{\"id\":\"INBOX\",\"name\":\"INBOX\",\"type\":\"system\"},{\"id\":\"Provider_reserved\",\"name\":\"Provider system\",\"type\":\"system\"}]}", .{});
             }

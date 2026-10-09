@@ -3,6 +3,25 @@ const j = @import("json.zig");
 const recipients = @import("recipients.zig");
 const storage = @import("store.zig");
 pub const Delta = struct { add: []const []const u8, remove: []const []const u8 };
+pub const Scope = enum { message, conversation };
+pub fn scope(request: j.Value) !Scope {
+    const text = j.text(request, "scope");
+    if (text.len == 0) return .message;
+    return std.meta.stringToEnum(Scope, text) orelse error.InvalidTriageScope;
+}
+/// Scope resolution happens before review. Mutations always accept only this
+/// explicit snapshot, never the thread ID or a query that could grow later.
+pub fn pinned(a: std.mem.Allocator, request: j.Value) ![]const []const u8 {
+    const values = j.get(request, "messageIds") orelse return error.MissingField;
+    if (values != .array or values.array.items.len == 0 or values.array.items.len > 100) return error.InvalidBatchSize;
+    const ids = try a.alloc([]const u8, values.array.items.len);
+    for (values.array.items, ids, 0..) |value, *id, index| {
+        id.* = try j.string(value);
+        try @import("../bounded.zig").identifier(id.*);
+        for (ids[0..index]) |previous| if (std.mem.eql(u8, previous, id.*)) return error.DuplicateMessage;
+    }
+    return ids;
+}
 fn has(labels: []const []const u8, wanted: []const u8) bool {
     for (labels) |label| if (std.mem.eql(u8, label, wanted)) return true;
     return false;

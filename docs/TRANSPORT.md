@@ -45,6 +45,13 @@ Wider methods are exposed only through capability-checked operations; read-only
 bar policy remains unchanged. Automatic cache refresh specifically uses bar
 read-only grants and never selects a wider terminal token.
 
+Larger ordinary terminal attachments use immutable account handles, private MIME
+spooling and bounded streaming rather than expanding the JSON buffer. Outgoing
+MIME is capped at 35 MiB, the outer HTTP stream at 36 MiB, and decoded saved
+files at 25 MiB, within account disk quotas. Saves create private atomic files
+without overwriting existing destinations. Streaming retains the same host,
+credential, deadline and cancellation policy.
+
 `ProgressSink` reports actual batch units and borrowed rows synchronously to the
 owned worker's observer. The TUI copies bounded previews; those callbacks do not
 change allowed hosts, deadlines, cancellation ownership or CLI JSON-lines frames.

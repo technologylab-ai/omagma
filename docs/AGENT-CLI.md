@@ -14,13 +14,17 @@ The JSONL agent CLI and TUI share the same backend operations, terminal grant,
 account checks, cache and mutation receipts. Reading full messages/threads,
 cache/server search, reply/reply-all, forwarding, sending attachments,
 archive/Trash/restore, stars/read state, label assignment and collection management, bulk actions/undo,
-contact list/search/create/update and invitation replies are available to both.
+contact list/search/create/update, custom-label colors, private browser preview,
+local draft discard, Spam/Not spam and invitation replies are available to both.
 The [complete permission setup](SETUP.md#full-tuicli-permissions) enables both
 interfaces for the authorized account.
 
-The TUI adds interactive conveniences: vim/mouse navigation, styled HTML and
-tables, pane layouts, the link chooser, quote/signature/thread folding, saved layouts/keymaps, `$EDITOR`, recipient/path completion, and automatic local
-draft recovery. CLI callers supply recipients and body source (including through
+The TUI adds interactive conveniences: Vim/mouse navigation, styled HTML and
+tables, pane layouts, action discovery, current-message find, unread navigation,
+search history/named searches, staged label checkboxes, link/file choosers,
+quote/signature/thread folding, saved layouts/keymaps, `$EDITOR`, native text
+undo, recipient/path completion and automatic local draft recovery.
+CLI callers supply recipients and body source (including through
 `--body-file` or `--body-stdin`) and explicitly save/update/recover drafts.
 The CLI returns decoded plain text and structured data rather than the styled
 screen, and can request up to 100 messages per page rather than the TUI's
@@ -30,9 +34,21 @@ The command table below is the backend contract. One-shot commands
 cover common operations; JSONL supplies arrays and structured fields for richer
 requests. Drafts are local in both interfaces. Neither currently offers
 permanent mail deletion, contact deletion or calendar views. Label support
-includes listing, assigning/removing existing labels and creating, renaming
-or deleting custom label definitions. Calendar support means invitation replies
-by email.
+includes listing, assigning/removing existing labels and creating, renaming,
+coloring or deleting custom definitions. Shared target resolution and membership
+counts support reviewed conversation/bulk workflows. The CLI also exposes the
+durable local send queue; its delay is explicit rather than the TUI's default
+countdown. Calendar support means invitation details/replies by email.
+
+## Software updates
+
+`omagma updates status|check|guide|dismiss [--json]` shares the TUI's release
+state and installation-aware guidance. `status` is cached; `check` explicitly
+requests public release metadata. `guide --json` includes versions,
+installation ownership, commands and instructions. `omagma updates automatic
+on|off` changes the persisted daily-check preference. These standalone commands
+need no account configuration or Google authorization and are separate from
+the account-scoped JSONL protocol. See [updates](UPDATES.md).
 
 ## Protocol
 
@@ -64,17 +80,21 @@ Send lines such as:
 | --- | --- |
 | accounts.list | accounts with address, enabled, capabilities, configured senderName/signature |
 | accounts.identities | verified send-as identities with address,name,signature,isDefault; cacheOnly supports cached identities plus configured primary fallback |
-| labels.list | bounded Gmail label id,name,type list; cacheOnly uses the downloaded account list |
-| labels.create | name, operationId; creates a custom label and returns its stable label ID |
+| labels.list | bounded Gmail label id,name,type,color list; cacheOnly uses the downloaded account list |
+| labels.create | name, operationId, optional color; creates a custom label and returns its stable label ID |
 | labels.rename | labelId, name, operationId; renames a custom label while retaining its ID and memberships |
 | labels.delete | labelId, confirmName, operationId; deletes the custom label, keeping its emails; confirmName must match the current name |
+| labels.color / palette | color requires labelId, operationId and color `{backgroundColor,textColor}`; palette returns allowed Gmail hex values |
+| mail.triage-scope | messageId, scope message/conversation; complete account-scoped messageIds, count and threadId, up to 100; incomplete/oversized resolution fails |
+| mail.label-state | messageIds; metadata-only per-label appliedCount/mixed state and complete target count |
 | mail.list / search / sync | limit 1..100, query, label, cursor; returns one message page and nextCursor; search selects local cache with cacheOnly:true or Gmail with false/default; sync is a list-operation alias, not a history refresh |
 | mail.refresh | optional limit/query/label/prefetchLimit; applies a bounded history update or recent resync to the account cache |
 | mail.prefetch | limit 0..64; refreshes and fills a bounded recent body head within existing cache quotas |
 | mail.recipients | cacheOnly:true; up to 1,024 recent account-scoped recipients from retained From/To/Cc and permitted saved contacts; excludes primary self, deduplicates and ranks recent interaction |
 | mail.read | messageId; decoded full text, envelope/threading fields, labels, attachments, invitation |
 | mail.thread | threadId; chronological messages |
-| mail.attachment | messageId, attachmentId; filename,mimeType,size,data(base64url without padding) |
+| mail.attachment | messageId, attachmentId; filename,mimeType,size and inline data(base64url) or an account blobId descriptor for larger content |
+| mail.attachment-save | messageId, attachmentId, absolute path; streams a new private file, refusing overwrite and symlink traversal |
 | mail.open | optional messageId; explicitly opens configured Chrome profile |
 | mail.reply | messageId, all:boolean, optional bodyFormat plain/markdown and preserveFormatting:boolean; creates a local reply/reply-all draft |
 | mail.forward | messageId, optional bodyFormat plain/markdown, preserveFormatting:boolean or original:boolean; creates an unaddressed local forward draft; formatting and original-email modes conflict |
@@ -85,11 +105,15 @@ Send lines such as:
 | mail.undo | undoToken; restores only actual touched-label changes for confirmed successful batch items |
 | draft.create / update | draft with bodyText source and optional bodyFormat plain/markdown; update also requires draftId |
 | draft.preview | draft or draftId; bodyFormat, exact bodyText source, rendered plainText and optional bodyHtml; local preview without saving or sending |
+| draft.open-preview | draftId; writes a bounded private sandboxed HTML preview and explicitly opens this account's Chrome profile; sends no mail |
 | draft.recovery-save | draft.recoveryFields exact five raw fields To/Cc/Bcc/Subject/Body, optional draftId; incomplete local recovery that cannot be sent |
 | draft.list / read / send / discard | read/send/discard require draftId; send also requires operationId |
+| draft.queue | draftId, operationId, optional delaySeconds 0..30 (default 10); stages a durable unsent intent and returns queueId/dueAtMs/state |
+| queue.list / read / cancel / resume / process | read/cancel/resume/process require queueId; resume accepts delaySeconds; process requires due time or wait:true; no automatic processing after restart |
+| attachment.import / discard | import takes path and optional mimeType, returning immutable account blobId metadata; discard takes blobId and refuses referenced content |
 | contacts.list / search | live list pages accept limit 1..100 and cursor; search accepts query (live up to 30); cacheOnly uses downloaded contacts; results include resourceName,etag,name,emails and live nextCursor |
-| contacts.upsert | contact; editing requires resourceName and expectedEtag or contact.etag |
-| invitation.inspect | messageId; validated uid, organizer, attendee, sequence, recurrenceId, summary,start |
+| contacts.upsert | contact; editing requires resourceName and expectedEtag or contact.etag; omitted emails on name-only updates preserve all supported addresses/provider metadata |
+| invitation.inspect | messageId; validated identities and calendar protocol, friendly startDisplay/endDisplay/durationDisplay, location, joinUrl, attendeeStatus and recurrenceDisplay |
 | invitation.reply | messageId,status accepted/tentative/declined,operationId |
 | operation.list / read | read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
@@ -118,7 +142,7 @@ For a local-only lookup, set `cacheOnly:true` on `mail.list`, `mail.read`, `mail
 
 **Relative cache windows:** cached `mail.list` and `mail.search` also accept `beforeMessageId` or `afterMessageId` to return an adjacent bounded window without replaying a cursor. The anchor row is excluded. These selectors remain account/query/label scoped and use current retained data across generation changes or a restart. `boundaryReceivedAt`, an optional millisecond timestamp from a visible message DTO, recovers the nearest retained boundary when that ID has been evicted; the result explicitly reports `boundaryFallback:true`. Without a known boundary or timestamp, `CacheBoundaryGone` is returned. Results include `cacheWindow` and `hasMoreCachedBefore`/`hasMoreCachedAfter`. Never combine these selectors with a cursor, and never use a provider L token to rewind cached mail. One-shot flags are `--before-message-id`, `--after-message-id` and `--boundary-received-at`, together with `--cached`.
 
-**Downloaded-body search:** `mail.search` with `cacheOnly:true` evaluates retained metadata and already downloaded plain-text bodies, without a previously recorded Gmail query or server request. It searches no raw HTML or encoded attachment data and never downloads a missing body. Whitespace joins up to 32 terms with AND; double quotes preserve a phrase, and `-` negates a term. Supported fields include `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `is:unread|read|starred` and `has:attachment`. Label names use the downloaded account label list; IDs also work. These are local predicates, while `--server` keeps Gmail's full query language.
+**Downloaded-body search:** `mail.search` with `cacheOnly:true` evaluates retained metadata and already downloaded plain-text bodies, without a previously recorded Gmail query or server request. It searches no raw HTML or encoded attachment data and never downloads a missing body. Whitespace joins up to 32 terms with AND; double quotes preserve a phrase, and `-` negates a term. Supported fields include `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `filename:`, `is:unread|read|starred|important` and `has:attachment`. `after:` (inclusive), `before:` (exclusive) and `on:` compare local calendar dates (`YYYY-MM-DD` or `YYYY/MM/DD`); `newer:`/`older:` are absolute-date aliases. Unknown named operators, unsupported predicate values and invalid dates fail explicitly. Label names use the downloaded account list; IDs also work. These local predicates are a subset of Gmail syntax; use `--server` for the full language.
 
 Results report `searchScope:"metadata-and-cached-bodies"`, `partial:true`, `matchedCachedCount`, `highlightTerm`, and `searchMatches` with messageId,field,offset,length,excerpt. Excerpts are bounded to 192 UTF-8 bytes; offsets/lengths describe bytes within the excerpt. Body-aware K cursors bind body residency as well as account/query/label/metadata generation, so newly fetched bodies invalidate an old result cursor. Restart the query after `InvalidCursor`. Metadata-only queries remain stable while bodies download. K cursors are distinct from cached provider-view C cursors and Gmail L continuations; never exchange them. A local match does not prove that uncached mailbox content lacks the query.
 
@@ -136,12 +160,63 @@ Reads do not mark read. Use mail.mark explicitly if requested. There is no perma
 {"cmd":"draft.send","account":"personal@example.com","draftId":"USE_RETURNED_ID","operationId":"task-unique-send-1"}
 ```
 
-Attachments are `{id:"",filename:"safe-basename.txt",mimeType:"text/plain",size:DECODED_BYTES,data:"BASE64URL_NO_PADDING"}` in draft.attachments. `size` stays an exact integer byte count in CLI responses; the TUI's kB/MB display does not change it. Body plus encoded attachments must fit the 3 MiB request. One-shot compose/send accept repeated `--attach-file FILE`, using application/octet-stream. Both JSONL `mail.attachment` and one-shot `omagma mail attachment` return JSON/base64url on stdout; they do not write a downloaded file, and there is no `--output-file` option. The TUI offers an interactive save picker. A CLI caller decodes `data` and writes it through its own tool to an explicitly chosen private path, refusing overwrite and treating filenames as untrusted.
+Small inline attachments use
+`{id:"",filename:"safe-basename.txt",mimeType:"text/plain",size:DECODED_BYTES,data:"BASE64URL_NO_PADDING"}`
+in draft.attachments. Larger content uses the descriptor returned by
+`attachment.import`, including an immutable `blobId` owned by this account.
+Use the returned descriptor rather than inventing a handle or passing a cache
+path. `attachment.discard` refuses a handle still referenced by a draft or
+protected content. `size` remains an exact decoded byte count.
+
+Ordinary outgoing attachments allow 16 files and 25 MiB decoded total;
+retained original resources allow 32 and a separate 2 MiB. Body/source and
+rendered alternatives stay bounded to 2 MiB, JSON requests to 3 MiB and complete
+outgoing MIME to 35 MiB. All combined content must fit the applicable limits.
+Repeated `--attach-file FILE` uses inline base64 for a set no larger than 2 MiB
+and account storage for larger sets, preserving the bounded JSON interface.
+
+`mail.attachment` returns inline `data` for smaller content or a `blobId`
+descriptor for a larger received file. Empty/omitted data with a handle does not
+mean the file is empty. `mail.attachment-save` streams the content into the
+caller's explicit new absolute path, with 0600 permissions and no overwrite or
+parent/leaf symlink traversal. Received files are individually bounded to
+25 MiB and account disk quotas. Saving does not require a mailbox mutation.
+There is no `--output-file` flag. Existing `attachment.open`/`mail open-attachment`
+opens an already saved supported private file; it does not download a handle.
+
+## Reviewed message and conversation targets
+
+`mail.triage-scope` resolves a single anchor with `scope:"message"` or
+`"conversation"` into complete account-scoped `messageIds`, `count` and
+`threadId`. The maximum is 100; incomplete, oversized or inconsistent
+conversations fail instead of returning a truncated mutation target.
+Review the returned IDs/count, then pass those exact IDs to `mail.batch`.
+Later arrivals are not implicitly added to that batch.
+
+`mail.label-state` accepts the explicit target IDs and returns their current
+per-label membership counts without fetching bodies. It supports checking
+all/mixed/none before constructing `addLabels`/`removeLabels`. A successful
+membership snapshot does not authorize unrelated mailbox changes.
+
+```json
+{"cmd":"mail.triage-scope","account":"personal@example.com","messageId":"PROVIDER_ID","scope":"conversation"}
+{"cmd":"mail.label-state","account":"personal@example.com","messageIds":["RETURNED_ID_1","RETURNED_ID_2"]}
+{"cmd":"mail.batch","account":"personal@example.com","messageIds":["RETURNED_ID_1","RETURNED_ID_2"],"action":"mark","addLabels":["EXISTING_LABEL_ID"]}
+```
+
+The one-shot adapter offers `--scope message|conversation` for
+archive/trash/restore/spam/unspam/mark/batch with one `--message-id` anchor. It
+resolves complete IDs before the mutation. Explicit `--message-ids ID,ID`
+continues to mean only that set. JSONL clients should use the resolver plus
+explicit batch IDs rather than assuming an extra scope field changes a
+single-message mutation.
 
 ## Label collection management
 
-`labels list` returns the account's definitions; `mail labels` remains a list
-alias. Create, rename and delete affect the collection, while `mail mark` and
+`labels list` returns the account's definitions; ordinary `mail labels` remains
+a list alias. In the one-shot adapter, supplying target IDs to either alias
+invokes membership inspection instead.
+Create, rename, color and delete affect the collection, while `mail mark` and
 `mail batch` add/remove memberships on selected messages. System definitions
 are protected. Writes require `mail-modify` and an explicit operation ID.
 
@@ -149,6 +224,9 @@ are protected. Writes require `mail-modify` and an explicit operation ID.
 omagma labels list --account personal@example.com --cached
 omagma labels create --account personal@example.com --name 'Projects/Volcano' --operation-id label-create-001
 omagma labels rename --account personal@example.com --label-id RETURNED_ID --name 'Projects/Magma' --operation-id label-rename-001
+omagma labels palette --account personal@example.com
+omagma labels color --account personal@example.com --label-id RETURNED_ID \
+  --background-color '#a479e2' --text-color '#000000' --operation-id label-color-001
 omagma labels delete --account personal@example.com --label-id RETURNED_ID --confirm-name 'Projects/Magma' --operation-id label-delete-001
 ```
 
@@ -156,6 +234,8 @@ Deleting a label removes its associations, keeping the messages and their
 bodies. It is distinct from removing that label from one message. Keep the
 operation ID to inspect or replay its recorded result; an uncertain remote
 outcome must be checked rather than submitted again under a new ID.
+Both color values must come from `labels.palette`; arbitrary RGB strings are
+rejected before mutation. Create can also receive the same optional color pair.
 
 ## Markdown drafts and preview
 
@@ -208,6 +288,19 @@ omagma draft send --account personal@example.com --draft-id LOCAL_ID --operation
 Review the returned alternatives before a task-authorized send. Rendering does
 not add a grant or bypass the account, recipient, attachment or request limits.
 
+`draft.open-preview` requires a saved `draftId`. One-shot callers can use
+`draft open-preview --draft-id ID` or `draft preview --draft-id ID --browser`.
+This explicitly opens the account's Chrome profile on a private generated file.
+The message is isolated in an opaque sandbox with scripts, forms, remote
+resources and navigation blocked; verified PNG/JPEG/GIF resources are inlined.
+It preserves the note/original's styles and tables, sends nothing and does not
+upload a Gmail draft. The artifact is owner-only, limited to 16 MiB, replaced
+on reuse and removed on local draft discard.
+
+```sh
+omagma draft preview --account personal@example.com --draft-id LOCAL_ID --browser
+```
+
 ## Replies and forwards with original content
 
 Set `preserveFormatting:true` on `mail.reply` or `mail.forward` to retain the
@@ -258,12 +351,58 @@ before saving a partial draft or sending mail. Embedded image bytes are
 retained; remote images still depend on the image server and recipient
 settings. Final styling depends on the receiving email client. An unknown send
 outcome protects the saved draft and must be checked before another submission.
+Captured original resources are separately limited to 32 items and 2 MiB;
+they do not consume the ordinary 16-file count. Incoming MIME bookkeeping
+accepts up to 49 file/resource descriptors, including related parts and the
+approved logo, within its separate 128-part parser bound. These parser limits
+do not expand outgoing ordinary-file or retained-resource quotas.
+
+## Local send queue and cancellation
+
+TUI review uses a ten-second cancellation period by default. Direct JSONL
+`mail.send`/`draft.send` and ordinary one-shot sends retain immediate submission;
+CLI delay is an explicit choice. None of these operations schedules future
+delivery through Gmail or through the read-only background cache timer.
+
+`draft.queue` stages a validated saved draft with a stable `operationId` and
+`delaySeconds` from 0–30 (default 10). Its receipt contains `queueId`, `draftId`,
+`operationId`, `state`, `createdAtMs` and `dueAtMs`. Staging sends nothing.
+`queue.process` submits a due queued item; before its deadline it returns
+`QueueNotDue` unless `wait:true` explicitly waits. `queue.cancel` cancels only an
+unsent queued intent and keeps its draft. `queue.resume` explicitly resets a
+queued item's countdown. Cancelled/applied/rejected/unknown/submitting entries
+are not resumed or automatically sent again.
+
+```json
+{"cmd":"draft.queue","account":"personal@example.com","draftId":"LOCAL_ID","operationId":"SEND_TASK_ID","delaySeconds":10}
+{"cmd":"queue.read","account":"personal@example.com","queueId":"RETURNED_QUEUE_ID"}
+{"cmd":"queue.cancel","account":"personal@example.com","queueId":"RETURNED_QUEUE_ID"}
+```
+
+To keep staging and processing separate in a one-shot workflow:
+
+```sh
+omagma draft queue --account personal@example.com --draft-id LOCAL_ID \
+  --operation-id SEND_TASK_ID --delay-seconds 10
+omagma queue process --account personal@example.com --queue-id RETURNED_QUEUE_ID --wait
+```
+
+`mail send`/`draft send --send-delay 10` stages and waits through this same queue,
+then returns its result. `queue resume --queue-id ID --delay-seconds 10` resets
+the deadline but still needs explicit processing. Another authorized client
+can inspect or cancel the queued item while a processor waits.
+
+No process startup automatically processes a pending item. Reopening a queued
+draft in the TUI first checks queue state and exposes `:resume-send` or
+`:cancel-send`. Normal TUI close cancels its unsent countdown; a crashed queued
+item stays pending for explicit handling. Submitting/unknown outcomes protect
+their recovery draft and require receipt/provider inspection, not a new send.
 
 ## Side effects and uncertainty
 
 Every send/RSVP needs a stable operationId chosen by the caller. Omagma persists an unknown receipt before dispatch and derives a stable RFC Message-ID from account+operationId. Repeating the **same account, identity and semantic content** returns the recorded receipt without another provider call. A new identity for the same unresolved draft/content also returns the existing unknown receipt, preventing accidental duplicate submission through a reopened draft. Reusing it for different content gives OperationConflict. This is a local duplicate guard, not a server-side idempotency guarantee.
 
-Outcomes: applied=provider accepted, rejected=known failure, unknown=possibly applied. **Do not retry unknown with a new ID.** Inspect operation.read and the provider's Sent folder before asking the user how to proceed. Direct sends also preserve a local recovery draft before dispatch. `draft.discard` removes a local draft, but refuses drafts referenced by an unknown operation. Such drafts also reject changed-content updates. Applied/rejected drafts may be explicitly discarded to free the 128-draft quota. Cache clear does not erase the journal. A full journal stops new sends; it never silently discards uncertain receipts. RSVP replay ignores its varying DTSTAMP but compares the semantic response.
+Outcomes: applied=provider accepted, rejected=known failure, unknown=possibly applied. **Do not retry unknown with a new ID.** Inspect operation.read and the provider's Sent folder before asking the user how to proceed. Direct sends also preserve a local recovery draft before dispatch. `draft.discard` removes a local draft and its regenerable preview, but refuses protected pending/submitting/unknown sends. Cancel an unsent queued intent before discarding or editing its draft. Applied/rejected drafts may be explicitly discarded to free the 128-draft quota. Cache clear does not erase the journal. A full journal stops new sends; it never silently discards uncertain receipts. RSVP replay ignores its varying DTSTAMP but compares the semantic response.
 
 The receipt's `messageId` is the provider resource ID; use it with `mail.read`
 when available. Its `rfcMessageId` is the submitted Internet Message-ID, which
@@ -272,7 +411,7 @@ header, while its `id` is the provider resource ID. Use that actual header for
 cross-mailbox `rfc822msgid:` searches after reading Sent. An empty search for
 the submitted header is not proof that an uncertain send failed.
 
-Contact updates use CONTACT-source etags and reject conflicts. Live writes invalidate the contacts cache before submission and return the validated provider contact directly; the next contacts read refreshes the cache. Mutating transport interruption or unrecognizable provider acknowledgement is uncertain. Failure to encode a live mutation's final response is also `UnknownOutcome`, even if its error frame cannot be allocated. Refresh authoritative provider state before another mutation. The permission error occurs before provider access if the required capability is absent.
+Contact updates use CONTACT-source etags and reject conflicts. Supported edits preserve all 32 addresses and bounded provider names/email/source metadata rather than reducing a contact to one address. Live writes invalidate the contacts cache before submission and return the validated provider contact directly; the next contacts read refreshes the cache. Mutating transport interruption or unrecognizable provider acknowledgement is uncertain. Failure to encode a live mutation's final response is also `UnknownOutcome`, even if its error frame cannot be allocated. Refresh authoritative provider state before another mutation. The permission error occurs before provider access if the required capability is absent.
 
 **Bulk and undo:** bulk actions preserve independent per-message outcomes and never submit sends. Up to 16 account-scoped undo receipts persist under the private cache quota. The receipt records actual pre-action membership only for touched labels. Undo therefore preserves unrelated labels changed later. Rejected, pending, unknown and already restored entries are skipped; an uncertain undo is not repeated automatically. Cache clear preserves these receipts. Apply bulk actions only to IDs explicitly selected for the intended account; a batch is a bounded sequence with partial outcomes, not a transaction.
 
@@ -284,8 +423,8 @@ Configurable body prefetch defaults to the smaller of the display page and 32. `
 
 ## One-shot interface
 
-One-shot command families are `mail`, `labels`, `draft`, `contacts`, `invitations`,
-`cache`, `operation` and `terminal-auth`. Common names map to the shared API:
+One-shot command families are `mail`, `labels`, `draft`, `queue`, `attachment`,
+`contacts`, `invitations`, `cache`, `operation` and `terminal-auth`. Common names map to the shared API:
 `mail compose` creates a local draft and `mail drafts` lists them.
 `mail labels` lists existing labels, and `mail identities`
 discovers sending identities.
@@ -329,13 +468,22 @@ omagma mail identities --account personal@example.com --cached
 omagma mail batch --account personal@example.com --action archive --message-ids ID1,ID2
 omagma mail undo --account personal@example.com --undo-token RETURNED_TOKEN
 omagma mail prefetch --account personal@example.com --limit 64
+omagma mail triage-scope --account personal@example.com --message-id PROVIDER_ID --scope conversation
+omagma mail label-state --account personal@example.com --message-ids ID1,ID2
+omagma mail attachment-save --account personal@example.com --message-id PROVIDER_ID \
+  --attachment-id ATTACHMENT_ID --path /absolute/private/downloads/report.pdf
+omagma attachment import --account personal@example.com --path /absolute/private/report.pdf
+omagma queue list --account personal@example.com
 ```
 
 For contact creation, the contact file supplies `name` and `emails`. To edit,
 include its returned `resourceName` and pass `--expected-etag RETURNED_ETAG`
-(or include the returned contact etag). This supports contact create/update,
-not deletion. Label assignment uses existing label IDs or the supported name
-resolver. Collection management uses `labels create|rename|delete`, with
+(or include the returned contact etag). Supported contacts retain up to 32
+addresses plus bounded provider metadata. A name-only edit can omit `emails`
+to preserve them; explicit address edits supply the intended complete array.
+This supports create/update, not deletion. Label assignment uses existing label
+IDs or the supported name resolver. Collection management uses
+`labels create|rename|color|delete`, with
 explicit operation IDs and a reviewed name for deletion. Invitation replies send email,
 not Calendar changes.
 
@@ -362,7 +510,13 @@ The CLI does not launch the TUI's editor, autocomplete or styled renderer.
 | `--attach-file FILE` (repeatable), `--draft-file FILE` | Regular outgoing files or a structured draft JSON object |
 | `--all` / `--reply-all` | Plan a reply-all draft |
 | `--unread` / `--read`, `--starred` / `--unstarred`, `--add-label LABEL`, `--remove-label LABEL` | Explicit mail.mark changes; label flags may repeat |
-| `--name NAME`, `--label-id ID`, `--confirm-name NAME` | Label collection create/rename/delete; combine writes with --operation-id |
+| `--name NAME`, `--label-id ID`, `--confirm-name NAME` | Label collection create/rename/color/delete; combine writes with --operation-id |
+| `--background-color HEX`, `--text-color HEX` | Gmail-compatible color pair for labels create/color; obtain values from labels palette |
+| `--scope message\|conversation` | One-shot complete target resolution from a single message anchor before triage |
+| `--queue-id ID`, `--delay-seconds N`, `--wait` | Queue read/cancel/resume/process; delay 0–30 for draft queue/resume; --wait only for queue process |
+| `--send-delay N` | Explicit 0–30 second queue+wait for mail send/draft send; no delayed-send default on direct CLI sends |
+| `--blob-id ID`, `--mime-type TYPE` | Account attachment handle discard / optional import media type |
+| `--browser` | draft preview with an existing draft-id; explicitly opens private account-profile browser preview |
 | `--contact-file FILE`, `--expected-etag ETAG` | Create/edit contact object and version precondition |
 | `--status accepted\|tentative\|declined` | Invitation reply, with message and operation IDs |
 | `--client-file FILE`, `--capabilities CSV` | terminal-auth authorize; follow [account setup](SETUP.md#full-tuicli-permissions) |
@@ -370,7 +524,7 @@ The CLI does not launch the TUI's editor, autocomplete or styled renderer.
 | `--action ACTION`, `--message-ids ID1,ID2`, `--undo-token TOKEN` | Batch actions/undo; repeated message-id flags also build a batch |
 | `--prefetch-bodies N` | Explicit 0–64 body head for terminal modes/cache refresh |
 | `--before-message-id ID`, `--after-message-id ID`, `--boundary-received-at MILLISECONDS` | Adjacent current cached window; combine with --cached, not cursor |
-| `--url HTTP_URL`, `--path FILE` | `mail open-link --url URL` / `mail open-attachment --path FILE`; --path opens an existing file, not a download |
+| `--url HTTP_URL`, `--path FILE` | Link opening, opening an already saved file, attachment import, or a new destination for mail attachment-save; meaning follows the command |
 | `--ui-file FILE`, `--editor-mode auto\|takeover`, `--no-mouse` | TUI preferences/editor/mouse options, not additional CLI business operations |
 
 Use --body-file or --body-stdin to keep content out of argv. --draft-file/--contact-file accept bounded JSON objects; combining --draft-file with compose fields or --attach-file is rejected as conflicting input. One-shot success exits 0; ordinary command errors emit an error response and exit nonzero. JSONL command errors allow the next frame, while output failures may end the process. A live mutation's `UnknownOutcome` survives that exit path. Never put tokens in argv, logs, shell history or agent messages.

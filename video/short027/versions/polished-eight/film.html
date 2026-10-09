@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Omagma v0.2.7 — 8 highlights</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}
+#S{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;transform-origin:0 0;color:#f7ede5;
+  font-family:"Adwaita Sans","Noto Color Emoji",sans-serif;background:radial-gradient(120% 95% at 50% 108%,#2c1409 0%,#130b07 50%,#080605 100%)}
+#S *{box-sizing:border-box}
+.L{position:absolute;left:0;top:0;opacity:0}
+.full{width:1920px;height:1080px}
+.fr{overflow:hidden;border-radius:16px;background:#15100c;box-shadow:0 28px 90px rgba(0,0,0,.65),0 0 0 1px rgba(255,160,100,.16)}
+.fr img{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none}
+.fr.det{border-radius:12px;box-shadow:0 40px 120px rgba(0,0,0,.8),0 0 0 2px rgba(255,140,70,.62),0 0 70px rgba(255,105,35,.32)}
+.fr.paper{background:#fff;box-shadow:0 40px 140px rgba(0,0,0,.7),0 0 0 2px rgba(255,170,110,.5),0 0 120px rgba(255,120,40,.45)}
+#glow{position:absolute;left:-240px;top:330px;width:2400px;height:1500px;border-radius:50%;background:radial-gradient(closest-side,rgba(255,118,38,.45),rgba(236,80,22,.13) 50%,transparent)}
+.ring{border:3px solid #ffa56b;border-radius:12px;box-shadow:0 0 0 2000px rgba(8,5,3,.38),0 0 44px rgba(255,140,60,.75)}
+.cap{left:120px;top:38px}
+.n{font:700 24px "JetBrainsMono Nerd Font",monospace;color:#ff9e61;letter-spacing:.08em}
+.h{font-weight:800;font-size:56px;line-height:1.15;letter-spacing:-.01em;margin-top:4px;white-space:nowrap}
+.sw{position:relative;height:44px;margin-top:8px}
+.s{position:absolute;left:0;top:0;font-size:28px;font-weight:500;color:#eccdb8;white-space:nowrap}
+kbd,code{display:inline-block;font:700 23px "JetBrainsMono Nerd Font",monospace;padding:3px 12px;border-radius:8px;margin:0 4px;vertical-align:2px}
+kbd{color:#fff4ec;border:1.5px solid #ff9e61}
+code{color:#ffb88a;background:rgba(255,255,255,.06);border:1px solid rgba(255,180,130,.28)}
+#bug{left:1480px;top:46px;width:320px;text-align:right;font:700 20px "JetBrainsMono Nerd Font",monospace;color:#d8b49c}
+#segs{display:flex;gap:6px;justify-content:flex-end;margin-top:12px}
+#segs i,#iSegs i{display:block;width:32px;height:5px;border-radius:3px;background:rgba(255,158,97,.18);overflow:hidden}
+#segs b{display:block;height:100%;background:#ff8a45;transform-origin:0 50%}
+#iSegs{display:flex;justify-content:center;gap:14px}
+#iSegs i{width:46px;height:6px;background:#ff8a45;box-shadow:0 0 14px rgba(255,122,53,.7)}
+.ctr{position:absolute;left:0;width:1920px;text-align:center}
+.card{position:absolute;top:300px;width:820px;padding:50px 56px 16px;border-radius:24px;background:linear-gradient(180deg,rgba(44,22,12,.94),rgba(22,13,9,.94));box-shadow:0 0 0 1px rgba(255,150,90,.24),0 30px 90px rgba(0,0,0,.55)}
+.card .t{font:700 30px "JetBrainsMono Nerd Font",monospace;color:#ff9e61;margin-bottom:38px}
+.card .r{position:relative;font-size:32px;font-weight:600;line-height:1.2;margin-bottom:36px;padding-left:34px;white-space:nowrap}
+.card .r:before{content:"";position:absolute;left:0;top:.45em;width:12px;height:12px;border-radius:50%;background:#ff8a45;box-shadow:0 0 14px #ff7a35}
+#flash{mix-blend-mode:screen;background:radial-gradient(70% 70% at 50% 55%,#ffe6cf,#ffb27a 60%,#ff8a45)}
+#vig{opacity:1;box-shadow:inset 0 0 260px rgba(0,0,0,.7)}
+</style>
+</head>
+<body>
+<div id="S">
+  <div id="glow"></div>
+  <div id="shots"></div>
+  <div id="caps"></div>
+  <div id="bug" class="L">Omagma v0.2.7<div id="segs"></div></div>
+  <div id="intro" class="L full">
+    <img id="iLogo" class="L logo" alt="" style="left:845px;top:200px;width:230px;height:230px">
+    <div id="iWord" class="L ctr" style="top:452px;font-size:110px;font-weight:800;letter-spacing:-.02em">Omagma</div>
+    <div id="iVer" class="L ctr" style="top:604px;font:700 34px 'JetBrainsMono Nerd Font',monospace;color:#ff9e61;letter-spacing:.12em">v0.2.7</div>
+    <div id="iCnt" class="L ctr" style="top:686px;font-size:44px;font-weight:600;color:#f3dccb">8 highlights</div>
+    <div id="iSegs" class="ctr" style="top:774px"></div>
+  </div>
+  <div id="recap" class="L full"></div>
+  <div id="outro" class="L full">
+    <div id="oRing" class="L" style="left:810px;top:190px;width:300px;height:300px;border-radius:50%;border:3px solid #ff9e61"></div>
+    <img id="oLogo" class="L logo" alt="" style="left:850px;top:230px;width:220px;height:220px">
+    <div id="oTitle" class="L ctr" style="top:500px;font-size:70px;font-weight:800">What's new in v0.2.7</div>
+    <div id="oPill" class="L ctr" style="top:620px"><span style="display:inline-block;font-size:32px;font-weight:700;color:#1c0e06;background:#ff9e61;padding:12px 34px;border-radius:40px">Get Omagma</span></div>
+    <div id="oWeb" class="L ctr" style="top:712px;font:600 34px 'JetBrainsMono Nerd Font',monospace;color:#ffd6bb">technologylab-ai.github.io/omagma</div>
+    <div id="oFoot" class="L ctr" style="top:990px;font-size:22px;color:#a88b78;letter-spacing:.06em">Experimental · TUI &amp; CLI · Linux/macOS</div>
+  </div>
+  <div id="flash" class="L full"></div>
+  <div id="vig" class="L full"></div>
+</div>
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id), ST = $('S');
+const A = '/video/cache/short027/assets/', LOGOS = [A + 'logo.png', '/assets/omagma-logo.png'];
+const FPS = 30, FRAMES = 3179, DUR = FRAMES / FPS;
+// Original "Slow Eruption" MP3: A + B (one repeat of the early phrases) + C, two 30 ms equal-power joins = 3179 frames.
+// Cue map only (not a listening claim). Music never triggers a UI switch; glow merely breathes on stable scenes.
+const M = window.FILM_MUSIC = {
+  intro: 0, bass: 4.6, B: 44.133667, roll: 79.335667, drop: 83.608667, next: 92.153667, last: 100.698667, stop: 103.126667, end: DUR,
+  sections: [{ id: 'A', src: [0, 44.125], at: 0 }, { id: 'B', src: [8.889333333, 44.125], at: 44.095 }, { id: 'C', src: [163.294, 189.96], at: 79.300667 }],
+  joins: [{ at: 44.095, dur: 0.03, curve: 'equal-power' }, { at: 79.300667, dur: 0.03, curve: 'equal-power' }], fades: 'none: natural quiet start and ending'
+};
+const CHB = [4.6, 13.4, 21.7, 30.0, 43.2, 54.4, 64.4, 82.4, 92.4];
+// [scene, phase, start, cameraSettled, holdEnd]: settled reading hold = [cameraSettled, holdEnd]. Phase ends where the next begins.
+const PH = [
+  ['intro', 'title', 0, 1.85, 4.2],
+  ['01', 'lead', 4.6, 4.9, 6.1], ['01', 'bar', 6.1, 6.5, 9.5], ['01', 'inbox', 9.5, 9.62, 13.4],
+  ['02', 'lead', 13.4, 13.7, 14.9], ['02', 'palette untouched', 14.9, 15.3, 16.7],
+  ['02', 'palette typing', 16.7, 16.7, 18.3], ['02', 'palette narrowed', 18.3, 18.3, 21.35],
+  ['03', 'lead', 21.7, 22.0, 23.2], ['03', 'find 1/5', 23.2, 23.45, 26.5], ['03', 'find 2/5', 26.5, 26.62, 29.7],
+  ['04', 'lead', 30.0, 30.3, 31.5], ['04', 'initial', 31.5, 31.9, 34.0], ['04', 'stage one', 34.0, 34.0, 36.0], ['04', 'staged two', 36.0, 36.0, 39.0],
+  ['04', 'apply', 39.0, 39.3, 39.6], ['04', 'reader result', 39.6, 40.15, 43.2],
+  ['05', 'lead', 43.2, 43.5, 44.7], ['05', 'invitation card', 44.7, 45.0, 46.0], ['05', 'review', 46.0, 46.4, 50.5], ['05', 'o join', 50.5, 51.0, 54.1],
+  ['06', 'lead', 54.4, 54.7, 55.9], ['06', 'files', 55.9, 56.3, 60.5], ['06', 'attached', 60.5, 60.8, 64.1],
+  ['07', 'lead', 64.4, 64.7, 65.9], ['07', 'format choice', 65.9, 66.3, 69.6], ['07', 'markdown note', 69.6, 69.72, 73.4],
+  ['07', 'browser note', 73.4, 73.8, 76.8], ['07', 'pan', 76.8, 79.0, 79.0], ['07', 'original intact', 79.0, 79.0, 82.1],
+  ['08', 'lead', 82.4, 82.7, 83.8], ['08', 'send review', 83.8, 84.05, 86.3], ['08', 'countdown', 86.3, 86.7, 89.3], ['08', 'send canceled', 89.3, 89.6, 92.25],
+  ['recap', 'cards', 92.4, 93.2, 102.1], ['outro', 'end card', 102.4, 104.2, DUR],
+];
+window.FILM = { width: 1920, height: 1080, fps: FPS, frameCount: FRAMES, duration: DUR, chapters: CHB, phases: PH };
+
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x)), lerp = (a, b, p) => a + (b - a) * p;
+const pr = (t, a, b) => (b <= a ? +(t >= a) : clamp((t - a) / (b - a)));
+const sm = p => p * p * (3 - 2 * p), eo = p => 1 - (1 - p) ** 3, ei = p => p * p * p;
+const E = (t, a, b, f = sm) => f(pr(t, a, b));
+const win = (t, a, b, fi = 0.3, fo = 0.3) => (t < a || t >= b ? 0 : E(t, a, a + fi, eo) * (1 - E(t, b - fo, b, ei)));
+const pulse = (t, c, up, dn) => (t < c - up || t > c + dn ? 0 : t < c ? sm(pr(t, c - up, c)) : 1 - sm(pr(t, c, c + dn)));
+const fx = (v, d = 3) => (+v).toFixed(d), pad = n => String(n).padStart(2, '0');
+const setL = (el, op, tf) => { el.style.opacity = fx(op, 4); if (tf != null) el.style.transform = tf; };
+const fadeUp = (el, p, dy) => setL(el, p, `translateY(${fx((1 - p) * dy, 2)}px)`);
+function kf(K, t) {
+  if (t <= K[0][0]) return K[0].slice(1);
+  for (let i = 1; i < K.length; i++) if (t < K[i][0]) {
+    const p = sm(pr(t, K[i - 1][0], K[i][0]));
+    return K[i].slice(1).map((v, j) => lerp(K[i - 1][j + 1], v, p));
+  }
+  return K[K.length - 1].slice(1);
+}
+
+/* ============ SHOTS: unmodified native PNGs; crop/scale only. k = [t, cx, cy, scale] in source px ============ */
+const DIM = {
+  'bar.png': [1480, 880], 'palette-detail.png': [1584, 396],
+  'palette-initial-detail.png': [1584, 836], 'palette-l-detail.png': [1584, 836], 'palette-la-detail.png': [1584, 484],
+  'palette-lab-detail.png': [1584, 396], 'palette-labe-detail.png': [1584, 396], 'palette-label-detail.png': [1584, 396],
+  'labels-initial-detail.png': [1584, 1056], 'labels-stage-one-detail.png': [1584, 1056],
+  'labels-staged-detail.png': [1584, 1056], 'meeting-review-detail.png': [2200, 1320], 'join-detail.png': [2200, 1320], 'files-detail.png': [2024, 880],
+  'format-choice-detail.png': [1540, 528], 'countdown-detail.png': [3520, 132],
+};
+const CAL = { barBtn: [966, 12, 138, 48] };          // real "Open TUI" button in bar.png px (editorial ring only, no pointer)
+const PANE = [2186, 100, 1330, 1650];                  // reader pane in find*.png
+const FR = [160, 212, 1600, 840], SF = 1600 / 3520;    // whole native screenshot, never cropped
+const SR = 830 / 1124, RR = [960 - 680 * SR, 214, 1360 * SR, 830]; // reader framing: source x2160..3520, y86..1210
+const TO_READER = { rk: [[39.6, ...FR], [40.15, ...RR]], k: [[39.6, 1760, 924, SF], [40.15, 2840, 648, SR]] };
+const LB = { mw: 1400, mh: 800 }, MR = { mw: 1440, mh: 800 }, SJ = Math.min(1440 / 2200, 800 / 1320);
+const F = (src, a, b, o = {}) => ({ src, a, b, W: 3520, H: 1848, r: FR, k: [[a, 1760, 924, SF]], ...o });
+const D = (src, a, b, o = {}) => {
+  const [W, H] = DIM[src], s = Math.min((o.mw || 1440) / W, (o.mh || 760) / H, 1.1), w = W * s, h = H * s;
+  return { src, a, b, W, H, det: 1, pop: 1, r: [960 - w / 2, 632 - h / 2, w, h], k: [[a, W / 2, H / 2, s]], ...o };
+};
+// hl rings: [tIn, tOut, x, y, w, h, fadeIn?, fadeOut?] in source px, drawn inside the frame.
+// Every genuine palette crop has the same width and filter-row offset. Keep
+// its top and text scale fixed while typing changes the results underneath.
+const PALETTE = (src, a, b, initial = false, final = false) => {
+  const [W, H] = DIM[src], s = 0.87, w = W * s, h = H * s;
+  return D(src, a, b, { r: [960 - w / 2, 264, w, h], k: [[a, W / 2, H / 2, s]],
+    pop: initial ? 1 : 0, fi: initial ? 0.3 : 0, fo: final ? 0.3 : 0 });
+};
+const SH = [
+  D('bar.png', 6.1, 9.62, { mw: 1500, mh: 800, fo: 0.12, hl: [[6.1, 9.62, ...CAL.barBtn, 0.3, 0.12]] }),
+  F('main.png', 9.5, 23.45, { fi: 0.12, fo: 0.25 }),
+  PALETTE('palette-initial-detail.png', 14.9, 16.7, true),
+  PALETTE('palette-l-detail.png', 16.7, 17.1),
+  PALETTE('palette-la-detail.png', 17.1, 17.5),
+  PALETTE('palette-lab-detail.png', 17.5, 17.9),
+  PALETTE('palette-labe-detail.png', 17.9, 18.3),
+  PALETTE('palette-label-detail.png', 18.3, 21.65, false, true),
+  F('find.png', 23.2, 26.62, { fi: 0.25, fo: 0.12, hl: [[23.2, 26.62, ...PANE, 0.25, 0.12]] }),
+  F('find-next.png', 26.5, 31.8, { fi: 0.12, hl: [[26.5, 30.0, ...PANE, 0]] }),
+  F('labels-context.png', 31.5, 39.3),
+  D('labels-initial-detail.png', 31.5, 34.0, { ...LB, fo: 0 }),
+  D('labels-stage-one-detail.png', 34.0, 36.0, { ...LB, fi: 0, fo: 0, pop: 0 }),
+  D('labels-staged-detail.png', 36.0, 39.25, { ...LB, fi: 0, fo: 0.25, pop: 0 }),
+  F('labels-result.png',39.2,46.3, { fi: 0.35, ...TO_READER, hl: [[39.85, 43.2, 2214, 304, 770, 52], [44.7, 46.3, 2214, 388, 1276, 102]] }),
+  D('meeting-review-detail.png', 46.0, 50.6, { ...MR, fo: 0.1 }),
+  D('join-detail.png', 50.5, 54.4, { ...MR, fi: 0.1, pop: 0, k: [[50.5, 1100, 660, SJ]], hl: [[50.7, 54.4, 1424, 1182, 190, 56]] }),
+  D('files-detail.png', 55.9, 60.62, { mw: 1560, mh: 700, fo: 0.12 }),
+  F('attached.png', 60.5, 64.4, { fi: 0.12, r: [120, 214, 1680, 830], k: [[60.5, 1050, 1335, 0.8]], hl: [[60.5, 64.4, 30, 1536, 2050, 182]] }),
+  D('format-choice-detail.png', 65.9, 69.72, { fo: 0.12 }),
+  F('forward.png', 69.6, 73.7, { fi: 0.12 }),
+  // Real light browser: note/table/branded footer y0..1600, original booking card + CID art y1700..3600. One viewport, one pan.
+  { src: 'browser.png', a: 73.4, b: 82.4, W: 2000, H: 3800, paper: 1, pop: 1, r: [300, 212, 1320, 840],
+    k: [[73.4, 1000, 836, 0.66], [76.8, 1000, 836, 0.66], [79.0, 1000, 2372, 0.66]] },
+  F('send-review-detail.png', 83.8, 86.42, { H: 1672, r: [160, 252, 1600, 760], k: [[83.8, 1760, 836, SF]], fi: 0.25, fo: 0.12, hl: [[83.8, 86.42, 212, 1536, 190, 50, 0.25, 0.12]] }),
+  // Native status row y44..88, left 1290 px, enlarged 1.25x. The capture is static: no ticking, no invented 9 s.
+  F('countdown.png',86.3,89.42,{fi:0.15,fo:0.12}),
+  D('countdown-detail.png', 86.3, 89.42, { r: [154, 604, 1612, 55], k: [[86.3, 645, 66, 1.25]], fi: 0.15, fo: 0.12 }),
+  F('send-canceled.png', 89.3, 92.4, { fi: 0.15, fo: 0.15, hl: [[89.3, 92.4, 4, 1800, 690, 46, 0.3, 0.15]] }),
+];
+const SHOTS = SH.map(sh => {
+  const fr = document.createElement('div'), img = new Image();
+  fr.className = 'L fr' + (sh.det ? ' det' : '') + (sh.paper ? ' paper' : '');
+  img.alt = ''; img.decoding = 'sync'; img.src = A + sh.src;
+  fr.appendChild(img); $('shots').appendChild(fr);
+  let ring = null;
+  if (sh.hl) { ring = document.createElement('div'); ring.className = 'L ring'; fr.appendChild(ring); }
+  return Object.assign(sh, { fr, img, ring, fi: sh.fi ?? 0.3, fo: sh.fo ?? 0.3, cam: null });
+});
+const vis = (sh, t) => win(t, sh.a, sh.b, sh.fi, sh.fo);
+
+/* ============ CAPTIONS: heading + subtitle land together; subtitle step cues lead each action. {key} pulses at the real event ============ */
+const CH = [
+  [1, 'Start from your bar', [[4.6, 'Open TUI runs `omagma tui`']]],
+  [2, 'Find a command', [[13.4, '{Ctrl P} in the mailbox · type a word to see matching actions', 14.9]]],
+  [3, 'Find inside the message', [[21.7, 'Find “calm” · {n} jumps to the next match', 26.5]]],
+  [4, 'Choose labels. Apply once.', [[30.0, 'Changes stay local until Apply.'], [33.4, 'Stage it: remove Projects, add Travel'], [38.4, 'Apply once · both messages updated']]],
+  [5, 'Meetings, made readable', [[43.2, '{I} opens a friendly review of the invitation', 46.0], [48.3, 'In the review, {o} joins the meeting', 50.5]]],
+  [6, 'Pick files together', [[54.4, 'Check several files, then attach them at once'], [59.9, 'Attach · all three go into the draft']]],
+  [7, 'Forward with a personal note', [[64.4, '{k} keeps the original HTML formatting · note in Markdown', 69.6], [72.8, 'Your note, rendered in a real browser'], [76.1, 'Original HTML formatting preserved below your note']]],
+  [8, 'Send with a safety net', [[82.4,'Review first · confirm to start the countdown'], [86.0,'{Ctrl Z} cancels before anything is sent',89.3],[89.4,'Canceled · your editable draft is kept']]],
+];
+const fmt = s => s.replace(/\{(.+?)\}/g, '<kbd>$1</kbd>').replace(/`(.+?)`/g, '<code>$1</code>');
+const CAPS = CH.map(([n, h, subs]) => {
+  const a = CHB[n - 1], b = CHB[n], el = document.createElement('div');
+  el.className = 'L cap';
+  el.innerHTML = `<div class="n">${pad(n)}/08</div><div class="h">${h}</div><div class="sw">${subs.map(s => `<div class="s">${fmt(s[1])}</div>`).join('')}</div>`;
+  $('caps').appendChild(el);
+  const sEls = [...el.querySelectorAll('.s')];
+  return { n, a, b, h, el, nEl: el.children[0], hEl: el.children[1],
+    subs: subs.map(([st, s, key], i) => ({ t: st, e: i + 1 < subs.length ? subs[i + 1][0] : b, key, plain: s.replace(/[{}`]/g, ''), el: sEls[i], kb: sEls[i].querySelector('kbd') })) };
+});
+
+/* ============ RECAP + chrome ============ */
+const REC = [
+  ['More everyday wins:', ['Choose themes + search Help', 'Save searches + color labels', 'Names in To/Cc/Bcc + choose sender', 'Jump to unread + half-page scroll']],
+  ['Safer, smoother everywhere:', ['Archive a message or whole thread', 'Mark spam + discard local drafts', 'Attachment reminders + Tab to buttons', 'Resume or cancel paused sends']],
+];
+const RCARDS = REC.map(([title, rows], i) => {
+  const el = document.createElement('div');
+  el.className = 'card L'; el.style.left = (120 + i * 860) + 'px';
+  el.innerHTML = `<div class="t">${title}</div>` + rows.map(r => `<div class="r">${r}</div>`).join('');
+  $('recap').appendChild(el);
+  return { el, rows: [...el.querySelectorAll('.r')] };
+});
+const SEGB = CHB.slice(1).map(() => { const i = document.createElement('i'), b = document.createElement('b'); i.appendChild(b); $('segs').appendChild(i); return b; });
+const ISEG = CHB.slice(1).map(() => $('iSegs').appendChild(document.createElement('i')));
+const ACC = [[M.bass, 0.5, 0.8], [M.B, 0.22, 0.6], [M.roll, 0.25, 0.7], [M.drop, 0.45, 1.4], [M.next, 0.3, 0.6], [M.last, 0.22, 0.8], [M.stop, 0.8, 1.4]];
+
+/* ================================ RENDER(t) — absolute, stateless ================================ */
+function shots(t) {
+  let dim = 0;
+  for (const sh of SHOTS) if (sh.det) dim = Math.max(dim, vis(sh, t));
+  for (const sh of SHOTS) {
+    const op = vis(sh, t), fr = sh.fr;
+    if (op < 0.002) { fr.style.opacity = 0; sh.cam = null; continue; }
+    const [x, y, w, h] = sh.rk ? kf(sh.rk, t) : sh.r, [cx, cy, s] = kf(sh.k, t), vw = w / s, vh = h / s;
+    const X = vw >= sh.W ? sh.W / 2 : clamp(cx, vw / 2, sh.W - vw / 2), Y = vh >= sh.H ? sh.H / 2 : clamp(cy, vh / 2, sh.H - vh / 2);
+    const e = sh.pop ? lerp(sh.paper ? 1.03 : 0.97, 1, eo(pr(t, sh.a, sh.a + 0.4))) : 1;
+    fr.style.width = fx(w, 1) + 'px'; fr.style.height = fx(h, 1) + 'px';
+    fr.style.filter = sh.det || sh.paper ? 'none' : `brightness(${fx(1 - 0.6 * dim)})`;
+    setL(fr, op, `translate(${fx(x, 2)}px,${fx(y, 2)}px) scale(${fx(e, 4)})`);
+    sh.img.style.transform = `translate(${fx(w / 2 - X * s, 2)}px,${fx(h / 2 - Y * s, 2)}px) scale(${fx(s, 5)})`;
+    sh.cam = { x, y, w, h, X, Y, s };
+    if (!sh.ring) continue;
+    let best = 0, R = null;
+    for (const q of sh.hl) { const o = win(t, q[0], q[1], q[6] ?? 0.3, q[7] ?? 0.3); if (o > best) { best = o; R = q; } }
+    if (!R) { sh.ring.style.opacity = 0; continue; }
+    sh.ring.style.width = fx(R[4] * s + 16, 1) + 'px'; sh.ring.style.height = fx(R[5] * s + 16, 1) + 'px';
+    setL(sh.ring, best, `translate(${fx((R[2] - X) * s + w / 2 - 8, 1)}px,${fx((R[3] - Y) * s + h / 2 - 8, 1)}px)`);
+  }
+}
+function render(tIn) {
+  const t = clamp(+tIn || 0, 0, DUR);
+  let g = 0;
+  for (const [c, k, d] of ACC) g = Math.max(g, k * pulse(t, c, 0.06, d));
+  const base = 0.25 + 0.35 * E(t, 0, 2.2) - 0.12 * E(t, 4.2, 5.0);
+  setL($('glow'), clamp(base + 0.5 * g), `scale(${fx(1 + 0.15 * g, 4)})`);
+
+  const io = 1 - E(t, 4.2, 4.55, ei), lp = E(t, 0.15, 1.4, eo);
+  $('intro').style.opacity = t < 4.6 ? 1 : 0;
+  setL($('iLogo'), lp * io, `translateY(${fx((1 - lp) * 18, 2)}px) scale(${fx(lerp(0.9, 1, lp) * lerp(1, 1.04, 1 - io), 4)})`);
+  fadeUp($('iWord'), E(t, 0.55, 1.5, eo) * io, 26);
+  fadeUp($('iVer'), E(t, 0.85, 1.7, eo) * io, 18);
+  fadeUp($('iCnt'), E(t, 0.75, 1.3, eo) * io, 18);
+  ISEG.forEach((s, i) => { s.style.opacity = fx(E(t, 1.2 + i * 0.05, 1.5 + i * 0.05) * io); });
+
+  shots(t);
+
+  for (const c of CAPS) {
+    const on = t >= c.a && t < c.b;
+    c.el.style.opacity = on ? 1 : 0;
+    if (!on) continue;
+    const pin = E(t, c.a, c.a + 0.3, eo), out = E(t, c.b - 0.3, c.b, ei);
+    fadeUp(c.nEl, pin * (1 - out), 10);
+    fadeUp(c.hEl, pin * (1 - out), 16);
+    for (const s of c.subs) {
+      const sin = E(t, s.t, s.t + 0.3, eo), sout = s.e >= c.b ? out : E(t, s.e - 0.2, s.e, ei);
+      setL(s.el, t < s.t ? 0 : sin * (1 - sout), `translateY(${fx((1 - sin) * 14, 2)}px)`);
+      if (!s.kb) continue;
+      const d = s.key == null ? 0 : pulse(t, s.key, 0.06, 0.3);
+      s.kb.style.transform = `translateY(${fx(3 * d, 2)}px)`;
+      s.kb.style.background = `rgba(255,158,97,${fx(0.12 + 0.5 * d)})`;
+      s.kb.style.boxShadow = `0 ${fx(4 - 3 * d, 2)}px 0 rgba(236,122,53,.55),0 0 ${fx(30 * d, 1)}px rgba(255,150,80,${fx(0.8 * d)})`;
+    }
+  }
+
+  setL($('bug'), E(t, 4.6, 4.9) * (1 - E(t, 92.1, 92.4)));
+  SEGB.forEach((b, i) => { b.style.transform = `scaleX(${fx(E(t, CHB[i], CHB[i] + 0.35), 4)})`; });
+
+  const ro = 1 - E(t, 102.1, 102.4, ei);
+  $('recap').style.opacity = t >= 92.4 && t < 102.4 ? 1 : 0;
+  RCARDS.forEach((c, i) => {
+    fadeUp(c.el, E(t, 92.45 + i * 0.08, 92.85 + i * 0.08, eo) * ro, 26);
+    c.rows.forEach((r, j) => fadeUp(r, E(t, 92.55 + i * 0.06 + j * 0.05, 92.95 + i * 0.06 + j * 0.05, eo), 16));
+  });
+
+  const ov = t >= 102.4;
+  $('outro').style.opacity = ov ? 1 : 0;
+  if (ov) {
+    const f = E(t, 102.4, M.stop, ei), sq = pulse(t, M.stop, 0, 0.35), rp = pr(t, M.stop, M.stop + 0.95);
+    setL($('oLogo'), pr(t, 102.4, 102.65), `translateY(${fx(lerp(-70, 0, f), 2)}px) scale(${fx(lerp(1.35, 1, f) * (1 - 0.045 * sq), 4)})`);
+    setL($('oRing'), t >= M.stop ? 0.85 * (1 - rp) : 0, `scale(${fx(lerp(0.7, 2.1, eo(rp)), 4)})`);
+    fadeUp($('oTitle'), E(t, 103.3, 103.75, eo), 26);
+    fadeUp($('oPill'), E(t, 103.42, 103.9, eo), 18);
+    fadeUp($('oWeb'), E(t, 103.52, 104.0, eo), 18);
+    fadeUp($('oFoot'), E(t, 103.75, 104.2, eo), 10);
+  }
+  setL($('flash'), 0.14 * pulse(t, M.bass, 0.03, 0.3) + 0.16 * pulse(t, M.drop, 0.04, 0.5) + 0.12 * pulse(t, M.stop, 0.03, 0.5));
+  return true;
+}
+window.render = render;
+
+/* ================================ QA ================================ */
+let LOGO_SRC = LOGOS[0];
+window.qa = tIn => {
+  const t = clamp(+tIn || 0, 0, DUR), p = PH.reduce((r, q) => (t >= q[2] ? q : r), PH[0]);
+  const scene = t < 4.6 ? 'intro' : t < 92.4 ? `${p[0]}/08` : t < 102.4 ? 'recap' : 'outro';
+  const visibleAssets = SHOTS.filter(s => vis(s, t) > 0.01).map(s => s.src);
+  if (t < 4.6 || t >= 102.4) visibleAssets.push(LOGO_SRC);
+  const captions = [];
+  for (const c of CAPS) if (t >= c.a && t < c.b) {
+    captions.push(`${pad(c.n)}/08 ${c.h}`);
+    c.subs.forEach(s => { if (t >= s.t && t < s.e) captions.push(s.plain); });
+  }
+  if (t < 4.6) captions.push('Omagma', 'v0.2.7', '8 highlights');
+  if (t >= 92.4 && t < 102.4) REC.forEach(([h, r]) => captions.push(h, ...r));
+  if (t >= 103.3) captions.push("What's new in v0.2.7", 'Get Omagma', 'technologylab-ai.github.io/omagma', 'Experimental · TUI & CLI · Linux/macOS');
+  return { t: +t.toFixed(4), frame: Math.min(FRAMES - 1, Math.round(t * FPS)), scene, phase: p[1], settled: t >= p[3] && t < p[4],
+    holdLeft: +Math.max(0, t >= p[3] ? p[4] - t : 0).toFixed(3), visibleAssets, captions };
+};
+
+/* ================================ READY ================================ */
+const load = img => new Promise((res, rej) => {
+  if (img.complete && img.naturalWidth) return res();
+  img.onload = () => res(); img.onerror = () => rej(new Error('Asset missing: ' + img.src));
+}).then(() => (img.decode ? img.decode().catch(() => {}) : 0));
+const FONTS = ['800 56px "Adwaita Sans"', '600 32px "Adwaita Sans"', '500 28px "Adwaita Sans"', '700 24px "JetBrainsMono Nerd Font"', '600 34px "JetBrainsMono Nerd Font"'];
+const fontsReady = document.fonts
+  ? Promise.all([...FONTS.map(f => document.fonts.load(f).catch(() => [])), document.fonts.load('32px "Noto Color Emoji"', '\u{1F30B}').catch(() => [])]).then(() => document.fonts.ready)
+  : Promise.resolve();
+const logoReady = LOGOS.reduce((p, src) => p.catch(() => new Promise((res, rej) => {
+  const i = new Image(); i.onload = () => res(src); i.onerror = rej; i.src = src;
+})), Promise.reject()).then(src => {
+  LOGO_SRC = src;
+  return Promise.all([...document.querySelectorAll('img.logo')].map(i => { i.src = src; return load(i); }));
+}, () => { throw new Error('Logo missing: ' + LOGOS.join(' | ')); });
+window.READY = window.ready = Promise.all([fontsReady, logoReady, ...SHOTS.map(s => load(s.img))]).then(() => {
+  const warnings = SHOTS.filter(s => s.img.naturalWidth !== s.W || s.img.naturalHeight !== s.H)
+    .map(s => `${s.src}: expected ${s.W}x${s.H}, got ${s.img.naturalWidth}x${s.img.naturalHeight}`);
+  if (LOGO_SRC !== LOGOS[0]) warnings.push('Logo fallback: ' + LOGO_SRC);
+  render(0);
+  return { ok: true, ...window.FILM, warnings };
+});
+window.READY.catch(e => console.error('[omagma film] READY rejected:', e));
+
+const fit = () => { const k = Math.min(innerWidth / 1920, innerHeight / 1080); ST.style.transform = k < 0.999 ? `scale(${k})` : ''; };
+addEventListener('resize', fit); fit();
+render(0);
+})();
+</script>
+</body>
+</html>

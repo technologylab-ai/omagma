@@ -11,6 +11,17 @@ None of this is part of the installed application. It is promo tooling in
 Node.js, Python, HTML/CSS and FFmpeg, and nothing here is shipped or run by
 Omagma.
 
+## Release films
+
+- [v0.2.7 — eight workflow highlights](short027/README.md): bar-to-TUI launch,
+  searchable actions, find, staged labels, meeting Join, files, intact HTML
+  originals and cancellable sending, with a closing everyday-polish recap.
+- [v0.2.6 short film](short026/README.md): new-mail cards, the attachment
+  browser and Markdown composition.
+
+Both reuse the original Slow Eruption MP3. Their separate sources and output
+names preserve the earlier launch film and each delivered master.
+
 ## One command per stage
 
 ```sh
@@ -136,3 +147,6 @@ throwaway profile.
 renders a labelled half-size review video with it. That track and grid are
 placeholders: they only show how the edit moves and are never the soundtrack
 or evidence about the real song.
+
+The latest v0.2.7 edit adds a ninth final update-guide scene. See
+[its timing, genuine captures and illustrative-version disclosure](short027/NINTH-SCENE.md).

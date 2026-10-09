@@ -2,6 +2,7 @@
 """Searchable help in isolated owned PTYs; fictional mail and no desktop input."""
 import argparse
 from pathlib import Path
+import re
 import sys
 import tempfile
 
@@ -9,6 +10,38 @@ from terminal_integration import require
 from terminal_local_ui import ACCOUNTS, setup
 from terminal_mouse_screen import MouseScreen
 from terminal_repaint import BuiltinTerminal
+
+
+def match_position(terminal):
+    match = re.search(r"(\d+)/(\d+) matches", terminal.text())
+    return tuple(map(int, match.groups())) if match else None
+
+
+def visit_matches(terminal, query, expected_actions):
+    """Exercise every result without pinning the size of a growing help list."""
+    terminal.send(b"/" + query.encode() + b"\r")
+    terminal.until(lambda: match_position(terminal) is not None
+                   and match_position(terminal)[0] == 1
+                   and f"Find: {query}" in terminal.text())
+    total = match_position(terminal)[1]
+    require(1 <= total <= 64, "help search returned an invalid bounded result count")
+    seen = []
+    for index in range(1, total + 1):
+        terminal.until(lambda index=index: match_position(terminal) == (index, total))
+        # The match counter precedes the scrolled body in the VT frame. Drain
+        # the remaining cells before inspecting this result's visible action.
+        terminal.gap(.04)
+        seen.append(terminal.text())
+        terminal.send(b"n")
+    terminal.until(lambda: match_position(terminal) == (1, total))
+    for action in expected_actions:
+        literal = "".join(action.split())
+        require(any(literal in "".join(text.split()) for text in seen),
+                f"help search never exposed the documented action: {action}")
+    for index in range(total, 0, -1):
+        terminal.send(b"N")
+        terminal.until(lambda index=index: match_position(terminal) == (index, total))
+    return total
 
 
 def run(binary, directory, columns, rows):
@@ -19,35 +52,12 @@ def run(binary, directory, columns, rows):
         terminal.until(lambda: terminal.screen.locate("Mail · 1/32") is not None)
         terminal.send(b"?")
         terminal.until(lambda: "Keyboard & mouse" in terminal.text())
-        terminal.send(b"/lAbElS\r")
-        terminal.until(lambda: "Find: lAbElS" in terminal.text() and "1/2 matches" in terminal.text()
-                       and "Choose labels" in terminal.text())
+        label_count = visit_matches(terminal, "lAbElS", ("Choose labels", "Manage custom label", "Stage checked"))
         # Confirming leaves ordinary help controls active; searching never
         # changes the mailbox's query or issues a server request.
-        terminal.send(b"n")
-        terminal.until(lambda: "2/2 matches" in terminal.text() and "Manage custom label" in terminal.text())
-        terminal.send(b"n")
-        terminal.until(lambda: "1/2 matches" in terminal.text() and "Choose labels" in terminal.text())
         terminal.resize(48, 20)
-        terminal.until(lambda: "1/2 matches" in terminal.text() and "Choose labels" in terminal.text())
-        terminal.send(b"/ctrl+s\r")
-        terminal.until(lambda: "1/4 matches" in terminal.text() and "Contact editor:" in terminal.text())
-        terminal.send(b"n")
-        terminal.until(lambda: "2/4 matches" in terminal.text() and "Save the draft" in terminal.text())
-        terminal.send(b"n")
-        terminal.until(lambda: "3/4 matches" in terminal.text() and "Complete a literal path" in terminal.text())
-        terminal.send(b"n")
-        terminal.until(lambda: "4/4 matches" in terminal.text() and "Confirm the file" in terminal.text())
-        terminal.send(b"n")
-        terminal.until(lambda: "1/4 matches" in terminal.text() and "Contact editor:" in terminal.text())
-        terminal.send(b"N")
-        terminal.until(lambda: "4/4 matches" in terminal.text() and "Confirm the file" in terminal.text())
-        terminal.send(b"N")
-        terminal.until(lambda: "3/4 matches" in terminal.text() and "Complete a literal path" in terminal.text())
-        terminal.send(b"N")
-        terminal.until(lambda: "2/4 matches" in terminal.text() and "Save the draft" in terminal.text())
-        terminal.send(b"N")
-        terminal.until(lambda: "1/4 matches" in terminal.text() and "Contact editor:" in terminal.text())
+        terminal.until(lambda: match_position(terminal) == (1, label_count))
+        visit_matches(terminal, "ctrl+s", ("Contact editor:", "Save the draft", "Confirm the file", "Stage checked"))
         terminal.send(b"/ctrl+shift+f\r")
         terminal.until(lambda: "1/1 matches" in terminal.text() and "Complete a literal path" in terminal.text())
         terminal.send(b"/personalize\r")

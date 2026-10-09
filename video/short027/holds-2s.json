@@ -1,0 +1,81 @@
+{
+  "revision": "shorter-holds-normal-music",
+  "fps": 30,
+  "sourceFrameCount": 3179,
+  "frameCount": 2914,
+  "cuts": [
+    {
+      "scene": "Inbox",
+      "startFrame": 324,
+      "endFrame": 377,
+      "holdBeforeSeconds": 3.78
+    },
+    {
+      "scene": "Filtered actions",
+      "startFrame": 567,
+      "endFrame": 592,
+      "holdBeforeSeconds": 3.05
+    },
+    {
+      "scene": "Find result",
+      "startFrame": 837,
+      "endFrame": 869,
+      "holdBeforeSeconds": 3.08
+    },
+    {
+      "scene": "Label result",
+      "startFrame": 1239,
+      "endFrame": 1270,
+      "holdBeforeSeconds": 3.05
+    },
+    {
+      "scene": "Join",
+      "startFrame": 1563,
+      "endFrame": 1596,
+      "holdBeforeSeconds": 3.1
+    },
+    {
+      "scene": "Attachments",
+      "startFrame": 1857,
+      "endFrame": 1896,
+      "holdBeforeSeconds": 3.3
+    },
+    {
+      "scene": "Original HTML",
+      "startFrame": 2403,
+      "endFrame": 2436,
+      "holdBeforeSeconds": 3.1
+    },
+    {
+      "scene": "Send canceled",
+      "startFrame": 2720,
+      "endFrame": 2739,
+      "holdBeforeSeconds": 2.65
+    }
+  ],
+  "paletteOverride": {
+    "startFrame": 447,
+    "endFrame": 651
+  },
+  "soundtrack": {
+    "rate": 1.0,
+    "sampleRate": 48000,
+    "crossfadeSamples": 1440,
+    "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+    "sourceSegmentsSamples": [
+      [
+        0,
+        2117728
+      ],
+      [
+        850416,
+        2118000
+      ],
+      [
+        7838112,
+        9118080
+      ]
+    ],
+    "notes": "Original opening, one repeat of early musical phrases, original natural ending. Incoming attacks have the established 35 ms lead-in; the first boundary is adjusted by 5.667 ms to fit whole video frames. No tempo or pitch processing."
+  }
+}

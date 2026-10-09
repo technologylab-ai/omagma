@@ -1,0 +1,291 @@
+{
+  "revision": "brisk",
+  "fps": 30,
+  "frameCount": 1924,
+  "duration": 64.13333333333334,
+  "sourceFrameCount": 3179,
+  "sourceDuration": 105.96666666666667,
+  "parts": [
+    {
+      "name": "intro",
+      "sourceIn": 0,
+      "sourceOut": 4.6,
+      "frameIn": 0,
+      "frameOut": 90,
+      "titleLead": false
+    },
+    {
+      "name": "lead01",
+      "sourceIn": 4.6,
+      "sourceOut": 6.1,
+      "frameIn": 90,
+      "frameOut": 117,
+      "titleLead": true
+    },
+    {
+      "name": "bar",
+      "sourceIn": 6.1,
+      "sourceOut": 9.5,
+      "frameIn": 117,
+      "frameOut": 174,
+      "titleLead": false
+    },
+    {
+      "name": "inbox",
+      "sourceIn": 9.5,
+      "sourceOut": 13.4,
+      "frameIn": 174,
+      "frameOut": 225,
+      "titleLead": false
+    },
+    {
+      "name": "lead02",
+      "sourceIn": 13.4,
+      "sourceOut": 14.9,
+      "frameIn": 225,
+      "frameOut": 252,
+      "titleLead": true
+    },
+    {
+      "name": "palette untouched",
+      "sourceIn": 14.9,
+      "sourceOut": 16.7,
+      "frameIn": 252,
+      "frameOut": 285,
+      "titleLead": false
+    },
+    {
+      "name": "palette typing",
+      "sourceIn": 16.7,
+      "sourceOut": 18.3,
+      "frameIn": 285,
+      "frameOut": 333,
+      "titleLead": false
+    },
+    {
+      "name": "palette narrowed",
+      "sourceIn": 18.3,
+      "sourceOut": 21.7,
+      "frameIn": 333,
+      "frameOut": 381,
+      "titleLead": false
+    },
+    {
+      "name": "lead03",
+      "sourceIn": 21.7,
+      "sourceOut": 23.2,
+      "frameIn": 381,
+      "frameOut": 408,
+      "titleLead": true
+    },
+    {
+      "name": "find first",
+      "sourceIn": 23.2,
+      "sourceOut": 26.5,
+      "frameIn": 408,
+      "frameOut": 459,
+      "titleLead": false
+    },
+    {
+      "name": "find next",
+      "sourceIn": 26.5,
+      "sourceOut": 30,
+      "frameIn": 459,
+      "frameOut": 507,
+      "titleLead": false
+    },
+    {
+      "name": "lead04",
+      "sourceIn": 30,
+      "sourceOut": 31.5,
+      "frameIn": 507,
+      "frameOut": 534,
+      "titleLead": true
+    },
+    {
+      "name": "labels initial",
+      "sourceIn": 31.5,
+      "sourceOut": 34,
+      "frameIn": 534,
+      "frameOut": 579,
+      "titleLead": false
+    },
+    {
+      "name": "stage one",
+      "sourceIn": 34,
+      "sourceOut": 36,
+      "frameIn": 579,
+      "frameOut": 612,
+      "titleLead": false
+    },
+    {
+      "name": "stage two",
+      "sourceIn": 36,
+      "sourceOut": 39.2,
+      "frameIn": 612,
+      "frameOut": 657,
+      "titleLead": false
+    },
+    {
+      "name": "labels result",
+      "sourceIn": 39.2,
+      "sourceOut": 43.2,
+      "frameIn": 657,
+      "frameOut": 711,
+      "titleLead": false
+    },
+    {
+      "name": "lead05",
+      "sourceIn": 43.2,
+      "sourceOut": 44.7,
+      "frameIn": 711,
+      "frameOut": 738,
+      "titleLead": true
+    },
+    {
+      "name": "meeting card",
+      "sourceIn": 44.7,
+      "sourceOut": 46,
+      "frameIn": 738,
+      "frameOut": 801,
+      "titleLead": false
+    },
+    {
+      "name": "meeting review",
+      "sourceIn": 46,
+      "sourceOut": 50.5,
+      "frameIn": 801,
+      "frameOut": 876,
+      "titleLead": false
+    },
+    {
+      "name": "join",
+      "sourceIn": 50.5,
+      "sourceOut": 54.4,
+      "frameIn": 876,
+      "frameOut": 930,
+      "titleLead": false
+    },
+    {
+      "name": "lead06",
+      "sourceIn": 54.4,
+      "sourceOut": 55.9,
+      "frameIn": 930,
+      "frameOut": 957,
+      "titleLead": true
+    },
+    {
+      "name": "files",
+      "sourceIn": 55.9,
+      "sourceOut": 60.5,
+      "frameIn": 957,
+      "frameOut": 1017,
+      "titleLead": false
+    },
+    {
+      "name": "attached",
+      "sourceIn": 60.5,
+      "sourceOut": 64.4,
+      "frameIn": 1017,
+      "frameOut": 1068,
+      "titleLead": false
+    },
+    {
+      "name": "lead07",
+      "sourceIn": 64.4,
+      "sourceOut": 65.9,
+      "frameIn": 1068,
+      "frameOut": 1095,
+      "titleLead": true
+    },
+    {
+      "name": "format choice",
+      "sourceIn": 65.9,
+      "sourceOut": 69.6,
+      "frameIn": 1095,
+      "frameOut": 1143,
+      "titleLead": false
+    },
+    {
+      "name": "personal note",
+      "sourceIn": 69.6,
+      "sourceOut": 73.4,
+      "frameIn": 1143,
+      "frameOut": 1203,
+      "titleLead": false
+    },
+    {
+      "name": "browser note",
+      "sourceIn": 73.4,
+      "sourceOut": 76.8,
+      "frameIn": 1203,
+      "frameOut": 1269,
+      "titleLead": false
+    },
+    {
+      "name": "browser pan",
+      "sourceIn": 76.8,
+      "sourceOut": 79,
+      "frameIn": 1269,
+      "frameOut": 1314,
+      "titleLead": false
+    },
+    {
+      "name": "original HTML",
+      "sourceIn": 79,
+      "sourceOut": 82.4,
+      "frameIn": 1314,
+      "frameOut": 1368,
+      "titleLead": false
+    },
+    {
+      "name": "lead08",
+      "sourceIn": 82.4,
+      "sourceOut": 83.8,
+      "frameIn": 1368,
+      "frameOut": 1395,
+      "titleLead": true
+    },
+    {
+      "name": "send review",
+      "sourceIn": 83.8,
+      "sourceOut": 86.3,
+      "frameIn": 1395,
+      "frameOut": 1455,
+      "titleLead": false
+    },
+    {
+      "name": "countdown",
+      "sourceIn": 86.3,
+      "sourceOut": 89.3,
+      "frameIn": 1455,
+      "frameOut": 1515,
+      "titleLead": false
+    },
+    {
+      "name": "canceled",
+      "sourceIn": 89.3,
+      "sourceOut": 92.4,
+      "frameIn": 1515,
+      "frameOut": 1584,
+      "titleLead": false
+    },
+    {
+      "name": "recap",
+      "sourceIn": 92.4,
+      "sourceOut": 102.4,
+      "frameIn": 1584,
+      "frameOut": 1817,
+      "titleLead": false
+    },
+    {
+      "name": "outro",
+      "sourceIn": 102.4,
+      "sourceOut": 105.96666666666667,
+      "frameIn": 1817,
+      "frameOut": 1924,
+      "titleLead": false
+    }
+  ],
+  "policy": "Brisk pacing with targeted reading time: invitation card2.1s, complete review2.5s plus stationary Join1.8s, send review2.0s/countdown2.0s/canceled result2.3s. Action cues lead transitions; old content clears during new headings."
+}

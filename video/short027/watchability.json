@@ -1,0 +1,688 @@
+{
+  "film": "film.html",
+  "fps": 30,
+  "frameCount": 3179,
+  "duration": 105.9666667,
+  "assetBase": "/video/cache/short027/assets/",
+  "rules": {
+    "captionSettle": "heading + subtitle + chapter number fade/rise together in 0.30 s at chapter start",
+    "orientationLead": "first new UI or action is 1.4-1.5 s after the caption lands; the previous UI is either kept still or the stage is empty",
+    "stepCues": "subtitle changes 0.6-2.6 s before the action or pan it describes",
+    "camera": "one static frame per UI phase; only motions: 04 full->reader ease (0.55 s), 05 footer push (0.5 s), 07 browser pan (2.2 s)",
+    "focusRings": "editorial outline over unmodified screenshots; fades in with its frame or during the camera ease, never mid-hold",
+    "chrome": "chapter segments fill in 0.35 s at chapter start, then stay static; glow breathes only on music cues over scenes that are already still",
+    "removed": [
+      "help",
+      "saved-search popup",
+      "label-color popup",
+      "recipient-name popups",
+      "full-frame modal under crops",
+      "bar click",
+      "9 s timer",
+      "split/expand browser"
+    ]
+  },
+  "music": {
+    "source": "original Slow Eruption MP3, cue map only (not listened)",
+    "sections": [
+      {
+        "id": "A",
+        "src": [
+          0,
+          44.125
+        ],
+        "film": [
+          0,
+          44.125
+        ]
+      },
+      {
+        "id": "B",
+        "src": [
+          8.889333333,
+          44.125
+        ],
+        "film": [
+          44.095,
+          79.330667
+        ]
+      },
+      {
+        "id": "C",
+        "src": [
+          163.294,
+          189.96
+        ],
+        "film": [
+          79.300667,
+          105.966667
+        ]
+      }
+    ],
+    "joins": [
+      {
+        "at": 44.095,
+        "dur": 0.03,
+        "curve": "equal-power"
+      },
+      {
+        "at": 79.300667,
+        "dur": 0.03,
+        "curve": "equal-power"
+      }
+    ],
+    "cues": {
+      "bass": 4.6,
+      "Bdownbeat": 44.133667,
+      "roll": 79.335667,
+      "drop": 83.608667,
+      "next": 92.153667,
+      "last": 100.698667,
+      "stop": 103.126667,
+      "end": 105.966667
+    },
+    "cueUse": {
+      "bass": "01 caption lands on an empty stage",
+      "Bdownbeat": "05 lead, labels-result still since 40.15",
+      "roll": "07 original booking still since 79.0",
+      "drop": "08 lead, caption only (UI arrives 83.8)",
+      "next": "send-canceled still -> recap at 92.4",
+      "last": "recap hold",
+      "stop": "logo lands"
+    }
+  },
+  "intro": {
+    "window": [
+      0,
+      4.6
+    ],
+    "countSettled": 1.3,
+    "allSettled": 1.85,
+    "hold": [
+      1.85,
+      4.2
+    ],
+    "holdSec": 2.35
+  },
+  "chapters": [
+    {
+      "id": "01",
+      "title": "Start from your bar",
+      "window": [
+        4.6,
+        13.4
+      ],
+      "captionSettled": 4.9,
+      "lead": [
+        4.6,
+        6.1
+      ],
+      "phases": [
+        {
+          "name": "bar",
+          "assets": [
+            "bar.png"
+          ],
+          "window": [
+            6.1,
+            9.5
+          ],
+          "cameraSettled": 6.5,
+          "hold": [
+            6.5,
+            9.5
+          ],
+          "holdSec": 3.0,
+          "focus": "Open TUI ring (in with frame)"
+        },
+        {
+          "name": "inbox",
+          "assets": [
+            "main.png"
+          ],
+          "event": "match cut, no pointer",
+          "window": [
+            9.5,
+            14.9
+          ],
+          "cameraSettled": 9.62,
+          "hold": [
+            9.62,
+            14.9
+          ],
+          "holdSec": 5.28,
+          "inChapterHoldSec": 3.78
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "title": "Find a command",
+      "window": [
+        13.4,
+        21.7
+      ],
+      "captionSettled": 13.7,
+      "lead": [
+        13.4,
+        14.9
+      ],
+      "leadShows": "main.png still",
+      "phases": [
+        {
+          "name": "palette",
+          "assets": [
+            "palette-detail.png"
+          ],
+          "event": "Ctrl P 14.9",
+          "window": [
+            14.9,
+            21.65
+          ],
+          "cameraSettled": 15.3,
+          "hold": [
+            15.3,
+            21.35
+          ],
+          "holdSec": 6.05
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "title": "Find inside the message",
+      "window": [
+        21.7,
+        30.0
+      ],
+      "captionSettled": 22.0,
+      "lead": [
+        21.7,
+        23.2
+      ],
+      "leadShows": "main.png still",
+      "phases": [
+        {
+          "name": "find 1/5",
+          "assets": [
+            "find.png"
+          ],
+          "window": [
+            23.2,
+            26.5
+          ],
+          "cameraSettled": 23.45,
+          "hold": [
+            23.45,
+            26.5
+          ],
+          "holdSec": 3.05,
+          "focus": "reader pane ring"
+        },
+        {
+          "name": "find 2/5",
+          "assets": [
+            "find-next.png"
+          ],
+          "event": "n 26.5",
+          "window": [
+            26.5,
+            31.5
+          ],
+          "cameraSettled": 26.62,
+          "hold": [
+            26.62,
+            29.7
+          ],
+          "holdSec": 3.08,
+          "note": "same camera as 1/5"
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "title": "Choose labels. Apply once.",
+      "window": [
+        30.0,
+        43.2
+      ],
+      "captionSettled": 30.3,
+      "lead": [
+        30.0,
+        31.5
+      ],
+      "leadShows": "find-next.png still",
+      "stepCues": {
+        "33.4": "Stage it: remove Projects, add Travel",
+        "38.4": "Apply once \u00b7 both messages updated"
+      },
+      "phases": [
+        {
+          "name": "initial",
+          "assets": [
+            "labels-initial-detail.png",
+            "labels-context.png (dimmed)"
+          ],
+          "window": [
+            31.5,
+            34.0
+          ],
+          "cameraSettled": 31.9,
+          "hold": [
+            31.9,
+            34.0
+          ],
+          "holdSec": 2.1
+        },
+        {
+          "name": "stage one",
+          "assets": [
+            "labels-stage-one-detail.png"
+          ],
+          "window": [
+            34.0,
+            36.0
+          ],
+          "cameraSettled": 34.0,
+          "hold": [
+            34.0,
+            36.0
+          ],
+          "holdSec": 2.0,
+          "note": "hard cut, identical dialog bounds"
+        },
+        {
+          "name": "staged two",
+          "assets": [
+            "labels-staged-detail.png"
+          ],
+          "window": [
+            36.0,
+            39.0
+          ],
+          "cameraSettled": 36.0,
+          "hold": [
+            36.0,
+            39.0
+          ],
+          "holdSec": 3.0
+        },
+        {
+          "name": "apply",
+          "assets": [
+            "labels-staged-detail.png",
+            "labels-result.png"
+          ],
+          "event": "captured Apply 39.0",
+          "window": [
+            39.0,
+            39.6
+          ],
+          "cameraSettled": 39.3,
+          "note": "Verified Apply event; intermediate backend receipt is omitted from picture."
+        },
+        {
+          "name": "reader result",
+          "assets": [
+            "labels-result.png"
+          ],
+          "window": [
+            39.6,
+            46.0
+          ],
+          "cameraMove": [
+            39.6,
+            40.15
+          ],
+          "cameraSettled": 40.15,
+          "hold": [
+            40.15,
+            43.2
+          ],
+          "holdSec": 3.05,
+          "focus": "Labels: Inbox \u00b7 Follow up \u00b7 Travel ring"
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "title": "Meetings, made readable",
+      "window": [
+        43.2,
+        54.4
+      ],
+      "captionSettled": 43.5,
+      "lead": [
+        43.2,
+        44.7
+      ],
+      "leadShows": "labels-result.png still (applied labels kept)",
+      "stepCues": {
+        "49.7": "In the review, o joins the meeting"
+      },
+      "phases": [
+        {
+          "name": "invitation card",
+          "assets": [
+            "labels-result.png"
+          ],
+          "window": [
+            44.7,
+            46.0
+          ],
+          "cameraSettled": 45.0,
+          "hold": [
+            45.0,
+            46.0
+          ],
+          "holdSec": 1.0,
+          "note": "frame itself still since 40.15; only the ring moves to the card"
+        },
+        {
+          "name": "review",
+          "assets": [
+            "meeting-review-detail.png"
+          ],
+          "event": "I 46.0",
+          "window": [
+            46.0,
+            50.5
+          ],
+          "cameraSettled": 46.4,
+          "hold": [
+            46.4,
+            50.5
+          ],
+          "holdSec": 4.1
+        },
+        {
+          "name": "o join",
+          "assets": [
+            "join-detail.png"
+          ],
+          "event": "o 50.5",
+          "window": [
+            50.5,
+            54.4
+          ],
+          "cameraMove": [
+            50.5,
+            51.0
+          ],
+          "cameraSettled": 51.0,
+          "hold": [
+            51.0,
+            54.1
+          ],
+          "holdSec": 3.1,
+          "focus": "[o Join] ring"
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "title": "Pick files together",
+      "window": [
+        54.4,
+        64.4
+      ],
+      "captionSettled": 54.7,
+      "lead": [
+        54.4,
+        55.9
+      ],
+      "leadShows": "empty stage",
+      "stepCues": {
+        "59.9": "Attach \u00b7 all three go into the draft"
+      },
+      "phases": [
+        {
+          "name": "files",
+          "assets": [
+            "files-detail.png"
+          ],
+          "window": [
+            55.9,
+            60.5
+          ],
+          "cameraSettled": 56.3,
+          "hold": [
+            56.3,
+            60.5
+          ],
+          "holdSec": 4.2
+        },
+        {
+          "name": "attached",
+          "assets": [
+            "attached.png"
+          ],
+          "event": "captured Attach 60.5",
+          "window": [
+            60.5,
+            64.4
+          ],
+          "cameraSettled": 60.8,
+          "hold": [
+            60.8,
+            64.1
+          ],
+          "holdSec": 3.3,
+          "focus": "attachment list ring (real crop x0..2100 y810..1848)"
+        }
+      ]
+    },
+    {
+      "id": "07",
+      "title": "Forward with a personal note",
+      "window": [
+        64.4,
+        82.4
+      ],
+      "captionSettled": 64.7,
+      "lead": [
+        64.4,
+        65.9
+      ],
+      "leadShows": "empty stage",
+      "stepCues": {
+        "72.8": "Your note, rendered in a real browser",
+        "76.1": "Below it: the original booking, intact (leads pan by 0.7 s)"
+      },
+      "phases": [
+        {
+          "name": "format choice",
+          "assets": [
+            "format-choice-detail.png"
+          ],
+          "window": [
+            65.9,
+            69.6
+          ],
+          "cameraSettled": 66.3,
+          "hold": [
+            66.3,
+            69.6
+          ],
+          "holdSec": 3.3
+        },
+        {
+          "name": "markdown note",
+          "assets": [
+            "forward.png"
+          ],
+          "event": "k 69.6",
+          "window": [
+            69.6,
+            73.4
+          ],
+          "cameraSettled": 69.72,
+          "hold": [
+            69.72,
+            73.4
+          ],
+          "holdSec": 3.68
+        },
+        {
+          "name": "browser note",
+          "assets": [
+            "browser.png"
+          ],
+          "window": [
+            73.4,
+            76.8
+          ],
+          "viewport": "1320x840, source y200..1472 (note, table, branded footer)",
+          "cameraSettled": 73.8,
+          "hold": [
+            73.8,
+            76.8
+          ],
+          "holdSec": 3.0
+        },
+        {
+          "name": "pan",
+          "assets": [
+            "browser.png"
+          ],
+          "cameraMove": [
+            76.8,
+            79.0
+          ]
+        },
+        {
+          "name": "original intact",
+          "assets": [
+            "browser.png"
+          ],
+          "window": [
+            79.0,
+            82.4
+          ],
+          "viewport": "source y1736..3008 (booking card, CID artwork, VIE->LIS, details)",
+          "cameraSettled": 79.0,
+          "hold": [
+            79.0,
+            82.1
+          ],
+          "holdSec": 3.1
+        }
+      ]
+    },
+    {
+      "id": "08",
+      "title": "Send with a safety net",
+      "window": [
+        82.4,
+        92.4
+      ],
+      "captionSettled": 82.7,
+      "lead": [
+        82.4,
+        83.8
+      ],
+      "leadShows": "empty stage",
+      "stepCues": {
+        "88.6": "Ctrl Z cancels before anything is sent",
+        "89.4": "Canceled \u00b7 your editable draft is kept"
+      },
+      "phases": [
+        {
+          "name": "send review",
+          "assets": [
+            "send-review-detail.png"
+          ],
+          "window": [
+            83.8,
+            86.3
+          ],
+          "cameraSettled": 84.05,
+          "hold": [
+            84.05,
+            86.3
+          ],
+          "holdSec": 2.25,
+          "visibleSec": 2.5,
+          "focus": "[y Send] ring"
+        },
+        {
+          "name": "countdown",
+          "assets": [
+            "countdown.png",
+            "countdown-detail.png"
+          ],
+          "event": "actual native [y Send] button click at86.3",
+          "window": [
+            86.3,
+            89.3
+          ],
+          "cameraSettled": 86.7,
+          "hold": [
+            86.7,
+            89.3
+          ],
+          "holdSec": 2.6,
+          "visibleSec": 3.0,
+          "note": "static 10 s capture, row y44..88 x0..1290 at 1.25x"
+        },
+        {
+          "name": "send canceled",
+          "assets": [
+            "send-canceled.png"
+          ],
+          "event": "Ctrl Z 89.3",
+          "window": [
+            89.3,
+            92.4
+          ],
+          "cameraSettled": 89.6,
+          "hold": [
+            89.6,
+            92.25
+          ],
+          "holdSec": 2.65,
+          "visibleSec": 3.1,
+          "focus": "Send cancelled \u00b7 draft retained ring"
+        }
+      ]
+    }
+  ],
+  "recap": {
+    "window": [
+      92.4,
+      102.4
+    ],
+    "fullyRevealed": 93.2,
+    "hold": [
+      93.2,
+      102.1
+    ],
+    "holdSec": 8.9,
+    "type": "2 cards x 4 rows, 32 px rows, 120 px side margins"
+  },
+  "ending": {
+    "window": [
+      102.4,
+      105.9666667
+    ],
+    "logoLands": 103.126667,
+    "textSettled": 104.2,
+    "hold": [
+      104.2,
+      105.9666667
+    ],
+    "holdSec": 1.77,
+    "copy": [
+      "What's new in v0.2.7",
+      "Get Omagma",
+      "technologylab-ai.github.io/omagma",
+      "Experimental \u00b7 TUI & CLI \u00b7 Linux/macOS"
+    ]
+  },
+  "engineeringRefinements": [
+    "The transient labels-applied receipt is not a picture; staged choices lead directly to verified labels-result.",
+    "Send confirmation was a captured click; the unrecorded y keycap/pulse was removed.",
+    "The genuine composer remains behind the countdown, keeping context.",
+    "After cancel the subtitle confirms: Canceled, your editable draft is kept."
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "schema": "omagma.soundtrack-plan.v1",
+  "fps": 30,
+  "frameCount": 1858,
+  "duration": 61.93333333333333,
+  "sampleRate": 48000,
+  "durationSamples48k": 2972800,
+  "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+  "derivation": "Explicit source sample cues reusing launch-film musical sections. Original opening and natural ending. Never sourceEnd minus pictureDuration.",
+  "crossfadeSeconds": 0.03,
+  "segments": [
+    {
+      "id": "intro-swell",
+      "sourceIn": 0.0,
+      "sourceOut": 8.919333333333332,
+      "sourceSamples48k": [
+        0,
+        428128
+      ],
+      "filmIn": 0.0,
+      "filmOut": 8.919333333333332
+    },
+    {
+      "id": "first-drum-phrases",
+      "sourceIn": 17.717,
+      "sourceOut": 44.125,
+      "sourceSamples48k": [
+        850416,
+        2118000
+      ],
+      "filmIn": 8.889333333333333,
+      "filmOut": 35.297333333333334
+    },
+    {
+      "id": "closing-riser-and-natural-tail",
+      "sourceIn": 163.294,
+      "sourceOut": 189.96,
+      "sourceSamples48k": [
+        7838112,
+        9118080
+      ],
+      "filmIn": 35.26733333333333,
+      "filmOut": 61.93333333333333
+    }
+  ],
+  "mappedMusicLandmarks": [
+    {
+      "name": "opening",
+      "source": 0,
+      "film": 0.0
+    },
+    {
+      "name": "bass",
+      "source": 4.6,
+      "film": 4.6
+    },
+    {
+      "name": "step",
+      "source": 17.752,
+      "film": 8.924333333333333
+    },
+    {
+      "name": "drums",
+      "source": 35.352,
+      "film": 26.52433333333333
+    },
+    {
+      "name": "roll",
+      "source": 163.329,
+      "film": 35.30233333333333
+    },
+    {
+      "name": "drop",
+      "source": 167.602,
+      "film": 39.575333333333326
+    },
+    {
+      "name": "nextPhrase",
+      "source": 176.147,
+      "film": 48.12033333333331
+    },
+    {
+      "name": "lastPhrase",
+      "source": 184.692,
+      "film": 56.66533333333333
+    },
+    {
+      "name": "stop",
+      "source": 187.12,
+      "film": 59.09333333333333
+    },
+    {
+      "name": "naturalEnd",
+      "source": 189.96,
+      "film": 61.93333333333333
+    }
+  ],
+  "mastering": "One static linear gain; target -14 LUFS \u00b10.6 and true peak <= -1dBTP. No dynamic compression or per-segment lift."
+}

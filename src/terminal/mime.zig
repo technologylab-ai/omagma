@@ -3,6 +3,8 @@ const b = @import("../bounded.zig");
 const recipients = @import("recipients.zig");
 const types = @import("types.zig");
 const markdown_logo = @import("markdown_logo.zig");
+const byte_stream = @import("../byte_stream.zig");
+pub const Source = byte_stream.Source;
 
 pub const max_raw_bytes = types.Limits.request_bytes;
 pub const max_body_bytes = types.Limits.body_bytes;
@@ -10,14 +12,14 @@ pub const max_headers_bytes = 32 * 1024;
 pub const max_headers = 256;
 pub const max_parts = 128;
 pub const max_depth = 16;
-pub const max_attachments = 32;
+pub const max_attachments = types.Limits.attachments + types.Limits.related_resources + 1;
 /// Calendar discovery uses the same bound as the invitation parser. Other
 /// attachment types remain governed by the ordinary attachment/body limits.
 pub const max_calendar_bytes = 128 * 1024;
 /// Last millisecond of year 9999, within the terminal timestamp formatter's range.
 pub const max_received_at_ms: i64 = 253402300799999;
 pub const Header = struct { name: []const u8, value: []const u8 };
-pub const Attachment = struct { id: []const u8 = "", filename: []const u8, mime_type: []const u8, content_id: []const u8 = "", disposition: []const u8 = "", content_location: []const u8 = "", size: usize = 0, data: []const u8 };
+pub const Attachment = struct { id: []const u8 = "", filename: []const u8, mime_type: []const u8, content_id: []const u8 = "", disposition: []const u8 = "", content_location: []const u8 = "", size: usize = 0, data: []const u8 = "", source: ?Source = null };
 pub const ParsedMessage = struct {
     headers: []const Header = &.{},
     from: []const recipients.IncomingMailbox = &.{},
@@ -478,9 +480,12 @@ const Context = struct {
         }
         const body = b.optional(part, "body") orelse return;
         const declared = if (b.optional(body, "size")) |v| try b.integer(v) else 0;
-        if (declared < 0 or declared > max_body_bytes) return error.BodyTooLarge;
+        if (declared < 0 or declared > types.Limits.attachment_bytes) return error.BodyTooLarge;
         const filename = if (b.optional(part, "filename")) |v| try b.string(v) else "";
         if (isCalendarPart(mime_type, filename) and declared > max_calendar_bytes) return error.CalendarTooLarge;
+        const inline_data = if (b.optional(body, "data")) |v| try b.string(v) else "";
+        const large = declared > max_body_bytes;
+        if (large and (inline_data.len != 0 or !(try isAttached(headers, filename)) or std.ascii.eqlIgnoreCase(try dispositionToken(headers), "inline") or (try header(headers, "Content-ID")).len != 0 or (try header(headers, "Content-Location")).len != 0)) return error.BodyTooLarge;
         const part_id = if (b.optional(part, "partId")) |v| try b.string(v) else "";
         var external_id: ?[]const u8 = null;
         var external_data: ?[]const u8 = null;
@@ -492,6 +497,7 @@ const Context = struct {
                 if (self.external_bodies) |map| if (b.optional(map, text)) |v| {
                     external_data = if (v == .object) try b.string(try b.field(v, "data")) else try b.string(v);
                 };
+                if (large and external_data != null) return error.BodyTooLarge;
                 if (external_data == null) {
                     if (isCalendarPart(mime_type, filename) or (filename.len == 0 and (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")))) return error.ExternalBodyRequired;
                     if (self.attachments.items.len == max_attachments) return error.TooManyAttachments;
@@ -500,6 +506,7 @@ const Context = struct {
                 }
             }
         }
+        if (large) return error.BodyTooLarge;
         const data = external_data orelse if (b.optional(body, "data")) |v| try b.string(v) else "";
         if (data.len == 0) {
             if (declared != 0) return error.BodySizeMismatch;
@@ -1021,7 +1028,9 @@ pub fn validateMimeType(mime_type: []const u8) !void {
     if (slash == null or slash.? == 0 or slash.? == mime_type.len - 1) return error.InvalidMimeType;
 }
 pub fn composeAttachments(input: []const types.Attachment, a: std.mem.Allocator) ![]const Attachment {
-    if (input.len > 16) return error.TooManyAttachments;
+    // Both the ordinary and related collections use this decoder. Their
+    // separate category counts are checked by the composer before encoding.
+    if (input.len > types.Limits.related_resources) return error.TooManyAttachments;
     const attachments = try a.alloc(Attachment, input.len);
     var total: usize = 0;
     for (input, attachments) |item, *dest| {
@@ -1035,7 +1044,7 @@ pub fn composeAttachments(input: []const types.Attachment, a: std.mem.Allocator)
     }
     return attachments;
 }
-fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment, related: bool) !void {
+fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment, related: bool, boundary: []const u8) !void {
     // Related resources must display in the HTML even when the source client
     // tagged a referenced image as an attachment. The frozen snapshot keeps
     // that source disposition separately.
@@ -1061,6 +1070,12 @@ fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment, related: bool)
         try writer.print("Content-Location: {s}\r\n", .{attachment.content_location});
     }
     if (std.ascii.eqlIgnoreCase(attachment.mime_type, "message/rfc822") or std.ascii.eqlIgnoreCase(attachment.mime_type, "message/global")) {
+        if (attachment.source) |source| {
+            try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n\r\n");
+            try emitIdentityStream(writer, source, attachment.size, boundary);
+            try writer.writeAll("\r\n");
+            return;
+        }
         if (!identityEncodingSafe(attachment.data)) return error.UnsupportedOriginalEncoding;
         try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n\r\n");
         try writer.writeAll(attachment.data);
@@ -1068,12 +1083,69 @@ fn attachmentPart(writer: *std.Io.Writer, attachment: Attachment, related: bool)
         return;
     }
     try writer.writeAll("Content-Transfer-Encoding: base64\r\n\r\n");
+    if (attachment.source) |source| return emitBase64Stream(writer, source, attachment.size);
     var offset: usize = 0;
     while (offset < attachment.data.len) {
         const end = @min(offset + 57, attachment.data.len);
         try emitBase64Line(writer, attachment.data[offset..end]);
         offset = end;
     }
+}
+
+fn emitBase64Stream(writer: *std.Io.Writer, source: Source, size: usize) !void {
+    // A multiple of 57 produces the same 76-column base64 lines as the small
+    // encoder. Short source reads never split/pad an intermediate base64 unit.
+    var chunk: [57 * 256]u8 = undefined;
+    var buffered: usize = 0;
+    var consumed: usize = 0;
+    while (true) {
+        const n = try source.read(chunk[buffered..]);
+        if (n == 0) break;
+        if (n > size -| consumed) return error.BodySizeMismatch;
+        consumed += n;
+        buffered += n;
+        const complete = buffered / 57 * 57;
+        var offset: usize = 0;
+        while (offset < complete) : (offset += 57) try emitBase64Line(writer, chunk[offset..][0..57]);
+        std.mem.copyForwards(u8, &chunk, chunk[complete..buffered]);
+        buffered -= complete;
+    }
+    if (consumed != size) return error.BodySizeMismatch;
+    if (buffered > 0) try emitBase64Line(writer, chunk[0..buffered]);
+}
+fn emitIdentityStream(writer: *std.Io.Writer, source: Source, size: usize, boundary: []const u8) !void {
+    var chunk: [16 * 1024]u8 = undefined;
+    var marker_buffer: [74]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&marker_buffer, "--{s}", .{boundary});
+    var line_bytes: usize = 0;
+    var marker_matches = true;
+    var cr = false;
+    var consumed: usize = 0;
+    while (true) {
+        const n = try source.read(&chunk);
+        if (n == 0) break;
+        if (n > size -| consumed) return error.BodySizeMismatch;
+        consumed += n;
+        for (chunk[0..n]) |byte| {
+            if (byte == 0 or (cr and byte != '\n')) return error.UnsupportedOriginalEncoding;
+            if (byte == '\n') {
+                if (!cr) return error.UnsupportedOriginalEncoding;
+                line_bytes = 0;
+                marker_matches = true;
+                cr = false;
+            } else if (byte == '\r') {
+                cr = true;
+            } else {
+                if (line_bytes < marker.len and byte != marker[line_bytes]) marker_matches = false;
+                line_bytes += 1;
+                if (line_bytes == marker.len and marker_matches) return error.MimeBoundaryCollision;
+                if (line_bytes > 998) return error.UnsupportedOriginalEncoding;
+            }
+        }
+        try writer.writeAll(chunk[0..n]);
+    }
+    if (consumed != size) return error.BodySizeMismatch;
+    if (cr) return error.UnsupportedOriginalEncoding;
 }
 
 /// Transport-only unique CID. The generated review HTML has a trusted branding
@@ -1111,12 +1183,28 @@ fn htmlPart(writer: *std.Io.Writer, html: []const u8, inline_logo: bool, logo_of
     } else try emitText(writer, html);
     for (related) |resource| {
         try writer.writeAll("--omagma-v1-related\r\n");
-        try attachmentPart(writer, resource, true);
+        try attachmentPart(writer, resource, true, "omagma-v1-related");
     }
     try writer.writeAll("--omagma-v1-related--\r\n");
 }
 
 pub fn encode(compose: Compose, out: []u8) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(out[0..@min(out.len, max_raw_bytes)]);
+    try encodeInto(compose, &writer, max_body_bytes);
+    return writer.buffered();
+}
+/// Serialize into an owned spool/writer. Attachment sources are consumed once
+/// and must verify their immutable content at EOF. No base64 JSON envelope or
+/// whole-message allocation is constructed. Caller flushes/publishes its spool
+/// only after this succeeds and must discard it on any error.
+pub fn encodeTo(compose: Compose, writer: *std.Io.Writer) !void {
+    var limited: byte_stream.LimitedWriter = .init(writer, types.Limits.mime_upload_bytes);
+    encodeInto(compose, &limited.interface, types.Limits.attachment_bytes) catch |err| {
+        if (limited.exceeded) return error.MessageTooLarge;
+        return err;
+    };
+}
+fn encodeInto(compose: Compose, writer: *std.Io.Writer, attachment_limit: usize) !void {
     try recipients.validateEnvelope(compose.envelope);
     try recipients.validateAddress(compose.from.address.slice());
     try recipients.validateHeader(compose.from.name.slice());
@@ -1130,15 +1218,21 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
     if (compose.calendar) |calendar| try validateBody(calendar);
     if (compose.html != null and compose.calendar != null) return error.UnsupportedComposeParts;
     if ((compose.inline_logo or compose.related.len > 0) and compose.html == null) return error.UnsupportedComposeParts;
-    if (compose.attachments.len + compose.related.len > 16) return error.TooManyAttachments;
+    if (compose.attachments.len > types.Limits.attachments or compose.related.len > types.Limits.related_resources) return error.TooManyAttachments;
     var attachment_bytes: usize = 0;
     for ([_][]const Attachment{ compose.attachments, compose.related }) |list| for (list) |attachment| {
         try validateAttachment(attachment.filename, attachment.mime_type);
-        if (attachment.data.len > max_body_bytes - attachment_bytes) return error.AttachmentsTooLarge;
-        attachment_bytes += attachment.data.len;
-        if (attachment.size != 0 and attachment.size != attachment.data.len) return error.BodySizeMismatch;
+        if (attachment.source != null and attachment.data.len != 0) return error.AmbiguousAttachmentSource;
+        const size = if (attachment.source != null) attachment.size else attachment.data.len;
+        if (size > attachment_limit - attachment_bytes) return error.AttachmentsTooLarge;
+        attachment_bytes += size;
+        if (attachment.source == null and attachment.size != 0 and attachment.size != attachment.data.len) return error.BodySizeMismatch;
     };
+    var related_bytes: usize = 0;
     for (compose.related, 0..) |resource, index| {
+        const size = if (resource.source != null) resource.size else resource.data.len;
+        if (size > max_body_bytes - related_bytes) return error.AttachmentsTooLarge;
+        related_bytes += size;
         if (std.ascii.startsWithIgnoreCase(resource.mime_type, "message/")) return error.UnsupportedRelatedType;
         if (resource.content_id.len == 0 and resource.content_location.len == 0) return error.MissingRelatedIdentity;
         if (resource.content_id.len > 0) _ = try contentId(resource.content_id);
@@ -1149,20 +1243,20 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
     const boundary = try outerBoundary(compose, &boundary_buffer);
     var eight_bit = false;
     for (compose.attachments) |attachment| if (std.ascii.eqlIgnoreCase(attachment.mime_type, "message/rfc822") or std.ascii.eqlIgnoreCase(attachment.mime_type, "message/global")) {
+        eight_bit = eight_bit or attachment.source != null;
         for (attachment.data) |c| eight_bit = eight_bit or c >= 128;
     };
-    var writer = std.Io.Writer.fixed(out);
     try writer.writeAll("From: ");
-    try writeMailbox(&writer, &compose.from);
+    try writeMailbox(writer, &compose.from);
     try writer.writeAll("\r\n");
-    try writeAddressHeader(&writer, "To", &compose.envelope.to);
-    try writeAddressHeader(&writer, "Cc", &compose.envelope.cc);
-    try writeAddressHeader(&writer, "Bcc", &compose.envelope.bcc);
+    try writeAddressHeader(writer, "To", &compose.envelope.to);
+    try writeAddressHeader(writer, "Cc", &compose.envelope.cc);
+    try writeAddressHeader(writer, "Bcc", &compose.envelope.bcc);
     try writer.writeAll("Subject: ");
-    try encodedWords(&writer, compose.subject);
+    try encodedWords(writer, compose.subject);
     try writer.print("\r\nDate: {s}\r\nMessage-ID: {s}\r\nMIME-Version: 1.0\r\n", .{ compose.date, compose.message_id });
     if (compose.in_reply_to.len > 0) try writer.print("In-Reply-To: {s}\r\n", .{compose.in_reply_to});
-    try writeReferences(&writer, compose.references);
+    try writeReferences(writer, compose.references);
     if (compose.html != null or compose.calendar != null or compose.attachments.len > 0) {
         const mixed = compose.calendar != null or compose.attachments.len > 0;
         try writer.print("Content-Type: multipart/{s}; boundary=\"{s}\"\r\n", .{ if (mixed) @as([]const u8, "mixed") else "alternative", boundary });
@@ -1170,25 +1264,24 @@ pub fn encode(compose: Compose, out: []u8) ![]const u8 {
         try writer.print("\r\n--{s}\r\n", .{boundary});
         if (compose.html != null and mixed) {
             try writer.writeAll("Content-Type: multipart/alternative; boundary=\"omagma-v1-alt\"\r\n\r\n--omagma-v1-alt\r\n");
-            try textPart(&writer, "text/plain", compose.body);
+            try textPart(writer, "text/plain", compose.body);
             try writer.writeAll("--omagma-v1-alt\r\n");
-            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.logo_offset, compose.message_id, compose.related);
+            try htmlPart(writer, compose.html.?, compose.inline_logo, compose.logo_offset, compose.message_id, compose.related);
             try writer.writeAll("--omagma-v1-alt--\r\n");
-        } else try textPart(&writer, "text/plain", compose.body);
+        } else try textPart(writer, "text/plain", compose.body);
         if (compose.calendar) |ics| {
             try writer.print("--{s}\r\n", .{boundary});
-            try textPart(&writer, "text/calendar; method=REPLY", ics);
+            try textPart(writer, "text/calendar; method=REPLY", ics);
         } else if (compose.html != null and !mixed) {
             try writer.print("--{s}\r\n", .{boundary});
-            try htmlPart(&writer, compose.html.?, compose.inline_logo, compose.logo_offset, compose.message_id, compose.related);
+            try htmlPart(writer, compose.html.?, compose.inline_logo, compose.logo_offset, compose.message_id, compose.related);
         }
         for (compose.attachments) |attachment| {
             try writer.print("--{s}\r\n", .{boundary});
-            try attachmentPart(&writer, attachment, false);
+            try attachmentPart(writer, attachment, false, boundary);
         }
         try writer.print("--{s}--\r\n", .{boundary});
-    } else try textPart(&writer, "text/plain", compose.body);
-    return writer.buffered();
+    } else try textPart(writer, "text/plain", compose.body);
 }
 
 test "original mail: exact message attachment and collision-safe outer MIME delimiter" {
@@ -1256,7 +1349,8 @@ fn outerBoundary(compose: Compose, buffer: []u8) ![]const u8 {
     hasher.update(compose.message_id);
     for (compose.attachments) |attachment| {
         hasher.update(attachment.data);
-        collision = collision or boundaryClashes(attachment.data, fixed);
+        if (attachment.source != null) hasher.update(attachment.filename);
+        collision = collision or attachment.source != null or boundaryClashes(attachment.data, fixed);
     }
     if (!collision) return fixed;
     var digest: [32]u8 = undefined;
@@ -1277,6 +1371,110 @@ pub fn base64Url(raw: []const u8, out: []u8) ![]const u8 {
     const size = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
     if (size > out.len) return error.OutputTooSmall;
     return std.base64.url_safe_no_pad.Encoder.encode(out, raw);
+}
+
+const SyntheticStream = struct {
+    size: usize,
+    offset: usize = 0,
+    chunk_size: usize = 4093,
+    eof: bool = false,
+    fail_at_eof: bool = false,
+    fn read(ctx: *anyopaque, output: []u8) anyerror!usize {
+        const self: *SyntheticStream = @ptrCast(@alignCast(ctx));
+        if (self.offset == self.size) {
+            self.eof = true;
+            if (self.fail_at_eof) return error.BlobChanged;
+            return 0;
+        }
+        const n = @min(@min(output.len, self.chunk_size), self.size - self.offset);
+        for (output[0..n], 0..) |*byte, index| byte.* = @truncate((self.offset + index) *% 31 +% 7);
+        self.offset += n;
+        return n;
+    }
+    fn source(self: *SyntheticStream) Source {
+        return .{ .ctx = self, .readFn = read };
+    }
+};
+test "attachment streaming: base64 short reads preserve bytes and verify exact EOF" {
+    var raw: [1027]u8 = undefined;
+    for (&raw, 0..) |*byte, index| byte.* = @truncate(index * 31 + 7);
+    var expected_buffer: [2048]u8 = undefined;
+    var expected: std.Io.Writer = .fixed(&expected_buffer);
+    var offset: usize = 0;
+    while (offset < raw.len) : (offset += @min(57, raw.len - offset)) try emitBase64Line(&expected, raw[offset..][0..@min(57, raw.len - offset)]);
+    for ([_]usize{ 1, 2, 3, 56, 57, 58, 4093 }) |chunk_size| {
+        var source: SyntheticStream = .{ .size = raw.len, .chunk_size = chunk_size };
+        var output: [2048]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&output);
+        try emitBase64Stream(&writer, source.source(), raw.len);
+        try std.testing.expectEqualStrings(expected.buffered(), writer.buffered());
+        try std.testing.expect(source.eof);
+    }
+    var short: SyntheticStream = .{ .size = 10 };
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    try std.testing.expectError(error.BodySizeMismatch, emitBase64Stream(&sink.writer, short.source(), 11));
+    var long: SyntheticStream = .{ .size = 12 };
+    try std.testing.expectError(error.BodySizeMismatch, emitBase64Stream(&sink.writer, long.source(), 11));
+    var changed: SyntheticStream = .{ .size = 12, .fail_at_eof = true };
+    try std.testing.expectError(error.BlobChanged, emitBase64Stream(&sink.writer, changed.source(), 12));
+}
+test "attachment streaming: native MIME supports files above JSON cap with bounded writes" {
+    var from: recipients.Mailbox = .{};
+    try from.address.set("self@example.test");
+    var to: recipients.List = .{};
+    var peer: recipients.Mailbox = .{};
+    try peer.address.set("peer@example.test");
+    try to.append(peer);
+    const envelope_out: recipients.Envelope = .{ .to = to };
+    var source: SyntheticStream = .{ .size = 4 * 1024 * 1024 };
+    var attachments = [_]Attachment{.{ .filename = "synthetic.bin", .mime_type = "application/octet-stream", .size = source.size, .source = source.source() }};
+    const compose: Compose = .{ .from = from, .envelope = &envelope_out, .subject = "Streaming fixture", .body = "See the attachment.", .date = "Thu, 08 Oct 2026 12:00:00 +0000", .message_id = "<stream@example.test>", .attachments = &attachments };
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+    try encodeTo(compose, &discard.writer);
+    try std.testing.expect(source.eof);
+    try std.testing.expect(discard.fullCount() > max_raw_bytes);
+    try std.testing.expect(discard.fullCount() < types.Limits.mime_upload_bytes);
+    attachments[0].size = types.Limits.attachment_bytes + 1;
+    source.offset = 0;
+    try std.testing.expectError(error.AttachmentsTooLarge, encodeTo(compose, &discard.writer));
+    try std.testing.expectEqual(@as(usize, 0), source.offset);
+}
+test "attachment streaming: identity source rejects controls and MIME delimiter collisions" {
+    const Literal = struct {
+        value: []const u8,
+        offset: usize = 0,
+        fn read(ctx: *anyopaque, out: []u8) anyerror!usize {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const n = @min(@min(out.len, 3), self.value.len - self.offset);
+            @memcpy(out[0..n], self.value[self.offset..][0..n]);
+            self.offset += n;
+            return n;
+        }
+    };
+    var output: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&output);
+    var good: Literal = .{ .value = "Subject: Fixture\r\n\r\nOriginal\r\n" };
+    try emitIdentityStream(&writer, .{ .ctx = &good, .readFn = Literal.read }, good.value.len, "outer");
+    try std.testing.expectEqualStrings(good.value, writer.buffered());
+    var bad: Literal = .{ .value = "Subject: Fixture\r\n\r\n--outer\r\n" };
+    try std.testing.expectError(error.MimeBoundaryCollision, emitIdentityStream(&writer, .{ .ctx = &bad, .readFn = Literal.read }, bad.value.len, "outer"));
+    bad = .{ .value = "Subject: Fixture\n\nOriginal" };
+    try std.testing.expectError(error.UnsupportedOriginalEncoding, emitIdentityStream(&writer, .{ .ctx = &bad, .readFn = Literal.read }, bad.value.len, "outer"));
+}
+test "attachment streaming: Gmail large file metadata stays external while bodies retain their cap" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const large_file = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"id\":\"large-file\",\"threadId\":\"large-file\",\"internalDate\":\"1791792000000\",\"payload\":{\"mimeType\":\"application/pdf\",\"filename\":\"large.pdf\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{});
+    const message = try normalizeGmail(large_file, a, null);
+    try std.testing.expectEqual(@as(usize, 1), message.attachments.len);
+    try std.testing.expectEqual(@as(usize, 4194304), message.attachments[0].size);
+    try std.testing.expectEqualStrings("external-large", message.attachments[0].id);
+    try std.testing.expectEqualStrings("", message.attachments[0].data);
+    const body = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"id\":\"large-body\",\"threadId\":\"large-body\",\"internalDate\":\"1791792000000\",\"payload\":{\"mimeType\":\"text/html\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{});
+    try std.testing.expectError(error.BodyTooLarge, normalizeGmail(body, a, null));
+    const inline_file = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"id\":\"inline-large\",\"threadId\":\"inline-large\",\"internalDate\":\"1791792000000\",\"payload\":{\"mimeType\":\"image/png\",\"filename\":\"image.png\",\"headers\":[{\"name\":\"Content-ID\",\"value\":\"<image@example.test>\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{});
+    try std.testing.expectError(error.BodyTooLarge, normalizeGmail(inline_file, a, null));
 }
 
 test "markdown mail: alternatives related approved CID and sixteen user files keep independent octets" {

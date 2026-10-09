@@ -30,14 +30,15 @@ pub fn build(b: *std.Build) void {
     const t = b.addTest(.{ .root_module = m, .filters = test_filters, .use_llvm = if (vaxis != null) true else null });
     const correctness = b.step("test", "Run correctness tests");
     correctness.dependOn(&b.addRunArtifact(t).step);
-    for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig" }) |path| {
+    for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig", "src/terminal_ux_backend_tests.zig", "src/terminal_ux_helper_tests.zig", "src/updates_tests.zig" }) |path| {
         const terminal_test = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
+        terminal_test.root_module.addOptions("build_options", options);
         if (macos_sdk) |sdk| linkNativeKeychain(terminal_test.root_module, sdk);
         correctness.dependOn(&b.addRunArtifact(terminal_test).step);
     }
 
     const probes = b.step("probes", "Compile all standalone transport/auth/budget probes");
-    for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
+    for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
         const probe = b.addExecutable(.{
             .name = std.fs.path.stem(path),
             .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }),

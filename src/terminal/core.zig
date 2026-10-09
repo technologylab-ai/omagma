@@ -9,6 +9,7 @@ const triage = @import("triage.zig");
 const batch = @import("batch.zig");
 const markdown_mail = @import("markdown_mail.zig");
 const label_collection = @import("labels.zig");
+const send_queue = @import("send_queue.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
 const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
@@ -23,7 +24,7 @@ fn fixtureLabel(source: Value, text: []const u8) ![]const u8 {
     for (system_labels) |system| if (std.ascii.eqlIgnoreCase(text, system)) return system;
     if (j.get(source, "labels")) |value| {
         for (try valueArray(value)) |item| if (std.mem.eql(u8, text, j.text(item, "id")) or std.mem.eql(u8, text, j.text(item, "name"))) return j.required(item, "id");
-    } else if (std.mem.eql(u8, text, "Projects")) return "Label_demo";
+    } else if (std.mem.eql(u8, text, "Projects") or std.mem.eql(u8, text, "Label_demo")) return "Label_demo";
     return error.LabelNotFound;
 }
 fn fixtureLabelDefinitions(a: std.mem.Allocator, source: Value) !Value {
@@ -186,7 +187,7 @@ pub const Session = struct {
         }
         const account = j.text(req, "account");
         const id = j.get(req, "id") orelse .null;
-        for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId", "beforeMessageId", "afterMessageId", "action", "undoToken", "url", "path", "labelId", "name", "confirmName" }) |key| if (j.get(req, key)) |field| {
+        for ([_][]const u8{ "cmd", "account", "cursor", "query", "label", "messageId", "threadId", "draftId", "operationId", "status", "expectedEtag", "grantFile", "clientFile", "preparedCalendar", "anchorMessageId", "beforeMessageId", "afterMessageId", "action", "undoToken", "url", "path", "labelId", "name", "confirmName", "queueId", "scope", "attachmentId", "blobId", "mimeType" }) |key| if (j.get(req, key)) |field| {
             if (field != .string) return failure(out_allocator, id, account, "InvalidRequest", "Expected string command fields");
         };
         if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
@@ -213,7 +214,7 @@ pub const Session = struct {
     }
     fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, fixtures: bool, data: Value) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
-            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "invitation.reply", "labels.create", "labels.rename", "labels.delete" }) |mutation| {
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -226,6 +227,7 @@ pub const Session = struct {
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
             error.OperationConflict => "This operation identity was already used for different content",
             error.CacheBusy => "Another client is using this account cache; retry later",
+            error.UnknownQueryOperator, error.InvalidQueryDate, error.InvalidQueryValue, error.InvalidQuery, error.TimezoneUnavailable, error.TimezoneRangeUnavailable => cache_query.diagnostic(err),
             else => @errorName(err),
         };
     }
@@ -289,8 +291,53 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "mail.refresh")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, req });
         var store = try storage.Store.open(s.io, a, s.cache_root, address, s.options);
         defer store.close();
+        if (std.mem.eql(u8, cmd, "attachment.import")) return j.value(a, try @import("attachment_blob.zig").importFile(&store, try j.required(req, "path"), j.text(req, "mimeType")));
+        if (std.mem.eql(u8, cmd, "attachment.discard")) {
+            try @import("attachment_blob.zig").discard(&store, try j.required(req, "blobId"));
+            return j.value(a, .{ .discarded = true });
+        }
+        if (std.mem.eql(u8, cmd, "labels.palette")) return j.value(a, .{ .colors = label_collection.palette });
+        if (std.mem.eql(u8, cmd, "mail.label-state")) return s.labelState(a, &store, req);
+        if (std.mem.eql(u8, cmd, "mail.triage-scope")) {
+            try s.capability(a, address, req, "mail-read");
+            const scope = try triage.scope(req);
+            const message_id = try j.required(req, "messageId");
+            try @import("../bounded.zig").identifier(message_id);
+            if (!s.options.fixtures) {
+                store.release();
+                return s.remote(a, address, cmd, req);
+            }
+            const source = try s.fixtureProviderSource(a, &store);
+            const messages = try array(source, "messages");
+            var thread_id: []const u8 = "";
+            for (messages) |message| if (std.mem.eql(u8, j.text(message, "id"), message_id)) {
+                thread_id = j.text(message, "threadId");
+                break;
+            };
+            for (store.state.outbox) |message| if (std.mem.eql(u8, message.id, message_id)) {
+                thread_id = message.threadId;
+                break;
+            };
+            if (thread_id.len == 0) return error.MessageNotFound;
+            var ids: std.ArrayList([]const u8) = .empty;
+            if (scope == .message) try ids.append(a, message_id) else {
+                for (messages) |message| if (std.mem.eql(u8, j.text(message, "threadId"), thread_id)) {
+                    if (ids.items.len == 100) return error.ThreadTooLarge;
+                    try ids.append(a, try j.required(message, "id"));
+                };
+                for (store.state.outbox) |message| if (std.mem.eql(u8, message.threadId, thread_id)) {
+                    var duplicate = false;
+                    for (ids.items) |id| duplicate = duplicate or std.mem.eql(u8, id, message.id);
+                    if (!duplicate) {
+                        if (ids.items.len == 100) return error.ThreadTooLarge;
+                        try ids.append(a, message.id);
+                    }
+                };
+            }
+            return j.value(a, .{ .scope = scope, .threadId = thread_id, .messageIds = ids.items, .count = ids.items.len, .complete = true });
+        }
         if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, false);
-        if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete")) return s.manageLabels(a, &store, req);
+        if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete") or std.mem.eql(u8, cmd, "labels.color")) return s.manageLabels(a, &store, req);
         if (std.mem.eql(u8, cmd, "accounts.identities")) return s.identities(a, &store, req, false);
         if (std.mem.eql(u8, cmd, "cache.stats")) return s.cacheStats(a, &store);
         if (std.mem.eql(u8, cmd, "cache.clear")) {
@@ -304,7 +351,23 @@ pub const Session = struct {
             return error.OperationNotFound;
         }
         if (std.mem.eql(u8, cmd, "draft.list")) return j.value(a, .{ .drafts = store.state.drafts });
+        if (std.mem.eql(u8, cmd, "draft.queue") or std.mem.startsWith(u8, cmd, "queue.")) return s.queuedSend(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.read")) return j.value(a, try store.draft(try j.required(req, "draftId")));
+        if (std.mem.eql(u8, cmd, "draft.open-preview")) {
+            try s.capability(a, address, req, "mail-read");
+            const draft = try store.draft(try j.required(req, "draftId"));
+            try validateDraft(draft, false);
+            const prepared = try markdown_mail.prepare(a, draft);
+            var header_draft = draft;
+            if (header_draft.from == null) header_draft.from = .{ .address = address };
+            const preview = @import("preview_file.zig");
+            try store.reserveBytes(try preview.byteSize(prepared, header_draft));
+            try store.save();
+            const written = try preview.writePreview(s.io, a, store.dir, prepared, header_draft);
+            const target = try @import("../open_target.zig").makePreview(&s.config.accounts[index], written.path);
+            if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, &s.config.accounts[index], &target);
+            return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .path = written.path, .url = target.url.slice(), .profile = target.profile_arg.slice() });
+        }
         if (std.mem.eql(u8, cmd, "draft.preview")) {
             const draft = if (j.get(req, "draft")) |input| try decodeDraft(a, input) else try store.draft(try j.required(req, "draftId"));
             try validateDraft(draft, false);
@@ -347,7 +410,7 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) {
             const draft = if (std.mem.eql(u8, cmd, "draft.send")) try store.draft(try j.required(req, "draftId")) else try decodeDraft(a, j.get(req, "draft") orelse return error.MissingField);
-            return s.send(a, &store, req, draft, null);
+            return s.send(a, &store, req, draft, null, false);
         }
         if (std.mem.eql(u8, cmd, "mail.reply")) {
             const format = try requestBodyFormat(req);
@@ -370,10 +433,10 @@ pub const Session = struct {
             if (try j.boolean(req, "original", false)) return s.forwardRaw(a, &store, req, format);
             const preserve = try j.boolean(req, "preserveFormatting", false);
             const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
-            if (message.attachments.len > 16) return error.TooManyAttachments;
+            if (message.attachments.len > (if (preserve) t.Limits.attachments + t.Limits.related_resources else t.Limits.attachments)) return error.TooManyAttachments;
             var total: usize = 0;
             for (message.attachments) |attachment| total = std.math.add(usize, total, attachment.size) catch return error.AttachmentsTooLarge;
-            if (total > t.Limits.body_bytes) return error.AttachmentsTooLarge;
+            if (total > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
             const attachments = try a.dupe(t.Attachment, message.attachments);
             for (attachments) |*attachment| if (attachment.data.len == 0 and attachment.size != 0) {
                 var request = try j.copyObject(a, req);
@@ -469,6 +532,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "mail.attachment")) {
             return j.value(a, try s.fetchKnownAttachment(a, &store, req, null));
         }
+        if (std.mem.eql(u8, cmd, "mail.attachment-save")) return s.saveKnownAttachment(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark")) {
             try s.capability(a, address, req, "mail-modify");
             if (!s.options.fixtures) {
@@ -543,12 +607,19 @@ pub const Session = struct {
             var invite: invitation.Invitation = .{};
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
             try invitation.parse(ics, address, aliases, &invite);
-            if (std.mem.eql(u8, cmd, "invitation.inspect")) return j.value(a, .{ .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice() });
+            if (std.mem.eql(u8, cmd, "invitation.inspect")) {
+                const timezone = @import("timezone.zig");
+                const local_zone = timezone.load(s.io, a, s.env) catch timezone.Zone{ .unavailable = true };
+                const event_name = invitation.eventTimezone(&invite);
+                const event_zone: ?timezone.Zone = if (event_name.len != 0 and invite.timezones.len == 0) timezone.loadNamed(s.io, a, s.env, event_name) catch null else null;
+                const friendly = try invitation.friendlyWithZone(a, &invite, &local_zone, if (event_zone) |*zone| zone else null);
+                return j.value(a, .{ .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable });
+            }
             const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
             const buf = try a.alloc(u8, invitation.max_calendar_bytes);
             const reply = try invitation.reply(&invite, status, try utcStamp(s.io, a), buf);
             const d: t.Draft = .{ .to = &.{.{ .address = invite.organizer.slice() }}, .subject = try std.fmt.allocPrint(a, "{s}: {s}", .{ @tagName(status), m.subject }), .bodyText = try std.fmt.allocPrint(a, "Invitation response: {s}", .{@tagName(status)}) };
-            return s.send(a, &store, req, d, reply);
+            return s.send(a, &store, req, d, reply, false);
         }
         return error.UnsupportedCommand;
     }
@@ -573,6 +644,42 @@ pub const Session = struct {
         }
         return j.value(a, .{ .labels = store.state.labels, .cached = cached });
     }
+    fn labelState(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        try s.capability(a, store.state.account, req, "mail-read");
+        const ids = try triage.pinned(a, req);
+        _ = try s.loadLabels(a, store, req, false);
+        const LabelState = struct { id: []const u8, name: []const u8, type: []const u8, color: ?t.LabelColor = null, appliedCount: usize = 0 };
+        const labels = try a.alloc(LabelState, store.state.labels.len);
+        for (store.state.labels, labels) |definition, *label| label.* = .{ .id = definition.id, .name = definition.name, .type = definition.type, .color = definition.color };
+        var remote_state: BatchRemote = .{ .session = s };
+        if (s.options.fixtures) remote_state.source = try s.fixtureProviderSource(a, store);
+        var network: @import("gmail.zig").NetworkSession = undefined;
+        var opened = false;
+        defer if (opened) network.close();
+        store.release();
+        for (ids) |id| {
+            var uncertain = false;
+            for (store.state.undo) |receipt| for (receipt.items) |item| {
+                if (std.mem.eql(u8, item.messageId, id) and (std.mem.eql(u8, item.outcome, "unknown") or std.mem.eql(u8, item.errorCode, "UnknownOutcome"))) uncertain = true;
+            };
+            const cached = if (uncertain) null else store.find(id);
+            const memberships: []const []const u8 = if (cached) |entry| entry.message.labels else missing: {
+                if (!s.options.fixtures and !opened) {
+                    try network.init(s.io, a, &s.config, store.state.account, "mail.labels", req);
+                    remote_state.transport = network.transport();
+                    opened = true;
+                }
+                break :missing try BatchRemote.labelsFn(&remote_state, a, store, id);
+            };
+            for (labels) |*label| {
+                for (memberships) |membership| if (std.mem.eql(u8, membership, label.id)) {
+                    label.appliedCount += 1;
+                    break;
+                };
+            }
+        }
+        return j.value(a, .{ .messageIds = ids, .count = ids.len, .labels = labels, .complete = true });
+    }
 
     fn ensureFixtureLabels(_: *Session, a: std.mem.Allocator, store: *storage.Store, source: Value) !void {
         if (store.state.fixtureLabelsReady) return;
@@ -594,17 +701,23 @@ pub const Session = struct {
         const cmd = j.text(req, "cmd");
         const create = std.mem.eql(u8, cmd, "labels.create");
         const deleting = std.mem.eql(u8, cmd, "labels.delete");
+        const coloring = std.mem.eql(u8, cmd, "labels.color");
+        const color = try label_collection.requestColor(a, req);
+        if (coloring and color == null) return error.InvalidLabelColor;
+        if (deleting and color != null) return error.InvalidLabelColor;
         const operation_id = try j.required(req, "operationId");
         if (operation_id.len > 256) return error.InvalidOperationId;
         try recipients.validateHeader(operation_id);
         const id = if (create) "" else try j.required(req, "labelId");
-        const name = if (deleting) "" else try j.required(req, "name");
+        const name = if (deleting or coloring) "" else try j.required(req, "name");
         const confirmation = if (deleting) try j.required(req, "confirmName") else "";
         if (!create) try label_collection.validateId(id);
-        if (!deleting) try label_collection.validateName(name);
+        if (!deleting and !coloring) try label_collection.validateName(name);
         if (confirmation.len > 512) return error.InvalidLabelConfirmation;
         try recipients.validateHeader(confirmation);
-        const payload = try std.json.Stringify.valueAlloc(a, .{ .cmd = cmd, .account = store.state.account, .labelId = id, .name = name, .confirmName = confirmation }, .{});
+        var intent = try j.value(a, .{ .cmd = cmd, .account = store.state.account, .labelId = id, .name = name, .confirmName = confirmation });
+        if (color) |value| try intent.object.put(a, "color", try j.value(a, value));
+        const payload = try std.json.Stringify.valueAlloc(a, intent, .{});
         const digest = storage.Store.hash(payload);
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
             if (!std.mem.eql(u8, operation.hash, &digest) or !std.mem.eql(u8, operation.kind, cmd)) return error.OperationConflict;
@@ -628,11 +741,12 @@ pub const Session = struct {
         };
         if (store.state.operations.len == 1000) return error.OperationJournalFull;
         const old = if (!create) try label_collection.custom(store.state.labels, id) else storage.Label{ .id = "", .name = "" };
+        const final_name = if (coloring) old.name else name;
         if (deleting) {
             if (!std.mem.eql(u8, confirmation, old.name)) return error.InvalidLabelConfirmation;
             if (s.options.fixtures and store.state.fixtureDeletedLabels.len == 512) return error.TooManyDeletedLabels;
         } else {
-            try label_collection.unique(store.state.labels, name, id);
+            try label_collection.unique(store.state.labels, final_name, id);
             if (create and store.state.labels.len == 512) return error.TooManyLabels;
         }
         var operations: std.ArrayList(storage.Operation) = .empty;
@@ -651,7 +765,7 @@ pub const Session = struct {
                 for (store.state.operations) |*operation| if (std.mem.eql(u8, operation.id, operation_id)) {
                     operation.errorCode = @errorName(err);
                     operation.outcome = switch (err) {
-                        error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.LabelNotFound, error.MessageNotFound, error.SystemLabelImmutable, error.InvalidLabelName, error.InvalidLabelConfirmation, error.DuplicateLabelName, error.TooManyLabels, error.InvalidIdentifier => "rejected",
+                        error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.LabelNotFound, error.MessageNotFound, error.SystemLabelImmutable, error.InvalidLabelName, error.InvalidLabelColor, error.InvalidLabelConfirmation, error.DuplicateLabelName, error.TooManyLabels, error.InvalidIdentifier => "rejected",
                         else => "unknown",
                     };
                     store.save() catch return error.UnknownOutcome;
@@ -685,9 +799,13 @@ pub const Session = struct {
                 }
                 break :fixture_result try j.value(a, .{ .deleted = true, .labelId = id });
             }
-            break :fixture_result try j.value(a, .{ .label = storage.Label{ .id = if (create) try store.nextId("Label") else id, .name = name, .type = "user" } });
+            break :fixture_result try j.value(a, .{ .label = storage.Label{ .id = if (create) try store.nextId("Label") else id, .name = final_name, .type = "user", .color = color orelse old.color } });
         };
-        return s.commitLabelResult(a, store, operation_id, create, deleting, id, name, old.name, result) catch return error.UnknownOutcome;
+        if (!deleting and color != null) {
+            const received = j.decode(storage.Label, a, j.get(result, "label") orelse return error.UnknownOutcome) catch return error.UnknownOutcome;
+            if (!label_collection.sameColor(color, received.color)) return error.UnknownOutcome;
+        }
+        return s.commitLabelResult(a, store, operation_id, create, deleting, id, final_name, old.name, result) catch return error.UnknownOutcome;
     }
 
     fn commitLabelResult(s: *Session, a: std.mem.Allocator, store: *storage.Store, operation_id: []const u8, create: bool, deleting: bool, id: []const u8, name: []const u8, old_name: []const u8, result: Value) !Value {
@@ -797,6 +915,7 @@ pub const Session = struct {
     };
     fn batchMail(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
         try s.capability(a, address, req, "mail-modify");
+        _ = try triage.scope(req);
         const undoing = std.mem.eql(u8, j.text(req, "cmd"), "mail.undo");
         var delta: triage.Delta = .{ .add = &.{}, .remove = &.{} };
         if (undoing) {
@@ -904,7 +1023,7 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "cache.activity")) return j.value(a, .{ .inboxArrivalCount = store.state.inboxArrivalCount, .generation = store.state.generation, .lastSyncAt = store.state.lastSyncAt });
         if (std.mem.eql(u8, cmd, "mail.list")) return cachedList(a, &store, req);
-        if (std.mem.eql(u8, cmd, "mail.search")) return cacheSearch(a, &store, req, s.allocator);
+        if (std.mem.eql(u8, cmd, "mail.search")) return cacheSearchEnv(a, &store, req, s.allocator, s.env);
         if (std.mem.eql(u8, cmd, "labels.list")) return s.loadLabels(a, &store, req, true);
         if (std.mem.eql(u8, cmd, "accounts.identities")) return s.identities(a, &store, req, true);
         if (std.mem.eql(u8, cmd, "cache.stats")) return s.cacheStats(a, &store);
@@ -949,15 +1068,22 @@ pub const Session = struct {
         return error.CacheUnsupported;
     }
     fn cacheSearch(a: std.mem.Allocator, store: *storage.Store, req: Value, body_allocator: std.mem.Allocator) !Value {
+        return cacheSearchEnv(a, store, req, body_allocator, null);
+    }
+    fn cacheSearchEnv(a: std.mem.Allocator, store: *storage.Store, req: Value, body_allocator: std.mem.Allocator, env: ?*const std.process.Environ.Map) !Value {
         const limit = try j.integer(req, "limit", 32);
         if (limit < 1 or limit > 100) return error.InvalidPageLimit;
         const query = j.text(req, "query");
         const label = j.text(req, "label");
         if (query.len > 4096 or label.len > 256) return error.InvalidQuery;
-        try cache_query.validate(query);
+        const plan = try cache_query.compile(query);
+        const timezone = @import("timezone.zig");
+        var empty_env = std.process.Environ.Map.init(a);
+        defer empty_env.deinit();
+        const zone: timezone.Zone = if (plan.needs_timezone) try timezone.load(store.io, a, env orelse &empty_env) else .{};
         const label_id = cachedLabel(store, label);
         var key = storage.Store.hash(try std.fmt.allocPrint(a, "cache-search\x00{s}\x00{s}\x00{s}", .{ store.state.account, query, label }));
-        if (cache_query.needsBody(query)) {
+        if (plan.needs_body) {
             // Body residency changes hit sets independently of metadata
             // generation. Bind pagination to that exact retained snapshot.
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -985,7 +1111,7 @@ pub const Session = struct {
             defer body_arena.deinit();
             // Each complete body is reclaimed before the next row. The result
             // holds metadata and a small literal excerpt, never whole bodies.
-            var full = if (cache_query.needsBody(query)) (try store.readWithAllocator(body_arena.allocator(), entry.message.id)) orelse entry.message else entry.message;
+            var full = if (plan.needs_body) (try store.readWithAllocator(body_arena.allocator(), entry.message.id)) orelse entry.message else entry.message;
             if (entry.message.labels.len > 64) return error.InvalidLabels;
             var names: [128][]const u8 = undefined;
             var names_count: usize = 0;
@@ -1002,7 +1128,7 @@ pub const Session = struct {
             }
             full.labels = names[0..names_count];
             full.unread = entry.message.unread;
-            if (!cacheMatches(full, query)) continue;
+            if (!try plan.matches(full, &zone)) continue;
             var message = entry.message;
             message.bodyCacheError = entry.bodyError;
             try candidates.append(a, message);
@@ -1778,7 +1904,7 @@ pub const Session = struct {
             const referenced = usage & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
             const has_identity = attachment.contentId != null or attachment.contentLocation != null;
             if (!has_identity or (is_file and !referenced and attachment.contentLocation == null)) continue;
-            if (resources.items.len == 16) return error.TooManyAttachments;
+            if (resources.items.len == t.Limits.related_resources) return error.TooManyAttachments;
             bytes = std.math.add(usize, bytes, attachment.size) catch return error.AttachmentsTooLarge;
             if (bytes > t.Limits.body_bytes) return error.AttachmentsTooLarge;
             if (attachment.contentId) |id| {
@@ -1826,15 +1952,73 @@ pub const Session = struct {
         const message = known_message orelse try s.read(a, store, message_id, req);
         if (!std.mem.eql(u8, message.id, message_id)) return error.MessageIdentityMismatch;
         for (message.attachments) |selected| if (std.mem.eql(u8, selected.id, attachment_id)) {
+            if (selected.blobId != null) return selected;
             if (selected.data.len > 0 or selected.size == 0) return selected;
             if (s.options.fixtures) return error.AttachmentNotFound;
             const account = store.state.account;
+            if (selected.size > t.Limits.body_bytes) {
+                var incoming = try @import("attachment_blob.zig").Incoming.create(store, selected.size);
+                defer incoming.close();
+                var buffer: [64 * 1024]u8 = undefined;
+                var writer = incoming.file.writer(s.io, &buffer);
+                store.release();
+                const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, selected, &writer.interface });
+                try writer.flush();
+                try s.reopenBody(a, store);
+                return incoming.commit(store, downloaded);
+            }
             store.release();
             const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachment, .{ s.io, a, &s.config, account, req, selected, s.progress_sink });
             try s.reopenBody(a, store);
             return downloaded;
         };
         return error.AttachmentNotFound;
+    }
+    fn saveKnownAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        try s.capability(a, store.state.account, req, "mail-read");
+        const message_id = try j.required(req, "messageId");
+        const attachment_id = try j.required(req, "attachmentId");
+        const path = try j.required(req, "path");
+        if (path.len == 0 or path.len > 4096 or !@import("file_dialog.zig").validText(path)) return error.InvalidAttachmentPath;
+        const leaf = std.fs.path.basename(path);
+        if (leaf.len == 0 or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return error.InvalidAttachmentPath;
+        const message = try s.read(a, store, message_id, req);
+        var selected: ?t.Attachment = null;
+        for (message.attachments) |attachment| if (std.mem.eql(u8, attachment.id, attachment_id)) {
+            selected = attachment;
+            break;
+        };
+        const attachment = selected orelse return error.AttachmentNotFound;
+        if (attachment.size > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+        var directory = try @import("path_completion.zig").openDirectory(s.io, std.fs.path.dirname(path) orelse ".", false);
+        defer directory.close(s.io);
+        var destination = try directory.createFileAtomic(s.io, leaf, .{ .permissions = .fromMode(0o600), .replace = false });
+        defer destination.deinit(s.io);
+        var buffer: [64 * 1024]u8 = undefined;
+        var writer = destination.file.writer(s.io, &buffer);
+        if (attachment.blobId != null) {
+            var source = try @import("attachment_blob.zig").Stream.init(store, attachment);
+            defer source.close();
+            var chunk: [64 * 1024]u8 = undefined;
+            while (true) {
+                const count = try @import("attachment_blob.zig").Stream.read(&source, &chunk);
+                if (count == 0) break;
+                try writer.interface.writeAll(chunk[0..count]);
+            }
+        } else if (attachment.data.len > 0 or attachment.size == 0) {
+            const decoded = try @import("mime.zig").decodeBase64Url(attachment.data, a);
+            if (decoded.len != attachment.size) return error.BodySizeMismatch;
+            try writer.interface.writeAll(decoded);
+        } else {
+            if (s.options.fixtures) return error.AttachmentNotFound;
+            const account = store.state.account;
+            store.release();
+            _ = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, attachment, &writer.interface });
+        }
+        try writer.flush();
+        try destination.file.sync(s.io);
+        try destination.link(s.io);
+        return j.value(a, .{ .saved = true, .path = path, .filename = attachment.filename, .size = attachment.size });
     }
     fn readMessage(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value, allow_cached: bool) !t.Message {
         try s.capability(a, store.state.account, req, "mail-read");
@@ -2035,14 +2219,7 @@ pub const Session = struct {
                 const raw = try std.Io.Dir.cwd().readFileAlloc(s.io, try std.fmt.allocPrint(a, "{s}/contacts/{s}.json", .{ root, key }), a, .limited(4 * 1024 * 1024));
                 const source = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
                 var list: std.ArrayList(t.Contact) = .empty;
-                for (try array(source, "connections")) |v| {
-                    const names = try array(v, "names");
-                    var addresses: std.ArrayList(t.Address) = .empty;
-                    for (try array(v, "emailAddresses")) |email| try addresses.append(a, .{ .address = j.text(email, "value") });
-                    const metadata = j.get(v, "metadata") orelse .null;
-                    const sources = try array(metadata, "sources");
-                    try list.append(a, .{ .resourceName = j.text(v, "resourceName"), .etag = if (sources.len > 0) j.text(sources[0], "etag") else j.text(v, "etag"), .name = if (names.len > 0) j.text(names[0], "displayName") else "", .emails = addresses.items });
-                }
+                for (try array(source, "connections")) |v| try list.append(a, try @import("contact_record.zig").normalize(a, v));
                 store.state.contacts = list.items;
             } else store.state.contacts = try a.dupe(t.Contact, &.{.{ .resourceName = "people/demo-alex", .etag = "demo-1", .name = "Alex Fixture", .emails = &.{.{ .address = "alex@example.org" }} }});
             store.state.contactsReady = true;
@@ -2064,14 +2241,15 @@ pub const Session = struct {
         for ([_][]const u8{ "resourceName", "etag", "name" }) |key| if (j.get(v, key)) |field| {
             if (field != .string) return error.InvalidRequest;
         };
-        var c: t.Contact = .{ .resourceName = j.text(v, "resourceName"), .etag = j.text(v, "etag"), .name = j.text(v, "name"), .emails = try decodeAddresses(a, j.get(v, "emails") orelse return error.MissingField) };
-        try recipients.validateHeader(c.name);
-        if (c.name.len > 256 or c.emails.len == 0) return error.InvalidContact;
         var pos: ?usize = null;
-        for (store.state.contacts, 0..) |old, i| if (std.mem.eql(u8, old.resourceName, c.resourceName)) {
+        for (store.state.contacts, 0..) |old, i| if (std.mem.eql(u8, old.resourceName, j.text(v, "resourceName"))) {
             pos = i;
             break;
         };
+        var clean = try j.copyObject(a, v);
+        if (j.get(v, "emails")) |emails| try clean.object.put(a, "emails", try j.value(a, try decodeAddresses(a, emails)));
+        const previous: ?t.Contact = if (pos) |i| store.state.contacts[i] else null;
+        var c = try @import("contact_record.zig").mergeInput(a, clean, previous);
         if (pos) |i| {
             const expected = j.text(req, "expectedEtag");
             if (!std.mem.eql(u8, if (expected.len > 0) expected else c.etag, store.state.contacts[i].etag)) return error.ContactConflict;
@@ -2081,6 +2259,7 @@ pub const Session = struct {
             c.resourceName = try store.nextId("people/contact");
         }
         c.etag = try store.nextId("contact-version");
+        c.provider = try @import("contact_record.zig").providerBody(a, c, previous);
         if (pos) |i| store.state.contacts[i] = c else {
             var list: std.ArrayList(t.Contact) = .empty;
             try list.appendSlice(a, store.state.contacts);
@@ -2091,7 +2270,79 @@ pub const Session = struct {
         try store.save();
         return j.value(a, c);
     }
-    fn send(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, draft: t.Draft, calendar: ?[]const u8) !Value {
+    fn queuedSend(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
+        const cmd = j.text(req, "cmd");
+        if (std.mem.eql(u8, cmd, "queue.list")) {
+            var entries: std.ArrayList(Value) = .empty;
+            for (store.state.sendQueue) |entry| try entries.append(a, try send_queue.receipt(a, store, entry));
+            return j.value(a, .{ .queue = entries.items });
+        }
+        if (std.mem.eql(u8, cmd, "draft.queue")) {
+            try s.capability(a, store.state.account, req, "mail-send");
+            const draft = try store.draft(try j.required(req, "draftId"));
+            try validateDraft(draft, true);
+            _ = try markdown_mail.prepare(a, draft);
+            const digest = storage.Store.hash(try operationPayload(a, draft, store.state.account, null));
+            const entry = try send_queue.stage(store, draft.id, try j.required(req, "operationId"), &digest, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), try send_queue.delay(req));
+            return send_queue.receipt(a, store, entry.*);
+        }
+        const id = try j.required(req, "queueId");
+        if (std.mem.eql(u8, cmd, "queue.read")) return send_queue.receipt(a, store, (try send_queue.find(store, id)).*);
+        if (std.mem.eql(u8, cmd, "queue.cancel")) return send_queue.receipt(a, store, (try send_queue.cancel(store, id)).*);
+        if (std.mem.eql(u8, cmd, "queue.resume")) {
+            try s.capability(a, store.state.account, req, "mail-send");
+            return send_queue.receipt(a, store, (try send_queue.resumeEntry(store, id, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), try send_queue.delay(req))).*);
+        }
+        if (!std.mem.eql(u8, cmd, "queue.process")) return error.UnsupportedCommand;
+        const wait_for_due = try j.boolean(req, "wait", false);
+        try s.capability(a, store.state.account, req, "mail-send");
+        var entry = try send_queue.find(store, id);
+        if (entry.state != .queued) return send_queue.receipt(a, store, entry.*);
+        const remaining = entry.dueAtMs - std.Io.Timestamp.now(s.io, .real).toMilliseconds();
+        if (remaining > 0) {
+            if (!wait_for_due) return error.QueueNotDue;
+            if (remaining > 30000) return error.QueueClockChanged;
+            store.release();
+            try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(remaining) }).sleep(s.io);
+            try s.reopenBody(a, store);
+            entry = try send_queue.find(store, id);
+            if (entry.state != .queued) return send_queue.receipt(a, store, entry.*);
+            if (entry.dueAtMs > std.Io.Timestamp.now(s.io, .real).toMilliseconds()) return error.QueueNotDue;
+        }
+        const draft = try store.draft(entry.draftId);
+        const digest = storage.Store.hash(try operationPayload(a, draft, store.state.account, null));
+        if (!std.mem.eql(u8, entry.hash, &digest)) {
+            entry.state = .canceled;
+            entry.errorCode = "DraftChanged";
+            try store.save();
+            return send_queue.receipt(a, store, entry.*);
+        }
+        // The durable claim precedes any send code. After a crash, submitting
+        // remains fenced even if the operation journal was not written yet.
+        entry.state = .submitting;
+        try store.save();
+        var request = try j.copyObject(a, req);
+        try request.object.put(a, "cmd", .{ .string = "draft.send" });
+        try request.object.put(a, "draftId", .{ .string = entry.draftId });
+        try request.object.put(a, "operationId", .{ .string = entry.operationId });
+        const sent = s.send(a, store, request, draft, null, true) catch |err| {
+            entry = try send_queue.find(store, id);
+            entry.state = .rejected;
+            entry.errorCode = @errorName(err);
+            for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, entry.operationId)) {
+                entry.state = .unknown;
+                break;
+            };
+            store.save() catch return error.UnknownOutcome;
+            return send_queue.receipt(a, store, entry.*);
+        };
+        entry = try send_queue.find(store, id);
+        entry.state = if (std.mem.eql(u8, j.text(sent, "outcome"), "applied")) .applied else if (std.mem.eql(u8, j.text(sent, "outcome"), "rejected")) .rejected else .unknown;
+        entry.errorCode = j.text(sent, "errorCode");
+        store.save() catch return error.UnknownOutcome;
+        return send_queue.receipt(a, store, entry.*);
+    }
+    fn send(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, draft: t.Draft, calendar: ?[]const u8, claimed_queue: bool) !Value {
         try s.capability(a, store.state.account, req, if (calendar != null) "calendar-rsvp" else "mail-send");
         try validateDraft(draft, true);
         const operation_id = try j.required(req, "operationId");
@@ -2099,6 +2350,16 @@ pub const Session = struct {
         try recipients.validateHeader(operation_id);
         const payload = try operationPayload(a, draft, store.state.account, calendar);
         const digest = storage.Store.hash(payload);
+        for (store.state.sendQueue) |entry| {
+            const same_operation = std.mem.eql(u8, entry.operationId, operation_id);
+            const same_content = std.mem.eql(u8, entry.hash, &digest);
+            const same_draft = draft.id.len != 0 and std.mem.eql(u8, entry.draftId, draft.id);
+            if (same_operation and !same_content) return error.OperationConflict;
+            if (!same_operation and !same_content and !same_draft) continue;
+            if (entry.state == .queued) return error.DraftQueued;
+            const claimed = claimed_queue and same_operation and same_content and same_draft and std.mem.eql(u8, entry.queueId, j.text(req, "queueId"));
+            if (entry.state == .unknown or (entry.state == .submitting and !claimed)) return error.UnknownOutcome;
+        }
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
             if (!std.mem.eql(u8, operation.hash, &digest)) return error.OperationConflict;
             return j.value(a, operation);
@@ -2112,6 +2373,8 @@ pub const Session = struct {
         const wire_identity = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ store.state.account, operation_id });
         const wire_hash = storage.Store.hash(wire_identity);
         var fixture_raw: ?[]const u8 = null;
+        var spool: ?@import("send_spool.zig").Spool = null;
+        defer if (spool) |*file| file.close();
         {
             var from: recipients.Mailbox = .{};
             const sender = draft.from orelse t.Address{ .address = store.state.account };
@@ -2135,13 +2398,19 @@ pub const Session = struct {
                 try target.append(mailbox);
             };
             const mime = @import("mime.zig");
-            const wire = try a.alloc(u8, mime.max_raw_bytes);
-            const raw = mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = "Mon, 05 Oct 2026 12:00:00 +0000", .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = try mime.composeAttachments(draft.attachments, a) }, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
-            // Gmail's outer JSON base64url envelope shares the request quota.
-            if (std.base64.url_safe_no_pad.Encoder.calcSize(raw.len) > t.Limits.request_bytes - 1024) return error.FormTooLarge;
-            if (s.options.fixtures) {
-                const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
-                fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+            var compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = if (s.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(s.io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references };
+            if (@import("send_spool.zig").required(draft.attachments)) {
+                spool = try @import("send_spool.zig").create(store, compose, draft.attachments);
+            } else {
+                compose.attachments = try mime.composeAttachments(draft.attachments, a);
+                const wire = try a.alloc(u8, mime.max_raw_bytes);
+                const raw = mime.encode(compose, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
+                // Legacy small drafts retain the bounded JSON send wire.
+                if (std.base64.url_safe_no_pad.Encoder.calcSize(raw.len) > t.Limits.request_bytes - 1024) return error.FormTooLarge;
+                if (s.options.fixtures) {
+                    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
+                    fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+                }
             }
         }
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
@@ -2154,7 +2423,7 @@ pub const Session = struct {
             var request = try j.copyObject(a, req);
             try request.object.put(a, "draft", try j.value(a, draft));
             if (calendar) |ics| try request.object.put(a, "preparedCalendar", .{ .string = ics });
-            const result = s.remote(a, store.state.account, if (calendar != null) "invitation.reply" else "mail.send", request) catch |err| {
+            const result = (if (spool) |*file| @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeSpool, .{ s.io, a, &s.config, store.state.account, request, draft, file, operation.rfcMessageId }) else s.remote(a, store.state.account, if (calendar != null) "invitation.reply" else "mail.send", request)) catch |err| {
                 operation.errorCode = @errorName(err);
                 operation.outcome = switch (err) {
                     error.UnverifiedSender, error.FormTooLarge, error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.OAuthClientRequired, error.WrongAccount, error.InvalidGrant, error.UnexpectedScope, error.GrantClientMismatch, error.MessageNotFound, error.ContactConflict, error.RateLimited => "rejected",
@@ -2252,7 +2521,9 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
     if (j.get(v, "original")) |original| {
         if (original != .null) draft.original = try j.decode(t.Original, a, original);
     }
-    _ = try @import("mime.zig").composeAttachments(draft.attachments, a);
+    for (draft.attachments) |attachment| if (attachment.blobId == null) {
+        _ = try @import("mime.zig").composeAttachments(&.{attachment}, a);
+    };
     if (draft.original) |original| _ = try @import("mime.zig").composeAttachments(original.resources, a);
     return draft;
 }
@@ -2273,17 +2544,26 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (d.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(d.bodyText)) return error.InvalidUtf8;
     const related = if (d.original) |original| original.resources else &.{};
-    if (d.attachments.len + related.len > 16) return error.TooManyAttachments;
+    if (d.attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
     if (d.original) |original| try @import("original_mail.zig").validate(original);
     var attachment_bytes: usize = 0;
+    var embedded_bytes: usize = 0;
     for ([_][]const t.Attachment{ d.attachments, related }) |list| for (list) |attachment| {
         if (attachment.filename.len == 0 or attachment.filename.len > 256 or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
         try recipients.validateHeader(attachment.filename);
         try recipients.validateHeader(attachment.mimeType);
         if (attachment.mimeType.len == 0 or attachment.mimeType.len > 128 or std.mem.indexOfScalar(u8, attachment.mimeType, '/') == null) return error.InvalidAttachment;
-        const n = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(attachment.data) catch return error.InvalidAttachment;
+        const n = if (attachment.blobId) |id| blk: {
+            try @import("attachment_blob.zig").validateId(id);
+            if (attachment.data.len != 0) return error.InvalidAttachmentHandle;
+            break :blk attachment.size;
+        } else std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(attachment.data) catch return error.InvalidAttachment;
         attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
-        if (attachment_bytes > t.Limits.body_bytes or n != attachment.size) return error.InvalidAttachment;
+        if (attachment_bytes > t.Limits.attachment_bytes or n != attachment.size) return error.InvalidAttachment;
+        if (attachment.blobId == null) {
+            embedded_bytes = std.math.add(usize, embedded_bytes, n) catch return error.BodyTooLarge;
+            if (embedded_bytes > t.Limits.body_bytes) return error.InvalidAttachment;
+        }
         // Validate every encoded byte without allocating a second binary copy.
         for (attachment.data) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return error.InvalidAttachment;
         try @import("mime.zig").validateAttachment(attachment.filename, attachment.mimeType);
@@ -2295,6 +2575,7 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
         }
     };
     for (related, 0..) |resource, index| {
+        if (resource.blobId != null) return error.InvalidOriginalResource;
         if (std.ascii.startsWithIgnoreCase(resource.mimeType, "message/")) return error.UnsupportedRelatedType;
         if (resource.contentId == null and resource.contentLocation == null) return error.MissingRelatedIdentity;
         for (related[0..index]) |previous| {
@@ -2640,6 +2921,377 @@ test "wishlist: old primary draft operation wire keeps optional nulls absent" {
     try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
     draft.from = .{ .address = "SELF@example.test" };
     try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
+}
+
+test "UX backend: complete triage scopes pin IDs and selective undo preserves each message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/triage-scope", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const message = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.triage-scope", .account = account, .messageId = "demo-1", .scope = "message" }));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(message, "count", 0));
+    const conversation = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.triage-scope", .account = account, .messageId = "demo-1", .scope = "conversation" }));
+    try std.testing.expect(try j.boolean(conversation, "complete", false));
+    try std.testing.expectEqual(@as(i64, 3), try j.integer(conversation, "count", 0));
+    var request = try j.value(a, .{ .cmd = "mail.batch", .account = account, .scope = "conversation", .action = "archive" });
+    try request.object.put(a, "messageIds", j.get(conversation, "messageIds").?);
+    const applied = try session.dispatch(a, request);
+    try std.testing.expectEqual(@as(i64, 3), try j.integer(applied, "appliedCount", 0));
+    const token = j.text(applied, "undoToken");
+    try std.testing.expectError(error.UndoMessageNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "mail.undo", .account = account, .undoToken = token, .messageIds = .{"demo-4"} })));
+    const undone = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.undo", .account = account, .undoToken = token, .messageIds = .{"demo-1"} }));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(undone, "restoredCount", 0));
+    var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+    defer store.close();
+    try std.testing.expect(hasLabel(.{ .id = "", .threadId = "", .labels = store.fixtureRecord("demo-1").?.labels }, "INBOX"));
+    try std.testing.expect(!hasLabel(.{ .id = "", .threadId = "", .labels = store.fixtureRecord("demo-2").?.labels }, "INBOX"));
+}
+
+test "UX backend: advertised default fixture label IDs apply and remove without changing mail" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/default-label-ids", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const listed = try session.dispatch(a, try j.value(a, .{ .cmd = "labels.list", .account = account }));
+    var definition: ?Value = null;
+    for (try array(listed, "labels")) |label| if (std.mem.eql(u8, j.text(label, "type"), "user")) {
+        definition = label;
+        break;
+    };
+    const id = try j.required(definition orelse return error.MissingFixtureLabel, "id");
+    const name = try j.required(definition.?, "name");
+    const before = try j.decode(t.Message, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "demo-1" })));
+    for ([_][]const u8{ id, name }) |input| {
+        const applied = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.batch", .account = account, .messageIds = .{"demo-1"}, .action = "mark", .addLabels = .{input} }));
+        try std.testing.expectEqual(@as(i64, 1), try j.integer(applied, "appliedCount", 0));
+        const marked = try j.decode(t.Message, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "demo-1" })));
+        try std.testing.expect(hasLabel(marked, id));
+        try std.testing.expectEqualStrings(before.bodyText, marked.bodyText);
+        const removed = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.batch", .account = account, .messageIds = .{"demo-1"}, .action = "mark", .removeLabels = .{id} }));
+        try std.testing.expectEqual(@as(i64, 1), try j.integer(removed, "appliedCount", 0));
+        const restored = try j.decode(t.Message, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "demo-1" })));
+        try std.testing.expect(!hasLabel(restored, id));
+        try std.testing.expectEqualDeep(before.labels, restored.labels);
+        try std.testing.expectEqualStrings(before.bodyText, restored.bodyText);
+    }
+    try std.testing.expectError(error.LabelNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "mail.batch", .account = account, .messageIds = .{"demo-1"}, .action = "mark", .addLabels = .{"Label_not_advertised"} })));
+    const stats = try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account }));
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", -1));
+}
+
+test "UX backend: label colors round trip rename and reject invalid colors before mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/label-colors", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const colored = try session.dispatch(a, try j.value(a, .{ .cmd = "labels.color", .account = account, .labelId = "Label_demo", .operationId = "color-fixture", .color = .{ .backgroundColor = "#FB4C2F", .textColor = "#ffffff" } }));
+    try std.testing.expectEqualStrings("#fb4c2f", j.text(j.get(j.get(colored, "label").?, "color").?, "backgroundColor"));
+    const renamed = try session.dispatch(a, try j.value(a, .{ .cmd = "labels.rename", .account = account, .labelId = "Label_demo", .operationId = "color-rename", .name = "Renamed project" }));
+    try std.testing.expectEqualStrings("#fb4c2f", j.text(j.get(j.get(renamed, "label").?, "color").?, "backgroundColor"));
+    try std.testing.expectError(error.InvalidLabelColor, session.dispatch(a, try j.value(a, .{ .cmd = "labels.color", .account = account, .labelId = "Label_demo", .operationId = "bad-color", .color = .{ .backgroundColor = "#123456", .textColor = "#ffffff" } })));
+    try std.testing.expectError(error.SystemLabelImmutable, session.dispatch(a, try j.value(a, .{ .cmd = "labels.color", .account = account, .labelId = "INBOX", .operationId = "system-color", .color = .{ .backgroundColor = "#fb4c2f", .textColor = "#ffffff" } })));
+}
+
+test "UX backend: label state preserves exact mixed targets and resolves uncertain memberships" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/label-state", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const clear = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.batch", .account = account, .messageIds = .{ "demo-1", "demo-2" }, .action = "mark", .starred = false }));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.batch", .account = account, .messageIds = .{"demo-1"}, .action = "mark", .starred = true }));
+    const state_request = try j.value(a, .{ .cmd = "mail.label-state", .account = account, .messageIds = .{ "demo-1", "demo-2" } });
+    const mixed = try session.dispatch(a, state_request);
+    try std.testing.expect(try j.boolean(mixed, "complete", false));
+    try std.testing.expectEqual(@as(i64, 2), try j.integer(mixed, "count", 0));
+    var starred_count: i64 = -1;
+    for (try array(mixed, "labels")) |label| if (std.mem.eql(u8, j.text(label, "id"), "STARRED")) {
+        starred_count = try j.integer(label, "appliedCount", -1);
+    };
+    try std.testing.expectEqual(@as(i64, 1), starred_count);
+    try std.testing.expectError(error.MessageNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "mail.label-state", .account = account, .messageIds = .{ "demo-1", "missing-target" } })));
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        // Cache was not updated after an uncertain receipt, while fixture
+        // provider labels have a known one-starred result.
+        try store.put(.{ .id = "demo-1", .threadId = "thread", .labels = &.{} }, false);
+        for (store.state.undo) |*receipt| if (std.mem.eql(u8, receipt.token, j.text(clear, "undoToken"))) {
+            receipt.items[0].outcome = "unknown";
+        };
+        try store.save();
+    }
+    const resolved = try session.dispatch(a, state_request);
+    starred_count = -1;
+    for (try array(resolved, "labels")) |label| if (std.mem.eql(u8, j.text(label, "id"), "STARRED")) {
+        starred_count = try j.integer(label, "appliedCount", -1);
+    };
+    try std.testing.expectEqual(@as(i64, 1), starred_count);
+}
+
+test "UX backend: send grace cancel edit restart and uncertainty never duplicate submission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/send-grace", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    const account = "personal@example.com";
+    const created = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .subject = "Reviewed fixture", .bodyText = "First version" } }));
+    const draft_id = j.text(created, "id");
+    const queued = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = draft_id, .operationId = "grace-cancel", .delaySeconds = 30 }));
+    const queue_id = j.text(queued, "queueId");
+    try std.testing.expectEqual(@as(i64, 30000), try j.integer(queued, "dueAtMs", 0) - try j.integer(queued, "createdAtMs", 0));
+    try std.testing.expectError(error.QueueNotDue, session.dispatch(a, try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = queue_id })));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.cancel", .account = account, .queueId = queue_id }));
+    try std.testing.expectEqualStrings("canceled", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = queue_id })), "state"));
+    const edited_queue = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = draft_id, .operationId = "grace-edit", .delaySeconds = 30 }));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = draft_id, .draft = .{ .to = "peer@example.test", .subject = "Edited fixture", .bodyText = "Second version" } }));
+    try std.testing.expectEqualStrings("canceled", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.read", .account = account, .queueId = j.text(edited_queue, "queueId") })), "state"));
+    const ready = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = draft_id, .operationId = "grace-send", .delaySeconds = 0 }));
+    session.deinit();
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    try std.testing.expectEqualStrings("queued", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.read", .account = account, .queueId = j.text(ready, "queueId") })), "state"));
+    const process = try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = j.text(ready, "queueId") });
+    var invalid_wait = try j.copyObject(a, process);
+    try invalid_wait.object.put(a, "wait", .{ .string = "invalid" });
+    try std.testing.expectError(error.InvalidRequest, session.dispatch(a, invalid_wait));
+    try std.testing.expectEqualStrings("applied", j.text(try session.dispatch(a, process), "state"));
+    _ = try session.dispatch(a, process);
+    const stats = try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account }));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(stats, "fixtureSends", 0));
+    session.options.fixture_scenario = "unknown-send";
+    const next = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = draft_id, .operationId = "grace-unknown", .delaySeconds = 0 }));
+    const unknown_process = try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = j.text(next, "queueId") });
+    try std.testing.expectEqualStrings("unknown", j.text(try session.dispatch(a, unknown_process), "state"));
+    try std.testing.expectEqualStrings("unknown", j.text(try session.dispatch(a, unknown_process), "state"));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = draft_id })));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft_id, .queueId = j.text(next, "queueId"), .operationId = "grace-unknown" })));
+    const interrupted_draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "other@example.test", .bodyText = "A distinct approved draft" } }));
+    const interrupted = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(interrupted_draft, "id"), .operationId = "grace-interrupted", .delaySeconds = 0 }));
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, options);
+        defer store.close();
+        const claimed = try send_queue.find(&store, j.text(interrupted, "queueId"));
+        claimed.state = .submitting;
+        // Simulate termination immediately after the durable claim, before
+        // the ordinary send operation receipt can be written.
+        try store.save();
+    }
+    session.deinit();
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    try std.testing.expectError(error.QueueNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "queue.process", .account = "work@example.com", .queueId = j.text(interrupted, "queueId") })));
+    const fenced = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = j.text(interrupted, "queueId") }));
+    try std.testing.expectEqualStrings("submitting", j.text(fenced, "state"));
+    const inline_draft = try j.value(a, .{ .to = "other@example.test", .bodyText = "A distinct approved draft" });
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "mail.send", .account = account, .draft = inline_draft, .operationId = "grace-interrupted" })));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "mail.send", .account = account, .draft = inline_draft, .operationId = "different-operation-same-content" })));
+    try std.testing.expectError(error.OperationConflict, session.dispatch(a, try j.value(a, .{ .cmd = "mail.send", .account = account, .draft = .{ .to = "other@example.test", .bodyText = "Changed content" }, .operationId = "grace-interrupted" })));
+    try std.testing.expectError(error.SendAlreadySubmitted, session.dispatch(a, try j.value(a, .{ .cmd = "queue.cancel", .account = account, .queueId = j.text(interrupted, "queueId") })));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = j.text(interrupted_draft, "id") })));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+}
+
+test "UX backend: formatted forward preserves 32 CID resources and an ordinary PDF through MIME" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/cid-forward", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const mime = @import("mime.zig");
+    const png = @import("markdown_logo.zig").png;
+    const png_encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(png.len));
+    _ = std.base64.url_safe_no_pad.Encoder.encode(png_encoded, png);
+    const pdf = "%PDF-1.7\nFictional ordinary report.\n%%EOF\n";
+    const pdf_encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(pdf.len));
+    _ = std.base64.url_safe_no_pad.Encoder.encode(pdf_encoded, pdf);
+    var parts: [33]t.Attachment = undefined;
+    var html: std.ArrayList(u8) = .empty;
+    try html.appendSlice(a, "<html><body><p>Fictional inline report</p>");
+    for (parts[0..32], 0..) |*part, index| {
+        const cid = try std.fmt.allocPrint(a, "figure-{d}@example.test", .{index});
+        part.* = .{ .id = cid, .filename = try std.fmt.allocPrint(a, "figure-{d}.png", .{index}), .mimeType = "image/png", .size = png.len, .data = png_encoded, .contentId = cid, .disposition = "inline" };
+        try html.appendSlice(a, try std.fmt.allocPrint(a, "<img src=\"cid:{s}\" alt=\"Figure {d}\">", .{ cid, index }));
+    }
+    try html.appendSlice(a, "</body></html>");
+    parts[32] = .{ .id = "report-file", .filename = "report.pdf", .mimeType = "application/pdf", .size = pdf.len, .data = pdf_encoded, .disposition = "attachment" };
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        try store.putOutbox(.{ .id = "source-report", .threadId = "source-thread", .from = .{ .address = "peer@example.test" }, .to = &.{.{ .address = account }}, .subject = "Fictional inline report", .bodyText = "Fictional inline report", .bodyHtml = html.items, .attachments = &parts, .labels = &.{"INBOX"} });
+        try store.save();
+    }
+    const forwarded = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.forward", .account = account, .messageId = "source-report", .preserveFormatting = true, .bodyFormat = "markdown" }));
+    var draft = try decodeDraft(a, forwarded);
+    try std.testing.expectEqual(@as(usize, 32), draft.original.?.resources.len);
+    try std.testing.expectEqual(@as(usize, 1), draft.attachments.len);
+    try std.testing.expectEqualStrings("report.pdf", draft.attachments[0].filename);
+    draft.to = &.{.{ .address = "recipient@example.test" }};
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = draft.id, .draft = draft }));
+    const receipt = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft.id, .operationId = "cid-forward-send" }));
+    try std.testing.expectEqualStrings("applied", j.text(receipt, "outcome"));
+    const sent = try j.decode(t.Message, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = j.text(receipt, "messageId") })));
+    const parsed = try mime.parse(try mime.decodeBase64Url(sent.fixtureRaw.?, a), a);
+    try std.testing.expectEqual(@as(usize, 34), parsed.attachments.len); // 32 original images, one logo, one PDF.
+    for (parts[0..32]) |expected| {
+        var found = false;
+        for (parsed.attachments) |part| if (part.content_id.len > 0 and std.mem.eql(u8, try mime.contentId(part.content_id), expected.contentId.?)) {
+            found = true;
+            try std.testing.expectEqualSlices(u8, png, part.data);
+        };
+        try std.testing.expect(found);
+        try std.testing.expect(std.mem.indexOf(u8, parsed.body_html, expected.contentId.?) != null);
+    }
+    var pdf_found = false;
+    for (parsed.attachments) |part| if (std.mem.eql(u8, part.filename, "report.pdf")) {
+        pdf_found = true;
+        try std.testing.expectEqualSlices(u8, pdf, part.data);
+    };
+    try std.testing.expect(pdf_found);
+    var too_many = draft;
+    const ordinary: [17]t.Attachment = @splat(draft.attachments[0]);
+    too_many.attachments = &ordinary;
+    try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
+    too_many = draft;
+    const related: [33]t.Attachment = @splat(draft.original.?.resources[0]);
+    too_many.original.?.resources = &related;
+    try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
+}
+
+test "UX backend: large immutable attachments forward save send and reject wrong accounts or corruption" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/large-attachments", .{tmp.sub_path});
+    const input_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/report.bin", .{tmp.sub_path});
+    const output_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/saved.bin", .{tmp.sub_path});
+    const input = try tmp.dir.createFile(std.testing.io, "report.bin", .{ .read = true, .permissions = .fromMode(0o600) });
+    defer input.close(std.testing.io);
+    var chunk: [64 * 1024]u8 = undefined;
+    for (&chunk, 0..) |*byte, i| byte.* = @truncate(i);
+    for (0..64) |_| try input.writeStreamingAll(std.testing.io, &chunk);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const imported = try j.decode(t.Attachment, a, try session.dispatch(a, try j.value(a, .{ .cmd = "attachment.import", .account = account, .path = input_path })));
+    try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), imported.size);
+    try std.testing.expect(imported.blobId != null and imported.data.len == 0);
+    // Changing the user's source after import cannot change the approved bytes.
+    try input.setLength(std.testing.io, 0);
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        const original: t.Message = .{ .id = "large-original", .threadId = "original-thread", .from = .{ .address = "peer@example.test" }, .subject = "Large report", .bodyText = "Report attached.", .attachments = &.{imported} };
+        try store.put(original, true);
+        try store.put(.{ .id = original.id, .threadId = original.threadId, .subject = original.subject, .labels = &.{"INBOX"} }, false);
+        try std.testing.expectEqualStrings(imported.blobId.?, store.find(original.id).?.message.attachments[0].blobId.?);
+        try store.save();
+    }
+    const forwarded = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.forward", .account = account, .messageId = "large-original" }));
+    var draft = try decodeDraft(a, forwarded);
+    try std.testing.expectEqualStrings(imported.blobId.?, draft.attachments[0].blobId.?);
+    try std.testing.expectEqualStrings("", draft.threadId);
+    draft.to = &.{.{ .address = "recipient@example.test" }};
+    try std.testing.expectError(error.AttachmentHandleNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = "work@example.com", .draft = draft })));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = draft.id, .draft = draft }));
+    try std.testing.expectError(error.AttachmentInUse, session.dispatch(a, try j.value(a, .{ .cmd = "attachment.discard", .account = account, .blobId = imported.blobId.? })));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = "large-original", .attachmentId = imported.id, .path = output_path }));
+    try std.testing.expectError(error.PathAlreadyExists, session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = "large-original", .attachmentId = imported.id, .path = output_path })));
+    const output = try tmp.dir.openFile(std.testing.io, "saved.bin", .{});
+    defer output.close(std.testing.io);
+    try std.testing.expectEqual(@as(u64, imported.size), (try output.stat(std.testing.io)).size);
+    try std.testing.expectEqual(@as(u32, 0o600), (try output.stat(std.testing.io)).permissions.toMode() & 0o777);
+    try tmp.dir.createDir(std.testing.io, "save-target", .fromMode(0o700));
+    try tmp.dir.symLink(std.testing.io, "save-target", "save-link", .{ .is_directory = true });
+    const linked_parent = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/save-link/refused.bin", .{tmp.sub_path});
+    if (session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = "large-original", .attachmentId = imported.id, .path = linked_parent }))) |_| {
+        return error.ExpectedSymlinkRefusal;
+    } else |_| {}
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "save-target/refused.bin", .{ .follow_symlinks = false }));
+    try tmp.dir.symLink(std.testing.io, "saved.bin", "saved-link.bin", .{});
+    const linked_leaf = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/saved-link.bin", .{tmp.sub_path});
+    try std.testing.expectError(error.PathAlreadyExists, session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = "large-original", .attachmentId = imported.id, .path = linked_leaf })));
+    var saved_chunk: [64 * 1024]u8 = undefined;
+    for (0..64) |index| {
+        try std.testing.expectEqual(saved_chunk.len, try output.readPositional(std.testing.io, &.{&saved_chunk}, index * saved_chunk.len));
+        try std.testing.expectEqualSlices(u8, &chunk, &saved_chunk);
+    }
+    const sent = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft.id, .operationId = "large-fixture-send" }));
+    try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        const blob_name = try @import("attachment_blob.zig").filename(a, imported.blobId.?);
+        const corrupt = try store.dir.openFile(std.testing.io, blob_name, .{ .mode = .read_write, .follow_symlinks = false });
+        defer corrupt.close(std.testing.io);
+        try corrupt.writeStreamingAll(std.testing.io, "changed");
+    }
+    try std.testing.expectError(error.AttachmentChanged, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft.id, .operationId = "corrupt-fixture-send" })));
+    const stats = try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account }));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(stats, "fixtureSends", 0));
 }
 
 test "markdown mail: persisted sources recovery preview compose reply forward send and uncertainty" {

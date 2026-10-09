@@ -33,6 +33,32 @@ pub fn validateHeader(value: []const u8) !void {
     for (value) |c| if (c < 32 or c == 127) return error.HeaderInjection;
 }
 
+/// Human-editable RFC mailbox form. MIME serialization performs any wire
+/// encoding later; quoting here protects commas, comments and angle brackets
+/// while keeping Unicode display names intact through the composer parser.
+pub fn formatDisplay(allocator: std.mem.Allocator, address: []const u8, name: []const u8) ![]u8 {
+    try validateAddress(address);
+    try validateHeader(name);
+    if (name.len > 256) return error.RecipientTooLarge;
+    if (std.mem.trim(u8, name, " ").len == 0) return allocator.dupe(u8, address);
+    var quoted = name[0] == ' ' or name[name.len - 1] == ' ';
+    var extra: usize = 0;
+    for (name) |byte| {
+        if (std.mem.indexOfScalar(u8, "()<>[]:;@\\,.\"", byte) != null) quoted = true;
+        if (byte == '\\' or byte == '"') extra += 1;
+    }
+    if (!quoted) return std.fmt.allocPrint(allocator, "{s} <{s}>", .{ name, address });
+    const result = try allocator.alloc(u8, name.len + extra + address.len + 5);
+    var writer: std.Io.Writer = .fixed(result);
+    try writer.writeByte('"');
+    for (name) |byte| {
+        if (byte == '\\' or byte == '"') try writer.writeByte('\\');
+        try writer.writeByte(byte);
+    }
+    try writer.print("\" <{s}>", .{address});
+    return result;
+}
+
 /// ASCII addr-spec, including quoted local parts and address literals. SMTPUTF8
 /// mailboxes are rejected explicitly; UTF-8 display names are supported.
 pub fn validateAddress(address: []const u8) !void {
