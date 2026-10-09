@@ -108,6 +108,37 @@ class FormulaTests(unittest.TestCase):
         result = subprocess.run(["ruby", "-c"], input=rendered, text=True, capture_output=True)
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_same_version_replacement_increments_revision_once(self):
+        original = checksums()
+        previous = formula.render_formula(VERSION, original)
+        self.assertEqual(0, formula.formula_revision(VERSION, original, previous))
+        changed = dict(original)
+        changed[f"omagma-{VERSION}-linux-x86_64.tar.gz"] = "f" * 64
+        revision = formula.formula_revision(VERSION, changed, previous)
+        self.assertEqual(1, revision)
+        replacement = formula.render_formula(VERSION, changed, revision)
+        self.assertIn('\n  revision 1\n', replacement)
+        self.assertEqual(1, formula.formula_revision(VERSION, changed, replacement))
+        self.assertEqual(2, formula.formula_revision(VERSION, original, replacement))
+        result = subprocess.run(["ruby", "-c"], input=replacement, text=True, capture_output=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_new_version_resets_revision_and_downgrade_is_refused(self):
+        previous = formula.render_formula(VERSION, checksums(), revision=3)
+        self.assertEqual(0, formula.formula_revision("0.2.5", {}, previous))
+        self.assertEqual(0, formula.formula_revision(VERSION, checksums()))
+        with self.assertRaisesRegex(ValueError, "downgrade"):
+            formula.formula_revision("0.2.3", {}, previous)
+
+    def test_unknown_existing_formula_cannot_silently_reset_revision(self):
+        previous = formula.render_formula(VERSION, checksums(), revision=2)
+        for malformed in (previous.replace('  revision 2', '  revision "2"'),
+                          previous.replace('  revision 2', '  revision 2\n  revision 3'),
+                          previous.replace('  version "0.2.4"', '  version "unknown"'),
+                          previous.replace('omagma-0.2.4-linux-x86_64.tar.gz', 'unexpected.tar.gz')):
+            with self.subTest(malformed=malformed[:100]), self.assertRaises(ValueError):
+                formula.formula_revision(VERSION, checksums(), malformed)
+
 
 if __name__ == "__main__":
     unittest.main()

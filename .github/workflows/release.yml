@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      qualify_existing_version:
+        description: Run read-only qualification even when this version is already published
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,7 +32,13 @@ jobs:
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/publish_release.py --check
+          QUALIFY_EXISTING_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.qualify_existing_version }}
+        run: |
+          if [ "$QUALIFY_EXISTING_VERSION" = true ]; then
+            python3 scripts/publish_release.py --check --qualify-existing-version
+          else
+            python3 scripts/publish_release.py --check
+          fi
       - name: Verify a development branch without publishing
         if: github.ref != 'refs/heads/main'
         id: branch

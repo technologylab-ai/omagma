@@ -245,6 +245,45 @@ class ApiPolicy(unittest.TestCase):
 
 
 class ExistingPublisherGuards(unittest.TestCase):
+    def test_existing_version_qualification_is_read_only_and_opt_in(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import publish_release
+        for extra, needed in (([], False), (["--qualify-existing-version"], True)):
+            with self.subTest(extra=extra), \
+                    patch.object(sys, "argv", ["publish_release.py", "--check", *extra]), \
+                    patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": SHA,
+                                            "GITHUB_OUTPUT": ""}), \
+                    patch.object(publish_release, "package_versions", return_value=("8.7.6", "0.17.0")), \
+                    patch.object(publish_release, "find_release", return_value={"draft": False}), \
+                    patch.object(publish_release, "api") as api, \
+                    patch.object(publish_release.subprocess, "run") as publish, \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                publish_release.main()
+                self.assertIn(f'"needed": {str(needed).lower()}', output.getvalue())
+                api.assert_not_called()
+                publish.assert_not_called()
+
+    def test_existing_version_flag_cannot_enable_publication_or_skip_draft_review(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import publish_release
+        with patch.object(sys, "argv", ["publish_release.py", "--qualify-existing-version"]), \
+                patch.object(sys, "stderr", new_callable=io.StringIO), \
+                patch.object(publish_release, "find_release") as find, \
+                patch.object(publish_release.subprocess, "run") as publish:
+            with self.assertRaises(SystemExit) as caught:
+                publish_release.main()
+            self.assertEqual(caught.exception.code, 2)
+            find.assert_not_called()
+            publish.assert_not_called()
+        with patch.object(sys, "argv", ["publish_release.py", "--check", "--qualify-existing-version"]), \
+                patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": SHA}), \
+                patch.object(publish_release, "package_versions", return_value=("8.7.6", "0.17.0")), \
+                patch.object(publish_release, "find_release", return_value={"draft": True}), \
+                patch.object(publish_release.subprocess, "run") as publish:
+            with self.assertRaisesRegex(ValueError, "unpublished draft"):
+                publish_release.main()
+            publish.assert_not_called()
+
     def test_promotion_refuses_an_existing_release_draft_or_tag(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         import publish_release

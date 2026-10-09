@@ -85,13 +85,17 @@ def release_notes(version, zig, repo, root=ROOT):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Report whether this commit needs a release")
+    parser.add_argument("--qualify-existing-version", action="store_true",
+                        help="With --check only, request qualification even for a published version")
     args = parser.parse_args()
+    if args.qualify_existing_version and not args.check:
+        parser.error("--qualify-existing-version requires --check; publication cannot replace a release")
     version, zig = package_versions()
     tag = "v" + version
     repo, commit = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
     existing = find_release(repo, tag)
     if args.check:
-        needed = existing is None or existing["draft"]
+        needed = existing is None or args.qualify_existing_version
         if existing and existing["draft"]:
             raise ValueError("Version has an unpublished draft; inspect it before retrying")
         if os.environ.get("GITHUB_OUTPUT"):

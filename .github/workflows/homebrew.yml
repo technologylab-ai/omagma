@@ -52,6 +52,7 @@ jobs:
           import base64, json, os, re, urllib.request
           from pathlib import Path
           request = urllib.request.Request('https://api.github.com/meta', headers={'User-Agent': 'omagma-tap-update'})
+          request.add_unredirected_header('Authorization', 'Bearer ' + os.environ['GH_TOKEN'])
           with urllib.request.urlopen(request, timeout=30) as response:
               raw = response.read(1024 * 1024 + 1)
           if len(raw) > 1024 * 1024:

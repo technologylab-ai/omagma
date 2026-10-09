@@ -134,8 +134,38 @@ def verified_bundle(item, digest, directory, local_assets=None):
     return path
 
 
-def render_formula(version, sums):
+def formula_revision(version, sums, previous=None):
+    """Keep regenerated formulae stable and make same-version asset fixes upgradeable."""
     validate_version(version)
+    if previous is None:
+        return 0
+    if len(previous.encode()) > 65536:
+        raise ValueError("Existing formula exceeds its size bound")
+    versions = re.findall(r'^  version "([0-9]+\.[0-9]+\.[0-9]+)"$', previous, re.M)
+    if len(versions) != 1:
+        raise ValueError("Existing formula has an unknown version")
+    old_version = versions[0]
+    if tuple(map(int, old_version.split('.'))) > tuple(map(int, version.split('.'))):
+        raise ValueError("Refusing a formula version downgrade")
+    if old_version != version:
+        return 0
+    revisions = re.findall(r'^  revision (.*)$', previous, re.M)
+    if len(revisions) > 1 or (revisions and not re.fullmatch(r'[0-9]{1,6}', revisions[0])):
+        raise ValueError("Existing formula has an unknown revision")
+    revision = int(revisions[0]) if revisions else 0
+    entries = re.findall(r'^      url "([^"\n]+)"\n      sha256 "([0-9a-f]{64})"$', previous, re.M)
+    base = f"https://github.com/{REPOSITORY}/releases/download/v{version}/"
+    expected = {base + f"omagma-{version}-{os_name}-{arch}.tar.gz":
+                sums[f"omagma-{version}-{os_name}-{arch}.tar.gz"] for os_name, arch in PLATFORMS}
+    if len(entries) != 4 or len(dict(entries)) != 4 or set(dict(entries)) != set(expected):
+        raise ValueError("Existing formula has an unknown four-platform asset inventory")
+    return revision + (dict(entries) != expected)
+
+
+def render_formula(version, sums, revision=0):
+    validate_version(version)
+    if type(revision) is not int or not 0 <= revision <= 999999:
+        raise ValueError("Invalid formula revision")
     # Validate the complete inventory even when called directly by unit tests.
     parse_checksums("".join(f"{sums[name]}  {name}\n" for name in sorted(sums)).encode(), version)
     base = f"https://github.com/{REPOSITORY}/releases/download/v{version}"
@@ -151,6 +181,7 @@ def render_formula(version, sums):
         lines.append("  end")
         platform_blocks.append("\n".join(lines))
     platforms = "\n\n".join(platform_blocks)
+    revision_line = f"  revision {revision}\n" if revision else ""
     return f'''# Generated from verified published v{version} assets by scripts/homebrew_formula.py.
 # Regenerate for the next release; do not edit checksum entries by hand.
 require "json"
@@ -160,7 +191,7 @@ class Omagma < Formula
   desc "Account-separated Gmail terminal client and agent CLI"
   homepage "https://technologylab-ai.github.io/omagma/"
   version "{version}"
-  license "MIT"
+{revision_line}  license "MIT"
 
 {platforms}
 
@@ -240,7 +271,13 @@ def main():
             name = f"omagma-{version}-{os_name}-{arch}.tar.gz"
             path = verified_bundle(assets[name], sums[name], Path(temporary), args.asset_dir)
             verify_bundle(path, version, os_name, arch, sums[f"omagma-{os_name}-{arch}"])
-    formula = render_formula(version, sums)
+    previous = None
+    if args.output is not None:
+        if args.output.is_symlink():
+            raise ValueError("Refusing a symlink formula")
+        if args.output.exists():
+            previous = args.output.read_text()
+    formula = render_formula(version, sums, formula_revision(version, sums, previous))
     if args.output is None:
         print(formula, end="")
     else:

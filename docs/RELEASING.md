@@ -15,6 +15,12 @@ Bump `.version` in `build.zig.zon`, commit the change and push `main` to qualify
 
 Let qualification run while the user tests locally. After the user explicitly approves publication, dispatch **Publish qualified release** on `main` with the successful qualification run ID. It verifies the source revision, platform results and artifact provenance, then publishes those exact artifacts without rebuilding or repeating the long suites. The dispatch revision must match the qualified commit. Changes after qualification require a new run; expired, failed, foreign or incomplete runs cannot be promoted.
 
+A manual **Release** dispatch with `qualify_existing_version=true` can force
+full read-only qualification of an already-published package version. That
+option only builds and verifies a candidate; it neither
+changes the existing release nor authorizes publication. The publisher's
+existing-release and tag protections still apply.
+
 Publication creates only a new version and never replaces a release, draft or tag. A prerelease version remains a prerelease rather than becoming latest. Homebrew and documentation deployment follow publication.
 
 Review `docs/release-notes/VERSION.md` before requesting publication. The publisher uses that version's highlights and appends matching compiler, download and setup links; a generic description is available when no versioned notes exist. Release notes describe the complete current application, including its experimental terminal status.
