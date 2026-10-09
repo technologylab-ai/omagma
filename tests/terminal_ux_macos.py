@@ -21,6 +21,8 @@ from build_info import build_mode, read_build_info
 from terminal_integration import require
 from terminal_macos import DarwinTerminal
 from terminal_mouse import MouseTerminal
+import terminal_mouse
+import terminal_label_manager as label_manager
 import terminal_ux_adversarial as adversarial
 import terminal_ux_batch_compose as compose
 import terminal_ux_batch_files_contacts as files
@@ -56,6 +58,8 @@ CASES = (
     ("contact-second-address", helpers.contact_second_address),
     ("updates-card-guide", updates_ui.card_and_guide),
     ("updates-narrow", updates_ui.narrow),
+    ("label-color-held-read", label_manager.colors_held_read),
+    ("label-color-held-read-mouse", label_manager.colors_held_read_mouse),
     # The helper and adversarial cases use the same shared factory.
 )
 
@@ -85,6 +89,7 @@ def main():
     with patch.object(support, "MouseTerminal", DarwinMouseTerminal), \
             patch.object(helpers, "MouseTerminal", DarwinMouseTerminal), \
             patch.object(updates_ui, "Terminal", DarwinMouseTerminal), \
+            patch.object(terminal_mouse, "MouseTerminal", DarwinMouseTerminal), \
             tempfile.TemporaryDirectory(prefix="omagma-macos-ux-") as temporary:
         # /var on Darwin is a symlink; file browsing uses the real owned spelling.
         root = Path(temporary).resolve()

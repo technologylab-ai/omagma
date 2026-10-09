@@ -2906,6 +2906,12 @@ const App = struct {
             return;
         }
         const row = self.uxAt(self.ux_selected) orelse return;
+        if (kind == .label_colors) {
+            if (!self.canManageLabels() or self.labelManagerBusy()) return;
+            if (!same(self.label_manager_account.value(), self.account())) return error.WrongAccount;
+            self.preemptReadOnly();
+            if (self.job.future != null) return error.OperationPending;
+        }
         const value = try self.allocator.dupe(u8, row.value);
         defer self.allocator.free(value);
         const index = row.index;
@@ -10069,6 +10075,63 @@ test "label color UX: unconfirmed response protects the account until receipt lo
     app.account_index = 1;
     try std.testing.expect(app.canManageLabels());
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "label color UX: keyboard and mouse Save retain the chooser and receipt during an active write" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\",\"capabilities\":[\"mail-modify\"]}]", .{}));
+    app.mode = .label_manager;
+    try app.label_manager_account.set(a, app.account());
+    try app.replaceLabels("{\"ok\":true,\"data\":{\"labels\":[{\"id\":\"Label_a\",\"name\":\"Projects\",\"type\":\"user\"}]}}");
+    try app.openLabelColors();
+    try app.ux_query.set(a, "#a479e2");
+    app.ux_selected = 0;
+    app.ux_focus = 2;
+    try std.testing.expectEqualStrings("#a479e2", app.uxAt(0).?.value);
+    try app.label_operations[0].set(a, "existing-label-operation");
+    try app.label_errors[0].set(a, "existing-label-diagnostic");
+    app.label_write_page[0] = .delete;
+    app.label_color_write[0] = false;
+    app.job.kind = .label_write;
+    app.job.request = "existing-label-request";
+    app.job.future = .{ .any_future = null, .result = {} };
+    defer app.job.future = null;
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    for ([_]bool{ false, true }) |mouse| {
+        if (mouse) {
+            try app.drawUx(vx.window());
+            var clicked = false;
+            for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                if (hit.kind == .dialog_action and hit.index == 12) {
+                    try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .button = .left, .mods = .{}, .type = .press });
+                    clicked = true;
+                    break;
+                }
+            }
+            try std.testing.expect(clicked);
+        } else try app.onUxKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(UxOverlay.label_colors, app.ux_overlay);
+        try std.testing.expectEqualStrings("#a479e2", app.ux_query.value());
+        try std.testing.expectEqualStrings("#a479e2", app.uxAt(app.ux_selected).?.value);
+        try std.testing.expectEqual(@as(usize, 0), app.ux_selected);
+        try std.testing.expectEqual(@as(usize, 2), app.ux_focus);
+        try std.testing.expectEqualStrings("Label_a", app.ux_target.value());
+        try std.testing.expectEqualStrings("personal@example.com", app.ux_account.value());
+        try std.testing.expectEqualStrings("existing-label-operation", app.label_operations[0].value());
+        try std.testing.expectEqualStrings("existing-label-diagnostic", app.label_errors[0].value());
+        try std.testing.expectEqual(LabelManagerPage.delete, app.label_write_page[0]);
+        try std.testing.expect(!app.label_color_write[0]);
+        try std.testing.expectEqual(JobKind.label_write, app.job.kind);
+        try std.testing.expectEqualStrings("existing-label-request", app.job.request);
+        try std.testing.expect(app.job.future != null);
+        try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    }
 }
 
 test "cache contention retries locally and exhausted busy never becomes a network miss" {

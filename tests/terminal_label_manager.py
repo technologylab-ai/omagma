@@ -241,7 +241,7 @@ def readonly(binary, directory, capture_dir=None):
         terminal.close()
 
 
-def colors(binary, directory, capture_dir=None):
+def colors(binary, directory, capture_dir=None, *, held_read=False, mouse=False):
     source = fixture_setup(binary, directory)
     for account in ACCOUNTS:
         source.data[account]["baseline"]["labels"] = [
@@ -253,8 +253,12 @@ def colors(binary, directory, capture_dir=None):
         for account in ACCOUNTS:
             client.request("labels.list", account=account)
         before = client.request("mail.read", messageId="shared-msg-096", cacheOnly=True)
+    if held_read:
+        source.stage(ACCOUNTS[0], "baseline", held=True)
     terminal = start_ready(binary, directory, source)
     try:
+        if held_read:
+            source.wait_entered(terminal.process, pump=terminal.pump)
         open_manager(terminal)
         focus(terminal, TAB, "[n New]")
         focus(terminal, TAB, "[r Rename]")
@@ -277,13 +281,20 @@ def colors(binary, directory, capture_dir=None):
         terminal.until(lambda: "Filter: #a479e2▏" in terminal.text()
                        and "› Purple #a479e2" in terminal.text()
                        and "Black text on this label color" in terminal.text())
+        if held_read:
+            require(source.is_held() and "Refreshing cached mail" in terminal.screen.lines()[1],
+                    "opening the color chooser canceled the held read before Save")
         terminal.resize(40, 12)
         wait_ux_dialog(terminal, "Color · Projects", "[Save color]",
                        "Filter: #a479e2▏", "› Purple #a479e2", "Black text on this label color")
         capture(terminal, capture_dir, "label-color-narrow")
         focus(terminal, TAB, "› Purple #a479e2")
         focus(terminal, TAB, "[Save color]")
-        terminal.send(ENTER)
+        if mouse:
+            target = terminal.screen.locate("[Save color]")
+            click(terminal, target["column"], target["row"])
+        else:
+            terminal.send(ENTER)
         terminal.until(lambda: "Label color: applied" in terminal.text())
         labels = label_data(binary, directory, source)
         changed = next(label for label in labels if label["id"] == "Label_demo")
@@ -298,6 +309,12 @@ def colors(binary, directory, capture_dir=None):
             require(after["labels"] == before["labels"] and after["bodyText"] == before["bodyText"],
                     "definition color update changed message membership/content")
             require(client.request("cache.stats")["fixtureSends"] == 0, "color management sent mail")
+            operations = client.request("operation.list")["operations"]
+            require(len(operations) == 1 and operations[0]["kind"] == "labels.color"
+                    and operations[0]["outcome"] == "applied" and operations[0]["labelId"] == "Label_demo",
+                    "color Save did not apply exactly one operation to the selected label")
+        if held_read:
+            require(source.is_held(), "color Save required releasing the held provider read")
         terminal.finish()
         print("PASS label color: Tab/Enter, safe Back, named valid color, narrow controls, readable text pair, account and membership isolation")
     except Exception:
@@ -307,14 +324,25 @@ def colors(binary, directory, capture_dir=None):
         terminal.close()
 
 
+def colors_held_read(binary, directory, capture_dir=None):
+    colors(binary, directory, capture_dir, held_read=True)
+
+
+def colors_held_read_mouse(binary, directory, capture_dir=None):
+    colors(binary, directory, capture_dir, held_read=True, mouse=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
-    parser.add_argument("--case", choices=("collection", "empty-drafts", "readonly", "colors"), action="append")
+    cases = (("collection", collection), ("empty-drafts", empty_and_drafts), ("readonly", readonly),
+             ("colors", colors), ("colors-held-read", colors_held_read),
+             ("colors-held-read-mouse", colors_held_read_mouse))
+    parser.add_argument("--case", choices=tuple(name for name, _ in cases), action="append")
     parser.add_argument("--capture-dir", type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="omagma-label-manager-") as temporary:
-        for name, run in (("collection", collection), ("empty-drafts", empty_and_drafts), ("readonly", readonly), ("colors", colors)):
+        for name, run in cases:
             if not args.case or name in args.case:
                 run(args.binary.resolve(), Path(temporary) / name, args.capture_dir)
     return 0
