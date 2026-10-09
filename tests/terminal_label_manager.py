@@ -10,6 +10,7 @@ from terminal_dialog_controls import focused, focus, TAB, BACKTAB, ENTER
 from terminal_file_dialog import capture, fixture_setup, start_ready
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, start
+from terminal_ux_batch_support import wait_ux_dialog
 
 
 def label_data(binary, directory, source, account=ACCOUNTS[0]):
@@ -17,9 +18,35 @@ def label_data(binary, directory, source, account=ACCOUNTS[0]):
         return client.request("labels.list", account=account, cacheOnly=True)["labels"]
 
 
+def wait_manager(terminal, *content):
+    # The title arrives before the rows and controls on a fragmented VT frame.
+    terminal.until(lambda: all(value in terminal.text() for value in
+                               ("Manage labels", "[n New]", "[q Back]", *content))
+                   and any(value in terminal.text() for value in
+                           ("Tab Controls · Enter Open · c Color · Ctrl+R Refresh",
+                            "/ Filter · Tab · Enter · Esc", "Read-only · mail-modify needed")))
+
+
 def open_manager(terminal):
     terminal.send(b":labels\r")
-    terminal.until(lambda: "Manage labels" in terminal.text() and "[n New]" in terminal.text())
+    wait_manager(terminal)
+
+
+def wait_editor(terminal, title, *content):
+    terminal.until(lambda: all(value in terminal.text() for value in
+                               (title, "Name:", "[Save Ctrl+S]", "[Cancel]", "q is text", *content)))
+
+
+def wait_delete(terminal, name):
+    terminal.until(lambda: all(value in terminal.text() for value in
+                               ("Delete label?", f"Label: {name}", "Emails are kept",
+                                "[y Delete]", "Tab · Enter · Esc Cancel"))
+                   and focused(terminal, "[Cancel]"))
+
+
+def wait_colors(terminal):
+    wait_ux_dialog(terminal, "Color · Projects", "[Save color]", "· current")
+    terminal.until(lambda: focused(terminal, "[Back]"))
 
 
 def collection(binary, directory, capture_dir=None):
@@ -40,7 +67,7 @@ def collection(binary, directory, capture_dir=None):
         heading = terminal.screen.locate("LABELS")
         require(heading is not None, "LABELS heading absent")
         click(terminal, heading["column"] + 2, heading["row"])
-        terminal.until(lambda: "Manage labels" in terminal.text() and "Projects" in terminal.text())
+        wait_manager(terminal, "Projects")
         require("CATEGORY_UPDATES" not in terminal.text(), "system label leaked into collection dialog")
         capture(terminal, capture_dir, "label-manager-wide")
         for label in ("[n New]", "[r Rename]", "[c Color]", "[d Delete]", "[o Open]", "[q Back]"):
@@ -54,7 +81,7 @@ def collection(binary, directory, capture_dir=None):
         terminal.until(lambda: "Labels · staged changes" not in terminal.text())
         open_manager(terminal)
         terminal.send(b"n")
-        terminal.until(lambda: "New label" in terminal.text() and "Name:" in terminal.text())
+        wait_editor(terminal, "New label")
         terminal.send(b"qjk Collection\t")
         terminal.until(lambda: focused(terminal, "[Save Ctrl+S]"))
         terminal.send(ENTER)
@@ -64,7 +91,7 @@ def collection(binary, directory, capture_dir=None):
         created_id = created["id"]
         # Rename is prefilled; Ctrl+U clears the name as ordinary field editing.
         terminal.send(b"r")
-        terminal.until(lambda: "Rename label" in terminal.text() and "Was: qjk Collection" in terminal.text())
+        wait_editor(terminal, "Rename label", "Was: qjk Collection")
         capture(terminal, capture_dir, "label-manager-rename")
         terminal.send(b"\x01" + b"\x1b[3~" * len("qjk Collection") + b"qjk Renamed\t\r")
         terminal.until(lambda: "Label renamed" in terminal.text() and "qjk Renamed" in terminal.text())
@@ -87,15 +114,14 @@ def collection(binary, directory, capture_dir=None):
         terminal.send(b"/qjk Renamed\r")
         # Safe initial Enter cancels; repeat d must not delete.
         terminal.send(b"d")
-        terminal.until(lambda: "Delete label?" in terminal.text() and "Emails are kept" in terminal.text()
-                       and focused(terminal, "[Cancel]"))
+        wait_delete(terminal, "qjk Renamed")
         capture(terminal, capture_dir, "label-manager-delete-review")
         terminal.send(b"d\r")
         terminal.until(lambda: "Manage labels" in terminal.text() and "Delete label?" not in terminal.text())
         require(any(value["id"] == created_id for value in label_data(binary, directory, source)),
                 "Cancel/default Enter deleted the collection")
         terminal.send(b"d")
-        terminal.until(lambda: "Delete label?" in terminal.text())
+        wait_delete(terminal, "qjk Renamed")
         focus(terminal, TAB, "[y Delete]")
         terminal.send(ENTER)
         terminal.until(lambda: "Label deleted" in terminal.text() and "Delete label?" not in terminal.text())
@@ -153,7 +179,7 @@ def empty_and_drafts(binary, directory, capture_dir=None):
         focus(terminal, TAB, "[q Back]")
         focus(terminal, BACKTAB, "[n New]")
         terminal.send(ENTER)
-        terminal.until(lambda: "New label" in terminal.text())
+        wait_editor(terminal, "New label")
         terminal.send(b"q-not-saved\x1b")
         terminal.until(lambda: "Manage labels" in terminal.text() and "New label" not in terminal.text())
         terminal.send(b"q")
@@ -165,7 +191,7 @@ def empty_and_drafts(binary, directory, capture_dir=None):
         open_manager(terminal)
         terminal.until(lambda: "No custom labels" in terminal.text())
         terminal.send(b"n")
-        terminal.until(lambda: "New label" in terminal.text())
+        wait_editor(terminal, "New label")
         terminal.send(b"\x1b")
         terminal.until(lambda: "New label" not in terminal.text())
         terminal.send(b"q")
@@ -194,9 +220,11 @@ def readonly(binary, directory, capture_dir=None):
         terminal.until(lambda: "Read-only" in terminal.text())
         capture(terminal, capture_dir, "label-manager-readonly")
         terminal.send(b"nrdc")
+        # Observe the subsequent focus change before asserting that the prior
+        # mutation shortcuts were ignored; inspecting the old frame proves nothing.
+        focus(terminal, TAB, "[o Open]")
         require("New label" not in terminal.text() and "Rename label" not in terminal.text()
                 and "Delete label?" not in terminal.text(), "read-only account offered collection mutations")
-        focus(terminal, TAB, "[o Open]")
         focus(terminal, TAB, "[q Back]")
         terminal.send(ENTER)
         terminal.until(lambda: "Manage labels" not in terminal.text())
@@ -230,8 +258,7 @@ def colors(binary, directory, capture_dir=None):
         focus(terminal, TAB, "[r Rename]")
         focus(terminal, TAB, "[c Color]")
         terminal.send(ENTER)
-        terminal.until(lambda: "Color · Projects" in terminal.text() and "· current" in terminal.text()
-                       and "[Save color]" in terminal.text() and focused(terminal, "[Back]"))
+        wait_colors(terminal)
         capture(terminal, capture_dir, "label-color-safe-default")
         terminal.send(ENTER)
         terminal.until(lambda: "Color · Projects" not in terminal.text() and "Manage labels" in terminal.text())
@@ -239,13 +266,21 @@ def colors(binary, directory, capture_dir=None):
             require(client.request("operation.list")["operations"] == [],
                     "opening color management/default Back changed a label")
         terminal.send(b"c")
-        terminal.until(lambda: "Color · Projects" in terminal.text())
-        terminal.send(TAB + b"#a479e2")
-        terminal.until(lambda: "Purple #a479e2" in terminal.text())
+        wait_colors(terminal)
+        terminal.send(TAB)
+        terminal.until(lambda: focused(terminal, "Filter: ▏"))
+        terminal.send(b"#a479e2")
+        # Purple also exists in the unfiltered palette. Wait for the actual
+        # query and chosen row before resizing or moving focus.
+        terminal.until(lambda: "Filter: #a479e2▏" in terminal.text()
+                       and "› Purple #a479e2" in terminal.text()
+                       and "Black text on this label color" in terminal.text())
         terminal.resize(40, 12)
-        terminal.until(lambda: "[Save color]" in terminal.text() and "[Back]" in terminal.text())
+        wait_ux_dialog(terminal, "Color · Projects", "[Save color]",
+                       "Filter: #a479e2▏", "› Purple #a479e2", "Black text on this label color")
         capture(terminal, capture_dir, "label-color-narrow")
-        focus(terminal, TAB + TAB, "[Save color]")
+        focus(terminal, TAB, "› Purple #a479e2")
+        focus(terminal, TAB, "[Save color]")
         terminal.send(ENTER)
         terminal.until(lambda: "Label color: applied" in terminal.text())
         labels = label_data(binary, directory, source)
