@@ -17,7 +17,7 @@ from terminal_integration import ACCOUNTS, FIXTURES, ROOT, Client, require
 from terminal_pty import wait_saved_compose
 from terminal_ux_batch_support import (TAB, ENTER, ESC, activate_button, capture,
     command, compose, diagnose, focused, focus_button, no_writes, read_draft, run_cases,
-    start, stats)
+    start, stats, wait_send_review, wait_ux_dialog)
 
 
 def beginning(body):
@@ -58,7 +58,7 @@ def named_contact_setup(binary, directory, display_name):
 
 def send_review(terminal):
     terminal.send(b"\x13")
-    terminal.until(lambda: "Review send" in terminal.text() and "[Back]" in terminal.text())
+    wait_send_review(terminal)
 
 
 def countdown_active(terminal):
@@ -86,7 +86,7 @@ def sender_completion_undo(binary, directory, capture_dir=None):
         terminal.send(TAB * 3 + b"Completion and undo fixture" + TAB + b"Base note." + ESC)
         terminal.gap(.08)
         command(terminal, "sender")
-        terminal.until(lambda: "sender" in terminal.text().lower() and "alias@example.test" in terminal.text())
+        wait_ux_dialog(terminal, "Choose sender", "[Use]", "alias@example.test")
         capture(terminal, capture_dir, "ux-sender-chooser")
         terminal.send(b"\x0e")  # Ctrl+N chooses the alias; Filter j stays data.
         activate_button(terminal, "[Use]")

@@ -17,7 +17,8 @@ import shutil
 from terminal_cache import ProviderFixture
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_ux_batch_support import (TAB, BACKTAB, ENTER, ESC, activate_button,
-    capture, command, diagnose, focus_button, no_writes, read_mail, run_cases, start)
+    capture, command, diagnose, focus_button, no_writes, read_mail, run_cases, start,
+    wait_ux_dialog)
 
 MARKER = "Owned UX current message 096."
 TOKEN = "needleUX"
@@ -81,7 +82,7 @@ def palette(binary, directory, capture_dir=None):
     terminal = start(binary, directory, source.options(), MARKER)
     try:
         command(terminal, "actions")
-        terminal.until(lambda: "Actions" in terminal.text() and "[Back]" in terminal.text())
+        wait_ux_dialog(terminal, "Actions", "[Run]")
         require(ACCOUNTS[0] in terminal.text(), "palette omitted its account context")
         terminal.send(b"qjk-unmatched-query")
         terminal.until(lambda: "qjk-unmatched-query" in terminal.text())
@@ -91,14 +92,14 @@ def palette(binary, directory, capture_dir=None):
         require(ACCOUNTS[0] in terminal.screen.lines()[0],
                 "a printable account number in the palette changed its pinned account")
         terminal.resize(40, 12)
-        terminal.until(lambda: "[Back]" in terminal.text() and "Actions" in terminal.text())
+        wait_ux_dialog(terminal, "Actions", "[Run]")
         capture(terminal, capture_dir, "ux-palette-40x12")
         activate_button(terminal, "[Back]")
         terminal.until(lambda: "Actions" not in terminal.text())
         terminal.resize(160, 40)
         terminal.until(lambda: MARKER in terminal.text())
         command(terminal, "actions")
-        terminal.until(lambda: "Actions" in terminal.text())
+        wait_ux_dialog(terminal, "Actions", "[Run]")
         terminal.send(b"theme")
         terminal.until(lambda: "theme" in terminal.text().lower() and "[Run]" in terminal.text())
         focus_button(terminal, "[Run]")
@@ -122,11 +123,11 @@ def palette_mono(binary, directory, capture_dir=None):
     terminal = start(binary, directory, source.options(), MARKER, mono=True)
     try:
         command(terminal, "actions")
-        terminal.until(lambda: "Actions" in terminal.text() and "[Back]" in terminal.text())
+        wait_ux_dialog(terminal, "Actions", "[Run]")
         terminal.send(b"qjk2")
         terminal.until(lambda: "qjk2" in terminal.text())
         terminal.resize(40, 12)
-        terminal.until(lambda: "[Back]" in terminal.text())
+        wait_ux_dialog(terminal, "Actions", "[Run]")
         focus_button(terminal, "[Back]")
         position = terminal.screen.locate("[Back]")
         require(terminal.screen.reverse_cells[position["row"]][position["column"]],
@@ -242,16 +243,22 @@ def history(binary, directory, capture_dir=None):
         terminal.send(b"q")
         terminal.until(lambda: "Gmail search" not in terminal.screen.lines()[0])
         command(terminal, "search-history")
-        terminal.until(lambda: "Search history" in terminal.text() and "subject:personal" in terminal.text())
-        require("Cache" in terminal.text() and "Gmail" in terminal.text(),
-                "history erased search scope or conflated cache and server searches")
+        # Darwin may deliver a render across several PTY reads. Observe the
+        # complete chooser before inspecting its selected detail, then choose
+        # both entries so the mailbox's Cache/Gmail help cannot satisfy this
+        # account-history scope oracle.
+        wait_ux_dialog(terminal, "Search history", "[Open]", "Gmail · subject:personal")
+        terminal.send(b"\x0e")
+        terminal.until(lambda: "Cache · subject:personal" in terminal.text())
+        terminal.send(b"\x10")
+        terminal.until(lambda: "Gmail · subject:personal" in terminal.text())
         capture(terminal, capture_dir, "ux-account-search-history")
         activate_button(terminal, "[Back]")
         terminal.until(lambda: "Search history" not in terminal.text())
         terminal.send(b"2")
         terminal.until(lambda: ACCOUNTS[1] in terminal.screen.lines()[0])
         command(terminal, "search-history")
-        terminal.until(lambda: "Search history" in terminal.text())
+        wait_ux_dialog(terminal, "Search history", "[Open]", "No matching actions or entries")
         require("subject:personal" not in terminal.text(), "search history leaked another account's queries")
         activate_button(terminal, "[Back]")
         no_writes(binary, directory, source.options())

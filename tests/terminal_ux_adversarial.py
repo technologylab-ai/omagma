@@ -20,7 +20,7 @@ from terminal_file_dialog import FIRST, fixture_setup
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, point
 from terminal_ux_batch_support import (ESC, ENTER, TAB, command, compose, diagnose,
-    run_cases, start)
+    run_cases, start, wait_ux_dialog)
 
 
 SUBJECT = "Independent interrupted queue fixture"
@@ -234,10 +234,9 @@ def queued_context_isolation(binary, directory, capture_dir=None):
             require("Queued send paused" not in terminal.text(),
                     "second draft retained the previous draft's paused-send hint")
             command(terminal, "actions")
-            terminal.until(lambda: "Actions" in terminal.text() and "[Back]" in terminal.text())
+            wait_ux_dialog(terminal, "Actions", "[Run]")
             terminal.send(b"pending send")
-            terminal.until(lambda: "pending send" in terminal.text())
-            terminal.gap(.1)
+            wait_ux_dialog(terminal, "Actions", "[Run]", "pending send", "No matching actions or entries")
             require("Resume pending send" not in terminal.text()
                     and "Cancel pending send" not in terminal.text(),
                     "second draft exposes the previous draft's recovery actions")

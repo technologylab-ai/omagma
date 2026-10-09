@@ -102,6 +102,19 @@ def command(terminal, value):
     terminal.send(b":" + value.encode() + ENTER)
 
 
+def wait_ux_dialog(terminal, title, primary, *content, cancel="[Back]", filtered=True):
+    """Observe a chooser's contents, controls and final hint across PTY reads."""
+    footer = "Type filter" if filtered else "Tab Controls"
+    expected = (title, primary, cancel, footer, *content)
+    terminal.until(lambda: all(value in terminal.text() for value in expected))
+
+
+def wait_send_review(terminal):
+    terminal.until(lambda: "Review send" in terminal.text()
+                   and "[Back]" in terminal.text() and "[y Send]" in terminal.text()
+                   and "Tab Controls · Enter Activate · j/k Scroll · Esc/q Back" in terminal.text())
+
+
 def focused(terminal, label):
     position = terminal.screen.locate(label)
     if position is None:

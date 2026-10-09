@@ -17,7 +17,7 @@ from terminal_mouse import MouseTerminal
 from terminal_ux_batch_navigation import MARKER, fixtures
 from terminal_ux_batch_support import (TAB, ENTER, ESC, FocusScreen,
     activate_button, capture, command, diagnose, no_writes, read_draft,
-    run_cases, start)
+    run_cases, start, wait_send_review, wait_ux_dialog)
 
 
 def search(terminal, query, scope):
@@ -41,7 +41,7 @@ def saved_rows(directory):
 
 def reopen_search(terminal, name, query, scope, account):
     command(terminal, "saved-searches")
-    terminal.until(lambda: "Saved searches" in terminal.text() and name in terminal.text())
+    wait_ux_dialog(terminal, "Saved searches", "[Open]", name)
     terminal.send(name.encode())  # Filter leaves exactly the named entry.
     title = "Cache" if scope == "cache" else "Gmail"
     terminal.until(lambda: f"{title} · {query}" in terminal.text())
@@ -71,7 +71,7 @@ def saved_searches(binary, directory, capture_dir=None):
     try:
         search(terminal, cache_query, "cache")
         command(terminal, "save-search")
-        terminal.until(lambda: "Save search · name" in terminal.text() and "[Save]" in terminal.text())
+        wait_ux_dialog(terminal, "Save search · name", "[Save]", filtered=False)
         terminal.send(cache_name.encode())
         activate_button(terminal, "[Save]")
         terminal.until(lambda: "Search saved for this account" in terminal.text())
@@ -84,8 +84,7 @@ def saved_searches(binary, directory, capture_dir=None):
         terminal.send(b"2")
         terminal.until(lambda: ACCOUNTS[1] in terminal.screen.lines()[0])
         command(terminal, "saved-searches")
-        terminal.until(lambda: "Saved searches" in terminal.text()
-                       and "No matching actions or entries" in terminal.text())
+        wait_ux_dialog(terminal, "Saved searches", "[Open]", "No matching actions or entries")
         require(cache_name not in terminal.text() and gmail_name not in terminal.text(),
                 "another account displayed the personal saved searches")
         activate_button(terminal, "[Back]")
@@ -170,8 +169,7 @@ def contact_second_address(binary, directory, capture_dir=None):
         terminal.send(b"a")
         terminal.until(lambda: "Choose recipient" in terminal.text() and display_name in terminal.text())
         terminal.send(ENTER)
-        terminal.until(lambda: "Choose contact address" in terminal.text()
-                       and first in terminal.text() and second in terminal.text())
+        wait_ux_dialog(terminal, "Choose contact address", "[Use]", first, second)
         terminal.send(b"\x0e")  # Ctrl+N explicitly chooses the second address.
         capture(terminal, capture_dir, "ux-contact-second-address")
         activate_button(terminal, "[Use]")
@@ -181,7 +179,7 @@ def contact_second_address(binary, directory, capture_dir=None):
         terminal.send(b"i" + TAB * 2 + b"Second contact address" + TAB + b"Fixture note." + ESC)
         terminal.gap(.08)
         terminal.send(b"\x13")  # Save locally and review; never confirm send.
-        terminal.until(lambda: "Review send" in terminal.text() and "[Back]" in terminal.text())
+        wait_send_review(terminal)
         draft = read_draft(binary, directory, extra)
         require([value["address"] for value in draft["to"]] == ["recipient@example.test"],
                 "contact picker altered the existing To recipient")
@@ -198,7 +196,8 @@ def contact_second_address(binary, directory, capture_dir=None):
 
         command(terminal, "add-contact")
         terminal.until(lambda: "Edit contact" in terminal.screen.lines()[0]
-                       and "Name:" in terminal.text() and "Email:" in terminal.text())
+                       and "Name:" in terminal.text() and "Email:" in terminal.text()
+                       and "[Cancel]" in terminal.text())
         require(body["from"]["name"] in terminal.text() and body["from"]["address"] in terminal.text(),
                 "add sender to contacts did not prefill the focused sender")
         capture(terminal, capture_dir, "ux-sender-contact-prefill")

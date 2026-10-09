@@ -17,7 +17,8 @@ from terminal_mouse import click, point
 from terminal_pty import wait_saved_compose
 from terminal_reader import reader_contains
 from terminal_ux_batch_support import (TAB, ENTER, ESC, activate_button, capture,
-    command, compose, diagnose, no_writes, read_draft, run_cases, start)
+    command, compose, diagnose, no_writes, read_draft, run_cases, start,
+    wait_send_review, wait_ux_dialog)
 
 
 def action_label(terminal, word):
@@ -93,18 +94,19 @@ def multi_select(binary, directory, capture_dir=None):
         terminal.send(b"\x15" + str(other_folder).encode() + b"/" + ENTER)
         terminal.until(lambda: second_name in terminal.text() and "1 selected" in terminal.text())
         terminal.send(TAB * 4 + b" ")
-        terminal.until(lambda: "2 selected" in terminal.text() and "4.2 MB combined" in terminal.text())
+        terminal.until(lambda: "2 selected" in terminal.text() and "4.2 MB combined" in terminal.text()
+                       and "[x] " + second_name in terminal.text())
         click(terminal, *point(terminal, "[x] " + second_name))
-        terminal.until(lambda: "1 selected" in terminal.text())
+        terminal.until(lambda: "1 selected" in terminal.text() and "[ ] " + second_name in terminal.text())
         click(terminal, *point(terminal, "[ ] " + second_name))
-        terminal.until(lambda: "2 selected" in terminal.text())
+        terminal.until(lambda: "2 selected" in terminal.text() and "[x] " + second_name in terminal.text())
         capture(terminal, capture_dir, "ux-outgoing-multi-select")
         label = action_label(terminal, "Attach")
         activate_button(terminal, label)
         terminal.until(lambda: "Attachments 2" in terminal.text() and "Path:" not in terminal.text())
         wait_saved_compose(terminal, 2)
         terminal.send(b"\x13")
-        terminal.until(lambda: "Review send" in terminal.text())
+        wait_send_review(terminal)
         retained = read_draft(binary, directory, source.options())
         require({file["filename"] for file in retained["attachments"]} == set(expected),
                 "multi-select changed a literal filename or selected a different file set")
@@ -150,7 +152,7 @@ def multi_preflight(binary, directory, capture_dir=None):
         click(terminal, *point(terminal, "[x] z-large.bin"))
         terminal.until(lambda: "1 selected" in terminal.text())
         activate_button(terminal, "[Attach]")
-        terminal.until(lambda: "Attachments 1" in terminal.text() and "Path:" not in terminal.text())
+        wait_saved_compose(terminal, 1)
         retained = read_draft(binary, directory, source.options())
         require([file["filename"] for file in retained["attachments"]] == ["a-small.txt"],
                 "correcting a failed selection changed its remaining checked file")
@@ -238,7 +240,7 @@ def large_file(binary, directory, capture_dir=None):
         terminal.send(ESC)
         terminal.gap(.1)
         terminal.send(b"\x13")
-        terminal.until(lambda: "Review send" in terminal.text())
+        wait_send_review(terminal)
         retained = read_draft(binary, directory, source.options())
         require(retained["attachments"] == [], "oversized file was silently retained/truncated")
         require(retained["subject"] == "Oversized attachment fixture", "oversized refusal discarded the note")
@@ -296,17 +298,17 @@ def discard_draft(binary, directory, capture_dir=None):
     try:
         compose(terminal, subject="Discard only this local draft")
         terminal.send(b"\x13")
-        terminal.until(lambda: "Review send" in terminal.text())
+        wait_send_review(terminal)
         terminal.send(ENTER)
         terminal.until(lambda: "Review send" not in terminal.text())
         before = read_draft(binary, directory, extra)
         command(terminal, "discard-draft")
-        terminal.until(lambda: "Discard" in terminal.text() and "[Cancel]" in terminal.text())
+        wait_ux_dialog(terminal, "Discard local draft", "[Discard]", cancel="[Cancel]", filtered=False)
         terminal.send(ENTER)
         terminal.until(lambda: "[Cancel]" not in terminal.text() and "Subject:" in terminal.text())
         require(read_draft(binary, directory, extra)["id"] == before["id"], "default discard Enter deleted the draft")
         command(terminal, "discard-draft")
-        terminal.until(lambda: "Discard" in terminal.text() and "[Cancel]" in terminal.text())
+        wait_ux_dialog(terminal, "Discard local draft", "[Discard]", cancel="[Cancel]", filtered=False)
         capture(terminal, capture_dir, "ux-local-draft-discard-review")
         activate_button(terminal, action_label(terminal, "Discard"))
         terminal.until(lambda: "Subject:" not in terminal.text() and "[Cancel]" not in terminal.text())

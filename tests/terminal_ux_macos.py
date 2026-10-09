@@ -83,6 +83,7 @@ def main():
                "cases": [], "passed": False}
     args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with patch.object(support, "MouseTerminal", DarwinMouseTerminal), \
+            patch.object(helpers, "MouseTerminal", DarwinMouseTerminal), \
             patch.object(updates_ui, "Terminal", DarwinMouseTerminal), \
             tempfile.TemporaryDirectory(prefix="omagma-macos-ux-") as temporary:
         # /var on Darwin is a symlink; file browsing uses the real owned spelling.

@@ -27,7 +27,8 @@ def capture(terminal, directory, name):
 
 
 def wait_card(terminal):
-    terminal.until(lambda: terminal.screen.locate("Upgrade available") is not None)
+    terminal.until(lambda: all(value in terminal.text() for value in
+                   ("Upgrade available", "0.2.8", "[How to update]", "[Dismiss]")))
     require("0.2.8" in terminal.text(), "fixture newer release is not visible")
     require("Operation failed" not in terminal.text(), "release load leaked a mail error")
 
@@ -37,8 +38,8 @@ def wait_guide(terminal):
     terminal.until(lambda: "omarchy plugin update" in terminal.text())
     # The title and command arrive before the footer in a large terminal frame.
     # Complete that actual frame before querying its button hit targets.
-    terminal.until(lambda: terminal.screen.locate("[Copy agent request]") is not None)
-    terminal.gap(.12)
+    terminal.until(lambda: "[Copy agent request]" in terminal.text()
+                   and "[Back]" in terminal.text() and "Esc/q Back" in terminal.text())
 
 
 def card_and_guide(binary, directory, capture_dir):
@@ -81,7 +82,7 @@ def card_and_guide(binary, directory, capture_dir):
         terminal.send(b"\t\r")
         terminal.until(lambda: "Copied to terminal clipboard" in terminal.text())
         terminal.send(b"\t\r")
-        terminal.until(lambda: terminal.screen.locate("Upgrade available") is not None)
+        wait_card(terminal)
         require(terminal.process.poll() is None, "Back exited the TUI")
 
         # Both card buttons and every guide control accept real SGR mouse hits.
@@ -97,7 +98,8 @@ def card_and_guide(binary, directory, capture_dir):
         # Compose has no card and no intercepted editing Tab/typing. Closing the
         # draft restores the still-available notification.
         terminal.send(b"c")
-        terminal.until(lambda: "Subject:" in terminal.text() and "Compose" in terminal.text())
+        terminal.until(lambda: "Subject:" in terminal.text() and "Compose" in terminal.text()
+                       and "Ctrl+S Review" in terminal.screen.lines()[-2])
         require(terminal.screen.locate("Upgrade available") is None,
                 "upgrade card distracted during composing")
         terminal.send(b"\x1b")
@@ -137,12 +139,14 @@ def narrow(binary, directory, capture_dir):
         require(terminal.screen.locate("Upgrade available") is None,
                 "narrow terminal used an obstructing card")
         terminal.send(b"\t\r")
-        terminal.until(lambda: terminal.screen.locate("Updates · this installation") is not None)
+        terminal.until(lambda: "Updates · this installation" in terminal.text()
+                       and "[Back]" in terminal.text())
         capture(terminal, capture_dir, "updates-narrow")
         terminal.send(b"\x1b")
         terminal.until(lambda: terminal.screen.locate("[Updates]") is not None)
         click(terminal, *point(terminal, "[Updates]"))
-        terminal.until(lambda: terminal.screen.locate("Updates · this installation") is not None)
+        terminal.until(lambda: "Updates · this installation" in terminal.text()
+                       and "[Back]" in terminal.text())
         terminal.send(b"q")
         terminal.until(lambda: terminal.screen.locate("[Updates]") is not None)
         terminal.finish()
