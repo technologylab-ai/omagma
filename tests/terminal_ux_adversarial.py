@@ -19,6 +19,8 @@ from terminal_composer_workflow import setup
 from terminal_file_dialog import FIRST, fixture_setup
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, point
+from terminal_pty import wait_saved_compose
+from terminal_reader import reader_contains
 from terminal_ux_batch_support import (ESC, ENTER, TAB, command, compose, diagnose,
     run_cases, start, wait_ux_dialog)
 
@@ -309,10 +311,11 @@ def unread_mailbox_scope(binary, directory, capture_dir=None):
         try:
             terminal.until(lambda: terminal.screen.locate(folder) is not None)
             click(terminal, *point(terminal, folder))
-            terminal.until(lambda: marker(initial) in terminal.text())
+            terminal.until(lambda: folder in terminal.screen.lines()[0]
+                           and reader_contains(terminal.screen, marker(initial)))
             for action, number in zip(("next-unread", "next-unread", "previous-unread"), expected):
                 command(terminal, action)
-                terminal.until(lambda: marker(number) in terminal.text())
+                terminal.until(lambda: reader_contains(terminal.screen, marker(number)))
                 require("AnchorNotCached" not in terminal.text(),
                         f"{folder} unread search returned a target outside its displayed mailbox")
             with Client(binary, case, extra=extra) as client:
@@ -376,11 +379,15 @@ def unread_body_query(binary, directory, capture_dir=None):
         with Client(binary, directory, extra=extra) as client:
             retained_matches(client)
         terminal.send(b"/" + query.encode() + ENTER)
-        terminal.until(lambda: "Cache search" in terminal.text() and marker(96) in terminal.text())
+        terminal.until(lambda: "Cache search" in terminal.screen.lines()[0]
+                       and reader_contains(terminal.screen, marker(96)))
         terminal.gap(.2)
         for action, number in (("next-unread", 93), ("next-unread", 63), ("previous-unread", 93)):
             command(terminal, action)
-            terminal.until(lambda: marker(number) in terminal.text())
+            # The same body is already visible in neighboring list snippets.
+            # Wait for the actual reader target before issuing another command
+            # that could preempt the still-running unread lookup.
+            terminal.until(lambda: reader_contains(terminal.screen, marker(number)))
             require("AnchorNotCached" not in terminal.text(),
                     "body-query unread navigation failed to reveal its anchored target")
         with Client(binary, directory, extra=extra) as client:
@@ -497,7 +504,7 @@ def checked_files_enter(binary, directory, capture_dir=None):
         # Enter activates the current file row, not the Attach button. The
         # explicit checked set must still win over the highlighted filename.
         terminal.send(ENTER)
-        terminal.until(lambda: "Attachments 2" in terminal.text() and "Path:" not in terminal.text())
+        wait_saved_compose(terminal, 2)
         with Client(binary, directory, extra=extra) as client:
             drafts = client.request("draft.list")["drafts"]
             require(len(drafts) == 1, "file-row Enter created another draft")
