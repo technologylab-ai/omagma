@@ -947,31 +947,13 @@ pub const Session = struct {
         if (undoing) return batch.undo(context, a, req);
         // Resolve names before recording the inverse: receipts must contain
         // provider IDs, so renamed labels do not change what undo restores.
-        const available = if (s.options.fixtures) j.get(batch_remote.source, "labels") else j.get(try @import("gmail.zig").dispatchAuthorized(s.io, a, address, &.{"mail-read"}, batch_remote.transport.?, "labels.list", req), "labels");
-        for ([_][]const []const u8{ delta.add, delta.remove }, 0..) |values, list_index| {
-            const resolved = try a.alloc([]const u8, values.len);
-            for (values, resolved) |label, *id| {
-                if (s.options.fixtures) {
-                    id.* = try fixtureLabel(batch_remote.source, label);
-                    continue;
-                }
-                id.* = label;
-                for ([_][]const u8{ "INBOX", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT" }) |system| if (std.ascii.eqlIgnoreCase(label, system)) {
-                    id.* = system;
-                    break;
-                };
-                if (available) |labels_value| {
-                    for (try valueArray(labels_value)) |item| {
-                        if (std.mem.eql(u8, label, j.text(item, "name")) or std.mem.eql(u8, label, j.text(item, "id"))) id.* = try j.required(item, "id");
-                    }
-                } else if (std.mem.eql(u8, label, "Projects")) {
-                    id.* = "Label_demo";
-                }
-                if (id.len == 0 or id.len > 256) return error.InvalidLabel;
-                try recipients.validateHeader(id.*);
+        if (s.options.fixtures) {
+            for ([_][]const []const u8{ delta.add, delta.remove }, 0..) |values, list_index| {
+                const resolved = try a.alloc([]const u8, values.len);
+                for (values, resolved) |label, *id| id.* = try fixtureLabel(batch_remote.source, label);
+                if (list_index == 0) delta.add = resolved else delta.remove = resolved;
             }
-            if (list_index == 0) delta.add = resolved else delta.remove = resolved;
-        }
+        } else delta = try @import("gmail.zig").resolveBatchLabels(a, batch_remote.transport.?, delta);
         for (delta.add) |added| for (delta.remove) |removed| if (std.mem.eql(u8, added, removed)) return error.ConflictingLabels;
         return batch.run(context, a, req, delta);
     }

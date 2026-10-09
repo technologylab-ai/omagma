@@ -33,6 +33,26 @@ pub fn requestColor(a: std.mem.Allocator, request: j.Value) !?t.LabelColor {
     const value = j.get(request, "color") orelse return null;
     return try color(j.decode(t.LabelColor, a, value) catch return error.InvalidLabelColor);
 }
+
+fn providerHex(value: j.Value) ?[]const u8 {
+    if (value != .string) return null;
+    const text = value.string;
+    if (text.len != 7 or text[0] != '#') return null;
+    for (text[1..]) |byte| if (!std.ascii.isHex(byte)) return null;
+    return text;
+}
+
+/// Provider colors are optional display metadata, not a requested mutation.
+/// Preserve usable RGB pairs, including legacy values outside the write palette;
+/// unavailable or malformed colors must not invalidate the label's identity.
+pub fn providerColor(label: j.Value) ?t.LabelColor {
+    const value = j.get(label, "color") orelse return null;
+    if (value != .object) return null;
+    return .{
+        .backgroundColor = providerHex(j.get(value, "backgroundColor") orelse return null) orelse return null,
+        .textColor = providerHex(j.get(value, "textColor") orelse return null) orelse return null,
+    };
+}
 pub fn sameColor(left: ?t.LabelColor, right: ?t.LabelColor) bool {
     if (left) |l| {
         const r = right orelse return false;

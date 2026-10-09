@@ -62,6 +62,17 @@ Give cold compilation, each probe and the complete suite adequate outer watchdog
 
 Backend integration covers bounded configuration, account isolation, empty and failed fetches, cancellation, background scheduling, owner exit and stdout backpressure. Model checks cover arbitrary configured domains, one-account handshakes, unknown identities, duplicate accounts, invalid frames, plain-text bounds, stale generations and 1,000 replacements. The UI harness exercises service restart, state changes, selection persistence, 1,000 Loader lifetimes and a quiet interval.
 
+Fixture UI workflows do not establish compatibility with live provider responses.
+Changes to Gmail or People decoding and mutations must also exercise the
+production dispatcher with independent synthetic response data and assert the
+exact requests, target identities and write counts. Cover omitted/null optional
+fields, malformed cosmetic metadata and empty repeated fields; keep outbound
+write validation and uncertain-result protections strict. The live label
+metadata regressions run with the ordinary unit suite, or separately with
+`zig build test -Doptimize=debug -Dtest-filter="live label metadata:"`.
+Real-account read-only checks can supplement these tests when authorized;
+production mailbox/contact writes require their own explicit authorization.
+
 ## Release resource qualification
 
 Run these Safe workloads when qualifying a release or investigating a resource

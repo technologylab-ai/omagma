@@ -12,6 +12,10 @@ const recipients = @import("recipients.zig");
 const invitation = @import("invitation.zig");
 const label_collection = @import("labels.zig");
 
+test {
+    _ = @import("gmail_label_regression_test.zig");
+}
+
 /// Tests inject this transport and fictional identity/capabilities. Production
 /// execute constructs it only after token and Gmail account verification.
 pub const Transport = struct {
@@ -424,7 +428,7 @@ const LabelResolver = struct {
         if (text.len == 0 or text.len > 256) return error.InvalidLabel;
         for ([_][]const u8{ "INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT", "SENT", "DRAFT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" }) |system| if (std.ascii.eqlIgnoreCase(text, system)) return system;
         if (self.entries == null) {
-            const value = try self.transport.request(self.a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", null);
+            const value = try self.transport.request(self.a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", null);
             self.entries = try array(value, "labels");
             if (self.entries.?.len > 10000) return error.TooManyLabels;
         }
@@ -441,6 +445,27 @@ const LabelResolver = struct {
         return found orelse error.LabelNotFound;
     }
 };
+
+/// Batch planning shares the real message adapter's lazy identity resolver.
+/// Canonical system labels need no collection lookup or cosmetic metadata.
+pub fn resolveBatchLabels(a: std.mem.Allocator, transport: Transport, delta: @import("triage.zig").Delta) !@import("triage.zig").Delta {
+    if (delta.add.len + delta.remove.len > 64) return error.TooManyLabels;
+    var resolver: LabelResolver = .{ .a = a, .transport = transport };
+    const add = try a.alloc([]const u8, delta.add.len);
+    const remove = try a.alloc([]const u8, delta.remove.len);
+    for (delta.add, add) |label, *id| id.* = try resolver.resolve(label);
+    for (delta.remove, remove) |label, *id| id.* = try resolver.resolve(label);
+    return .{ .add = add, .remove = remove };
+}
+
+fn providerLabel(value: j.Value) !@import("store.zig").Label {
+    return .{
+        .id = try j.required(value, "id"),
+        .name = try j.required(value, "name"),
+        .type = if (j.get(value, "type")) |kind| try j.string(kind) else "user",
+        .color = label_collection.providerColor(value),
+    };
+}
 const ExternalBodiesBudget = struct { parts: usize = 0, bytes: usize = 0 };
 fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, payload: j.Value, map: *std.json.ObjectMap, depth: usize, budget: *ExternalBodiesBudget) anyerror!void {
     if (depth > mime.max_depth) return error.MimeTooDeep;
@@ -983,7 +1008,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
             const name = try j.required(entry, "name");
             try b.identifier(id);
             if (name.len > 512) return error.InvalidLabel;
-            label.* = .{ .id = id, .name = try mime.sanitizeText(name, a), .type = j.text(entry, "type"), .color = try label_collection.requestColor(a, entry) };
+            label.* = .{ .id = id, .name = try mime.sanitizeText(name, a), .type = j.text(entry, "type"), .color = label_collection.providerColor(entry) };
         }
         return j.value(a, .{ .labels = labels });
     }
@@ -1003,8 +1028,10 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         }
         const value = try transport.request(a, if (modifying) .POST else .GET, try messageUrl(a, id, if (modifying) "/modify?fields=id,labelIds" else "?format=minimal&fields=id,labelIds"), body);
         if (!std.mem.eql(u8, j.text(value, "id"), id)) return if (modifying) error.UnknownOutcome else error.MessageIdentityMismatch;
-        const labels = j.decode([]const []const u8, a, j.get(value, "labelIds") orelse return if (modifying) error.UnknownOutcome else error.InvalidProviderResponse) catch return if (modifying) error.UnknownOutcome else error.InvalidProviderResponse;
-        if (labels.len > 64) return if (modifying) error.UnknownOutcome else error.TooManyLabels;
+        const memberships = array(value, "labelIds") catch return if (modifying) error.UnknownOutcome else error.InvalidProviderResponse;
+        if (memberships.len > 64) return if (modifying) error.UnknownOutcome else error.TooManyLabels;
+        const labels = try a.alloc([]const u8, memberships.len);
+        for (memberships, labels) |membership, *label| label.* = j.string(membership) catch return if (modifying) error.UnknownOutcome else error.InvalidProviderResponse;
         for (labels) |label| if (label.len > 256) return if (modifying) error.UnknownOutcome else error.InvalidLabel;
         return j.value(a, .{ .messageId = id, .labels = labels });
     }
@@ -1137,8 +1164,12 @@ fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, req
     if (confirmation.len > 512) return error.InvalidLabelConfirmation;
     try recipients.validateHeader(confirmation);
     const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", null);
-    const definitions = try j.decode([]@import("store.zig").Label, a, j.get(response, "labels") orelse return error.InvalidProviderResponse);
-    if (definitions.len > 512) return error.TooManyLabels;
+    const definitions_value = j.get(response, "labels") orelse return error.InvalidProviderResponse;
+    if (definitions_value != .array) return error.InvalidProviderResponse;
+    const entries = definitions_value.array.items;
+    if (entries.len > 512) return error.TooManyLabels;
+    const definitions = try a.alloc(@import("store.zig").Label, entries.len);
+    for (entries, definitions) |entry, *definition| definition.* = try providerLabel(entry);
     for (definitions) |label| {
         try b.identifier(label.id);
         if (label.name.len > 512 or !std.unicode.utf8ValidateSlice(label.name)) return error.InvalidProviderResponse;
@@ -1160,7 +1191,7 @@ fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, req
         if (receipt != .null and (receipt != .object or receipt.object.count() != 0)) return error.UnknownOutcome;
         return j.value(a, .{ .deleted = true, .labelId = id }) catch return error.UnknownOutcome;
     }
-    const label = j.decode(@import("store.zig").Label, a, receipt) catch return error.UnknownOutcome;
+    const label = providerLabel(receipt) catch return error.UnknownOutcome;
     label_collection.validateId(label.id) catch return error.UnknownOutcome;
     if (!std.mem.eql(u8, label.name, final_name) or !std.ascii.eqlIgnoreCase(label.type, "user") or (!creating and !std.mem.eql(u8, label.id, id))) return error.UnknownOutcome;
     if (color != null and !label_collection.sameColor(color, label.color)) return error.UnknownOutcome;
@@ -1230,7 +1261,7 @@ test "user label names resolve exact provider IDs once and system IDs need no re
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.calls += 1;
             try std.testing.expectEqual(std.http.Method.GET, method);
-            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", url);
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)", url);
             try std.testing.expect(body == null);
             return j.value(a, .{ .labels = .{ .{ .id = "Label_42", .name = "Follow Up", .type = "user" }, .{ .id = "Label_43", .name = "Travel/2026", .type = "user" } } });
         }
