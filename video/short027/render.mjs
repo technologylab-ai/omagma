@@ -3,7 +3,7 @@ import {resolve,join} from 'node:path';
 import {parseArgs} from 'node:util';
 import {browser,reservation,root} from './cdp.mjs';
 const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},plan:{type:'string'},film:{type:'string',default:'film.html'}}});
-if(!['film.html','film-brisk.html','film-nine.html'].includes(o.film))throw Error('unknown film source');
+if(!['film.html','film-brisk.html','film-nine.html','film-motion.html'].includes(o.film))throw Error('unknown film source');
 await reservation();
 const plan=JSON.parse(readFileSync(resolve(o.plan||join(root,'video/short027/soundtrack.json')),'utf8'));
 const expectedFrames=Number(plan.frameCount);

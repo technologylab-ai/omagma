@@ -1,0 +1,116 @@
+{
+  "schema": "omagma.soundtrack-plan.v1",
+  "fps": 30,
+  "frameCount": 2453,
+  "duration": 81.76666666666667,
+  "sampleRate": 48000,
+  "durationSamples48k": 3924800,
+  "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+  "derivation": "The nine-feature soundtrack gains one bounded early phrase at its original rate. Quiet opening0\u201311.125 and natural ending163.294\u2013189.960 remain; three30ms equal-power joins. The extra8.889333\u201317.719333 source interval ends before the measured17.752 phrase attack. Exact48k sample cues fit2453 video frames; no pitch/tempo stretching or silence padding.",
+  "crossfadeSeconds": 0.03,
+  "segments": [
+    {
+      "id": "quiet-intro",
+      "sourceIn": 0.0,
+      "sourceOut": 11.125,
+      "sourceSamples48k": [
+        0,
+        534000
+      ],
+      "filmIn": 0.0,
+      "filmOut": 11.125
+    },
+    {
+      "id": "extra-early-phrase",
+      "sourceIn": 8.889333333333333,
+      "sourceOut": 17.719333333333335,
+      "sourceSamples48k": [
+        426688,
+        850528
+      ],
+      "filmIn": 11.095,
+      "filmOut": 19.925
+    },
+    {
+      "id": "early-phrases",
+      "sourceIn": 8.889333333333333,
+      "sourceOut": 44.125,
+      "sourceSamples48k": [
+        426688,
+        2118000
+      ],
+      "filmIn": 19.895,
+      "filmOut": 55.13066666666667
+    },
+    {
+      "id": "natural-ending",
+      "sourceIn": 163.294,
+      "sourceOut": 189.96,
+      "sourceSamples48k": [
+        7838112,
+        9118080
+      ],
+      "filmIn": 55.10066666666667,
+      "filmOut": 81.76666666666667
+    }
+  ],
+  "mappedMusicLandmarks": [
+    {
+      "name": "opening",
+      "source": 0,
+      "film": 0.0
+    },
+    {
+      "name": "bass",
+      "source": 4.6,
+      "film": 4.6
+    },
+    {
+      "name": "extraStep",
+      "source": 8.928,
+      "film": 11.13366666666667
+    },
+    {
+      "name": "step",
+      "source": 8.928,
+      "film": 19.933666666666667
+    },
+    {
+      "name": "drums",
+      "source": 35.352,
+      "film": 46.35766666666667
+    },
+    {
+      "name": "roll",
+      "source": 163.329,
+      "film": 55.13566666666665
+    },
+    {
+      "name": "drop",
+      "source": 167.602,
+      "film": 59.408666666666676
+    },
+    {
+      "name": "nextPhrase",
+      "source": 176.147,
+      "film": 67.95366666666663
+    },
+    {
+      "name": "lastPhrase",
+      "source": 184.692,
+      "film": 76.49866666666665
+    },
+    {
+      "name": "stop",
+      "source": 187.12,
+      "film": 78.92666666666665
+    },
+    {
+      "name": "naturalEnd",
+      "source": 189.96,
+      "film": 81.76666666666668
+    }
+  ],
+  "mastering": "One static linear gain; target -14 LUFS \u00b10.6 and true peak <= -1dBTP. No dynamic compression or per-segment lift.",
+  "revision": "motion"
+}

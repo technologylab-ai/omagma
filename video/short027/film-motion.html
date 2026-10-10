@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Omagma v0.2.7 — nine highlights, motion edit</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#080605;overflow:hidden}
+#screen{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0}
+iframe{display:block;width:1920px;height:1080px;border:0}
+.scene{position:absolute;inset:0;display:none;color:#f7ede5;font-family:"Adwaita Sans","Noto Color Emoji",sans-serif;background:radial-gradient(110% 90% at 50% 105%,#2c1409,#100a07 65%,#080605);overflow:hidden}
+.caption{position:absolute;left:120px;top:38px}
+.number{font:700 24px "JetBrainsMono Nerd Font",monospace;color:#ff9e61;letter-spacing:.08em}
+h1{font-size:56px;line-height:1.15;margin:4px 0 8px;font-weight:800}
+.subtitle{font-size:28px;color:#eccdb8;margin:0;height:44px;white-space:nowrap}
+kbd{display:inline-block;font:700 23px "JetBrainsMono Nerd Font",monospace;padding:3px 12px;border-radius:8px;margin:0 4px;vertical-align:2px;color:#fff4ec;border:1.5px solid #ff9e61}
+.bug{position:absolute;right:120px;top:46px;width:320px;text-align:right;font:700 20px "JetBrainsMono Nerd Font",monospace;color:#d8b49c}
+.segs{display:flex;gap:6px;justify-content:flex-end;margin-top:12px}
+.segs i{width:32px;height:5px;border-radius:3px;background:#ff9e612e;overflow:hidden}
+.segs b{display:block;height:100%;background:#ff8a45;transform-origin:0 50%}
+.native{position:absolute;border-radius:16px;background:#111620;overflow:hidden;box-shadow:0 25px 90px #0009,0 0 0 1px #ff9e6140}
+.native.detail{box-shadow:0 25px 90px #0009,0 0 0 2px #ff9e6170,0 0 70px #ec7a3528}
+.native.paper{background:#fff;box-shadow:0 40px 120px #000b,0 0 0 2px #ffab6e70,0 0 90px #ec7a3530}
+.native img{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;display:block}
+.focus{position:absolute;border:2px solid #ff9e61;border-radius:8px;box-shadow:0 0 24px #ec7a3540;pointer-events:none}
+.disclosure{position:absolute;left:120px;bottom:8px;font-size:22px;color:#c8beb5}
+.guide-only{position:absolute;right:120px;bottom:8px;font-size:22px;color:#c8beb5}
+#reveal-edge{position:absolute;display:none;width:2px;height:840px;top:212px;background:#ffb47e;box-shadow:0 0 18px #ff9e6190;pointer-events:none}
+</style></head><body><div id="screen">
+<iframe id="picture" src="film.html" title="Omagma feature scenes"></iframe>
+<div id="reveal-edge"></div>
+<div id="forward-story" class="scene">
+ <div class="caption"><div class="number">07/09</div><h1>Forward with a personal note</h1><p class="subtitle"></p></div>
+ <div class="bug">Omagma v0.2.7<div class="segs"></div></div>
+ <div id="story-previous" class="native"></div><div id="story-native" class="native"></div><div id="story-menu" class="native detail"></div><div id="story-browser" class="native paper"></div>
+</div>
+<div id="upgrade" class="scene">
+ <div class="caption"><div class="number">09/09</div><h1>Update on your terms</h1><p class="subtitle">A quiet notice. The exact steps when you're ready.</p></div>
+ <div class="bug">Omagma v0.2.7<div class="segs"></div></div>
+ <div id="upgrade-card" class="native detail"></div><div id="upgrade-guide" class="native detail"></div>
+ <div class="disclosure">Illustrative update demo · 0.2.8 fixture</div><div class="guide-only">Guide only · nothing installs automatically</div>
+</div>
+</div><script>
+(() => {
+ 'use strict';
+ const $=id=>document.getElementById(id),A='/video/cache/short027/assets/';
+ const frame=$('picture'),loaded=new Promise(r=>frame.addEventListener('load',r,{once:true}));
+ const clamp=v=>Math.max(0,Math.min(1,v)),sm=v=>v*v*(3-2*v),lerp=(a,b,p)=>a+(b-a)*p;
+ const progress=(t,a,b)=>clamp((t-a)/(b-a)),ease=(t,a,b)=>sm(progress(t,a,b));
+ let plan,music,manifest,child,sourceRender,sourceQa,chapterStarts,images={},viewState={};
+ const sceneStory=$('forward-story'),sceneUpdate=$('upgrade'),previous=$('story-previous'),native=$('story-native'),menu=$('story-menu'),browser=$('story-browser'),card=$('upgrade-card'),guide=$('upgrade-guide');
+ function phase(t){const seconds=Math.max(0,Math.min(plan.duration,Number(t)||0)),n=Math.min(plan.frameCount-1,seconds*plan.fps),p=plan.parts.find(p=>n<p.frameOut)||plan.parts.at(-1),q=clamp((n-p.frameIn)/(p.frameOut-p.frameIn));return{t:seconds,p,local:seconds-p.frameIn/plan.fps,source:p.overlay?92.3:p.sourceIn+q*(p.sourceOut-p.sourceIn)};}
+ function alpha(s){if(s.p.titleLead)return 1-ease(s.local,0,.18);const i=plan.parts.indexOf(s.p);return i>0&&plan.parts[i-1].titleLead?ease(s.local,0,.28):1;}
+ function imageIn(host,name){const img=images[name];if(!img)throw Error('Unloaded genuine capture '+name);host.replaceChildren(img);return img;}
+ function viewport(host,name,rect,center,scale,opacity=1){const [x,y,w,h]=rect,img=imageIn(host,name),vw=w/scale,vh=h/scale;const cx=Math.max(vw/2,Math.min(img.naturalWidth-vw/2,center[0])),cy=Math.max(vh/2,Math.min(img.naturalHeight-vh/2,center[1]));host.style.left=x+'px';host.style.top=y+'px';host.style.width=w+'px';host.style.height=h+'px';host.style.opacity=String(opacity);img.style.transform=`translate(${w/2-cx*scale}px,${h/2-cy*scale}px) scale(${scale})`;return{asset:name,center:[cx,cy],scale,rect,opacity};}
+ function fitDetail(host,name,width,height,opacity=1){const img=images[name],s=Math.min(width/img.naturalWidth,height/img.naturalHeight),w=img.naturalWidth*s,h=img.naturalHeight*s;return viewport(host,name,[960-w/2,632-h/2,w,h],[img.naturalWidth/2,img.naturalHeight/2],s,opacity);}
+ function fills(t){for(const host of [child.document.getElementById('segs'),...document.querySelectorAll('.segs')])Array.from(host.querySelectorAll('b')).forEach((b,i)=>{b.style.transform='scaleX('+ease(t,chapterStarts[i],chapterStarts[i]+.35)+')';});}
+ function story(s){
+  const chapter=plan.parts.find(p=>p.name==='received airline'),start=chapter.frameIn/plan.fps,caption=sceneStory.querySelector('.caption'),subtitle=sceneStory.querySelector('.subtitle');
+  caption.style.opacity=String(ease(s.t,start,start+.28));caption.style.transform=`translateY(${16*(1-ease(s.t,start,start+.28))}px)`;
+  const previousPart=plan.parts[plan.parts.indexOf(s.p)-1];subtitle.innerHTML=s.p.caption;subtitle.style.opacity=String(s.p.name==='received airline'?1-ease(s.t,s.p.frameOut/plan.fps-.15,s.p.frameOut/plan.fps):previousPart?.caption===s.p.caption?1:ease(s.local,0,s.p.captionFade||.18));
+  previous.style.display='none';native.style.display='block';menu.style.display='none';browser.style.display='none';
+  let asset=manifest.receivedAsset,uiAlpha=1;
+  if(s.p.name==='received airline')uiAlpha=ease(s.local,0,.3);
+  else if(s.p.name==='forward menu'||s.p.name==='keep formatting'){
+   const menuStart=plan.parts.find(p=>p.name==='forward menu').frameIn/plan.fps;native.style.filter='brightness('+lerp(1,.42,ease(s.t,menuStart,menuStart+.3))+')';menu.style.display='block';viewState.menu=fitDetail(menu,manifest.menuAsset,1440,650,ease(s.t,menuStart,menuStart+.3));
+   const focus=document.createElement('div');focus.className='focus';const r=manifest.menuFocus||[40,130,424,48],sc=viewState.menu.scale;focus.style.cssText=`left:${r[0]*sc-5}px;top:${r[1]*sc-5}px;width:${r[2]*sc+10}px;height:${r[3]*sc+10}px;opacity:${s.p.name==='keep formatting'?ease(s.local,0,.2):0}`;menu.append(focus);
+  }else if(s.p.name==='empty note'){
+   asset=manifest.emptyAsset;uiAlpha=ease(s.local,0,.28);previous.style.display='block';viewState.previous=viewport(previous,manifest.receivedAsset,[160,212,1600,840],[1760,924],1600/3520,1-uiAlpha);previous.style.filter='brightness(.42)';
+   menu.style.display='block';viewState.menu=fitDetail(menu,manifest.menuAsset,1440,650,1-uiAlpha);
+  }
+  else if(s.p.name==='note typing'){
+   const q=clamp(s.local/(s.p.typingSeconds||((s.p.frameOut-s.p.frameIn)/plan.fps))),characters=Math.floor(q*manifest.typingCharacterCounts.at(-1));let i=-1;for(let n=0;n<manifest.typingCharacterCounts.length;n++)if(manifest.typingCharacterCounts[n]<=characters)i=n;
+   asset=i<0?manifest.emptyAsset:manifest.typingAssets[i];viewState.typingIndex=i;viewState.typedCharacters=i<0?0:manifest.typingCharacterCounts[i];
+  }
+  else if(s.p.name==='finished note')asset=manifest.finalAsset;
+  else if(['browser note','browser scroll','original HTML'].includes(s.p.name)){
+   native.style.display='none';browser.style.display='block';const scroll=plan.parts.find(p=>p.name==='browser scroll'),a=scroll.frameIn/plan.fps,b=scroll.frameOut/plan.fps,p=ease(s.t,a,b),geometry=manifest.browserCamera||{rect:[300,212,1320,840],scale:.66,top:836,bottom:2660};
+   if(s.p.name==='browser note'){previous.style.display='block';previous.style.filter='none';viewState.previous=viewport(previous,manifest.finalAsset,[160,212,1600,840],[1760,924],1600/3520,1-ease(s.local,0,.3));}
+   viewState.browser=viewport(browser,manifest.browserAsset,geometry.rect,[manifest.browserDimensions[0]/2,lerp(geometry.top,geometry.bottom,p)],geometry.scale,s.p.name==='browser note'?ease(s.local,0,.3):1);viewState.scrollProgress=p;return;
+  }
+  if(s.p.name!=='forward menu'&&s.p.name!=='keep formatting')native.style.filter='none';
+  viewState.native=viewport(native,asset,[160,212,1600,840],[1760,924],1600/3520,uiAlpha);
+ }
+ function update(s){
+  const start=plan.parts.find(p=>p.name==='lead09').frameIn/plan.fps,caption=sceneUpdate.querySelector('.caption');caption.style.opacity=String(ease(s.t,start,start+.28));
+  card.style.display='none';guide.style.display='none';sceneUpdate.querySelector('.guide-only').style.opacity='0';
+  if(s.p.name==='lead09')return;
+  if(s.p.name==='update guide'){
+   if(s.local<.3){card.style.display='block';viewState.card=fitDetail(card,'updates-card-focused-detail.png',1113,290,1-ease(s.local,0,.3));}
+   guide.style.display='block';const source=images['updates-guide-detail.png'],geometry=viewport(guide,'updates-guide-detail.png',[403,200,1113,823],[source.naturalWidth/2,source.naturalHeight/2],1113/source.naturalWidth,ease(s.local,0,.3));
+   const focus=document.createElement('div');focus.className='focus';focus.style.cssText='left:22px;top:315px;width:1068px;height:169px';guide.append(focus);viewState.upgrade=geometry;sceneUpdate.querySelector('.guide-only').style.opacity='1';
+  }else{card.style.display='block';const first=plan.parts.find(p=>p.name==='upgrade card').frameIn/plan.fps;viewState.upgrade=fitDetail(card,s.p.name==='How to update'?'updates-card-focused-detail.png':'updates-card-detail.png',1113,290,ease(s.t,first,first+.3));}
+ }
+ function nativeMotion(s){
+  const list=Array.from(child.document.querySelectorAll('#shots .fr')),get=name=>list.find(f=>f.querySelector('img').getAttribute('src').endsWith('/'+name));
+  list.forEach(f=>{f.style.clipPath='none';f.style.transformOrigin='0 0';});$('reveal-edge').style.display='none';
+  if(s.p.name==='inbox'){
+   const f=get('main.png'),bar=get('bar.png'),q=ease(s.local,0,.75),barScale=800/880,barWidth=1480*barScale;f.style.opacity='1';f.style.width='1600px';f.style.height='840px';f.style.clipPath=`inset(0 ${(1-q)*100}% 0 0 round 16px)`;f.style.transformOrigin='800px 420px';f.style.transform=`translate(160px,212px) scale(${lerp(.985,1,q)})`;
+   // The outgoing bar must be positioned explicitly even after an arbitrary
+   // seek: sourceRender skips geometry on expired source shots.
+   bar.style.width=barWidth+'px';bar.style.height='800px';bar.style.transform=`translate(${960-barWidth/2}px,232px)`;bar.style.opacity=String(1-ease(s.local,0,.52));bar.querySelector('img').style.transform=`scale(${barScale})`;
+   const launchRing=bar.querySelector('.ring');launchRing.style.width=(138*barScale+16)+'px';launchRing.style.height=(48*barScale+16)+'px';launchRing.style.transform=`translate(${966*barScale-8}px,${12*barScale-8}px)`;launchRing.style.opacity='1';
+   $('reveal-edge').style.display=q>0&&q<1?'block':'none';$('reveal-edge').style.left=(160+1600*q)+'px';$('reveal-edge').style.opacity=String(Math.sin(Math.PI*q)*.7);viewState.reveal=q;
+  }
+  if(s.p.name==='join'){
+   const f=get('join-detail.png'),img=f.querySelector('img'),q=ease(s.local,.06,.76),w=1333.333333,h=800,scale=lerp(800/1320,.75,q),vw=w/scale,vh=h/scale,cx=Math.max(vw/2,Math.min(2200-vw/2,lerp(1100,900,q))),cy=Math.max(vh/2,Math.min(1320-vh/2,lerp(660,740,q)));
+   img.style.transform=`translate(${w/2-cx*scale}px,${h/2-cy*scale}px) scale(${scale})`;
+   const ring=f.querySelector('.ring');ring.style.width=(190*scale+16)+'px';ring.style.height=(56*scale+16)+'px';ring.style.transform=`translate(${(1424-cx)*scale+w/2-8}px,${(1182-cy)*scale+h/2-8}px)`;ring.style.opacity=String(ease(s.local,.02,.28));viewState.joinCamera={scale,center:[cx,cy],progress:q};
+  }
+ }
+ window.render=t=>{
+  if(!child)return false;const s=phase(t);viewState={};sourceRender(s.source);child.document.getElementById('iCnt').textContent='9 highlights';for(const el of child.document.querySelectorAll('.cap .n'))el.textContent=el.textContent.replace('/08','/09');
+  frame.style.opacity=s.p.overlay?'0':'1';sceneStory.style.display=s.p.overlay==='forward'?'block':'none';sceneUpdate.style.display=s.p.overlay==='upgrade'?'block':'none';
+  child.document.getElementById('shots').style.opacity=String(alpha(s));nativeMotion(s);if(s.p.overlay==='forward')story(s);if(s.p.overlay==='upgrade')update(s);
+  child.document.getElementById('intro-nine-segment').style.opacity=String(ease(s.source,1.2,1.55));fills(s.t);
+  let accent=0;for(const cue of music.mappedMusicLandmarks){const d=s.t-cue.film;if(d>=0&&d<.55&&cue.name!=='opening'&&cue.name!=='naturalEnd')accent=Math.max(accent,1-sm(d/.55));}
+  const glow=child.document.getElementById('glow');glow.style.opacity=String(.44+.16*accent);glow.style.transform='scale('+(1+.08*accent)+')';child.document.getElementById('flash').style.opacity=String(.08*accent);return true;
+ };
+ window.qa=t=>{const s=phase(t),base=sourceQa(s.source),settle=s.p.name==='inbox'?.75:s.p.name==='join'?.76:.3,settled=!s.p.titleLead&&!['note typing','browser scroll'].includes(s.p.name)&&s.local>=settle;return{...base,t:s.t,frame:Math.min(plan.frameCount-1,Math.round(s.t*plan.fps)),scene:s.p.overlay==='forward'?'07/09':s.p.overlay==='upgrade'?'09/09':base.scene.replace('/08','/09'),phase:s.p.name,settled,holdLeft:settled?Math.max(0,s.p.frameOut/plan.fps-s.t):0,sourceTime:s.source,bodyOpacity:alpha(s),captions:s.p.overlay==='forward'?['07/09 Forward with a personal note',s.p.caption.replace(/<[^>]*>/g,'')]:s.p.overlay==='upgrade'?['09/09 Update on your terms','Illustrative0.2.8 fixture; guide only']:base.captions.map(x=>x.replace('/08','/09').replace('8 highlights','9 highlights')),visibleAssets:s.p.overlay?Object.values(viewState).filter(x=>x&&x.asset&&x.opacity>.01).map(x=>x.asset):(alpha(s)<.01?[]:base.visibleAssets),motion:viewState};};
+ window.READY=Promise.all([fetch('motion.json').then(r=>r.json()),fetch('soundtrack-motion.json').then(r=>r.json()),fetch('/video/cache/short027/forward-story-manifest.json').then(r=>{if(!r.ok)throw Error('Missing genuine forward-story captures');return r.json();}),loaded]).then(async([p,m,c])=>{
+  plan=p;music=m;manifest=c;child=frame.contentWindow;const ready=await child.READY;await document.fonts.ready;sourceRender=child.render;sourceQa=child.qa;
+  if(plan.frameCount!==music.frameCount||plan.fps!==music.fps)throw Error('Picture/music timing mismatch');
+  if(!manifest.typingCharacterCounts||manifest.typingCharacterCounts.length!==manifest.typingAssets.length||manifest.typingCharacterCounts.some((n,i,a)=>!Number.isInteger(n)||n<=0||(i>0&&n<=a[i-1])))throw Error('Missing genuine character-count marks for native typing states');
+  const names=[manifest.receivedAsset,manifest.menuAsset,manifest.emptyAsset,manifest.finalAsset,manifest.browserAsset,...manifest.typingAssets,'updates-card-detail.png','updates-card-focused-detail.png','updates-guide-detail.png'];
+  await Promise.all(Array.from(new Set(names)).map(name=>new Promise((r,j)=>{const img=new Image();img.src=A+name;img.onload=()=>{images[name]=img;r();};img.onerror=()=>j(Error('Missing genuine capture '+name));})));
+  for(const el of document.querySelectorAll('.segs'))for(let i=0;i<9;i++){const seg=document.createElement('i');seg.append(document.createElement('b'));el.append(seg);}
+  const intro=document.createElement('i');intro.id='intro-nine-segment';child.document.getElementById('iSegs').append(intro);const seg=child.document.createElement('i');seg.append(child.document.createElement('b'));child.document.getElementById('segs').append(seg);
+  chapterStarts=Array.from({length:9},(_,i)=>plan.parts.find(p=>p.chapter===i+1).frameIn/plan.fps);
+  window.FILM={width:1920,height:1080,fps:plan.fps,frameCount:plan.frameCount,duration:plan.duration,parts:plan.parts,chapters:chapterStarts};window.FILM_MUSIC=music;window.render(0);return{ok:true,...window.FILM,warnings:ready.warnings||[]};
+ });
+ const fit=()=>{$('screen').style.transform='scale('+Math.min(innerWidth/1920,innerHeight/1080)+')';};addEventListener('resize',fit);fit();
+})();
+</script></body></html>

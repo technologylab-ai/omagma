@@ -1,10 +1,5 @@
 # Ninth feature: update on your terms
 
-The current [motion edit](MOTION-SCENES.md) retains this complete scene at
-61.60–70.433 seconds, including the genuine focused How action, full guide and
-illustrative-version disclosure. The timing table below records the preserved
-72.967-second nine-feature edit.
-
 The approved polished eight-feature edit gains one final prominent task before
 the recap: the genuine upgrade card opens its installation-specific update
 guide. Output is 72.967 seconds / 2,189 frames; the first 52.8 seconds retain their

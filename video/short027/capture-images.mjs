@@ -12,6 +12,19 @@ const scenes=[
  ['meeting','meeting','meeting'],['meeting-review','meeting','meeting-review','Meeting ·'],['meeting-details','meeting','meeting-details','Meeting ·'],['join','meeting','join','Meeting ·'],
  ['recipient','compose','recipient'],['recipient-named','compose','composer'],['sender','compose','sender','Choose sender'],['composer','compose','composer'],['composer-edit','compose','composer-edit'],['composer-undo','compose','composer-undo'],['files','compose','files','Attach file'],['attached','compose','attached'],['send-review','compose','send-review','Review send'],['countdown','compose','countdown'],['countdown-nine','compose','countdown-nine'],['send-canceled','compose','send-canceled'],
  ['forward','forward','forward'],['format-choice','forward','format-choice','Forward'],['newmail','newmail','newmail','New mail'],['newmail-hidden','newmail','newmail-hidden']];
+const forwardStoryPath=join(root,'video/cache/short027/forward-story.json');
+let forwardStory=null;
+if(existsSync(forwardStoryPath)){
+ forwardStory=JSON.parse(readFileSync(forwardStoryPath,'utf8'));
+ scenes.push(['forward-story-received','forward-story','received'],
+  ['forward-story-menu','forward-story','forward-menu','Forward'],
+  ['forward-story-empty-composer','forward-story','empty-composer'],
+  ['forward-story-empty','forward-story','empty-note'],
+  ['forward-story-final','forward-story','final-note']);
+ for(const mark of forwardStory.marks.filter(m=>/^typed-[0-9]+$/.test(m.name))){
+  scenes.push(['forward-story-type-'+mark.name.slice(6),'forward-story',mark.name]);
+ }
+}
 const priorReceipt=join(root,'video/cache/short027/raster-receipt.json');
 const receipt=onlyTape&&existsSync(priorReceipt)?JSON.parse(readFileSync(priorReceipt,'utf8')):{source:'actual captured PTY cells only, no cell edits',scale:2,assets:{}};
 const b=await browser();
@@ -38,6 +51,26 @@ try{
   asset('browser',await q.screenshot(),{source:'unmodified native draft.open-preview artifact, opaque iframe',width:2000,height:3800,heading:content.heading,frameBounds:content.frameBounds});
   const clip={x:0,y:0,width:1000,height:1000,scale:1};asset('browser-top',Buffer.from((await q.call('Page.captureScreenshot',{format:'png',clip})).data,'base64'),{width:2000,height:2000,clip});
   receipt.browser={nativePreview:true,sandbox:content.sandbox,embeddedImages:(content.html.match(/data:image\/png;base64,/g)||[]).length,originalBookingAndMarkdownNote:true};await q.close();
+ }
+ if((!onlyTape||onlyTape==='forward-story')&&existsSync(join(out,'forward-story-browser.html'))){
+  const q=await b.page('video/cache/short027/assets/forward-story-browser.html',{width:1000,height:1900,scale:2,ready:false});
+  const content=await q.evaluate(`(()=>{const f=document.querySelector('iframe');return {heading:document.querySelector('h1').textContent,sandbox:f.getAttribute('sandbox'),html:f.srcdoc,frameBounds:f.getBoundingClientRect().toJSON()};})()`);
+  if(content.sandbox!==''||!content.html.includes('EMBER AIR')||!content.html.includes('Lisbon trip')||!content.html.includes('data:image/png;base64,')||!content.html.includes('<table'))throw Error('new forward browser lost original/note/resources');
+  await q.evaluate('new Promise(r=>setTimeout(r,700))');
+  asset('forward-story-browser',await q.screenshot(),{source:'unmodified native forward draft.open-preview artifact, opaque iframe',width:2000,height:3800,heading:content.heading,frameBounds:content.frameBounds});
+  receipt.forwardStoryBrowser={nativePreview:true,sandbox:content.sandbox,embeddedImages:(content.html.match(/data:image\/png;base64,/g)||[]).length,originalBookingAndMarkdownNote:true};
+  await q.close();
+  const menu=receipt.assets['forward-story-menu-detail.png'];
+  const manifest={
+   typingAssets:forwardStory.marks.filter(m=>/^typed-[0-9]+$/.test(m.name)).map(m=>'forward-story-type-'+m.name.slice(6)+'.png'),
+   typingCharacterCounts:forwardStory.marks.filter(m=>/^typed-[0-9]+$/.test(m.name)).map(m=>m.typedCharacters),
+   receivedAsset:'forward-story-received.png',menuAsset:'forward-story-menu-detail.png',
+   emptyAsset:'forward-story-empty.png',emptyComposerAsset:'forward-story-empty-composer.png',
+   finalAsset:'forward-story-final.png',browserAsset:'forward-story-browser.png',
+   menuDimensions:[menu.width,menu.height],browserDimensions:[2000,3800],
+   nativeDimensions:[3520,1848],source:'unmodified genuine synthetic native captures',
+  };
+  writeFileSync(join(root,'video/cache/short027/forward-story-manifest.json'),JSON.stringify(manifest,null,2)+'\n');
  }
  if(!onlyTape)copyFileSync(join(root,'video/assets/omagma-logo-master.png'),join(out,'logo.png'));
  writeFileSync(join(root,'video/cache/short027/raster-receipt.json'),JSON.stringify(receipt,null,2)+'\n');console.log('Rendered '+Object.keys(receipt.assets).length+' genuine TUI/light-browser assets.');

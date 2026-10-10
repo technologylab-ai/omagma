@@ -1,0 +1,362 @@
+{
+  "revision": "motion",
+  "fps": 30,
+  "frameCount": 2453,
+  "duration": 81.76666666666667,
+  "sourceFrameCount": 3179,
+  "sourceDuration": 105.96666666666667,
+  "parts": [
+    {
+      "name": "intro",
+      "sourceIn": 0,
+      "sourceOut": 4.6,
+      "frameIn": 0,
+      "frameOut": 90,
+      "titleLead": false
+    },
+    {
+      "name": "lead01",
+      "sourceIn": 4.6,
+      "sourceOut": 6.1,
+      "frameIn": 90,
+      "frameOut": 117,
+      "titleLead": true,
+      "chapter": 1
+    },
+    {
+      "name": "bar",
+      "sourceIn": 6.1,
+      "sourceOut": 9.5,
+      "frameIn": 117,
+      "frameOut": 174,
+      "titleLead": false
+    },
+    {
+      "name": "inbox",
+      "sourceIn": 9.5,
+      "sourceOut": 13.4,
+      "frameIn": 174,
+      "frameOut": 249,
+      "titleLead": false
+    },
+    {
+      "name": "lead02",
+      "sourceIn": 13.4,
+      "sourceOut": 14.9,
+      "frameIn": 249,
+      "frameOut": 276,
+      "titleLead": true,
+      "chapter": 2
+    },
+    {
+      "name": "palette untouched",
+      "sourceIn": 14.9,
+      "sourceOut": 16.7,
+      "frameIn": 276,
+      "frameOut": 309,
+      "titleLead": false
+    },
+    {
+      "name": "palette typing",
+      "sourceIn": 16.7,
+      "sourceOut": 18.3,
+      "frameIn": 309,
+      "frameOut": 357,
+      "titleLead": false
+    },
+    {
+      "name": "palette narrowed",
+      "sourceIn": 18.3,
+      "sourceOut": 21.7,
+      "frameIn": 357,
+      "frameOut": 405,
+      "titleLead": false
+    },
+    {
+      "name": "lead03",
+      "sourceIn": 21.7,
+      "sourceOut": 23.2,
+      "frameIn": 405,
+      "frameOut": 432,
+      "titleLead": true,
+      "chapter": 3
+    },
+    {
+      "name": "find first",
+      "sourceIn": 23.2,
+      "sourceOut": 26.5,
+      "frameIn": 432,
+      "frameOut": 483,
+      "titleLead": false
+    },
+    {
+      "name": "find next",
+      "sourceIn": 26.5,
+      "sourceOut": 30,
+      "frameIn": 483,
+      "frameOut": 531,
+      "titleLead": false
+    },
+    {
+      "name": "lead04",
+      "sourceIn": 30,
+      "sourceOut": 31.5,
+      "frameIn": 531,
+      "frameOut": 558,
+      "titleLead": true,
+      "chapter": 4
+    },
+    {
+      "name": "labels initial",
+      "sourceIn": 31.5,
+      "sourceOut": 34,
+      "frameIn": 558,
+      "frameOut": 603,
+      "titleLead": false
+    },
+    {
+      "name": "stage one",
+      "sourceIn": 34,
+      "sourceOut": 36,
+      "frameIn": 603,
+      "frameOut": 636,
+      "titleLead": false
+    },
+    {
+      "name": "stage two",
+      "sourceIn": 36,
+      "sourceOut": 39.2,
+      "frameIn": 636,
+      "frameOut": 681,
+      "titleLead": false
+    },
+    {
+      "name": "labels result",
+      "sourceIn": 39.2,
+      "sourceOut": 43.2,
+      "frameIn": 681,
+      "frameOut": 735,
+      "titleLead": false
+    },
+    {
+      "name": "lead05",
+      "sourceIn": 43.2,
+      "sourceOut": 44.7,
+      "frameIn": 735,
+      "frameOut": 762,
+      "titleLead": true,
+      "chapter": 5
+    },
+    {
+      "name": "meeting card",
+      "sourceIn": 44.7,
+      "sourceOut": 46,
+      "frameIn": 762,
+      "frameOut": 825,
+      "titleLead": false
+    },
+    {
+      "name": "meeting review",
+      "sourceIn": 46,
+      "sourceOut": 50.5,
+      "frameIn": 825,
+      "frameOut": 900,
+      "titleLead": false
+    },
+    {
+      "name": "join",
+      "sourceIn": 50.5,
+      "sourceOut": 54.4,
+      "frameIn": 900,
+      "frameOut": 972,
+      "titleLead": false
+    },
+    {
+      "name": "lead06",
+      "sourceIn": 54.4,
+      "sourceOut": 55.9,
+      "frameIn": 972,
+      "frameOut": 999,
+      "titleLead": true,
+      "chapter": 6
+    },
+    {
+      "name": "files",
+      "sourceIn": 55.9,
+      "sourceOut": 60.5,
+      "frameIn": 999,
+      "frameOut": 1059,
+      "titleLead": false
+    },
+    {
+      "name": "attached",
+      "sourceIn": 60.5,
+      "sourceOut": 64.4,
+      "frameIn": 1059,
+      "frameOut": 1110,
+      "titleLead": false
+    },
+    {
+      "name": "received airline",
+      "frameIn": 1110,
+      "frameOut": 1176,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Received airline email"
+    },
+    {
+      "name": "forward menu",
+      "frameIn": 1176,
+      "frameOut": 1215,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Open the forward menu"
+    },
+    {
+      "name": "keep formatting",
+      "frameIn": 1215,
+      "frameOut": 1248,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "<kbd>k</kbd> Keep formatting"
+    },
+    {
+      "name": "empty note",
+      "frameIn": 1248,
+      "frameOut": 1275,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Blank personal note \u00b7 original protected"
+    },
+    {
+      "name": "note typing",
+      "frameIn": 1275,
+      "frameOut": 1365,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Type in Markdown \u00b7 the live preview follows",
+      "typingSeconds": 2.7
+    },
+    {
+      "name": "finished note",
+      "frameIn": 1365,
+      "frameOut": 1419,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Your note above the original airline email"
+    },
+    {
+      "name": "browser note",
+      "frameIn": 1419,
+      "frameOut": 1485,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Original HTML formatting preserved below your note",
+      "captionFade": 0.25
+    },
+    {
+      "name": "browser scroll",
+      "frameIn": 1485,
+      "frameOut": 1575,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Original HTML formatting preserved below your note"
+    },
+    {
+      "name": "original HTML",
+      "frameIn": 1575,
+      "frameOut": 1632,
+      "titleLead": false,
+      "overlay": "forward",
+      "chapter": 7,
+      "caption": "Original HTML formatting preserved below your note"
+    },
+    {
+      "name": "lead08",
+      "sourceIn": 82.4,
+      "sourceOut": 83.8,
+      "frameIn": 1632,
+      "frameOut": 1659,
+      "titleLead": true,
+      "chapter": 8
+    },
+    {
+      "name": "send review",
+      "sourceIn": 83.8,
+      "sourceOut": 86.3,
+      "frameIn": 1659,
+      "frameOut": 1719,
+      "titleLead": false
+    },
+    {
+      "name": "countdown",
+      "sourceIn": 86.3,
+      "sourceOut": 89.3,
+      "frameIn": 1719,
+      "frameOut": 1779,
+      "titleLead": false
+    },
+    {
+      "name": "canceled",
+      "sourceIn": 89.3,
+      "sourceOut": 92.4,
+      "frameIn": 1779,
+      "frameOut": 1848,
+      "titleLead": false
+    },
+    {
+      "name": "lead09",
+      "frameIn": 1848,
+      "frameOut": 1878,
+      "titleLead": true,
+      "overlay": "upgrade",
+      "chapter": 9
+    },
+    {
+      "name": "upgrade card",
+      "frameIn": 1878,
+      "frameOut": 1944,
+      "titleLead": false,
+      "overlay": "upgrade"
+    },
+    {
+      "name": "How to update",
+      "frameIn": 1944,
+      "frameOut": 1962,
+      "titleLead": false,
+      "overlay": "upgrade"
+    },
+    {
+      "name": "update guide",
+      "frameIn": 1962,
+      "frameOut": 2113,
+      "titleLead": false,
+      "overlay": "upgrade"
+    },
+    {
+      "name": "recap",
+      "sourceIn": 92.4,
+      "sourceOut": 102.4,
+      "frameIn": 2113,
+      "frameOut": 2346,
+      "titleLead": false
+    },
+    {
+      "name": "outro",
+      "sourceIn": 102.4,
+      "sourceOut": 105.96666666666667,
+      "frameIn": 2346,
+      "frameOut": 2453,
+      "titleLead": false
+    }
+  ],
+  "policy": "Separate nine-feature motion revision. Output-clock gradual TUI reveal and moderate Join push; genuine received/menu/empty/progressive-note/browser forwarding narrative; unchanged update-guide scene and recap. All UI cells/images are immutable native synthetic captures."
+}

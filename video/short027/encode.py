@@ -80,7 +80,14 @@ def main():
     final_loud=loudness(a.out)
     if abs(float(final_loud["input_i"])+14)>.6 or float(final_loud["input_tp"])>-1.0:raise RuntimeError("social audio loudness/true-peak gate failed")
     capture=json.loads((cache/"capture-receipt.json").read_text())
-    receipt={"film":str(a.out),"durationSeconds":DURATION,"frames":FRAMES,"binarySha256":capture["binarySha256"],"buildInfo":capture["buildInfo"],"musicSha256":MUSIC_SHA,"musicSourceSegments":[[segment["sourceIn"],segment["sourceOut"]] for segment in segments],"musicCrossfadeSeconds":PLAN["crossfadeSeconds"],"musicEnding":"original natural ending retained; two explicit30ms phrase seams","soundtrackPlanSha256":hashlib.sha256(a.plan.read_bytes()).hexdigest(),"staticGainDb":gain_db,"loudnessBefore":measure,"loudnessFinal":final_loud,"ffprobe":probe,"faststart":faststart(a.out),"pictureSourceSha256":hashlib.sha256(a.picture_source.read_bytes()).hexdigest(),"sha256":hashlib.sha256(a.out.read_bytes()).hexdigest(),"encodeCommand":command}
+    receipt={"film":str(a.out),"durationSeconds":DURATION,"frames":FRAMES,"binarySha256":capture["binarySha256"],"buildInfo":capture["buildInfo"],"musicSha256":MUSIC_SHA,"musicSourceSegments":[[segment["sourceIn"],segment["sourceOut"]] for segment in segments],"musicCrossfadeSeconds":PLAN["crossfadeSeconds"],"musicEnding":f"original natural ending retained; {len(segments)-1} explicit30ms phrase seams","soundtrackPlanSha256":hashlib.sha256(a.plan.read_bytes()).hexdigest(),"staticGainDb":gain_db,"loudnessBefore":measure,"loudnessFinal":final_loud,"ffprobe":probe,"faststart":faststart(a.out),"pictureSourceSha256":hashlib.sha256(a.picture_source.read_bytes()).hexdigest(),"sha256":hashlib.sha256(a.out.read_bytes()).hexdigest(),"encodeCommand":command}
+    if revision=='motion':
+        forward=cache/'forward-story-capture-receipt.json';proof=cache/'forward-story-proof.json';co_direction=cache/'opus-motion/provenance.json'
+        fresh=json.loads(forward.read_text())
+        if not fresh['synthetic'] or fresh['fixtureSends']!=0 or fresh['liveProviderWrites']!=0 or not fresh['allChildrenReaped']:raise RuntimeError('forwarding capture provenance/cleanup gate failed')
+        receipt['additionalNativeCapture']={'forwardStory':fresh,'proofSha256':hashlib.sha256(proof.read_bytes()).hexdigest(),'manifestSha256':hashlib.sha256((cache/'forward-story-manifest.json').read_bytes()).hexdigest()}
+        receipt['coDirection']=json.loads(co_direction.read_text())
+        receipt['motionQaReceiptSha256']=hashlib.sha256((cache/'motion-qa/receipt.json').read_bytes()).hexdigest()
     a.out.with_suffix(".report.json").write_text(json.dumps(receipt,indent=2))
     print(json.dumps({k:receipt[k] for k in ["film","durationSeconds","frames","sha256","loudnessFinal"]},indent=2))
 if __name__=="__main__":main()

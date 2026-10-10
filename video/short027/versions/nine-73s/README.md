@@ -1,25 +1,9 @@
-# Current nine-feature motion edit
+# Current nine-feature edit
 
-The current source is an **81.767-second, nine-highlight motion edit**. It adds a
-short gradual TUI reveal, a moderate push toward Join, and the complete genuine
-forwarding story: received airline email → Keep formatting → blank personal note
-→ fast native typing with a live preview → rendered outgoing HTML and a connected
-scroll through the original booking. [Motion timing and source provenance](MOTION-SCENES.md)
-describe the edit. The previous 72.967-second nine-feature source is preserved in
-[versions/nine-73s](versions/nine-73s/); all previous delivered movies remain intact.
-
-With the coordinator's existing live `HOST_TOKEN` reservation and genuine source
-assets already captured, build and deliver the current edit:
-
-```sh
-bash video/short027/build.sh motion
-python3 video/short027/deliver.py --revision motion
-```
-
-[MOTION-SCENES.md](MOTION-SCENES.md) includes fresh forward capture, proxy and
-chronological playback-review commands. Current output is
-`video/out/omagma-v0.2.7-motion.mp4`; unique final copies belong in
-`~/Videos/Omagma/`.
+The latest source is the **72.967-second, nine-highlight** release film.
+[Ninth scene workflow, timing and disclosure](NINTH-SCENE.md) describes the
+genuine upgrade card and update guide. Previous sections below preserve the
+approved eight-feature production history and source details.
 
 ## Earlier eight-feature edits
 
