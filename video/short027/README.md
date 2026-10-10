@@ -1,5 +1,11 @@
 # Current continuous nine-feature edit
 
+The preferred picture order is now **action palette → labels → in-message
+search**, using [flow.json](flow.json). Labels is chapter 03 and search is 04.
+Both chapters retain their durations; all later timings remain unchanged.
+The approved aligned soundtrack is copied verbatim, including every audio
+packet and timestamp. [Reordered-picture workflow](SMOOTH-EDIT.md) records the edit.
+
 The preferred soundtrack is now [soundtrack-aligned.json](soundtrack-aligned.json).
 The original passage and complete fill play through 70.446 seconds. A short
 pre-attack join then admits one closing-phrase drum entrance; two active drum

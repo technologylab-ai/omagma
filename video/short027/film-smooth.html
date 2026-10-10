@@ -31,7 +31,7 @@ const clamp=x=>Math.max(0,Math.min(1,x)),sm=x=>x*x*(3-2*x),lerp=(a,b,p)=>a+(b-a)
 const ease=(t,a,b)=>sm(clamp((t-a)/(b-a))),fmt=s=>s.replace(/\{(.+?)\}/g,'<kbd>$1</kbd>').replace(/`(.+?)`/g,'<code>$1</code>');
 let plan,manifest,chapters,images={},layers=[],chrome,state={};
 const FR=[160,212,1600,840],SF=1600/3520,RR=[960-680*(830/1124),214,1360*(830/1124),830],SR=830/1124;
-const titles=['','Start from your bar','Find a command','Find inside the message','Choose labels. Apply once.','Meetings, made readable','Pick files together','Forward with a personal note','Send with a safety net','Update on your terms'];
+let titles=['','Start from your bar','Find a command','Find inside the message','Choose labels. Apply once.','Meetings, made readable','Pick files together','Forward with a personal note','Send with a safety net','Update on your terms'];
 const subs={
  'bar':'Open TUI runs `omagma tui`','inbox':'Open TUI runs `omagma tui`',
  'palette untouched':'{Ctrl P} in the mailbox · type a word to see matching actions','palette typing':'{Ctrl P} in the mailbox · type a word to see matching actions','palette narrowed':'Matching actions · choose the command you need',
@@ -71,7 +71,7 @@ function descriptor(i,t){
   const q=ease(local,.4,1.6);d.views=[{asset:'labels-result.png',rect:FR.map((v,k)=>lerp(v,RR[k],q)),center:[lerp(1760,2840,q),lerp(924,648,q)],scale:lerp(SF,SR,q),focus:[2214,304,770,52]}];break;
  }
  case 'meeting card':{
-  const q=ease(local,0,.35),a=[2214,304,770,52],b=[2214,388,1276,102];d.views=[{asset:'labels-result.png',rect:RR,center:[2840,648],scale:SR,focus:a.map((v,k)=>lerp(v,b[k],q))}];break;
+  const linked=i>0&&plan.parts[i-1].name==='labels result',q=linked?ease(local,0,.35):1,a=[2214,304,770,52],b=[2214,388,1276,102];d.views=[{asset:'labels-result.png',rect:RR,center:[2840,648],scale:SR,focus:a.map((v,k)=>lerp(v,b[k],q))}];break;
  }
  case 'meeting review':d.views=[detail('meeting-review-detail.png',1440,800)];break;
  case 'join':{
@@ -164,8 +164,11 @@ window.qa=t=>{window.render(t);return state;};
 // Await each newly selected bitmap before a renderer captures the frame.
 // Two animation frames alone do not establish that a changed img is decoded.
 window.prepareFrame=()=>Promise.all(layers.filter(l=>l.el.style.display!=='none').flatMap(l=>Array.from(l.el.querySelectorAll('img')).filter(im=>im.closest('.native')?im.closest('.native').style.display!=='none':im.closest('.special').style.display!=='none')).map(im=>im.decode()));
-window.READY=Promise.all([fetch('smooth.json').then(r=>r.json()),fetch('/video/cache/short027/forward-story-manifest.json').then(r=>r.json()),document.fonts.ready]).then(async([p,m])=>{
+const timeline=new URLSearchParams(location.search).get('timeline')||'smooth.json';
+if(!['smooth.json','flow.json'].includes(timeline))throw Error('Unknown movie timeline');
+window.READY=Promise.all([fetch(timeline).then(r=>r.json()),fetch('/video/cache/short027/forward-story-manifest.json').then(r=>r.json()),document.fonts.ready]).then(async([p,m])=>{
  plan=p;manifest=m;chapters=Array.from({length:9},(_,k)=>plan.parts.find(p=>p.chapter===k+1).frameIn/plan.fps);
+ if(plan.chapterTitles)titles=plan.chapterTitles;
  names.push(manifest.receivedAsset,manifest.menuAsset,manifest.emptyAsset,manifest.finalAsset,manifest.browserAsset,...manifest.typingAssets);
  await Promise.all([...new Set(names)].map(async name=>{const img=new Image();img.decoding='sync';img.src=ROOT+name;await img.decode();images[name]=img;}));
  await Promise.all(['800 56px "Adwaita Sans"','700 24px "JetBrainsMono Nerd Font"','32px "Noto Color Emoji"'].map(f=>document.fonts.load(f)));await document.fonts.ready;

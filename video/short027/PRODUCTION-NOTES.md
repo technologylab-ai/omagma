@@ -1,5 +1,10 @@
 # Current continuous nine-feature edit
 
+The preferred picture now flows from the action palette directly to labels,
+then to in-message search. Chapter numbers 03/04 follow that order. Both block
+lengths and all later timestamps are preserved; the approved music packets are
+copied exactly. [Current picture/audio reproduction](SMOOTH-EDIT.md) documents it.
+
 The preferred music-first revision preserves the complete original fill, then
 joins at one closing-phrase entrance around 70.476 seconds. It determines an
 84.233-second picture duration: seven frames extend the settled website ending;

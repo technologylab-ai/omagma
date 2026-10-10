@@ -2,8 +2,9 @@ import {mkdirSync,writeFileSync,existsSync,readdirSync,rmSync,readFileSync} from
 import {resolve,join} from 'node:path';
 import {parseArgs} from 'node:util';
 import {browser,reservation,root} from './cdp.mjs';
-const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},plan:{type:'string'},film:{type:'string',default:'film.html'}}});
+const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},plan:{type:'string'},timeline:{type:'string'},film:{type:'string',default:'film.html'}}});
 if(!['film.html','film-brisk.html','film-nine.html','film-motion.html','film-smooth.html'].includes(o.film))throw Error('unknown film source');
+if(o.timeline&&(o.film!=='film-smooth.html'||!['smooth.json','flow.json'].includes(o.timeline)))throw Error('unknown timeline');
 await reservation();
 const plan=JSON.parse(readFileSync(resolve(o.plan||join(root,'video/short027/soundtrack.json')),'utf8'));
 const expectedFrames=Number(plan.frameCount);
@@ -15,7 +16,7 @@ const scale=Number(o.scale),workers=Number(o.workers),step=Number(o.step);
 if(!(scale>=.1&&scale<=2&&Number.isInteger(workers)&&workers>=1&&workers<=6&&Number.isInteger(step)&&step>=1))throw Error('bad render options');
 const b=await browser();
 try{
-  const pages=await Promise.all(Array.from({length:workers},()=>b.page('video/short027/'+o.film,{scale})));
+  const pages=await Promise.all(Array.from({length:workers},()=>b.page('video/short027/'+o.film+(o.timeline?'?timeline='+encodeURIComponent(o.timeline):''),{scale})));
   const film=await pages[0].evaluate('window.FILM');if(!film||film.fps!==plan.fps||film.width!==1920||film.height!==1080||Math.round(film.duration*film.fps)!==expectedFrames)throw Error('film dimensions/timing differ from explicit soundtrack plan');
   const start=o.from===undefined?0:Number(o.from),end=o.to===undefined?film.duration:Number(o.to);
   if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>film.duration+1e-6||end<=start)throw Error('bad render time range');

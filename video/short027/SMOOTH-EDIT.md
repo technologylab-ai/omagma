@@ -1,5 +1,30 @@
 # Continuous nine-feature edit
 
+## Preferred chapter flow
+
+The preferred picture now uses [flow.json](flow.json): action palette → labels
+dialog → in-message Find. Labels moves to chapter 03 at 13.900–22.600 seconds;
+Find moves to chapter 04 at 22.600–27.000. Both retain their approved lengths.
+All later chapters and the 84.233-second ending remain at the same timestamps.
+The search-to-meeting handoff uses a direct 0.4-second dissolve; no unrelated
+inbox view or blank title screen is inserted.
+
+The approved music is copied from the aligned movie without encoding, gain
+processing or retiming. `encode_flow.py` compares all AAC payload hashes,
+timestamps, durations and priming data before delivery. Only picture frames
+417–824 are rendered again; other approved frames are reused.
+
+```sh
+node video/short027/render.mjs --film film-smooth.html --timeline flow.json --plan video/short027/soundtrack-aligned.json --from 13.9 --to 27.5 --out video/cache/short027/flow-patch-frames
+python3 video/short027/encode_flow.py --approved "$APPROVED_VIDEO" --expected-sha256 "$APPROVED_VIDEO_SHA256"
+python3 video/short027/deliver.py --revision flow
+```
+
+Use the existing live host reservation and the approved aligned frame set.
+The first-use output paths are preserved; archive existing flow outputs before
+regenerating them. Review the three changed handoffs at normal speed before
+delivery. All previous delivered comparison movies remain intact.
+
 ## Preferred music-first timing
 
 The preferred edit is now **84.233 seconds / 2,527 frames**. The music join is
