@@ -22,6 +22,7 @@ const text_layout = @import("text_layout.zig");
 const html_view = @import("html_view.zig");
 const mime = @import("mime.zig");
 const markdown_mail = @import("markdown_mail.zig");
+const original_mail = @import("original_mail.zig");
 const recipients = @import("recipients.zig");
 const completion = @import("completion.zig");
 const path_completion = @import("path_completion.zig");
@@ -934,6 +935,8 @@ const App = struct {
     compose_source_probe: bool = false,
     compose_source_subject: Field = .{},
     compose_source_resources: usize = 0,
+    compose_source_format_error: ?anyerror = null,
+    compose_source_original_too_large: bool = false,
     compose_view: ComposeView = .rendered,
     compose_preview_full: bool = false,
     compose_preview_scroll: usize = 0,
@@ -5339,8 +5342,48 @@ const App = struct {
         if (!same(text(get(message, "id")), self.pending_compose_id[0..self.pending_compose_id_len])) return error.InvalidIdentity;
         self.compose_source_html = text(get(message, "bodyHtml")).len != 0;
         self.compose_source_resources = 0;
-        for (items(get(message, "attachments"))) |attachment| {
-            if (get(attachment, "contentId") != .null or get(attachment, "contentLocation") != .null) self.compose_source_resources += 1;
+        self.compose_source_format_error = null;
+        self.compose_source_original_too_large = false;
+        const values = items(get(message, "attachments"));
+        var lower_bound: usize = 0;
+        for (values) |attachment| {
+            const size = get(attachment, "size");
+            if (size == .integer and size.integer >= 0 and @as(u64, @intCast(size.integer)) <= std.math.maxInt(usize)) lower_bound +|= @intCast(size.integer);
+        }
+        // The RAW original contains every file. This is only a definite lower
+        // bound; a smaller descriptor total does not promise a usable .eml.
+        self.compose_source_original_too_large = lower_bound > types.Limits.body_bytes;
+        if (self.compose_source_html) preflight: {
+            if (truth(get(message, "bodyHtmlAmbiguous"))) {
+                self.compose_source_format_error = error.AmbiguousOriginalHtml;
+                break :preflight;
+            }
+            if (values.len > 64) {
+                self.compose_source_format_error = error.TooManyAttachments;
+                break :preflight;
+            }
+            var metadata: [64]types.Attachment = undefined;
+            for (values, metadata[0..values.len]) |value, *descriptor| {
+                const size = get(value, "size");
+                if (size != .integer or size.integer < 0 or @as(u64, @intCast(size.integer)) > std.math.maxInt(usize)) {
+                    self.compose_source_format_error = error.InvalidAttachment;
+                    break :preflight;
+                }
+                descriptor.* = .{
+                    .id = text(get(value, "id")),
+                    .filename = text(get(value, "filename")),
+                    .mimeType = text(get(value, "mimeType")),
+                    .size = @intCast(size.integer),
+                    .contentId = if (get(value, "contentId") == .string) text(get(value, "contentId")) else null,
+                    .disposition = if (get(value, "disposition") == .string) text(get(value, "disposition")) else null,
+                    .contentLocation = if (get(value, "contentLocation") == .string) text(get(value, "contentLocation")) else null,
+                };
+            }
+            const plan = original_mail.resourcePlan(text(get(message, "bodyHtml")), metadata[0..values.len]) catch |err| {
+                self.compose_source_format_error = err;
+                break :preflight;
+            };
+            self.compose_source_resources = plan.count;
         }
         try self.compose_source_subject.set(self.allocator, text(get(message, "subject")));
         self.compose_source_ready = true;
@@ -5401,7 +5444,7 @@ const App = struct {
             }
             if (self.compose_source_html) {
                 self.compose_choice = true;
-                self.dialog_focus.reset(.compose_format, 0);
+                self.dialog_focus.reset(.compose_format, self.composeChoiceInitial());
                 self.say(false, "Choose original format · Tab controls · Enter chooses · Esc Back", .{});
                 return;
             }
@@ -5419,9 +5462,9 @@ const App = struct {
         if (self.paste) return;
         const forward = self.compose_intent == .forward;
         const count: usize = if (forward) 4 else 3;
-        self.dialog_focus.ensure(.compose_format, 0);
+        self.dialog_focus.ensure(.compose_format, self.composeChoiceInitial());
         if (tabDirection(key)) |backwards| {
-            self.dialog_focus.move(backwards, count, if (forward) 0b1111 else 0b111);
+            self.dialog_focus.move(backwards, count, self.composeChoiceMask());
             return;
         }
         const back = key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches('c', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == count - 1);
@@ -5438,6 +5481,17 @@ const App = struct {
             else => null,
         } else null;
         if (selected) |choice| {
+            const index: usize = switch (choice) {
+                .formatted => 0,
+                .text => 1,
+                .attached => 2,
+                .choose => unreachable,
+            };
+            if (!self.composeChoiceEnabled(index)) {
+                self.dialog_focus.index = self.composeChoiceInitial();
+                self.say(false, "{s}", .{self.composeChoiceReason(index).?});
+                return;
+            }
             self.compose_source_mode = choice;
             self.compose_choice = false;
             try self.dispatchConversationCompose();
@@ -5455,20 +5509,54 @@ const App = struct {
         inner.fill(.{ .style = self.style(.text) });
         const forward = self.compose_intent == .forward;
         const count: usize = if (forward) 4 else 3;
-        self.dialog_focus.ensure(.compose_format, 0);
+        self.dialog_focus.ensure(.compose_format, self.composeChoiceInitial());
         // One action per row keeps every choice reachable even at 30 columns.
         const first: usize = if (inner.height >= count + 3) 2 else 0;
         if (first != 0) {
             try self.line(inner, 0, try self.fitLine(inner, self.compose_source_subject.value(), inner.width), .subject);
-            try self.line(inner, 1, try std.fmt.allocPrint(self.frame.allocator(), "HTML · {d} embedded resources", .{self.compose_source_resources}), .muted);
+            try self.line(inner, 1, if (self.compose_source_format_error != null) "HTML · Keep formatting unavailable" else try std.fmt.allocPrint(self.frame.allocator(), "HTML · {d} embedded resources", .{self.compose_source_resources}), .muted);
         }
         for (0..count) |index| {
             const label: []const u8 = if (index == 0) "[Keep formatting k]" else if (index == 1) "[Text quote t]" else if (forward and index == 2) "[Attach original .eml e]" else "[Back Esc/q]";
-            _ = try self.actionButton(inner, @intCast(first + index), 0, label, self.dialog_focus.index == index, true, .dialog_action, index);
+            _ = try self.actionButton(inner, @intCast(first + index), 0, label, self.dialog_focus.index == index, self.composeChoiceEnabled(index), .dialog_action, index);
+        }
+        if (self.composeChoiceReason(0) orelse self.composeChoiceReason(2)) |reason| {
+            var next = try self.flowTone(inner, reason, 0, first + count, .warning);
+            if (self.compose_source_format_error != null) if (self.composeChoiceReason(2)) |original_reason| {
+                if (next < inner.height) next = try self.flowTone(inner, original_reason, 0, next, .warning);
+            };
+            if (next < inner.height) try self.line(inner, next, "Tab / Shift+Tab · Enter", .muted);
+            return;
         }
         const explanation: []const u8 = if (self.dialog_focus.index == 0) "Original HTML below your Omagma-styled note" else if (self.dialog_focus.index == 1) "Editable text copy of the original" else if (forward and self.dialog_focus.index == 2) "Recipient opens the attached email" else "Return without creating a draft";
         if (first + count < inner.height) try self.line(inner, first + count, try self.fitLine(inner, explanation, inner.width), .muted);
         if (first + count + 1 < inner.height) try self.line(inner, first + count + 1, "Tab / Shift+Tab · Enter", .muted);
+    }
+    fn composeChoiceInitial(self: *const App) usize {
+        return if (self.compose_source_format_error == null) 0 else 1;
+    }
+    fn composeChoiceEnabled(self: *const App, index: usize) bool {
+        return if (index == 0) self.compose_source_format_error == null else if (index == 2 and self.compose_intent == .forward) !self.compose_source_original_too_large else true;
+    }
+    fn composeChoiceMask(self: *const App) u8 {
+        var mask: u8 = 0;
+        for (0..(if (self.compose_intent == .forward) @as(usize, 4) else 3)) |index| if (self.composeChoiceEnabled(index)) {
+            mask |= @as(u8, 1) << @intCast(index);
+        };
+        return mask;
+    }
+    fn composeChoiceReason(self: *const App, index: usize) ?[]const u8 {
+        if (index == 0) if (self.compose_source_format_error) |err| return switch (err) {
+            error.AttachmentsTooLarge => "Embedded images exceed 2 MiB · choose Text quote",
+            error.TooManyAttachments => "Too many embedded images · choose Text quote",
+            error.AmbiguousOriginalHtml => "Several HTML bodies · choose Text quote",
+            error.AmbiguousContentId => "Several images share a reference · choose Text quote",
+            error.OriginalResourceUnavailable, error.InvalidContentId => "Original images are unavailable · choose Text quote",
+            error.BodyTooLarge => "Original HTML exceeds 2 MiB · choose Text quote",
+            else => "Original formatting is unavailable · choose Text quote",
+        };
+        if (index == 2 and self.compose_intent == .forward and self.compose_source_original_too_large) return "Original email exceeds 2 MiB · choose Text quote";
+        return null;
     }
     fn composeIntentLabel(self: *const App) []const u8 {
         return switch (self.compose_intent) {
@@ -6882,7 +6970,7 @@ const App = struct {
                 self.ux_focus = 1;
                 self.ux_selected = if (down) @min(self.ux_selected +| 1, self.uxCount() -| 1) else self.ux_selected -| 1;
             } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
-                if (hit.kind == .dialog_action) {
+                if (hit.kind == .dialog_action and self.composeChoiceEnabled(hit.index)) {
                     if (hit.index >= 100) {
                         self.ux_selected = hit.index - 100;
                         self.ux_focus = 1;
@@ -13064,6 +13152,71 @@ test "formatted composer: received classes stay untrusted and snapshot preview s
     try app.requireComposePreview();
     try std.testing.expectEqualStrings("Original fallback", app.compose.original.?.bodyText);
     try std.testing.expectEqual(@as(usize, 2), app.compose_preview_builds);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "formatted chooser: shared metadata plan rejects large images before keys tabs or mouse dispatch" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    try app.pinComposeTarget(.reply, "photo-source");
+    const ordinary: types.Attachment = .{ .id = "ordinary", .filename = "document.pdf", .mimeType = "application/pdf", .size = 30 * 1024 * 1024, .contentId = "unused@example.test", .disposition = "attachment" };
+    var photo: types.Attachment = .{ .id = "photo", .filename = "photo.png", .mimeType = "image/png", .size = 14 * 1024, .contentId = "photo@example.test", .disposition = "inline" };
+    const html = "<p>Readable photo message</p><img src='cid:photo@example.test'>";
+    var message: types.Message = .{ .id = "photo-source", .threadId = "photo-thread", .bodyHtml = html, .attachments = &.{ photo, ordinary } };
+    var encoded = try std.json.Stringify.valueAlloc(owned, message, .{});
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
+    try std.testing.expect(app.compose_source_format_error == null);
+    try std.testing.expectEqual(@as(usize, 1), app.compose_source_resources);
+    try std.testing.expect(app.compose_source_original_too_large);
+    app.compose_intent = .forward;
+    try std.testing.expectEqual(@as(u8, 0b1011), app.composeChoiceMask());
+    try std.testing.expect(app.composeChoiceEnabled(0));
+
+    photo.size = 5 * 1024 * 1024;
+    message.attachments = &.{photo};
+    encoded = try std.json.Stringify.valueAlloc(owned, message, .{});
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
+    try std.testing.expectEqual(error.AttachmentsTooLarge, app.compose_source_format_error.?);
+    try std.testing.expectEqualStrings("Embedded images exceed 2 MiB · choose Text quote", app.composeChoiceReason(0).?);
+    for ([_]PendingCompose{ .reply, .reply_all, .forward }) |intent| {
+        app.compose_intent = intent;
+        app.pending_compose = intent;
+        app.compose_choice = true;
+        app.dialog_focus.reset(.compose_format, app.composeChoiceInitial());
+        try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+        try app.onComposeChoiceKey(.{ .codepoint = 'k' });
+        try std.testing.expect(app.compose_choice and app.pending_compose == intent and app.job.future == null);
+        app.dialog_focus.index = 0;
+        try app.onComposeChoiceKey(.{ .codepoint = Key.enter });
+        try std.testing.expect(app.compose_choice and app.job.future == null);
+        try app.onComposeChoiceKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(@as(usize, if (intent == .forward) 3 else 2), app.dialog_focus.index);
+        try app.onComposeChoiceKey(.{ .codepoint = Key.tab });
+        try std.testing.expectEqual(@as(usize, 1), app.dialog_focus.index);
+        if (intent == .forward) {
+            try app.onComposeChoiceKey(.{ .codepoint = 'e' });
+            try std.testing.expect(app.compose_choice and app.job.future == null);
+        }
+        app.mouse_hits.clear();
+        app.mouse_hits.add(.{ .x = 0, .y = 0, .width = 20, .height = 1 }, .dialog_action, 0);
+        try app.onMouse(.{ .type = .press, .button = .left, .col = 1, .row = 0, .mods = .{} });
+        try std.testing.expect(app.compose_choice and app.job.future == null);
+    }
+    message.attachments = &.{};
+    encoded = try std.json.Stringify.valueAlloc(owned, message, .{});
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
+    try std.testing.expectEqual(error.OriginalResourceUnavailable, app.compose_source_format_error.?);
+    photo.size = 14 * 1024;
+    message.attachments = &.{photo};
+    message.bodyHtmlAmbiguous = true;
+    encoded = try std.json.Stringify.valueAlloc(owned, message, .{});
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
+    try std.testing.expectEqual(error.AmbiguousOriginalHtml, app.compose_source_format_error.?);
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 

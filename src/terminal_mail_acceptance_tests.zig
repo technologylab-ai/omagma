@@ -633,9 +633,11 @@ test "mail acceptance: unused identities on ordinary large files retain reading 
         try std.testing.expectEqualStrings("RmljdGlvbmFsIHNsaWRlcwo", forwarded.attachments[0].data);
         try std.testing.expectEqual(@as(usize, 17), forwarded.attachments[0].size);
 
-        // Explicit inline resources remain subject to the small body budget.
+        // Materialized inline resources retain the small body budget; an
+        // unloaded external descriptor no longer refuses ordinary reading.
         try wire.object.put(a, "id", .{ .string = "same-message" });
         try leaf.object.getPtr("body").?.object.put(a, "size", .{ .integer = 30 * 1024 * 1024 });
+        try leaf.object.getPtr("body").?.object.put(a, "data", .{ .string = "eA" });
         try leaf.object.getPtr("headers").?.array.items[0].object.put(a, "value", .{ .string = "inline; filename=report.pptx" });
         var inline_peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, wire, .{}) }} };
         try std.testing.expectError(error.BodyTooLarge, readProvider(a, account, &inline_peer));
@@ -643,4 +645,151 @@ test "mail acceptance: unused identities on ordinary large files retain reading 
         const stats = try sessionCommand(a, session, .{ .cmd = "cache.stats", .account = account });
         try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", -1));
     }
+}
+
+test "mail acceptance: external inline photos leave mail readable and refuse oversized formatting before hydration" {
+    const literal =
+        \\{"id":"same-message","threadId":"same-thread","internalDate":"45","labelIds":["INBOX"],"payload":{"mimeType":"multipart/mixed","headers":[{"name":"From","value":"Sender <sender@example.test>"},{"name":"To","value":"personal@example.com, teammate@example.test"},{"name":"Subject","value":"Inline photo and document"},{"name":"Message-ID","value":"<inline-photo@example.test>"}],"body":{"size":0},"parts":[{"mimeType":"text/plain","headers":[],"body":{"size":2,"data":"SGk"}},{"mimeType":"text/html","headers":[],"body":{"size":55,"data":"PHA-SGk8L3A-PGltZyBzcmM9ImNpZDpwaG90b0BleGFtcGxlLnRlc3QiIGFsdD0iUGhvdG8iPg"}},{"mimeType":"image/png","filename":"","headers":[{"name":"Content-Disposition","value":"inline"},{"name":"Content-ID","value":"<photo@example.test>"}],"body":{"size":5242880,"attachmentId":"photo-token"}},{"partId":"document","mimeType":"application/pdf","filename":"agenda.pdf","headers":[{"name":"Content-Disposition","value":"attachment"}],"body":{"size":5,"data":"JVBERi0"}}]}}
+    ;
+    const single_html = "<p>Hi</p><img src=\"cid:photo@example.test\" alt=\"Photo\">";
+    const aggregate_html = "<p>Hi</p><img src=\"cid:photo@example.test\"><img src=\"cid:second@example.test\">";
+    for (0..2) |variant| {
+        errdefer std.debug.print("mail acceptance external inline photo variant={d}\n", .{variant});
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var wire = try std.json.parseFromSliceLeaky(j.Value, a, literal, .{});
+        if (variant == 1) {
+            const parts = wire.object.getPtr("payload").?.object.getPtr("parts").?;
+            try parts.array.items[2].object.getPtr("body").?.object.put(a, "size", .{ .integer = 1310720 });
+            try parts.array.items[1].object.put(a, "body", try std.json.parseFromSliceLeaky(j.Value, a, "{\"size\":78,\"data\":\"PHA-SGk8L3A-PGltZyBzcmM9ImNpZDpwaG90b0BleGFtcGxlLnRlc3QiPjxpbWcgc3JjPSJjaWQ6c2Vjb25kQGV4YW1wbGUudGVzdCI-\"}", .{}));
+            try parts.array.append(try std.json.parseFromSliceLeaky(j.Value, a, "{\"mimeType\":\"image/png\",\"filename\":\"second.png\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"},{\"name\":\"Content-ID\",\"value\":\"<second@example.test>\"}],\"body\":{\"size\":1310720,\"attachmentId\":\"second-photo-token\"}}", .{}));
+        }
+        const wire_text = try std.json.Stringify.valueAlloc(a, wire, .{});
+        var peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = wire_text }} };
+        const account = "personal@example.com";
+        const message = try readProvider(a, account, &peer);
+        try std.testing.expectEqualStrings("Hi", message.bodyText);
+        try std.testing.expectEqualStrings(if (variant == 0) single_html else aggregate_html, message.bodyHtml.?);
+        try std.testing.expectEqual(@as(usize, 2 + variant), message.attachments.len);
+        try std.testing.expectEqualStrings("photo-token", message.attachments[0].id);
+        try std.testing.expectEqualStrings("attachment", message.attachments[0].filename);
+        try std.testing.expectEqual(@as(usize, if (variant == 0) 5242880 else 1310720), message.attachments[0].size);
+        try std.testing.expectEqualStrings("", message.attachments[0].data);
+        try std.testing.expectEqualStrings("photo@example.test", message.attachments[0].contentId.?);
+        try std.testing.expectEqualStrings("inline", message.attachments[0].disposition.?);
+        try std.testing.expectEqualStrings("agenda.pdf", message.attachments[1].filename);
+        try std.testing.expectEqualStrings("JVBERi0", message.attachments[1].data);
+        try peer.complete(0); // Reading has no image download or write.
+        try std.testing.expectError(error.AttachmentsTooLarge, @import("terminal/original_mail.zig").resourcePlan(message.bodyHtml.?, message.attachments));
+
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        const cache_root = try std.fmt.allocPrint(a, "{s}/inline-cache", .{root});
+        const source = try j.value(a, .{ .account = account, .messages = [_]j.Value{wire} });
+        try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = try std.json.Stringify.valueAlloc(a, source, .{}) });
+        var env = std.process.Environ.Map.init(std.testing.allocator);
+        defer env.deinit();
+        const session = try newCachedSession(std.testing.allocator, cache_root, &env);
+        defer std.testing.allocator.destroy(session);
+        defer session.deinit();
+        session.options.fixtures = true;
+        session.options.fixture_root = root;
+        {
+            var store = try storage.Store.open(std.testing.io, a, cache_root, account, session.options);
+            defer store.close();
+            try store.put(message, true);
+            try store.save();
+        }
+        const reopened = try j.decode(t.Message, a, try cached(a, session, account, "mail.read"));
+        try std.testing.expectEqualStrings(message.bodyHtml.?, reopened.bodyHtml.?);
+        try std.testing.expectEqual(message.attachments[0].size, reopened.attachments[0].size);
+        try std.testing.expectEqualStrings("", reopened.attachments[0].data);
+        _ = try sessionCommand(a, session, .{ .cmd = "mail.attachment-save", .account = account, .messageId = "same-message", .attachmentId = "document", .path = try std.fmt.allocPrint(a, "{s}/agenda.pdf", .{root}) });
+        var document: [16]u8 = undefined;
+        try std.testing.expectEqualStrings("%PDF-", try tmp.dir.readFile(std.testing.io, "agenda.pdf", &document));
+
+        // No externalBodies map exists. In the aggregate case each image is
+        // individually fetchable by the small fixture transport, so an eager
+        // fetch would fail AttachmentNotFound instead of this resource limit.
+        for ([_]struct { command: []const u8, all: bool = false }{
+            .{ .command = "mail.reply" },
+            .{ .command = "mail.reply", .all = true },
+            .{ .command = "mail.forward" },
+        }) |action| {
+            const request = try std.json.Stringify.valueAlloc(a, .{ .cmd = action.command, .account = account, .messageId = "same-message", .preserveFormatting = true, .bodyFormat = "markdown", .all = action.all }, .{});
+            const refused = try std.json.parseFromSliceLeaky(j.Value, a, try session.client().call(a, request), .{});
+            try std.testing.expect(!try j.boolean(refused, "ok", true));
+            try std.testing.expectEqualStrings("AttachmentsTooLarge", j.text(j.get(refused, "error").?, "code"));
+        }
+        for ([_]bool{ false, true }) |all| {
+            const reply = try core.decodeDraft(a, try sessionCommand(a, session, .{ .cmd = "mail.reply", .account = account, .messageId = "same-message", .bodyFormat = "markdown", .all = all }));
+            try std.testing.expect(reply.original == null);
+            try std.testing.expectEqual(@as(usize, 0), reply.attachments.len);
+            try std.testing.expectEqualStrings("sender@example.test", reply.to[0].address);
+            try std.testing.expectEqual(@as(usize, @intFromBool(all)), reply.cc.len);
+            const preview = try sessionCommand(a, session, .{ .cmd = "draft.preview", .account = account, .draftId = reply.id });
+            try std.testing.expect(std.mem.indexOf(u8, j.text(preview, "plainText"), "Hi") != null);
+        }
+
+        if (variant == 0) {
+            // Model an already verified received blob with bounded synthetic
+            // bytes. Text Forward and save use the existing streamed file path;
+            // neither needs to materialize it as a preserved HTML resource.
+            const blob = @import("terminal/attachment_blob.zig");
+            var block: [64 * 1024]u8 = undefined;
+            for (&block, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+            var received = message;
+            received.id = "verified-photo";
+            const attachments = try a.dupe(t.Attachment, message.attachments);
+            {
+                var store = try storage.Store.open(std.testing.io, a, cache_root, account, session.options);
+                defer store.close();
+                var incoming = try blob.Incoming.create(&store, attachments[0].size);
+                defer incoming.close();
+                for (0..attachments[0].size / block.len) |_| try incoming.file.writeStreamingAll(std.testing.io, &block);
+                attachments[0] = try incoming.commit(&store, attachments[0]);
+                received.attachments = attachments;
+                try store.putOutbox(received);
+            }
+            _ = try sessionCommand(a, session, .{ .cmd = "mail.attachment-save", .account = account, .messageId = received.id, .attachmentId = "photo-token", .path = try std.fmt.allocPrint(a, "{s}/photo.bin", .{root}) });
+            const saved = try tmp.dir.openFile(std.testing.io, "photo.bin", .{});
+            defer saved.close(std.testing.io);
+            var buffer: [64 * 1024]u8 = undefined;
+            var offset: usize = 0;
+            while (true) {
+                const count = try saved.readPositional(std.testing.io, &.{&buffer}, offset);
+                if (count == 0) break;
+                const start = offset % block.len;
+                const first = @min(count, block.len - start);
+                try std.testing.expectEqualSlices(u8, block[start..][0..first], buffer[0..first]);
+                try std.testing.expectEqualSlices(u8, block[0 .. count - first], buffer[first..count]);
+                offset += count;
+            }
+            try std.testing.expectEqual(@as(usize, 5242880), offset);
+            const forwarded = try core.decodeDraft(a, try sessionCommand(a, session, .{ .cmd = "mail.forward", .account = account, .messageId = received.id, .bodyFormat = "markdown" }));
+            try std.testing.expect(forwarded.original == null);
+            try std.testing.expectEqual(@as(usize, 2), forwarded.attachments.len);
+            try std.testing.expectEqualStrings(attachments[0].blobId.?, forwarded.attachments[0].blobId.?);
+            try std.testing.expectEqualStrings("", forwarded.attachments[0].data);
+            try std.testing.expectEqual(@as(usize, 5242880), forwarded.attachments[0].size);
+            try std.testing.expect(forwarded.attachments[0].contentId == null);
+            const preview = try sessionCommand(a, session, .{ .cmd = "draft.preview", .account = account, .draftId = forwarded.id });
+            try std.testing.expect(std.mem.indexOf(u8, j.text(preview, "plainText"), "Hi") != null);
+        }
+        const stats = try sessionCommand(a, session, .{ .cmd = "cache.stats", .account = account });
+        try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", -1));
+    }
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var loaded = try std.json.parseFromSliceLeaky(j.Value, a, literal, .{});
+    const body = loaded.object.getPtr("payload").?.object.getPtr("parts").?.array.items[2].object.getPtr("body").?;
+    _ = body.object.orderedRemove("attachmentId");
+    try body.object.put(a, "data", .{ .string = "AA" });
+    var peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, loaded, .{}) }} };
+    try std.testing.expectError(error.BodyTooLarge, readProvider(a, "personal@example.com", &peer));
+    try peer.complete(0);
 }

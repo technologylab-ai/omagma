@@ -186,6 +186,9 @@ const decoder_retries = [_]struct { revision: u32, code: []const u8 }{
     .{ .revision = 2, .code = "InvalidUtf8" },
     // Received attachments are bounded at 50 MiB instead of 25 MiB.
     .{ .revision = 2, .code = "BodyTooLarge" },
+    // Large external images and other unloaded binary parts, including inline
+    // ones referenced by Content-ID, stay descriptors instead of refusing.
+    .{ .revision = 3, .code = "BodyTooLarge" },
 };
 pub const decoder_revision: u32 = decoder_retries[decoder_retries.len - 1].revision;
 
@@ -1384,15 +1387,20 @@ test "older decoder refusals are retried once on writable opens and current refu
     try std.testing.expect(!retriedByNewerDecoder("", 0));
     try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", decoder_revision));
     try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", decoder_revision));
-    // A cache already migrated by the first revision still retries refusals
-    // that the second revision accepts, but not those the first one retried.
-    try std.testing.expectEqual(@as(u32, 2), decoder_revision);
-    for ([_][]const u8{ "UnsupportedCharset", "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable", "BodyTooLarge" }) |code| {
+    // A cache migrated by an earlier revision retries only refusals that a
+    // later revision accepts, once.
+    try std.testing.expectEqual(@as(u32, 3), decoder_revision);
+    for ([_][]const u8{ "UnsupportedCharset", "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable" }) |code| {
         try std.testing.expect(retriedByNewerDecoder(code, 1));
         try std.testing.expect(!retriedByNewerDecoder(code, 2));
     }
+    try std.testing.expect(retriedByNewerDecoder("BodyTooLarge", 1));
+    try std.testing.expect(retriedByNewerDecoder("BodyTooLarge", 2));
+    try std.testing.expect(!retriedByNewerDecoder("BodyTooLarge", 3));
     try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", 1));
+    try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", 2));
     try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", 1));
+    try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", 2));
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/decoder", .{tmp.sub_path});
     const options: t.Options = .{ .fixtures = true };
     var generation: u64 = 0;

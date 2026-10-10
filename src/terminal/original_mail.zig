@@ -64,6 +64,43 @@ pub fn resourceUsage(html: []const u8, resources: []const t.Attachment) !u64 {
     return used;
 }
 
+pub const ResourcePlan = struct {
+    indices: [t.Limits.related_resources]u6 = undefined,
+    count: usize = 0,
+    bytes: usize = 0,
+};
+
+/// Metadata-only preflight shared by the format chooser and fresh capture.
+/// No allocation, file access or resource download occurs here. Explicit files
+/// are retained as related resources only when HTML actually references them;
+/// other identified resources are retained for opaque conditional markup too.
+/// Selected resources keep the 32-part and 2 MiB decoded aggregate limits.
+pub fn resourcePlan(html: []const u8, attachments: []const t.Attachment) !ResourcePlan {
+    if (html.len == 0) return error.OriginalHtmlUnavailable;
+    const usage = try resourceUsage(html, attachments);
+    _ = try scan(html);
+    var plan: ResourcePlan = .{};
+    for (attachments, 0..) |attachment, index| {
+        const is_file = if (attachment.disposition) |value| std.ascii.eqlIgnoreCase(value, "attachment") else false;
+        const referenced = usage & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
+        const has_identity = attachment.contentId != null or attachment.contentLocation != null;
+        if (!has_identity or (is_file and !referenced)) continue;
+        if (plan.count == plan.indices.len) return error.TooManyAttachments;
+        plan.bytes = std.math.add(usize, plan.bytes, attachment.size) catch return error.AttachmentsTooLarge;
+        if (plan.bytes > t.Limits.body_bytes) return error.AttachmentsTooLarge;
+        if (attachment.contentId) |id| {
+            _ = try @import("mime.zig").contentId(id);
+            for (plan.indices[0..plan.count]) |previous| if (attachments[previous].contentId) |other| if (std.mem.eql(u8, id, other)) return error.AmbiguousContentId;
+        }
+        if (attachment.contentLocation) |location| {
+            for (plan.indices[0..plan.count]) |previous| if (attachments[previous].contentLocation) |other| if (std.mem.eql(u8, location, other)) return error.AmbiguousContentId;
+        }
+        plan.indices[plan.count] = @intCast(index);
+        plan.count += 1;
+    }
+    return plan;
+}
+
 pub fn prepare(a: std.mem.Allocator, note: Note, original: t.Original) !Prepared {
     const envelope = try inspect(original);
     try bodyText(note.html);
@@ -892,6 +929,40 @@ fn fixtureOriginal(html: []const u8) t.Original {
 const fixture_note = "<div>New note<img src=\"cid:omagma-logo@omagma.invalid\"></div>";
 fn fixtureNote() Note {
     return .{ .html = fixture_note, .plain = "New note", .logoOffset = std.mem.indexOf(u8, fixture_note, logo_content_id).? };
+}
+
+test "original mail: resource plan separates unloaded file metadata from bounded preserved resources" {
+    const html = "<p>Original</p><img src='cid:photo@example.test'>";
+    const resources = [_]t.Attachment{
+        .{ .id = "file", .filename = "report.pptx", .size = 30 * 1024 * 1024, .contentId = "unused@example.test", .contentLocation = "report.pptx", .disposition = "attachment" },
+        .{ .id = "photo", .filename = "photo.png", .size = 14 * 1024, .contentId = "photo@example.test", .disposition = "inline" },
+    };
+    const eligible = try resourcePlan(html, &resources);
+    try std.testing.expectEqual(@as(usize, 1), eligible.count);
+    try std.testing.expectEqual(@as(u6, 1), eligible.indices[0]);
+    try std.testing.expectEqual(@as(usize, 14 * 1024), eligible.bytes);
+    var photo = resources[1];
+    photo.size = 2 * 1024 * 1024;
+    try std.testing.expectEqual(photo.size, (try resourcePlan(html, &.{photo})).bytes);
+    photo.size = 5 * 1024 * 1024;
+    try std.testing.expectError(error.AttachmentsTooLarge, resourcePlan(html, &.{photo}));
+    // A large explicit file becomes a resource when referenced, so it cannot
+    // evade the preservation limit merely by using attachment disposition.
+    try std.testing.expectError(error.AttachmentsTooLarge, resourcePlan("<img src='report.pptx'>", &resources));
+    var many: [33]t.Attachment = @splat(.{ .id = "conditional", .filename = "conditional.png", .size = 8, .disposition = "inline" });
+    var locations: [33][2]u8 = undefined;
+    for (&many, 0..) |*item, index| {
+        locations[index] = .{ 'a' + @as(u8, @intCast(index / 10)), '0' + @as(u8, @intCast(index % 10)) };
+        item.contentLocation = &locations[index];
+    }
+    try std.testing.expectEqual(@as(usize, 32), (try resourcePlan("<p>Conditional resources</p>", many[0..32])).count);
+    try std.testing.expectError(error.TooManyAttachments, resourcePlan("<p>Conditional resources</p>", &many));
+    try std.testing.expectError(error.OriginalResourceUnavailable, resourcePlan("<img src='cid:missing@example.test'>", &resources));
+    try std.testing.expectError(error.AmbiguousContentId, resourcePlan(html, &.{ resources[1], resources[1] }));
+    try std.testing.expectError(error.AmbiguousContentId, resourcePlan("<p>Original</p>", &.{ many[0], many[0] }));
+    photo.size = 1;
+    photo.contentId = "invalid cid";
+    try std.testing.expectError(error.InvalidContentId, resourcePlan("<p>Original</p>", &.{photo}));
 }
 
 test "original mail: body prefix keeps attributes styles comments images and trusted logo offset" {

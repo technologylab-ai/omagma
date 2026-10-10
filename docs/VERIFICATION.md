@@ -103,7 +103,12 @@ uses an owned PTY and fictional provider-shaped mail. It starts with an older
 cache containing a body refusal, refreshes through the provider decoder, opens
 the recovered message and its attachments, saves a file, and creates formatted
 replies and forwards without sending. Restart checks distinguish successful
-recovery from a refusal that remains final under the current decoder. The Darwin
+recovery from a refusal that remains final under the current decoder. A large
+unloaded inline-photo case keeps the body and file controls accessible, then
+checks Reply, Reply all and Forward: unsupported formatting choices explain
+their limits and remain disabled through keyboard and mouse input. Native
+acceptance also saves and forwards verified photo bytes, and rejects an
+oversized combined resource plan before downloading its images. The Darwin
 variant uses the existing PTY guardian. No desktop window or real mailbox is
 needed.
 

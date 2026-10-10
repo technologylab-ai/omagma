@@ -22,18 +22,21 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_pty import Terminal, wait_saved_compose
 from terminal_polish_compose import panel_text
 from terminal_reader import reader_contains, reader_rows
-from terminal_screen import Screen
+from terminal_mouse_screen import MouseScreen
 
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures/terminal/provider-acceptance"
 ACCOUNT = ACCOUNTS[0]
 GOOD = "provider-bom-contract"
 INVALID = "provider-truncated-text"
+LARGE_IMAGE_BYTES = 5 * 1024 * 1024
+LARGE_IMAGE_NAME = "contract-photo.png"
+LARGE_IMAGE_REASON = "Embedded images exceed 2 MiB · choose Text quote"
 COUNTERS = ("fixtureCalls", "syncCalls", "syncMetadataGets", "syncListCalls",
             "syncHistoryPages", "syncBodyGets")
 
 
-class AcceptanceScreen(Screen):
+class AcceptanceScreen(MouseScreen):
     """Never treat a partly painted synchronized VT frame as an actual state."""
     def __init__(self, columns=160, rows=42):
         super().__init__(columns, rows)
@@ -131,6 +134,34 @@ class ProviderFixture:
         source["sync"].update(fixtureHold=self.hold.name, fixtureEntered=self.entered.name)
         self.path.write_text(json.dumps(source, ensure_ascii=False) + "\n")
         self.hold.write_text("Owned synthetic provider refresh held.\n")
+
+    def options(self):
+        return ("--fixture-root", str(self.root), "--prefetch-bodies", "2")
+
+
+class LargeInlineFixture:
+    """A literal unloaded 5 MiB descriptor; never manufacture giant JSON data."""
+    def __init__(self, directory):
+        self.root = directory / "provider"
+        shutil.copytree(FIXTURE / "accounts", self.root / "accounts")
+        path = self.root / "accounts/personal.json"
+        source = json.loads(path.read_text())
+        message = next(value for value in source["messages"] if value["id"] == GOOD)
+        # The independent literal HTML body remains unchanged. Without its
+        # plain sibling, the ordinary reader must render the image placeholder.
+        alternative, _, image = message["payload"]["parts"]
+        alternative["parts"] = [alternative["parts"][1]]
+        image["filename"] = LARGE_IMAGE_NAME
+        image["body"] = {"size": 5242880, "attachmentId": "provider-large-photo"}
+        image["headers"] = [
+            {"name": "Content-Type", "value": "image/png"},
+            {"name": "Content-Disposition", "value": 'inline; filename="contract-photo.png"'},
+            {"name": "Content-ID", "value": "<provider-logo@example.test>"},
+        ]
+        source["externalBodies"].pop("provider-external-logo")
+        path.write_text(json.dumps(source, ensure_ascii=False) + "\n")
+        require(path.stat().st_size < 20 * 1024 and "provider-large-photo" not in source["externalBodies"],
+                "large-image fixture accidentally hydrated the external photo")
 
     def options(self):
         return ("--fixture-root", str(self.root), "--prefetch-bodies", "2")
@@ -286,6 +317,121 @@ class AcceptanceFailure(Exception):
     def __init__(self, message, diagnostics):
         super().__init__(message)
         self.diagnostics = diagnostics
+
+
+def run_large_images(binary, directory, terminal_type=Terminal):
+    manifest, _, _ = validate_fixture()
+    directory.mkdir(mode=0o700, parents=True)
+    source = LargeInlineFixture(directory)
+    terminal = terminal_type(binary, directory, extra=source.options(), columns=160, rows=42,
+                             screen_type=AcceptanceScreen,
+                             environment={"NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0"})
+    stage = "large-inline-reader"
+    saved = []
+    try:
+        terminal.until(lambda: accepted_reader(terminal, manifest)
+                       and reader_contains(terminal.screen, "[Image: Fictional logo]"))
+        require_available(terminal)
+        with Client(binary, directory, extra=source.options()) as client:
+            message = client.request("mail.read", messageId=GOOD, cacheOnly=True)
+            photo = next(item for item in message["attachments"] if item["filename"] == LARGE_IMAGE_NAME)
+            require(message["bodySource"] == "html" and photo["size"] == LARGE_IMAGE_BYTES and photo["data"] == "",
+                    "ordinary reading refused or eagerly hydrated the large inline image")
+        stage = "large-inline-drawer"
+        terminal.send(b"B")
+        terminal.until(lambda: not terminal.screen.frame_open and all(label in terminal.text() for label in
+                                  ("Received attachments", LARGE_IMAGE_NAME, "5.2 MB")))
+        terminal.send(b"\x1b")
+        terminal.until(lambda: "Received attachments" not in terminal.text() and accepted_reader(terminal, manifest))
+
+        def button_background(label):
+            found = terminal.screen.locate(label)
+            require(found is not None, "format-picker action disappeared")
+            return terminal.screen.styles[found["row"]][found["column"]][1]
+
+        def no_new_draft():
+            with Client(binary, directory, extra=source.options()) as client:
+                require({item["id"] for item in client.request("draft.list")["drafts"]} == {item["id"] for item in saved},
+                        "disabled format action created a local draft")
+                require(client.request("cache.stats")["fixtureSends"] == 0
+                        and not client.request("operation.list")["operations"], "large-image picker queued or sent mail")
+
+        for action, key in (("reply", b"r"), ("reply-all", b"R"), ("forward", b"f")):
+            stage = "large-inline-" + action
+            terminal.send(key)
+            terminal.until(lambda: not terminal.screen.frame_open and "[Keep formatting k]" in terminal.text()
+                           and LARGE_IMAGE_REASON in terminal.text())
+            selected = button_background("[Text quote t]")
+            require(selected != button_background("[Keep formatting k]"), "unavailable formatting retained default focus")
+            terminal.send(b"k")
+            terminal.gap(.08)
+            no_new_draft()
+            require(terminal.screen.mouse_tracking_mode in (1000, 1002, 1003)
+                    and 1006 in terminal.screen.mouse_modes, "owned PTY has no active cell mouse reporting")
+            found = terminal.screen.locate("[Keep formatting k]")
+            terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}M".encode())
+            terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}m".encode())
+            terminal.gap(.08)
+            no_new_draft()
+            frame = terminal.screen.completed_frames
+            terminal.send(b"\x1b[Z")
+            terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
+                           and button_background("[Back Esc/q]") == selected)
+            frame = terminal.screen.completed_frames
+            terminal.send(b"\t")
+            terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
+                           and button_background("[Text quote t]") == selected)
+            if action == "forward":
+                require(button_background("[Attach original .eml e]") != selected,
+                        "definitely oversized original email retained an enabled action")
+                terminal.send(b"e")
+                terminal.until(lambda: "Original email exceeds 2 MiB · choose Text quote" in terminal.text())
+                no_new_draft()
+                terminal.send(b"\x1b")
+                terminal.until(lambda: "[Keep formatting k]" not in terminal.text() and accepted_reader(terminal, manifest))
+                continue
+            if action == "reply-all":
+                found = terminal.screen.locate("[Text quote t]")
+                terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}M".encode())
+                terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}m".encode())
+            else:
+                terminal.send(b"\r")  # The focused, enabled Text quote action.
+            terminal.until(lambda: not terminal.screen.frame_open and "Compose" in terminal.screen.lines()[0]
+                           and "Subject:" in terminal.text())
+            note = f"Large-photo {action} note.\n\n"
+            terminal.send(b"\x07i\x1b[200~" + note.encode() + b"\x1b[201~")
+            terminal.until(lambda: panel_contains(terminal, "Compose", note))
+            terminal.send(b"\x1b")
+            wait_saved_compose(terminal, 0)
+            frame = terminal.screen.completed_frames
+            terminal.send(b"q")
+            terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
+                           and "Compose" not in terminal.screen.lines()[0])
+            terminal.send(b"\r")
+            terminal.until(lambda: accepted_reader(terminal, manifest))
+            with Client(binary, directory, extra=source.options()) as client:
+                rows = client.request("draft.list")["drafts"]
+                new = [item for item in rows if item["id"] not in {item["id"] for item in saved}]
+                require(len(new) == 1, "Text quote did not create exactly one editable local draft")
+                value = client.request("draft.read", draftId=new[0]["id"])
+                require(value.get("original") is None and not value["attachments"] and value["bodyText"].startswith(note),
+                        "Text quote hydrated the photo or lost the editable note")
+                require(value["to"] == manifest["replyToExpected"]
+                        and value["cc"] == (manifest["replyAllCcExpected"] if action == "reply-all" else []),
+                        "large-image Text quote changed reply recipients")
+                saved.append(value)
+            no_new_draft()
+        result = terminal.finish()
+        result.update(largeInlineBytes=LARGE_IMAGE_BYTES, descriptorOnly=True, actualImagePlaceholder=True,
+                      attachmentDrawerHumanSize="5.2 MB", disabledFormattingActions=["reply", "reply-all", "forward"],
+                      disabledOriginalEmail=True, textQuoteNotesSaved=["reply", "reply-all"], forwardedPickerCancelled=True,
+                      enabledTextQuoteMouseActivated=True, fixtureSends=0, operations=0)
+        return result
+    except Exception as failure:
+        raise AcceptanceFailure(str(failure), {"stage": stage, "currentCells": terminal.screen.lines(),
+                                "outputTail": bytes(terminal.output[-8192:]).decode("utf-8", "backslashreplace")}) from failure
+    finally:
+        terminal.close()
 
 
 def run_case(binary, directory, terminal_type=Terminal):
@@ -475,6 +621,7 @@ def main():
     parser.add_argument("--build-mode", type=build_mode)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--fixture-only", action="store_true")
+    parser.add_argument("--case", choices=("all", "legacy", "large-images"), default="all")
     args = parser.parse_args()
     validate_fixture()
     if args.fixture_only:
@@ -497,7 +644,11 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="omagma-mail-acceptance-") as temporary:
             # Darwin's /var is a symlink; the file dialog requires the real path.
-            receipt["result"] = run_case(binary, Path(temporary).resolve() / "owned", terminal_type)
+            root = Path(temporary).resolve()
+            if args.case in ("all", "legacy"):
+                receipt["result"] = run_case(binary, root / "owned", terminal_type)
+            if args.case in ("all", "large-images"):
+                receipt["largeInlineImages"] = run_large_images(binary, root / "owned-large", terminal_type)
         require(hashlib.sha256(binary.read_bytes()).hexdigest() == digest, "tested binary changed during acceptance")
         receipt["passed"] = True
     except Exception as failure:

@@ -504,6 +504,14 @@ You can use your own accounts after consent, including sending a first message t
 | Browser preview / UI preferences | One preview per account, at most 16 MiB / at most 256 KiB private preferences |
 | Queued send intents | 32 active, 128 retained records per account; delay 0–30 seconds |
 
+Large inline photos remain unloaded while reading: the reader shows image
+placeholders, and received-file controls can save their content within the
+50 MiB incoming limit. Keeping original formatting still has a separate
+2 MiB combined embedded-resource limit. The reply/forward chooser checks that
+before downloading images, disables unavailable choices and explains when to
+use Text quote. A known oversized original email also disables its `.eml`
+choice; the backend rechecks the fresh source when creating the draft.
+
 Inline JSON body/resource data must fit the request limit. Ordinary file
 handles avoid embedding large file bytes in that frame; the final encoded MIME
 still has its separate cap. Oversized or unavailable content fails before saving a

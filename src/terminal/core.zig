@@ -437,6 +437,12 @@ pub const Session = struct {
             var total: usize = 0;
             for (message.attachments) |attachment| total = std.math.add(usize, total, attachment.size) catch return error.AttachmentsTooLarge;
             if (total > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+            if (preserve) {
+                if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
+                // Refuse the resource plan before hydrating any file. Capture
+                // below still validates the fresh source and downloaded bytes.
+                _ = try @import("original_mail.zig").resourcePlan(message.bodyHtml orelse return error.OriginalHtmlUnavailable, message.attachments);
+            }
             const attachments = try a.dupe(t.Attachment, message.attachments);
             for (attachments) |*attachment| if (attachment.data.len == 0 and attachment.size != 0) {
                 var request = try j.copyObject(a, req);
@@ -1882,23 +1888,9 @@ pub const Session = struct {
         const html = message.bodyHtml orelse return error.OriginalHtmlUnavailable;
         if (html.len == 0) return error.OriginalHtmlUnavailable;
         if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
-        const usage = try @import("original_mail.zig").resourceUsage(html, message.attachments);
+        const plan = try @import("original_mail.zig").resourcePlan(html, message.attachments);
         var resources: std.ArrayList(t.Attachment) = .empty;
-        var bytes: usize = 0;
-        for (message.attachments, 0..) |attachment, index| {
-            const is_file = if (attachment.disposition) |value| std.ascii.eqlIgnoreCase(value, "attachment") else false;
-            const referenced = usage & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
-            const has_identity = attachment.contentId != null or attachment.contentLocation != null;
-            if (!has_identity or (is_file and !referenced)) continue;
-            if (resources.items.len == t.Limits.related_resources) return error.TooManyAttachments;
-            bytes = std.math.add(usize, bytes, attachment.size) catch return error.AttachmentsTooLarge;
-            if (bytes > t.Limits.body_bytes) return error.AttachmentsTooLarge;
-            if (attachment.contentId) |id| {
-                _ = try @import("mime.zig").contentId(id);
-                for (resources.items) |previous| if (previous.contentId) |other| if (std.mem.eql(u8, id, other)) return error.AmbiguousContentId;
-            }
-            try resources.append(a, attachment);
-        }
+        for (plan.indices[0..plan.count]) |index| try resources.append(a, message.attachments[index]);
         for (resources.items) |*attachment| if (attachment.data.len == 0 and attachment.size != 0) {
             var request = try j.copyObject(a, req);
             try request.object.put(a, "attachmentId", .{ .string = attachment.id });

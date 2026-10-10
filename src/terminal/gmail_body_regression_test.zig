@@ -158,3 +158,39 @@ test "live message body: conflicting calendar parts keep the mail and files but 
     try std.testing.expectError(error.NotInvitation, gmail.dispatchAuthorized(std.testing.io, a, account, &.{ "mail-read", "calendar-rsvp" }, rsvp.transport(), "invitation.reply", try j.value(a, .{ .messageId = "c1", .status = "accepted", .operationId = "synthetic-rsvp" })));
     try std.testing.expectEqual(@as(usize, 0), rsvp.writes);
 }
+
+const photo_full_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/p1?format=full";
+/// A phone photo sent inline: HTML references a 5 MiB JPEG by Content-ID; the
+/// part has no filename and Gmail exposes it only by attachmentId.
+const photo_wire =
+    \\{"id":"p1","threadId":"p1","internalDate":"1791651960000","labelIds":["INBOX"],"snippet":"Foto vom Termin:",
+    \\"payload":{"mimeType":"multipart/related","filename":"","headers":[
+    \\{"name":"From","value":"Synthetic Sender <sender@example.test>"},{"name":"To","value":"synthetic@example.test"},
+    \\{"name":"Subject","value":"Synthetic photo"},{"name":"Message-ID","value":"<synthetic-photo@example.test>"},
+    \\{"name":"Content-Type","value":"multipart/related; boundary=\"_rel_\"; type=\"text/html\""}],
+    \\"body":{"size":0},"parts":[
+    \\{"partId":"0","mimeType":"text/html","filename":"","headers":[{"name":"Content-Type","value":"text/html; charset=utf-8"}],"body":{"size":59,"data":"PHA-Rm90byB2b20gVGVybWluOjwvcD48aW1nIHNyYz0iY2lkOnBob3RvQGV4YW1wbGUudGVzdCI-DQo"}},
+    \\{"partId":"1","mimeType":"image/jpeg","filename":"","headers":[{"name":"Content-Type","value":"image/jpeg"},{"name":"Content-Disposition","value":"inline"},{"name":"Content-ID","value":"<photo@example.test>"},{"name":"Content-Transfer-Encoding","value":"base64"}],"body":{"attachmentId":"ANGjdJ_synthetic_photo","size":5242880}}]}}
+;
+
+test "live message body: a large inline photo stays an unloaded descriptor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var peer: Peer = .{ .steps = &.{.{ .url = photo_full_url, .response = photo_wire }} };
+    const result = try gmail.dispatchAuthorized(std.testing.io, a, account, &.{"mail-read"}, peer.transport(), "mail.read", try j.value(a, .{ .messageId = "p1" }));
+    // The read downloads nothing beyond the message itself.
+    try std.testing.expectEqual(@as(usize, 1), peer.calls);
+    try std.testing.expectEqual(@as(usize, 0), peer.writes);
+    const message = try j.decode(types.Message, a, result);
+    try std.testing.expect(std.mem.indexOf(u8, message.bodyText, "Foto vom Termin:") != null);
+    try std.testing.expectEqual(@as(usize, 1), message.attachments.len);
+    const photo = message.attachments[0];
+    try std.testing.expectEqualStrings("image/jpeg", photo.mimeType);
+    try std.testing.expectEqualStrings("ANGjdJ_synthetic_photo", photo.id);
+    try std.testing.expectEqual(@as(usize, 5242880), photo.size);
+    try std.testing.expectEqualStrings("", photo.data);
+    try std.testing.expectEqualStrings("photo@example.test", photo.contentId.?);
+    try std.testing.expectEqualStrings("inline", photo.disposition.?);
+    try std.testing.expectEqualStrings("attachment", photo.filename);
+}

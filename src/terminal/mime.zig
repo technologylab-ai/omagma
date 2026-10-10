@@ -491,13 +491,14 @@ const Context = struct {
         if (isCalendarPart(mime_type, filename) and declared > max_calendar_bytes) return error.CalendarTooLarge;
         const inline_data = if (b.optional(body, "data")) |v| try b.string(v) else "";
         const large = declared > max_body_bytes;
-        // A large part may only remain an unloaded file descriptor. Senders
-        // often put an unused Content-ID or Content-Location on an ordinary
-        // explicit attachment; those stay listable. Inline parts and implicit
-        // related resources keep the loaded-content cap.
-        const disposition = try dispositionToken(headers);
-        const referenced = (try header(headers, "Content-ID")).len != 0 or (try header(headers, "Content-Location")).len != 0;
-        if (large and (inline_data.len != 0 or !(try isAttached(headers, filename)) or std.ascii.eqlIgnoreCase(disposition, "inline") or (referenced and !std.ascii.eqlIgnoreCase(disposition, "attachment")))) return error.BodyTooLarge;
+        // A large part may only remain an unloaded external descriptor, which
+        // the reader shows as a file and B streams within the receive cap.
+        // That includes inline photos referenced by Content-ID/Location and
+        // parts without a filename. Text bodies, calendars (which are always
+        // loaded for invitations) and data present in the response keep the
+        // loaded-content cap.
+        const text_body = (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) and !(try isAttached(headers, filename));
+        if (large and (inline_data.len != 0 or text_body or isCalendarPart(mime_type, filename))) return error.BodyTooLarge;
         const part_id = if (b.optional(part, "partId")) |v| try b.string(v) else "";
         var external_id: ?[]const u8 = null;
         var external_data: ?[]const u8 = null;
@@ -1535,25 +1536,33 @@ test "attachment streaming: Gmail large file metadata stays external while bodie
     try std.testing.expectEqualStrings("", message.attachments[0].data);
     const body = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"id\":\"large-body\",\"threadId\":\"large-body\",\"internalDate\":\"1791792000000\",\"payload\":{\"mimeType\":\"text/html\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{});
     try std.testing.expectError(error.BodyTooLarge, normalizeGmail(body, a, null));
-    const inline_file = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"id\":\"inline-large\",\"threadId\":\"inline-large\",\"internalDate\":\"1791792000000\",\"payload\":{\"mimeType\":\"image/png\",\"filename\":\"image.png\",\"headers\":[{\"name\":\"Content-ID\",\"value\":\"<image@example.test>\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{});
-    try std.testing.expectError(error.BodyTooLarge, normalizeGmail(inline_file, a, null));
-    // An explicit attachment stays an unloaded descriptor despite an unused
-    // Content-ID or Content-Location.
+    // Unloaded binary descriptors stay listable whether named, inline,
+    // referenced by Content-ID/Location or without a filename.
     for ([_][]const u8{
-        "{\"name\":\"Content-ID\",\"value\":\"<deck@example.test>\"}",
-        "{\"name\":\"Content-Location\",\"value\":\"deck.pptx\"}",
-    }) |reference| {
-        const named = try std.fmt.allocPrint(a, "{{\"id\":\"named-large\",\"threadId\":\"named-large\",\"internalDate\":\"1791792000000\",\"payload\":{{\"mimeType\":\"application/vnd.openxmlformats-officedocument.presentationml.presentation\",\"filename\":\"deck.pptx\",\"headers\":[{{\"name\":\"Content-Disposition\",\"value\":\"attachment; filename=\\\"deck.pptx\\\"\"}},{s}],\"body\":{{\"attachmentId\":\"external-deck\",\"size\":31457280}}}}}}", .{reference});
-        const listed = try normalizeGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, named, .{}), a, null);
+        "\"mimeType\":\"image/png\",\"filename\":\"image.png\",\"headers\":[{\"name\":\"Content-ID\",\"value\":\"<image@example.test>\"}]",
+        "\"mimeType\":\"image/jpeg\",\"filename\":\"\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"},{\"name\":\"Content-ID\",\"value\":\"<photo@example.test>\"}]",
+        "\"mimeType\":\"image/jpeg\",\"headers\":[{\"name\":\"Content-Location\",\"value\":\"photo.jpg\"}]",
+        "\"mimeType\":\"application/vnd.openxmlformats-officedocument.presentationml.presentation\",\"filename\":\"deck.pptx\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment; filename=\\\"deck.pptx\\\"\"},{\"name\":\"Content-ID\",\"value\":\"<deck@example.test>\"}]",
+        "\"mimeType\":\"application/vnd.openxmlformats-officedocument.presentationml.presentation\",\"filename\":\"deck.pptx\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"},{\"name\":\"Content-Location\",\"value\":\"deck.pptx\"}]",
+    }) |part| {
+        const source = try std.fmt.allocPrint(a, "{{\"id\":\"descriptor\",\"threadId\":\"descriptor\",\"internalDate\":\"1791792000000\",\"payload\":{{{s},\"body\":{{\"attachmentId\":\"external-large\",\"size\":31457280}}}}}}", .{part});
+        const listed = try normalizeGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}), a, null);
         try std.testing.expectEqual(@as(usize, 1), listed.attachments.len);
-        try std.testing.expectEqualStrings("deck.pptx", listed.attachments[0].filename);
         try std.testing.expectEqual(@as(usize, 31457280), listed.attachments[0].size);
+        try std.testing.expectEqualStrings("external-large", listed.attachments[0].id);
         try std.testing.expectEqualStrings("", listed.attachments[0].data);
     }
-    // Inline disposition, inline data and loaded external data keep the cap.
+    // Calendars keep their own smaller cap.
     for ([_][]const u8{
-        "{\"payload\":{\"mimeType\":\"image/png\",\"filename\":\"image.png\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline; filename=image.png\"},{\"name\":\"Content-ID\",\"value\":\"<image@example.test>\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
+        "{\"payload\":{\"mimeType\":\"text/calendar\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
+        "{\"payload\":{\"mimeType\":\"application/octet-stream\",\"filename\":\"invite.ics\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
+    }) |source| try std.testing.expectError(error.CalendarTooLarge, parseGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}), a));
+    // Unnamed text bodies, inline data and the receive cap refuse.
+    for ([_][]const u8{
+        "{\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}",
+        "{\"payload\":{\"mimeType\":\"image/png\",\"filename\":\"image.png\",\"headers\":[{\"name\":\"Content-ID\",\"value\":\"<image@example.test>\"}],\"body\":{\"size\":4194304,\"data\":\"iVBORw0KGgo\"}}}",
         "{\"payload\":{\"mimeType\":\"application/pdf\",\"filename\":\"large.pdf\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"},{\"name\":\"Content-ID\",\"value\":\"<pdf@example.test>\"}],\"body\":{\"size\":4194304,\"data\":\"JVBERi0\"}}}",
+        "{\"payload\":{\"mimeType\":\"image/jpeg\",\"filename\":\"huge.jpg\",\"headers\":[],\"body\":{\"attachmentId\":\"external-large\",\"size\":52428801}}}",
     }) |source| try std.testing.expectError(error.BodyTooLarge, parseGmail(try std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}), a));
     const loaded = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"external-large\":{\"size\":5,\"data\":\"JVBERi0\"}}", .{});
     try std.testing.expectError(error.BodyTooLarge, parseGmailExternal(try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"payload\":{\"mimeType\":\"application/pdf\",\"filename\":\"large.pdf\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"attachment\"},{\"name\":\"Content-ID\",\"value\":\"<pdf@example.test>\"}],\"body\":{\"attachmentId\":\"external-large\",\"size\":4194304}}}", .{}), a, loaded));
