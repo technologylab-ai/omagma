@@ -23,6 +23,11 @@ from terminal_integration import ACCOUNTS, Client, FIXTURES, addresses, require
 POSITIVE = ("named-calendar", "named-octet", "named-application", "duplicate", "wide")
 STATUSES = ("accepted", "tentative", "declined")
 CASE_NAMES = ("formats", "refusals", "replay", "unknown", "legacy")
+CONFLICT_BODY = ("Fictional mail remains readable.\n"
+                 "The two attached calendar requests conflict; keep all files available.\n")
+CONFLICT_FILE_NAME = "conflict-notes.txt"
+CONFLICT_FILE = b"Fictional ordinary file preserved beside conflicting invitations.\n"
+CONFLICT_CALENDAR_NAMES = ("conflicting-first.ics", "conflicting-second.ics")
 
 
 def encoded(value):
@@ -102,9 +107,20 @@ class InvitationFixture:
                     repeated = repeated.replace(b"DESCRIPTION:Join this fictional", b"DESCRIPTION:Join this \n fictional")
                     if case == "conflicting":
                         repeated = repeated.replace(b"SEQUENCE:7", b"SEQUENCE:8")
+                        # Conflicting event discovery must leave ordinary mail
+                        # readable and every file accessible. Literal body/file
+                        # oracles are independent of either calendar's content.
+                        children = [part("text/plain", CONFLICT_BODY.encode()),
+                                    part("text/calendar", calendar, CONFLICT_CALENDAR_NAMES[0]),
+                                    part("application/octet-stream", repeated, CONFLICT_CALENDAR_NAMES[1]),
+                                    part("application/octet-stream", CONFLICT_FILE, CONFLICT_FILE_NAME)]
+                        for index, child in enumerate(children):
+                            child["partId"] = f"conflicting-{index}"
+                    else:
+                        children = [part("text/calendar", calendar),
+                                    part("application/octet-stream", repeated, "invite.ics")]
                     payload = {"partId": "", "mimeType": "multipart/mixed", "filename": "", "headers": [],
-                               "body": {"size": 0}, "parts": [part("text/calendar", calendar),
-                                                                part("application/octet-stream", repeated, "invite.ics")]}
+                               "body": {"size": 0}, "parts": children}
                 else:
                     kind = {"named-calendar": "text/calendar", "named-octet": "application/octet-stream",
                             "named-application": "application/ics"}.get(case, "text/calendar")
@@ -141,6 +157,46 @@ def inspect_identity(value, case, account):
     for key, expected in identity(case, account).items():
         require(value.get(key) == expected, f"{case}: invitation inspection changed {key}")
     require(value["summary"] == "Fictional calendar meeting", f"{case}: summary was lost")
+
+
+def conflicting_file_oracles(account):
+    first = invitation("conflicting", account)
+    second = first.replace(b"\r\n", b"\n").rstrip(b"\n")
+    second = second.replace(b"DESCRIPTION:Join this fictional", b"DESCRIPTION:Join this \n fictional")
+    second = second.replace(b"SEQUENCE:7", b"SEQUENCE:8")
+    return {
+        CONFLICT_CALENDAR_NAMES[0]: ("text/calendar", first),
+        CONFLICT_CALENDAR_NAMES[1]: ("application/octet-stream", second),
+        CONFLICT_FILE_NAME: ("application/octet-stream", CONFLICT_FILE),
+    }
+
+
+def check_conflicting_mail(message, account):
+    require(message["id"] == "invite-conflicting" and message["bodyText"] == CONFLICT_BODY,
+            "calendar conflict made the ordinary mail body unavailable or substituted its snippet")
+    require(message.get("invitation") is None and not message.get("bodyCacheError"),
+            "calendar conflict selected an invitation or recorded a whole-message refusal")
+    expected = conflicting_file_oracles(account)
+    files = message["attachments"]
+    require(len(files) == 3 and {item["filename"] for item in files} == set(expected),
+            "calendar conflict lost an .ics file or the ordinary attachment")
+    require(len({item["id"] for item in files}) == 3,
+            "conflicting mail attachments do not have independent download identities")
+    for item in files:
+        mime_type, raw = expected[item["filename"]]
+        require(item["mimeType"] == mime_type and item["size"] == len(raw),
+                "calendar conflict changed a file's exact type or byte count")
+    return expected
+
+
+def check_conflicting_attachment(attachment, filename, expected):
+    mime_type, raw = expected[filename]
+    data = attachment.get("data") or attachment.get("base64")
+    require(isinstance(data, str), "conflicting mail attachment did not expose its literal bytes")
+    decoded = base64.b64decode(data + "=" * (-len(data) % 4), altchars=b"-_", validate=True)
+    require(attachment["filename"] == filename and attachment["mimeType"] == mime_type
+            and attachment["size"] == len(raw) and decoded == raw,
+            "calendar conflict changed downloadable attachment identity or bytes")
 
 
 def reply_identity(receipt, case, account, status, operation_id):
@@ -216,14 +272,29 @@ def refusals(binary, directory, source):
         # complete response oracle and also guard the immutable on-disk bytes.
         good = client.request("mail.read", messageId="invite-named-calendar", cacheOnly=True)
         digest = body_digest(directory, good["id"])
-        for case, expected in (("conflicting", "AmbiguousCalendarPart"), ("html-only", "NotInvitation"),
+        for case, expected in (("conflicting", "NotInvitation"), ("html-only", "NotInvitation"),
                                ("foreign", "NotAnAttendee"), ("publish", "NotInvitationRequest"),
                                ("multi-event", "AmbiguousInvitation")):
             before = client.request("operation.list")["operations"]
+            sends = client.request("cache.stats")["fixtureSends"]
+            if case == "conflicting":
+                ordinary = client.request("mail.read", messageId="invite-conflicting")
+                files = check_conflicting_mail(ordinary, ACCOUNTS[0])
+                for item in ordinary["attachments"]:
+                    downloaded = client.request("mail.attachment", messageId=ordinary["id"], attachmentId=item["id"])
+                    check_conflicting_attachment(downloaded, item["filename"], files)
+                ordinary = client.request("mail.read", messageId=ordinary["id"], cacheOnly=True)
+                ordinary_digest = body_digest(directory, ordinary["id"])
             for command, params in (("invitation.inspect", {}), ("invitation.reply", {"status": "accepted", "operationId": "refused-" + case})):
                 error = client.request(command, messageId="invite-" + case, ok=False, **params)
                 require(error["code"] == expected, f"{case}: refused with an unexpected error {error['code']}")
             require(client.request("operation.list")["operations"] == before, "invalid invitation created a submission record")
+            require(client.request("cache.stats")["fixtureSends"] == sends, "invalid invitation submitted an extra RSVP")
+            if case == "conflicting":
+                require(client.request("mail.read", messageId=ordinary["id"], cacheOnly=True) == ordinary,
+                        "rejected conflicting invitation changed the readable mail or files")
+                require(body_digest(directory, ordinary["id"]) == ordinary_digest,
+                        "rejected conflicting invitation rewrote immutable ordinary-mail bytes")
             require(client.request("mail.read", messageId=good["id"], cacheOnly=True) == good, "refusal changed valid cached mail")
             require(body_digest(directory, good["id"]) == digest, "refusal rewrote immutable cached body bytes")
         require(client.request("cache.stats")["fixtureSends"] == 0, "refused invitation sent a response")

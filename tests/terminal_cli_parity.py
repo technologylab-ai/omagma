@@ -24,7 +24,8 @@ from terminal_integration import (
     no_core_dump, one_shot_cached_server_search, require,
 )
 from terminal_invitations import (
-    InvitationFixture, finished, identity, inspect_identity, part, reply_identity,
+    InvitationFixture, check_conflicting_attachment, check_conflicting_mail,
+    finished, identity, inspect_identity, part, reply_identity,
 )
 
 
@@ -108,9 +109,40 @@ def invitations(binary, directory):
                 "one-shot reply overwrote another account's journal")
         one_shot(client, "invitations", "reply", ["--message-id", "invite-named-calendar", "--status", "declined",
                  "--operation-id", shared_operation], error="OperationConflict")
+        # A conflicting invitation stays ordinary readable mail in both public
+        # interfaces. Every named calendar and ordinary file remains available.
+        before_operations = client.request("operation.list")["operations"]
+        before_sends = client.request("cache.stats")["fixtureSends"]
+        flags = ["--message-id", "invite-conflicting"]
+        ordinary = client.request("mail.read", messageId="invite-conflicting")
+        expected_files = check_conflicting_mail(ordinary, ACCOUNTS[0])
+        command = one_shot(client, "mail", "read", flags)
+        check_conflicting_mail(command, ACCOUNTS[0])
+        require(command == ordinary, "one-shot conflicting ordinary mail differed from JSONL")
+        cached = client.request("mail.read", messageId=ordinary["id"], cacheOnly=True)
+        require(one_shot(client, "mail", "read", [*flags, "--cached"]) == cached,
+                "cached conflicting ordinary mail differed between public interfaces")
+        for item in ordinary["attachments"]:
+            downloaded = client.request("mail.attachment", messageId=ordinary["id"], attachmentId=item["id"])
+            check_conflicting_attachment(downloaded, item["filename"], expected_files)
+            command = one_shot(client, "mail", "attachment", [*flags, "--attachment-id", item["id"]])
+            check_conflicting_attachment(command, item["filename"], expected_files)
+            require(command == downloaded, "one-shot conflicting attachment download differed from JSONL")
+        for command, params in (("invitation.inspect", {}),
+                                ("invitation.reply", {"status": "accepted", "operationId": "refused-conflicting-jsonl"})):
+            require(client.request(command, messageId=ordinary["id"], ok=False, **params)["code"] == "NotInvitation",
+                    "JSONL guessed an event identity for conflicting ordinary mail")
+        one_shot(client, "invitations", "inspect", flags, error="NotInvitation")
+        one_shot(client, "invitations", "reply", [*flags, "--status", "accepted",
+                 "--operation-id", "refused-conflicting-one-shot"], error="NotInvitation")
+        require(client.request("operation.list")["operations"] == before_operations
+                and client.request("cache.stats")["fixtureSends"] == before_sends,
+                "conflicting invitation actions submitted an extra RSVP or journal row")
+        require(client.request("mail.read", messageId=ordinary["id"], cacheOnly=True) == cached,
+                "conflicting invitation actions changed ordinary cached mail or its files")
+
         for case, error in (("html-only", "NotInvitation"), ("foreign", "NotAnAttendee"),
-                            ("publish", "NotInvitationRequest"), ("multi-event", "AmbiguousInvitation"),
-                            ("conflicting", "AmbiguousCalendarPart")):
+                            ("publish", "NotInvitationRequest"), ("multi-event", "AmbiguousInvitation")):
             one_shot(client, "invitations", "reply", ["--message-id", "invite-" + case, "--status", "accepted",
                      "--operation-id", "refused-" + case], error=error)
         for flags, error in ((["--message-id", "invite-named-calendar", "--status", "cancelled", "--operation-id", "bad-status"], "InvalidInvitationStatus"),
