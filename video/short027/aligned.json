@@ -1,0 +1,255 @@
+{
+  "revision": "aligned",
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "parts": [
+    {
+      "name": "intro",
+      "frameIn": 0,
+      "frameOut": 96,
+      "chapter": 0,
+      "transition": 0
+    },
+    {
+      "name": "bar",
+      "frameIn": 96,
+      "frameOut": 177,
+      "chapter": 1,
+      "transition": 0.4
+    },
+    {
+      "name": "inbox",
+      "frameIn": 177,
+      "frameOut": 258,
+      "chapter": 1,
+      "transition": 0
+    },
+    {
+      "name": "palette untouched",
+      "frameIn": 258,
+      "frameOut": 303,
+      "chapter": 2,
+      "transition": 0.4
+    },
+    {
+      "name": "palette typing",
+      "frameIn": 303,
+      "frameOut": 357,
+      "chapter": 2,
+      "transition": 0
+    },
+    {
+      "name": "palette narrowed",
+      "frameIn": 357,
+      "frameOut": 417,
+      "chapter": 2,
+      "transition": 0
+    },
+    {
+      "name": "find first",
+      "frameIn": 417,
+      "frameOut": 489,
+      "chapter": 3,
+      "transition": 0.4
+    },
+    {
+      "name": "find next",
+      "frameIn": 489,
+      "frameOut": 549,
+      "chapter": 3,
+      "transition": 0
+    },
+    {
+      "name": "labels initial",
+      "frameIn": 549,
+      "frameOut": 609,
+      "chapter": 4,
+      "transition": 0.4
+    },
+    {
+      "name": "stage one",
+      "frameIn": 609,
+      "frameOut": 654,
+      "chapter": 4,
+      "transition": 0
+    },
+    {
+      "name": "stage two",
+      "frameIn": 654,
+      "frameOut": 705,
+      "chapter": 4,
+      "transition": 0
+    },
+    {
+      "name": "apply labels",
+      "frameIn": 705,
+      "frameOut": 729,
+      "chapter": 4,
+      "transition": 0
+    },
+    {
+      "name": "labels result",
+      "frameIn": 729,
+      "frameOut": 810,
+      "chapter": 4,
+      "transition": 0.4
+    },
+    {
+      "name": "meeting card",
+      "frameIn": 810,
+      "frameOut": 873,
+      "chapter": 5,
+      "transition": 0
+    },
+    {
+      "name": "meeting review",
+      "frameIn": 873,
+      "frameOut": 951,
+      "chapter": 5,
+      "transition": 0.4
+    },
+    {
+      "name": "join",
+      "frameIn": 951,
+      "frameOut": 1029,
+      "chapter": 5,
+      "transition": 0
+    },
+    {
+      "name": "files",
+      "frameIn": 1029,
+      "frameOut": 1104,
+      "chapter": 6,
+      "transition": 0.4
+    },
+    {
+      "name": "attached",
+      "frameIn": 1104,
+      "frameOut": 1170,
+      "chapter": 6,
+      "transition": 0.4
+    },
+    {
+      "name": "received airline",
+      "frameIn": 1170,
+      "frameOut": 1242,
+      "chapter": 7,
+      "transition": 0.4
+    },
+    {
+      "name": "forward menu",
+      "frameIn": 1242,
+      "frameOut": 1287,
+      "chapter": 7,
+      "transition": 0.35
+    },
+    {
+      "name": "keep formatting",
+      "frameIn": 1287,
+      "frameOut": 1320,
+      "chapter": 7,
+      "transition": 0
+    },
+    {
+      "name": "empty note",
+      "frameIn": 1320,
+      "frameOut": 1353,
+      "chapter": 7,
+      "transition": 0.4
+    },
+    {
+      "name": "note typing",
+      "frameIn": 1353,
+      "frameOut": 1446,
+      "chapter": 7,
+      "transition": 0
+    },
+    {
+      "name": "finished note",
+      "frameIn": 1446,
+      "frameOut": 1506,
+      "chapter": 7,
+      "transition": 0
+    },
+    {
+      "name": "browser note",
+      "frameIn": 1506,
+      "frameOut": 1569,
+      "chapter": 7,
+      "transition": 0.7
+    },
+    {
+      "name": "browser scroll",
+      "frameIn": 1569,
+      "frameOut": 1665,
+      "chapter": 7,
+      "transition": 0
+    },
+    {
+      "name": "original HTML",
+      "frameIn": 1665,
+      "frameOut": 1725,
+      "chapter": 7,
+      "transition": 0
+    },
+    {
+      "name": "send review",
+      "frameIn": 1725,
+      "frameOut": 1791,
+      "chapter": 8,
+      "transition": 0.7
+    },
+    {
+      "name": "countdown",
+      "frameIn": 1791,
+      "frameOut": 1860,
+      "chapter": 8,
+      "transition": 0.35
+    },
+    {
+      "name": "canceled",
+      "frameIn": 1860,
+      "frameOut": 1932,
+      "chapter": 8,
+      "transition": 0.35
+    },
+    {
+      "name": "upgrade card",
+      "frameIn": 1932,
+      "frameOut": 1998,
+      "chapter": 9,
+      "transition": 0.4
+    },
+    {
+      "name": "how to update",
+      "frameIn": 1998,
+      "frameOut": 2025,
+      "chapter": 9,
+      "transition": 0
+    },
+    {
+      "name": "update guide",
+      "frameIn": 2025,
+      "frameOut": 2175,
+      "chapter": 9,
+      "transition": 0.4
+    },
+    {
+      "name": "recap",
+      "frameIn": 2175,
+      "frameOut": 2409,
+      "chapter": 0,
+      "transition": 0.4
+    },
+    {
+      "name": "outro",
+      "frameIn": 2409,
+      "frameOut": 2527,
+      "chapter": 0,
+      "transition": 0.4
+    }
+  ],
+  "policy": "Explicit output-clock compositor; one constant background, opaque previous scene below incoming scene, no source-time remapping, no global flashes, no title-only or unrelated-inbox intermediate shots. Typed native states and native focus changes do not reanimate the surrounding screen.",
+  "timingReason": "Music-first edit: matching phrase entrances determine84.233333s. Seven frames extend only the settled final website still; all UI sequences, transitions and cameras retain their approved durations."
+}

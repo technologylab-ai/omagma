@@ -1,11 +1,11 @@
 # Current continuous nine-feature edit
 
-The preferred soundtrack is now [soundtrack-continuation.json](soundtrack-continuation.json).
-The original passage plays uninterrupted through 68.040 seconds, then a
-1.960-second overlap hands it to the original final drum fill and natural ending.
-The earlier edit's 53-second splice is preserved only for comparison. This
-audio revision keeps the approved 84-second picture and pacing unchanged;
-[replace_audio.py](replace_audio.py) copies the reviewed H.264 packets directly.
+The preferred soundtrack is now [soundtrack-aligned.json](soundtrack-aligned.json).
+The original passage and complete fill play through 70.446 seconds. A short
+pre-attack join then admits one closing-phrase drum entrance; two active drum
+patterns are not overlapped. Music determines the 84.233-second duration:
+seven frames extend only the final website still, and all UI sequences keep
+their approved timing. Earlier soundtrack edits remain for comparison.
 
 The current source is an **84.000-second, nine-highlight continuous edit**.
 Every native UI transition now uses an explicit output clock and one steady
@@ -27,9 +27,9 @@ python3 video/short027/deliver.py --revision smooth
 ```
 
 That block preserves the earlier comparison soundtrack. For the preferred
-continuation soundtrack, use the audio replacement commands at the top of
-[SMOOTH-EDIT.md](SMOOTH-EDIT.md) and deliver with `--revision continuation`.
-An already reviewed movie can be reused directly, avoiding a picture rerender.
+aligned soundtrack, use the frame-fit commands at the top of
+[SMOOTH-EDIT.md](SMOOTH-EDIT.md) and deliver with `--revision aligned`.
+The approved rendered frames are reused, avoiding a UI picture rerender.
 
 Review the actual encoded master at 1× and inspect dense consecutive 30 fps
 handoff frames before delivery. Current output is

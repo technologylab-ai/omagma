@@ -45,6 +45,8 @@ def main():
     raw=cache/("soundtrack-"+revision+"-raw.wav");normalized=cache/("soundtrack-"+revision+".wav")
     if PLAN["sourceSha256"]!=MUSIC_SHA or abs(float(PLAN["duration"])-DURATION)>1/48000:raise RuntimeError("soundtrack plan duration/hash mismatch")
     segments=PLAN["segments"];crossfade_samples=round(float(PLAN["crossfadeSeconds"])*48000)
+    crossfade_curves=PLAN.get("crossfadeCurves",["qsin","qsin"])
+    if not isinstance(crossfade_curves,list) or len(crossfade_curves)!=2 or any(curve not in ("tri","qsin") for curve in crossfade_curves):raise RuntimeError("unsupported crossfade envelope")
     if not 2<=len(segments)<=8 or PLAN["sampleRate"]!=48000:raise RuntimeError("expected explicit bounded48k segment plan")
     lengths=[]
     for segment in segments:
@@ -58,7 +60,7 @@ def main():
     last="a0"
     for i in range(1,len(segments)):
         output="raw" if i==len(segments)-1 else f"x{i}"
-        graph+=f";[{last}][a{i}]acrossfade=ns={crossfade_samples}:c1=qsin:c2=qsin[{output}]"
+        graph+=f";[{last}][a{i}]acrossfade=ns={crossfade_samples}:c1={crossfade_curves[0]}:c2={crossfade_curves[1]}[{output}]"
         last=output
     run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(a.music),"-filter_complex",graph,"-map","[raw]","-vn","-ar","48000","-ac","2","-c:a","pcm_s24le","-map_metadata","-1",str(raw)])
     measure=loudness(raw)
@@ -68,7 +70,7 @@ def main():
     # limiter, per-segment lift or dynamic loudness processing.
     run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(raw),"-map","0:a:0","-vn","-af",f"volume={gain_db:.9f}dB","-ar","48000","-ac","2","-c:a","pcm_s24le","-map_metadata","-1",str(normalized)])
     if a.audio_only:
-        receipt={"durationSeconds":DURATION,"samples48k":round(DURATION*48000),"musicSha256":MUSIC_SHA,"segments":segments,"staticGainDb":gain_db,"measuredInput":measure,"file":str(normalized)}
+        receipt={"durationSeconds":DURATION,"samples48k":round(DURATION*48000),"musicSha256":MUSIC_SHA,"segments":segments,"crossfadeSeconds":PLAN["crossfadeSeconds"],"crossfadeCurves":crossfade_curves,"staticGainDb":gain_db,"measuredInput":measure,"file":str(normalized)}
         (cache/("soundtrack-"+revision+".report.json")).write_text(json.dumps(receipt,indent=2)+"\n")
         print(json.dumps(receipt,indent=2));return
     command=["ffmpeg","-hide_banner","-loglevel","error","-y","-framerate","30","-i",str(a.frames/"%05d.jpg"),"-i",str(normalized),"-map","0:v:0","-map","1:a:0","-frames:v",str(FRAMES),"-t",f"{DURATION:.9f}","-vf","scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p","-c:v","libx264","-profile:v","high","-preset","slow","-crf","18","-threads","4","-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709","-color_range","tv","-c:a","aac","-b:a","256k","-ar","48000","-ac","2","-map_metadata","-1","-movflags","+faststart",str(a.out)]
@@ -81,14 +83,15 @@ def main():
     if abs(float(final_loud["input_i"])+14)>.6 or float(final_loud["input_tp"])>-1.0:raise RuntimeError("social audio loudness/true-peak gate failed")
     capture=json.loads((cache/"capture-receipt.json").read_text())
     receipt={"film":str(a.out),"durationSeconds":DURATION,"frames":FRAMES,"binarySha256":capture["binarySha256"],"buildInfo":capture["buildInfo"],"musicSha256":MUSIC_SHA,"musicSourceSegments":[[segment["sourceIn"],segment["sourceOut"]] for segment in segments],"musicCrossfadeSeconds":PLAN["crossfadeSeconds"],"musicEnding":f"original natural ending retained; {len(segments)-1} explicit {PLAN['crossfadeSeconds']*1000:g}ms phrase seams","soundtrackPlanSha256":hashlib.sha256(a.plan.read_bytes()).hexdigest(),"staticGainDb":gain_db,"loudnessBefore":measure,"loudnessFinal":final_loud,"ffprobe":probe,"faststart":faststart(a.out),"pictureSourceSha256":hashlib.sha256(a.picture_source.read_bytes()).hexdigest(),"sha256":hashlib.sha256(a.out.read_bytes()).hexdigest(),"encodeCommand":command}
-    if revision in ('motion','smooth'):
-        forward=cache/'forward-story-capture-receipt.json';proof=cache/'forward-story-proof.json';co_direction=cache/('opus-smooth/provenance.json' if revision=='smooth' else 'opus-motion/provenance.json')
+    if revision in ('motion','smooth','aligned'):
+        forward=cache/'forward-story-capture-receipt.json';proof=cache/'forward-story-proof.json';co_direction=cache/('opus-motion/provenance.json' if revision=='motion' else 'opus-smooth/provenance.json')
         fresh=json.loads(forward.read_text())
         if not fresh['synthetic'] or fresh['fixtureSends']!=0 or fresh['liveProviderWrites']!=0 or not fresh['allChildrenReaped']:raise RuntimeError('forwarding capture provenance/cleanup gate failed')
         receipt['additionalNativeCapture']={'forwardStory':fresh,'proofSha256':hashlib.sha256(proof.read_bytes()).hexdigest(),'manifestSha256':hashlib.sha256((cache/'forward-story-manifest.json').read_bytes()).hexdigest()}
         receipt['coDirection']=json.loads(co_direction.read_text())
-        qa_receipt=cache/('smooth-qa/receipt.json' if revision=='smooth' else 'motion-qa/receipt.json')
+        qa_receipt=cache/('motion-qa/receipt.json' if revision=='motion' else 'smooth-qa/receipt.json')
         receipt['motionQaReceiptSha256']=hashlib.sha256(qa_receipt.read_bytes()).hexdigest()
+        if revision=='aligned':receipt['pictureTimingFit']=json.loads((a.frames/'render.json').read_text())
     a.out.with_suffix(".report.json").write_text(json.dumps(receipt,indent=2))
     print(json.dumps({k:receipt[k] for k in ["film","durationSeconds","frames","sha256","loudnessFinal"]},indent=2))
 if __name__=="__main__":main()

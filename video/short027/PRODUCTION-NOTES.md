@@ -1,8 +1,10 @@
 # Current continuous nine-feature edit
 
-The preferred audio revision now preserves the original passage through 68.040
-seconds before its closing handoff. [Soundtrack continuation and video-copy
-workflow](SMOOTH-EDIT.md) replaces only the audio; approved visuals stay unchanged.
+The preferred music-first revision preserves the complete original fill, then
+joins at one closing-phrase entrance around 70.476 seconds. It determines an
+84.233-second picture duration: seven frames extend the settled website ending;
+all UI sequences remain as approved. [Aligned soundtrack and frame-fit workflow](SMOOTH-EDIT.md)
+reuses the reviewed native frames. Earlier fixed-length comparisons remain.
 
 The current source is an **84.000-second, nine-highlight continuous edit**.
 Every native UI transition now uses an explicit output clock and one steady

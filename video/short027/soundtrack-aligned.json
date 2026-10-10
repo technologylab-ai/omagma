@@ -1,0 +1,108 @@
+{
+  "schema": "omagma.soundtrack-plan.v1",
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "sampleRate": 48000,
+  "durationSamples48k": 4043200,
+  "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+  "derivation": "Choose the musical handoff before the movie duration: retain the original passage through its full final fill, then admit only the original closing-phrase entrance. Raw attack-rise anchors are70.492458 and176.202958, yielding84.249500 seconds before video-frame quantization. The selected2527-frame duration84.233333 advances the replacement entrance16.167ms. Source0\u201370.476333 and176.173000\u2013189.960000 overlap only30ms in the quiet pre-attack region. The outgoing next attack is outside the retained source; the incoming attack arrives at essentially full gain. Linear sum-one envelopes prevent an equal-power gain bump. No repeat, tempo/pitch changes, long mixed drum loops, added ending fade or silence padding. Keep the original quiet opening, the loved passage around53 seconds and the complete natural ending. Structural/signal analysis is evidence for the chosen edit, not subjective auditory approval.",
+  "crossfadeSeconds": 0.03,
+  "crossfadeCurves": [
+    "tri",
+    "tri"
+  ],
+  "segments": [
+    {
+      "id": "opening-loved-passage-and-complete-fill",
+      "sourceIn": 0.0,
+      "sourceOut": 70.47633333333333,
+      "sourceSamples48k": [
+        0,
+        3382864
+      ],
+      "filmIn": 0.0,
+      "filmOut": 70.47633333333333
+    },
+    {
+      "id": "one-closing-phrase-entrance-and-natural-ending",
+      "sourceIn": 176.173,
+      "sourceOut": 189.96,
+      "sourceSamples48k": [
+        8456304,
+        9118080
+      ],
+      "filmIn": 70.44633333333333,
+      "filmOut": 84.23333333333333
+    }
+  ],
+  "musicalJoinEvidence": {
+    "outgoingNextAttackRiseSource": 70.49245833333333,
+    "outgoingNextAttackRiseSample48k": 3383638,
+    "outgoingNextAttackExcluded": true,
+    "incomingAttackRiseSource": 176.20295833333333,
+    "incomingAttackRiseSample48k": 8457742,
+    "incomingAttackRiseFilm": 70.47629166666667,
+    "incomingRiseFromSeamEndSamples": -2,
+    "unquantizedMusicDuration": 84.24949999999998,
+    "frameQuantizationAttackAdvanceSeconds": 0.01616666666664912,
+    "method": "Raw48k mono source,1ms centered RMS in1500\u201310000Hz, attack rise at2x local pre-attack median. About1\u20133ms uncertainty; not a subjective listening test. Early/closing pickups near70.356/176.070 occur about136ms before their respective entrances.",
+    "harmonicContext": "Spectral pitch-class inspection near both phrase entrances concentrates on C#/F#; this supports common tonal context but does not prove melodic or aesthetic equivalence.",
+    "arrangement": "Keep the complete developing passage and its final fill, replace the outgoing next-phrase entrance with one entrance into the source's softer closing continuation. Blend only the30ms lead-in; do not overlap active drum loops.",
+    "auditoryApproval": false
+  },
+  "mappedMusicLandmarks": [
+    {
+      "name": "opening",
+      "source": 0.0,
+      "film": 0.0
+    },
+    {
+      "name": "bass",
+      "source": 4.6,
+      "film": 4.6
+    },
+    {
+      "name": "step",
+      "source": 8.928,
+      "film": 8.928
+    },
+    {
+      "name": "drums",
+      "source": 35.352,
+      "film": 35.352
+    },
+    {
+      "name": "protectedPassage",
+      "source": 53.0,
+      "film": 53.0
+    },
+    {
+      "name": "seamStart",
+      "source": 70.44633333333333,
+      "film": 70.446333333
+    },
+    {
+      "name": "singleClosingAttack",
+      "source": 176.20295833333333,
+      "film": 70.476291667
+    },
+    {
+      "name": "lastPhrase",
+      "source": 184.692,
+      "film": 78.965333333
+    },
+    {
+      "name": "stop",
+      "source": 187.12,
+      "film": 81.393333333
+    },
+    {
+      "name": "naturalEnd",
+      "source": 189.96,
+      "film": 84.233333333
+    }
+  ],
+  "mastering": "One static linear gain, target\u221214LUFS \u00b10.6 and true peak <=\u22121dBTP. Preserve composed dynamics; no limiter, compression or per-segment gain.",
+  "revision": "aligned"
+}

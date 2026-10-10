@@ -1,5 +1,34 @@
 # Continuous nine-feature edit
 
+## Preferred music-first timing
+
+The preferred edit is now **84.233 seconds / 2,527 frames**. The music join is
+chosen at a complete fill/phrase boundary, then the picture is fitted to that
+duration. Seven identical frames extend the final settled website still; all
+earlier UI frames, motions and reading holds remain exactly as approved.
+
+[soundtrack-aligned.json](soundtrack-aligned.json) retains source
+0–70.476333 seconds and 176.173–189.960 seconds. A 30 ms linear pre-attack
+overlap at film 70.446333–70.476333 ends before the outgoing next drum hit;
+the incoming phrase supplies one entrance. The previous long overlap at 68
+seconds mixed different beat phases. Matching the whole fill, the incoming
+entrance and picture duration replaces that approach. Original tempo/pitch,
+the enjoyed 53-second passage and composed natural ending remain.
+
+```sh
+python3 video/short027/fit_music.py
+python3 video/short027/encode.py --plan video/short027/soundtrack-aligned.json --frames video/cache/short027/aligned-frames --picture-source video/short027/film-smooth.html --out video/out/omagma-v0.2.7-aligned.mp4
+python3 video/short027/deliver.py --revision aligned
+```
+
+Run under the existing live host reservation. `fit_music.py` requires a new
+output directory and preserves the approved source frames; choose a fresh
+`--out` and corresponding encode `--frames` path for repeated regeneration.
+Raw source continuity and single-attack checks support this edit; they do not
+claim subjective musical approval. User listening remains decisive.
+
+## Earlier fixed-length audio comparisons
+
 The preferred audio is the later continuation edit in
 [soundtrack-continuation.json](soundtrack-continuation.json): source 0–70.000
 seconds and 174.000–189.960 seconds, overlapping at film 68.040–70.000.
