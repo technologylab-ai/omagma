@@ -13,8 +13,8 @@ case "$stage" in
     python3 video/short027/capture_palette.py --expected-sha256 "$OMAGMA_SHA256"
     node video/short027/capture-images.mjs
     ;;
-  film|brisk|nine|motion|check) ;;
-  *) echo 'Usage: video/short027/build.sh [capture|film|brisk|nine|motion|all|check]' >&2; exit 2 ;;
+  film|brisk|nine|motion|smooth|check) ;;
+  *) echo 'Usage: video/short027/build.sh [capture|film|brisk|nine|motion|smooth|all|check]' >&2; exit 2 ;;
 esac
 if [[ "$stage" == film || "$stage" == all ]]; then
   node video/short027/render.mjs
@@ -34,6 +34,10 @@ if [[ "$stage" == motion ]]; then
   node video/short027/render.mjs --film film-motion.html --plan video/short027/soundtrack-motion.json --out video/cache/short027/motion-frames
   python3 video/short027/encode.py --plan video/short027/soundtrack-motion.json --frames video/cache/short027/motion-frames --picture-source video/short027/film-motion.html --out video/out/omagma-v0.2.7-motion.mp4
 fi
+if [[ "$stage" == smooth ]]; then
+  node video/short027/render.mjs --film film-smooth.html --plan video/short027/soundtrack-smooth.json --out video/cache/short027/smooth-frames
+  python3 video/short027/encode.py --plan video/short027/soundtrack-smooth.json --frames video/cache/short027/smooth-frames --picture-source video/short027/film-smooth.html --out video/out/omagma-v0.2.7-smooth.mp4
+fi
 if [[ "$stage" == check ]]; then
   node --check video/short027/cdp.mjs
   node --check video/short027/render.mjs
@@ -41,6 +45,7 @@ if [[ "$stage" == check ]]; then
   node --check video/short027/capture_cdp.mjs
   node --check video/short027/qa.mjs
   node --check video/short027/qa-motion.mjs
+  node --check video/short027/qa-smooth.mjs
   node --check video/short027/review-motion.mjs
   python3 -m py_compile video/short027/capture.py video/short027/capture_bar.py video/short027/capture_labels.py video/short027/capture_forward_story.py video/short027/capture_fixture.py video/short027/encode.py video/short027/deliver.py video/short027/preview.py video/short027/convert_updates.py
 fi

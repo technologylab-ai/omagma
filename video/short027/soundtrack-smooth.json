@@ -1,0 +1,99 @@
+{
+  "schema": "omagma.soundtrack-plan.v1",
+  "fps": 30,
+  "frameCount": 2520,
+  "duration": 84,
+  "sampleRate": 48000,
+  "durationSamples48k": 4032000,
+  "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+  "derivation": "Keep source0\u201353.400 uninterrupted, including the original quiet introduction, developing early phrases and first drums. One0.800-second equal-power crossfade at film52.600\u201353.400 leads into source158.560\u2013189.960, retaining the final composed build, drop and natural decay. The overlap straddles phrase transitions near source52.9 and158.9. Source53.400\u2013158.560, including the disliked middle, is skipped. No repeated early phrase, splice near20 seconds, stretching, pitch processing, silence padding, limiter or per-segment gain. Exact48k sample cues give2520 video frames at30fps. Phrase analysis is signal-based; subjective listening is still required.",
+  "crossfadeSeconds": 0.8,
+  "segments": [
+    {
+      "id": "uninterrupted-opening",
+      "sourceIn": 0,
+      "sourceOut": 53.4,
+      "sourceSamples48k": [
+        0,
+        2563200
+      ],
+      "filmIn": 0,
+      "filmOut": 53.4
+    },
+    {
+      "id": "original-final-build-and-ending",
+      "sourceIn": 158.56,
+      "sourceOut": 189.96,
+      "sourceSamples48k": [
+        7610880,
+        9118080
+      ],
+      "filmIn": 52.6,
+      "filmOut": 84.0
+    }
+  ],
+  "mappedMusicLandmarks": [
+    {
+      "name": "opening",
+      "source": 0,
+      "film": 0
+    },
+    {
+      "name": "bass",
+      "source": 4.6,
+      "film": 4.6
+    },
+    {
+      "name": "step",
+      "source": 8.928,
+      "film": 8.928
+    },
+    {
+      "name": "earlyPhrase",
+      "source": 17.752,
+      "film": 17.752
+    },
+    {
+      "name": "drums",
+      "source": 35.352,
+      "film": 35.352
+    },
+    {
+      "name": "finalBuild",
+      "source": 158.96,
+      "film": 53.0
+    },
+    {
+      "name": "roll",
+      "source": 163.329,
+      "film": 57.369
+    },
+    {
+      "name": "drop",
+      "source": 167.602,
+      "film": 61.642
+    },
+    {
+      "name": "nextPhrase",
+      "source": 176.147,
+      "film": 70.187
+    },
+    {
+      "name": "lastPhrase",
+      "source": 184.692,
+      "film": 78.732
+    },
+    {
+      "name": "stop",
+      "source": 187.12,
+      "film": 81.16
+    },
+    {
+      "name": "naturalEnd",
+      "source": 189.96,
+      "film": 84.0
+    }
+  ],
+  "mastering": "One static linear gain; target-14 LUFS \u00b10.6 and true peak <=-1dBTP. Preserve the composed quiet opening and natural ending; no dynamic compression or per-segment lift.",
+  "revision": "smooth"
+}

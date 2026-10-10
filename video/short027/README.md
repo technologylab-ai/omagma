@@ -1,25 +1,30 @@
-# Current nine-feature motion edit
+# Current continuous nine-feature edit
 
-The current source is an **81.767-second, nine-highlight motion edit**. It adds a
-short gradual TUI reveal, a moderate push toward Join, and the complete genuine
-forwarding story: received airline email → Keep formatting → blank personal note
-→ fast native typing with a live preview → rendered outgoing HTML and a connected
-scroll through the original booking. [Motion timing and source provenance](MOTION-SCENES.md)
-describe the edit. The previous 72.967-second nine-feature source is preserved in
-[versions/nine-73s](versions/nine-73s/); all previous delivered movies remain intact.
+The current source is an **84.000-second, nine-highlight continuous edit**.
+Every native UI transition now uses an explicit output clock and one steady
+background. Palette hands directly to Find; chapter changes retain their picture;
+headings change separately; global brightness flashes and the early music loop
+are removed. The gradual TUI reveal, focused camera moves, complete genuine
+forwarding story and ninth update-guide scene remain.
+[Transition policy, actual visual co-review and reproduction](SMOOTH-EDIT.md)
+describe the edit. All previous sources and delivered comparison movies remain
+preserved, including the 81.767-second motion and 72.967-second nine-feature edits.
 
 With the coordinator's existing live `HOST_TOKEN` reservation and genuine source
 assets already captured, build and deliver the current edit:
 
 ```sh
-bash video/short027/build.sh motion
-python3 video/short027/deliver.py --revision motion
+node video/short027/qa-smooth.mjs
+bash video/short027/build.sh smooth
+python3 video/short027/deliver.py --revision smooth
 ```
 
-[MOTION-SCENES.md](MOTION-SCENES.md) includes fresh forward capture, proxy and
-chronological playback-review commands. Current output is
-`video/out/omagma-v0.2.7-motion.mp4`; unique final copies belong in
-`~/Videos/Omagma/`.
+Review the actual encoded master at 1× and inspect dense consecutive 30 fps
+handoff frames before delivery. Current output is
+`video/out/omagma-v0.2.7-smooth.mp4`; unique final copies belong in
+`~/Videos/Omagma/`. [SMOOTH-EDIT.md](SMOOTH-EDIT.md) includes fresh forward capture
+and explains the full transition-review standard. The older
+[MOTION-SCENES.md](MOTION-SCENES.md) records the preserved motion comparison.
 
 ## Earlier eight-feature edits
 

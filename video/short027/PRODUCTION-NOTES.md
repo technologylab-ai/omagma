@@ -1,12 +1,14 @@
-# Current nine-feature motion edit
+# Current continuous nine-feature edit
 
-The current source is an **81.767-second, nine-highlight motion edit**. It adds a
-short gradual TUI reveal, a moderate push toward Join, and the complete genuine
-forwarding story: received airline email → Keep formatting → blank personal note
-→ fast native typing with a live preview → rendered outgoing HTML and a connected
-scroll through the original booking. [Motion timing and source provenance](MOTION-SCENES.md)
-describe the edit. The previous 72.967-second nine-feature source is preserved in
-[versions/nine-73s](versions/nine-73s/); all previous delivered movies remain intact.
+The current source is an **84.000-second, nine-highlight continuous edit**.
+Every native UI transition now uses an explicit output clock and one steady
+background. Palette hands directly to Find; chapter changes retain their picture;
+headings change separately; global brightness flashes and the early music loop
+are removed. The gradual TUI reveal, focused camera moves, complete genuine
+forwarding story and ninth update-guide scene remain.
+[Transition policy, actual visual co-review and reproduction](SMOOTH-EDIT.md)
+describe the edit. All previous sources and delivered comparison movies remain
+preserved, including the 81.767-second motion and 72.967-second nine-feature edits.
 
 # Production notes — v0.2.7 films
 

@@ -3,7 +3,7 @@ import {resolve,join} from 'node:path';
 import {parseArgs} from 'node:util';
 import {browser,reservation,root} from './cdp.mjs';
 const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},plan:{type:'string'},film:{type:'string',default:'film.html'}}});
-if(!['film.html','film-brisk.html','film-nine.html','film-motion.html'].includes(o.film))throw Error('unknown film source');
+if(!['film.html','film-brisk.html','film-nine.html','film-motion.html','film-smooth.html'].includes(o.film))throw Error('unknown film source');
 await reservation();
 const plan=JSON.parse(readFileSync(resolve(o.plan||join(root,'video/short027/soundtrack.json')),'utf8'));
 const expectedFrames=Number(plan.frameCount);
@@ -23,7 +23,7 @@ try{
   const jobs=o.stills?o.stills.split(',').map(Number):Array.from({length:Math.ceil((last-first)/step)},(_,i)=>(first+i*step)/film.fps);
   if(!jobs.length||jobs.some(t=>!Number.isFinite(t)||t<0||t>=film.duration))throw Error('invalid frame times');
   let done=0;
-  await Promise.all(pages.map(async(p,w)=>{for(let i=w;i<jobs.length;i+=workers){const t=jobs[i];await p.evaluate('window.render('+t+');new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))');const data=await p.screenshot(o.stills?'png':'jpeg');writeFileSync(join(out,o.stills?'t'+t.toFixed(2).padStart(6,'0')+'.png':String(i).padStart(5,'0')+'.jpg'),data);if(++done%150===0)console.log(done+'/'+jobs.length+' frames');}}));
+  await Promise.all(pages.map(async(p,w)=>{for(let i=w;i<jobs.length;i+=workers){const t=jobs[i];await p.evaluate('window.render('+t+');Promise.resolve(window.prepareFrame?.()).then(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true)))))');const data=await p.screenshot(o.stills?'png':'jpeg');writeFileSync(join(out,o.stills?'t'+t.toFixed(2).padStart(6,'0')+'.png':String(i).padStart(5,'0')+'.jpg'),data);if(++done%150===0)console.log(done+'/'+jobs.length+' frames');}}));
   writeFileSync(join(out,'render.json'),JSON.stringify({film,count:jobs.length,scale,step,workers,from:start,to:end,sampleFps:film.fps/step,revision:plan.revision,pictureSource:o.film},null,2));
   console.log('rendered '+jobs.length+' frames/stills');
 }finally{await b.close();}
