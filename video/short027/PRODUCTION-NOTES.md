@@ -1,5 +1,9 @@
 # Current continuous nine-feature edit
 
+The preferred audio revision now preserves the original passage through 68.040
+seconds before its closing handoff. [Soundtrack continuation and video-copy
+workflow](SMOOTH-EDIT.md) replaces only the audio; approved visuals stay unchanged.
+
 The current source is an **84.000-second, nine-highlight continuous edit**.
 Every native UI transition now uses an explicit output clock and one steady
 background. Palette hands directly to Find; chapter changes retain their picture;

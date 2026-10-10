@@ -1,5 +1,27 @@
 # Continuous nine-feature edit
 
+The preferred audio is the later continuation edit in
+[soundtrack-continuation.json](soundtrack-continuation.json): source 0–70.000
+seconds and 174.000–189.960 seconds, overlapping at film 68.040–70.000.
+The original music around 53 seconds now continues for another fifteen seconds
+before any edit. The final drum fill prepares the softer closing phrase; the
+original stop and decay still finish at 84 seconds. Tempo and pitch are unchanged.
+The older 52.600-second handoff described below remains a comparison arrangement;
+the user's listening feedback found that it interrupted a passage they enjoyed.
+
+This revision replaces only the soundtrack. The approved video packets, frame
+count, timing and color metadata are preserved by [replace_audio.py](replace_audio.py).
+Signal checks establish source continuity, not subjective musical approval.
+
+```sh
+python3 video/short027/encode.py --plan video/short027/soundtrack-continuation.json --audio-only
+python3 video/short027/replace_audio.py --video "$REVIEWED_VIDEO" --expected-video-sha256 "$REVIEWED_VIDEO_SHA256" --audio video/cache/short027/soundtrack-continuation.wav --plan video/short027/soundtrack-continuation.json --out video/out/omagma-v0.2.7-continuation.mp4
+python3 video/short027/deliver.py --revision continuation
+```
+
+These commands use the same existing live host reservation. They create a new
+movie and preserve previous delivered versions; the picture is not rendered again.
+
 The current source runs **84.000 seconds / 2,520 frames at 30 fps**. It rebuilds
 every native UI handoff around one steady background, while retaining the gradual
 TUI reveal, purposeful camera moves, complete forwarding story, update guide and

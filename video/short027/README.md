@@ -1,5 +1,12 @@
 # Current continuous nine-feature edit
 
+The preferred soundtrack is now [soundtrack-continuation.json](soundtrack-continuation.json).
+The original passage plays uninterrupted through 68.040 seconds, then a
+1.960-second overlap hands it to the original final drum fill and natural ending.
+The earlier edit's 53-second splice is preserved only for comparison. This
+audio revision keeps the approved 84-second picture and pacing unchanged;
+[replace_audio.py](replace_audio.py) copies the reviewed H.264 packets directly.
+
 The current source is an **84.000-second, nine-highlight continuous edit**.
 Every native UI transition now uses an explicit output clock and one steady
 background. Palette hands directly to Find; chapter changes retain their picture;
@@ -11,13 +18,18 @@ describe the edit. All previous sources and delivered comparison movies remain
 preserved, including the 81.767-second motion and 72.967-second nine-feature edits.
 
 With the coordinator's existing live `HOST_TOKEN` reservation and genuine source
-assets already captured, build and deliver the current edit:
+assets already captured, build the base picture:
 
 ```sh
 node video/short027/qa-smooth.mjs
 bash video/short027/build.sh smooth
 python3 video/short027/deliver.py --revision smooth
 ```
+
+That block preserves the earlier comparison soundtrack. For the preferred
+continuation soundtrack, use the audio replacement commands at the top of
+[SMOOTH-EDIT.md](SMOOTH-EDIT.md) and deliver with `--revision continuation`.
+An already reviewed movie can be reused directly, avoiding a picture rerender.
 
 Review the actual encoded master at 1× and inspect dense consecutive 30 fps
 handoff frames before delivery. Current output is

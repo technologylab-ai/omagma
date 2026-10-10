@@ -1,0 +1,89 @@
+{
+  "schema": "omagma.soundtrack-plan.v1",
+  "fps": 30,
+  "frameCount": 2520,
+  "duration": 84.0,
+  "sampleRate": 48000,
+  "durationSamples48k": 4032000,
+  "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+  "derivation": "The user explicitly wants the original beautiful passage near53 seconds to continue. Preserve source0\u201370.000 at its original tempo and pitch, uninterrupted and unblended through film68.040. A single1.960-second equal-power crossfade at film68.040\u201370.000 hands the existing drums to source174.000\u2013189.960. This incoming section includes the original final drum fill before its quieter closing phrase near176.147, followed by the final accent, stop and complete natural decay. The incoming cue precedes the measured174.059 high-frequency transient, and both source boundaries are enveloped by the long crossfade, rather than hard cuts through drum strokes. No early repeat,53-second edit, silence padding, tempo/pitch processing or artificial ending fade. Exact48k sample cues give84 seconds/2520frames. The new instruction to retain the passage overrides the earlier broad wish to skip the source middle. Musical continuity remains subject to user listening; measurements are not a perceptual endorsement.",
+  "crossfadeSeconds": 1.96,
+  "segments": [
+    {
+      "id": "uninterrupted-original-passage",
+      "sourceIn": 0.0,
+      "sourceOut": 70.0,
+      "sourceSamples48k": [
+        0,
+        3360000
+      ],
+      "filmIn": 0.0,
+      "filmOut": 70.0
+    },
+    {
+      "id": "original-final-fill-and-natural-ending",
+      "sourceIn": 174.0,
+      "sourceOut": 189.96,
+      "sourceSamples48k": [
+        8352000,
+        9118080
+      ],
+      "filmIn": 68.04,
+      "filmOut": 84.0
+    }
+  ],
+  "mappedMusicLandmarks": [
+    {
+      "name": "opening",
+      "source": 0.0,
+      "film": 0.0
+    },
+    {
+      "name": "bass",
+      "source": 4.6,
+      "film": 4.6
+    },
+    {
+      "name": "step",
+      "source": 8.928,
+      "film": 8.928
+    },
+    {
+      "name": "drums",
+      "source": 35.352,
+      "film": 35.352
+    },
+    {
+      "name": "protectedPassage",
+      "source": 53.0,
+      "film": 53.0
+    },
+    {
+      "name": "lastUnblendedSourceSample",
+      "source": 68.04,
+      "film": 68.04
+    },
+    {
+      "name": "originalClosingPhrase",
+      "source": 176.147,
+      "film": 70.187
+    },
+    {
+      "name": "lastPhrase",
+      "source": 184.692,
+      "film": 78.732
+    },
+    {
+      "name": "stop",
+      "source": 187.12,
+      "film": 81.16
+    },
+    {
+      "name": "naturalEnd",
+      "source": 189.96,
+      "film": 84.0
+    }
+  ],
+  "mastering": "One static linear gain; target\u221214LUFS \u00b10.6 and true peak <=\u22121dBTP. Preserve quiet opening, composed dynamics and original natural ending; no dynamic compression, limiter or per-segment lift.",
+  "revision": "continuation"
+}
