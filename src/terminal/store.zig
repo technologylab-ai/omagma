@@ -166,6 +166,38 @@ pub const QueuedSend = struct {
     dueAtMs: i64,
     errorCode: []const u8 = "",
 };
+/// Body refusal codes that a newer incoming-mail decoder may now accept. A
+/// cache recorded by an older decoder clears matching refusals once on a
+/// writable open, so those bodies are fetched again instead of remaining
+/// unavailable. Other refusals stay final. Append a revision; never reuse one.
+const decoder_retries = [_]struct { revision: u32, code: []const u8 }{
+    // Gmail declares base64 UTF-8 inline text with its stripped byte order mark.
+    .{ .revision = 1, .code = "BodySizeMismatch" },
+    // ISO-8859-15 text.
+    .{ .revision = 2, .code = "UnsupportedCharset" },
+    // Conflicting calendar parts no longer refuse the message.
+    .{ .revision = 2, .code = "AmbiguousCalendarPart" },
+    // Malformed encoded words in Subject, display names and filenames display
+    // as literal text.
+    .{ .revision = 2, .code = "InvalidEncodedWord" },
+    .{ .revision = 2, .code = "InvalidBase64" },
+    .{ .revision = 2, .code = "InvalidQuotedPrintable" },
+    .{ .revision = 2, .code = "InvalidCharsetData" },
+    .{ .revision = 2, .code = "InvalidUtf8" },
+    // Received attachments are bounded at 50 MiB instead of 25 MiB.
+    .{ .revision = 2, .code = "BodyTooLarge" },
+};
+pub const decoder_revision: u32 = decoder_retries[decoder_retries.len - 1].revision;
+
+fn retriedByNewerDecoder(code: []const u8, recorded: u32) bool {
+    if (code.len == 0 or std.mem.eql(u8, code, "DiskQuotaExceeded")) return false;
+    // Indexes from before revisions were recorded hold refusals from unknown
+    // older decoders, some since fixed. Retry each of them once.
+    if (recorded == 0) return true;
+    for (decoder_retries) |retry| if (retry.revision > recorded and std.mem.eql(u8, retry.code, code)) return true;
+    return false;
+}
+
 pub const State = struct {
     schema: u8 = 1,
     account: []const u8,
@@ -193,6 +225,9 @@ pub const State = struct {
     /// Cumulative incoming Inbox additions at successful history checkpoints.
     /// Default zero keeps old schema-1 indexes readable; cache.clear preserves it.
     inboxArrivalCount: u64 = 0,
+    /// Decoder revision that recorded the stored body refusals. Zero for old
+    /// schema-1 indexes; see `decoder_revision`.
+    decoderRevision: u32 = 0,
     quotaFloor: ?QuotaFloor = null,
     quotaDiskLimit: usize = 0,
     metadataPolicy: usize = 0,
@@ -306,6 +341,13 @@ pub const Store = struct {
                 entry.bodyError = "";
             };
             s.state.quotaDiskLimit = s.options.disk_limit;
+            changed = true;
+        }
+        if (s.state.decoderRevision < decoder_revision) {
+            for (s.state.entries) |*entry| if (retriedByNewerDecoder(entry.bodyError, s.state.decoderRevision)) {
+                entry.bodyError = "";
+            };
+            s.state.decoderRevision = decoder_revision;
             changed = true;
         }
         if (changed) {
@@ -1326,4 +1368,75 @@ test "cache activity: legacy indexes baseline zero and secure stamps never parse
     try store.dir.deleteFile(std.testing.io, "index.json");
     try store.dir.symLink(std.testing.io, "unrelated", "index.json", .{});
     try std.testing.expectError(error.InsecureCacheFile, cacheStamp(std.testing.io, root, "self@example.test", .{ .fixtures = true }));
+}
+
+test "older decoder refusals are retried once on writable opens and current refusals stay final" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const legacy = try std.json.parseFromSliceLeaky(State, a, "{\"account\":\"legacy@example.test\"}", .{});
+    try std.testing.expectEqual(@as(u32, 0), legacy.decoderRevision);
+    try std.testing.expect(retriedByNewerDecoder("BodySizeMismatch", 0));
+    try std.testing.expect(retriedByNewerDecoder("MimeTooDeep", 0));
+    try std.testing.expect(!retriedByNewerDecoder("DiskQuotaExceeded", 0));
+    try std.testing.expect(!retriedByNewerDecoder("", 0));
+    try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", decoder_revision));
+    try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", decoder_revision));
+    // A cache already migrated by the first revision still retries refusals
+    // that the second revision accepts, but not those the first one retried.
+    try std.testing.expectEqual(@as(u32, 2), decoder_revision);
+    for ([_][]const u8{ "UnsupportedCharset", "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable", "BodyTooLarge" }) |code| {
+        try std.testing.expect(retriedByNewerDecoder(code, 1));
+        try std.testing.expect(!retriedByNewerDecoder(code, 2));
+    }
+    try std.testing.expect(!retriedByNewerDecoder("BodySizeMismatch", 1));
+    try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", 1));
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/decoder", .{tmp.sub_path});
+    const options: t.Options = .{ .fixtures = true };
+    var generation: u64 = 0;
+    {
+        var store = try Store.open(std.testing.io, a, root, "self@example.test", options);
+        defer store.close();
+        try std.testing.expectEqual(decoder_revision, store.state.decoderRevision);
+        try store.put(.{ .id = "cached", .threadId = "thread", .receivedAt = 4000, .bodyText = "Cached body" }, true);
+        try store.put(.{ .id = "mismatch", .threadId = "thread", .receivedAt = 3000 }, false);
+        try store.put(.{ .id = "quota", .threadId = "thread", .receivedAt = 2000 }, false);
+        try store.put(.{ .id = "older", .threadId = "thread", .receivedAt = 1000 }, false);
+        store.find("mismatch").?.bodyError = "BodySizeMismatch";
+        store.find("quota").?.bodyError = "DiskQuotaExceeded";
+        // A refusal by an unknown older decoder that may since have been fixed.
+        store.find("older").?.bodyError = "InvalidQuotedPrintable";
+        store.state.decoderRevision = 0;
+        try store.save();
+        generation = store.state.generation;
+    }
+    {
+        // A cached reader neither migrates nor writes the legacy index.
+        var reader = try Store.openCached(std.testing.io, a, root, "self@example.test", options);
+        defer reader.close();
+        try std.testing.expectEqual(@as(u32, 0), reader.state.decoderRevision);
+        try std.testing.expectEqualStrings("BodySizeMismatch", reader.find("mismatch").?.bodyError);
+    }
+    {
+        var store = try Store.open(std.testing.io, a, root, "self@example.test", options);
+        defer store.close();
+        try std.testing.expectEqualStrings("", store.find("mismatch").?.bodyError);
+        try std.testing.expectEqualStrings("DiskQuotaExceeded", store.find("quota").?.bodyError);
+        try std.testing.expectEqualStrings("", store.find("older").?.bodyError);
+        try std.testing.expectEqualStrings("Cached body", (try store.read("cached")).?.bodyText);
+        try std.testing.expectEqual(decoder_revision, store.state.decoderRevision);
+        // Cached list/view generations observe the cleared refusal.
+        try std.testing.expect(store.state.generation > generation);
+        // The retries still fail: the current decoder's refusals are final.
+        store.find("mismatch").?.bodyError = "BodySizeMismatch";
+        store.find("older").?.bodyError = "InvalidQuotedPrintable";
+        try store.save();
+    }
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", options);
+    defer store.close();
+    try std.testing.expectEqualStrings("BodySizeMismatch", store.find("mismatch").?.bodyError);
+    try std.testing.expectEqualStrings("InvalidQuotedPrintable", store.find("older").?.bodyError);
+    try std.testing.expectEqual(decoder_revision, store.state.decoderRevision);
 }

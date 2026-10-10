@@ -203,10 +203,11 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   code, rendered HTML and meaningful plain text. Raw HTML and remote images
   stay inert. The tiny approved footer logo is embedded, with no remote fetch.
 - Multiple outgoing attachments survive local saves and `$EDITOR` return.
-  Ordinary files have a 16-file/25 MiB decoded limit, retained inline resources
+  Ordinary outgoing files have a 16-file/25 MiB decoded limit, retained inline resources
   a separate 32-resource/2 MiB limit, and outgoing MIME a 35 MiB cap. Bodies stay
   limited to 2 MiB and JSON requests to 3 MiB; larger ordinary files use private
-  immutable account storage.
+  immutable account storage. Received file attachments stream up to 50 MiB each;
+  cached file handles remain subject to account disk quotas.
 - In the outgoing browser, Listing Space or checkbox clicks selects files
   across folders; Attach imports the complete checked set. `:detach NUMBER`
   removes one. Received Save/Save & open and `:save-all DIRECTORY` stream files

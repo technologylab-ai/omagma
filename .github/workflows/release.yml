@@ -113,6 +113,7 @@ jobs:
           python3 tests/terminal_integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-integration.json
           python3 tests/terminal_transport.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-transport.json
           python3 tests/terminal_pty.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-pty.json
+          python3 tests/terminal_mail_acceptance.py --binary .verification-debug/bin/omagma --build-mode debug --receipt tests/results/terminal-debug-mail-acceptance.json
           python3 tests/terminal_html.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-html.json
           python3 tests/terminal_repaint.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-repaint.json
           python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
@@ -225,6 +226,7 @@ jobs:
           python3 tests/terminal_integration.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-integration.json
           python3 tests/terminal_transport.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-transport.json
           python3 tests/terminal_pty.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-pty.json
+          python3 tests/terminal_mail_acceptance.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --receipt tests/results/terminal-safe-mail-acceptance.json
           python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html.json --resource-cycles 1000 --idle-seconds 60
           python3 tests/terminal_repaint.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-repaint.json
           python3 tests/terminal_mouse.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-mouse.json
@@ -332,6 +334,7 @@ jobs:
           # the Linux job; these checks do not establish a macOS memory baseline.
           python3 tests/terminal_macos.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_macos_features.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-features.json
+          python3 tests/terminal_mail_acceptance.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-mail-acceptance.json
           python3 tests/terminal_ux_macos.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-ux.json
           python3 tests/launch_macos.py --binary .verification-macos-debug/bin/omagma
           .verification-macos-debug/bin/omagma probe-keyring
@@ -366,6 +369,7 @@ jobs:
           python3 tests/terminal_transport.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-transport.json
           python3 tests/terminal_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           python3 tests/terminal_macos_features.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-features.json
+          python3 tests/terminal_mail_acceptance.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --receipt tests/results/macos-safe-mail-acceptance.json
           python3 tests/terminal_ux_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-ux.json
           python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} probe-keyring

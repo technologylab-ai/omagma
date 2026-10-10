@@ -5,7 +5,9 @@ pub const Limits = struct {
     pub const body_bytes: usize = 2 * 1024 * 1024;
     pub const attachments: usize = 16;
     pub const related_resources: usize = 32;
+    /// Combined decoded ordinary outgoing files. Incoming saves have their own cap.
     pub const attachment_bytes: usize = 25 * 1024 * 1024;
+    pub const incoming_attachment_bytes: usize = @import("../attachment_limits.zig").incoming_bytes;
     pub const mime_upload_bytes: usize = 35 * 1024 * 1024;
     pub const page: usize = 100;
     pub const recipients: usize = 32;

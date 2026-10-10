@@ -492,7 +492,7 @@ You can use your own accounts after consent, including sending a first message t
 | Ordinary outgoing attachments | 16 files, 25 MiB combined decoded bytes |
 | Retained original inline resources | 32 resources, 2 MiB combined decoded bytes, separate from ordinary files |
 | Original email (.eml) source | 2 MiB; encoded draft must also fit the request limit |
-| Parsed incoming file/resource descriptors | 49 per message, within 128 MIME parts; streamed file content up to 25 MiB each and account disk quota |
+| Parsed incoming file/resource descriptors | 49 per message, within 128 MIME parts; streamed file content up to 50 MiB each; cached blobs also obey the account disk quota |
 | Outgoing recipients | 32 across To/Cc/Bcc |
 | Local drafts / undo receipts | 128 / 16 per account |
 | Cached contacts / operation journal | 1,024 / 1,000 per account |

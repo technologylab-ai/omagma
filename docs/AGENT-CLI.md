@@ -180,7 +180,9 @@ descriptor for a larger received file. Empty/omitted data with a handle does not
 mean the file is empty. `mail.attachment-save` streams the content into the
 caller's explicit new absolute path, with 0600 permissions and no overwrite or
 parent/leaf symlink traversal. Received files are individually bounded to
-25 MiB and account disk quotas. Saving does not require a mailbox mutation.
+50 MiB; cached attachment handles also obey account disk quotas. The file is
+decoded incrementally, so its content does not consume a whole JSON frame or
+raise the 2 MiB text-body limit. Saving does not require a mailbox mutation.
 There is no `--output-file` flag. Existing `attachment.open`/`mail open-attachment`
 opens an already saved supported private file; it does not download a handle.
 

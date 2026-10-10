@@ -1,0 +1,12 @@
+{
+  "id": "legacy-contract-note",
+  "to": [{"address": "reviewer@example.test", "name": "Fictional Reviewer"}],
+  "cc": [],
+  "bcc": [],
+  "subject": "Keep this unsent note",
+  "bodyText": "This local note must survive a decoder upgrade and refresh.\n",
+  "threadId": "",
+  "inReplyTo": "",
+  "references": "",
+  "attachments": []
+}

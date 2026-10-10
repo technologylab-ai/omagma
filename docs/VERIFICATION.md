@@ -73,6 +73,50 @@ metadata regressions run with the ordinary unit suite, or separately with
 Real-account read-only checks can supplement these tests when authorized;
 production mailbox/contact writes require their own explicit authorization.
 
+## Provider responses and ordinary mailbox workflows
+
+Generated MIME fixtures have exact body sizes and regular optional metadata.
+They are useful for UI behavior, but cannot establish compatibility with Gmail
+responses that contain legacy label colors or retain a stripped UTF-8 byte order
+mark in their declared body size. These failures need independent literal
+provider responses, rather than fixtures produced by the application's encoder
+or a generator that computes every declared size from the delivered data.
+
+`src/terminal_mail_acceptance_tests.zig` runs with the ordinary Debug and Safe
+unit gates on every native release platform. Its production-dispatcher checks
+assert requests, identities, full body and attachment bytes, cache persistence
+and later cached reads. A bounded set of 64 deterministic structure mutations
+varies MIME nesting, part order, header case and optional fields while retaining
+an independent content oracle. Malformed binary attachments remain explicit
+failures. This is targeted compatibility coverage; it is not evidence that every
+possible email is supported.
+
+The attachment stream probe separately receives 30 MiB with a content length
+and the exact 50 MiB incoming boundary with chunked framing, through the actual
+HTTP client, base64 JSON decoder and independent digest sink. It checks constant
+workspace use, over-limit refusal and unchanged upload limits. These tests do
+not create a large attachment by sending synthetic mail, which would conflate
+the smaller outgoing limit with receiving.
+
+`python3 tests/terminal_mail_acceptance.py --binary /path/to/omagma --receipt /tmp/mail-acceptance.json`
+uses an owned PTY and fictional provider-shaped mail. It starts with an older
+cache containing a body refusal, refreshes through the provider decoder, opens
+the recovered message and its attachments, saves a file, and creates formatted
+replies and forwards without sending. Restart checks distinguish successful
+recovery from a refusal that remains final under the current decoder. The Darwin
+variant uses the existing PTY guardian. No desktop window or real mailbox is
+needed.
+
+For an authorized live read-only check, sample several messages in each enabled
+account, including attachment-bearing mail, rather than reading only the first
+listed message. Record categorical refusal counts and artifact identities
+without mail content or identifiers. Inspect every failure: a passing head
+message does not make other recorded body refusals a passing compatibility
+check. Test live mutations only with explicitly authorized disposable accounts.
+When diagnosing a user report, distinguish cached reads from the fresh source
+read used to preserve formatting, and verify the executable actually running;
+repairing a cache with a candidate CLI does not replace a running older TUI.
+
 ## Release resource qualification
 
 Run these Safe workloads when qualifying a release or investigating a resource

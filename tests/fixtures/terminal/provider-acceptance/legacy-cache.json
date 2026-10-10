@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "account": "personal@example.com",
+  "generation": 42,
+  "serial": 7,
+  "entries": [
+    {
+      "message": {
+        "id": "provider-bom-contract",
+        "threadId": "provider-contract-thread",
+        "from": {"address": "contracts@example.test", "name": "Fictional Contract Desk"},
+        "to": [{"address": "personal@example.com", "name": ""}],
+        "subject": "Fictional contract acceptance",
+        "snippet": "METADATA PREVIEW ONLY: the complete contract is not in this snippet.",
+        "messageId": "<provider-contract@example.test>",
+        "labels": ["INBOX", "Label_contract"],
+        "receivedAt": 1791638400000,
+        "unread": false
+      },
+      "bytes": 0,
+      "bodyHash": "",
+      "bodyError": "BodySizeMismatch"
+    },
+    {
+      "message": {
+        "id": "provider-truncated-text",
+        "threadId": "provider-truncated-thread",
+        "from": {"address": "contracts@example.test", "name": "Fictional Contract Desk"},
+        "to": [{"address": "personal@example.com", "name": ""}],
+        "subject": "Fictional truncated message",
+        "snippet": "METADATA PREVIEW ONLY: the invalid message has no accepted full body.",
+        "messageId": "<provider-truncated@example.test>",
+        "labels": ["INBOX"],
+        "receivedAt": 1791638340000,
+        "unread": false
+      },
+      "bytes": 0,
+      "bodyHash": "",
+      "bodyError": "BodySizeMismatch"
+    }
+  ],
+  "drafts": [
+    {
+      "id": "legacy-contract-note",
+      "to": [{"address": "reviewer@example.test", "name": "Fictional Reviewer"}],
+      "subject": "Keep this unsent note",
+      "bodyText": "",
+      "attachments": []
+    }
+  ],
+  "labels": [
+    {"id": "INBOX", "name": "INBOX", "type": "system"},
+    {"id": "UNREAD", "name": "UNREAD", "type": "system"},
+    {"id": "Label_contract", "name": "Contract review", "type": "user"}
+  ],
+  "fixtureLabelsReady": true,
+  "fixtureCalls": 11,
+  "fixtureSends": 0,
+  "historyId": "7000",
+  "lastSyncAt": 0,
+  "inboxArrivalCount": 9,
+  "metadataPolicy": 2000,
+  "diskPolicy": 268435456,
+  "syncCalls": 3,
+  "syncMetadataGets": 4,
+  "syncListCalls": 2,
+  "syncHistoryPages": 1,
+  "syncBodyGets": 6
+}

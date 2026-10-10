@@ -14,6 +14,7 @@ const label_collection = @import("labels.zig");
 
 test {
     _ = @import("gmail_label_regression_test.zig");
+    _ = @import("gmail_body_regression_test.zig");
 }
 
 /// Tests inject this transport and fictional identity/capabilities. Production
@@ -164,7 +165,10 @@ pub const NetworkSession = struct {
         const access = try a.alloc(u8, 4096);
         errdefer std.crypto.secureZero(u8, access);
         const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (if (bar_only) try keyring.lookupAutomatic(io, account, refresh) else try keyring.lookup(io, account, refresh)) orelse return error.NotConnected;
-        self.client = try http.Client.init(io);
+        // One absolute attachment deadline covers token refresh, the profile
+        // check, the streamed download and its single 401 retry. Every other
+        // command keeps the ordinary client deadline.
+        self.client = if (std.mem.eql(u8, cmd, "mail.attachment")) try http.Client.initAttachmentDownload(io) else try http.Client.init(io);
         errdefer self.client.deinit();
         const scopes: []const []const u8 = if (grant) |g| g.scopes else &.{oauth.readonly_scope};
         const tokens = try oauth.refreshScoped(io, &self.client, &self.desktop, refresh_token, access, scopes);
@@ -225,7 +229,7 @@ pub fn executeAttachment(io: std.Io, a: std.mem.Allocator, config: *const Config
 pub fn executeAttachmentToWriter(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
     try mime.validateAttachment(expected.filename, expected.mimeType);
     if (expected.id.len == 0 or expected.id.len > 1024) return error.InvalidAttachmentId;
-    if (expected.size > types.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+    if (expected.size > types.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
     const message_id = try j.required(request, "messageId");
     try b.identifier(message_id);
     var session: NetworkSession = undefined;
@@ -258,12 +262,12 @@ pub fn executeAttachmentToWriter(io: std.Io, a: std.mem.Allocator, config: *cons
 fn downloadToWriter(session: *NetworkSession, a: std.mem.Allocator, message_id: []const u8, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
     var decoder = try @import("attachment_json.zig").Decoder.init(writer, expected.size);
     const url = try std.fmt.allocPrint(a, "{s}/attachments/{s}?fields=size,data", .{ try messageUrl(a, message_id, ""), try escaped(a, expected.id) });
-    var response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, 36 * 1024 * 1024, session.response) catch |err| return decoder.failure orelse err;
+    var response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
     if (response.status == 401 and !session.network.refreshed_401) {
         session.network.refreshed_401 = true;
         const token = try oauth.refreshScoped(session.io, &session.client, &session.desktop, session.refresh_token, session.access, session.scopes);
         session.network.access = token.access_token;
-        response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, 36 * 1024 * 1024, session.response) catch |err| return decoder.failure orelse err;
+        response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
     }
     if (response.status < 200 or response.status >= 300) _ = try decodeResponse(a, .GET, url, response.status, response.body);
     try decoder.finish();

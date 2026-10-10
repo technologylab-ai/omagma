@@ -392,7 +392,7 @@ fn saveAttachmentResponse(io: Io, allocator: Allocator, response: []const u8, ac
     const result = get(parsed, "data");
     const size = get(result, "size");
     if (!truth(get(result, "saved")) or !same(text(get(result, "path")), path)) return error.AttachmentSaveFailed;
-    if (size != .integer or size.integer < 0 or size.integer > @as(i64, @intCast(types.Limits.attachment_bytes))) return error.InvalidAttachment;
+    if (size != .integer or size.integer < 0 or size.integer > @as(i64, @intCast(types.Limits.incoming_attachment_bytes))) return error.InvalidAttachment;
     if (@as(usize, @intCast(size.integer)) != expected_size) return error.AttachmentSizeMismatch;
     // The shared backend has already atomically written the chosen file.
     // Verify its receipt and checked descriptor; never decode or write it twice.
@@ -3261,7 +3261,7 @@ const App = struct {
     fn readerAttachmentPrompt(self: *App, open_after: bool) !void {
         const chosen = self.readerAttachment(self.reader_choice) orelse return;
         const size = get(chosen.attachment, "size");
-        if (size != .integer or size.integer < 0 or size.integer > types.Limits.attachment_bytes) return error.InvalidAttachment;
+        if (size != .integer or size.integer < 0 or size.integer > types.Limits.incoming_attachment_bytes) return error.InvalidAttachment;
         if (text(get(chosen.message, "id")).len == 0 or text(get(chosen.message, "id")).len > 256 or text(get(chosen.attachment, "id")).len == 0 or text(get(chosen.attachment, "id")).len > 1024) return error.InvalidAttachment;
         try self.reader_attachment_message.set(self.allocator, text(get(chosen.message, "id")));
         try self.reader_attachment_id.set(self.allocator, text(get(chosen.attachment, "id")));
@@ -6393,7 +6393,7 @@ const App = struct {
             index += 1;
             if (index != number) continue;
             const size = get(attachment, "size");
-            if (size != .integer or size.integer < 0 or size.integer > @as(i64, @intCast(types.Limits.attachment_bytes))) return error.InvalidAttachment;
+            if (size != .integer or size.integer < 0 or size.integer > @as(i64, @intCast(types.Limits.incoming_attachment_bytes))) return error.InvalidAttachment;
             const message_id = text(get(message, "id"));
             const attachment_id = text(get(attachment, "id"));
             if (message_id.len == 0 or attachment_id.len == 0 or attachment_id.len > 1024) return error.InvalidAttachment;

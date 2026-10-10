@@ -104,9 +104,11 @@ Exercise account-scoped pagination/cache restart, complete body retrieval, HTML-
 
 ## Implemented interfaces and bounded policy
 
-`gmail_decode.normalize(value, allocator, externalBodies)` produces the shared `types.Message`. FULL payloads resolve external textual bodies from the supplied attachment-response map; attachments in normalized DTOs carry base64url data and sanitized basename filenames. METADATA responses may omit body, MIME type and empty labels. RFC 2047 display names decode after recipient parsing, so an encoded comma remains part of one name; oversized names fail instead of silently truncating. Gmail's internal timestamp must be between zero and 253402300799999 milliseconds, through the last millisecond of year 9999. Supported text charsets are UTF-8, US-ASCII, ISO-8859-1 and Windows-1252; others return `UnsupportedCharset`.
+`gmail_decode.normalize(value, allocator, externalBodies)` produces the shared `types.Message`. FULL payloads resolve external textual bodies from the supplied attachment-response map; unopened ordinary external files retain descriptors without fetching their content. RFC 2047 display names decode after recipient parsing, so an encoded comma remains part of one name; malformed display encodings fall back to sanitized literal text in subjects, names and filenames, while address/header-injection and size checks stay strict. Oversized names fail instead of silently truncating. METADATA responses may omit body, MIME type and empty labels. Gmail's internal timestamp must be between zero and 253402300799999 milliseconds, through the last millisecond of year 9999. Supported text charsets are UTF-8, US-ASCII, ISO-8859-1, ISO-8859-15 and Windows-1252; other body charsets return `UnsupportedCharset`.
 
-`terminal/gmail.execute(io, allocator, config, account, cmd, request)` verifies an enabled configured account, exact credential/grant identity and Gmail profile before dispatch. Each operation owns one HTTP client with the existing 30-second total job deadline and joined 10-second request deadlines. One explicit HTTP 401 permits one refresh/retry; send timeouts, disconnects, server errors and malformed successful receipts yield an unknown outcome rather than an automatic send retry. Listing fetches at most 100 envelopes using METADATA; bodies and attachments are retrieved on demand. Thread reads reject more than 100 messages explicitly and sort successful results chronologically.
+Gmail inline text can understate its delivered byte count or omit a leading UTF-8 byte order mark while still counting those three bytes. The latter exception is restricted to inline UTF-8/base64 text leaves; actual decoded-byte budgets still apply, and files retain their integrity checks. Conflicting calendar parts leave the mail and files readable without enabling an ambiguous RSVP. Cached refusals carry a decoder revision: older failures are retried once on a writable cache open, and repeated refusals remain final. Read-only cache access never migrates an index. Restart older running clients after installing an updated decoder.
+
+`terminal/gmail.execute(io, allocator, config, account, cmd, request)` verifies an enabled configured account, exact credential/grant identity and Gmail profile before dispatch. Each operation owns one HTTP client. Ordinary jobs and uploads have a 30-second total deadline; explicit incoming file downloads have a 180-second total deadline. JSON requests retain joined 10-second deadlines within the remaining job budget. One explicit HTTP 401 permits one refresh/retry without resetting that budget; send timeouts, disconnects, server errors and malformed successful receipts yield an unknown outcome rather than an automatic send retry. Listing fetches at most 100 envelopes using METADATA; bodies and attachments are retrieved on demand. Thread reads reject more than 100 messages explicitly and sort successful results chronologically.
 
 Live contact writes invalidate and persist the local contacts cache before dispatch. After the provider validates an applied receipt, the executor returns that contact directly; it performs no additional cache decoding, cache allocation or disk write. The next contacts read refreshes the cache. If encoding a successful live mutation's final response fails, the executor reports `UnknownOutcome` rather than implying the write failed; that error survives even when the error JSON cannot be allocated. Ordinary read and fixture response allocation failures remain `OutOfMemory`. Unknown send journals and their recovery drafts remain available for reconciliation and are never automatically resubmitted.
 
@@ -126,12 +128,14 @@ DTOs use base64url bytes; larger files use immutable account-scoped handles.
 The encoder preserves binary octets and emits RFC 2231 UTF-8 filename
 continuations. Larger sends spool MIME privately, then stream a bounded
 multipart upload with its thread metadata. Complete outgoing MIME is limited to
-35 MiB and the outer HTTP upload/download stream to 36 MiB. Received file saves
-decode incrementally into private, atomic, no-clobber destinations, with a
-25 MiB decoded file bound and account disk quotas. Explicit JSON requests still
-fit 3 MiB; unsupported sizes fail rather than truncating. The fixed HTTP
-workspace remains 8 MiB and no terminal buffer is added to the bar's static
-reservation.
+35 MiB and the outer HTTP upload stream to 36 MiB. Received file saves decode
+incrementally into private, atomic, no-clobber destinations, with a 50 MiB
+decoded file bound. The attachment download wire budget is 69,970,604 bytes:
+padded base64 for 50 MiB plus 64 KiB of JSON framing. Cached attachment handles
+also obey account disk quotas. Explicit JSON requests still fit 3 MiB and text
+bodies stay within 2 MiB; unsupported sizes fail rather than truncating. The
+fixed HTTP workspace remains 8 MiB, the terminal heap remains capped at 64 MiB,
+and no terminal buffer is added to the bar's static reservation.
 
 Incoming address lists use caller-owned heap slices capped at 1,024 participants per header, with no fixed stack array added. Address-header parsing is bounded at 16 KiB; MIME headers allow at most 256 fields within 32 KiB per entity/part header block, and individual header values are at most 8 KiB. Mailbox addresses remain bounded at 254 bytes and decoded display names at 256 bytes. Encoded display names are parsed structurally before RFC 2047 decoding, so raw encoded words may exceed the decoded-name limit without failing prematurely. Overflow is explicit; no list or identity is silently truncated. The parser supports its existing quoted phrases, comments, groups and empty groups; SMTPUTF8 addresses and unsupported charsets remain explicit errors, and complete obsolete RFC 5322 grammar is not claimed.
 

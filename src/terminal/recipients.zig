@@ -38,6 +38,18 @@ pub fn validateHeader(value: []const u8) !void {
 /// while keeping Unicode display names intact through the composer parser.
 pub fn formatDisplay(allocator: std.mem.Allocator, address: []const u8, name: []const u8) ![]u8 {
     try validateAddress(address);
+    return formatDisplayName(allocator, address, name);
+}
+
+/// Preserve received display names before reply selection. Incoming addresses
+/// have different size bounds; only selected outgoing recipients use SMTP
+/// validation in addIncomingExternal.
+pub fn formatIncomingDisplay(allocator: std.mem.Allocator, address: []const u8, name: []const u8) ![]u8 {
+    try validateAddressSyntax(address, true);
+    return formatDisplayName(allocator, address, name);
+}
+
+fn formatDisplayName(allocator: std.mem.Allocator, address: []const u8, name: []const u8) ![]u8 {
     try validateHeader(name);
     if (name.len > 256) return error.RecipientTooLarge;
     if (std.mem.trim(u8, name, " ").len == 0) return allocator.dupe(u8, address);

@@ -1,0 +1,130 @@
+{
+  "account": "personal@example.com",
+  "generation": 7000,
+  "sync": {"historyId": "7000", "history": []},
+  "labels": [
+    {"id": "INBOX", "name": "INBOX", "type": "system"},
+    {"id": "UNREAD", "name": "UNREAD", "type": "system"},
+    {"id": "Label_contract", "name": "Contract review", "type": "user"}
+  ],
+  "messages": [
+    {
+      "id": "provider-bom-contract",
+      "threadId": "provider-contract-thread",
+      "labelIds": ["INBOX", "Label_contract"],
+      "snippet": "METADATA PREVIEW ONLY: the complete contract is not in this snippet.",
+      "historyId": "7000",
+      "internalDate": "1791638400000",
+      "sizeEstimate": 1200,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {"name": "From", "value": "Fictional Contract Desk <contracts@example.test>"},
+          {"name": "To", "value": "Personal Fixture <personal@example.com>, Fictional Teammate <teammate@example.test>"},
+          {"name": "Cc", "value": "Fictional Reviewer <reviewer@example.test>, Duplicate Teammate <TEAMMATE@example.test>, Duplicate Personal <personal@example.com>"},
+          {"name": "Subject", "value": "Fictional contract acceptance"},
+          {"name": "Message-ID", "value": "<provider-contract@example.test>"},
+          {"name": "Date", "value": "Sat, 10 Oct 2026 12:00:00 +0000"},
+          {"name": "MIME-Version", "value": "1.0"},
+          {"name": "Content-Type", "value": "multipart/mixed; boundary=fictional-mixed"}
+        ],
+        "body": {"size": 0},
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "multipart/alternative",
+            "filename": "",
+            "headers": [{"name": "Content-Type", "value": "multipart/alternative; boundary=fictional-alternative"}],
+            "body": {"size": 0},
+            "parts": [
+              {
+                "partId": "0.0",
+                "mimeType": "text/plain",
+                "filename": "",
+                "headers": [
+                  {"name": "Content-Type", "value": "text/plain; charset=\"UTF-8\""},
+                  {"name": "Content-Transfer-Encoding", "value": "base64"}
+                ],
+                "body": {
+                  "size": 108,
+                  "data": "VGhlIGZpY3Rpb25hbCBjb250cmFjdCBpcyBhcHByb3ZlZC4NCkNhZsOpIGJ1ZGdldDogRVVSIDQyLg0KVGhpcyBzZW50ZW5jZSBleGlzdHMgb25seSBpbiB0aGUgZnVsbCBib2R5Lg0K"
+                }
+              },
+              {
+                "partId": "0.1",
+                "mimeType": "text/html",
+                "filename": "",
+                "headers": [
+                  {"name": "Content-Type", "value": "text/html; charset=utf-8"},
+                  {"name": "Content-Transfer-Encoding", "value": "base64"}
+                ],
+                "body": {
+                  "size": 214,
+                  "data": "PGh0bWw-PGJvZHk-PHA-VGhlIGZpY3Rpb25hbCBjb250cmFjdCBpcyBhcHByb3ZlZC48L3A-PHA-Q2Fmw6kgYnVkZ2V0OiBFVVIgNDIuPC9wPjxwPlRoaXMgc2VudGVuY2UgZXhpc3RzIG9ubHkgaW4gdGhlIGZ1bGwgYm9keS48L3A-PGltZyBzcmM9ImNpZDpwcm92aWRlci1sb2dvQGV4YW1wbGUudGVzdCIgYWx0PSJGaWN0aW9uYWwgbG9nbyI-PC9ib2R5PjwvaHRtbD4NCg"
+                }
+              }
+            ]
+          },
+          {
+            "partId": "1",
+            "mimeType": "application/rtf",
+            "filename": "contract-acceptance.rtf",
+            "headers": [
+              {"name": "Content-Type", "value": "application/rtf; name=\"contract-acceptance.rtf\""},
+              {"name": "Content-Disposition", "value": "attachment; filename=\"contract-acceptance.rtf\""},
+              {"name": "Content-Transfer-Encoding", "value": "base64"}
+            ],
+            "body": {"size": 107, "attachmentId": "provider-external-document"}
+          },
+          {
+            "partId": "2",
+            "mimeType": "image/png",
+            "filename": "provider-logo.png",
+            "headers": [
+              {"name": "Content-Type", "value": "image/png"},
+              {"name": "Content-Disposition", "value": "inline; filename=\"provider-logo.png\""},
+              {"name": "Content-ID", "value": "<provider-logo@example.test>"},
+              {"name": "Content-Transfer-Encoding", "value": "base64"}
+            ],
+            "body": {"size": 70, "attachmentId": "provider-external-logo"}
+          }
+        ]
+      }
+    },
+    {
+      "id": "provider-truncated-text",
+      "threadId": "provider-truncated-thread",
+      "labelIds": ["INBOX"],
+      "snippet": "METADATA PREVIEW ONLY: the invalid message has no accepted full body.",
+      "historyId": "7000",
+      "internalDate": "1791638340000",
+      "sizeEstimate": 400,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {"name": "From", "value": "Fictional Contract Desk <contracts@example.test>"},
+          {"name": "To", "value": "personal@example.com"},
+          {"name": "Subject", "value": "Fictional truncated message"},
+          {"name": "Message-ID", "value": "<provider-truncated@example.test>"},
+          {"name": "Content-Type", "value": "text/plain; charset=utf-8"},
+          {"name": "Content-Transfer-Encoding", "value": "base64"}
+        ],
+        "body": {"size": 38, "data": "VW5yZWNvdmVyYWJsZSB0cnVuY2F0ZWQgbWVzc2FnZS4NCg"}
+      }
+    }
+  ],
+  "externalBodies": {
+    "provider-external-document": {
+      "size": 107,
+      "data": "e1xydGYxXGFuc2lcZGVmZjB7XGZvbnR0Ymx7XGYwIENhbGlicmk7fX1cZjBcZnMyMiBGaWN0aW9uYWwgY29udHJhY3QgYWNjZXB0YW5jZS5ccGFyIEJ1ZGdldDogRVVSIDQyLlxwYXJ9DQo"
+    },
+    "provider-external-logo": {
+      "size": 70,
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI_ScLbtAAAAABJRU5ErkJggg"
+    }
+  }
+}

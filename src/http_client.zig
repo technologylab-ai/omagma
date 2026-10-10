@@ -2,7 +2,8 @@ const std = @import("std");
 const limits = @import("limits.zig");
 const platform = @import("platform.zig");
 pub const Source = @import("byte_stream.zig").Source;
-pub const terminal_stream_bytes = 36 * limits.MiB;
+pub const terminal_upload_bytes = 36 * limits.MiB;
+pub const terminal_download_bytes = @import("attachment_limits.zig").download_json_bytes;
 var slab: [limits.http_workspace]u8 align(16) = undefined;
 var reserved = std.atomic.Value(bool).init(false);
 
@@ -81,6 +82,13 @@ pub const Client = struct {
     pub fn init(io: std.Io) !Client {
         if (reserved.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return error.ClientAlreadyActive;
         return .{ .io = io, .workspace = .{ .fixed = .init(&slab) }, .job_deadline = .fromNow(io, platform.seconds(limits.job_seconds)) };
+    }
+    /// Explicit incoming files share one longer, bounded job. Ordinary JSON
+    /// requests retain their ten-second cap and retries retain this deadline.
+    pub fn initAttachmentDownload(io: std.Io) !Client {
+        var client = try init(io);
+        client.job_deadline = .fromNow(io, platform.seconds(@import("attachment_limits.zig").download_seconds));
+        return client;
     }
     pub fn deinit(self: *Client) void {
         if (self.inner) |*inner| inner.deinit();
@@ -263,11 +271,11 @@ pub const Client = struct {
         try validateDestination(uri, loopback, true);
         if (!loopback and !std.mem.eql(u8, uri.host.?.percent_encoded, "gmail.googleapis.com")) return error.InvalidHost;
         if (upload) |body| {
-            if (body.size > terminal_stream_bytes) return error.FormTooLarge;
+            if (body.size > terminal_upload_bytes) return error.FormTooLarge;
             if (body.content_type.len == 0 or body.content_type.len > 512) return error.InvalidContentType;
             for (body.content_type) |byte| if (byte < 32 or byte >= 127) return error.InvalidContentType;
         }
-        if (download) |body| if (body.limit > terminal_stream_bytes) return error.ResponseBufferTooLarge;
+        if (download) |body| if (body.limit > terminal_download_bytes) return error.ResponseBufferTooLarge;
         if (self.inner == null) self.inner = .{ .allocator = self.workspace.allocator(), .io = self.io, .read_buffer_size = limits.headers, .connection_pool = .{ .free_size = 0 } };
         var authorization: [limits.secret + 7]u8 = undefined;
         defer std.crypto.secureZero(u8, &authorization);
@@ -354,6 +362,21 @@ test "HTTP slab rejects excess requests and captures high-water" {
     a.free(mem);
     try std.testing.expectEqual(@as(usize, 120), work.peak);
     try std.testing.expectEqual(@as(usize, 1), work.rejected);
+}
+
+test "attachment streaming: explicit downloads have a separate bounded job deadline" {
+    const ordinary_ms = blk: {
+        var client = try Client.init(std.testing.io);
+        defer client.deinit();
+        break :blk (try client.streamDuration()).raw.toMilliseconds();
+    };
+    try std.testing.expect(ordinary_ms > 29_000 and ordinary_ms <= 30_000);
+    var incoming = try Client.initAttachmentDownload(std.testing.io);
+    defer incoming.deinit();
+    const incoming_ms = (try incoming.streamDuration()).raw.toMilliseconds();
+    try std.testing.expect(incoming_ms > 179_000 and incoming_ms <= 180_000);
+    incoming.job_deadline = .fromNow(std.testing.io, .{ .clock = .awake, .raw = .fromMilliseconds(0) });
+    try std.testing.expectError(error.Timeout, incoming.streamDuration());
 }
 
 test "updates: public metadata endpoints remain outside Google credential policy" {

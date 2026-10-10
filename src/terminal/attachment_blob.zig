@@ -89,7 +89,9 @@ pub fn open(store: *storage.Store, id: []const u8, size: usize) !std.Io.File {
     errdefer file.close(store.io);
     const stat = try file.stat(store.io);
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureAttachmentFile;
-    if (stat.size != size or stat.size > t.Limits.attachment_bytes) return error.AttachmentChanged;
+    // Incoming and outgoing handles share storage. Import and MIME validation
+    // independently retain the smaller outgoing-file limit.
+    if (stat.size != size or stat.size > t.Limits.incoming_attachment_bytes) return error.AttachmentChanged;
     return file;
 }
 pub fn discard(store: *storage.Store, id: []const u8) !void {
@@ -145,7 +147,7 @@ pub const Incoming = struct {
     size: usize,
     moved: bool = false,
     pub fn create(store: *storage.Store, size: usize) !Incoming {
-        if (size > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+        if (size > t.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
         var iterator = store.dir.iterate();
         var blobs: usize = 0;
         while (try iterator.next(store.io)) |entry| if (std.mem.startsWith(u8, entry.name, "blob-")) {
@@ -237,7 +239,84 @@ test "UX backend: incoming reservations survive concurrent opens and orphan spoo
     store.close();
     store = try storage.Store.open(std.testing.io, a, root, account, options);
     try std.testing.expectError(error.FileNotFound, store.dir.statFile(std.testing.io, orphan, .{}));
-    try std.testing.expectError(error.AttachmentsTooLarge, Incoming.create(&store, t.Limits.attachment_bytes + 1));
+    try std.testing.expectError(error.AttachmentsTooLarge, Incoming.create(&store, t.Limits.incoming_attachment_bytes + 1));
     try discard(&store, attached.blobId.?);
     try std.testing.expectError(error.AttachmentHandleNotFound, open(&store, attached.blobId.?, 3));
+}
+
+test "attachment streaming: 30 MiB incoming blob survives reopen within account quota and bounded allocation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = std.testing.allocator, .limit = t.Limits.runtime_bytes };
+    var arena = std.heap.ArenaAllocator.init(cap.allocator());
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/incoming-large", .{tmp.sub_path});
+    const options: t.Options = .{ .fixtures = true };
+    var store = try storage.Store.open(std.testing.io, a, root, "self@example.test", options);
+    defer store.close();
+    const size = 30 * 1024 * 1024;
+    var block: [64 * 1024]u8 = undefined;
+    for (&block, 0..) |*byte, i| byte.* = @truncate(i *% 31 +% 7);
+    var expected_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    const attached = blk: {
+        var incoming = try Incoming.create(&store, size);
+        defer incoming.close();
+        for (0..size / block.len) |_| {
+            try incoming.file.writeStreamingAll(std.testing.io, &block);
+            expected_hash.update(&block);
+        }
+        break :blk try incoming.commit(&store, .{ .id = "provider-large", .filename = "received.bin", .size = size });
+    };
+    var expected_digest: [32]u8 = undefined;
+    expected_hash.final(&expected_digest);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(expected_digest, .lower), attached.blobId.?);
+    try std.testing.expectEqualStrings("", attached.data);
+    store.close();
+    store = try storage.Store.open(std.testing.io, a, root, "self@example.test", options);
+    {
+        var source = try Stream.init(&store, attached);
+        defer source.close();
+        const stat = try source.file.stat(std.testing.io);
+        try std.testing.expectEqual(.file, stat.kind);
+        try std.testing.expectEqual(@as(u64, size), stat.size);
+        try std.testing.expectEqual(@as(u32, 0o600), stat.permissions.toMode() & 0o777);
+        var output: [64 * 1024]u8 = undefined;
+        var count: usize = 0;
+        while (true) {
+            const n = try Stream.read(&source, &output);
+            if (n == 0) break;
+            const offset = count % block.len;
+            const first = @min(n, block.len - offset);
+            try std.testing.expectEqualSlices(u8, block[offset..][0..first], output[0..first]);
+            try std.testing.expectEqualSlices(u8, block[0 .. n - first], output[first..n]);
+            count += n;
+        }
+        try std.testing.expectEqual(@as(usize, size), count);
+        try std.testing.expect(source.verified);
+    }
+    {
+        var other = try storage.Store.open(std.testing.io, a, root, "other@example.test", options);
+        defer other.close();
+        try std.testing.expectError(error.AttachmentHandleNotFound, Stream.init(&other, attached));
+    }
+    const before = try store.diskBytes();
+    {
+        var boundary = try Incoming.create(&store, 50 * 1024 * 1024);
+        defer boundary.close();
+        try std.testing.expectEqual(@as(u64, 50 * 1024 * 1024), (try boundary.file.stat(std.testing.io)).size);
+        try std.testing.expect((try store.diskBytes()) >= before + 50 * 1024 * 1024);
+    }
+    try std.testing.expectEqual(before, try store.diskBytes());
+    try std.testing.expectError(error.AttachmentsTooLarge, Incoming.create(&store, 50 * 1024 * 1024 + 1));
+    store.options.disk_limit = before + 1024;
+    try std.testing.expectError(error.DiskQuotaExceeded, Incoming.create(&store, 2 * 1024 * 1024));
+    try std.testing.expectEqual(before, try store.diskBytes());
+    const outgoing = try tmp.dir.createFile(std.testing.io, "outgoing-too-large.bin", .{ .permissions = .fromMode(0o600) });
+    try outgoing.setLength(std.testing.io, size);
+    outgoing.close(std.testing.io);
+    const outgoing_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/outgoing-too-large.bin", .{tmp.sub_path});
+    try std.testing.expectError(error.AttachmentsTooLarge, importFile(&store, outgoing_path, "application/octet-stream"));
+    try std.testing.expect(cap.peak < 2 * 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 0), cap.rejected);
 }

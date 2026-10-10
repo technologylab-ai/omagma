@@ -47,10 +47,16 @@ read-only grants and never selects a wider terminal token.
 
 Larger ordinary terminal attachments use immutable account handles, private MIME
 spooling and bounded streaming rather than expanding the JSON buffer. Outgoing
-MIME is capped at 35 MiB, the outer HTTP stream at 36 MiB, and decoded saved
-files at 25 MiB, within account disk quotas. Saves create private atomic files
-without overwriting existing destinations. Streaming retains the same host,
-credential, deadline and cancellation policy.
+MIME is capped at 35 MiB and the outer HTTP upload at 36 MiB. Incoming files may
+contain up to 50 MiB of decoded bytes; their streamed JSON download allows
+69,970,604 bytes (padded base64 plus 64 KiB framing). Cached file handles retain
+account disk quotas. Saves create private atomic files without overwriting
+existing destinations. The stream uses fixed chunks and the existing 8 MiB
+HTTP workspace, without increasing the 64 MiB terminal heap or 2 MiB text-body
+limit. Explicit incoming file downloads share a 180-second job deadline across
+any permitted 401 refresh/retry. Ordinary JSON requests retain their 10-second
+deadline, and default jobs and uploads retain 30 seconds. Streaming preserves
+the host and credential checks and joins cancellation before returning.
 
 `ProgressSink` reports actual batch units and borrowed rows synchronously to the
 owned worker's observer. The TUI copies bounded previews; those callbacks do not

@@ -23,7 +23,7 @@ pub const Decoder = struct {
     symbols: usize = 0,
     padding: usize = 0,
     pub fn init(sink: *std.Io.Writer, expected: usize) !Decoder {
-        if (expected > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+        if (expected > t.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
         return .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .sink = sink, .expected = expected };
     }
     fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
@@ -187,4 +187,14 @@ test "attachment streaming: arbitrary chunks decode padded binary and reject tru
     var wrong_size = try Decoder.init(&sink, 2);
     try std.testing.expectError(error.WriteFailed, wrong_size.writer.writeAll("{\"size\":3,\"data\":\"AP-A\"}"));
     try std.testing.expectEqual(error.BodySizeMismatch, wrong_size.failure.?);
+}
+
+test "attachment streaming: incoming size boundary is independent of outgoing files" {
+    var bytes: [1]u8 = undefined;
+    var sink: std.Io.Writer = .fixed(&bytes);
+    _ = try Decoder.init(&sink, 30 * 1024 * 1024);
+    _ = try Decoder.init(&sink, 50 * 1024 * 1024);
+    try std.testing.expectError(error.AttachmentsTooLarge, Decoder.init(&sink, 50 * 1024 * 1024 + 1));
+    try std.testing.expectError(error.AttachmentsTooLarge, Decoder.init(&sink, 51 * 1024 * 1024));
+    try std.testing.expectEqual(@as(usize, 0), sink.buffered().len);
 }

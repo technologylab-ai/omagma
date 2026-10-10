@@ -1272,7 +1272,9 @@ pub const Session = struct {
                 return j.value(a, .{ .messages = ids.items, .nextPageToken = if (end < candidates.items.len) try std.fmt.allocPrint(a, "{d}", .{end}) else @as(?[]const u8, null) });
             }
             if (std.mem.indexOf(u8, url, "/attachments/")) |pos| {
-                const id = url[pos + 13 ..];
+                const tail = url[pos + 13 ..];
+                const end = std.mem.indexOfScalar(u8, tail, '?') orelse tail.len;
+                const id = try decodeUrlValue(a, tail[0..end]);
                 return j.get(j.get(self.source, "externalBodies") orelse return error.AttachmentNotFound, id) orelse error.AttachmentNotFound;
             }
             if (std.mem.indexOf(u8, url, "/messages/")) |pos| {
@@ -1298,21 +1300,23 @@ pub const Session = struct {
             while (fields.next()) |field| {
                 const equal = std.mem.indexOfScalar(u8, field, '=') orelse continue;
                 if (!std.mem.eql(u8, field[0..equal], name)) continue;
-                const raw = field[equal + 1 ..];
-                const out = try a.alloc(u8, raw.len);
-                var used: usize = 0;
-                var i: usize = 0;
-                while (i < raw.len) : (i += 1) {
-                    if (raw[i] == '%') {
-                        if (i + 2 >= raw.len) return error.InvalidUrl;
-                        out[used] = std.fmt.parseInt(u8, raw[i + 1 .. i + 3], 16) catch return error.InvalidUrl;
-                        i += 2;
-                    } else out[used] = raw[i];
-                    used += 1;
-                }
-                return out[0..used];
+                return decodeUrlValue(a, field[equal + 1 ..]);
             }
             return "";
+        }
+        fn decodeUrlValue(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
+            const out = try a.alloc(u8, raw.len);
+            var used: usize = 0;
+            var i: usize = 0;
+            while (i < raw.len) : (i += 1) {
+                if (raw[i] == '%') {
+                    if (i + 2 >= raw.len) return error.InvalidUrl;
+                    out[used] = std.fmt.parseInt(u8, raw[i + 1 .. i + 3], 16) catch return error.InvalidUrl;
+                    i += 2;
+                } else out[used] = raw[i];
+                used += 1;
+            }
+            return out[0..used];
         }
     };
     fn fixtureGate(s: *Session, a: std.mem.Allocator, source: Value, req: Value) !void {
@@ -1885,7 +1889,7 @@ pub const Session = struct {
             const is_file = if (attachment.disposition) |value| std.ascii.eqlIgnoreCase(value, "attachment") else false;
             const referenced = usage & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
             const has_identity = attachment.contentId != null or attachment.contentLocation != null;
-            if (!has_identity or (is_file and !referenced and attachment.contentLocation == null)) continue;
+            if (!has_identity or (is_file and !referenced)) continue;
             if (resources.items.len == t.Limits.related_resources) return error.TooManyAttachments;
             bytes = std.math.add(usize, bytes, attachment.size) catch return error.AttachmentsTooLarge;
             if (bytes > t.Limits.body_bytes) return error.AttachmentsTooLarge;
@@ -1936,7 +1940,10 @@ pub const Session = struct {
         for (message.attachments) |selected| if (std.mem.eql(u8, selected.id, attachment_id)) {
             if (selected.blobId != null) return selected;
             if (selected.data.len > 0 or selected.size == 0) return selected;
-            if (s.options.fixtures) return error.AttachmentNotFound;
+            if (s.options.fixtures) {
+                var fixture_peer: FixtureRemote = .{ .session = s, .source = try s.fixtureProviderSource(a, store) };
+                return @import("gmail.zig").attachmentAuthorized(a, store.state.account, &.{"mail-read"}, fixture_peer.transport(), message_id, selected);
+            }
             const account = store.state.account;
             if (selected.size > t.Limits.body_bytes) {
                 var incoming = try @import("attachment_blob.zig").Incoming.create(store, selected.size);
@@ -1944,7 +1951,7 @@ pub const Session = struct {
                 var buffer: [64 * 1024]u8 = undefined;
                 var writer = incoming.file.writer(s.io, &buffer);
                 store.release();
-                const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, selected, &writer.interface });
+                const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, selected, &writer.interface });
                 try writer.flush();
                 try s.reopenBody(a, store);
                 return incoming.commit(store, downloaded);
@@ -1971,7 +1978,7 @@ pub const Session = struct {
             break;
         };
         const attachment = selected orelse return error.AttachmentNotFound;
-        if (attachment.size > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+        if (attachment.size > t.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
         var directory = try @import("path_completion.zig").openDirectory(s.io, std.fs.path.dirname(path) orelse ".", false);
         defer directory.close(s.io);
         var destination = try directory.createFileAtomic(s.io, leaf, .{ .permissions = .fromMode(0o600), .replace = false });
@@ -1992,10 +1999,16 @@ pub const Session = struct {
             if (decoded.len != attachment.size) return error.BodySizeMismatch;
             try writer.interface.writeAll(decoded);
         } else {
-            if (s.options.fixtures) return error.AttachmentNotFound;
-            const account = store.state.account;
-            store.release();
-            _ = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, attachment, &writer.interface });
+            if (s.options.fixtures) {
+                const fetched = try s.fetchKnownAttachment(a, store, req, message);
+                const decoded = try @import("mime.zig").decodeBase64Url(fetched.data, a);
+                if (decoded.len != attachment.size) return error.BodySizeMismatch;
+                try writer.interface.writeAll(decoded);
+            } else {
+                const account = store.state.account;
+                store.release();
+                _ = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, attachment, &writer.interface });
+            }
         }
         try writer.flush();
         try destination.file.sync(s.io);
@@ -2584,7 +2597,13 @@ fn addressHeader(a: std.mem.Allocator, list: []const t.Address) ![]const u8 {
     var bytes: std.ArrayList(u8) = .empty;
     for (list, 0..) |address, i| {
         if (i > 0) try bytes.appendSlice(a, ", ");
-        try bytes.appendSlice(a, address.address);
+        if (address.name.len == 0) {
+            try bytes.appendSlice(a, address.address);
+        } else {
+            const display = try recipients.formatIncomingDisplay(a, address.address, address.name);
+            defer a.free(display);
+            try bytes.appendSlice(a, display);
+        }
     }
     return bytes.items;
 }

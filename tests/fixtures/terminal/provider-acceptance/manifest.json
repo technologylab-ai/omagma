@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "syntheticOnly": true,
+  "networkRequired": false,
+  "description": "Literal Gmail FULL inputs model stripped UTF-8 BOM sizes inside nested alternative mail. These provider byte counts intentionally differ from decoded inline body lengths; never regenerate them as size=len(data).",
+  "goodMessageId": "provider-bom-contract",
+  "invalidMessageId": "provider-truncated-text",
+  "plainDecodedBytes": 105,
+  "plainDeclaredBytes": 108,
+  "htmlDecodedBytes": 211,
+  "htmlDeclaredBytes": 214,
+  "invalidDecodedBytes": 34,
+  "invalidDeclaredBytes": 38,
+  "documentDecodedBytes": 107,
+  "documentDeclaredBytes": 107,
+  "documentFilename": "contract-acceptance.rtf",
+  "documentHumanSize": "107 B",
+  "imageContentId": "provider-logo@example.test",
+  "imageFilename": "provider-logo.png",
+  "imageDeclaredBytes": 70,
+  "imageExpectedBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
+  "imageSha256": "2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c",
+  "replyToExpected": [{"address": "contracts@example.test", "name": "Fictional Contract Desk"}],
+  "replyAllCcExpected": [
+    {"address": "teammate@example.test", "name": "Fictional Teammate"},
+    {"address": "reviewer@example.test", "name": "Fictional Reviewer"}
+  ],
+  "plainExpected": "The fictional contract is approved.\nCafé budget: EUR 42.\nThis sentence exists only in the full body.\n",
+  "htmlExpected": "<html><body><p>The fictional contract is approved.</p><p>Café budget: EUR 42.</p><p>This sentence exists only in the full body.</p><img src=\"cid:provider-logo@example.test\" alt=\"Fictional logo\"></body></html>\r\n",
+  "documentExpected": "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Calibri;}}\\f0\\fs22 Fictional contract acceptance.\\par Budget: EUR 42.\\par}\r\n"
+}
