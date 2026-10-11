@@ -9,9 +9,10 @@ pub fn build(b: *std.Build) void {
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
     const tui_enabled = b.option(bool, "tui", "Include the libvaxis terminal client") orelse true;
     const browser_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
-    const browser_enabled = b.option(bool, "browser", "Enable the synthetic WebAssembly prototype") orelse false;
+    const browser_enabled = b.option(bool, "browser", "Build WebAssembly and embed its page for omagma server") orelse false;
     const browser_vaxis = if (browser_enabled) b.lazyDependency("vaxis", .{ .target = browser_target, .optimize = optimize }) else null;
-    const browser_step = b.step("browser", "Build the synthetic browser TUI prototype");
+    const browser_step = b.step("browser", "Build the browser TUI WebAssembly module");
+    var browser_assets: ?std.Build.LazyPath = null;
     if (browser_vaxis) |v| {
         const browser_module = b.createModule(.{
             .root_source_file = b.path("src/browser.zig"),
@@ -31,6 +32,13 @@ pub fn build(b: *std.Build) void {
         browser.max_memory = 64 * 1024 * 1024;
         browser.stack_size = 2 * 1024 * 1024;
         browser_step.dependOn(&b.addInstallArtifact(browser, .{ .dest_dir = .{ .override = .{ .custom = "web-demo" } } }).step);
+        const package = b.addSystemCommand(&.{"node"});
+        package.addFileArg(b.path("web-demo/build.mjs"));
+        package.addArg("--wasm");
+        package.addArtifactArg(browser);
+        package.addArg("--out-dir");
+        browser_assets = package.addOutputDirectoryArg("site");
+        for ([_][]const u8{ "app.mjs", "credentials.mjs", "transport.mjs", "bridge.mjs", "index.html", "style.css", "package.json", "package-lock.json" }) |source| package.addFileInput(b.path(b.fmt("web-demo/{s}", .{source})));
     }
     const vaxis = if (tui_enabled) b.lazyDependency("vaxis", .{ .target = target, .optimize = optimize }) else null;
     const m = b.createModule(.{
@@ -44,7 +52,12 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", @import("build.zig.zon").version);
     options.addOption(bool, "tui", vaxis != null);
+    options.addOption(bool, "browser", browser_assets != null);
     m.addOptions("build_options", options);
+    const generated = b.addWriteFiles();
+    const assets_module = b.createModule(.{ .root_source_file = generated.add("browser_assets.zig", embeddedAssetSource(browser_assets != null)), .target = target, .optimize = optimize });
+    if (browser_assets) |directory| _ = generated.addCopyDirectory(directory, "assets", .{});
+    m.addImport("browser_assets", assets_module);
     const browser_export_module = b.createModule(.{ .root_source_file = b.path("src/browser_export_main.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos });
     if (macos_sdk) |sdk| linkNativeKeychain(browser_export_module, sdk);
     const browser_export = b.addExecutable(.{ .name = "omagma-browser-export", .root_module = browser_export_module, .linkage = if (target.result.os.tag == .linux) .static else null });
@@ -52,6 +65,8 @@ pub fn build(b: *std.Build) void {
     const browser_export_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_export_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(browser_export_tests.root_module, sdk);
     b.step("test-browser-export", "Check private browser export with synthetic file credentials").dependOn(&b.addRunArtifact(browser_export_tests).step);
+    const browser_server_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_server_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
+    b.step("test-browser-server", "Check bounded browser static HTTP handling").dependOn(&b.addRunArtifact(browser_server_tests).step);
     if (vaxis) |v| m.addImport("vaxis", v.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "omagma", .root_module = m, .linkage = if (target.result.os.tag == .linux) .static else null, .use_llvm = if (vaxis != null) true else null });
     b.installArtifact(exe);
@@ -81,6 +96,26 @@ pub fn build(b: *std.Build) void {
         if (macos_sdk) |sdk| linkNativeKeychain(probe.root_module, sdk);
         probes.dependOn(&b.addInstallArtifact(probe, .{}).step);
     }
+}
+
+fn embeddedAssetSource(enabled: bool) []const u8 {
+    if (!enabled) return "pub fn assets(comptime Asset: type) [0]Asset { return .{}; }\n";
+    return
+    \\pub fn assets(comptime Asset: type) [9]Asset {
+    \\    return .{
+    \\        .{ .path = "/index.html", .mime = "text/html; charset=utf-8", .bytes = @embedFile("assets/index.html") },
+    \\        .{ .path = "/app.mjs", .mime = "text/javascript; charset=utf-8", .bytes = @embedFile("assets/app.mjs") },
+    \\        .{ .path = "/style.css", .mime = "text/css; charset=utf-8", .bytes = @embedFile("assets/style.css") },
+    \\        .{ .path = "/xterm.css", .mime = "text/css; charset=utf-8", .bytes = @embedFile("assets/xterm.css") },
+    \\        .{ .path = "/omagma.wasm", .mime = "application/wasm", .bytes = @embedFile("assets/omagma.wasm") },
+    \\        .{ .path = "/app.mjs.LEGAL.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/app.mjs.LEGAL.txt") },
+    \\        .{ .path = "/LICENSE-xterm.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/LICENSE-xterm.txt") },
+    \\        .{ .path = "/LICENSE-xterm-addon-fit.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/LICENSE-xterm-addon-fit.txt") },
+    \\        .{ .path = "/LICENSE-xterm-addon-unicode11.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/LICENSE-xterm-addon-unicode11.txt") },
+    \\    };
+    \\}
+    \\
+    ;
 }
 
 fn linkNativeKeychain(module: *std.Build.Module, sdk: []const u8) void {

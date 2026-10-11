@@ -20,6 +20,9 @@ const dialog = select('#credential-dialog');
 const form = select('#credential-form');
 const credentialError = select('#credential-error');
 const credentialSubmit = select('#credential-connect');
+const fileConnectButton = select('#connect-file-open');
+const sessionParameter = new URLSearchParams(location.hash.slice(1)).get('omagma-session');
+const serverSession = location.protocol === 'http:' && location.hostname === '127.0.0.1' && /^[a-f0-9]{64}$/.test(sessionParameter ?? '') ? sessionParameter : null;
 const encoder = new TextEncoder();
 const hasJSPI = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
 const terminal = new Terminal({
@@ -47,6 +50,7 @@ let connectAttempt = 0;
 let activeJob = null;
 let lifecycleBusy = false;
 let credentialBusy = false;
+let credentialRequest = null;
 let resizeScheduled = false;
 let inputScheduled = false;
 let wasmCols = 0;
@@ -97,6 +101,8 @@ function updateControls() {
   connectButton.hidden = mode !== 'demo';
   connectButton.disabled = !ready || lifecycleBusy || credentialBusy || !canConnect;
   connectButton.title = canConnect ? 'Load your existing Omagma accounts' : 'Live mail requires a JSPI-capable browser and the live browser build';
+  fileConnectButton.hidden = !serverSession || mode !== 'demo';
+  fileConnectButton.disabled = connectButton.disabled;
   disconnectButton.hidden = mode === 'demo';
   disconnectButton.disabled = mode === 'demo';
   credentialSubmit.disabled = credentialBusy || lifecycleBusy;
@@ -275,14 +281,44 @@ function updateConnectionSelection() { select('#credential-selection').textConte
 function clearSelectedFiles() { form.reset(); select('#credential-separate').open = false; updateConnectionSelection(); }
 function stopConnection() {
   connectAttempt++;
+  credentialRequest?.abort(); credentialRequest = null;
   credentialBusy = false;
   clearSelectedFiles();
   if (dialog.open) dialog.close();
   void start().catch(() => {});
 }
 
-form.addEventListener('submit', event => {
-  event.preventDefault();
+async function localConnection() {
+  const controller = new AbortController();
+  credentialRequest = controller;
+  const timer = setTimeout(() => controller.abort(), 30000);
+  const bytes = new Uint8Array(64 * 1024);
+  let length = 0;
+  let reader;
+  try {
+    const response = await fetch(new URL('./connection.json', import.meta.url), {
+      headers: { Authorization: `Omagma-Session ${serverSession}` },
+      credentials: 'omit', cache: 'no-store', redirect: 'error', mode: 'same-origin',
+      referrerPolicy: 'no-referrer', signal: controller.signal,
+    });
+    if (!response.ok || response.headers.get('content-type')?.split(';')[0] !== 'application/json') throw new Error('Could not load local Omagma accounts. You can select an exported connection file instead.');
+    reader = response.body.getReader();
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (length + chunk.value.length > bytes.length) throw new Error('The local connection exceeds its supported size.');
+      bytes.set(chunk.value, length); length += chunk.value.length;
+    }
+    return await importConnectionFile({ size: length, text: async () => new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)) });
+  } finally {
+    clearTimeout(timer);
+    try { await reader?.cancel(); } catch {}
+    bytes.fill(0);
+    if (credentialRequest === controller) credentialRequest = null;
+  }
+}
+
+function beginConnection(local = false) {
   if (credentialBusy) return;
   const attempt = ++connectAttempt;
   credentialBusy = true;
@@ -293,7 +329,8 @@ form.addEventListener('submit', event => {
     let connectingGeneration = null;
     try {
       const bundle = selectedFiles('#credential-bundle', 1)[0];
-      if (bundle) records = await importConnectionFile(bundle);
+      if (local) records = await localConnection();
+      else if (bundle) records = await importConnectionFile(bundle);
       else if (select('#credential-separate').open) {
         const clients = selectedFiles('#credential-clients', 3);
         const grants = selectedFiles('#credential-grants', 1)[0];
@@ -320,15 +357,18 @@ form.addEventListener('submit', event => {
       credentialError.textContent = detail;
       credentialBusy = false;
       updateControls();
+      if (!dialog.open) dialog.showModal();
     } finally {
       for (const record of records) { record.refreshToken = ''; record.clientSecret = ''; }
       records = [];
       if (attempt === connectAttempt) { select('#credential-bundle').value = ''; updateConnectionSelection(); }
     }
   })();
-});
+}
 
-connectButton.addEventListener('click', () => { credentialError.textContent = ''; dialog.showModal(); });
+form.addEventListener('submit', event => { event.preventDefault(); beginConnection(); });
+connectButton.addEventListener('click', () => { credentialError.textContent = ''; if (serverSession) beginConnection(true); else dialog.showModal(); });
+fileConnectButton.addEventListener('click', () => { credentialError.textContent = ''; dialog.showModal(); });
 select('#credential-select').addEventListener('click', () => select('#credential-bundle').click());
 select('#credential-bundle').addEventListener('change', () => {
   for (const selector of ['#credential-clients', '#credential-grants', '#credential-tokens', '#credential-folder']) select(selector).value = '';
@@ -343,5 +383,9 @@ focusButton.addEventListener('click', () => terminal.focus());
 resetButton.addEventListener('click', stopConnection);
 select('#send-grace-cancel').addEventListener('click', () => transport?.cancelSend());
 select('#send-acknowledge').addEventListener('click', () => { acknowledgePendingSend(); updateControls(); });
-window.addEventListener('pagehide', () => { transport?.close(); pendingInput.fill(0); });
+window.addEventListener('pagehide', () => {
+  connectAttempt++; generation++; ready = false;
+  credentialRequest?.abort(); transport?.close(); pendingInput.fill(0); pendingLength = 0;
+});
+window.addEventListener('pageshow', event => { if (event.persisted) stopConnection(); });
 void start().catch(() => {});

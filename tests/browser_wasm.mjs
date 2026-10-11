@@ -17,13 +17,19 @@ for (let index = 2; index < process.argv.length; index += 2) {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const site = resolve(args.get("--site-dir") || join(root, "web-demo/dist"));
 const work = resolve(args.get("--work-dir") || "/tmp/omagma-wasm-browser");
+let suppliedOrigin = null;
+if (args.has("--origin")) {
+  const url = new URL(args.get("--origin"));
+  assert(url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "--origin must be an owned loopback HTTP origin");
+  suppliedOrigin = url.origin;
+}
 assert(work !== site && !site.startsWith(work + sep), "browser scratch directory must not contain the site");
 await mkdir(work, { recursive: true, mode: 0o700 });
-const wasmBytes = await readFile(join(site, "omagma.wasm"));
+const wasmBytes = suppliedOrigin ? Buffer.from(await (await fetch(suppliedOrigin + "/omagma.wasm")).arrayBuffer()) : await readFile(join(site, "omagma.wasm"));
 assert.deepEqual(wasmBytes.subarray(0, 8), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]), "site does not contain a real WebAssembly module");
 const staticRequests = [];
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
-const server = createServer(async (request, response) => {
+const server = suppliedOrigin ? null : createServer(async (request, response) => {
   staticRequests.push(request.url);
   try {
     const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
@@ -37,8 +43,8 @@ const server = createServer(async (request, response) => {
     response.end("Not found");
   }
 });
-await new Promise((accept) => server.listen(0, "127.0.0.1", accept));
-const origin = `http://127.0.0.1:${server.address().port}`;
+if (server) await new Promise((accept) => server.listen(0, "127.0.0.1", accept));
+const origin = suppliedOrigin || `http://127.0.0.1:${server.address().port}`;
 const profile = join(work, `chrome-profile-${process.pid}`);
 await mkdir(profile, { recursive: true, mode: 0o700 });
 const browser = spawn(args.get("--chromium") || "/usr/bin/chromium", [
@@ -201,7 +207,7 @@ try {
   await call("Page.navigate", { url: origin + "/" });
   await until(async () => evaluate("window.omagmaDemo?.ready === true || Boolean(window.omagmaDemo?.error)"), "WASM terminal did not finish loading");
   assert.equal(await evaluate("window.omagmaDemo.error"), null, "WASM terminal reported an error");
-  assert(staticRequests.includes("/omagma.wasm"), "browser did not load the site's WebAssembly bytes");
+  assert(events.some((event) => event.method === "Network.requestWillBeSent" && event.params.request.url === origin + "/omagma.wasm"), "browser did not load the site's WebAssembly bytes");
   if (args.get("--geometry-only") === "true") {
     await viewport(1920, 1300);
     const before = await geometry();
@@ -362,7 +368,7 @@ try {
 
   const report = { synthetic: true, desktopUsed: false, browser: version.product,
     wasmBytes: wasmBytes.length, wasmSha256: createHash("sha256").update(wasmBytes).digest("hex"),
-    exports, abi, palette, rendering, staticRequests, initialCols: await evaluate("window.omagmaDemo.cols"),
+    exports, abi, palette, rendering, staticRequests, origin, realNativeServer: Boolean(suppliedOrigin), initialCols: await evaluate("window.omagmaDemo.cols"),
     initialRows: await evaluate("window.omagmaDemo.rows"), arrowAndLetterNavigation: true,
     accountSeparation: true, localSearchAndReset: true, unicodeInputAndSearch: true,
     nativePaneLayout: true, expandedReader: true, nativeHelp: true, nativeThemePicker: true,
@@ -427,5 +433,5 @@ try {
   if (browser.exitCode === null && browser.signalCode === null) {
     try { process.kill(-browser.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
   }
-  await new Promise((accept) => server.close(accept));
+  if (server) await new Promise((accept) => server.close(accept));
 }

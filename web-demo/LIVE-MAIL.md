@@ -4,8 +4,9 @@ The browser mode uses the same Zig Gmail request builder, message decoder,
 recipient validation and MIME encoder as the native application. JavaScript
 supplies HTTPS through `fetch` and keeps OAuth credentials in session memory.
 WebAssembly Promise Integration suspends the Zig request while the browser
-awaits its response. A local static file server is sufficient; there is no
-mail proxy or application server.
+awaits its response. Gmail requests go directly from the browser to Google.
+The local Zig server can supply existing native credentials to the launched
+session; static hosting instead uses an exported connection file.
 
 This is a browser adapter for a focused set of terminal workflows. Start with
 inbox reading, plain-text composition and replies. The native disk cache,
@@ -14,6 +15,25 @@ this first live mode.
 
 ## Load existing credentials
 
+When running `omagma server`, open its printed link and choose **Connect Gmail**.
+The server reads the enabled accounts, terminal grants and refresh tokens from
+the currently selected native store and supplies one bounded connection bundle
+in memory. No exported file or storage migration is needed. Loading is explicit;
+starting the server alone performs no credential lookup or Google request.
+
+The printed link includes a random capability in its fragment. The page sends
+that capability in an authorization header to the fixed local connection
+endpoint, which checks its loopback Host and same-origin request metadata.
+It does not allow cross-origin credential reads, cache the response or reflect
+credential lookup failures. The server wipes its transient bundle and native
+workspace after serving it. Credentials then stay in the current browser tab,
+using the same scope and identity validation as file import. Keep that launched
+link private; a plain link without its capability can still use file import.
+
+Use **Load file** to select an exported connection instead. For a custom native
+setup, `server --config FILE --grant-file FILE` selects the existing files.
+
+For static hosting or a separate browser instance, export remains available.
 Export one connection file using the prototype's native command:
 
 ```sh
@@ -52,11 +72,11 @@ Existing grants are preserved. A read-only grant permits reading; a reply or
 new message requires an explicitly declared send capability and a token with
 the necessary Gmail scope. The browser does not upgrade permissions or start a
 new consent flow. The native Secret Service and Keychain cannot be read by a
-webpage; the explicit native export supplies the selected credentials.
+webpage; the local server or explicit native export supplies the selected credentials.
 
 Credentials stay in the current browser session. Disconnect clears the active
 connection and invalidates pending results. Reloading requires loading the
-connection file again. Browser JavaScript can access the credentials it reads, so use the
+connection again. Browser JavaScript can access the credentials it reads, so use the
 controlled local page or a deployment you trust.
 
 ## Read and reply

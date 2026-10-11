@@ -19,6 +19,24 @@ for (let index = 2; index < process.argv.length; index += 2) {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const site = resolve(args.get("--site-dir") || join(root, "web-demo/dist"));
 const work = resolve(args.get("--work-dir") || "/tmp/omagma-wasm-browser-live");
+let suppliedOrigin = null;
+if (args.has("--origin")) {
+  const url = new URL(args.get("--origin"));
+  assert(url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, "--origin must be an owned loopback HTTP origin");
+  suppliedOrigin = url.origin;
+}
+let suppliedLaunchURL = null;
+let localSessionNonce = "";
+if (args.get("--native-connect") === "true") {
+  assert(suppliedOrigin, "--native-connect requires --origin for the real native server");
+  let url;
+  try { url = new URL(process.env.OMAGMA_TEST_LAUNCH_URL || ""); }
+  catch { assert.fail("native server test launch URL was not provided privately"); }
+  const fragment = url.hash.match(/^#omagma-session=([a-f0-9]{64})$/);
+  assert(url.origin === suppliedOrigin && url.pathname === "/" && !url.search && fragment, "native test launch URL does not match the owned guarded server");
+  suppliedLaunchURL = url.href;
+  localSessionNonce = fragment[1];
+}
 assert(work !== site && !site.startsWith(work + sep), "browser scratch directory must not contain the site");
 await mkdir(work, { recursive: true, mode: 0o700 });
 const readScope = "https://www.googleapis.com/auth/gmail.readonly";
@@ -28,7 +46,7 @@ const clientSecret = "synthetic-client-secret-never-valid";
 const accounts = ["ada.browser@example.test", "bea.browser@example.test"];
 const refreshSecrets = accounts.map((_, index) => `synthetic-refresh-${index}-never-valid`);
 const accessSecrets = accounts.map((_, index) => `synthetic-access-${index}-never-valid`);
-const syntheticSecrets = [clientSecret, ...refreshSecrets, ...accessSecrets];
+const syntheticSecrets = [clientSecret, ...refreshSecrets, ...accessSecrets, ...(localSessionNonce ? [localSessionNonce] : [])];
 const hashParts = (parts) => createHash("sha256").update(parts.map((part) => part + "\0").join("")).digest("hex");
 async function credentialFiles(name, address, scopes, changes = {}) {
   const directory = join(work, "synthetic-credentials", name);
@@ -131,7 +149,7 @@ function outgoingMessage(record) {
 
 const staticRequests = [];
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".wasm": "application/wasm" };
-const server = createServer(async (request, response) => {
+const server = suppliedOrigin ? null : createServer(async (request, response) => {
   staticRequests.push(request.url);
   try {
     const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
@@ -141,8 +159,8 @@ const server = createServer(async (request, response) => {
     response.end(await readFile(path));
   } catch { response.writeHead(404, { "Content-Type": "text/plain" }); response.end("Not found"); }
 });
-await new Promise((accept) => server.listen(0, "127.0.0.1", accept));
-const origin = `http://127.0.0.1:${server.address().port}`;
+if (server) await new Promise((accept) => server.listen(0, "127.0.0.1", accept));
+const origin = suppliedOrigin || `http://127.0.0.1:${server.address().port}`;
 const profile = join(work, `chrome-profile-${process.pid}`);
 await mkdir(profile, { recursive: true, mode: 0o700 });
 const browser = spawn(args.get("--chromium") || "/usr/bin/chromium", [
@@ -424,12 +442,75 @@ try {
   await call("Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] });
   await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   const version = await call("Browser.getVersion");
-  await call("Page.navigate", { url: origin + "/" });
+  await call("Page.navigate", { url: suppliedLaunchURL || origin + "/" });
   await until(async () => evaluate("window.omagmaDemo?.ready === true || Boolean(window.omagmaDemo?.error)"), "WASM terminal did not load");
   assert.equal(await evaluate("window.omagmaDemo.error"), null);
   assert(await evaluate("typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function'"), "owned browser lacks JSPI support");
   assert.equal(requests.length, 0, "default fictional demo unexpectedly connected Google");
-  if (args.get("--connect-only") === "true") {
+  if (args.get("--native-connect") === "true") {
+    assert((await evaluate("location.hash")) === "#omagma-session=" + localSessionNonce, "native launch capability is not retained in its intended fragment");
+    const visibleURL = await evaluate("location.href");
+    for (const secret of [clientSecret, ...refreshSecrets, ...accessSecrets]) assert(!visibleURL.includes(secret), "native URL contains OAuth credential material");
+    assert.equal((await session()).mode, "demo", "native launch connected without the user's Connect action");
+    assert.equal(requests.length, 0, "native launch contacted Google before Connect");
+    await screenshot("native-server-sample.png");
+    await click("#connect-open");
+    await connected(2);
+    assert.equal(await evaluate("document.querySelector('#credential-dialog').open"), false, "native server connection asked for credential files");
+    const localRequests = events.filter((event) => event.method === "Network.requestWillBeSent" && event.params.request.url === origin + "/connection.json");
+    assert.equal(localRequests.length, 1, "native Connect did not fetch one guarded in-memory connection bundle");
+    const localAuthorization = Object.entries(localRequests[0].params.request.headers).find(([key]) => key.toLowerCase() === "authorization")?.[1];
+    assert(localAuthorization === "Omagma-Session " + localSessionNonce, "native Connect did not authenticate its local credential request");
+    assert.deepEqual((await session()).canSend, [true, true], "native bundle capability binding was lost");
+    const ada = await act(() => text("1"));
+    assert(ada.includes("Ada live mailbox") && ada.includes("Hello Ada,"), "native server connection did not render the first verified mailbox");
+    const bea = await act(() => text("2"));
+    assert(bea.includes("Bea live mailbox") && bea.includes("Hello Bea,"), "native server connection did not render the second verified mailbox");
+    assert(!bea.includes("Ada live mailbox") && !bea.includes("Hello Ada,"), "native connection switched mail across account boundaries");
+    const active = await evaluate("JSON.stringify({diagnostics:window.omagmaDemo,session:window.omagmaDemo.sessionInfo(),state:window.omagmaDemo.state()})");
+    for (const secret of syntheticSecrets) assert(!active.includes(secret), "native connection exposed credentials or its local session secret in diagnostics");
+    await screenshot("native-server-connected.png");
+    const beforePageTransition = requests.length;
+    await evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}));window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));true");
+    await until(async () => (await evaluate("window.omagmaDemo?.ready === true")) && (await session()).mode === "demo" && (await session()).accountCount === 0,
+      "persisted page transition did not erase the live connection and restore sample mode");
+    assert.equal(requests.length, beforePageTransition, "persisted page transition automatically replayed Google authorization or mail requests");
+    assert(!((await screen()).includes("Ada live mailbox") || (await screen()).includes("Bea live mailbox")), "persisted page transition retained live mailbox content");
+    await disconnect();
+    assert.equal(sends().length, 0, "native connection acceptance attempted a Gmail mutation");
+    const beforeReload = requests.length;
+    const marker = events.length;
+    await call("Page.reload", { ignoreCache: true });
+    await until(async () => events.slice(marker).some((event) => event.method === "Page.loadEventFired"), "native connection reload did not load a new document");
+    await until(async () => evaluate("window.omagmaDemo?.ready === true"), "native connection reload did not restore sample mode");
+    assert.equal((await session()).accountCount, 0, "native connection reload retained credentials");
+    assert.equal(requests.length, beforeReload, "native connection reload automatically reused credentials");
+    assert((await evaluate("location.hash")) === "#omagma-session=" + localSessionNonce, "refresh discarded the native Connect capability");
+    await click("#connect-open");
+    await connected(2);
+    assert.equal(await evaluate("document.querySelector('#credential-dialog').open"), false, "refresh changed native Connect into a file chooser");
+    await disconnect();
+    const privacy = await evaluate(`(async()=>({
+      diagnostics:JSON.stringify(window.omagmaDemo),html:document.documentElement.outerHTML,
+      localStorage:Object.fromEntries(Object.keys(localStorage).map(key=>[key,localStorage.getItem(key)])),
+      sessionStorage:Object.fromEntries(Object.keys(sessionStorage).map(key=>[key,sessionStorage.getItem(key)])),
+      databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie
+    }))()`);
+    const exposed = JSON.stringify(privacy) + JSON.stringify(events.filter((event) => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
+    for (const secret of syntheticSecrets) assert(!exposed.includes(secret), "native connection leaked credentials or its launch secret into persistence or logs");
+    assert.deepEqual(privacy.localStorage, {}); assert.deepEqual(privacy.sessionStorage, {});
+    assert.deepEqual(privacy.databases, []); assert.deepEqual(privacy.caches, []); assert.equal(privacy.cookies, "");
+    assert((await evaluate("location.hash")) === "#omagma-session=" + localSessionNonce, "native Connect changed its launch capability");
+    assert.deepEqual(transportErrors, []); assert.deepEqual(unexpectedDestinations, []);
+    const report = { synthetic: true, desktopUsed: false, browser: version.product, origin,
+      realNativeServer: true, authenticatedNativeConnection: true, fileDialogRequired: false,
+      accountCount: 2, verifiedReadsAndIsolation: true, credentialsInPersistenceOrLogs: 0,
+      launchCapabilityInFragmentOnly: true, explicitConnectAfterRefresh: true, actualGoogleRequests: 0, googleSendRequests: sends().length,
+      syntheticPersistedPageTransitionHandlers: true,
+      requestCount: requests.length, maximumActiveRequests };
+    await writeFile(join(work, "native-connect-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    console.log(JSON.stringify(report));
+  } else if (args.get("--connect-only") === "true") {
     const sample = await evaluate("document.body.innerText");
     assert(/Sample inbox/i.test(sample), "default screen does not clearly identify the sample inbox");
     assert.match(await evaluate("document.querySelector('#connect-open').textContent"), /Connect Gmail/i);
@@ -547,7 +628,7 @@ try {
     assert.equal(privacy.cookies, "");
     assert.deepEqual(transportErrors, []);
     assert.deepEqual(unexpectedDestinations, []);
-    const report = { synthetic: true, desktopUsed: false, browser: version.product, actualGoogleRequests: 0,
+    const report = { synthetic: true, desktopUsed: false, browser: version.product, actualGoogleRequests: 0, origin, realNativeServer: Boolean(suppliedOrigin),
       primaryFileChooser: "credential-bundle", visibleChooserButton: chooser.primaryCaption.trim(), invalidBundlesRejectedBeforeNetwork: bundles.invalid.length,
       nativeChooserButtonVerified: true,
       profileIdentityVerified: true, readonlyAndNarrowedScopes: true, omittedScopeRefresh: true,
@@ -811,6 +892,7 @@ try {
   assert.deepEqual(transportErrors, [], "synthetic transport handler failed");
   assert.deepEqual(unexpectedDestinations, [], "message content or host attempted an unapproved external destination");
   const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product,
+    origin, realNativeServer: Boolean(suppliedOrigin),
     fixedGoogleUrlsIntercepted: true, defaultDemoRequests: 0, requestCount: requests.length,
     maximumActiveRequests, staticRequests, packetReview, mismatchedClientRejected: true, profileIdentityChecked: true,
     failedAccountListsIsolated: true, readonlyCapabilitiesAndNarrowedScopes: true, omittedScopeRefresh: true,
@@ -833,5 +915,5 @@ try {
   if (browser.exitCode === null && browser.signalCode === null) {
     try { process.kill(-browser.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
   }
-  await new Promise((accept) => server.close(accept));
+  if (server) await new Promise((accept) => server.close(accept));
 }

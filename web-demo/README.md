@@ -3,8 +3,9 @@
 This is an isolated showcase prototype, built from the native TUI source. Zig
 owns the screen, layout and mail interaction; xterm.js supplies the browser's
 terminal display and input. It starts with fictional mail and can connect
-existing grants through an exported connection file for live Gmail reading, plain composition and
-replies. See [live mail](LIVE-MAIL.md) for credential loading and scope.
+existing grants through the local server or an exported connection file for live
+Gmail reading, plain composition and replies. See [live mail](LIVE-MAIL.md) for
+credential loading and scope.
 
 The prototype runs client-side with browser HTTP and credential adapters. The
 native disk cache, external editor, attachment filesystem and background send
@@ -15,7 +16,7 @@ that feature is absent.
 ## Build and try it
 
 Use exactly Zig 0.17.0, as required by the main application. The browser assets
-are served as ordinary static files; no application backend is needed. From the
+are embedded in the native executable; no application backend is needed. From the
 repository root, with that compiler selected on `PATH`:
 
 On a shared host, reserve the [cooperative host lock](../docs/VERIFICATION.md#cooperative-host-measurement-lock)
@@ -23,22 +24,29 @@ before builds or the headless browser suite.
 
 ```sh
 zig version
-zig build browser -Dbrowser=true -Doptimize=debug -j2 --prefix .development-wasm
 npm ci --prefix web-demo --ignore-scripts --no-audit --no-fund
-npm run build --prefix web-demo -- --wasm "$PWD/.development-wasm/web-demo/omagma.wasm"
-python3 -m http.server 8766 --bind 127.0.0.1 --directory web-demo/dist
+zig build -Dbrowser=true -Doptimize=debug -j2 --prefix .development-wasm
+.development-wasm/bin/omagma server
 ```
 
-Open `http://127.0.0.1:8766/`. The Python command is an ordinary static-file
-preview tool, not an application backend. Any static HTTP host can serve the
-generated `web-demo/dist/` folder. Opening `index.html` as a `file:` URL does
-not work because the browser needs to fetch the WASM module.
+Open the URL printed by the command. The Zig server binds `127.0.0.1`, starting
+at port 8766 and trying the next port when it is occupied. `--port 9000` chooses
+a different starting port. The executable contains the page, bundled
+JavaScript, styles, WASM and dependency licenses; it can run from any folder
+without Node.js or a separate asset directory. Ctrl+C stops the server.
+
+For static hosting, build the standalone module with `zig build browser
+-Dbrowser=true` and package it with `npm run build --prefix web-demo -- --wasm
+"$PWD/zig-out/web-demo/omagma.wasm"`. Any static HTTP host can serve the generated
+`web-demo/dist/` folder. A `file:` URL cannot load the WASM module.
 
 Try `j` / `k`, Enter, `1` / `2` / `3` to switch accounts, `/` for a local
 substring search, `v` for right/below layouts, `z` to expand the reader, `a` for
 fictional contacts, and `?` for the native help overlay. Escape backs out;
 Reset demo creates fresh fictional state. **Connect Gmail** loads one exported
-connection file; Disconnect returns to fictional mode. In live mode, `c` composes,
+connection file on a static host, or uses your configured native accounts when
+opened through the server's printed link. **Load file** remains available in
+server mode. Disconnect returns to fictional mode. In live mode, `c` composes,
 `r` replies, `R` replies to all, and Ctrl+S opens send review. Tab/Shift+Tab move
 between fields or review buttons. Explicit Send begins the ten-second local
 cancellation window. Native help documents the full
@@ -52,12 +60,17 @@ Focused synthetic checks:
 npm test --prefix web-demo
 node tests/browser_wasm.mjs --work-dir /tmp/omagma-wasm-browser
 node tests/browser_wasm_live.mjs --work-dir /tmp/omagma-wasm-live-browser
+zig build test-browser-export test-browser-server -Doptimize=debug -j2
 ```
 
 The browser test starts its own headless Chromium and static test server,
 checks real keyboard interaction and network requests, and writes private
 screenshots and a receipt under the requested scratch directory. It does not
 use an existing browser profile or map desktop windows.
+Pass `--origin http://127.0.0.1:PORT` to either browser suite to test the native
+server. `tests/browser_server.mjs --binary /absolute/path/to/omagma --site-dir
+/absolute/path/to/site` checks embedded asset bytes, HTTP behavior and occupied
+port fallback from an empty working directory.
 
 ## What is reused
 
@@ -103,6 +116,12 @@ tokens into one private connection file. It reads the existing selected store
 and leaves native credentials and configuration unchanged. See
 [the export instructions](LIVE-MAIL.md#load-existing-credentials) for the
 development build command and output requirements.
+
+The local server uses the same collector to supply those credentials in memory
+when Connect is clicked, so it needs no export file. Its random session
+capability is carried in the launched URL fragment and a request header, never
+in a credential endpoint URL. The endpoint permits only authenticated,
+same-origin loopback reads and wipes its bounded response workspace afterward.
 
 The Connect dialog reads that connection file into session memory. Existing
 file-backed setups can also use the collapsed separate-file controls. Browser `fetch`

@@ -148,6 +148,32 @@ const bar_fixture_options =
 ;
 
 const specs = [_]Spec{
+    .{ .mode = "server", .text =
+    \\Serve the bundled browser mail client
+    \\
+    \\Usage: omagma server [--port PORT] [--config FILE] [--grant-file FILE]
+    \\  --port PORT   First port to try, 1..65535; default 8766.
+    \\  --config FILE      Existing private Omagma config; uses the usual default.
+    \\  --grant-file FILE  Existing terminal registry; uses the usual default.
+    \\
+    \\Starts a Zig HTTP server on 127.0.0.1 and prints its local URL.
+    \\If the port is occupied, tries successive ports until one is available.
+    \\The page, JavaScript, styles and WebAssembly are embedded in the executable.
+    \\No separate static server or runtime asset folder is needed. Ctrl+C stops it.
+    \\Starts with sample mail; Connect Gmail loads your configured Omagma accounts
+    \\directly from the selected native credential store. No export is required.
+    \\The printed link contains a random session capability for this connection.
+    \\Credentials travel only to that browser session and Google, stay in tab
+    \\memory, and are cleared on disconnect. Native storage/config remain intact.
+    \\Load file remains available for an exported browser connection file.
+    \\
+    \\Requires a browser-enabled build. Help reads no credentials and starts no server.
+    \\
+    \\Examples:
+    \\  omagma server
+    \\  omagma server --port 9000
+    \\
+    },
     .{ .mode = "daemon", .text =
     \\Read-only Gmail bar backend (Linux)
     \\

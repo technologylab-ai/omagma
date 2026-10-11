@@ -20,7 +20,7 @@ var config_storage: [16 * 1024]u8 = undefined;
 var probe_storage: [l.response]u8 = undefined;
 // All module-owned static storage is accounted at compile time; unassigned
 // capacity is physically reserved and touched once, with no allocator fallback.
-const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + @import("terminal/background.zig").reservation_bytes + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0);
+const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + @import("terminal/background.zig").reservation_bytes + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0) + (if (@import("build_options").browser) @import("browser_server.zig").reservation_bytes else 0);
 comptime {
     if (assigned_bytes > l.app_reservation) @compileError("Application reservation exceeds16MiB");
 }
@@ -71,6 +71,7 @@ fn usageError(err: anyerror) bool {
         error.InvalidCredentialStore,
         error.CredentialDirectoryRequired,
         error.OutputRequired,
+        error.InvalidPort,
         error.ExportFormatRequired,
         error.UnsupportedExportFormat,
         error.InvalidCredentialDirectory,
@@ -98,7 +99,7 @@ fn printHelp(io: std.Io) !void {
 fn printFullHelp(io: std.Io) !void {
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
-    try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n  cache-refresh --help\n  build-info | budget (use --help for scoped diagnostics)\n", .{ @import("build_options").version, builtin.zig_version_string });
+    try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  server [--port PORT]\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n  cache-refresh --help\n  build-info | budget (use --help for scoped diagnostics)\n", .{ @import("build_options").version, builtin.zig_version_string });
     try writer.interface.flush();
     try @import("terminal/cli.zig").help(io);
     try @import("terminal/credential_cli.zig").help(io);
@@ -118,7 +119,7 @@ fn standaloneHelpRequested(mode: []const u8, args: *std.process.Args.Iterator) ?
         // Standalone value flags (including probe positional arguments) are
         // data. Recognized value options consume their value before help scan.
         var value_flag = false;
-        for ([_][]const u8{ "--config", "--account", "--grant-file", "--to", "--directory", "--format", "--output", "--cache-dir", "--interval", "--prefetch-bodies", "--metadata-limit", "--disk-limit-bytes", "--fixture-root", "--fixture-scenario", "--fixture-delay-ms", "--fixture-fail-account", "--fixture-empty-account", "--fixture-rows", "--fixture-fail-after", "--fixture-auto-refresh-ms" }) |flag| if (std.mem.eql(u8, arg, flag)) {
+        for ([_][]const u8{ "--config", "--account", "--grant-file", "--to", "--directory", "--format", "--output", "--port", "--cache-dir", "--interval", "--prefetch-bodies", "--metadata-limit", "--disk-limit-bytes", "--fixture-root", "--fixture-scenario", "--fixture-delay-ms", "--fixture-fail-account", "--fixture-empty-account", "--fixture-rows", "--fixture-fail-after", "--fixture-auto-refresh-ms" }) |flag| if (std.mem.eql(u8, arg, flag)) {
             value_flag = true;
             break;
         };
@@ -142,6 +143,12 @@ fn app(init: std.process.Init) !void {
     const mode = args.next() orelse "help";
     if (@import("terminal/standalone_help.zig").known(mode)) {
         if (standaloneHelpRequested(mode, &args)) |verb| return @import("terminal/standalone_help.zig").render(io, mode, if (verb.len == 0) null else verb);
+    }
+    if (std.mem.eql(u8, mode, "server")) {
+        if (!@import("build_options").browser) return error.BrowserAssetsNotIncluded;
+        const server = @import("browser_server.zig");
+        const assets = @import("browser_assets").assets(server.Asset);
+        return @import("browser_connection.zig").run(init, io, &args, &assets);
     }
     if (std.mem.eql(u8, mode, "credentials")) return @import("terminal/credential_cli.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "__wait-probe-child")) return @import("platform.zig").waitCancellationChild(io);

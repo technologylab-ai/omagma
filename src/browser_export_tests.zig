@@ -110,3 +110,58 @@ test "browser export: rejects unsafe directories noncanonical paths symlinks and
     try std.testing.expectError(error.OutputInsideRepository, exporter.run(io, a, "/tmp", fixture.config, fixture.grants, fixture.output));
     try std.testing.expectError(error.FileNotFound, fixture.dir.statFile(io, "browser/connection.json", .{}));
 }
+
+test "browser collection: bounded in-memory bundle skips disabled accounts without creating output files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = try Fixture.init(a, true);
+    defer fixture.deinit();
+    var grants = [_]auth.Grant{
+        .{ .account = account, .clientFile = fixture.client, .clientId = client_id, .grantId = &fixture.grant, .capabilities = caps, .scopes = fixture.scopes },
+        .{ .account = "disabled@example.test", .clientFile = "/synthetic-disabled-client-must-not-be-read.json", .clientId = client_id, .grantId = &fixture.grant, .capabilities = caps, .scopes = fixture.scopes },
+    };
+    try fixture.write("grants.json", auth.Registry{ .accounts = &grants });
+    const before = try fixture.dir.readFileAlloc(io, "config.json", a, .limited(16 * 1024));
+    var output: [64 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &output);
+    const collected = try exporter.collect(io, a, "/tmp", fixture.config, fixture.grants, &output);
+    try std.testing.expectEqual(@as(usize, 1), collected.exportedAccounts);
+    try std.testing.expectEqualStrings("file", collected.credentialStore);
+    try std.testing.expect(collected.bytes.ptr == &output);
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, a, collected.bytes, .{ .duplicate_field_behavior = .@"error" });
+    const entries = value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings(account, entries[0].object.get("account").?.string);
+    try std.testing.expectEqualStrings("SYNTHETIC_REFRESH_TOKEN_ONLY", entries[0].object.get("refreshToken").?.string);
+    try std.testing.expectEqualStrings(before, try fixture.dir.readFileAlloc(io, "config.json", a, .limited(16 * 1024)));
+    try std.testing.expectError(error.FileNotFound, fixture.dir.statFile(io, "browser", .{}));
+    var token: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &token);
+    try std.testing.expectEqualStrings("SYNTHETIC_REFRESH_TOKEN_ONLY", (try keyring.lookupTerminal(io, fixture.settings, account, client_id, &fixture.grant, &token)).?);
+}
+
+test "browser collection: disabled grants no grants and small buffers fail cleanly with no file writes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = try Fixture.init(a, true);
+    defer fixture.deinit();
+    var disabled = [_]auth.Grant{.{ .account = account, .clientFile = "/synthetic-disabled-client-must-not-be-read.json", .clientId = client_id, .grantId = &fixture.grant, .capabilities = caps, .scopes = fixture.scopes, .enabled = false }};
+    try fixture.write("grants.json", auth.Registry{ .accounts = &disabled });
+    var output: [1024]u8 = @splat(0xa5);
+    try std.testing.expectError(error.NoEnabledTerminalGrants, exporter.collect(io, a, "/tmp", fixture.config, fixture.grants, &output));
+    for (output) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try fixture.write("grants.json", auth.Registry{});
+    @memset(&output, 0xa5);
+    try std.testing.expectError(error.NoEnabledTerminalGrants, exporter.collect(io, a, "/tmp", fixture.config, fixture.grants, &output));
+    for (output) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    var enabled = [_]auth.Grant{.{ .account = account, .clientFile = fixture.client, .clientId = client_id, .grantId = &fixture.grant, .capabilities = caps, .scopes = fixture.scopes }};
+    try fixture.write("grants.json", auth.Registry{ .accounts = &enabled });
+    var small: [16]u8 = @splat(0xa5);
+    try std.testing.expectError(error.BrowserConnectionTooLarge, exporter.collect(io, a, "/tmp", fixture.config, fixture.grants, &small));
+    for (small) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectError(error.FileNotFound, fixture.dir.statFile(io, "browser", .{}));
+    var too_large: [64 * 1024 + 1]u8 = undefined;
+    try std.testing.expectError(error.InvalidBrowserConnectionBuffer, exporter.collect(io, a, "/tmp", "/synthetic-no-config.json", "/synthetic-no-grants.json", &too_large));
+}

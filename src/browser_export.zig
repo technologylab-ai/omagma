@@ -1,5 +1,5 @@
-//! Explicit, offline export of existing terminal grants to one private browser
-//! connection file. The selected credential store and config remain unchanged.
+//! Offline collection of existing terminal grants for browser connections.
+//! Explicit file export shares the same bounded collector; storage stays selected.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const credentials = @import("keyring.zig");
@@ -65,9 +65,19 @@ fn loadConfig(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: [
     try config.parse(a, bytes[0..length]);
 }
 
-pub fn run(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: []const u8, grant_path: []const u8, output_path: []const u8) !Result {
-    var output_parent = try openOutputParent(io, a, output_path);
-    defer output_parent.close(io);
+pub const Collection = struct {
+    bytes: []const u8,
+    exportedAccounts: usize,
+    credentialStore: []const u8,
+};
+/// Reads only existing enabled grants, client files and the selected credential
+/// store. No directories/files are created, no configuration is changed, and
+/// no Google request is made. The returned bytes borrow `out`; callers wipe the
+/// output and their allocator workspace after use. A valid output buffer is
+/// cleared on failure; an invalid-sized buffer is rejected before any lookup.
+pub fn collect(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: []const u8, grant_path: []const u8, out: []u8) !Collection {
+    if (out.len == 0 or out.len > max_bundle_bytes) return error.InvalidBrowserConnectionBuffer;
+    errdefer std.crypto.secureZero(u8, out);
     var config: Config = undefined;
     try loadConfig(io, a, home, config_path, &config);
     const registry = try auth.load(io, a, grant_path);
@@ -90,11 +100,18 @@ pub fn run(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: []co
         count += 1;
     }
     if (count == 0) return error.NoEnabledTerminalGrants;
-    var output: [max_bundle_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &output);
-    var writer: std.Io.Writer = .fixed(&output);
+    var writer: std.Io.Writer = .fixed(out);
     std.json.Stringify.value(.{ .format = "omagma-browser-connection", .version = @as(u8, 1), .accounts = accounts[0..count] }, .{}, &writer) catch return error.BrowserConnectionTooLarge;
     writer.writeByte('\n') catch return error.BrowserConnectionTooLarge;
+    return .{ .bytes = writer.buffered(), .exportedAccounts = count, .credentialStore = @tagName(config.credential_store) };
+}
+
+pub fn run(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: []const u8, grant_path: []const u8, output_path: []const u8) !Result {
+    var output_parent = try openOutputParent(io, a, output_path);
+    defer output_parent.close(io);
+    var output: [max_bundle_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &output);
+    const collected = try collect(io, a, home, config_path, grant_path, &output);
     // Re-pin the canonical path after potentially interactive keyring lookup.
     var current_parent = try private.directory(io, std.fs.path.dirname(output_path).?, false);
     defer current_parent.close(io);
@@ -102,12 +119,12 @@ pub fn run(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: []co
     var atomic = try output_parent.createFileAtomic(io, std.fs.path.basename(output_path), .{ .permissions = .fromMode(0o600), .replace = false });
     defer atomic.deinit(io);
     try private.privateAtomicFile(io, atomic.file);
-    try atomic.file.writeStreamingAll(io, writer.buffered());
+    try atomic.file.writeStreamingAll(io, collected.bytes);
     try atomic.file.sync(io);
     atomic.link(io) catch |err| return if (err == error.PathAlreadyExists) error.OutputAlreadyExists else err;
     const published = try files.openRegular(io, a, output_parent, std.fs.path.basename(output_path));
     defer published.close(io);
     try private.privateFile(io, published);
-    if ((try published.stat(io)).size != writer.buffered().len) return error.OutputVerificationFailed;
-    return .{ .exportedAccounts = count, .credentialStore = @tagName(config.credential_store), .outputFile = output_path };
+    if ((try published.stat(io)).size != collected.bytes.len) return error.OutputVerificationFailed;
+    return .{ .exportedAccounts = collected.exportedAccounts, .credentialStore = collected.credentialStore, .outputFile = output_path };
 }
