@@ -8,6 +8,30 @@ pub fn build(b: *std.Build) void {
     const test_filter = b.option([]const u8, "test-filter", "Run only correctness tests containing this text");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
     const tui_enabled = b.option(bool, "tui", "Include the libvaxis terminal client") orelse true;
+    const browser_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const browser_enabled = b.option(bool, "browser", "Enable the synthetic WebAssembly prototype") orelse false;
+    const browser_vaxis = if (browser_enabled) b.lazyDependency("vaxis", .{ .target = browser_target, .optimize = optimize }) else null;
+    const browser_step = b.step("browser", "Build the synthetic browser TUI prototype");
+    if (browser_vaxis) |v| {
+        const browser_module = b.createModule(.{
+            .root_source_file = b.path("src/browser.zig"),
+            .target = browser_target,
+            .optimize = optimize,
+        });
+        browser_module.addImport("vaxis", v.module("vaxis"));
+        const browser_options = b.addOptions();
+        browser_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+        browser_options.addOption(bool, "tui", true);
+        browser_module.addOptions("build_options", browser_options);
+        const browser = b.addExecutable(.{ .name = "omagma", .root_module = browser_module, .use_llvm = true });
+        browser.entry = .disabled;
+        browser.rdynamic = true;
+        browser.export_memory = true;
+        browser.initial_memory = 8 * 1024 * 1024;
+        browser.max_memory = 64 * 1024 * 1024;
+        browser.stack_size = 2 * 1024 * 1024;
+        browser_step.dependOn(&b.addInstallArtifact(browser, .{ .dest_dir = .{ .override = .{ .custom = "web-demo" } } }).step);
+    }
     const vaxis = if (tui_enabled) b.lazyDependency("vaxis", .{ .target = target, .optimize = optimize }) else null;
     const m = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

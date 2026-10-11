@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta name="description" content="An experimental Omagma terminal UI running as Zig WebAssembly, with fictional mail held in memory.">
+    <title>Omagma · browser experiment</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./xterm.css">
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./app.mjs"></script>
+  </head>
+  <body>
+    <main class="demo">
+      <header class="masthead">
+        <div class="identity">
+          <span class="brand-mark" aria-hidden="true">o/</span>
+          <div><h1>Omagma</h1><p>browser experiment</p></div>
+        </div>
+        <div class="runtime-badge"><span aria-hidden="true" class="runtime-dot"></span>Zig + WebAssembly</div>
+      </header>
+
+      <section class="terminal-window" aria-label="Omagma terminal demonstration">
+        <div class="window-bar">
+          <div class="window-title"><span class="tab-mark" aria-hidden="true">&gt;_</span>omagma <span class="window-subtitle">/ fictional inboxes</span></div>
+          <div class="window-actions">
+            <span id="terminal-size" class="terminal-size" aria-hidden="true"></span>
+            <button id="terminal-focus" type="button" title="F6 moves focus from the terminal to page controls" disabled>Focus terminal</button>
+            <button id="demo-reset" type="button" disabled>Reset demo</button>
+          </div>
+        </div>
+        <div class="terminal-stage">
+          <div id="terminal" aria-label="Interactive Omagma terminal. Press j or k to navigate, Enter to read, question mark for help."></div>
+          <div id="runtime-message" class="runtime-message" role="status"><span class="loading-dot" aria-hidden="true"></span><span id="runtime-message-text">Loading WebAssembly…</span></div>
+        </div>
+      </section>
+
+      <footer class="demo-footer">
+        <div class="key-guide" aria-label="Terminal keyboard shortcuts">
+          <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> accounts</span>
+          <span><kbd>j</kbd><kbd>k</kbd> navigate</span>
+          <span><kbd>Enter</kbd> read</span>
+          <span><kbd>/</kbd> search</span>
+          <span><kbd>v</kbd> layout</span>
+          <span><kbd>T</kbd> theme</span>
+          <span><kbd>?</kbd> help</span>
+          <span><kbd>F6</kbd> page controls</span>
+        </div>
+        <div class="demo-status"><span id="runtime-status" role="status">Starting the TUI</span><span class="status-separator" aria-hidden="true">·</span><span>Fictional mail · in memory only</span></div>
+      </footer>
+    </main>
+  </body>
+</html>

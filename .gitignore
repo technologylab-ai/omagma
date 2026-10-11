@@ -16,6 +16,11 @@ config.local.json
 website/node_modules/
 website/dist/
 
+# Browser prototype dependencies and generated static assets stay local.
+web-demo/node_modules/
+web-demo/dist/
+web-demo/omagma.wasm
+
 # Local TUI iteration binaries are not release artifacts.
 .local-tui-*/
 .development-*/

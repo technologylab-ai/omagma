@@ -1,6 +1,7 @@
 //! Account-scoped terminal mail UI. libvaxis owns input/rendering; the same
 //! bounded operation client serves this UI and the JSON CLI.
 const std = @import("std");
+const browser_target = @import("builtin").cpu.arch == .wasm32 and @import("builtin").os.tag == .freestanding;
 const vaxis = @import("vaxis");
 const types = @import("types.zig");
 const editor = @import("editor.zig");
@@ -44,7 +45,13 @@ const max_cols = 240;
 const max_rows = 80;
 const response_limit = types.Limits.runtime_bytes / 2;
 const Event = union(enum) { fetch_progress, loading_tick, cache_changed, theme_tick, key_press: Key, mouse: vaxis.Mouse, winsize: vaxis.Winsize, paste_start, paste_end, operation_done, compose_idle, terminate };
-const Loop = input_loop.Loop(Event);
+const Loop = if (browser_target) struct {} else input_loop.Loop(Event);
+const Tty = if (browser_target) struct {
+    output: *Io.Writer,
+    fn writer(self: *@This()) *Io.Writer {
+        return self.output;
+    }
+} else vaxis.Tty;
 const FileFocus = enum { path, parent, home, hidden, listing, confirm, cancel };
 const ComposeView = enum { rendered, original, plain };
 const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, label_manager, attachment, theme };
@@ -798,7 +805,7 @@ const App = struct {
     options: types.Options,
     environ: *const std.process.Environ.Map,
     vx: *vaxis.Vaxis,
-    tty: *vaxis.Tty,
+    tty: *Tty,
     loop: *Loop,
     cancellation: Io.Event = .unset,
     account_arena: std.heap.ArenaAllocator,
@@ -8323,7 +8330,7 @@ const App = struct {
         var event_zone: ?timezone.Zone = null;
         defer if (event_zone) |*zone| zone.deinit(a);
         const tzid = invitation.eventTimezone(&invite);
-        if (tzid.len > 0 and invite.timezones.len == 0) event_zone = timezone.loadNamed(self.io, a, self.environ, tzid) catch null;
+        if (!browser_target and tzid.len > 0 and invite.timezones.len == 0) event_zone = timezone.loadNamed(self.io, a, self.environ, tzid) catch null;
         const presentation = try invitation.friendlyWithZone(a, &invite, &self.zone, if (event_zone) |*zone| zone else null);
         if (invite.summary.len > 0) self.reader_invitation_title.display(invite.summary.slice());
         if (presentation.start.len > 0) self.reader_invitation_when.display(try std.fmt.allocPrint(a, "{s}{s}{s}", .{ presentation.start, if (presentation.duration.len > 0) " · " else "", presentation.duration }));
@@ -9901,7 +9908,7 @@ const App = struct {
         try self.vx.resize(self.allocator, self.tty.writer(), size);
     }
     fn draw(self: *App) !void {
-        try self.ensureLoadingAnimation();
+        if (!browser_target) try self.ensureLoadingAnimation();
         _ = self.frame.reset(.retain_capacity);
         self.clearObsoleteStatus();
         self.mouse_hits.clear();
@@ -9919,7 +9926,7 @@ const App = struct {
         try self.line(win, 0, try self.fittedGlobalHeader(win), .accent);
         try self.line(win, 1, try self.fitLine(win, try self.syncLine(), win.width), self.syncTone());
         const body = win.child(.{ .y_off = 2, .height = win.height -| 4 });
-        if (self.mode == .compose or self.mode == .review or self.mode == .attachment) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or (self.mode == .search and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
+        if (!browser_target and (self.mode == .compose or self.mode == .review or self.mode == .attachment)) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or (self.mode == .search and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
             const panes = layout.computeWithRatios(body.width, body.height, self.focus, self.reader_layout, self.expanded, try self.navigationWidth(body), self.ui_preferences.listWidthPercent, self.ui_preferences.listHeightPercent);
             if (panes.navigation) |rect| try self.navigationDraw(self.pane(body, rect, " Accounts / mailboxes ", self.focus == .navigation));
             if (panes.list) |rect| try self.listDraw(self.pane(body, rect, try self.listTitle(), self.focus == .list));
@@ -9940,23 +9947,29 @@ const App = struct {
         } else try self.line(win, win.height - 2, try self.fitLine(win, if (self.updateVisible()) try std.fmt.allocPrint(self.frame.allocator(), "Tab Updates · {s}", .{self.fittedHints(win.width)}) else self.fittedHints(win.width), win.width), .muted);
         const status_line = if (self.grace_active and self.grace_pending.load(.acquire) and win.width < 70) (if (self.grace_focus == 0) "Tab Switch · Enter: Undo" else "Tab Switch · Enter: Send now") else self.status[0..self.status_len];
         try self.line(win, win.height - 1, try self.fitLine(win, status_line, win.width), if (self.warning) .warning else .muted);
-        try self.drawReaderOverlay(win);
-        try self.drawFileDialog(win);
-        try self.drawLabelPicker(win);
-        try self.drawLabelManager(win);
+        if (!browser_target) {
+            try self.drawReaderOverlay(win);
+            try self.drawFileDialog(win);
+            try self.drawLabelPicker(win);
+            try self.drawLabelManager(win);
+        }
         if (self.mode == .help) try self.helpDraw(win) else if (self.mode == .trash_confirm) {
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\n{d} messages · exact targets pinned\n{s}\n\nMove these messages to Trash.\nThis can be undone; mail is not permanently deleted.", .{ self.pinned_targets.account.slice(), self.pinned_targets.count, self.triage_subject.value() });
             try self.overlay(win, " Move selected mail to Trash? ", review);
         } else if (self.mode == .invitation) {
             try self.invitationDraw(win);
         }
-        try self.drawNewMail(win);
-        try self.drawUpdateNotice(win);
+        if (!browser_target) {
+            try self.drawNewMail(win);
+            try self.drawUpdateNotice(win);
+        }
         try self.drawThemePicker(win);
-        try self.drawComposeChoice(win);
-        try self.drawUx(win);
-        try self.drawGrace(win);
-        try self.drawUpdates(win);
+        if (!browser_target) {
+            try self.drawComposeChoice(win);
+            try self.drawUx(win);
+            try self.drawGrace(win);
+            try self.drawUpdates(win);
+        }
     }
 };
 
@@ -14003,3 +14016,304 @@ test "reader copy: plain paragraph and folded placeholder projection preserve li
         try std.testing.expectEqualStrings(example.expected, copied);
     }
 }
+/// Browser experiment: the production App renderer and libvaxis parser/screen,
+/// with a deliberately reduced, in-memory input/provider adapter. Native TUI
+/// behavior and persistence never run in this freestanding build.
+pub const BrowserDemo = struct {
+    app: App = undefined,
+    vx: vaxis.Vaxis = undefined,
+    tty: Tty = undefined,
+    fixture_messages: [3][]const Value = @splat(&.{}),
+    output: *Io.Writer = undefined,
+
+    pub fn init(self: *BrowserDemo, allocator: Allocator, output: *Io.Writer, cols: u16, rows: u16) !void {
+        if (!browser_target) @compileError("BrowserDemo requires wasm32-freestanding");
+        self.output = output;
+        self.tty = .{ .output = output };
+        self.vx = try vaxis.init(undefined, allocator, undefined, .{});
+        self.vx.caps.rgb = true;
+        // xterm.js handles semicolon RGB SGR without the optional colorspace
+        // slot; the pinned libvaxis colon form omits that slot.
+        self.vx.sgr = .legacy;
+        self.vx.state.alt_screen = true;
+        self.app = .{
+            .io = undefined,
+            .allocator = allocator,
+            .client = .{ .ctx = self, .callFn = unavailable },
+            .options = .{ .fixtures = true },
+            .environ = undefined,
+            .vx = &self.vx,
+            .tty = &self.tty,
+            .loop = undefined,
+            .account_arena = .init(allocator),
+            .list_arena = .init(allocator),
+            .read_arena = .init(allocator),
+            .contact_arena = .init(allocator),
+            .job_arena = .init(allocator),
+            .frame = .init(allocator),
+            .ui_preferences = .{ .theme = .omagma },
+            .theme_choice = .omagma,
+            .view_ready = true,
+        };
+        const a = self.app.account_arena.allocator();
+        self.app.accounts = items(try std.json.parseFromSliceLeaky(Value, a, "[{\"address\":\"alex@example.test\"},{\"address\":\"studio@example.test\"},{\"address\":\"team@example.test\"}]", .{}));
+        const subjects = [_][]const u8{
+            "Omagma, now in your browser",
+            "Design review — autumn palette",
+            "Friday demo checklist",
+            "A small note from Montréal",
+            "Release planning",
+            "Weekend reading list",
+            "The café experiment",
+            "Project update: native and browser",
+            "Invitation to the showcase",
+            "Three accounts, one bounded screen",
+            "A Unicode postcard: こんにちは",
+            "Final rehearsal notes",
+        };
+        const bodies = [_][]const u8{
+            "Hello Alex,\n\nThis is the actual Zig TUI renderer, compiled to WebAssembly.\nThe browser only supplies a terminal and forwards key presses.\n\nTry j/k to choose mail, Enter to focus the reader, v to switch layouts, and ? for the original help.\n\nAll accounts and messages are fictional. This demo has no network, filesystem, or credentials.\n\nCheers,\nMorgan",
+            "A warm orange accent, calm blue secondary text, and a compact list.\n\nThe UI comes from the existing native terminal application.\n\nReview points:\n• Can we still read the sender at narrow widths?\n• Does the reader preserve literal message text?\n• Do keyboard controls feel natural in a browser?\n\nResize the window to explore the responsive layouts.\n\nMorgan",
+            "For Friday:\n\n1. Open the inbox.\n2. Switch account with 1, 2, or 3.\n3. Search locally using /.\n4. Toggle the reader layout with v.\n5. Show the searchable help overlay.\n\nThe demo is intentionally read-only. Write, editor, and file actions explain their limits.\n\nThanks,\nSam",
+            "Bonjour!\n\nA quick Unicode check: café, naïve, Montréal, 日本語, and a friendly 🚀.\n\nTerminal cell width and text wrapping still happen inside WebAssembly.\n\nThis message is long enough to scroll on a small terminal.\n\nOne\nTwo\nThree\nFour\nFive\nSix\nSeven\nEight\nNine\nTen\n\nÀ bientôt,\nCamille",
+        };
+        for (&self.fixture_messages, 0..) |*account_messages, account_index| {
+            const values = try a.alloc(Value, subjects.len);
+            for (values, 0..) |*value, index| {
+                const message: types.Message = .{
+                    .id = try std.fmt.allocPrint(a, "demo-{d}-{d}", .{ account_index, index }),
+                    .threadId = try std.fmt.allocPrint(a, "thread-{d}-{d}", .{ account_index, index }),
+                    .from = .{ .address = if (index % 2 == 0) "morgan@example.test" else "sam@example.test", .name = if (index % 2 == 0) "Morgan Chen" else "Sam Rivera" },
+                    .to = &.{.{ .address = text(get(self.app.accounts[account_index], "address")) }},
+                    .subject = subjects[index],
+                    .snippet = "Synthetic mail · rendered by the native TUI in WebAssembly",
+                    .bodyText = bodies[index % bodies.len],
+                    .bodyCached = true,
+                    .bodySource = .plain,
+                    .unread = index % 3 == 0,
+                    .labels = if (index % 4 == 0) &.{ "INBOX", "STARRED" } else &.{"INBOX"},
+                    .receivedAt = 1791712800000 - @as(i64, @intCast(index)) * 3600000,
+                };
+                value.* = try std.json.parseFromSliceLeaky(Value, a, try std.json.Stringify.valueAlloc(a, message, .{}), .{});
+            }
+            account_messages.* = values;
+            self.app.sync[account_index] = .{ .state = .current, .cache_ready = true, .last_sync_at = 1791712800000 };
+        }
+        self.app.contacts = items(try std.json.parseFromSliceLeaky(Value, a, "[{\"name\":\"Morgan Chen\",\"emails\":[{\"address\":\"morgan@example.test\"}]},{\"name\":\"Sam Rivera\",\"emails\":[{\"address\":\"sam@example.test\"}]}]", .{}));
+        self.app.contacts_state = .current;
+        self.app.contacts_cache_ready = true;
+        try self.reload();
+        self.notice();
+        try self.resize(cols, rows);
+    }
+    fn unavailable(_: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+        return error.BrowserDemoReadOnly;
+    }
+    fn notice(self: *BrowserDemo) void {
+        self.app.say(false, "Browser demo · synthetic read-only mail · j/k Enter / 1–3 v ?", .{});
+    }
+    fn preview(self: *BrowserDemo) !void {
+        self.app.clearReader();
+        if (self.app.selectedMessage()) |message| {
+            const a = self.app.read_arena.allocator();
+            const thread = try a.alloc(Value, 1);
+            thread[0] = message;
+            self.app.thread = thread;
+            self.app.markup = try self.app.prepareMarkup(a, thread);
+            try self.app.reader_account.set(self.app.allocator, self.app.account());
+            try self.app.reader_message.set(self.app.allocator, text(get(message, "id")));
+        }
+    }
+    fn reload(self: *BrowserDemo) !void {
+        self.app.clearReader();
+        _ = self.app.list_arena.reset(.retain_capacity);
+        const a = self.app.list_arena.allocator();
+        var matches: std.ArrayList(Value) = .empty;
+        const query = self.app.query.value();
+        for (self.fixture_messages[self.app.account_index]) |message| {
+            if (self.app.folder == 7 and !messageUnread(message)) continue;
+            if (self.app.folder == 3 and messageHasLabel(message, "INBOX")) continue;
+            if (self.app.folder != 0 and self.app.folder != 3 and self.app.folder != 6 and self.app.folder != 7) continue;
+            if (query.len > 0 and cache_query.find(text(get(message, "subject")), query) == null and cache_query.find(text(get(message, "bodyText")), query) == null and cache_query.find(text(get(get(message, "from"), "name")), query) == null) continue;
+            try matches.append(a, message);
+        }
+        self.app.messages = matches.items;
+        self.app.selected = 0;
+        self.app.top = 0;
+        try self.preview();
+    }
+    fn switchAccount(self: *BrowserDemo, index: usize) !void {
+        if (index >= self.app.accounts.len) return;
+        self.app.account_index = index;
+        self.app.navigation = index;
+        self.app.focus = .list;
+        self.app.mode = .browse;
+        self.app.expanded = false;
+        try self.reload();
+    }
+    pub fn resize(self: *BrowserDemo, cols: u16, rows: u16) !void {
+        try self.app.resize(.{ .cols = cols, .rows = rows, .x_pixel = 0, .y_pixel = 0 });
+    }
+    pub fn draw(self: *BrowserDemo) !void {
+        try self.app.draw();
+        try self.output.writeAll("\x1b[?1000h\x1b[?1006h\x1b[H");
+        self.vx.queueRefresh();
+        try self.vx.render(self.output);
+    }
+    pub fn key(self: *BrowserDemo, key_value: Key) !void {
+        const app = &self.app;
+        if (app.mode == .help) return app.onHelpKey(key_value);
+        if (app.mode == .theme) {
+            if (tabDirection(key_value)) |backwards| app.dialog_focus.move(backwards, 3, 0b111) else if (key_value.matches(Key.escape, .{}) or key_value.matches('q', .{})) app.mode = .browse else if (key_value.matches(Key.enter, .{})) {
+                if (app.dialog_focus.index != 2) app.ui_preferences.theme = app.theme_choice;
+                app.mode = .browse;
+                app.say(false, "Browser demo uses Omagma colors · desktop themes and preference files are unavailable", .{});
+            } else if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{})) app.theme_choice = .follow_omarchy else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{})) app.theme_choice = .omagma;
+            return;
+        }
+        if (app.mode == .search) {
+            if (key_value.matches(Key.escape, .{})) app.mode = .browse else if (key_value.matches(Key.enter, .{})) {
+                try app.query.set(app.allocator, app.input.value());
+                app.query_scope = .cache;
+                app.mode = .browse;
+                app.focus = .list;
+                try self.reload();
+            } else try app.input.handleKey(app.allocator, key_value, false, 4096);
+            return;
+        }
+        if (key_value.matches('?', .{})) return app.openHelp();
+        if (app.mode == .contacts) {
+            if (key_value.matches('q', .{}) or key_value.matches(Key.escape, .{})) app.mode = .browse else if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{})) app.contacts_selected = @min(app.contacts_selected +| 1, app.contacts.len -| 1) else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{})) app.contacts_selected -|= 1 else app.say(false, "Contacts are synthetic · editing is unavailable in this browser demo", .{});
+            return;
+        }
+        if (key_value.matches('1', .{})) return self.switchAccount(0);
+        if (key_value.matches('2', .{})) return self.switchAccount(1);
+        if (key_value.matches('3', .{})) return self.switchAccount(2);
+        if (key_value.matches('/', .{})) {
+            app.mode = .search;
+            app.previous_mode = .browse;
+            app.input_query_scope = .cache;
+            try app.input.set(app.allocator, "");
+            return;
+        }
+        if (key_value.matches('T', .{}) or key_value.matches('t', .{ .shift = true })) {
+            app.mode = .theme;
+            app.theme_choice = app.ui_preferences.theme;
+            app.dialog_focus.reset(.theme, 0);
+            return;
+        }
+        if (key_value.matches('v', .{})) {
+            app.reader_layout = if (app.reader_layout == .right) .below else .right;
+            return;
+        }
+        if (key_value.matches('a', .{})) {
+            app.mode = .contacts;
+            return;
+        }
+        if (tabDirection(key_value)) |backwards| {
+            app.focus = switch (app.focus) {
+                .navigation => if (backwards) .reader else .list,
+                .list => if (backwards) .navigation else .reader,
+                .reader => if (backwards) .list else .navigation,
+            };
+            return;
+        }
+        if (key_value.matches('h', .{}) or key_value.matches(Key.left, .{})) {
+            app.focus = if (app.focus == .reader) .list else .navigation;
+            return;
+        }
+        if (key_value.matches('l', .{}) or key_value.matches(Key.right, .{})) {
+            app.focus = if (app.focus == .navigation) .list else .reader;
+            return;
+        }
+        if (key_value.matches('q', .{}) or key_value.matches(Key.escape, .{}) or key_value.matches('c', .{ .ctrl = true })) {
+            if (app.expanded) app.expanded = false else if (app.focus != .list) app.focus = .list else if (app.query.value().len > 0) {
+                try app.query.set(app.allocator, "");
+                try self.reload();
+            } else self.notice();
+            return;
+        }
+        if (key_value.matches(Key.enter, .{})) {
+            if (app.focus == .navigation) {
+                if (app.navigation < app.accounts.len) try self.switchAccount(app.navigation) else if (app.navigation < app.accounts.len + folders.len) {
+                    app.folder = app.navigation - app.accounts.len;
+                    app.focus = .list;
+                    try self.reload();
+                } else app.mode = .contacts;
+            } else app.focus = .reader;
+            return;
+        }
+        if (key_value.matches('z', .{})) {
+            app.expanded = !app.expanded;
+            app.focus = .reader;
+            return;
+        }
+        const down = key_value.matches('j', .{}) or key_value.matches(Key.down, .{});
+        const up = key_value.matches('k', .{}) or key_value.matches(Key.up, .{});
+        if (down or up) {
+            if (app.focus == .reader or app.expanded) app.scrollReader(down, 1) else if (app.focus == .navigation) app.navigation = if (down) @min(app.navigation +| 1, app.accounts.len + folders.len) else app.navigation -| 1 else {
+                app.selected = layout.stepMessage(app.messages.len, app.selected, down);
+                try self.preview();
+            }
+            return;
+        }
+        if (key_value.matches('d', .{ .ctrl = true }) or key_value.matches(Key.page_down, .{})) {
+            app.scrollReader(true, @max(app.reader_height / 2, 1));
+            return;
+        }
+        if (key_value.matches('u', .{ .ctrl = true }) or key_value.matches(Key.page_up, .{})) {
+            app.scrollReader(false, @max(app.reader_height / 2, 1));
+            return;
+        }
+        if (key_value.matches('g', .{ .ctrl = true }) or key_value.matches(Key.home, .{})) {
+            if (app.focus == .reader) app.reader_scroll = 0 else {
+                app.selected = 0;
+                try self.preview();
+            }
+            return;
+        }
+        if (key_value.matches('G', .{}) or key_value.matches(Key.end, .{})) {
+            if (app.focus == .reader) app.reader_scroll = app.readerScrollEnd() else {
+                app.selected = app.messages.len -| 1;
+                try self.preview();
+            }
+            return;
+        }
+        app.say(false, "That action is unavailable in the read-only browser demo · ? shows native help", .{});
+    }
+    pub fn mouse(self: *BrowserDemo, event: vaxis.Mouse) !void {
+        if (self.app.mode == .help or self.app.mode == .search) return;
+        if (event.button == .wheel_up or event.button == .wheel_down) {
+            const previous = self.app.focus;
+            if (self.app.mouse_hits.at(event.col, event.row)) |hit| {
+                if (hit.kind == .reader) self.app.focus = .reader;
+            }
+            try self.key(.{ .codepoint = if (event.button == .wheel_up) 'k' else 'j' });
+            self.app.focus = previous;
+            return;
+        }
+        if (event.button != .left or event.type != .press) return;
+        if (self.app.mouse_hits.at(event.col, event.row)) |hit| switch (hit.kind) {
+            .mail => {
+                self.app.selected = hit.index;
+                self.app.focus = .list;
+                try self.preview();
+            },
+            .reader => self.app.focus = .reader,
+            .account => try self.switchAccount(hit.index),
+            .folder => {
+                self.app.folder = hit.index;
+                self.app.focus = .list;
+                try self.reload();
+            },
+            .contacts => self.app.mode = .contacts,
+            .theme_choice => self.app.theme_choice = if (hit.index == 0) .omagma else .follow_omarchy,
+            .theme_action => {
+                if (hit.index != 2) self.app.ui_preferences.theme = self.app.theme_choice;
+                self.app.mode = .browse;
+                self.app.say(false, "Browser demo uses Omagma colors · desktop themes and preference files are unavailable", .{});
+            },
+            else => self.app.say(false, "That action is unavailable in the read-only browser demo", .{}),
+        };
+    }
+};
