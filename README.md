@@ -93,6 +93,16 @@ until `:resume-send`; uncertain submissions are protected from automatic retry.
 [Compose workflow](docs/TERMINAL.md#compose-reply-and-forward) ·
 [Markdown CLI](docs/AGENT-CLI.md#markdown-drafts-and-preview).
 
+An optional `-Dbrowser=true` source build runs the same TUI controller in
+WebAssembly. `omagma server` serves its embedded page, prints a private local
+URL and chooses the next free port when needed. Connect uses existing configured
+accounts; a private one-file credential export also supports static hosting.
+The browser supports reading, contacts, completion, cached search and reviewed
+compose/reply/text-forward workflows. [Build and try the browser](web-demo/README.md)
+· [Supported workflows and limits](web-demo/LIVE-MAIL.md)
+· [Shared controller and platform adapters](docs/BROWSER-ARCHITECTURE.md).
+Ordinary native builds keep their existing dependency selection.
+
 To explore without Google credentials, use the optional fictional-mail demo:
 
 ```sh
