@@ -412,7 +412,13 @@ try {
 
   // The bridge rejects an oversized event before copying it into linear
   // memory. Reset must remain available after that controlled refusal.
-  await text("x".repeat(65537));
+  await call("Emulation.setFocusEmulationEnabled", { enabled: true });
+  await call("Page.bringToFront");
+  await call("Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] });
+  await focus();
+  await evaluate("window.__omagmaTestPasteCount=0;document.addEventListener('paste',()=>window.__omagmaTestPasteCount++,true);navigator.clipboard.writeText('x'.repeat(65537))");
+  await key("V", "KeyV", 10);
+  await until(async () => evaluate("window.__omagmaTestPasteCount===1"), "owned browser did not deliver the oversized clipboard event");
   await until(async () => evaluate("Boolean(window.omagmaDemo.error)"), "oversized browser input was not refused");
   assert.match(await evaluate("window.omagmaDemo.error"), /64 KiB/, "oversized input did not explain its bound");
   await frameAfter(() => click("#demo-reset"));

@@ -61,6 +61,7 @@ let cacheBusy = false;
 let cacheError = '';
 let cacheRevisions = [];
 let deferredFit = false;
+let resizeCover = false;
 let resizeScheduled = false;
 let inputScheduled = false;
 let wasmCols = 0;
@@ -170,11 +171,12 @@ function fitTerminal() {
   const { cols, rows } = boundedSize(proposed.cols, proposed.rows);
   if (activeJob && (cols !== terminal.cols || rows !== terminal.rows)) {
     deferredFit = true;
-    if (!error && ready) { message.hidden = false; messageText.textContent = 'Resizing terminal… waiting for the current request. Ctrl+C cancels a read.'; }
+    if (!error && ready) { resizeCover = true; message.hidden = false; messageText.textContent = 'Resizing terminal… waiting for the current request. Ctrl+C cancels a read.'; }
     return;
   }
   deferredFit = false;
   if (cols !== terminal.cols || rows !== terminal.rows) terminal.resize(cols, rows);
+  if (resizeCover && !error && ready) { resizeCover = false; message.hidden = true; }
   sizeLabel.textContent = `${cols} × ${rows}`;
 }
 
