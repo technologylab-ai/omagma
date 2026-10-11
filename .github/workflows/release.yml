@@ -131,7 +131,7 @@ jobs:
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
             terminal_local_ui terminal_polish_reader terminal_polish_compose \
             terminal_polish_status terminal_timezone terminal_recipient_preview \
-            terminal_editor_notice \
+            terminal_editor_notice terminal_reader_copy terminal_reader_editor \
             terminal_file_dialog terminal_invitations terminal_cli_parity \
             terminal_cli_usage terminal_forward_ux \
             terminal_markdown_mail terminal_markdown_compose \
@@ -204,7 +204,7 @@ jobs:
             terminal_scroll_progress terminal_loading terminal_fetch_wheel \
             terminal_local_ui terminal_polish_reader terminal_polish_compose \
             terminal_polish_status terminal_timezone terminal_recipient_preview \
-            terminal_editor_notice \
+            terminal_editor_notice terminal_reader_copy terminal_reader_editor \
             terminal_file_dialog terminal_invitations terminal_cli_parity \
             terminal_cli_usage terminal_forward_ux \
             terminal_markdown_mail terminal_markdown_compose \
@@ -338,6 +338,8 @@ jobs:
           python3 tests/terminal_macos_features.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-features.json
           python3 tests/terminal_mail_acceptance.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-mail-acceptance.json
           python3 tests/terminal_ux_macos.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-ux.json
+          python3 tests/terminal_reader_copy.py --binary .verification-macos-debug/bin/omagma --output tests/results/macos-debug-reader-copy.json
+          python3 tests/terminal_reader_editor.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-reader-editor.json
           python3 tests/launch_macos.py --binary .verification-macos-debug/bin/omagma
           .verification-macos-debug/bin/omagma probe-keyring
           .verification-macos-debug/bin/auth_probe keyring
@@ -373,6 +375,8 @@ jobs:
           python3 tests/terminal_macos_features.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-features.json
           python3 tests/terminal_mail_acceptance.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --receipt tests/results/macos-safe-mail-acceptance.json
           python3 tests/terminal_ux_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-ux.json
+          python3 tests/terminal_reader_copy.py --binary dist/omagma-macos-${{ matrix.arch }} --output tests/results/macos-safe-reader-copy.json
+          python3 tests/terminal_reader_editor.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-reader-editor.json
           python3 tests/launch_macos.py --binary dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} probe-keyring
       - name: Safe portable Markdown, invitation and command acceptance

@@ -18,6 +18,9 @@ pub const Id = enum {
     manage_labels,
     scope,
     find,
+    copy_message,
+    view_editor,
+    select_text,
     next_unread,
     previous_unread,
     search_history,
@@ -40,6 +43,7 @@ pub const Id = enum {
 };
 pub const Context = struct {
     mail: bool = false,
+    received: bool = false,
     composing: bool = false,
     draft: bool = false,
     search: bool = false,
@@ -52,6 +56,7 @@ pub const Entry = struct {
     detail: []const u8,
     keys: []const u8 = "",
     needs_mail: bool = false,
+    needs_received: bool = false,
     needs_compose: bool = false,
     needs_draft: bool = false,
     needs_search: bool = false,
@@ -60,6 +65,7 @@ pub const Entry = struct {
 
     pub fn available(self: Entry, context: Context) bool {
         return (!self.needs_mail or context.mail) and
+            (!self.needs_received or context.received) and
             (!self.needs_compose or context.composing) and
             (!self.needs_draft or context.draft) and
             (!self.needs_search or context.search) and
@@ -82,6 +88,9 @@ pub const entries = [_]Entry{
     .{ .id = .manage_labels, .name = "Manage labels", .detail = "Create, rename, color and delete custom labels", .keys = ":labels" },
     .{ .id = .scope, .name = "Message or conversation", .detail = "Choose what mail actions affect", .keys = ":scope", .needs_mail = true },
     .{ .id = .find, .name = "Find in message", .detail = "Highlight and jump through visible text", .keys = ":find", .needs_mail = true },
+    .{ .id = .select_text, .name = "Select received text", .detail = "Visual character or line selection of this message's rendered body", .keys = "V", .needs_received = true },
+    .{ .id = .copy_message, .name = "Copy message", .detail = "Copy this message's envelope and full plaintext body", .keys = ":copy-message", .needs_received = true },
+    .{ .id = .view_editor, .name = "View in editor", .detail = "Open a private received-mail copy; edits never change mail", .keys = "e / :view-editor", .needs_received = true },
     .{ .id = .next_unread, .name = "Next unread", .detail = "Find the next unread cached message", .keys = ":next-unread" },
     .{ .id = .previous_unread, .name = "Previous unread", .detail = "Find the previous unread cached message", .keys = ":previous-unread" },
     .{ .id = .search_history, .name = "Search history", .detail = "Recent account-specific cache and server queries", .keys = ":search-history" },
@@ -127,4 +136,11 @@ test "action palette: queries are literal and writes require a matching context"
     try std.testing.expectEqual(@as(usize, 0), collect("sender", .{}).len);
     try std.testing.expectEqual(@as(usize, 1), collect("Choose sender", .{ .composing = true }).len);
     try std.testing.expectEqual(@as(usize, 0), collect("; rm", .{ .mail = true, .writable = true }).len);
+}
+
+test "action palette: received copy and editor are hidden until a current body is loaded" {
+    try std.testing.expectEqual(@as(usize, 0), collect("Copy message", .{ .mail = true }).len);
+    try std.testing.expectEqual(@as(usize, 0), collect("View in editor", .{ .mail = true }).len);
+    try std.testing.expectEqual(@as(usize, 1), collect("Copy message", .{ .mail = true, .received = true }).len);
+    try std.testing.expectEqual(@as(usize, 1), collect("View in editor", .{ .mail = true, .received = true }).len);
 }

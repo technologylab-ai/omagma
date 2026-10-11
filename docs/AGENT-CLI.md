@@ -580,6 +580,9 @@ JSONL carries every structured operation, including multi-ID arrays, local raw
 draft recovery and contact objects. One-shot calls accept those objects through
 `--draft-file`/`--contact-file`; do not invent extra flags for object fields.
 The CLI does not launch the TUI's editor, autocomplete or styled renderer.
+For an agent handoff, `mail.read` already returns decoded `bodyText`; the TUI
+also offers `:copy-message` for a focused message, visual/mouse selection for excerpts,
+and `e` to open a disposable received-message snapshot in the user's editor.
 
 Operation `--help` gives its applicable flags, defaults/effects and a shell
 example. `--help-all` adds common resource/fixture options and the complete

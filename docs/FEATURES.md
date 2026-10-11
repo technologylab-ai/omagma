@@ -47,6 +47,9 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - Reader beside or below the list, expanded reading, Vim-oriented keys and
   mouse navigation, with a choice of Omagma volcano-orange colors or the
   current Omarchy palette.
+- Copy passages with mouse dragging or `V` visual selection and `y`, using
+  the active theme's highlights. Open received mail in `$EDITOR` as a private
+  disposable text copy, or explicitly copy the whole focused message.
 - Cache-first startup and usable cached mail during refresh; bounded message
   count/byte retention evicts the oldest mail tail.
 - An optional Linux read-only five-minute cache timer keeps mail ready while the

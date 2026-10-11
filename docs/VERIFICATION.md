@@ -122,6 +122,16 @@ When diagnosing a user report, distinguish cached reads from the fresh source
 read used to preserve formatting, and verify the executable actually running;
 repairing a cache with a candidate CLI does not replace a running older TUI.
 
+## Received-message copy acceptance
+
+Received-message copy/editor acceptance uses `tests/terminal_reader_copy.py`
+and `tests/terminal_reader_editor.py` with an
+owned PTY and fictional mail. Capture OSC 52 on its private master, rather than
+writing to a real desktop clipboard. Check exact excerpts, Unicode and wrapped
+lines, theme/monochrome styles, source changes, resize and editor return. The
+received editor's temporary files must disappear while cached mail and drafts
+remain unchanged; existing compose editor readback still needs its own check.
+
 ## Release resource qualification
 
 Run these Safe workloads when qualifying a release or investigating a resource

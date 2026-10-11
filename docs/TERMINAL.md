@@ -41,7 +41,7 @@ After the cached tail, ordinary forward movement can fetch one older Gmail page.
 
 Enter opens the full thread. `h`/`l` or Tab changes pane, `v` moves the reader beside or below the list, and `z` expands it. With the reader focused, `J`/`K` moves to adjacent mail across windows while lowercase `j`/`k` scrolls the body. `{`/`}` chooses a thread message, `t` or a click folds its body, and `Q`/`S` folds quoted history/a standard signature. The header stays compact in short panes and shows reading position. These controls do not change stored mail.
 
-Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Use your terminal's selection modifier for text selection, or `--no-mouse` to retain ordinary terminal mouse behavior.
+Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Drag across the received message body to select text, then press `y` or choose **Copy**. Your terminal's selection modifier, or `--no-mouse`, also retains ordinary terminal text selection.
 
 Unread subjects are bold and marked `●`; read subjects use normal weight.
 Stars appear as `⭐` on the sender row, independently of unread or bulk
@@ -61,6 +61,34 @@ Ctrl+P on the mailbox screen, or `:actions`, opens a searchable action palette
 for this account and view. Type an action name, use Ctrl+N/P or the result list
 to choose it, and deliberately activate Run/Enter. Tab/Shift+Tab also reaches
 the controls. Opening, filtering and Back do not perform an action.
+
+## Copying received mail
+
+Focus the reader with `l` or Tab, then press `V` to start character selection.
+Press `V` again while selecting to switch between character and line selection. Use `h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$`
+and `gg`/`G` to extend it; `y` copies, and Escape clears the selection.
+`o` swaps the two selection ends; Ctrl+D/U moves the caret half a page.
+The selected text is highlighted. Mouse dragging uses the same explicit
+`y`/Copy action; Tab and Enter can also reach the Copy and Cancel controls.
+Highlighting follows the active theme's selection and text colors, with its
+accent marking the caret. Monochrome mode uses reverse video.
+
+Selection copies the displayed message body, with wrapped lines rejoined,
+without pane borders, padding or action hints. Folded text stays excluded;
+unfold quotes or signatures first if you want to select them. To copy the
+whole focused message with its envelope, use `:copy-message` or the
+**Copy message** action in Ctrl+P. This includes the decoded body and complete URLs.
+
+`e` or `:view-editor` opens the focused received message in `$EDITOR`, then
+`$VISUAL`, then an available nvim/vi/nano. The editor receives a private
+temporary `message.txt` with its envelope and decoded body. You can select,
+copy or save a separate file there. Closing the editor returns to the TUI
+and removes the temporary snapshot; changes never update the received mail
+or create a draft. In the composer, `e` continues to edit the draft body.
+
+Copying uses the terminal clipboard protocol (OSC 52), including over SSH.
+The terminal must allow clipboard writes; Omagma does not read the clipboard.
+Received-message editor viewing works independently of clipboard support.
 
 ## Software updates
 
@@ -417,6 +445,10 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | :next-unread / :previous-unread | Adjacent unread cached mail in the current view |
 | :search-history / :saved-searches / :save-search NAME | Reuse or save account-specific queries |
 | v / z | Reader layout / expand |
+| V in the reader | Start character selection; repeat to switch character/line selection |
+| y / Escape in visual selection | Copy / clear selection |
+| :copy-message / Ctrl+P Copy message | Copy focused received message with its envelope |
+| e / :view-editor in the reader | Open a temporary received-message copy in the external editor |
 | J/K | Reader: adjacent mail |
 | {/}, t, Q/S | Reader: thread card, fold body, quotes/signature |
 | c / r / R | Compose / reply / reply-all |

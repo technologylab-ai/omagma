@@ -39,7 +39,7 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 ## Terminal and agents
 
-**The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides separate accounts, full mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, local drafts, replies/forwarding, contacts, custom labels, attachments, mailbox changes and invitation replies. `$EDITOR` takes over the terminal and returns to the draft; tmux is not required. Calendar views, permanent mail deletion and contact deletion remain outside the current scope. [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) describes their interface differences.
+**The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides separate accounts, full mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, local drafts, replies/forwarding, contacts, custom labels, attachments, mailbox changes and invitation replies. Copy received text by dragging or using Vim visual selection, or open the message in `$EDITOR`. The editor takes over the terminal and returns to the TUI; compose edits return to the draft, while received-message snapshots are discarded. No tmux is required. Calendar views, permanent mail deletion and contact deletion remain outside the current scope. [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) describes their interface differences.
 
 ![Omagma TUI with fictional mail, compact links and a new-mail card](docs/images/omagma-tui-arrivals.png)
 

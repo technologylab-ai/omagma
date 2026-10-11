@@ -32,6 +32,7 @@ const invitation = @import("invitation.zig");
 const action_palette = @import("actions.zig");
 const edit_history = @import("edit_history.zig");
 const reader_find = @import("reader_find.zig");
+const reader_selection = @import("reader_selection.zig");
 const composer_hints = @import("composer_hints.zig");
 const updates = @import("updates.zig");
 const label_selection = @import("label_selection.zig");
@@ -68,6 +69,9 @@ const ContactsState = enum { loading, cached, current, denied, failed, busy };
 const QueryScope = enum { cache, server };
 const ScrollBoundary = struct { id: []const u8, received_at: i64 = 0 };
 const ReaderOverlay = enum { none, links, attachments, save_attachment, open_attachment };
+const ReaderCopyRequest = struct { mode: reader_selection.Mode, row: usize, column: usize, end_row: ?usize = null, end_column: usize = 0 };
+const ReaderDragAnchor = struct { card: usize, row: usize, column: usize };
+const ReaderBodyBounds = struct { start: usize, end: usize };
 const StatusKind = enum { view, failure, action, unknown };
 const StatusOwner = struct {
     mode: Mode = .browse,
@@ -280,6 +284,13 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Q / S", .action = "Fold quoted history or a standard signature" },
     .{ .keys = "L / B", .action = "Choose a URL or received attachment" },
     .{ .keys = "j / k in the reader", .action = "Scroll the current message" },
+    .{ .keys = "V in the reader", .action = "Select received body text; V again toggles character and whole-line Visual mode" },
+    .{ .keys = "h/j/k/l · w/b/e · 0/$ · gg/G in Visual", .action = "Extend a grapheme-safe selection; Ctrl+U/D moves half a page; o swaps its ends" },
+    .{ .keys = "y · Tab/Shift+Tab · Enter in Visual", .action = "Copy selected text or reach Copy/Cancel controls; mouse drag selects, copying stays explicit" },
+    .{ .keys = "Esc / Ctrl+C in Visual", .action = "Cancel text selection; mail editing/operator keys stay paused; Ctrl+V block mode is unavailable" },
+    .{ .keys = "e / :view-editor in the reader", .action = "View a private received-mail copy with $EDITOR; saved edits are discarded, mail is unchanged" },
+    .{ .keys = ":copy-message · Ctrl+P Copy message", .action = "Explicitly copy this message's decoded envelope and full plaintext body to the terminal clipboard" },
+    .{ .action = "Reader text selection excludes headers, UI controls, pane borders and other messages. Normal v still changes reader layout." },
     .{ .keys = "v", .action = "Place the reader on the right or below" },
     .{ .keys = "z", .action = "Expand or shrink the reader" },
     .{ .keys = "o", .action = "Open mail in this account's browser profile" },
@@ -830,6 +841,28 @@ const App = struct {
     reader_card_pinned: bool = false,
     // Find is pinned to one account/message; ranges use rendered body rows.
     reader_finder: reader_find.Model = .{},
+    reader_copy: reader_selection.Model = .{},
+    reader_copy_account: @import("../bounded.zig").Text(254) = .{},
+    reader_copy_message: @import("../bounded.zig").Text(128) = .{},
+    reader_copy_source: ?[32]u8 = null,
+    reader_copy_generation: u64 = 0,
+    reader_copy_refresh: bool = false,
+    reader_copy_height: u16 = 0,
+    reader_copy_quotes: bool = false,
+    reader_copy_signatures: bool = false,
+    reader_copy_collect: bool = false,
+    reader_copy_scope: bool = false,
+    reader_copy_paint: bool = false,
+    reader_copy_error: ?anyerror = null,
+    reader_copy_request: ?ReaderCopyRequest = null,
+    reader_copy_mark: ?reader_selection.SelectionMark = null,
+    reader_copy_rect: ?layout.Rect = null,
+    reader_body_bounds: [types.Limits.page]?ReaderBodyBounds = @splat(null),
+    reader_drag_anchor: ?ReaderDragAnchor = null,
+    reader_dragging: bool = false,
+    reader_copy_focus: u2 = 0,
+    reader_copy_g_pending: bool = false,
+    reader_copy_test_value: Field = .{},
     reader_find_query: @import("../bounded.zig").Text(256) = .{},
     reader_find_active: bool = false,
     reader_find_account: @import("../bounded.zig").Text(254) = .{},
@@ -1168,6 +1201,8 @@ const App = struct {
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        self.reader_copy.deinit(self.allocator);
+        self.reader_copy_test_value.deinit(self.allocator);
         self.closeUx();
         self.ux_query.deinit(self.allocator);
         self.ux_account.deinit(self.allocator);
@@ -1323,7 +1358,7 @@ const App = struct {
         return self.ordinaryMailbox() and self.new_mail.visible();
     }
     fn ordinaryMailbox(self: *const App) bool {
-        return self.mode == .browse and !self.update_open and self.ux_overlay == .none and !self.compose_active and !self.grace_active and !self.compose_choice and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0;
+        return self.mode == .browse and !self.readerCopyVisible() and !self.update_open and self.ux_overlay == .none and !self.compose_active and !self.grace_active and !self.compose_choice and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0;
     }
     fn updateVisible(self: *const App) bool {
         return self.update_loaded and self.ordinaryMailbox() and updates.visible(&self.update_snapshot, @import("build_options").version);
@@ -1636,6 +1671,9 @@ const App = struct {
         return count;
     }
     fn replaceLabels(self: *App, response: []const u8) !void {
+        self.reader_drag_anchor = null;
+        self.reader_dragging = false;
+        if (self.readerCopyVisible()) self.reader_copy_refresh = true;
         if (self.label_arena) |*arena| arena.deinit();
         self.labels = &.{};
         self.label_arena = .init(self.allocator);
@@ -2639,6 +2677,20 @@ const App = struct {
         return key;
     }
     fn onReaderCommand(self: *App, command: []const u8) !bool {
+        if (same(command, "view-editor")) {
+            self.viewReaderEditor() catch |err| switch (err) {
+                error.MessageRequired, error.ReaderMessageChanging => self.say(false, "Current message is still loading · wait for this preview", .{}),
+                else => return err,
+            };
+            return true;
+        }
+        if (same(command, "copy-message")) {
+            self.copyReaderMessage() catch |err| switch (err) {
+                error.MessageRequired, error.ReaderMessageChanging => self.say(false, "Current message is still loading · wait for this preview", .{}),
+                else => return err,
+            };
+            return true;
+        }
         if (try self.onUxCommand(command)) return true;
         if (same(command, "labels")) {
             if (self.mode != .browse and !(self.mode == .command and self.previous_mode == .browse)) return error.NotMailbox;
@@ -2747,7 +2799,8 @@ const App = struct {
     }
     fn openActions(self: *App) !void {
         const composing = self.mode == .compose or (self.mode == .command and self.previous_mode == .compose);
-        const context: action_palette.Context = .{ .mail = !composing and !self.drafts_list and self.readerReplyId().len > 0, .composing = composing, .draft = composing or self.drafts_list, .search = self.query.value().len > 0, .writable = self.canManageLabels(), .contacts_write = self.hasCapability("contacts-write") };
+        const received = !composing and !self.drafts_list and self.thread.len > 0 and self.reader_card < self.thread.len and same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId());
+        const context: action_palette.Context = .{ .received = received, .mail = !composing and !self.drafts_list and self.readerReplyId().len > 0, .composing = composing, .draft = composing or self.drafts_list, .search = self.query.value().len > 0, .writable = self.canManageLabels(), .contacts_write = self.hasCapability("contacts-write") };
         try self.beginUx(.actions, " Actions ");
         for (action_palette.entries, 0..) |entry, index| {
             if (!entry.available(context) or (composing and (entry.id == .compose or entry.id == .theme))) continue;
@@ -3057,6 +3110,9 @@ const App = struct {
             .add_contact => try self.addCurrentSender(),
             .save_all => try self.openSaveAll(null),
             .find => try self.beginUx(.find, " Find in message "),
+            .copy_message => try self.copyReaderMessage(),
+            .view_editor => try self.viewReaderEditor(),
+            .select_text => try self.requestReaderCopy(.character, self.reader_scroll, 0),
             .next_unread => try self.navigateUnread(true),
             .previous_unread => try self.navigateUnread(false),
             .resume_send => {
@@ -3631,6 +3687,10 @@ const App = struct {
         self.reader_message.cursor = 0;
     }
     fn clearMarkup(self: *App) void {
+        self.reader_drag_anchor = null;
+        self.reader_dragging = false;
+        self.reader_copy_generation +%= 1;
+        if (self.readerCopyVisible()) self.reader_copy_refresh = true;
         // Replacing a cached body is a layout invalidation, not a new search
         // target. readerDraw reconciles the pinned identity after replacement.
         if (self.reader_find_active) self.reader_find_refresh = true;
@@ -6969,6 +7029,7 @@ const App = struct {
         self.leaveContacts();
     }
     fn onMouse(self: *App, mouse: vaxis.Mouse) !void {
+        if (try self.onReaderCopyMouse(mouse)) return;
         if (self.grace_active) {
             if (!self.options.no_mouse and mouse.type == .press and mouse.button == .left and !mouse.mods.shift and !mouse.mods.alt and !mouse.mods.ctrl) if (self.grace_rect) |rect| if (mouse.col >= rect.x and mouse.col < rect.x + rect.width and mouse.row >= rect.y and mouse.row < rect.y + rect.height) {
                 if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
@@ -7527,6 +7588,7 @@ const App = struct {
     }
     fn onKey(self: *App, original_key: Key) !void {
         self.acknowledgeNewMail();
+        if (!self.paste and try self.onReaderCopyKey(original_key)) return;
         self.action_notice = false;
         var key = original_key;
         if (self.update_open) {
@@ -8178,7 +8240,8 @@ const App = struct {
         var layout_options = options;
         layout_options.base_row = base_row;
         const find_here = self.reader_find_scope and (self.reader_find_text or tone == .subject);
-        if (self.reader_find_collect and find_here) self.scanReaderFlow(clean, win, layout_options);
+        const copy_here = self.reader_copy_scope and self.reader_find_text;
+        if ((self.reader_find_collect and find_here) or (self.reader_copy_collect and copy_here)) self.scanReaderFlow(clean, win, layout_options);
         var iterator = text_layout.Iterator.init(clean, win.width, win.screen.width_method, layout_options);
         var link_index: usize = 0;
         var shown_row = base_row;
@@ -8190,7 +8253,7 @@ const App = struct {
             }
             const glyph_start = shown_byte;
             shown_byte += glyph.text.len;
-            if (self.reader_find_collect) continue;
+            if (self.reader_find_collect or self.reader_copy_collect) continue;
             while (link_index < link_ranges.len and glyph.byte_offset >= link_ranges[link_index].end) link_index += 1;
             while (next_match) |match_at| {
                 if (glyph.byte_offset < match_at + highlight.len) break;
@@ -8209,6 +8272,7 @@ const App = struct {
                 }
             };
             if (self.reader_find_paint and find_here and !glyph.marker) cell_style = self.readerFindStyle(cell_style, glyph.position.row, glyph_start, shown_byte);
+            if (copy_here and !glyph.marker) cell_style = self.readerCopyStyle(cell_style, glyph.position.row, glyph_start, shown_byte);
             win.writeCell(glyph.position.column, @intCast(glyph.position.row - offset), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = cell_style });
         }
         return iterator.position.row + 1;
@@ -8347,6 +8411,326 @@ const App = struct {
         _ = self.reader_finder.next(forward);
         self.reader_find_reveal = true;
     }
+    fn readerCopyVisible(self: *const App) bool {
+        return self.reader_copy.active() or self.reader_copy_request != null or self.reader_copy_mark != null;
+    }
+    fn readerCopyTarget(self: *App) !Value {
+        if (self.mode != .browse and !(self.mode == .command and self.previous_mode == .browse)) return error.NotMailbox;
+        if (self.compose_active or self.drafts_list or self.thread.len == 0 or self.reader_card >= self.thread.len) return error.MessageRequired;
+        if (!same(self.reader_account.value(), self.account()) or !same(self.reader_message.value(), self.messageId())) return error.ReaderMessageChanging;
+        return self.thread[self.reader_card];
+    }
+    fn readerCopyDigest(message: Value) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(text(get(message, "bodyText")));
+        hash.update("\x00");
+        hash.update(text(get(message, "bodyHtml")));
+        var result: [32]u8 = undefined;
+        hash.final(&result);
+        return result;
+    }
+    fn clearReaderCopy(self: *App) void {
+        self.reader_copy.cancel();
+        self.reader_copy_request = null;
+        self.reader_copy_mark = null;
+        self.reader_copy_account.wipe();
+        self.reader_copy_message.wipe();
+        self.reader_copy_source = null;
+        self.reader_copy_refresh = false;
+        self.reader_copy_focus = 0;
+        self.reader_copy_g_pending = false;
+        self.reader_drag_anchor = null;
+        self.reader_dragging = false;
+    }
+    fn readerCopyChanged(self: *App) void {
+        const visible = self.readerCopyVisible();
+        self.clearReaderCopy();
+        if (visible) self.say(false, "Selection cleared · message or layout changed", .{});
+    }
+    fn reconcileReaderCopy(self: *App) void {
+        if (!self.readerCopyVisible()) return;
+        const message = self.readerCopyTarget() catch {
+            self.readerCopyChanged();
+            return;
+        };
+        if (!same(self.reader_copy_account.slice(), self.account()) or !same(self.reader_copy_message.slice(), text(get(message, "id"))) or self.reader_copy_quotes != self.fold_quotes or self.reader_copy_signatures != self.fold_signatures) {
+            self.readerCopyChanged();
+            return;
+        }
+        if (self.reader_copy_refresh) {
+            const digest = readerCopyDigest(message);
+            if (self.reader_copy_source == null or !std.mem.eql(u8, &digest, &self.reader_copy_source.?)) {
+                self.readerCopyChanged();
+                return;
+            }
+            if (self.reader_copy.active()) self.reader_copy_mark = self.reader_copy.mark();
+            self.reader_copy.ready = false;
+            self.reader_copy_refresh = false;
+        }
+    }
+    fn requestReaderCopy(self: *App, mode: reader_selection.Mode, row: usize, column: usize) !void {
+        const message = try self.readerCopyTarget();
+        self.clearReaderCopy();
+        try self.reader_copy_account.set(self.account());
+        try self.reader_copy_message.set(text(get(message, "id")));
+        self.reader_copy_source = readerCopyDigest(message);
+        self.reader_copy_quotes = self.fold_quotes;
+        self.reader_copy_signatures = self.fold_signatures;
+        self.reader_copy.reset(self.allocator, self.reader_copy_generation, 0, .unicode);
+        self.reader_copy_request = .{ .mode = mode, .row = row, .column = column };
+        self.focus = .reader;
+        self.reader_cards[self.reader_card] = true;
+        self.reader_copy_focus = 0;
+    }
+    fn revealReaderCopyCursor(self: *App) void {
+        const row = self.reader_copy.cursorRow() orelse return;
+        if (row < self.reader_scroll) self.reader_scroll = row else if (row - self.reader_scroll >= self.reader_height) self.reader_scroll = row + 1 - @max(self.reader_height, 1);
+        self.reader_anchor_card = false;
+        self.reader_card_pinned = true;
+    }
+    fn emitReaderCopy(self: *App, value: []const u8) !void {
+        if (value.len == 0) return error.NoTextSelected;
+        if (value.len > types.Limits.request_bytes) return error.ClipboardTextTooLarge;
+        if (@import("builtin").is_test) {
+            try self.reader_copy_test_value.set(self.allocator, value);
+        } else {
+            // The real terminal owns clipboard access. In fixture PTYs this
+            // escape is captured by the test's master, never a desktop viewer.
+            try self.vx.copyToSystemClipboard(self.tty.writer(), value, self.allocator);
+            try self.tty.writer().flush();
+        }
+        self.sayAction(false, "Sent {s} to terminal clipboard · terminal support applies", .{try attachmentSizeLabel(self.frame.allocator(), value.len)});
+    }
+    fn copyReaderSelection(self: *App) !void {
+        self.reconcileReaderCopy();
+        if (!self.reader_copy.active() or self.reader_copy_mark != null) return error.NoTextSelected;
+        const value = try self.reader_copy.copy(self.frame.allocator());
+        try self.emitReaderCopy(value);
+        self.clearReaderCopy();
+    }
+    fn readerSnapshot(self: *App) ![]const u8 {
+        const message = try self.readerCopyTarget();
+        const from = get(message, "from");
+        const to = try Compose.mailboxes(self.frame.allocator(), get(message, "to"));
+        const cc = try Compose.mailboxes(self.frame.allocator(), get(message, "cc"));
+        const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
+        const body = text(get(message, "bodyText"));
+        if (body.len > types.Limits.body_bytes) return error.BodyTooLarge;
+        const raw = try std.fmt.allocPrint(self.frame.allocator(), "From: {s} <{s}>\nTo: {s}\n{s}{s}Subject: {s}\nDate: {s}\n\n{s}", .{ text(get(from, "name")), text(get(from, "address")), to, if (cc.len > 0) @as([]const u8, "Cc: ") else "", if (cc.len > 0) try std.fmt.allocPrint(self.frame.allocator(), "{s}\n", .{cc}) else "", text(get(message, "subject")), stamp, body });
+        if (raw.len > types.Limits.request_bytes) return error.MessageTooLarge;
+        return safe(self.frame.allocator(), raw, true);
+    }
+    fn copyReaderMessage(self: *App) !void {
+        const snapshot = try self.readerSnapshot();
+        self.clearReaderCopy();
+        try self.emitReaderCopy(snapshot);
+    }
+    fn viewReaderEditor(self: *App) anyerror!void {
+        if (@import("builtin").is_test) return error.EditorUnavailableInScreenTest;
+        const snapshot = try self.readerSnapshot();
+        self.clearReaderCopy();
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        self.loop.stop();
+        const writer = self.tty.writer();
+        try self.vx.resetState(writer);
+        try writer.flush();
+        try std.posix.tcsetattr(self.tty.fd.handle, .FLUSH, self.tty.termios);
+        const result = editor.view(self.io, self.allocator, self.environ, snapshot, self.tty.fd.handle, &self.cancellation);
+        _ = try vaxis.Tty.makeRaw(self.tty.fd.handle);
+        try self.vx.enterAltScreen(writer);
+        try self.vx.enableDetectedFeatures(writer);
+        try setMouseReporting(self.vx, writer, !self.options.no_mouse);
+        if (self.tty.getWinsize()) |size| try self.resize(size) else |_| {}
+        self.vx.queueRefresh();
+        try self.loop.start();
+        const exit_code = result catch |err| {
+            self.sayFailure("Editor view closed · received mail unchanged", @errorName(err));
+            return;
+        };
+        if (exit_code == 0) self.sayAction(false, "Editor view closed · received mail unchanged", .{}) else self.sayAction(true, "Editor exited with {d} · received mail unchanged", .{exit_code});
+    }
+    fn onReaderCopyKey(self: *App, key: Key) !bool {
+        if (self.mode != .browse or self.ux_overlay != .none or self.reader_overlay != .none or self.label_picker or self.compose_choice or self.update_open or self.grace_active) return false;
+        self.reconcileReaderCopy();
+        if (self.readerCopyVisible()) {
+            if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+                self.clearReaderCopy();
+                return true;
+            }
+            if (key.matches('l', .{ .ctrl = true })) return false; // Theme-only redraw retains source pins.
+            if (key.matches('v', .{})) {
+                self.clearReaderCopy();
+                return false; // Normal v remains the layout shortcut.
+            }
+            if (self.reader_copy_request != null or !self.reader_copy.active()) return true;
+            if (tabDirection(key)) |backwards| {
+                self.reader_copy_focus = @intCast((@as(usize, self.reader_copy_focus) + if (backwards) @as(usize, 2) else 1) % 3);
+                return true;
+            }
+            if (key.matches(Key.enter, .{})) {
+                if (self.reader_copy_focus == 1) try self.copyReaderSelection() else if (self.reader_copy_focus == 2) self.clearReaderCopy();
+                return true;
+            }
+            if (key.matches('y', .{})) {
+                try self.copyReaderSelection();
+                return true;
+            }
+            if (key.matches('V', .{}) or key.matches('v', .{ .shift = true })) {
+                self.reader_copy.mode = if (self.reader_copy.mode == .character) .line else .character;
+                self.reader_copy_focus = 0;
+                return true;
+            }
+            if (key.matches('v', .{ .ctrl = true })) {
+                self.say(false, "Block selection is not supported · V toggles character/line", .{});
+                return true;
+            }
+            if (key.matches('o', .{})) {
+                self.reader_copy.swapEnds();
+                self.reader_copy_focus = 0;
+                self.revealReaderCopyCursor();
+                return true;
+            }
+            if (key.matches('d', .{ .ctrl = true }) or key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_down, .{}) or key.matches(Key.page_up, .{})) {
+                const down = key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{});
+                const amount = @max(self.reader_height / @as(usize, if (key.mods.ctrl) 2 else 1), 1);
+                for (0..amount) |_| _ = self.reader_copy.move(if (down) .down else .up);
+                self.reader_copy_focus = 0;
+                self.revealReaderCopyCursor();
+                return true;
+            }
+            if (key.matches('g', .{})) {
+                if (self.reader_copy_g_pending) {
+                    _ = self.reader_copy.move(.first);
+                    self.reader_copy_g_pending = false;
+                    self.revealReaderCopyCursor();
+                } else self.reader_copy_g_pending = true;
+                return true;
+            }
+            self.reader_copy_g_pending = false;
+            const motion: ?reader_selection.Motion = if (key.matches('h', .{}) or key.matches(Key.left, .{})) .left else if (key.matches('l', .{}) or key.matches(Key.right, .{})) .right else if (key.matches('j', .{}) or key.matches(Key.down, .{})) .down else if (key.matches('k', .{}) or key.matches(Key.up, .{})) .up else if (key.matches('w', .{})) .word_forward else if (key.matches('b', .{})) .word_backward else if (key.matches('e', .{})) .word_end else if (key.matches('0', .{}) or key.matches(Key.home, .{})) .line_start else if (key.matches('$', .{})) .line_end else if (key.matches('G', .{}) or key.matches('g', .{ .shift = true }) or key.matches(Key.end, .{})) .last else null;
+            if (motion) |motion_value| {
+                _ = self.reader_copy.move(motion_value);
+                self.reader_copy_focus = 0;
+                self.revealReaderCopyCursor();
+                return true;
+            }
+            // Vim operator letters must never become mail mutations or open
+            // a composer/browser. Explicit view/navigation actions can leave.
+            if (key.matches('J', .{}) or key.matches('K', .{}) or key.matches('{', .{}) or key.matches('}', .{}) or key.matches('Q', .{}) or key.matches('S', .{}) or key.matches('t', .{}) or key.matches('L', .{}) or key.matches('B', .{}) or key.matches(':', .{}) or key.matches('?', .{}) or key.matches('z', .{}) or key.matches('f', .{ .ctrl = true }) or key.matches('r', .{ .ctrl = true }) or key.matches('1', .{}) or key.matches('2', .{}) or key.matches('3', .{})) {
+                self.clearReaderCopy();
+                return false;
+            }
+            self.say(false, "Visual selection · y Copy · Esc Cancel · mail actions are paused", .{});
+            return true;
+        }
+        if (self.focus != .reader and !self.expanded) return false;
+        if (key.matches('V', .{}) or key.matches('v', .{ .shift = true })) {
+            self.requestReaderCopy(.character, self.reader_scroll, 0) catch |err| switch (err) {
+                error.MessageRequired, error.ReaderMessageChanging => self.say(false, "Current message is still loading · wait for this preview", .{}),
+                else => return err,
+            };
+            return true;
+        }
+        if (key.matches('e', .{})) {
+            self.viewReaderEditor() catch |err| switch (err) {
+                error.MessageRequired, error.ReaderMessageChanging => self.say(false, "Current message is still loading · wait for this preview", .{}),
+                else => return err,
+            };
+            return true;
+        }
+        if (key.matches('y', .{})) {
+            self.say(false, "V selects text · y copies a selection · :copy-message copies the current mail", .{});
+            return true;
+        }
+        return false;
+    }
+    fn readerCopyStyle(self: *const App, original: vaxis.Style, row: usize, byte_start: usize, byte_end: usize) vaxis.Style {
+        if (!self.reader_copy_paint or !self.reader_copy_scope) return original;
+        const selected = self.reader_copy.range(row) orelse return original;
+        if (byte_start >= selected.end or byte_end <= selected.start) return original;
+        var style_in = original;
+        const cursor_row = self.reader_copy.cursorRow();
+        const cursor_line = if (self.reader_copy.active()) self.reader_copy.lines.items[self.reader_copy.cursor.line] else return original;
+        const cursor = cursor_row != null and cursor_row.? == row and byte_start <= cursor_line.byte_base + self.reader_copy.cursor.byte and byte_end > cursor_line.byte_base + self.reader_copy.cursor.byte;
+        if (self.mono) {
+            style_in.reverse = true;
+            if (cursor) {
+                style_in.bold = true;
+                style_in.ul_style = .single;
+            }
+        } else {
+            style_in.bg = .{ .rgb = if (cursor) self.palette.accent else self.palette.selection };
+            style_in.fg = .{ .rgb = if (cursor) self.palette.background else self.palette.foreground };
+        }
+        return style_in;
+    }
+    fn readerCopyBar(self: *App, outer: vaxis.Window) !void {
+        if (!self.readerCopyVisible() or outer.height == 0) return;
+        const bar = outer.child(.{ .y_off = outer.height - 1, .height = 1 });
+        bar.fill(.{ .style = self.style(.text) });
+        const title = if (self.reader_copy.mode == .line) "V-LINE" else "VISUAL";
+        const controls: u16 = if (bar.width >= 28) 25 else 18;
+        const title_width = bar.width -| controls;
+        if (title_width > 0) try self.line(bar.child(.{ .width = title_width }), 0, title, .accent);
+        const x = try self.actionButton(bar, 0, title_width, if (bar.width >= 28) "[Copy y]" else "[y Copy]", self.reader_copy_focus == 1, self.reader_copy.active(), .dialog_action, 601);
+        _ = try self.actionButton(bar, 0, x, if (bar.width >= 28) "[Cancel Esc]" else "[Esc]", self.reader_copy_focus == 2, true, .dialog_action, 602);
+    }
+    fn onReaderCopyMouse(self: *App, mouse: vaxis.Mouse) !bool {
+        if (self.options.no_mouse or mouse.mods.shift or mouse.mods.alt or mouse.mods.ctrl or self.mode != .browse or self.ux_overlay != .none or self.reader_overlay != .none or self.label_picker or self.compose_choice or self.update_open or self.grace_active) return false;
+        self.reconcileReaderCopy();
+        if (mouse.type == .press and mouse.button == .left) {
+            if (self.reader_copy.active()) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| if (hit.kind == .dialog_action and (hit.index == 601 or hit.index == 602)) {
+                self.reader_copy_focus = if (hit.index == 601) 1 else 2;
+                if (hit.index == 601) try self.copyReaderSelection() else self.clearReaderCopy();
+                return true;
+            };
+            if (self.reader_copy.active()) {
+                const hit = self.mouse_hits.at(mouse.col, mouse.row);
+                const body_click = if (hit) |value| value.kind == .reader else false;
+                self.clearReaderCopy();
+                return body_click;
+            }
+            if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| if (hit.kind != .reader) return false;
+            const rect = self.reader_copy_rect orelse return false;
+            if (mouse.col < rect.x or mouse.col >= rect.x + rect.width or mouse.row < rect.y or mouse.row >= rect.y + rect.height) return false;
+            const logical_row = self.reader_scroll + @as(usize, @intCast(mouse.row - @as(i16, @intCast(rect.y))));
+            for (self.reader_body_bounds[0..self.thread.len], 0..) |bounds, card| if (bounds) |body| if (logical_row >= body.start and logical_row < body.end) {
+                self.reader_drag_anchor = .{ .card = card, .row = logical_row, .column = @intCast(mouse.col - @as(i16, @intCast(rect.x))) };
+                return false; // A plain click keeps its existing reader focus action.
+            };
+            return false;
+        }
+        if ((mouse.type == .drag or mouse.type == .motion) and mouse.button == .left) {
+            const anchor = self.reader_drag_anchor orelse return false;
+            const rect = self.reader_copy_rect orelse return false;
+            const col: usize = @intCast(std.math.clamp(mouse.col - @as(i16, @intCast(rect.x)), 0, @as(i16, @intCast(rect.width -| 1))));
+            const y = std.math.clamp(mouse.row - @as(i16, @intCast(rect.y)), 0, @as(i16, @intCast(rect.height -| 1)));
+            if (!self.reader_dragging and anchor.row == self.reader_scroll + @as(usize, @intCast(y)) and anchor.column == col) return true;
+            if (!self.reader_dragging) {
+                self.reader_card = anchor.card;
+                try self.requestReaderCopy(.character, anchor.row, anchor.column);
+                self.reader_drag_anchor = anchor;
+                self.reader_dragging = true;
+            }
+            const row = self.reader_scroll + @as(usize, @intCast(y));
+            if (self.reader_copy_request) |*request| {
+                request.end_row = row;
+                request.end_column = col;
+            } else if (self.reader_copy.active()) {
+                self.reader_copy.extend(row, col);
+                self.revealReaderCopyCursor();
+            }
+            return true;
+        }
+        if (mouse.type == .release and mouse.button == .left) {
+            const dragging = self.reader_dragging;
+            self.reader_drag_anchor = null;
+            self.reader_dragging = false;
+            return dragging; // Clipboard changes only on y or the Copy control.
+        }
+        return false;
+    }
     fn clearReaderFind(self: *App) void {
         self.reader_find_active = false;
         self.reader_finder = .{};
@@ -8422,6 +8806,14 @@ const App = struct {
         }
         return original;
     }
+    fn addReaderCopyLine(self: *App, row: usize, text_line: []const u8, options: reader_selection.LineOptions) void {
+        if (self.reader_copy_error != null) return;
+        const trimmed = std.mem.trim(u8, text_line, " ");
+        if (same(trimmed, "[Signature folded · S shows it]") or same(trimmed, "[Quoted history folded · Q shows it]")) return;
+        self.reader_copy.addLine(self.allocator, row, text_line, options) catch |err| {
+            self.reader_copy_error = err;
+        };
+    }
     fn scanReaderFlow(self: *App, clean: []const u8, win: vaxis.Window, options: text_layout.Options) void {
         var iterator = text_layout.Iterator.init(clean, win.width, win.screen.width_method, options);
         var buffer: [32 * 1024]u8 = undefined;
@@ -8429,26 +8821,50 @@ const App = struct {
         var row = options.base_row;
         var join: reader_find.Join = .separate;
         var source_end: usize = 0;
+        const copy_here = self.reader_copy_collect and self.reader_copy_scope and self.reader_find_text;
+        var hidden_line = false;
+        var hard_start: usize = 0;
+        var hard_end = std.mem.indexOfScalar(u8, clean, '\n') orelse clean.len;
+        var hard_hidden = same(std.mem.trim(u8, clean[0..hard_end], " "), "[Signature folded · S shows it]") or same(std.mem.trim(u8, clean[0..hard_end], " "), "[Quoted history folded · Q shows it]");
         while (iterator.next()) |glyph| {
             if (glyph.position.row != row) {
-                self.reader_finder.addWrappedLine(buffer[0..length], row, join);
+                if (self.reader_find_collect) self.reader_finder.addWrappedLine(buffer[0..length], row, join);
+                if (copy_here) {
+                    if (!hidden_line) self.addReaderCopyLine(row, buffer[0..length], .{ .join = @fromBackingInt(@intCast(@backingInt(join))) });
+                    for (row + 1..glyph.position.row) |blank| self.addReaderCopyLine(blank, "", .{});
+                }
                 const gap = clean[@min(source_end, glyph.byte_offset)..glyph.byte_offset];
                 join = if (glyph.position.row > row + 1 or std.mem.indexOfScalar(u8, gap, '\n') != null) .separate else if (gap.len > 0) .space else .none;
                 row = glyph.position.row;
                 length = 0;
+                hidden_line = false;
+            }
+            if (copy_here) {
+                while (glyph.byte_offset > hard_end and hard_end < clean.len) {
+                    hard_start = hard_end + 1;
+                    hard_end = std.mem.indexOfScalarPos(u8, clean, hard_start, '\n') orelse clean.len;
+                    const source_line = std.mem.trim(u8, clean[hard_start..hard_end], " ");
+                    hard_hidden = same(source_line, "[Signature folded · S shows it]") or same(source_line, "[Quoted history folded · Q shows it]");
+                }
+                hidden_line = hidden_line or hard_hidden;
             }
             if (glyph.text.len > buffer.len - length) {
                 self.reader_finder.truncated = true;
+                if (copy_here) self.reader_copy_error = error.ReaderSelectionTooLarge;
                 return;
             }
             @memcpy(buffer[length..][0..glyph.text.len], glyph.text);
             length += glyph.text.len;
             source_end = iterator.offset;
         }
-        self.reader_finder.addWrappedLine(buffer[0..length], row, join);
+        if (self.reader_find_collect) self.reader_finder.addWrappedLine(buffer[0..length], row, join);
+        if (copy_here) {
+            if (!hidden_line) self.addReaderCopyLine(row, buffer[0..length], .{ .join = @fromBackingInt(@intCast(@backingInt(join))) });
+            for (row + 1..iterator.position.row + 1) |blank| self.addReaderCopyLine(blank, "", .{});
+        }
     }
     fn readerRichDraw(self: *App, prepared: *const html_view.Prepared, win: vaxis.Window, base_row: usize) usize {
-        if (!self.reader_find_collect and !(self.reader_find_paint and self.reader_find_scope)) return prepared.drawHighlightedFolded(win, self.reader_scroll, base_row, self.palette, self.mono, self.fold_quotes, self.fold_signatures, self.search_highlight.value());
+        if (!self.reader_find_collect and !self.reader_copy_collect and !(self.reader_find_paint and self.reader_find_scope) and !(self.reader_copy_paint and self.reader_copy_scope)) return prepared.drawHighlightedFolded(win, self.reader_scroll, base_row, self.palette, self.mono, self.fold_quotes, self.fold_signatures, self.search_highlight.value());
         var row = base_row;
         var in_quote = false;
         var in_signature = false;
@@ -8467,7 +8883,7 @@ const App = struct {
             if ((self.fold_quotes and quoted) or (self.fold_signatures and (signature or in_signature))) {
                 const is_signature = self.fold_signatures and (signature or in_signature);
                 if (if (is_signature) !in_signature else !in_quote) {
-                    if (!self.reader_find_collect and row >= self.reader_scroll and row - self.reader_scroll < win.height) _ = win.printSegment(.{ .text = if (is_signature) "[Signature folded · S shows it]" else "[Quoted history folded · Q shows it]", .style = html_view.style(self.palette, self.mono, .{}, .quote) }, .{ .row_offset = @intCast(row - self.reader_scroll), .wrap = .none });
+                    if (!self.reader_find_collect and !self.reader_copy_collect and row >= self.reader_scroll and row - self.reader_scroll < win.height) _ = win.printSegment(.{ .text = if (is_signature) "[Signature folded · S shows it]" else "[Quoted history folded · Q shows it]", .style = html_view.style(self.palette, self.mono, .{}, .quote) }, .{ .row_offset = @intCast(row - self.reader_scroll), .wrap = .none });
                     row += 1;
                 }
                 if (is_signature) in_signature = true else in_quote = true;
@@ -8477,7 +8893,7 @@ const App = struct {
             in_quote = false;
             const absolute = row;
             row += 1;
-            if (!self.reader_find_collect and (absolute < self.reader_scroll or absolute - self.reader_scroll >= win.height)) continue;
+            if (!self.reader_find_collect and !self.reader_copy_collect and (absolute < self.reader_scroll or absolute - self.reader_scroll >= win.height)) continue;
             var length: usize = 0;
             var source_bytes: usize = 0;
             var prefix: usize = 0;
@@ -8492,14 +8908,14 @@ const App = struct {
                     if (source_bytes <= rendered_line.prefix_bytes) prefix = length;
                 }
             }
-            if (self.reader_find_collect) {
-                if (self.reader_find_scope) {
-                    const join: reader_find.Join = if (after_hidden) .separate else switch (rendered_line.join) {
-                        .separate => .separate,
-                        .space => .space,
-                        .none => .none,
-                    };
-                    const skip = if (join == .separate) 0 else prefix;
+            if (self.reader_find_collect or self.reader_copy_collect) {
+                const join: reader_find.Join = if (after_hidden) .separate else @fromBackingInt(@intCast(@backingInt(rendered_line.join)));
+                const skip = if (join == .separate) 0 else prefix;
+                if (self.reader_copy_collect and self.reader_copy_scope) {
+                    const columns = positionAfter(win, buffer[0..skip]).column;
+                    self.addReaderCopyLine(absolute, buffer[skip..length], .{ .join = @fromBackingInt(@intCast(@backingInt(join))), .byte_base = skip, .column = columns });
+                }
+                if (self.reader_find_collect and self.reader_find_scope) {
                     self.reader_finder.addWrappedLineAt(buffer[skip..length], absolute, join, skip);
                 }
                 after_hidden = false;
@@ -8527,6 +8943,7 @@ const App = struct {
                         }
                     };
                     if (rendered_line.join == .separate or byte_offset >= prefix) appearance = self.readerFindStyle(appearance, absolute, byte_offset, byte_offset + glyph.len);
+                    appearance = self.readerCopyStyle(appearance, absolute, byte_offset, byte_offset + glyph.len);
                     if (column +| columns <= win.width) win.writeCell(column, @intCast(absolute - self.reader_scroll), .{ .char = .{ .grapheme = glyph, .width = @intCast(@min(columns, 255)) }, .style = appearance });
                     column +|= columns;
                     byte_offset += glyph.len;
@@ -8537,9 +8954,11 @@ const App = struct {
     }
     fn readerDraw(self: *App, outer: vaxis.Window) !void {
         self.reconcileReaderFind();
+        self.reconcileReaderCopy();
         self.mouseArea(outer, .reader, 0);
         const browsing = self.mode == .browse or (self.mode == .help and self.previous_mode == .browse) or (self.mode == .command and self.previous_mode == .browse);
-        const find_rows: u16 = if (browsing and self.reader_find_active and outer.height > 0) 1 else 0;
+        const copy_rows: u16 = if (browsing and self.readerCopyVisible() and outer.height > 0) 1 else 0;
+        const find_rows: u16 = if (copy_rows == 0 and browsing and self.reader_find_active and outer.height > 0) 1 else 0;
         const toolbar_rows: u16 = if (browsing and self.focus != .reader and !self.expanded and outer.height >= 18 and outer.width >= 60) 1 else 0;
         const summary_rows: u16 = if (browsing and self.thread.len > 1 and outer.height >= 6) 1 else 0;
         if (toolbar_rows > 0) try self.line(outer, 0, try self.fitLine(outer, "l Focus reader · o Gmail · L Links · B Files", outer.width), .accent);
@@ -8547,8 +8966,9 @@ const App = struct {
         if (partial_rows > 0) try self.line(outer, toolbar_rows + summary_rows, "Cached thread · partial", .muted);
         const invitation_index = self.readerInvitationIndex();
         const header_rows = toolbar_rows + summary_rows + partial_rows;
-        const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows -| find_rows });
+        const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows -| find_rows -| copy_rows });
         self.reader_height = win.height;
+        self.reader_copy_rect = .{ .x = @intCast(win.x_off), .y = @intCast(win.y_off), .width = win.width, .height = win.height };
         // Measure the new body before clamping a restored scroll position.
         // clearReader resets the old line count, not the persisted position.
         if (self.thread.len == 0) {
@@ -8592,11 +9012,49 @@ const App = struct {
             self.reader_find_width = win.width;
             self.reader_find_height = win.height;
         }
+        if (self.readerCopyVisible()) {
+            if (self.reader_copy.ready and (self.reader_copy.width != win.width or self.reader_copy.method != win.screen.width_method or self.reader_copy_height != win.height)) {
+                self.reader_copy_mark = self.reader_copy.mark();
+                self.reader_copy.ready = false;
+            }
+            if (!self.reader_copy.ready) {
+                self.reader_copy.reset(self.allocator, self.reader_copy_generation, win.width, win.screen.width_method);
+                self.reader_copy_error = null;
+                self.reader_copy_collect = true;
+                _ = self.readerBodyDraw(win) catch |err| {
+                    self.reader_copy_collect = false;
+                    return err;
+                };
+                self.reader_copy_collect = false;
+                self.mouse_hits.count = body_hit_start;
+                self.reader_copy.finish();
+                self.reader_copy_height = win.height;
+                if (self.reader_copy_error) |err| {
+                    self.clearReaderCopy();
+                    self.sayFailure("Selection unavailable · e opens an editor snapshot", @errorName(err));
+                } else if (self.reader_copy_mark) |mark| {
+                    self.reader_copy_mark = null;
+                    if (!self.reader_copy.restore(mark)) self.readerCopyChanged() else self.revealReaderCopyCursor();
+                } else if (self.reader_copy_request) |request| {
+                    self.reader_copy_request = null;
+                    if (request.end_row != null and !self.reader_copy.containsRow(request.row)) self.readerCopyChanged() else if (self.reader_copy.begin(request.mode, request.row, request.column)) {
+                        if (request.end_row) |end| self.reader_copy.extend(end, request.end_column);
+                        self.revealReaderCopyCursor();
+                    } else {
+                        self.clearReaderCopy();
+                        self.say(false, "No selectable body text · e opens the message snapshot", .{});
+                    }
+                }
+            }
+        }
         const painted_scroll = self.reader_scroll;
+        self.reader_copy_paint = self.reader_copy.active();
         self.reader_find_paint = self.reader_find_active;
         defer {
             self.reader_find_paint = false;
             self.reader_find_scope = false;
+            self.reader_copy_paint = false;
+            self.reader_copy_scope = false;
         }
         self.reader_lines = try self.readerBodyDraw(win);
         if (self.reader_anchor_card) {
@@ -8613,7 +9071,7 @@ const App = struct {
             self.mouse_hits.count = body_hit_start;
             self.reader_lines = try self.readerBodyDraw(win);
         }
-        if (invitation_index) |index| if (self.reader_invitation_row) |logical_row| {
+        if (!self.readerCopyVisible()) if (invitation_index) |index| if (self.reader_invitation_row) |logical_row| {
             // Follow the message's labels while its header is visible, then
             // pin the same distinct action at the viewport edge while scrolling.
             const rows = readerInvitationRows(win);
@@ -8630,6 +9088,7 @@ const App = struct {
             try self.line(outer, toolbar_rows, try self.fitLine(outer, summary, outer.width), .muted);
         }
         if (find_rows > 0) try self.readerFindBar(outer);
+        if (self.readerCopyVisible()) try self.readerCopyBar(outer);
     }
     fn readerScrollEnd(self: *const App) usize {
         const end = readerEnd(self.reader_lines, self.reader_height);
@@ -8692,10 +9151,15 @@ const App = struct {
     }
     fn readerBodyDraw(self: *App, win: vaxis.Window) !usize {
         var row: usize = 0;
+        const natural_height = win.height +| @as(u16, if (self.readerCopyVisible() and !self.reader_find_active) 1 else 0);
+        var layout_win = win;
+        layout_win.height = natural_height;
+        self.reader_body_bounds = @splat(null);
         self.reader_invitation_row = null;
         const invitation_index = self.readerInvitationIndex();
         var attachment_number: usize = 0;
         for (self.thread, 0..) |message, message_index| {
+            self.reader_copy_scope = false;
             self.reader_find_scope = self.reader_find_active and same(self.reader_find_message.slice(), text(get(message, "id")));
             self.reader_card_rows[message_index] = row;
             const from = get(message, "from");
@@ -8707,7 +9171,7 @@ const App = struct {
                 self.readerMouseRows(win, block_start, row - block_start, .reader_thread, message_index);
                 if (!self.reader_cards[message_index]) {
                     if (invitation_index == message_index) {
-                        const rows = readerInvitationRows(win);
+                        const rows = readerInvitationRows(layout_win);
                         if (rows > 0) {
                             self.reader_invitation_row = row;
                             row += rows;
@@ -8717,7 +9181,7 @@ const App = struct {
                     continue;
                 }
             }
-            const compact = win.height <= 12 or win.width < 60;
+            const compact = natural_height <= 12 or win.width < 60;
             const to = try Compose.mailboxes(self.frame.allocator(), get(message, "to"));
             const cc = try Compose.mailboxes(self.frame.allocator(), get(message, "cc"));
             const subject = text(get(message, "subject"));
@@ -8742,14 +9206,16 @@ const App = struct {
             const labels = try self.readerLabels(message);
             if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
             if (invitation_index == message_index) {
-                const rows = readerInvitationRows(win);
+                const rows = readerInvitationRows(layout_win);
                 if (rows > 0) {
-                    if (win.height >= 12) row += 1;
+                    if (natural_height >= 12) row += 1;
                     self.reader_invitation_row = row;
                     row += rows;
                 }
             }
             row += 1;
+            const body_start = row;
+            self.reader_copy_scope = same(self.reader_copy_message.slice(), text(get(message, "id"))) and same(self.reader_copy_account.slice(), self.account());
             var rich_drawn = false;
             if (message_index < self.markup.len) {
                 const view = &self.markup[message_index];
@@ -8778,6 +9244,8 @@ const App = struct {
                 const folded = try reader_tools.fold(self.frame.allocator(), body, self.fold_quotes, self.fold_signatures);
                 row = try self.flowReaderText(win, folded.text, self.reader_scroll, row);
             }
+            self.reader_body_bounds[message_index] = .{ .start = body_start, .end = row };
+            self.reader_copy_scope = false;
             var links_in_text: reader_tools.Links = .{};
             reader_tools.findLinks(text(get(message, "bodyText")), &links_in_text);
             if (links_in_text.count > 0 or std.mem.indexOf(u8, text(get(message, "bodyHtml")), "href=") != null) {
@@ -9014,10 +9482,12 @@ const App = struct {
         }
     }
     fn contextHints(self: *const App) []const u8 {
+        if (self.readerCopyVisible()) return " VISUAL · h/j/k/l w/b/e 0/$ gg/G · o Swap · V Line/char · y Copy · Esc Cancel";
         if (self.reader_overlay == .save_attachment or self.reader_overlay == .open_attachment) return " Tab Controls · Ctrl+F Complete · Enter Save · Esc Attachments · Ctrl+U Clear · q is text";
         if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
         if (self.reader_overlay == .attachments) return " Tab Controls · Enter Activate · j/k Choose · s Save · o Save & open · Esc/q Back";
         if (self.reader_overlay == .links) return " j/k Choose URL  Enter Open in account profile  Esc/q Back";
+        if (self.mode == .browse and self.ux_overlay == .none and !self.label_picker and (self.focus == .reader or self.expanded)) return if (self.expanded) " V Select · e Editor · j/k Scroll · J/K Mail · r/R Reply · f Forward · m Labels · L Links · B Files · o Gmail · v Layout · ? Help · q Shrink" else " V Select · e Editor · j/k Scroll · J/K Mail · r/R Reply · f Forward · m Labels · L Links · B Files · o Gmail · v Layout · ? Help · q List";
         if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Half · Esc/q Source";
         if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · x Remove · A Add · Esc Body · Ctrl+S Review";
         return switch (self.mode) {
@@ -9034,6 +9504,7 @@ const App = struct {
         };
     }
     fn fittedHints(self: *const App, width: u16) []const u8 {
+        if (self.readerCopyVisible()) return if (width < 64) "VISUAL · y Copy · Esc Cancel · Tab Controls" else self.contextHints();
         if (self.grace_active) return if (width < 70) "Ctrl+Z Undo · Ctrl+S Send now" else if (self.grace_focus == 0) " Ctrl+Z Undo · Ctrl+S Send now · Tab Switch · Enter: Undo · Esc/q Undo" else " Ctrl+Z Undo · Ctrl+S Send now · Tab Switch · Enter: Send now · Esc/q Undo";
         if (self.compose_choice) return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         if (self.fileDialogActive()) return self.fileDialogHints(width);
@@ -9041,10 +9512,10 @@ const App = struct {
         if (self.mode == .contacts and width < 60) return "n New  e Edit  ? Help  q Back";
         if (self.mode == .help and width < 80) return if (self.help_searching) "Enter Keep Esc Clear q is text" else "/ Find n/N Match Esc/q Back";
         if (self.mode == .browse and self.reader_overlay == .none and !self.label_picker and self.focus != .navigation and self.query.value().len == 0) {
-            if (width < 48) return if (self.focus == .reader or self.expanded) " j/k Scroll  m Labels  ? Help" else " m Labels  T Theme  ? Help";
-            if (width < 80) return if (self.focus == .reader or self.expanded) " r Reply  f Forward  m Labels  q Back  ? Help" else " j/k Mail  f Forward  m Labels  T Theme  ? Help";
-            if (width < 110) return if (self.focus == .reader or self.expanded) " j/k Scroll  r/R Reply  f Forward  m Labels  L Links  B Files  q Back  ? Help" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  T Theme  ? Help  q Quit";
-            if (width < 160) return if (self.focus == .reader or self.expanded) " j/k Scroll  J/K Mail  r/R Reply  f Forward  m Labels  L Links  B Files  o Gmail  z View  ? Help  q Back" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  T Theme  / Cache  \\ Gmail  ? Help  q Quit";
+            if (width < 48) return if (self.focus == .reader or self.expanded) " V Select  e Editor  ? Help" else " m Labels  T Theme  ? Help";
+            if (width < 80) return if (self.focus == .reader or self.expanded) " V Select  e Editor  f Forward  ? Help" else " j/k Mail  f Forward  m Labels  T Theme  ? Help";
+            if (width < 110) return if (self.focus == .reader or self.expanded) " V Select  e Editor  r/R Reply  f Forward  m Labels  L Links  B Files  q Back  ? Help" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  T Theme  ? Help  q Quit";
+            if (width < 160) return if (self.focus == .reader or self.expanded) " V Select  e Editor  j/k Scroll  J/K Mail  r/R Reply  f Forward  m Labels  L Links  B Files  o Gmail  z View  ? Help  q Back" else " j/k Mail  r/R Reply  f Forward  c New  m Labels  s Star  u Unread  T Theme  / Cache  \\ Gmail  ? Help  q Quit";
         }
         if (self.mode == .browse and self.focus == .navigation and width < 60) return " j/k Move  a Contacts  ? Help";
         if (self.mode == .attachment) return " Tab Controls · Ctrl+F Complete · Enter Attach · Esc Back · Ctrl+U Clear";
@@ -9365,6 +9836,8 @@ const App = struct {
         try self.line(inner, inner.height - 1, try self.fitLine(inner, "Tab Controls · Enter Activate · j/k Scroll · Esc Cancel", inner.width), .muted);
     }
     fn resize(self: *App, original: vaxis.Winsize) !void {
+        self.reader_drag_anchor = null;
+        self.reader_dragging = false;
         var size = original;
         size.cols = @min(@max(size.cols, 1), max_cols);
         size.rows = @min(@max(size.rows, 1), max_rows);
@@ -13442,4 +13915,34 @@ test "formatted chooser: every action fits narrow modal and reverse Back creates
         }
     }
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "reader copy: plain paragraph and folded placeholder projection preserve literal hard breaks" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var screen = try vaxis.Screen.init(a, .{ .cols = 20, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 12, .screen = &screen };
+    app.reader_copy_collect = true;
+    app.reader_copy_scope = true;
+    app.reader_find_text = true;
+    for ([_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "Intro\n\nOutro", .expected = "Intro\n\nOutro" },
+        .{ .input = "Intro\n[Quoted history folded · Q shows it]\n\nOutro", .expected = "Intro\n\nOutro" },
+        .{ .input = "A paragraph wraps into several displayed rows with café and 東京.", .expected = "A paragraph wraps into several displayed rows with café and 東京." },
+    }) |example| {
+        app.reader_copy.reset(a, 1, win.width, win.screen.width_method);
+        app.reader_copy_error = null;
+        app.scanReaderFlow(example.input, win, .{});
+        try std.testing.expect(app.reader_copy_error == null);
+        app.reader_copy.finish();
+        try std.testing.expect(app.reader_copy.begin(.character, 0, 0));
+        _ = app.reader_copy.move(.last);
+        _ = app.reader_copy.move(.line_end);
+        const copied = try app.reader_copy.copy(a);
+        defer a.free(copied);
+        try std.testing.expectEqualStrings(example.expected, copied);
+    }
 }

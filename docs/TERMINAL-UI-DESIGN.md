@@ -20,7 +20,7 @@ The libvaxis package hash is `vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mec
 
 ## Layout
 
-At 120 columns and above, navigation can remain alongside mail/reader panes. Horizontal splitting requires at least 80 available columns; below layout uses stacked panes when there are at least 48 columns and 16 content rows. Otherwise the focused pane uses the available space, and narrow navigation takes over when focused. `v` chooses right/below, `:split` sets bounded ratios, and `z` expands the reader. Below 30 columns or 10 rows, a resize message replaces the layout while quit remains available. Rendering is bounded to 240 columns by 80 rows.
+At 120 columns and above, navigation can remain alongside mail/reader panes. Horizontal splitting requires at least 80 available columns; below layout uses stacked panes when there are at least 48 columns and 16 content rows. Otherwise the focused pane uses the available space, and narrow navigation takes over when focused. `v` chooses right/below, `:layout` also changes the layout, `:split` sets bounded ratios, and `z` expands the reader. In the reader, `V` starts text selection; repeating it switches character/line selection. Below 30 columns or 10 rows, a resize message replaces the layout while quit remains available. Rendering is bounded to 240 columns by 80 rows.
 
 The palette follows the current Omarchy theme, with semantic accent/selection, sender and muted metadata roles. `NO_COLOR` uses terminal-default colors, bold and reverse video. No icon font or image protocol is required. Configured accounts remain distinct; navigation wraps full addresses and the header identifies the selected account. There is no unified account or unread total.
 
@@ -227,6 +227,12 @@ Invitation review keeps its captured account, attendee and organizer in a fixed 
 ## External editor
 
 There is **no tmux dependency or launch**. The built-in split composer is available now. `$EDITOR` uses full-terminal takeover and restoration. `editor-mode=auto|takeover` selects this path; `embedded` returns `EmbeddedEditorDeferred` before entering raw mode.
+
+Received-message `e` uses the same takeover with a disposable `message.txt`
+snapshot. Its envelope, unfolded text and literal links can be copied or saved
+separately; no editor changes flow into mail or drafts. The snapshot and editor
+artifacts inside its private directory are removed on return or interruption.
+GUI editors need a wait option so their process remains attached until closing.
 
 The pinned graph exports a PTY-backed `vaxis.widgets.Terminal`, but source inspection found defects that prevent using it as the default arbitrary editor pane:
 

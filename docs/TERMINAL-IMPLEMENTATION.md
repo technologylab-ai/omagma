@@ -19,7 +19,13 @@ navigation, full mail and bounded thread reading, separate local/server search,
 cache-first scrolling, contacts, drafts, replies, reply-all, forwarding and review
 before sending. The reader can be right, below or expanded. A built-in split composer
 keeps the mail context visible. `$EDITOR` runs with terminal takeover and restores
-the TUI afterward. New TUI compositions opt into Markdown; saved drafts retain
+the TUI afterward. Received-message viewing uses an owner-only temporary text
+snapshot and discards editor changes; compose retains its existing readback.
+Reader visual selection owns bounded rendered text for one pinned message,
+keeps Unicode graphemes intact and rejoins soft wraps without pane padding.
+Mouse drag and keyboard selection use terminal OSC 52 for clipboard writes.
+Source, folding and width changes invalidate the projection before copying.
+New TUI compositions opt into Markdown; saved drafts retain
 their interpretation. A shared native renderer derives bounded HTML and plain
 alternatives from exact draft source for preview and send review. Ctrl+T changes
 format, normal compose `p` selects outgoing/original/plain context, and only

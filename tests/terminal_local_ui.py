@@ -30,6 +30,14 @@ def setup(directory):
 
 
 def navigation(terminal):
+    # A PTY can split one redraw after its title but before the lower frame.
+    # Wait for that observable frame boundary before examining its cells.
+    def complete_frame():
+        title = terminal.screen.locate("Accounts / mailboxes")
+        return title is not None and any(
+            rect[0] <= title["column"] < rect[1] and rect[2] - 1 == title["row"]
+            for rect in panel_interiors(terminal.screen))
+    terminal.until(complete_frame)
     title = terminal.screen.locate("Accounts / mailboxes")
     require(title is not None, "account pane absent")
     area = next((rect for rect in panel_interiors(terminal.screen)

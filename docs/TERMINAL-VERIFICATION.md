@@ -84,6 +84,8 @@ python3 tests/terminal_loading.py --binary /path/to/local/omagma
 python3 tests/terminal_local_ui.py --binary /path/to/local/omagma
 python3 tests/terminal_polish_status.py --binary /path/to/local/omagma
 python3 tests/terminal_polish_reader.py --binary /path/to/local/omagma
+python3 tests/terminal_reader_copy.py --binary /path/to/local/omagma
+python3 tests/terminal_reader_editor.py --binary /path/to/local/omagma
 python3 tests/terminal_polish_compose.py --binary /path/to/local/omagma
 ```
 
