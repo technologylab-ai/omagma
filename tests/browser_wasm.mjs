@@ -312,7 +312,7 @@ try {
     if (size.width >= 1440) assert(picked.includes("A warm orange accent"), `${size.label}: pointer selection did not update the reader`);
     entry.pointerHit.selectedMessage = 2;
     await focus();
-    await frameAfter(() => text("1"));
+    await frameAfter(() => key("Home", "Home"));
     await writeFile(join(work, "rendering-acceptance.json"), JSON.stringify(rendering, null, 2) + "\n", { mode: 0o600 });
   }
   await viewport(1440, 1000);
@@ -406,12 +406,15 @@ try {
   report.readerUnicodeCells = readerGlyphs;
   const scrolled = await frameAfter(() => key("PageDown", "PageDown"));
   assert.notEqual(scrolled, narrowReader, "narrow reader did not scroll with PageDown");
-  assert(scrolled.includes("Montréal"), "scrolling changed the selected message");
+  assert(/\b(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)\b/.test(scrolled), "PageDown did not retain the selected Unicode fixture's numbered body");
   await screenshot("wasm-reader-narrow.png");
+  const restoredReader = await frameAfter(() => key("PageUp", "PageUp"));
+  assert.equal(restoredReader, narrowReader, "PageUp did not restore the exact selected reader after scrolling");
   report.narrowViewport.readerScroll = true;
 
   // The bridge rejects an oversized event before copying it into linear
-  // memory. Reset must remain available after that controlled refusal.
+  // memory. A controlled refusal keeps the session and normal input usable.
+  const beforeOversize = await evaluate("({session:window.omagmaDemo.sessionInfo(),screen:window.omagmaDemo.screenText(),ready:window.omagmaDemo.ready})");
   await call("Emulation.setFocusEmulationEnabled", { enabled: true });
   await call("Page.bringToFront");
   await call("Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] });
@@ -419,12 +422,18 @@ try {
   await evaluate("window.__omagmaTestPasteCount=0;document.addEventListener('paste',()=>window.__omagmaTestPasteCount++,true);navigator.clipboard.writeText('x'.repeat(65537))");
   await key("V", "KeyV", 10);
   await until(async () => evaluate("window.__omagmaTestPasteCount===1"), "owned browser did not deliver the oversized clipboard event");
-  await until(async () => evaluate("Boolean(window.omagmaDemo.error)"), "oversized browser input was not refused");
-  assert.match(await evaluate("window.omagmaDemo.error"), /64 KiB/, "oversized input did not explain its bound");
-  await frameAfter(() => click("#demo-reset"));
-  await until(async () => evaluate("window.omagmaDemo.ready"), "Reset did not recover after oversized input");
+  await until(async () => evaluate("Boolean(window.omagmaDemo.inputNotice)"), "oversized browser paste was not refused");
+  assert.match(await evaluate("window.omagmaDemo.inputNotice"), /too large.*skipped/i, "oversized paste did not explain that it was skipped");
+  assert.match(await evaluate("document.querySelector('#request-status-hint').textContent"), /64 KiB/, "oversized paste did not explain its bound");
+  assert.equal(await evaluate("window.omagmaDemo.error"), null, "oversized paste stopped the session");
+  assert.equal(await evaluate("window.omagmaDemo.ready"), beforeOversize.ready, "oversized paste changed terminal readiness");
+  assert.deepEqual(await evaluate("window.omagmaDemo.sessionInfo()"), beforeOversize.session, "oversized paste replaced the current session");
+  assert.equal(await screen(), beforeOversize.screen, "oversized paste partially changed native terminal state");
+  const afterOversizeKey = await frameAfter(() => key("PageDown", "PageDown"));
+  assert.notEqual(afterOversizeKey, beforeOversize.screen, "normal keyboard input stopped after rejecting the paste");
+  assert.equal(await evaluate("window.omagmaDemo.inputNotice"), "", "normal input did not clear the skipped-paste notice");
   report.inputEventLimit = 65536;
-  report.oversizedInputRefusedAndReset = true;
+  report.oversizedPasteSkippedWithoutSessionLoss = true;
   const reloadMarker = events.length;
   await call("Page.reload", { ignoreCache: true });
   await until(async () => events.slice(reloadMarker).some((event) => event.method === "Page.loadEventFired"), "reload did not load a new document");

@@ -124,8 +124,8 @@ function providerMessage(accountIndex, index, format) {
   const mimeType = index === 1 ? "text/html" : "text/plain";
   const body = index === 1 ? bodyHtml : bodyText(owner, index);
   return { id: `${owner.toLowerCase()}-message-${index}`, threadId: `${owner.toLowerCase()}-thread-${index}`,
-    labelIds: args.get("--workflows-only") === "true" ? (index === 2 ? [] : index === 3 ? ["UNREAD"] : index === 1 ? ["INBOX"] : ["INBOX", "UNREAD"]) : ["INBOX", "UNREAD"], snippet: `Synthetic ${owner} preview ${index}`, historyId: "1200",
-    internalDate: "1791712800000", sizeEstimate: 600,
+    labelIds: args.get("--workflows-only") === "true" ? (index === 2 ? [] : index === 3 ? ["UNREAD"] : index === 1 ? ["INBOX"] : index === 4 ? ["INBOX", "UNREAD", "CATEGORY_UPDATES"] : ["INBOX", "UNREAD"]) : ["INBOX", "UNREAD"], snippet: `Synthetic ${owner} preview ${index}`, historyId: "1200",
+    internalDate: String(1791712800000 - index * 60000), sizeEstimate: 600,
     payload: { partId: "", mimeType, filename: "", headers: [
       { name: "From", value: "Morgan Browser <morgan@example.test>" },
       { name: "To", value: accounts[accountIndex] }, { name: "Subject", value: subject(owner, index) },
@@ -151,7 +151,7 @@ function providerRemoteContact(accountIndex) {
   return { resourceName: `people/${owner}-outside-first-page`, names: [{ displayName: `${owner.toUpperCase()} Contact Outside First Page`, metadata: { primary: true } }],
     emailAddresses: [{ value: `remote.${owner}@example.test` }], metadata: { sources: [{ type: "CONTACT", etag: `outside-${owner}` }] } };
 }
-function outgoingMessage(record) {
+function outgoingMessage(record, { allowMarkdown = false } = {}) {
   const separator = record.raw.indexOf("\r\n\r\n");
   assert(separator >= 0, "outgoing message lacks an RFC5322 header separator");
   const headers = record.raw.slice(0, separator).replace(/\r\n[ \t]+/g, " ");
@@ -160,12 +160,47 @@ function outgoingMessage(record) {
     assert(colon > 0, "outgoing message has a malformed header");
     return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()];
   }));
-  assert.match(values["content-type"], /^text\/plain;\s*charset=UTF-8$/i, "browser composed a non-plain message");
-  assert.equal(values["content-transfer-encoding"], "base64");
   assert.match(values["message-id"], /^<omagma-[a-f0-9]{64}@mail\.invalid>$/);
   assert(values.date && /\+0000$/.test(values.date), "outgoing message lost its native date");
-  const body = Buffer.from(record.raw.slice(separator + 4).replace(/\s/g, ""), "base64").toString("utf8").replace(/\r\n/g, "\n");
-  return { headers: values, body };
+  const payload = record.raw.slice(separator + 4);
+  const decode = (value) => Buffer.from(value.replace(/\s/g, ""), "base64").toString("utf8").replace(/\r\n/g, "\n");
+  if (/^text\/plain;\s*charset=UTF-8$/i.test(values["content-type"])) {
+    assert.equal(values["content-transfer-encoding"], "base64");
+    return { headers: values, body: decode(payload), html: null };
+  }
+  assert(allowMarkdown && /^multipart\/alternative;/i.test(values["content-type"]), "unexpected outgoing message format");
+  const leaves = [];
+  function parseEntity(headers, body, depth = 0) {
+    assert(depth <= 4 && leaves.length < 10, "outgoing MIME structure exceeds the bounded fixture");
+    const type = headers["content-type"] || "";
+    if (/^multipart\//i.test(type)) {
+      const boundary = type.match(/boundary=(?:"([^"\r\n]+)"|([^;\s]+))/i);
+      assert(boundary, "multipart has no boundary");
+      const marker = "--" + (boundary[1] || boundary[2]);
+      assert(body.includes(marker + "--"), "multipart is incomplete");
+      for (const part of body.split(marker).slice(1)) {
+        if (part.startsWith("--")) break;
+        const entity = part.replace(/^\r\n/, "");
+        const split = entity.indexOf("\r\n\r\n");
+        assert(split >= 0, "outgoing MIME part has no header separator");
+        const partHeaders = Object.fromEntries(entity.slice(0, split).replace(/\r\n[ \t]+/g, " ").split("\r\n").map(line => {
+          const colon = line.indexOf(":");assert(colon > 0);return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()];
+        }));
+        parseEntity(partHeaders, entity.slice(split + 4), depth + 1);
+      }
+    } else {
+      assert.equal(headers["content-transfer-encoding"], "base64");
+      leaves.push({ type, text: /^text\//i.test(type) ? decode(body) : null, contentId: headers["content-id"] });
+    }
+  }
+  parseEntity(values, payload);
+  const plain = leaves.filter(part => /^text\/plain;\s*charset=UTF-8$/i.test(part.type));
+  const html = leaves.filter(part => /^text\/html;\s*charset=UTF-8$/i.test(part.type));
+  assert.equal(plain.length, 1, "Markdown MIME lost or duplicated its plain alternative");
+  assert.equal(html.length, 1, "Markdown MIME lost or duplicated its HTML alternative");
+  assert(leaves.every(part => /^text\/(plain|html);/i.test(part.type) || (/^image\/png$/i.test(part.type) && /omagma.*logo/i.test(part.contentId || ""))), "Markdown added an unexpected attachment");
+  return { headers: values, body: plain[0].text, html: html[0].text };
+
 }
 
 const staticRequests = [];
@@ -234,6 +269,8 @@ try {
   const heldProfiles = [];
   const heldReads = [];
   const canceledRequests = new Set();
+  let expectedDialog = null;
+  const handledDialogs = [];
   let activeRequests = 0;
   let maximumActiveRequests = 0;
   socket.addEventListener("message", (event) => {
@@ -244,6 +281,7 @@ try {
     } else {
       events.push(value);
       if (value.method === "Fetch.requestPaused") void respond(value.params).catch((error) => transportErrors.push(error));
+      if (value.method === "Page.javascriptDialogOpening") void handleOwnedDialog(value.params).catch(error => transportErrors.push(error));
     }
   });
   function call(method, params = {}) {
@@ -253,6 +291,25 @@ try {
       pending.set(id, { accept, reject, timer });
       socket.send(JSON.stringify({ id, method, params }));
     });
+  }
+  async function handleOwnedDialog(params) {
+    const intent = expectedDialog;
+    expectedDialog = null;
+    if (!intent || params.type !== intent.type || (intent.type === "confirm" && !/disconnect.*discard.*drafts/i.test(params.message))) {
+      await call("Page.handleJavaScriptDialog", { accept: false });
+      throw new Error(`Unexpected owned browser dialog: ${params.type}`);
+    }
+    await call("Page.handleJavaScriptDialog", { accept: intent.accept });
+    handledDialogs.push({ purpose: intent.purpose, type: params.type, accept: intent.accept });
+  }
+  async function disconnectDecision(accept) {
+    assert.equal(expectedDialog, null, "another dialog decision is pending");
+    const intent = { purpose: accept ? "discard-session-drafts" : "keep-session-drafts", type: "confirm", accept };
+    const before = handledDialogs.length;
+    expectedDialog = intent;
+    try { await click("#disconnect-session"); await pause(50); }
+    finally { if (expectedDialog === intent) expectedDialog = null; }
+    if (!accept) assert(handledDialogs.slice(before).some(dialog => dialog.purpose === intent.purpose), "Cancel-disconnect test did not display a draft-loss confirmation");
   }
   async function respond({ requestId, request, networkId }) {
     const url = new URL(request.url);
@@ -350,6 +407,7 @@ try {
               else if (query === "is:unread" || labels.includes("UNREAD")) indices = indices.filter(index => index !== 1 && index !== 2);
               else if (labels.includes("INBOX")) indices = indices.filter(index => index !== 2 && index !== 3);
               if (query === "live mailbox") indices = [0];
+              if (query === "category:updates") indices = [4];
             }
             payload = { messages: indices.map(index => ({ id: `${owner}-message-${index}`, threadId: `${owner}-thread-${index}` })), nextPageToken: "must-not-be-followed", resultSizeEstimate: 5000 };
           }
@@ -368,6 +426,14 @@ try {
               payload.payload.body = { size: Buffer.byteLength(body), data: Buffer.from(body).toString("base64url") };
             }
           }
+        } else if (/^\/gmail\/v1\/users\/me\/threads\/(ada|bea)-thread-\d+$/.test(url.pathname) && request.method === "GET") {
+          const index = Number(url.pathname.match(/-(\d+)$/)[1]);
+          assert.equal(url.pathname.includes("ada-thread"), accountIndex === 0, "thread request crossed accounts");
+          if (holdNextFullRead) {
+            holdNextFullRead = false;
+            await new Promise(release => heldReads.push({ requestId, networkId, url: request.url, release }));
+          }
+          payload = { id: `${accountIndex === 0 ? "ada" : "bea"}-thread-${index}`, historyId: "1200", messages: [providerMessage(accountIndex, index, "full")] };
         } else if (url.pathname === "/gmail/v1/users/me/messages/send" && request.method === "POST") {
           const sent = JSON.parse(request.postData);
           assert(typeof sent.raw === "string" && sent.raw.length > 0, "send request has no RFC5322 message");
@@ -473,6 +539,22 @@ try {
     assert.equal(await evaluate("window.omagmaDemo.error"), null, "terminal operation stopped the browser experiment");
     return screen();
   }
+  async function editComposer({ plain = false, body = false } = {}) {
+    const current = await screen();
+    if (/original format/i.test(current) && /Text quote/i.test(current)) await act(() => text("t"));
+    if (plain && /\bMD ·|Format: Markdown|Markdown → HTML/.test(await screen())) await act(() => key("t", "KeyT", 2));
+    if (body) await act(() => key("g", "KeyG", 2));
+    if (!/INSERT/.test(await screen())) await act(() => text("i"));
+  }
+  let nativeFolderGetsBeforeEnter = 0;
+  async function chooseNativeFolder(account, count, folder) {
+    await act(() => text(String(account)));
+    await act(() => text("hh"));
+    await act(() => text("k".repeat(32))); // Native restores navigation context; reach the first row explicitly.
+    await act(() => text("j".repeat(count + folder)));
+    nativeFolderGetsBeforeEnter = gmailGets().length;
+    return act(() => key("Enter", "Enter"));
+  }
   async function importFiles(paths) {
     if (!(await evaluate("document.querySelector('#credential-dialog').open"))) await click("#connect-open");
     await until(async () => evaluate("document.querySelector('#credential-dialog').open"), "credential chooser did not open");
@@ -504,7 +586,7 @@ try {
   }
   async function disconnect() {
     const info = await session();
-    if (info.mode !== "demo") await click("#disconnect-session");
+    if (info.mode !== "demo") await disconnectDecision(true);
     else if (await evaluate("document.querySelector('#credential-dialog').open")) await click("#credential-cancel");
     await until(async () => {
       const current = await session();
@@ -664,6 +746,14 @@ try {
     assert(/Compose/.test(selectedContact) && inputField("To", selectedContact).includes(contactAddresses[0][1]), "selecting a contact did not create an addressed composer");
     assert.equal(sends().length, 0, "selecting a contact submitted a message");
     checks.peopleListSearchSelectionAndAccountIsolation = true;
+    const cancelSession = await session();
+    const cancelScreen = await screen();
+    const cancelRequests = requests.length;
+    await disconnectDecision(false);
+    assert.deepEqual(await session(), cancelSession, "Cancel-disconnect changed the verified session");
+    assert.equal(await screen(), cancelScreen, "Cancel-disconnect discarded the retained contact draft");
+    assert.equal(requests.length, cancelRequests, "Cancel-disconnect initiated a provider request");
+    checks.disconnectCancelPreservesSessionAndDraft = true;
     await settled();
     const contactedRows = await cacheRows();
     assert(contactedRows.some(row => row.key[0] === accounts[0] && row.snapshot.contactsLoaded && row.snapshot.contacts.some(contact => contact.name === contactNames[0][0])), "Google contacts were not retained in the actor-scoped browser cache");
@@ -687,9 +777,10 @@ try {
     await connected(2);
     await act(() => text("1"));
     await act(() => text("c"));
+    await editComposer();
     await act(() => text("ada.cont"));
     const completion = await act(() => key(" ", "Space", 2));
-    assert(completion.includes("Recipients") && completion.includes(contactAddresses[0][0]), "real Ctrl+Space did not provide a contact recipient completion");
+    assert(/Recipients|Choose recipient|Contacts/.test(completion) && completion.includes(contactAddresses[0][0]), "real Ctrl+Space did not provide a contact recipient completion");
     assert(!completion.includes(contactAddresses[1][0]), "recipient completion contains another account's contacts");
     const acceptedCompletion = await act(() => key("Enter", "Enter"));
     assert(inputField("To", acceptedCompletion).includes(contactAddresses[0][0]), "Enter did not accept the contact address into To");
@@ -706,24 +797,46 @@ try {
     const remoteAccepted = await act(() => key("Enter", "Enter"));
     assert(inputField("Cc", remoteAccepted).includes("remote.ada@example.test"), "remote recipient completion was not accepted into the selected Cc field");
     checks.explicitCompletionFindsContactsBeyondCachedPage = true;
+    // Shared native drafts are retained across browse and account changes.
+    await act(() => key("Tab", "Tab"));
+    await act(() => key("Tab", "Tab"));
+    await act(() => text("Retained Ada draft"));
     await act(() => key("Escape", "Escape"));
-    await act(() => key("Escape", "Escape"));
-    const differentIntent = await act(() => text("f"));
-    assert(differentIntent.includes("Keep this session draft?") && differentIntent.includes("Resume draft") && differentIntent.includes("Discard draft and continue") && differentIntent.includes("Cancel"), "a hidden draft silently replaced a different compose intent");
-    const resumedDraft = await act(() => key("Enter", "Enter"));
-    assert(inputField("To", resumedDraft).includes(contactAddresses[0][0]), "default Resume lost the hidden draft recipient");
-    await act(() => key("Escape", "Escape"));
-    const accountDecision = await act(() => text("2"));
-    assert(accountDecision.includes("Keep this session draft?"), "switching account silently changed an existing draft");
-    await act(() => key("Escape", "Escape"));
-    assert((await screen()).includes(accounts[0]) && !(await screen()).includes("Bea live mailbox"), "Cancel switched the hidden draft's account");
-    await act(() => text("2"));
-    await act(() => text("j"));
-    const discardedAccount = await act(() => key("Enter", "Enter"));
-    assert(discardedAccount.includes(accounts[1]) && discardedAccount.includes("Bea live mailbox"), "explicit Discard did not continue to the requested account");
+    await act(() => text("q"));
+    const bea = await act(() => text("2"));
+    assert(bea.includes(accounts[1]) && !bea.includes("Ada live mailbox"), "retained draft prevented isolated native account navigation");
     const freshDraft = await act(() => text("c"));
-    assert.equal(inputField("To", freshDraft), "", "discarded draft recipients survived in another account's new composer");
-    checks.hiddenDraftResumeDiscardCancelAndActorBoundary = true;
+    assert.equal(inputField("To", freshDraft), "", "new Bea draft inherited Ada recipients");
+    await editComposer();
+    await act(() => text("bea.own@example.test"));
+    for (let field = 0; field < 3; field++) await act(() => key("Tab", "Tab"));
+    await act(() => text("Retained Bea draft"));
+    await act(() => key("Escape", "Escape"));
+    await act(() => text("q"));
+    const beforeDrafts = gmailGets().length;
+    const adaDrafts = await chooseNativeFolder(1, 2, 2);
+    assert(adaDrafts.includes("Retained Ada draft") && !adaDrafts.includes("Retained Bea draft"), "native Drafts list leaked another actor's retained draft");
+    assert.equal(gmailGets().length, nativeFolderGetsBeforeEnter, "session Drafts list unexpectedly fetched Gmail");
+    assert(gmailGets().slice(beforeDrafts).every(request => request.accountIndex === 0), "native draft account switch refreshed another actor's mailbox");
+    const reopenedAda = await act(() => key("Enter", "Enter"));
+    assert(inputField("To", reopenedAda).includes(contactAddresses[0][0]) && inputField("Cc", reopenedAda).includes("remote.ada@example.test"), "native Drafts did not restore the exact Ada recipient fields");
+    assert.equal(inputField("Subject", reopenedAda), "Retained Ada draft");
+    await act(() => text("q"));
+    const beaDrafts = await chooseNativeFolder(2, 2, 2);
+    assert(beaDrafts.includes("Retained Bea draft") && !beaDrafts.includes("Retained Ada draft"));
+    const reopenedBea = await act(() => key("Enter", "Enter"));
+    assert(inputField("To", reopenedBea).includes("bea.own@example.test") && !inputField("To", reopenedBea).includes(contactAddresses[0][0]));
+    const discard = await act(() => text("d"));
+    assert(/Discard local draft/.test(discard) && discard.includes("Cancel"), "normal d did not open the shared discard review");
+    const canceledDiscard = await act(() => key("Enter", "Enter"));
+    assert.equal(inputField("Subject", canceledDiscard), "Retained Bea draft", "default Cancel discarded the native draft");
+    await act(() => text("d"));
+    await act(() => key("Tab", "Tab", 8)); // shared dialog defaults Cancel; previous control is Discard.
+    await act(() => key("Enter", "Enter"));
+    const afterDiscard = await chooseNativeFolder(2, 2, 2);
+    assert(!afterDiscard.includes("Retained Bea draft"), "explicit shared Discard retained the draft");
+    assert.equal(sends().length, 0, "local draft retention/discard sent mail");
+    checks.nativeRetainedDraftsReopenAndDiscardRemainActorScoped = true;
     await disconnect();
 
     scopeMode = "workflows";
@@ -736,13 +849,14 @@ try {
     assert.equal(inputField("Subject", forward), "Fwd: Ada live mailbox");
     assert(forward.includes("Hello Ada,") && forward.includes("Morgan") && forward.includes("Ada live mailbox"), "plain forward omitted its source envelope or quoted body");
     assert.equal(sends().length, 0, "forward submitted before review");
+    await editComposer();
     await act(() => text("forward.recipient@example.test"));
     const forwardReview = await act(() => key("s", "KeyS", 2));
     assert(forwardReview.includes("Review send") && forwardReview.includes("forward.recipient@example.test"), "forward did not show the exact send review");
     assert.equal(sends().length, 0, "forward review itself submitted mail");
     await screenshot("workflows-forward-review.png");
     const forwardSend = await explicitSend("plain forward");
-    const forwardMail = outgoingMessage(forwardSend);
+    const forwardMail = outgoingMessage(forwardSend, { allowMarkdown: true });
     assert.equal(forwardMail.headers.subject, "Fwd: Ada live mailbox");
     assert(forwardMail.headers.from.includes(accounts[0]) && forwardMail.headers.to.includes("forward.recipient@example.test"));
     assert(forwardMail.body.includes("Hello Ada,") && forwardMail.body.includes("Morgan") && forwardMail.body.includes("Ada live mailbox"), "forward MIME lost its literal source content");
@@ -750,7 +864,10 @@ try {
     assert.equal(forwardMail.headers["in-reply-to"], undefined, "forward retained reply threading");
     assert.equal(forwardMail.headers.references, undefined, "forward retained source References");
     assert.equal(sends().length, 1, "forward did not submit exactly one synthetic POST");
-    checks.plainForwardWithoutReplyThreading = true;
+    const expectedForward = "> ---------- Forwarded message ----------\n> From: Morgan Browser <morgan@example.test>\n> Subject: Ada live mailbox\n> \n> Hello Ada,\n> \n> Synthetic live read in WebAssembly.\n> Nothing touched Google.\n\nSent with omagma — https://technologylab-ai.github.io/omagma/ 🌋";
+    assert.equal(forwardMail.body.trim(), expectedForward, "shared native forward quote changed the literal source envelope/body");
+    assert(forwardMail.html?.includes("<blockquote") && !forwardMail.html.includes("<script"), "native Markdown forward lost its safe HTML alternative");
+    checks.sharedMarkdownForwardWithoutReplyThreading = true;
     checks.tenSecondGraceAndExactOneSyntheticForwardPost = true;
 
     // The same loaded body and a cache search must remain fully local.
@@ -758,7 +875,7 @@ try {
     await act(() => text("j"));
     const beforeBodyLoad = fullReads().length;
     await act(() => key("Enter", "Enter"));
-    assert.equal(fullReads().length, beforeBodyLoad + 1, "Enter did not load the selected missing cached body");
+    assert.equal(fullReads().length, beforeBodyLoad + 1, "Enter did not load the selected native conversation");
     await act(() => text("q"));
     const beforeRevisit = gmailGets().length;
     await act(() => text("k"));
@@ -786,6 +903,15 @@ try {
     await act(() => text("q"));
     checks.localBodyRevisitAndCacheSearchNoGET = true;
     checks.explicitGmailSearchUsesGET = true;
+    const operatorBefore = gmailGets().length;
+    await act(() => text("\\"));
+    await act(() => text("category:updates"));
+    const gmailOperator = await act(() => key("Enter", "Enter"));
+    assert(gmailGets().slice(operatorBefore).some(request => new URL(request.url).searchParams.get("q")?.includes("category:updates")), "Gmail-only operator was rejected by the optional local cache preview");
+    assert(gmailOperator.includes("Ada bounded message 4"), "Gmail-only operator did not display the independent provider result");
+    await act(() => text("q"));
+    checks.gmailOnlyOperatorReachesProvider = true;
+
 
     const ax = await call("Accessibility.getFullAXTree");
     const accessibleText = ax.nodes.filter(node => !node.ignored).map(node => `${node.name?.value || ""} ${node.value?.value || ""}`).join("\n");
@@ -820,11 +946,12 @@ try {
     assert((await screen()).includes("Hello Ada,"), "verified exact-grant cache did not restore its loaded body");
     const restoreRequests = requests.slice(verifiedRestoreBefore);
     assert(restoreRequests.some(request => new URL(request.url).pathname.endsWith("/profile")));
-    assert(!restoreRequests.some(request => new URL(request.url).pathname.endsWith("/messages") || new URL(request.url).searchParams.get("format") === "full"), "verified cache restore fetched an already-retained mailbox/body");
+    assert(!restoreRequests.some(request => new URL(request.url).searchParams.get("format") === "full"), "verified cache restore fetched an already-retained body");
+    assert(restoreRequests.filter(request => new URL(request.url).pathname.endsWith("/messages")).every(request => request.accountIndex === 0), "native cache refresh used another actor");
     const beforeRestoredContacts = peopleRequests().length;
     const restoredContacts = await act(() => text("a"));
     assert(restoredContacts.includes(contactNames[0][0]), "verified contact cache was not restored");
-    assert.equal(peopleRequests().length, beforeRestoredContacts, "restored contacts made a redundant People request");
+    assert(peopleRequests().slice(beforeRestoredContacts).every(request => request.accountIndex === 0), "native contact refresh crossed the restored cache actor");
     await act(() => text("q"));
     checks.reloadRequiresProfileBeforeExactGrantRestore = true;
 
@@ -889,12 +1016,7 @@ try {
 
     // Navigation uses only real terminal keys. Folder changes clear the old
     // projection before a failed remote list; clearing search keeps the folder.
-    async function chooseFolder(index) {
-      await act(() => text("1"));
-      await act(() => text("h"));
-      await act(() => text("j".repeat(index + 1)));
-      return act(() => key("Enter", "Enter"));
-    }
+    const chooseFolder = index => chooseNativeFolder(1, 1, index);
     listFailure = { accountIndex: 0, mode: "forbidden" };
     const failedArchive = await chooseFolder(3);
     assert(failedArchive.includes("Archive") && !failedArchive.includes("Ada live mailbox") && !failedArchive.includes("Hello Ada,"), "failed Archive fetch relabeled the old Inbox body or list");
@@ -905,9 +1027,10 @@ try {
     await act(() => text("/"));
     await act(() => text("bounded"));
     await act(() => key("Enter", "Enter"));
+    assert.equal(gmailGets().length, archiveSearchBefore, "Archive cache search called Gmail");
     const archiveClear = await act(() => text("q"));
     assert(archiveClear.includes("Archive") && archiveClear.includes("Ada bounded message 2") && !archiveClear.includes("Ada live mailbox"), "clearing Archive cache search restored Inbox rows");
-    assert.equal(gmailGets().length, archiveSearchBefore, "clearing Archive cache search called Gmail");
+    assert(gmailGets().slice(archiveSearchBefore).filter(request => new URL(request.url).pathname.endsWith("/messages")).every(request => new URL(request.url).searchParams.get("q")?.includes("-in:inbox")), "native Archive refresh lost its folder scope while clearing search");
     const unread = await chooseFolder(7);
     assert(unread.includes("Unread") && unread.includes("Ada live mailbox") && !unread.includes("Ada HTML-only mailbox"), "Unread fixture retained read mail");
     await act(() => text("/"));
@@ -924,9 +1047,8 @@ try {
 
     // While HTTP has suspended WASM, the browser keeps the old terminal grid
     // intact and covers it until the queued native resize can render safely.
-    await act(() => text("j"));
     holdNextFullRead = true;
-    await key("Enter", "Enter");
+    await key("j", "KeyJ");
     await until(async () => heldReads.length === 1 && (await session()).busy, "synthetic body read did not suspend for resize regression");
     const heldGrid = await evaluate("({cols:window.omagmaDemo.cols,rows:window.omagmaDemo.rows,text:window.omagmaDemo.screenText()})");
     await call("Emulation.setDeviceMetricsOverride", { width: 600, height: 700, deviceScaleFactor: 1, mobile: false });
@@ -946,10 +1068,12 @@ try {
     await disconnect();
 
     // An intercepted connection-close after dispatch exercises the native
-    // uncertain-outcome guard and host acknowledgement in this same instance.
-    await importBundle(bundles.workflowAda);
-    await connected(1);
+    // uncertain-outcome guard and receipt-pinned acknowledgement in this instance.
+    await importBundle(bundles.workflows);
+    await connected(2);
+    await act(() => text("1"));
     await act(() => text("c"));
+    await editComposer({ plain: true });
     await act(() => text("unknown.workflow@example.test"));
     for (let field = 0; field < 3; field++) await act(() => key("Tab", "Tab"));
     await act(() => text("Workflow uncertain draft"));
@@ -966,11 +1090,28 @@ try {
     assert.equal(sends().length, 2, "an uncertain native draft retried its Gmail mutation");
     const unknownReceipt = await evaluate("JSON.parse(localStorage.getItem('omagma-browser-pending-send-v1'))");
     assert.deepEqual(Object.keys(unknownReceipt).sort(), ["id", "startedAt"], "workflow pending receipt retained mail or credentials");
+    await act(() => text("q"));
+    await act(() => text("2"));
+    await act(() => text("c"));
+    await editComposer({ plain: true });
+    await act(() => text("bea.guard@example.test"));
+    for (let field = 0; field < 3; field++) await act(() => key("Tab", "Tab"));
+    await act(() => text("Bea acknowledgement guard"));
+    await act(() => key("s", "KeyS", 2));
+    await act(() => text("y"));
+    assert.equal(sends().length, 2, "another actor's review bypassed the pending uncertainty guard");
+    assert.deepEqual(await evaluate("JSON.parse(localStorage.getItem('omagma-browser-pending-send-v1'))"), unknownReceipt, "another actor's preflight cancellation cleared the old uncertainty receipt");
     const beforeAcknowledgement = requests.length;
     await act(() => click("#send-acknowledge"));
     assert.equal(requests.length, beforeAcknowledgement, "Checked Sent acknowledgement itself called Google");
     assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "Checked Sent acknowledgement retained the host receipt");
-    assert((await screen()).includes("Workflow uncertain draft"), "Checked Sent acknowledgement discarded the native draft");
+    assert((await screen()).includes("Bea acknowledgement guard"), "receipt-pinned acknowledgement mutated another actor's active draft");
+    if (/INSERT/.test(await screen())) await act(() => key("Escape", "Escape"));
+    await act(() => text("q"));
+    const recoveredUnknownDrafts = await chooseNativeFolder(1, 2, 2);
+    assert(recoveredUnknownDrafts.includes("Workflow uncertain draft"), "acknowledgement discarded the receipt's native draft");
+    const recoveredUnknown = await act(() => key("Enter", "Enter"));
+    assert.equal(inputField("Subject", recoveredUnknown), "Workflow uncertain draft");
     await act(() => text("y"));
     assert.equal((await session()).sendPhase, null, "acknowledgement reused the previous send review");
     const freshReview = await act(() => key("s", "KeyS", 2));
@@ -981,6 +1122,7 @@ try {
     await act(() => click("#send-grace-cancel"));
     assert.equal(sends().length, 2, "acknowledged draft submitted without completing its new local cancellation window");
     checks.actualUnknownOutcomeNoRetryAndAcknowledgementRequiresFreshReview = true;
+    checks.unknownAcknowledgementPinnedAcrossActorsAndDrafts = true;
     await screenshot("workflows-unknown-acknowledged.png");
     await disconnect();
     const beforeGuardReload = requests.length;
@@ -1023,9 +1165,8 @@ try {
     const idleDesktop = await activity();
     assertIdleActivity(idleDesktop, "connected idle");
     await act(() => text("1"));
-    await act(() => key("j", "KeyJ"));
     holdNextFullRead = true;
-    await key("Enter", "Enter");
+    await key("j", "KeyJ");
     await until(async () => heldReads.length === 1 && (await session()).busy && (await activity()).busy,
       "held body read did not show request activity");
     const desktop = await activity();
@@ -1058,9 +1199,8 @@ try {
     await focus();
     await act(() => text("q"));
     await act(() => text("1"));
-    await act(() => text("jj"));
     holdNextFullRead = true;
-    await key("Enter", "Enter");
+    await key("j", "KeyJ");
     await until(async () => heldReads.length === 2 && (await session()).busy && (await activity()).busy,
       "second held body read did not enter busy state");
     const small = await activity();
@@ -1223,7 +1363,7 @@ try {
     assert.deepEqual((await session()).canSend, [false], "read-only connection file enabled sending");
     assert((await screen()).includes("Ada live mailbox") && (await screen()).includes("Hello Ada,"), "single-file read-only connection did not read the verified mailbox");
     const denied = await act(() => text("c"));
-    assert(/PermissionDenied|read.only|read only/i.test(denied), "single-file read-only account accepted compose");
+    assert(/PermissionDenied|permission required|read.only|read only/i.test(denied), "single-file read-only account accepted compose");
     await disconnect();
     await importBundle(bundles.ada);
     await connected(1);
@@ -1320,7 +1460,9 @@ try {
     new Uint8Array(e.memory.buffer,e.connect_ptr(),connection.length).set(connection);
     if(await invoke('connect')(connection.length)!==0)throw new Error('Packet fixture connection failed');
     async function input(bytes){new Uint8Array(e.memory.buffer,e.input_ptr(),bytes.length).set(bytes);if(await invoke('input')(bytes.length)!==0)throw new Error('Packet fixture input failed')}
-    await input(encoder.encode('crecipient@example.test\t\t\tBuffered review regression\tPlain packet body'));
+    await input(encoder.encode('c'));
+    await input(new Uint8Array([0x14]));
+    await input(encoder.encode('irecipient@example.test\t\t\tBuffered review regression\tPlain packet body'));
     await input(new Uint8Array([0x13,0x79]));
     const before=posted;
     const review=decoder.decode(new Uint8Array(e.memory.buffer,e.output_ptr(),e.output_len()));
@@ -1354,9 +1496,10 @@ try {
 
   listFailure = { accountIndex: 0, mode: "forbidden" };
   await importFiles(files.ada);
-  await until(async () => (await credentialError()).length > 0, "first live list denial was not reported", 30000);
+  await connected(1);
   const failedFirstList = await screen();
-  assert(!(failedFirstList.includes(accounts[0]) && failedFirstList.includes("Omagma, now in your browser")), "first live list failure displayed fictional mail under a live account");
+  assert(/PermissionDenied|permission required/i.test(failedFirstList), "first live list denial was not reported in the native mail status");
+  assert(!failedFirstList.includes("Omagma, now in your browser") && !failedFirstList.includes("Hello Ada,"), "first live list failure displayed fictional or prior mail under a live account");
   listFailure = null;
   await disconnect();
 
@@ -1366,7 +1509,7 @@ try {
   assert.deepEqual((await session()).canSend, [false], "read-only grant enabled sending");
   const readonlyBefore = sends().length;
   const readonlyCompose = await act(() => text("c"));
-  assert(/PermissionDenied|read.only|read only/i.test(readonlyCompose), "read-only compose did not explain its permission refusal");
+  assert(/PermissionDenied|permission required|read.only|read only/i.test(readonlyCompose), "read-only compose did not explain its permission refusal");
   assert.equal(sends().length, readonlyBefore);
   await disconnect();
 
@@ -1415,6 +1558,7 @@ try {
   const composeBody = "Hello synthetic recipient,\nPlain UTF-8 café 🚀.\n" + "界🚀 café ".repeat(260) + "\n";
   assert(Buffer.byteLength(composeBody) > 2048, "paste fixture does not cross multiple bridge input chunks");
   await act(() => text("c"));
+  await editComposer({ plain: true });
   await act(() => text("recipient@example.test"));
   await act(() => key("Tab", "Tab"));
   await act(() => key("Tab", "Tab"));
@@ -1455,7 +1599,7 @@ try {
   await focus();
   await act(() => key("s", "KeyS", 2));
   const newSend = await explicitSend("plain compose");
-  await until(async () => (await screen()).includes("Gmail confirmed"), "successful synthetic send did not report confirmation");
+  await until(async () => (await screen()).includes("Submitted; recipient delivery is not confirmed"), "successful synthetic send did not report native submission acceptance");
   const newMail = outgoingMessage(newSend);
   assert(newMail.headers.from.includes(accounts[0]) && newMail.headers.to.includes("recipient@example.test"));
   assert.equal(newMail.headers.subject, "Browser synthetic compose");
@@ -1464,6 +1608,7 @@ try {
 
   await focus();
   await act(() => text("r"));
+  await editComposer({ plain: true, body: true });
   await act(() => paste("Browser reply.\n"));
   await act(() => key("s", "KeyS", 2));
   const replyBefore = sends().length;
@@ -1481,16 +1626,16 @@ try {
   // the WASM stack is suspended. Old responses may not revive that session.
   await focus();
   await act(() => text("1"));
-  await act(() => text("jj"));
+  await act(() => text("q"));
   holdNextFullRead = true;
-  await key("Enter", "Enter");
+  await key("G", "KeyG", 8); // The bounded last message has not been prefetched.
   await until(async () => heldReads.length === 1, "body request was not suspended by the synthetic transport");
   const heldRequestCount = requests.length;
   await text("jj");
   await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await pause(100);
   assert.equal(requests.length, heldRequestCount, "WASM reentered the transport while another body request was suspended");
-  await click("#disconnect-session");
+  await disconnectDecision(true);
   for (const held of heldReads) { canceledRequests.add(held.requestId); held.release(); }
   await disconnect();
   await pause(200);
@@ -1502,6 +1647,7 @@ try {
   await importFiles(files.ada);
   await connected(1);
   await act(() => text("c"));
+  await editComposer({ plain: true });
   await act(() => text("uncertain.recipient@example.test"));
   for (let field = 0; field < 3; field++) await act(() => key("Tab", "Tab"));
   await act(() => text("Synthetic uncertain send"));
@@ -1527,8 +1673,10 @@ try {
   assert.equal(outgoingMessage(uncertainSend).body, "Protected uncertain body.\n");
   const beforeReload = requests.length;
   const reloadMarker = events.length;
+  expectedDialog = { purpose: "intentional-reload-discards-session-draft", type: "beforeunload", accept: true };
   await call("Page.reload", { ignoreCache: true });
   await until(async () => events.slice(reloadMarker).some((event) => event.method === "Page.loadEventFired"), "reload did not create a new document");
+  expectedDialog = null;
   await until(async () => evaluate("window.omagmaDemo?.ready === true"), "reload did not recreate fictional mode");
   assert.equal((await session()).mode, "demo");
   assert.equal((await session()).accountCount, 0, "reload restored private live credentials");
