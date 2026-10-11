@@ -36,6 +36,7 @@ await Promise.all([
   cp(resolve(here, 'node_modules/@xterm/xterm/css/xterm.css'), resolve(out, 'xterm.css')),
   cp(resolve(here, 'node_modules/@xterm/xterm/LICENSE'), resolve(out, 'LICENSE-xterm.txt')),
   cp(resolve(here, 'node_modules/@xterm/addon-fit/LICENSE'), resolve(out, 'LICENSE-xterm-addon-fit.txt')),
+  cp(resolve(here, 'node_modules/@xterm/addon-unicode11/LICENSE'), resolve(out, 'LICENSE-xterm-addon-unicode11.txt')),
   cp(wasm, resolve(out, 'omagma.wasm')),
 ]);
 console.log(`Built static browser experiment: ${out}`);

@@ -66,6 +66,13 @@ WASM. The module is freestanding and has no host imports. The build requires
 explicit `-Dbrowser=true`; ordinary native builds keep their existing entry
 point and dependency selection. No WASI runtime or remote PTY is involved.
 
+The browser uses xterm's pinned Unicode 11 width provider so stars, rockets,
+CJK text and combining accents agree with the native renderer's current
+`wcwidth` mode in these fixtures. This does not establish complete agreement
+with the native library's newer Unicode tables. The terminal host's inset box
+defines the usable grid size; margins are excluded from fitting so the right
+and bottom borders remain visible.
+
 The native executable keeps its ordinary platform entry point. A freestanding
 WebAssembly module cannot open `/dev/tty`, start native processes, use the
 desktop keyring or listen for the current loopback OAuth callback. Those need

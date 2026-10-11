@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { boundedSize, BrowserWasmBridge } from './bridge.mjs';
 
 const terminalElement = document.querySelector('#terminal');
@@ -20,13 +21,16 @@ const terminal = new Terminal({
   scrollback: 0,
   cursorBlink: false,
   cursorStyle: 'block',
-  allowProposedApi: false,
+  // xterm exposes Unicode width providers through its proposed Unicode API.
+  allowProposedApi: true,
   convertEol: false,
   overviewRuler: { width: 0 },
   theme: { background: '#0d1219', foreground: '#d1d9e6', cursor: '#b5cc90', selectionBackground: '#364258' },
 });
 const fit = new FitAddon();
 terminal.loadAddon(fit);
+terminal.loadAddon(new Unicode11Addon());
+terminal.unicode.activeVersion = '11';
 terminal.open(terminalElement);
 let bridge = null;
 let module = null;
@@ -53,6 +57,25 @@ function cellStyle(col, row) {
   return cell ? { fg: cell.getFgColor(), bg: cell.getBgColor(), fgRGB: cell.isFgRGB(), bgRGB: cell.isBgRGB() } : null;
 }
 
+function cell(col, row) {
+  const buffer = terminal.buffer.active;
+  const cell = buffer.getLine(buffer.viewportY + row)?.getCell(col);
+  return cell ? { chars: cell.getChars(), width: cell.getWidth() } : null;
+}
+
+function geometry() {
+  const rect = element => {
+    if (!element) return null;
+    const { x, y, top, right, bottom, left, width, height } = element.getBoundingClientRect();
+    return { x, y, top, right, bottom, left, width, height };
+  };
+  return {
+    stage: rect(document.querySelector('.terminal-stage')),
+    terminal: rect(terminalElement),
+    screen: rect(terminalElement.querySelector('.xterm-screen')),
+  };
+}
+
 // Read-only diagnostics for the synthetic experiment and browser regression
 // checks. All UI behavior and state come from the compiled Zig module.
 Object.defineProperty(window, 'omagmaDemo', { value: Object.freeze({
@@ -61,8 +84,11 @@ Object.defineProperty(window, 'omagmaDemo', { value: Object.freeze({
   get cols() { return terminal.cols; },
   get rows() { return terminal.rows; },
   get frameCount() { return frameCount; },
+  get unicodeVersion() { return terminal.unicode.activeVersion; },
   screenText,
   cellStyle,
+  cell,
+  geometry,
   exports() { return bridge ? Object.keys(bridge.exports).sort() : []; },
   state() { return bridge?.state() ?? null; },
 }), writable: false, configurable: false });

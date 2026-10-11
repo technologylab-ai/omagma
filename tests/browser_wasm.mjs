@@ -123,6 +123,75 @@ try {
     const capture = await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     await writeFile(join(work, name), Buffer.from(capture.data, "base64"), { mode: 0o600 });
   }
+  async function viewport(width, height, deviceScaleFactor = 1, zoom = 1) {
+    await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor, mobile: false });
+    await evaluate(`document.documentElement.style.zoom=${JSON.stringify(String(zoom))};true`);
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    await pause(100);
+    assert.equal(await evaluate("window.omagmaDemo.error"), null, "viewport change stopped the WASM terminal");
+  }
+  async function geometry() {
+    // Read DOM directly so an older shell with no new diagnostics can be the
+    // negative control. The screen must fit the actual padded content area,
+    // rather than merely fit the document or its clipping ancestor.
+    return evaluate(`(()=>{
+      const element=document.querySelector('#terminal');const css=getComputedStyle(element);
+      const rect=value=>{const r=value.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}};
+      const host=rect(element),screen=rect(element.querySelector('.xterm-screen'));
+      const scaleX=host.width/parseFloat(css.width),scaleY=host.height/parseFloat(css.height);
+      const content={left:host.left+(parseFloat(css.paddingLeft)+parseFloat(css.borderLeftWidth))*scaleX,
+        right:host.right-(parseFloat(css.paddingRight)+parseFloat(css.borderRightWidth))*scaleX,
+        top:host.top+(parseFloat(css.paddingTop)+parseFloat(css.borderTopWidth))*scaleY,
+        bottom:host.bottom-(parseFloat(css.paddingBottom)+parseFloat(css.borderBottomWidth))*scaleY};
+      return {host,content,screen,stage:rect(document.querySelector('.terminal-stage')),
+        cols:window.omagmaDemo.cols,rows:window.omagmaDemo.rows,
+        documentWidth:document.documentElement.clientWidth,documentScrollWidth:document.documentElement.scrollWidth};
+    })()`);
+  }
+  function assertGeometry(value, label) {
+    const tolerance = 0.75;
+    assert(value.screen.right <= value.content.right + tolerance, `${label}: rightmost terminal cell is clipped (${value.screen.right} > padded content ${value.content.right})`);
+    assert(value.screen.bottom <= value.content.bottom + tolerance, `${label}: bottom terminal row is clipped (${value.screen.bottom} > padded content ${value.content.bottom})`);
+    assert(value.screen.left >= value.content.left - tolerance && value.screen.top >= value.content.top - tolerance, `${label}: terminal begins outside its content area`);
+    assert(value.documentScrollWidth <= value.documentWidth, `${label}: shell overflows the document horizontally`);
+  }
+  async function grid() {
+    return evaluate(`(()=>{
+      const api=window.omagmaDemo;
+      const rows=Array.from({length:api.rows},(_,row)=>Array.from({length:api.cols},(_,col)=>api.cell(col,row)));
+      const lines=rows.map(row=>row.map(cell=>cell.chars).join(''));
+      const top=rows.findIndex(row=>row.some(cell=>cell.chars==='╭'));
+      let bottom=-1;for(let row=top+1;row<rows.length;row++)if(rows[row].some(cell=>cell.chars==='╰'))bottom=row;
+      const right=top<0?[]:rows[top].flatMap((cell,col)=>cell.chars==='╮'?[col]:[]);
+      const left=top<0?[]:rows[top].flatMap((cell,col)=>cell.chars==='╭'?[col]:[]);
+      const shifted=[];for(let row=top+1;row<bottom;row++)for(const col of [...left,...right]){
+        const chars=rows[row][col].chars;if(chars!=='│')shifted.push({row,col,chars});
+      }
+      const glyphs=[];for(let row=0;row<rows.length;row++)for(let col=0;col<api.cols;col++){
+        if(['⭐','🚀','こ','ん','に','ち','は','日','本','語'].includes(rows[row][col].chars))
+          glyphs.push({row,col,...rows[row][col],next:rows[row][col+1],readerStatus:lines[row].includes('Starred')});
+      }
+      return {top,bottom,left,right,shifted,glyphs,unicodeVersion:api.unicodeVersion};
+    })()`);
+  }
+  function assertGrid(value, label, readerVisible) {
+    assert(value.top >= 0 && value.bottom > value.top && value.right.length > 0, `${label}: pane border corners are missing`);
+    assert.deepEqual(value.shifted, [], `${label}: pane dividers shifted between native rows`);
+    const stars = value.glyphs.filter((glyph) => glyph.chars === "⭐");
+    assert(stars.length > 0, `${label}: starred-row width regression has no fixture coverage`);
+    assertGlyphWidths(value.glyphs, label);
+    if (readerVisible) {
+      assert(stars.some((glyph) => glyph.readerStatus), `${label}: reader Starred status has no width coverage`);
+      assert(value.glyphs.some((glyph) => glyph.chars === "こ"), `${label}: Japanese subject has no width coverage`);
+    }
+  }
+  function assertGlyphWidths(glyphs, label) {
+    for (const glyph of glyphs) {
+      assert.equal(glyph.width, 2, `${label}: ${glyph.chars} occupies the wrong number of terminal columns`);
+      assert.equal(glyph.next?.width, 0, `${label}: ${glyph.chars} has no wide-cell continuation`);
+      assert.equal(glyph.next?.chars, "", `${label}: ${glyph.chars} overwrote its continuation cell`);
+    }
+  }
   await call("Page.enable");
   await call("Runtime.enable");
   await call("Network.enable");
@@ -133,6 +202,14 @@ try {
   await until(async () => evaluate("window.omagmaDemo?.ready === true || Boolean(window.omagmaDemo?.error)"), "WASM terminal did not finish loading");
   assert.equal(await evaluate("window.omagmaDemo.error"), null, "WASM terminal reported an error");
   assert(staticRequests.includes("/omagma.wasm"), "browser did not load the site's WebAssembly bytes");
+  if (args.get("--geometry-only") === "true") {
+    await viewport(1920, 1300);
+    const before = await geometry();
+    await screenshot("wasm-geometry-1920.png");
+    await writeFile(join(work, "geometry-control.json"), JSON.stringify(before, null, 2) + "\n", { mode: 0o600 });
+    assertGeometry(before, "1920x1300 baseline control");
+    console.log(JSON.stringify({ geometry: before, clipped: false }));
+  } else {
   const exports = await evaluate("window.omagmaDemo.exports()");
   assert(exports.includes("memory"), "loaded module did not expose linear memory");
   const abi = await evaluate(`(async()=>{
@@ -169,6 +246,57 @@ try {
   assert.equal(palette.body.bg, 0x111620, "xterm changed the native body's RGB background");
   assert.equal(palette.accent.fg, 0xff9e61, "xterm changed the native orange accent");
   assert(palette.body.fgRGB && palette.body.bgRGB && palette.accent.fgRGB, "native palette no longer uses explicit RGB terminal cells");
+  const rendering = [];
+  for (const size of [
+    { label: "1440", width: 1440, height: 1000, dpr: 1, zoom: 1 },
+    { label: "1920", width: 1920, height: 1300, dpr: 1, zoom: 1 },
+    { label: "1920-dpr125", width: 1920, height: 1300, dpr: 1.25, zoom: 1 },
+    { label: "1536-browser125", width: 1536, height: 1040, dpr: 1.25, zoom: 1 },
+    { label: "1920-zoom110", width: 1920, height: 1300, dpr: 1.25, zoom: 1.1 },
+    { label: "1920-zoom125", width: 1920, height: 1300, dpr: 1, zoom: 1.25 },
+    { label: "600", width: 600, height: 700, dpr: 1, zoom: 1 },
+    { label: "600-zoom125", width: 600, height: 700, dpr: 1.25, zoom: 1.25 },
+  ]) {
+    await viewport(size.width, size.height, size.dpr, size.zoom);
+    const bounds = await geometry();
+    const cells = await grid();
+    const entry = { ...size, bounds, cells };
+    rendering.push(entry);
+    await screenshot(`wasm-rendering-${size.label}.png`);
+    await writeFile(join(work, "rendering-acceptance.json"), JSON.stringify(rendering, null, 2) + "\n", { mode: 0o600 });
+    assertGeometry(bounds, size.label);
+    assertGrid(cells, size.label, size.width >= 1440);
+    // CSS document zoom is a separate layout stress case. Chrome's native
+    // page zoom changes the CSS viewport and DPR, represented above by the
+    // 1536x1040 / DPR1.25 case for a 1920x1300 physical viewport.
+    if (size.zoom !== 1) continue;
+    const target = await evaluate(`(()=>{
+      const api=window.omagmaDemo;
+      for(let row=0;row<api.rows;row++)for(let col=0;col<api.cols;col++){
+        if(api.cell(col,row).chars!=='D')continue;
+        let rest='';for(let cursor=col;cursor<api.cols;cursor++)rest+=api.cell(cursor,row).chars;
+        if(rest.startsWith('Design review'))return {row,col};
+      }return null;
+    })()`);
+    assert(target, `${size.label}: pointer fixture subject is not visible`);
+    const pointer = { x: bounds.screen.left + (target.col + 3.5) * bounds.screen.width / bounds.cols,
+      y: bounds.screen.top + (target.row + 0.5) * bounds.screen.height / bounds.rows };
+    const picked = await frameAfter(async () => {
+      await call("Input.dispatchMouseEvent", { type: "mousePressed", ...pointer, button: "left", clickCount: 1 });
+      await call("Input.dispatchMouseEvent", { type: "mouseReleased", ...pointer, button: "left", clickCount: 1 });
+    });
+    entry.pointerHit = { row: target.row, col: target.col, ...pointer,
+      selectionLine: picked.split("\n").find((line) => line.includes("Mail")) };
+    await writeFile(join(work, "rendering-acceptance.json"), JSON.stringify(rendering, null, 2) + "\n", { mode: 0o600 });
+    await screenshot(`wasm-pointer-${size.label}.png`);
+    assert(/Mail[^\n]*2\/12/.test(picked), `${size.label}: pointer coordinates did not select the intended native row`);
+    if (size.width >= 1440) assert(picked.includes("A warm orange accent"), `${size.label}: pointer selection did not update the reader`);
+    entry.pointerHit.selectedMessage = 2;
+    await focus();
+    await frameAfter(() => text("1"));
+    await writeFile(join(work, "rendering-acceptance.json"), JSON.stringify(rendering, null, 2) + "\n", { mode: 0o600 });
+  }
+  await viewport(1440, 1000);
   await focus();
   assert(initial.includes("Omagma, now in your browser"), "initial fictional message missing");
   assert(initial.includes("actual Zig TUI renderer"), "initial body was not rendered by the terminal");
@@ -225,10 +353,11 @@ try {
   await frameAfter(() => click("#demo-reset"));
   await until(async () => evaluate("window.omagmaDemo.ready"), "Reset did not restart WASM");
   assert((await screen()).includes("actual Zig TUI renderer"), "Reset did not restore fictional initial state");
+  assertGrid(await grid(), "Reset keeps Unicode cell widths", true);
 
   const report = { synthetic: true, desktopUsed: false, browser: version.product,
     wasmBytes: wasmBytes.length, wasmSha256: createHash("sha256").update(wasmBytes).digest("hex"),
-    exports, abi, palette, staticRequests, initialCols: await evaluate("window.omagmaDemo.cols"),
+    exports, abi, palette, rendering, staticRequests, initialCols: await evaluate("window.omagmaDemo.cols"),
     initialRows: await evaluate("window.omagmaDemo.rows"), arrowAndLetterNavigation: true,
     accountSeparation: true, localSearchAndReset: true, unicodeInputAndSearch: true,
     nativePaneLayout: true, expandedReader: true, nativeHelp: true, nativeThemePicker: true,
@@ -249,6 +378,11 @@ try {
   await frameAfter(() => key("Enter", "Enter"));
   const narrowReader = await frameAfter(() => text("z"));
   assert(narrowReader.includes("Montréal"), "narrow reader did not open the selected Unicode message");
+  const readerGlyphs = (await grid()).glyphs;
+  assert(readerGlyphs.some((glyph) => glyph.chars === "🚀"), "reader rocket fixture has no terminal-cell coverage");
+  assert(readerGlyphs.some((glyph) => glyph.chars === "日"), "reader Japanese fixture has no terminal-cell coverage");
+  assertGlyphWidths(readerGlyphs, "narrow Unicode reader");
+  report.readerUnicodeCells = readerGlyphs;
   const scrolled = await frameAfter(() => key("PageDown", "PageDown"));
   assert.notEqual(scrolled, narrowReader, "narrow reader did not scroll with PageDown");
   assert(scrolled.includes("Montréal"), "scrolling changed the selected message");
@@ -280,6 +414,7 @@ try {
   report.screenshot = join(work, "wasm-terminal.png");
   await writeFile(join(work, "browser-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
   console.log(JSON.stringify(report));
+  }
 } finally {
   socket?.close();
   try { process.kill(-browser.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
