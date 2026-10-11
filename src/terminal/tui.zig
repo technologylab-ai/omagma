@@ -7694,7 +7694,7 @@ const App = struct {
             return;
         }
         if (key.matches('s', .{ .ctrl = true })) return self.saveDraft(.save_review);
-        if (self.compose.insert_mode and self.compose.selected < 3 and (key.matches(' ', .{ .ctrl = true }) or key.codepoint == 0)) {
+        if (self.compose.insert_mode and self.compose.selected < 3 and (key.matches(' ', .{ .ctrl = true }) or key.matches('@', .{ .ctrl = true }) or key.codepoint == 0)) {
             self.completion_open = true;
             self.completion_dismissed = false;
             self.compose.completion_selected = 0;
@@ -13470,6 +13470,58 @@ test "recipient preview: Ctrl N P works for unsaved correspondents without conta
     try app.onComposeKey(.{ .codepoint = 'n', .mods = .{ .ctrl = true } });
     try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "No matching") != null);
     try std.testing.expectEqualStrings("caro", app.compose.fields[0].value());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: decoded NUL opens recipients and queues the current-token contacts fallback" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{ .behavior = .contacts };
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    try app.replaceRecipients("{\"ok\":true,\"data\":{\"recipients\":[{\"address\":\"recent@example.test\",\"name\":\"Recent correspondent\"}]}}");
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.insert_mode = true;
+    app.update_loaded = true;
+    try app.compose.fields[4].set(a, "Unsent body stays intact");
+
+    var decoder: input_loop.Decoder = .{};
+    @memcpy((try decoder.writable())[0..1], "\x00");
+    decoder.added(1);
+    const first = (try decoder.next()) orelse return error.MissingDecodedKey;
+    const key = switch (first) {
+        .key_press => |decoded| decoded,
+        else => return error.UnexpectedInputEvent,
+    };
+    try std.testing.expect(key.matches('@', .{ .ctrl = true }));
+    try app.onKey(key);
+    try std.testing.expect(app.completion_open and app.mode == .compose);
+    try std.testing.expectEqual(@as(usize, 1), app.composeCompletions().len);
+    try std.testing.expectEqualStrings("recent@example.test", app.composeCompletions().values[0].address);
+    try std.testing.expect((try decoder.next()) == null);
+
+    const field_text = "kept@example.test, ada.cont, tail@example.test";
+    try app.compose.fields[0].set(a, field_text);
+    app.compose.fields[0].cursor = "kept@example.test, ada.cont".len;
+    // Hold the sole worker while observing the exact queued fallback. The
+    // decoder/UI regression must not perform an actual provider request.
+    app.job = .{ .kind = .read };
+    app.job.future = try app.io.concurrent(struct {
+        fn complete() void {}
+    }.complete, .{});
+    @memcpy((try decoder.writable())[0..1], "\x00");
+    decoder.added(1);
+    const second = (try decoder.next()) orelse return error.MissingDecodedKey;
+    switch (second) {
+        .key_press => |decoded| try app.onKey(decoded),
+        else => return error.UnexpectedInputEvent,
+    }
+    try std.testing.expect(app.mode == .contacts and app.picker and app.picker_replace_token and app.pending_contacts);
+    try std.testing.expectEqualStrings("ada.cont", app.contacts_query.value());
+    try std.testing.expectEqualStrings("self@example.test", app.contacts_account.value());
+    try std.testing.expectEqualStrings(field_text, app.compose.fields[0].value());
+    try std.testing.expectEqualStrings("Unsent body stays intact", app.compose.fields[4].value());
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
