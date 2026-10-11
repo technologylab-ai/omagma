@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -127,7 +128,7 @@ def help_paths(runner):
     for mode in LEGACY_MODES:
         for flag in ("--help", "-h"):
             result = runner.run([mode, "--config", str(runner.invalid_config), flag], without_home=True)
-            require(result.returncode == 0 and not result.stderr and b"Experimental terminal mail" in result.stdout,
+            require(result.returncode == 0 and not result.stderr and ("Usage: omagma " + mode).encode() in result.stdout,
                     "legacy command help loaded HOME/configuration or entered its runtime")
     for mode in ("tui", "cli", "agent", *FAMILIES):
         for flag in ("--help", "-h"):
@@ -145,6 +146,8 @@ def help_paths(runner):
             result = runner.run([family, verb, "--config", str(runner.invalid_config), "--help"])
             require(result.returncode == 0 and not result.stderr and b"Experimental terminal mail" in result.stdout,
                     f"supported one-shot {family}/{verb} was denied or loaded configuration before help")
+            require(b"Shell example" in result.stdout and b"--help-all" in result.stdout,
+                    "one-shot help omitted an executable example or advanced disclosure path")
     root = runner.run(["--help"]).stdout
     require(len(root.splitlines()) <= 35 and b"omagma cli --help" in root and b"--help-all" in root,
             "root help is not a compact entry point with next steps")
@@ -162,6 +165,48 @@ def help_paths(runner):
         result = runner.run(["updates", verb, "--help"], without_home=True)
         require(result.returncode == 0 and not result.stderr and verb.encode() in result.stdout,
                 "update help entered its runtime or omitted its own operation")
+    for mode in ("cache-refresh", "version", "--version", "build-info", "budget", "probe-keyring", "probe-callback", "probe-https"):
+        for flag in ("--help", "-h"):
+            result = runner.run([mode, flag], without_home=True)
+            require(result.returncode == 0 and not result.stderr and b"omagma" in result.stdout,
+                    "standalone help entered a probe, refresh or diagnostic instead of showing usage")
+    for verb in ("status", "migrate"):
+        result = runner.run(["credentials", verb, "--help"], without_home=True)
+        require(result.returncode == 0 and not result.stderr and ("omagma credentials " + verb).encode() in result.stdout,
+                "credential help omitted its own operation")
+    require(b"--to STORE" not in runner.run(["credentials", "status", "--help"], without_home=True).stdout,
+            "credential status help still mixes migration-only options")
+    expanded = runner.run(["draft", "create", "--help-all"], without_home=True)
+    require(expanded.returncode == 0 and b"bare JSON object" in expanded.stdout
+            and b"$defs" in expanded.stdout and b"--metadata-limit" in expanded.stdout,
+            "expanded one-shot help omitted structured file shape or common advanced flags")
+    request_input = runner.run(["mail", "send", "--body-file", str(runner.directory / "missing-body"), "--help"], without_home=True)
+    require(request_input.returncode == 0 and b"Shell example" in request_input.stdout and not request_input.stderr,
+            "help tried to read a body file before returning")
+    environment = dict(runner.environment); environment.pop("HOME", None)
+    p = subprocess.Popen([str(runner.binary), "draft", "preview", "--body-stdin", "--help"],
+                         cwd=runner.directory, env=environment, stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=no_core_dump)
+    try:
+        p.wait(timeout=3)  # Keep stdin open: help must not wait for EOF.
+        require(p.returncode == 0 and b"Shell example" in p.stdout.read() and not p.stderr.read(),
+                "help consumed stdin or entered a draft operation")
+    finally:
+        if p.poll() is None: p.kill(); p.wait(timeout=3)
+        p.stdin.close(); p.stdout.close(); p.stderr.close()
+    literal = runner.run(["draft", "preview", "--fixtures", "--cache-dir", str(runner.directory / "literal-help"),
+                          "--account", "personal@example.com", "--subject", "--help", "--body", "Hello"])
+    require(literal.returncode == 0 and json.loads(literal.stdout)["ok"],
+            "literal help-valued field was mistaken for an option")
+    typo = runner.usage(["mail", "read", "--fictional-unknown-option"], "UnknownOption", without_home=True)
+    require(b"Details: omagma mail read --help." in typo.stderr,
+            "known operation usage error did not point to contextual help")
+    bad_verb = runner.usage(["mail", CANARY], "UnknownCommand", without_home=True)
+    require(b"Details: omagma mail --help." in bad_verb.stderr,
+            "unknown operation did not point to its known family")
+    common = runner.run(["cli", "--help-options"], without_home=True)
+    require(common.returncode == 0 and b"--cache-messages" in common.stdout and b"--metrics-file" in common.stdout,
+            "shared advanced aliases or metrics options are not discoverable")
     full = runner.run(["--help-all"], without_home=True)
     require(full.returncode == 0 and b"recipients" in full.stdout and b"draft preview" in full.stdout,
             "extended help is unavailable without configuration")
@@ -280,6 +325,18 @@ def help_examples(runner):
         if family == "draft":
             require("<strong>Hello</strong>" in response["data"]["bodyHtml"],
                     "help's Markdown preview example did not render")
+    # Execute the printed shell syntax separately, proving one-shot discovery
+    # is usable without translating its JSONL examples.
+    for family, verb in (("mail", "list"), ("mail", "read"), ("mail", "search"), ("draft", "preview"),
+                         ("contacts", "list"), ("labels", "palette"), ("cache", "stats")):
+        text = runner.run([family, verb, "--help"], without_home=True).stdout.decode()
+        shell = text.split("Shell example", 1)[1].splitlines()[1].strip()
+        argv = shlex.split(shell)
+        require(argv[0] == "omagma" and argv[1:3] == [family, verb], "printed shell example changed its operation")
+        argv = [returned_id if v == "RETURNED_MESSAGE_ID" else v for v in argv[1:]]
+        result = runner.run([*argv, *common])
+        require(result.returncode == 0 and json.loads(result.stdout)["ok"],
+                f"printed {family}/{verb} shell example is not executable")
 
 
 def protocol(runner):

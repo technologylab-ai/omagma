@@ -21,6 +21,10 @@ configuration, authorization or network access.
 | `omagma cli --help mail` | Only the JSONL commands in that namespace |
 | `omagma mail --help` | Mail operations with short descriptions |
 | `omagma mail read --help` | That operation's flags, JSONL fields and example |
+| `omagma mail read --help-all` | Scoped operation help plus shared defaults and advanced flags |
+| `omagma draft create --help-all` | Compose flags plus the complete bare Draft file schema |
+| `omagma contacts upsert --help-all` | Contact flags plus the complete bare Contact file schema |
+| `omagma cli --help-options` | Launch/config/cache/fixture/resource options |
 | `omagma cli --help mail.read` | Complete request fields, nested objects, conditions, limits and examples |
 | `omagma cli --schema mail.read` | Machine-readable JSON Schema for that request, with all referenced types included |
 | `omagma cli --schema` | Machine-readable schemas for all public JSONL commands |
@@ -577,7 +581,14 @@ draft recovery and contact objects. One-shot calls accept those objects through
 `--draft-file`/`--contact-file`; do not invent extra flags for object fields.
 The CLI does not launch the TUI's editor, autocomplete or styled renderer.
 
-`--help` is a concise command summary, not a complete flag list. Supported user-facing flags are listed below; developer fixture/metrics switches are described in [developer references](DEVELOPMENT.md). All one-shot replies are JSON; `--json` is accepted for compatibility.
+Operation `--help` gives its applicable flags, defaults/effects and a shell
+example. `--help-all` adds common resource/fixture options and the complete
+Draft/Contact file schema when relevant. `--help-options` shows shared process
+options directly. Help returns before reading body files or stdin, even when
+placed after those options. Literal option values such as `--subject --help`
+remain data. Usage errors point to the nearest family/operation help without
+echoing private argument values. All one-shot replies are JSON; `--json` is
+accepted for compatibility.
 
 | Flags | Purpose / scope |
 | --- | --- |
@@ -596,7 +607,7 @@ The CLI does not launch the TUI's editor, autocomplete or styled renderer.
 | `--all` / `--reply-all` | Plan a reply-all draft |
 | `--unread` / `--read`, `--starred` / `--unstarred`, `--add-label LABEL`, `--remove-label LABEL` | Explicit mail.mark changes; label flags may repeat |
 | `--name NAME`, `--label-id ID`, `--confirm-name NAME` | Label collection create/rename/color/delete; combine writes with --operation-id |
-| `--background-color HEX`, `--text-color HEX` | Gmail-compatible color pair for labels create/color; obtain values from labels palette |
+| `--background-color HEX`, `--text-color HEX` | Gmail-compatible color pair for labels create/rename/color; obtain values from labels palette |
 | `--scope message\|conversation` | One-shot complete target resolution from a single message anchor before triage |
 | `--queue-id ID`, `--delay-seconds N`, `--wait` | Queue read/cancel/resume/process; delay 0–30 for draft queue/resume; --wait only for queue process |
 | `--send-delay N` | Explicit 0–30 second queue+wait for mail send/draft send; no delayed-send default on direct CLI sends |

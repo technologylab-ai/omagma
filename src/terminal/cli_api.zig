@@ -212,3 +212,19 @@ pub fn full(io: std.Io, a: std.mem.Allocator) !void {
     try writeSchema(&writer.interface, catalogue.definitions);
     try writer.interface.flush();
 }
+pub fn sourceSchema(io: std.Io, a: std.mem.Allocator, name: []const u8, field: []const u8) !void {
+    const catalogue = try load(a);
+    const entry = catalogue.find(name) orelse return error.UnknownCommand;
+    const properties = j.get(entry, "properties") orelse return error.InvalidDiscoveryMetadata;
+    const source = j.get(properties, field) orelse return error.InvalidDiscoveryMetadata;
+    var schema = try j.copyObject(a, source);
+    try schema.object.put(a, "$schema", .{ .string = "https://json-schema.org/draft/2020-12/schema" });
+    var selected = j.object(a);
+    try collectDefinitions(a, catalogue.definitions, schema, &selected, 0);
+    if (selected.object.count() > 0) try schema.object.put(a, "$defs", selected);
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.print("\n--{s}-file accepts this bare JSON object, without cmd/account or a {s} wrapper:\n", .{ field, field });
+    try writeSchema(&writer.interface, schema);
+    try writer.interface.flush();
+}

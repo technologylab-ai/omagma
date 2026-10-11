@@ -37,12 +37,17 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
         if (eq(verb, "--help") or eq(verb, "-h")) {
             return help_info.family(io, mode);
         }
-        if (eq(verb, "--help-all")) return help(io);
+        if (eq(verb, "--help-all")) {
+            try help_info.family(io, mode);
+            return help_info.options(io);
+        }
+        if (eq(verb, "--help-options")) return help_info.options(io);
         if (!knownVerb(mode, verb)) return error.UnknownCommand;
         operation = verb;
         const command = help_info.jsonAlias(mode, verb) orelse try std.fmt.allocPrint(sa, "{s}.{s}", .{ help_info.jsonFamily(mode), verb });
         try req.object.put(sa, "cmd", .{ .string = command });
     }
+    if (try helpBeforeInput(io, sa, mode, operation, args)) return;
     while (args.next()) |arg| {
         if (eq(arg, "--help") or eq(arg, "-h")) {
             if (jsonl) {
@@ -279,6 +284,46 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
         if (eof) break;
     }
 }
+// Help is handled before reading a body file or waiting for stdin. Iterator
+// copies borrow the same immutable argv, but retain their own position on POSIX.
+fn helpBeforeInput(io: std.Io, a: std.mem.Allocator, mode: []const u8, operation: ?[]const u8, args: *std.process.Args.Iterator) !bool {
+    var scan = args.*;
+    const jsonl = eq(mode, "cli") or eq(mode, "agent");
+    while (scan.next()) |arg| {
+        if (eq(arg, "--help") or eq(arg, "-h")) {
+            if (jsonl) {
+                const target = scan.next();
+                try help_info.protocol(io, a, if (target != null and !std.mem.startsWith(u8, target.?, "-")) target else null);
+            } else if (operation) |verb| try help_info.command(io, mode, verb) else try help_info.family(io, mode);
+            return true;
+        }
+        if (eq(arg, "--help-all")) {
+            if (jsonl) try @import("cli_api.zig").full(io, a) else if (operation) |verb| try help_info.expanded(io, a, mode, verb) else {
+                try help_info.family(io, mode);
+                try help_info.options(io);
+            }
+            return true;
+        }
+        if (eq(arg, "--help-options")) {
+            try help_info.options(io);
+            return true;
+        }
+        if (jsonl and eq(arg, "--schema")) {
+            const target = scan.next();
+            if (scan.next() != null) return error.UnknownOption;
+            try @import("cli_api.zig").schemas(io, a, target);
+            return true;
+        }
+        if (valueOption(arg)) {
+            if (!scan.skip()) return false;
+        } else if (!booleanOption(arg)) return false;
+    }
+    return false;
+}
+fn booleanOption(arg: []const u8) bool {
+    for ([_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin" }) |flag| if (eq(arg, flag)) return true;
+    return false;
+}
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
@@ -328,47 +373,25 @@ fn readStdin(io: std.Io, a: std.mem.Allocator, limit: usize) ![]const u8 {
     return r.interface.allocRemaining(a, .limited(limit));
 }
 pub fn help(io: std.Io) !void {
-    var buf: [2048]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
-    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|attachment-save|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|spam|unspam|mark|batch|undo|triage-scope|label-state|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|open-preview|create|update|send|queue|discard --account ADDRESS ...\n  omagma queue list|read|cancel|resume|process|send-now --account ADDRESS [--queue-id ID]\n  omagma attachment import|discard|open --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|spam|unspam|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN [--message-ids ID,ID].\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd; all except accounts.list require account. Use omagma cli --help for examples.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 25MiB decoded total, 35MiB MIME). Larger files use private account handles; JSON stays bounded to3MiB.\nLocal cache and drafts are private. No permanent-delete command exists.\n");
-    try w.interface.writeAll("Updates (no account/OAuth required): omagma updates status|check|guide|dismiss [--json]\n  status reads cached metadata; check requests official stable release metadata.\n  guide shows instructions for the running installation, never installs files.\n  omagma updates automatic on|off controls the daily TUI background check.\n");
-    try w.interface.writeAll("Outgoing bodies: --format markdown|plain (default plain) on compose/create/update/send/reply/forward.\nDraft source stays in bodyText; JSONL uses draft.bodyFormat (reply/forward: bodyFormat).\nReview rendered alternatives with draft preview --draft-id ID, or --body-file FILE --format markdown.\n");
-    try w.interface.writeAll("Reply/forward: --preserve-formatting retains original HTML and embedded images inline; bodyText is your separate note.\nForward: --original encloses the exact original as a separate .eml file. These modes cannot be combined.\nJSONL uses preserveFormatting:true on mail.reply/mail.forward, or original:true on mail.forward.\n");
-    try w.interface.writeAll("Label collection: omagma labels list|create|rename|delete|color|palette --account ADDRESS\n  create --name NAME --operation-id ID [--background-color HEX --text-color HEX]\n  rename --label-id ID --name NAME --operation-id ID\n  color --label-id ID --background-color HEX --text-color HEX --operation-id ID\n  delete --label-id ID --confirm-name NAME --operation-id ID\nLabel deletion removes the custom label and its associations, never messages. System labels are protected.\nCollection writes need mail-modify; keep each operation ID stable and never retry an unknown outcome automatically.\n");
-    try w.interface.writeAll(
-        \\Scope: mail triage-scope --message-id ID --scope message|conversation lists every pinned target (max100).
-        \\Use --scope message|conversation with archive/trash/restore/spam/unspam/mark/batch and one --message-id ID.
-        \\Incomplete or oversized conversations are refused. Explicit mail batch --message-ids ID,ID applies only those IDs.
-        \\Label membership: mail label-state --message-ids ID,ID (or mail labels with those IDs); use --add-label/--remove-label in a batch to apply reviewed changes.
-        \\Grace: draft queue --draft-id ID --operation-id ID [--delay-seconds 0..30], then queue process --queue-id ID --wait.
-        \\queue cancel keeps the draft unsent; queue resume --queue-id ID [--delay-seconds N] explicitly restarts a queued countdown.
-        \\queue send-now --queue-id ID skips the remaining countdown for that same reviewed intent; terminal outcomes never submit again.
-        \\queue list/read inspect durable status. Restarted processes never send a queued entry automatically.
-        \\mail send or draft send --send-delay 0..30 stages and waits through the same queue. Unknown/submitting entries are never retried.
-        \\Attachments: attachment import --path FILE [--mime-type TYPE] returns an account blobId; attachment discard --blob-id ID refuses referenced content.
-        \\Save received content: mail attachment-save --message-id ID --attachment-id ID --path NEW_FILE (private, no overwrite).
-        \\Browser preview: draft open-preview --draft-id ID, or draft preview --draft-id ID --browser, opens the private preview in the account Chrome profile.
-        \\
-    );
-    try w.interface.flush();
+    return help_info.overviewFull(io);
 }
 
 fn runUpdates(io: std.Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, args: *std.process.Args.Iterator) !void {
     const updates = @import("updates.zig");
     const verb = args.next() orelse "status";
     if (eq(verb, "--help") or eq(verb, "-h")) return help_info.family(io, "updates");
-    if (eq(verb, "--help-all")) return help(io);
+    if (eq(verb, "--help-all")) return help_info.family(io, "updates");
     if (!eq(verb, "status") and !eq(verb, "check") and !eq(verb, "guide") and !eq(verb, "dismiss") and !eq(verb, "automatic")) return error.UnknownCommand;
     var automatic: ?bool = null;
     if (eq(verb, "automatic")) {
         const choice = args.next() orelse return error.ValueRequired;
-        if (eq(choice, "--help") or eq(choice, "-h")) return help_info.command(io, "updates", verb);
+        if (eq(choice, "--help") or eq(choice, "-h") or eq(choice, "--help-all")) return help_info.command(io, "updates", verb);
         automatic = if (eq(choice, "on")) true else if (eq(choice, "off")) false else return error.InvalidUpdatePreference;
     }
     var fixtures = false;
     var json = false;
     while (args.next()) |arg| {
-        if (eq(arg, "--help") or eq(arg, "-h")) return help_info.command(io, "updates", verb);
+        if (eq(arg, "--help") or eq(arg, "-h") or eq(arg, "--help-all")) return help_info.command(io, "updates", verb);
         if (eq(arg, "--fixtures")) fixtures = true else if (eq(arg, "--json")) json = true else return error.UnknownOption;
     }
     var snapshot = try updates.init(io, a, environ, fixtures);

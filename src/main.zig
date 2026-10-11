@@ -28,9 +28,24 @@ var unassigned_reserve: [l.app_reservation - assigned_bytes]u8 = undefined;
 pub fn main(init: std.process.Init) void {
     app(init) catch |err| {
         std.debug.print("omagma: {s}\n", .{@errorName(err)});
-        if (usageError(err)) std.debug.print("Try omagma --help for available commands and options.\n", .{});
+        if (usageError(err)) {
+            std.debug.print("Try omagma --help for available commands and options.\n", .{});
+            contextHelpHint(init.minimal.args);
+        }
         std.process.exit(1);
     };
+}
+fn contextHelpHint(arguments: std.process.Args) void {
+    var args = arguments.iterate();
+    _ = args.skip();
+    const mode = args.next() orelse return;
+    const info = @import("terminal/cli_help.zig");
+    const verb = args.next();
+    if (info.knownFamily(mode)) {
+        if (verb != null and info.knownVerb(mode, verb.?)) std.debug.print("Details: omagma {s} {s} --help.\n", .{ mode, verb.? }) else std.debug.print("Details: omagma {s} --help.\n", .{mode});
+    } else if (std.mem.eql(u8, mode, "credentials") and verb != null and (std.mem.eql(u8, verb.?, "status") or std.mem.eql(u8, verb.?, "migrate"))) {
+        std.debug.print("Details: omagma credentials {s} --help.\n", .{verb.?});
+    } else if (@import("terminal/standalone_help.zig").known(mode) or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "tui")) std.debug.print("Details: omagma {s} --help.\n", .{mode});
 }
 fn usageError(err: anyerror) bool {
     return switch (err) {
@@ -59,6 +74,17 @@ fn usageError(err: anyerror) bool {
         error.InvalidCredentialOption,
         error.UrlRequired,
         error.ValueOutOfRange,
+        error.InvalidBodyFormat,
+        error.ConflictingDraftOptions,
+        error.ConflictingSearchMode,
+        error.FormatRequiresComposeCommand,
+        error.FormatRequiresDraftSource,
+        error.OriginalRequiresForward,
+        error.PreserveFormattingRequiresReplyOrForward,
+        error.ConflictingForwardModes,
+        error.CachedFlagRequiresOneShotCommand,
+        error.ServerFlagRequiresSearch,
+        error.InvalidUpdatePreference,
         => true,
         else => false,
     };
@@ -69,10 +95,33 @@ fn printHelp(io: std.Io) !void {
 fn printFullHelp(io: std.Io) !void {
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
-    try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
+    try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n  cache-refresh --help\n  build-info | budget (use --help for scoped diagnostics)\n", .{ @import("build_options").version, builtin.zig_version_string });
     try writer.interface.flush();
     try @import("terminal/cli.zig").help(io);
     try @import("terminal/credential_cli.zig").help(io);
+}
+fn standaloneHelpRequested(mode: []const u8, args: *std.process.Args.Iterator) ?[]const u8 {
+    var scan = args.*;
+    var verb: ?[]const u8 = null;
+    if (std.mem.eql(u8, mode, "credentials")) {
+        const first = scan.next() orelse return null;
+        if (std.mem.eql(u8, first, "--help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help-all")) return "";
+        if (!std.mem.eql(u8, first, "status") and !std.mem.eql(u8, first, "migrate")) return null;
+        verb = first;
+    }
+    while (scan.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help-all")) return verb orelse "";
+        if (std.mem.eql(u8, arg, "--fixtures") or std.mem.eql(u8, arg, "--dry-run-open") or std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "--quiet")) continue;
+        // Standalone value flags (including probe positional arguments) are
+        // data. Recognized value options consume their value before help scan.
+        var value_flag = false;
+        for ([_][]const u8{ "--config", "--account", "--grant-file", "--to", "--directory", "--cache-dir", "--interval", "--prefetch-bodies", "--metadata-limit", "--disk-limit-bytes", "--fixture-root", "--fixture-scenario", "--fixture-delay-ms", "--fixture-fail-account", "--fixture-empty-account", "--fixture-rows", "--fixture-fail-after", "--fixture-auto-refresh-ms" }) |flag| if (std.mem.eql(u8, arg, flag)) {
+            value_flag = true;
+            break;
+        };
+        if (value_flag and !scan.skip()) return null;
+    }
+    return null;
 }
 fn app(init: std.process.Init) !void {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
@@ -88,6 +137,9 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (@import("terminal/standalone_help.zig").known(mode)) {
+        if (standaloneHelpRequested(mode, &args)) |verb| return @import("terminal/standalone_help.zig").render(io, mode, if (verb.len == 0) null else verb);
+    }
     if (std.mem.eql(u8, mode, "credentials")) return @import("terminal/credential_cli.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "__wait-probe-child")) return @import("platform.zig").waitCancellationChild(io);
     if (std.mem.eql(u8, mode, "probe-keyring-upgrade")) {
