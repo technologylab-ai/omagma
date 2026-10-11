@@ -50,6 +50,6 @@ pub fn main(init: std.process.Init) !void {
         try oauth.callbackProbe(init.io);
         std.debug.print("callback timeout, stalled read, strict state and listener close passed\n", .{});
     } else if (std.mem.eql(u8, mode, "auth")) {
-        try oauth.authorize(init.io, args.next() orelse return error.Args, args.next() orelse return error.Args, args.next() orelse return error.Args, args.next() orelse return error.Args);
+        try oauth.authorize(init.io, args.next() orelse return error.Args, args.next() orelse return error.Args, args.next() orelse return error.Args, args.next() orelse return error.Args, .{});
     } else return error.Mode;
 }
