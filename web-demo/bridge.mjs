@@ -7,7 +7,7 @@ export function boundedSize(cols, rows) {
 }
 
 export class BrowserWasmBridge {
-  constructor(instance, onFrame) {
+  constructor(instance, onFrame, promising = null) {
     this.exports = instance.exports;
     this.onFrame = onFrame;
     if (!(this.exports.memory instanceof WebAssembly.Memory)) {
@@ -16,12 +16,14 @@ export class BrowserWasmBridge {
     for (const name of requiredFunctions) {
       if (typeof this.exports[name] !== 'function') throw new Error(`The browser module is missing ${name}().`);
     }
+    this.calls = {};
+    for (const name of ['init', 'resize', 'input', 'connect']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
   }
 
-  invoke(name, ...args) {
+  async invoke(name, ...args) {
     try {
-      const status = this.exports[name](...args);
-      if (status !== 0) throw new Error(`The WebAssembly TUI returned status ${status} from ${name}().`);
+      const status = await this.calls[name](...args);
+      if (status !== 0) throw new Error(name === 'connect' ? 'Google could not verify or load this account. Check the matching grants and token files.' : `The WebAssembly TUI returned status ${status} from ${name}().`);
       this.frame();
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
@@ -33,12 +35,12 @@ export class BrowserWasmBridge {
 
   init(cols, rows) {
     const size = boundedSize(cols, rows);
-    this.invoke('init', size.cols, size.rows);
+    return this.invoke('init', size.cols, size.rows);
   }
 
   resize(cols, rows) {
     const size = boundedSize(cols, rows);
-    this.invoke('resize', size.cols, size.rows);
+    return this.invoke('resize', size.cols, size.rows);
   }
 
   view(ptr, len, limit, label) {
@@ -58,7 +60,7 @@ export class BrowserWasmBridge {
     this.onFrame(this.view(ptr, len, MAX_OUTPUT_FRAME, 'output').slice());
   }
 
-  input(bytes) {
+  async input(bytes) {
     if (!(bytes instanceof Uint8Array)) throw new TypeError('Terminal input must be UTF-8 bytes.');
     if (bytes.length > MAX_INPUT_EVENT) throw new Error('This experiment accepts up to 64 KiB of input at a time.');
     let offset = 0;
@@ -70,10 +72,25 @@ export class BrowserWasmBridge {
       // Raw byte chunks preserve decoder state across boundaries, including
       // a UTF-8 character or ANSI keyboard sequence split between calls.
       buffer.set(bytes.subarray(offset, offset + len));
-      this.invoke('input', len);
+      await this.invoke('input', len);
       offset += len;
     }
   }
+
+  async connect(metadata) {
+    if (typeof this.exports.connect_ptr !== 'function' || typeof this.exports.connect_capacity !== 'function' || !this.calls.connect) throw new Error('This browser build does not include live mail support.');
+    const bytes = new TextEncoder().encode(JSON.stringify(metadata));
+    const capacity = this.exports.connect_capacity();
+    if (bytes.length > capacity) throw new Error('The selected account metadata exceeds the browser limit.');
+    const ptr = this.exports.connect_ptr();
+    const buffer = this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection');
+    buffer.fill(0);
+    buffer.set(bytes);
+    try { await this.invoke('connect', bytes.length); }
+    finally { this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection').fill(0); bytes.fill(0); }
+  }
+
+  wipe() { new Uint8Array(this.exports.memory.buffer).fill(0); }
 
   state() {
     if (typeof this.exports.state_ptr !== 'function' || typeof this.exports.state_len !== 'function') return null;

@@ -65,7 +65,7 @@ const Network = struct {
         return decodeResponse(a, method, url, response.status, response.body);
     }
 };
-fn decodeResponse(a: std.mem.Allocator, method: std.http.Method, url: []const u8, status: u16, bytes: []const u8) !j.Value {
+pub fn decodeResponse(a: std.mem.Allocator, method: std.http.Method, url: []const u8, status: u16, bytes: []const u8) !j.Value {
     const mutating = method == .POST or method == .PATCH or method == .PUT or method == .DELETE;
     switch (status) {
         200...299 => {},
@@ -567,7 +567,7 @@ pub fn date(io: std.Io, a: std.mem.Allocator, calendar: bool) ![]const u8 {
     if (calendar) return try std.fmt.allocPrint(a, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{ year_day.year, @backingInt(month_day.month), month_day.day_index + 1, time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() });
     const weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
     const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    return try std.fmt.allocPrint(a, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{ weekdays[(day.day + 4) % 7], month_day.day_index + 1, months[@backingInt(month_day.month) - 1], year_day.year, time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() });
+    return try std.fmt.allocPrint(a, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{ weekdays[@as(usize, @intCast((day.day + 4) % 7))], month_day.day_index + 1, months[@backingInt(month_day.month) - 1], year_day.year, time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute() });
 }
 
 const MultipartSource = struct {
@@ -961,6 +961,51 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
     return j.value(a, plan);
 }
 
+/// Bounded provider listing shared by the native dispatcher and the browser
+/// transport adapter. No credential or persistence lifetime is created here.
+pub fn listAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value) !j.Value {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
+    const limit = try j.integer(request, "limit", 30);
+    if (limit < 1 or limit > types.Limits.page) return error.InvalidPageLimit;
+    const query = j.text(request, "query");
+    var resolver: LabelResolver = .{ .a = a, .transport = transport };
+    const label_input = j.text(request, "label");
+    const label = if (label_input.len > 0) try resolver.resolve(label_input) else "";
+    const include_spam_trash = try j.boolean(request, "includeSpamTrash", false) or std.ascii.eqlIgnoreCase(label, "TRASH") or std.ascii.eqlIgnoreCase(label, "SPAM") or std.mem.indexOf(u8, query, "in:trash") != null or std.mem.indexOf(u8, query, "in:spam") != null or std.mem.indexOf(u8, query, "in:anywhere") != null;
+    var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={d}&includeSpamTrash={s}&fields=messages(id,threadId),nextPageToken", .{ limit, if (include_spam_trash) @as([]const u8, "true") else "false" });
+    for ([_][]const u8{ "query", "label", "cursor" }, [_][]const u8{ "q", "labelIds", "pageToken" }) |key, parameter| {
+        const value = if (std.mem.eql(u8, key, "label")) label else j.text(request, key);
+        if (value.len != 0) url = try std.fmt.allocPrint(a, "{s}&{s}={s}", .{ url, parameter, try escaped(a, value) });
+    }
+    const listed = try transport.request(a, .GET, url, null);
+    const entries = try array(listed, "messages");
+    if (entries.len > limit) return error.InvalidPage;
+    const messages = try a.alloc(types.Message, entries.len);
+    transport.progress(.metadata, 0, entries.len);
+    for (entries, messages, 0..) |entry, *dest, index| {
+        try io.checkCancel();
+        const id = try j.required(entry, "id");
+        const got = try transport.request(a, .GET, try messageUrl(a, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null);
+        if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
+        dest.* = try @import("gmail_decode.zig").normalize(got, a, null);
+        transport.row(.{ .kind = .page, .index = index, .total = entries.len, .message = dest.* });
+        transport.progress(.metadata, index + 1, entries.len);
+    }
+    return j.value(a, .{ .messages = messages, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null), .labelId = label });
+}
+
+/// The browser adapter uses the same validation, MIME encoder, threading and
+/// uncertain-result policy as native mail.send, after its own profile check.
+pub fn sendAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value) !j.Value {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-send")) return error.PermissionDenied;
+    const draft = try j.decode(types.Draft, a, j.get(request, "draft") orelse return error.MissingField);
+    try @import("core.zig").validateDraft(draft, true);
+    if (j.get(request, "icalendar") != null or j.get(request, "preparedCalendar") != null) return error.InvalidInvitationCommand;
+    return try send(io, a, account, transport, request, draft, null, null);
+}
+
 pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {
     try recipients.validateAddress(account);
     const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
@@ -1039,35 +1084,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         for (labels) |label| if (label.len > 256) return if (modifying) error.UnknownOutcome else error.InvalidLabel;
         return j.value(a, .{ .messageId = id, .labels = labels });
     }
-    if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) {
-        const limit = try j.integer(request, "limit", 30);
-        if (limit < 1 or limit > types.Limits.page) return error.InvalidPageLimit;
-        const query = j.text(request, "query");
-        var resolver: LabelResolver = .{ .a = a, .transport = transport };
-        const label_input = j.text(request, "label");
-        const label = if (label_input.len > 0) try resolver.resolve(label_input) else "";
-        const include_spam_trash = try j.boolean(request, "includeSpamTrash", false) or std.ascii.eqlIgnoreCase(label, "TRASH") or std.ascii.eqlIgnoreCase(label, "SPAM") or std.mem.indexOf(u8, query, "in:trash") != null or std.mem.indexOf(u8, query, "in:spam") != null or std.mem.indexOf(u8, query, "in:anywhere") != null;
-        var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={d}&includeSpamTrash={s}&fields=messages(id,threadId),nextPageToken", .{ limit, if (include_spam_trash) @as([]const u8, "true") else "false" });
-        for ([_][]const u8{ "query", "label", "cursor" }, [_][]const u8{ "q", "labelIds", "pageToken" }) |key, parameter| {
-            const value = if (std.mem.eql(u8, key, "label")) label else j.text(request, key);
-            if (value.len != 0) url = try std.fmt.allocPrint(a, "{s}&{s}={s}", .{ url, parameter, try escaped(a, value) });
-        }
-        const listed = try transport.request(a, .GET, url, null);
-        const entries = try array(listed, "messages");
-        if (entries.len > limit) return error.InvalidPage;
-        const messages = try a.alloc(types.Message, entries.len);
-        transport.progress(.metadata, 0, entries.len);
-        for (entries, messages, 0..) |entry, *dest, index| {
-            try io.checkCancel();
-            const id = try j.required(entry, "id");
-            const got = try transport.request(a, .GET, try messageUrl(a, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null);
-            if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
-            dest.* = try @import("gmail_decode.zig").normalize(got, a, null);
-            transport.row(.{ .kind = .page, .index = index, .total = entries.len, .message = dest.* });
-            transport.progress(.metadata, index + 1, entries.len);
-        }
-        return j.value(a, .{ .messages = messages, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null), .labelId = label });
-    }
+    if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) return listAuthorized(io, a, account, capabilities, transport, request);
     if (std.mem.eql(u8, cmd, "mail.thread")) {
         const id = try j.required(request, "threadId");
         try b.identifier(id);
@@ -1102,9 +1119,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         return error.AttachmentNotFound;
     }
     if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) {
-        const draft = try j.decode(types.Draft, a, j.get(request, "draft") orelse return error.MissingField);
-        if (j.get(request, "icalendar") != null or j.get(request, "preparedCalendar") != null) return error.InvalidInvitationCommand;
-        return try send(io, a, account, transport, request, draft, null, null);
+        return try sendAuthorized(io, a, account, capabilities, transport, request);
     }
     if (std.mem.eql(u8, cmd, "invitation.reply")) {
         if (j.get(request, "preparedCalendar")) |prepared| {

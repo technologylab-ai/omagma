@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://oauth2.googleapis.com https://gmail.googleapis.com; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <meta name="description" content="An experimental Omagma terminal UI running as Zig WebAssembly, with fictional mail held in memory.">
     <title>Omagma · browser experiment</title>
     <link rel="icon" href="data:,">
@@ -26,10 +26,14 @@
           <div class="window-title"><span class="tab-mark" aria-hidden="true">&gt;_</span>omagma <span class="window-subtitle">/ fictional inboxes</span></div>
           <div class="window-actions">
             <span id="terminal-size" class="terminal-size" aria-hidden="true"></span>
+            <button id="connect-open" type="button" disabled>Connect…</button>
+            <button id="disconnect-session" type="button" hidden>Disconnect</button>
             <button id="terminal-focus" type="button" title="F6 moves focus from the terminal to page controls" disabled>Focus terminal</button>
             <button id="demo-reset" type="button" disabled>Reset demo</button>
           </div>
         </div>
+        <div id="send-grace" class="send-notice" role="status" hidden><span id="send-grace-text"></span><button id="send-grace-cancel" type="button">Cancel send</button></div>
+        <div id="send-uncertainty" class="send-notice" role="status" hidden><span>A previous send has no confirmation. Check Sent before sending again.</span><button id="send-acknowledge" type="button">I checked Sent</button></div>
         <div class="terminal-stage">
           <div id="terminal" aria-label="Interactive Omagma terminal. Press j or k to navigate, Enter to read, question mark for help."></div>
           <div id="runtime-message" class="runtime-message" role="status"><span class="loading-dot" aria-hidden="true"></span><span id="runtime-message-text">Loading WebAssembly…</span></div>
@@ -47,8 +51,21 @@
           <span><kbd>?</kbd> help</span>
           <span><kbd>F6</kbd> page controls</span>
         </div>
-        <div class="demo-status"><span id="runtime-status" role="status">Starting the TUI</span><span class="status-separator" aria-hidden="true">·</span><span>Fictional mail · in memory only</span></div>
+        <div class="demo-status"><span id="runtime-status" role="status">Starting the TUI</span><span class="status-separator" aria-hidden="true">·</span><span id="session-status">Fictional mail · in memory only</span></div>
       </footer>
     </main>
+    <dialog id="credential-dialog" aria-labelledby="credential-title">
+      <form id="credential-form">
+        <h2 id="credential-title">Connect existing Omagma grants</h2>
+        <p>Selected files stay in this tab. Google requests go directly to Google.</p>
+        <label>Desktop OAuth client JSON<input id="credential-clients" type="file" accept=".json,application/json" multiple></label>
+        <label>Terminal grants JSON<input id="credential-grants" type="file" accept=".json,application/json"></label>
+        <label>Matching terminal token files<input id="credential-tokens" type="file" accept=".token" multiple></label>
+        <label>Or choose the credential folder<input id="credential-folder" type="file" webkitdirectory multiple></label>
+        <p class="credential-hint">Use your existing Desktop registration, terminal-grants.json and file-store tokens. Up to three matched accounts connect; sending needs their mail-send grant.</p>
+        <p id="credential-error" role="status"></p>
+        <div class="credential-actions"><button id="credential-cancel" type="button">Cancel</button><button id="credential-connect" type="submit">Connect</button></div>
+      </form>
+    </dialog>
   </body>
 </html>

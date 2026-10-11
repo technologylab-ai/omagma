@@ -1,13 +1,16 @@
 # Omagma in a browser: WebAssembly experiment
 
 This is an isolated showcase prototype, built from the native TUI source. Zig
-owns the screen, layout and demo interaction; xterm.js supplies the browser's
-terminal display and input. The mailbox is fictional and stays in memory.
+owns the screen, layout and mail interaction; xterm.js supplies the browser's
+terminal display and input. It starts with fictional mail and can connect
+existing file-backed grants for live Gmail reading, plain composition and
+replies. See [live mail](LIVE-MAIL.md) for credential loading and scope.
 
-The prototype proves that the existing interface can run client-side. It is
-not the complete native application: the native network worker, OAuth,
-credential stores, disk cache, external editor and attachment filesystem are
-outside this demo.
+The prototype runs client-side with browser HTTP and credential adapters. The
+native disk cache, external editor, attachment filesystem and background send
+queue remain outside this focused browser mode. Live networking requires a
+browser with WebAssembly Promise Integration; fictional mode also works when
+that feature is absent.
 
 ## Build and try it
 
@@ -34,7 +37,11 @@ not work because the browser needs to fetch the WASM module.
 Try `j` / `k`, Enter, `1` / `2` / `3` to switch accounts, `/` for a local
 substring search, `v` for right/below layouts, `z` to expand the reader, `a` for
 fictional contacts, and `?` for the native help overlay. Escape backs out;
-Reset demo creates fresh fictional state. Native help documents the full
+Reset demo creates fresh fictional state. Connect loads existing local file
+credentials; Disconnect returns to fictional mode. In live mode, `c` composes,
+`r` replies, `R` replies to all, and Ctrl+S opens send review. Tab/Shift+Tab move
+between fields or review buttons. Explicit Send begins the ten-second local
+cancellation window. Native help documents the full
 application, while this demo implements the subset described here. Actions
 outside the demo explain that they are unavailable. `T` opens the native theme
 picker; browser execution has no access to the desktop's theme files.
@@ -44,6 +51,7 @@ Focused synthetic checks:
 ```sh
 npm test --prefix web-demo
 node tests/browser_wasm.mjs --work-dir /tmp/omagma-wasm-browser
+node tests/browser_wasm_live.mjs --work-dir /tmp/omagma-wasm-live-browser
 ```
 
 The browser test starts its own headless Chromium and static test server,
@@ -62,7 +70,10 @@ interface in HTML.
 `src/browser.zig` exports the browser ABI; `BrowserDemo` in
 `src/terminal/tui.zig` owns the synthetic fixture adapter and calls the shared
 `App.draw`. The pinned libvaxis parser, screen, text layout and renderer run in
-WASM. The module is freestanding and has no host imports. The build requires
+WASM. The freestanding module imports only `env.http_request` and `env.now_ms`.
+The HTTP call is suspended while browser `fetch` runs, then returns status and
+bounded response bytes to the same Zig request/decoder code. OAuth credentials
+stay in the host transport, outside WASM and diagnostics. The build requires
 explicit `-Dbrowser=true`; ordinary native builds keep their existing entry
 point and dependency selection. No WASI runtime or remote PTY is involved.
 
@@ -78,7 +89,7 @@ WebAssembly module cannot open `/dev/tty`, start native processes, use the
 desktop keyring or listen for the current loopback OAuth callback. Those need
 browser adapters; selecting a WASM target alone is insufficient.
 
-## Could credentials be supplied at runtime?
+## Credentials at runtime
 
 Yes. A browser file chooser can read explicitly selected files. JavaScript can
 copy those bytes into exported WebAssembly memory, or provide a virtual
@@ -94,27 +105,29 @@ OAuth client/flow works from the browser origin. The native file backend's
 ownership, permissions and canonical-path checks have no direct equivalent in
 a user-selected browser file.
 
-For a private live showcase, a **Load local credentials** button is a feasible
-extension. It would read the selected OAuth client JSON, account/grant
-metadata and matching token files into session memory, exchange the refresh
-token using browser `fetch`, and verify the returned Gmail profile before
-enabling that account. File selection is sufficient; the files do not need
-to be uploaded to a server. Importing a read-only bar grant would allow
-reading, while replying requires the matching terminal grant's send scope.
+The Connect dialog reads selected Desktop OAuth client JSON, terminal-grant
+metadata and exact matching token files into session memory. Browser `fetch`
+exchanges the refresh token; Zig verifies the Gmail profile before exposing
+the account. File selection is sufficient; the files do not need to be
+uploaded to a server. Read-only terminal grants permit reading, while replying
+requires the declared send capability and a token with the matching scope.
+The current importer uses terminal-grant files; a bar-only import path is not
+implemented.
 
 A transport-only probe on 2026-10-11 found that Google's token endpoint
 accepted a localhost-origin CORS preflight and returned a CORS-readable
 `invalid_client` response to a POST with entirely synthetic credentials.
-This establishes the transport path, not success with a real desktop client
-or refresh token. A real exchange remains a separate, user-authorized check.
+The live adapter is additionally exercised through synthetic browser responses
+at the fixed Google URLs. These checks establish transport/integration
+behavior, not success with a particular real desktop grant or recipient
+delivery. Real verification occurs when the user loads their selected files.
 
-The provider port still needs browser HTTP completion events, token expiry
-handling and bounded cache/draft storage. The native worker's synchronous I/O
-and file-backed executor cannot be enabled just by adding a file chooser.
-A cooperative browser adapter can expose pending work to JavaScript and accept
-its asynchronous results, while reusing the existing decoding, MIME, draft and
-TUI logic. Session-only storage would be sufficient for a first live demo;
-recovery and queued-send state need an explicit browser persistence design.
+The browser adapter supplies token expiry handling and asynchronous HTTP
+completion through Promise Integration. One operation owns the request path;
+account views and drafts remain bounded in session memory. A generic pending
+send receipt survives reload and carries no token or message body. Full draft
+recovery and queued-send persistence remain separate native/browser-storage
+work.
 
 Replies use the ordinary Gmail API. The existing MIME and reply/thread-header
 logic can be reused with explicit send authorization, send review and the
@@ -144,7 +157,9 @@ run the application on the companion rather than entirely in WebAssembly.
 
 ## Scope and safety
 
-No real account, OAuth token, grant or local mail cache is used. No mail is sent
-and no contact or mailbox is changed. Refresh restores fictional state. The
-prototype does not request credentials or persist mail in browser storage.
+Default fictional mode uses no real account or credential and makes no Google
+requests. Live mode uses only explicitly selected credentials and scopes;
+reading does not mark mail read, and sending requires explicit review and
+confirmation. No credential or mail body is persisted in browser storage.
+Development checks use fictional grants and intercepted provider responses.
 Build output and dependency directories are local artifacts, not a release.

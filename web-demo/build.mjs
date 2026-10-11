@@ -5,20 +5,20 @@ import { resolve } from 'node:path';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const args = process.argv.slice(2);
-if (args.length !== 0 && (args.length !== 2 || args[0] !== '--wasm')) {
-  throw new Error('Usage: npm run build -- [--wasm /path/to/omagma.wasm]');
+const options = new Map();
+for (let index = 0; index < args.length; index += 2) {
+  if (!['--wasm', '--out-dir'].includes(args[index]) || !args[index + 1] || options.has(args[index])) throw new Error('Usage: npm run build -- [--wasm /path/to/omagma.wasm] [--out-dir /path/to/site]');
+  options.set(args[index], args[index + 1]);
 }
-const wasm = args.length ? resolve(process.cwd(), args[1]) : resolve(here, 'omagma.wasm');
+const wasm = options.has('--wasm') ? resolve(process.cwd(), options.get('--wasm')) : resolve(here, 'omagma.wasm');
 // Packaging only: the served application is a static page, JS, CSS and WASM.
 const module = await WebAssembly.compile(await readFile(wasm));
-if (WebAssembly.Module.imports(module).length !== 0) {
-  throw new Error('The browser experiment requires an import-free WASM module.');
-}
+for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms'].includes(entry.name) || entry.kind !== 'function') throw new Error('The browser module imports an unsupported host capability.');
 const exports = new Set(WebAssembly.Module.exports(module).map(({ name }) => name));
 for (const name of ['memory', 'init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len']) {
   if (!exports.has(name)) throw new Error(`Missing browser WASM export: ${name}`);
 }
-const out = resolve(here, 'dist');
+const out = options.has('--out-dir') ? resolve(process.cwd(), options.get('--out-dir')) : resolve(here, 'dist');
 await mkdir(out, { recursive: true });
 await build({
   absWorkingDir: here,

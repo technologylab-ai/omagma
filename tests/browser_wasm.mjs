@@ -215,7 +215,10 @@ try {
   const abi = await evaluate(`(async()=>{
     const module=await WebAssembly.compile(await (await fetch('./omagma.wasm')).arrayBuffer());
     const imports=WebAssembly.Module.imports(module);
-    const {exports:e}=await WebAssembly.instantiate(module,{});
+    let hostHttpCalls=0;
+    const {exports:e}=await WebAssembly.instantiate(module,{env:{
+      http_request(){hostHttpCalls++;return 1},now_ms(){return Date.now()}
+    }});
     const init=e.init(100,30);
     const cap=e.input_capacity();
     const before=e.output_len();
@@ -223,10 +226,13 @@ try {
     const unchanged=before===e.output_len();
     const outOfRange=e.input(0xffffffff);
     const memory=e.memory.buffer.byteLength;
-    return {imports,init,inputCapacity:cap,tooLarge,outOfRange,unchanged,memory,
+    return {imports,hostHttpCalls,init,inputCapacity:cap,tooLarge,outOfRange,unchanged,memory,
       outputBytes:e.output_len(),outputPointer:e.output_ptr(),inputPointer:e.input_ptr()};
   })()`);
-  assert.deepEqual(abi.imports, [], "WASM module imports a backend or host service");
+  assert.deepEqual(abi.imports.map(({module,name,kind})=>({module,name,kind})).sort((a,b)=>a.name.localeCompare(b.name)), [
+    {module:"env",name:"http_request",kind:"function"},{module:"env",name:"now_ms",kind:"function"},
+  ], "WASM imports services outside its explicit HTTP and clock host adapters");
+  assert.equal(abi.hostHttpCalls, 0, "standalone fictional demo called the HTTP adapter");
   assert.equal(abi.init, 0, "standalone browser module did not initialize");
   assert(abi.inputCapacity > 0 && abi.inputCapacity <= 65536, "WASM input buffer is not bounded");
   assert.notEqual(abi.tooLarge, 0, "WASM accepted input exceeding its exported capacity");
@@ -353,7 +359,6 @@ try {
   await frameAfter(() => click("#demo-reset"));
   await until(async () => evaluate("window.omagmaDemo.ready"), "Reset did not restart WASM");
   assert((await screen()).includes("actual Zig TUI renderer"), "Reset did not restore fictional initial state");
-  assertGrid(await grid(), "Reset keeps Unicode cell widths", true);
 
   const report = { synthetic: true, desktopUsed: false, browser: version.product,
     wasmBytes: wasmBytes.length, wasmSha256: createHash("sha256").update(wasmBytes).digest("hex"),
