@@ -18,7 +18,15 @@ it. Homebrew verifies its selected release download. Then [connect your Google
 accounts](SETUP.md#full-tuicli-permissions), or give your agent the public
 [setup URL](AGENT-SETUP.md) and ask it to guide you one step at a time. The agent
 fetches the instructions and prepares local files itself; you do not need a
-source checkout.
+source checkout. Installing the executable does not create account configuration
+or authorize Google access. Before first use, the setup workflow prepares
+`~/.config/omagma/config.json` and connects the requested accounts. A
+`FileNotFound` error on a fresh `omagma tui` launch can mean that this configuration
+has not been created yet.
+
+Homebrew includes the setup guides and skill under
+`$(brew --prefix omagma)/share/doc/omagma`. To register the bundled skill with
+Codex or Claude Code, follow [optional setup skill](AGENT-SETUP.md#optional-setup-skill).
 
 For a fresh terminal-only installation, use one Google OAuth registration,
 leave `oauthClientFile` absent or empty, and authorize with `--client-file`.
@@ -114,6 +122,27 @@ an operating-system permission request. Cancel it to refuse the operation;
 blocked helpers are canceled at a finite deadline. Unlock the relevant keychain
 explicitly if Omagma reports `KeyringUnavailable`, then retry. See
 [privacy and credential handling](PRIVACY.md).
+
+In Keychain Access, select **login** and choose **Unlock Keychain “login”**
+if it is locked. Alternatively, run this in Terminal on the Mac and enter the
+Keychain password at the hidden prompt, normally your Mac login password:
+
+```sh
+security unlock-keychain ~/Library/Keychains/login.keychain-db
+```
+
+Do not put that password in a command argument or send it to an agent. A remote
+SSH login has its own security session and can see the Keychain as locked while
+the Mac desktop sees it as unlocked. If `omagma tui` reports
+`KeyringUnavailable` over SSH, quit it, run the same unlock command in that SSH
+shell, and reopen Omagma from that shell. A new SSH login may need its own
+unlock. This does not require another Google sign-in.
+
+When using credentials imported from another computer, macOS may also ask you
+to approve the first read of an **Omagma account credential** by its signed
+`security` tool. Approve that specific item locally if you want to use it.
+This Keychain approval is separate from Google consent and does not require
+reauthorizing the Gmail account.
 
 Follow [account setup](SETUP.md) for Google Console, per-account consent and
 reconnection. An agent can verify status and real mail/contact reads after

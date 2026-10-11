@@ -20,14 +20,29 @@ If no compatible release asset exists, use a source checkout with exact Zig **0.
 
 ## Optional setup skill
 
-The repository and complete bundle include [omagma-setup](../skills/omagma-setup/SKILL.md). An agent can read it directly. To make it discoverable in Codex, ask your agent to link it into your skills directory after installing the release bundle:
+The repository, complete bundle and Homebrew package include [omagma-setup](../skills/omagma-setup/SKILL.md). An agent can read it directly. The package supplies the skill but does not automatically register it with your agents.
+
+For a Homebrew installation, make it discoverable in Codex with:
+
+```sh
+omagma_skill="$(brew --prefix)/opt/omagma/share/doc/omagma/skills/omagma-setup"
+mkdir -p ~/.codex/skills
+ln -s "$omagma_skill" ~/.codex/skills/omagma-setup
+```
+
+The `opt/omagma` link follows Homebrew upgrades. Claude Code can use the same
+target at `~/.claude/skills/omagma-setup`; agents using the shared skills
+directory can use `~/.agents/skills/omagma-setup`. Inspect an existing
+`omagma-setup` directory or link before changing it.
+
+For an extracted release bundle or source checkout, use its persistent path:
 
 ```sh
 mkdir -p ~/.codex/skills
 ln -s /absolute/path/to/omagma/skills/omagma-setup ~/.codex/skills/omagma-setup
 ```
 
-Restart your agent session after installation and ask it to use `$omagma-setup`. Other agents that support `SKILL.md` can use the same instructions. The skill stays in the omagma folder and refers to the included project docs. It does not grant permission to modify unrelated desktop settings or bypass Google consent.
+Restart your agent session after installation and ask it to use `$omagma-setup`. Other agents that support `SKILL.md` can use the same instructions. The skill stays alongside the included project docs. It does not grant permission to modify unrelated desktop settings or bypass Google consent.
 
 Source builds use the compiler pin declared in `build.zig.zon`; complete release bundles need no compiler.
 
