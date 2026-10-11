@@ -24,6 +24,10 @@ futures and the original blocking versus nonblocking event behavior. Browser
 jobs run through WebAssembly Promise Integration; the host serializes one
 operation, and completion is applied after the worker returns. The native
 controller's account, selection and draft generation checks remain in use.
+Native account switches retain their background refresh. The browser platform
+selects cached accounts locally, including missing bodies and failed/empty
+cache states. Explicit connection initializes an uncached actor once; Ctrl+R,
+Enter and Gmail search retain their network routes.
 
 `src/browser_provider.zig` implements the native `types.Client` JSON protocol.
 It owns verified browser sessions, current mail inventory, bounded folder/search

@@ -708,6 +708,199 @@ try {
     const report = { beforeSpace, afterSpace, afterWord, afterFastWord, events: await evaluate("window.__omagmaKeyboardEvents") };
     await writeFile(join(work, "keyboard-diagnostic.json"), JSON.stringify(report, null, 2)+"\n", {mode:0o600});
     console.log(JSON.stringify(report));
+  } else if (args.get("--account-switch-only") === "true") {
+    const checks = {};
+    const localSelections = [];
+    const explicitRequests = [];
+    const owner = index => index === 0 ? "Ada" : "Bea";
+    const googlePauses = () => events.filter(event => event.method === "Fetch.requestPaused" &&
+      ["https://oauth2.googleapis.com", "https://gmail.googleapis.com", "https://people.googleapis.com"].includes(new URL(event.params.request.url).origin));
+    function assertActor(terminalText, index, { empty = false, missingBody = false } = {}) {
+      assert(terminalText.includes(`> ${accounts[index].split("@")[0]}`), `account ${index + 1}: native active-account marker did not change`);
+      assert(!terminalText.includes(subject(owner(1 - index), 0)) && !terminalText.includes(`Hello ${owner(1 - index)},`),
+        `account ${index + 1}: another actor's mailbox or body remained visible`);
+      if (empty) {
+        assert(!terminalText.includes(subject(owner(index), 0)) && !terminalText.includes(`Hello ${owner(index)},`),
+          `account ${index + 1}: an empty cache reused a prior mailbox`);
+        assert.match(terminalText, /No cached mail|Local cache cleared/i, "empty account selection did not explain the cache miss");
+        assert.match(terminalText, /Ctrl\+R.*(?:fetch|refresh)/i, "empty account selection did not explain explicit refresh");
+      } else {
+        assert(terminalText.includes(subject(owner(index), 0)), `account ${index + 1}: cached mailbox rows are missing`);
+        if (missingBody) {
+          assert.match(terminalText, /Body not cached.*Enter fetches full mail/i, "uncached selected body did not show its explicit-fetch placeholder");
+          assert(!terminalText.includes(`Hello ${owner(index)},`), "uncached body reused a previous reader snapshot");
+        } else assert(terminalText.includes(`Hello ${owner(index)},`), `account ${index + 1}: its loaded cached body did not render`);
+      }
+    }
+    async function localSelection(label, index, action, expected = {}) {
+      const before = requests.length;
+      const pausedBefore = googlePauses().length;
+      const terminalText = await act(action);
+      await settled(`${label}: account selection did not settle locally`);
+      await pause(250); // Observe queued jobs as well as the first painted frame.
+      assert.equal(requests.length, before, `${label}: account selection called Google or refreshed an OAuth token`);
+      assert.equal(googlePauses().length, pausedBefore, `${label}: account selection emitted a provider request, including a preflight`);
+      assertActor(await screen(), index, expected);
+      localSelections.push({ label, account: index + 1, googleRequests: 0, missingBody: Boolean(expected.missingBody), empty: Boolean(expected.empty) });
+      return terminalText;
+    }
+    async function pointerAccount(index) {
+      const target = await evaluate(`(()=>{
+        const api=window.omagmaDemo,needle=${JSON.stringify(accounts[index].split("@")[0])};
+        const rect=document.querySelector('.xterm-screen').getBoundingClientRect();
+        for(let row=0;row<Math.min(api.rows,14);row++)for(let col=0;col<Math.min(api.cols,30);col++){
+          let tail='';for(let cursor=col;cursor<Math.min(api.cols,30);cursor++)tail+=api.cell(cursor,row).chars;
+          if(tail.startsWith(needle))return {row,col,x:rect.left+(col+3.5)*rect.width/api.cols,y:rect.top+(row+0.5)*rect.height/api.rows};
+        }return null;
+      })()`);
+      assert(target, `account ${index + 1}: rendered sidebar pointer target is missing`);
+      await call("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 });
+      await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 });
+    }
+    async function navigationAccount(index) {
+      await text("hh" + "k".repeat(32) + "j".repeat(index));
+      await key("Enter", "Enter");
+    }
+    function assertBootstrap(delta, label) {
+      for (let index = 0; index < 2; index++) {
+        const actor = delta.filter(request => request.accountIndex === index);
+        assert(actor.some(request => new URL(request.url).origin === "https://oauth2.googleapis.com"), `${label}: actor ${index + 1} skipped token verification`);
+        assert(actor.some(request => new URL(request.url).pathname.endsWith("/profile")), `${label}: actor ${index + 1} skipped profile verification`);
+        assert(actor.some(request => new URL(request.url).pathname.endsWith("/messages")), `${label}: actor ${index + 1} did not bootstrap its absent mailbox cache`);
+      }
+    }
+    async function explicit(label, index, action, predicate) {
+      const before = requests.length;
+      await act(action);
+      await settled(`${label}: explicit request did not settle`);
+      const delta = requests.slice(before);
+      assert(delta.length > 0 && delta.every(request => request.accountIndex === index), `${label}: explicit request used another actor or performed no request`);
+      assert(delta.some(predicate), `${label}: the intended provider request is missing`);
+      explicitRequests.push({ label, account: index + 1, requests: delta.map(({ url, method, accountIndex }) => ({ url, method, accountIndex })) });
+      return delta;
+    }
+    const isList = request => new URL(request.url).pathname.endsWith("/messages");
+
+    // First Connect is an explicit verification/bootstrap operation, distinct
+    // from subsequent account navigation over an already-valid local view.
+    await importBundle(bundles.both);
+    await connected(2);
+    assertBootstrap(requests, "fresh Connect");
+    const freshRows = await cacheRows();
+    assert.equal(freshRows.length, 2, "fresh Connect did not save both verified actors");
+    for (const row of freshRows) assert(row.snapshot.messages.length === 30 && row.snapshot.messages.some(message => message.id.endsWith("-message-0") && message.bodyCached), "bootstrap did not retain a bounded mailbox and its selected body");
+    checks.firstConnectVerifiesAndBootstrapsBothActors = true;
+    for (const index of [0, 1, 0, 1, 0]) await localSelection(`cached numeric ${index + 1}`, index, () => text(String(index + 1)));
+    await screenshot("account-switch-cached.png");
+
+    // Preserve valid headers while deliberately removing Ada's selected body.
+    // This is a cache hit with a missing body, not an invalid/failing row.
+    await disconnect();
+    const missingBodyRows = structuredClone(freshRows);
+    const adaRow = missingBodyRows.find(row => row.snapshot.account === accounts[0]);
+    const selectedBody = adaRow.snapshot.messages.find(message => message.id === "ada-message-0");
+    assert(selectedBody?.bodyCached, "body-miss fixture did not start from a retained body");
+    Object.assign(selectedBody, { bodyCached: false, bodyText: "", bodyHtml: null, bodyHtmlAmbiguous: false, bodySource: "unknown", bodyCacheError: "" });
+    adaRow.byteLength = Buffer.byteLength(JSON.stringify(adaRow.snapshot));
+    await putCacheRows(missingBodyRows, true);
+    const restoreBefore = requests.length;
+    await importBundle(bundles.both);
+    await connected(2);
+    const restored = requests.slice(restoreBefore);
+    for (const index of [0, 1]) assert(restored.some(request => request.accountIndex === index && new URL(request.url).pathname.endsWith("/profile")), "cached Connect skipped actor verification");
+    assert(!restored.some(request => isList(request) || new URL(request.url).pathname.includes("/threads/") || new URL(request.url).searchParams.get("format") === "full"), "valid cached Connect implicitly refreshed mail or fetched its missing body");
+    checks.verifiedCacheRestoreDoesNotBootstrapOrReadMissingBody = true;
+    for (const index of [0, 1, 0, 1, 0]) await localSelection(`body-miss numeric ${index + 1}`, index, () => text(String(index + 1)), { missingBody: index === 0 });
+    for (const index of [1, 0, 1, 0]) await localSelection(`body-miss pointer ${index + 1}`, index, () => pointerAccount(index), { missingBody: index === 0 });
+    for (const index of [1, 0, 1, 0]) await localSelection(`body-miss navigation ${index + 1}`, index, () => navigationAccount(index), { missingBody: index === 0 });
+    await screenshot("account-switch-body-placeholder.png");
+    checks.cachedNumericPointerNavigationEmitZeroGoogleRequests = true;
+    checks.missingSelectedBodyRemainsLocalAcrossSwitches = true;
+
+    // Enter is deliberately explicit. It fetches Ada's missing selected body
+    // without refreshing either mailbox or borrowing Bea's reader context.
+    await act(() => text("l"));
+    const bodyDelta = await explicit("Enter loads selected missing body", 0, () => key("Enter", "Enter"), request => /\/(?:threads\/ada-thread-0|messages\/ada-message-0)$/.test(new URL(request.url).pathname));
+    assert(!bodyDelta.some(isList), "Enter on an uncached body refreshed the mailbox instead of reading the selection");
+    assertActor(await screen(), 0);
+    checks.explicitEnterReadsCorrectActorBody = true;
+
+    await localSelection("cached numeric 2 before explicit refresh", 1, () => text("2"));
+    await explicit("Ctrl+R refreshes Bea", 1, () => key("r", "KeyR", 2), isList);
+    assertActor(await screen(), 1);
+    checks.explicitRefreshUsesCorrectActor = true;
+
+    // A failed explicit refresh is its own lifecycle. Selecting that actor
+    // later must not turn navigation into an implicit retry.
+    listFailure = { accountIndex: 1, mode: "forbidden" };
+    await explicit("Bea explicit refresh fails", 1, () => key("r", "KeyR", 2), isList);
+    assert.match(await screen(), /PermissionDenied|permission required/i, "explicit refresh failure was not reported");
+    assertActor(await screen(), 1);
+    for (const index of [0, 1, 0, 1]) await localSelection(`failed-refresh numeric ${index + 1}`, index, () => text(String(index + 1)));
+    listFailure = null;
+    await explicit("Bea explicit retry refreshes", 1, () => key("r", "KeyR", 2), isList);
+    checks.failedRefreshDoesNotMakeAccountSelectionRetry = true;
+
+    const searchBefore = requests.length;
+    await act(() => text("\\"));
+    await act(() => text("live mailbox"));
+    await explicit("Bea explicit Gmail search", 1, () => key("Enter", "Enter"), request => isList(request) && new URL(request.url).searchParams.get("q")?.trim() === "live mailbox");
+    assert(requests.slice(searchBefore).every(request => request.accountIndex === 1), "explicit Gmail search crossed account ownership");
+    await localSelection("leave Gmail search by selecting Ada", 0, () => text("1"));
+    checks.explicitGmailSearchStillUsesNetwork = true;
+
+    // Clear both persistent and in-memory caches. Numeric, pointer and native
+    // navigation remain local even though neither actor has mailbox rows.
+    const clearBefore = requests.length;
+    const clearPauses = googlePauses().length;
+    await act(() => click("#cache-clear"));
+    await settled();
+    assert.deepEqual(await cacheRows(), [], "Clear cache retained persistent actor rows");
+    assert.equal(requests.length, clearBefore, "Clear cache called Google");
+    assert.equal(googlePauses().length, clearPauses, "Clear cache emitted a provider preflight");
+    for (const index of [1, 0, 1, 0]) await localSelection(`empty numeric ${index + 1}`, index, () => text(String(index + 1)), { empty: true });
+    for (const index of [1, 0]) await localSelection(`empty pointer ${index + 1}`, index, () => pointerAccount(index), { empty: true });
+    for (const index of [1, 0]) await localSelection(`empty navigation ${index + 1}`, index, () => navigationAccount(index), { empty: true });
+    await screenshot("account-switch-empty-cache.png");
+    await explicit("Ctrl+R bootstraps cleared Ada cache", 0, () => key("r", "KeyR", 2), isList);
+    assertActor(await screen(), 0);
+    await localSelection("Bea remains uncached after Ada refresh", 1, () => text("2"), { empty: true });
+    await localSelection("Ada refreshed cache is still local", 0, () => text("1"));
+    checks.clearedCacheSelectionIsLocalUntilExplicitRefresh = true;
+
+    await act(() => click("#cache-clear"));
+    await settled();
+    await disconnect();
+    assert.deepEqual(await cacheRows(), [], "disconnect repopulated a cleared cache");
+    const freshAgainBefore = requests.length;
+    await importBundle(bundles.both);
+    await connected(2);
+    assertBootstrap(requests.slice(freshAgainBefore), "Connect after cleared cache");
+    checks.explicitConnectBootstrapsAfterClearedCache = true;
+    await screenshot("account-switch-explicit-connect.png");
+    await disconnect();
+
+    const privacy = await evaluate(`(async()=>({localStorage:{...localStorage},sessionStorage:{...sessionStorage},databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie}))()`);
+    const persisted = await cacheRows();
+    assert.deepEqual(privacy.localStorage, {});
+    assert.deepEqual(privacy.sessionStorage, {});
+    assertCacheDatabases(privacy.databases);
+    assert.deepEqual(privacy.caches, []);
+    assert.equal(privacy.cookies, "");
+    const diagnosticText = JSON.stringify(privacy) + JSON.stringify(persisted) + JSON.stringify(events.filter(event => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
+    for (const secret of syntheticSecrets) assert(!diagnosticText.includes(secret), "account-switch test leaked credentials into storage or diagnostics");
+    assert.equal(sends().length, 0, "account-switch test emitted a Gmail write");
+    assert(maximumActiveRequests <= 1, "account-switch requests bypassed the serial worker");
+    assert.deepEqual(transportErrors, [], "account-switch fixture transport failed");
+    assert.deepEqual(unexpectedDestinations, [], "account-switch test attempted an unapproved external request");
+    checks.noCredentialsPersistedOrLogged = true;
+    const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product, origin,
+      fixedGoogleUrlsIntercepted: true, requestCount: requests.length, googleFetchPauseCount: googlePauses().length,
+      syntheticSendRequests: sends().length, maximumActiveRequests, localSelections, explicitRequests, checks,
+      wasmSha256: createHash("sha256").update(await readFile(join(site, "omagma.wasm"))).digest("hex"),
+      appSha256: createHash("sha256").update(await readFile(join(site, "app.mjs"))).digest("hex") };
+    await writeFile(join(work, "account-switch-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    console.log(JSON.stringify(report));
   } else if (args.get("--workflows-only") === "true") {
     const checks = {};
     const inputField = (label, terminalText) => {

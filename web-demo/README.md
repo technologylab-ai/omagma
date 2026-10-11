@@ -58,7 +58,9 @@ picker; browser execution has no access to the desktop's theme files.
 In live mode, `a` opens granted Google contacts. Recipient fields offer local
 suggestions while typing; Ctrl+Space also searches Google when a name is absent
 from the retained page. `/` searches cached mail and `\` searches Gmail;
-Ctrl+R refreshes. The cache keeps up to 300 message records per account, shows
+Account switching displays cached mail without Google requests. Ctrl+R explicitly
+refreshes; Enter loads a missing body. First Connect initializes an uncached
+account once. The cache keeps up to 300 message records per account, shows
 30 matching rows, and enforces 3 MiB per snapshot / 8 MiB total. IndexedDB holds
 mail and contacts, while credentials and drafts stay in tab memory. Leaving a composer saves a session
 draft; open Drafts to resume it. Reload/disconnect discards session drafts. Disconnect

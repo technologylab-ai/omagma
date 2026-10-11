@@ -20,6 +20,9 @@ pub const Capabilities = struct {
     durable_drafts: bool = true,
     aliases: bool = true,
     background_recipients: bool = true,
+    /// Native futures refresh while input remains available. An inline host
+    /// can select its cached account without starting a blocking refresh.
+    refresh_on_account_switch: bool = true,
     quit: bool = true,
     mail_changes: bool = true,
     open_urls: bool = true,
@@ -41,6 +44,7 @@ pub const browser_capabilities: Capabilities = .{
     .durable_drafts = false,
     .aliases = false,
     .background_recipients = false,
+    .refresh_on_account_switch = false,
     .quit = false,
     .mail_changes = false,
     .open_urls = false,

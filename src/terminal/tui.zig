@@ -4469,6 +4469,9 @@ const App = struct {
         self.compose_source_probe = false;
     }
     fn reload(self: *App) !void {
+        return self.reloadWithRefresh(true);
+    }
+    fn reloadWithRefresh(self: *App, refresh: bool) !void {
         if (self.job.future != null and self.job.kind == .cached_search and (!self.cacheSearch() or !cache_query.needsBody(self.query.value()))) self.preemptReadOnly();
         self.pending_read = false;
         self.pending_thread = false;
@@ -4476,6 +4479,29 @@ const App = struct {
         if (self.drafts_list) return self.start(.drafts, .{ .account = self.account(), .cmd = "draft.list" });
         if (self.cacheSearch()) {
             _ = self.loadCachedList("") catch |err| if (err == error.CacheBusy) false else return err;
+            return;
+        }
+        if (!refresh) {
+            const cached_ready = self.loadCachedList("") catch |err| blk: {
+                self.sayFailure("Cache unavailable", @errorName(err));
+                break :blk false;
+            };
+            // Account navigation is local, including a selected body miss.
+            // Enter/reply/forward can request a body; Ctrl+R refreshes mail.
+            self.pending_read = false;
+            self.pending_thread = false;
+            self.pending_cached_read = false;
+            self.pending_cached_thread = false;
+            self.pending_list = false;
+            self.pending_cached_list = false;
+            self.pending_remote_list = false;
+            self.pending_page = false;
+            self.pending_window_provider = false;
+            self.cache_view_missing = false;
+            if (self.page_loading) self.completePageLoad();
+            self.sync[self.account_index].state = .cached;
+            self.sync[self.account_index].cache_ready = cached_ready;
+            if (!cached_ready and !self.cache_busy) self.say(false, "No cached mail in this view · Ctrl+R fetches Gmail", .{});
             return;
         }
         if (self.query.value().len > 0 and self.query_scope == .server) {
@@ -5291,7 +5317,7 @@ const App = struct {
         self.sync[index].state = .cached;
         try self.restoreWorkingContext();
         try self.prepareLabels();
-        try self.reload();
+        try self.reloadWithRefresh(self.capabilities.refresh_on_account_switch);
     }
     fn providerPageCursor(self: *const App, cursor_value: []const u8) bool {
         return std.mem.startsWith(u8, cursor_value, "L:") or (self.options.fixtures and std.mem.startsWith(u8, cursor_value, "1:"));
@@ -11069,6 +11095,99 @@ const CacheTestClient = struct {
     }
 };
 
+const AccountSwitchTestClient = struct {
+    state: enum { body, metadata, empty, missing, failed } = .body,
+    provider_calls: std.atomic.Value(usize) = .init(0),
+    fn provider(ctx: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        _ = self.provider_calls.fetchAdd(1, .monotonic);
+        return error.ProviderMustNotRun;
+    }
+    fn cached(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.state == .missing) return error.CacheMiss;
+        if (self.state == .failed) return error.InvalidProviderResponse;
+        const request = try std.json.parseFromSlice(Value, a, raw, .{});
+        defer request.deinit();
+        const account_address = text(get(request.value, "account"));
+        if (same(text(get(request.value, "cmd")), "mail.read")) {
+            if (self.state != .body) return error.CacheMiss;
+            return std.json.Stringify.valueAlloc(a, .{ .ok = true, .account = account_address, .data = .{ .id = "shared-message", .threadId = "shared-thread", .bodyText = account_address, .bodyCached = true } }, .{});
+        }
+        const rows: []const types.Message = if (self.state == .empty) &.{} else &.{.{ .id = "shared-message", .threadId = "shared-thread", .subject = account_address }};
+        return std.json.Stringify.valueAlloc(a, .{ .ok = true, .account = account_address, .data = .{ .messages = rows, .cacheReady = true, .cached = true } }, .{});
+    }
+};
+
+test "local UI: cache-only account switching never fetches metadata or a missing body" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var observer: AccountSwitchTestClient = .{};
+    var app = factory.app(a);
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    app.loop = loop;
+    defer app.deinit();
+    app.capabilities = platform.browser_capabilities;
+    app.update_loaded = true;
+    app.client = .{ .ctx = &observer, .callFn = AccountSwitchTestClient.provider, .cachedFn = AccountSwitchTestClient.cached };
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"first@example.test\"},{\"address\":\"second@example.test\"}]", .{}));
+    for ([_]@TypeOf(observer.state){ .body, .metadata, .empty, .missing, .failed }) |state| {
+        observer.state = state;
+        for ([_]usize{ 1, 0, 1, 0 }) |account_index| {
+            // An earlier view's delayed intents must not escape a local switch.
+            app.pending_read = true;
+            app.pending_thread = true;
+            app.pending_list = true;
+            app.pending_remote_list = true;
+            app.pending_cached_list = true;
+            app.pending_page = true;
+            app.pending_window_provider = true;
+            try app.chooseAccount(account_index);
+            try app.dispatchPending();
+            try std.testing.expect(app.job.future == null);
+            try std.testing.expectEqual(@as(usize, 0), observer.provider_calls.load(.acquire));
+            try std.testing.expectEqual(account_index, app.account_index);
+            if (state == .body) {
+                try std.testing.expectEqualStrings(app.account(), app.reader_account.value());
+                try std.testing.expectEqualStrings(app.account(), text(get(app.thread[0], "bodyText")));
+            } else try std.testing.expectEqual(@as(usize, 0), app.thread.len);
+            const cached_rows: usize = if (state == .body or state == .metadata) 1 else 0;
+            try std.testing.expectEqual(cached_rows, app.messages.len);
+            try std.testing.expectEqual(state == .body or state == .metadata or state == .empty, app.sync[account_index].cache_ready);
+        }
+    }
+}
+
+test "local UI: native account selection retains its automatic refresh" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var observer: AccountSwitchTestClient = .{};
+    var app = factory.app(a);
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    app.loop = loop;
+    defer app.deinit();
+    app.capabilities.preferences = false;
+    app.capabilities.mail_changes = false;
+    app.capabilities.updates = false;
+    app.client = .{ .ctx = &observer, .callFn = AccountSwitchTestClient.provider, .cachedFn = AccountSwitchTestClient.cached };
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"first@example.test\"},{\"address\":\"second@example.test\"}]", .{}));
+    try app.chooseAccount(1);
+    try std.testing.expect(app.job.future != null and app.job.kind == .refresh);
+    app.job.future.?.await(app.io);
+    try app.finish();
+    try std.testing.expectEqual(@as(usize, 1), observer.provider_calls.load(.acquire));
+}
+
 test "send grace UX: countdown focus paste stable hit targets and submission fence" {
     const a = std.testing.allocator;
     const Transport = struct {
@@ -14771,8 +14890,12 @@ pub const BrowserSession = struct {
         self.app.closeUx();
         try self.app.boot();
         self.app.account_index = index;
+        self.app.sync[index] = .{ .state = .cached };
         self.updateIdentity();
         try self.app.chooseAccount(index);
+        // An explicit connection initializes an uncached actor once. Later
+        // account navigation uses that snapshot until the user refreshes it.
+        if (!self.app.sync[index].cache_ready) try self.app.refreshMailbox();
         self.app.navigation = index;
         self.app.focus = .list;
         try self.drain();

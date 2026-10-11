@@ -160,3 +160,9 @@ warning when drafts exist. Pasted input is limited to 64 KiB per event; oversize
 paste is skipped while keeping the session. Paste autosave happens after the
 complete paste. Ctrl+C cancels reads and the send countdown; it does not abort
 an already submitted send.
+
+Switching connected accounts reads the local snapshot and cached reader only.
+It does not refresh OAuth, enumerate Gmail or fetch an uncached body. First
+Connect initializes an account without a snapshot; afterward use Ctrl+R to
+refresh, Enter to load a missing body, or an explicit Gmail search. Empty, failed
+and cleared caches remain local on account selection too.
