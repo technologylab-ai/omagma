@@ -33,6 +33,10 @@
             <button id="demo-reset" type="button" disabled>Reset demo</button>
           </div>
         </div>
+        <div id="request-status" class="request-status" role="status" aria-live="polite" aria-atomic="true">
+          <span id="request-status-spinner" class="request-spinner" aria-hidden="true" hidden></span>
+          <div class="request-status-copy"><span id="runtime-status">Starting the TUI</span><span id="request-status-hint" class="request-status-hint"></span></div>
+        </div>
         <div id="sample-notice" class="sample-notice" role="status">Sample inbox · Connect to load your Gmail</div>
         <div id="send-grace" class="send-notice" role="status" hidden><span id="send-grace-text"></span><button id="send-grace-cancel" type="button">Cancel send</button></div>
         <div id="send-uncertainty" class="send-notice" role="status" hidden><span>A previous send has no confirmation. Check Sent before sending again.</span><button id="send-acknowledge" type="button">I checked Sent</button></div>
@@ -53,7 +57,7 @@
           <span><kbd>?</kbd> help</span>
           <span><kbd>F6</kbd> page controls</span>
         </div>
-        <div class="demo-status"><span id="runtime-status" role="status">Starting the TUI</span><span class="status-separator" aria-hidden="true">·</span><span id="session-status">Sample mode · no Gmail connection</span></div>
+        <div class="demo-status"><span id="session-status" role="status">Sample mode · no Gmail connection</span></div>
       </footer>
     </main>
     <dialog id="credential-dialog" aria-labelledby="credential-title">

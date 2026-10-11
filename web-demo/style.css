@@ -51,7 +51,14 @@ button:disabled { opacity: 0.4; cursor: default; }
 .key-guide > span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 kbd { min-width: 19px; text-align: center; border: 1px solid #303a4a; border-bottom-width: 2px; border-radius: 4px; background: #151c27; color: #c7d0df; padding: 2px 5px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: 10px; line-height: 1.2; }
 .demo-status { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; font-size: 10px; color: #6f7a8d; }
-#runtime-status { color: #96a580; }
+.request-status { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 15px; border-bottom: 1px solid var(--border); border-left: 4px solid transparent; background: var(--panel); color: #96a580; }
+.request-status-copy { display: flex; flex-direction: column; gap: 4px; }
+#runtime-status { font-size: 14px; line-height: 20px; font-weight: 600; }
+.request-status-hint { min-height: 16px; font-size: 12px; line-height: 16px; color: #d4dfc5; }
+.request-status.is-busy { color: #e4f1d2; background: #233126; border-left-color: var(--accent); }
+.request-status.is-busy #runtime-status { font-weight: 750; }
+.request-spinner { width: 16px; height: 16px; flex: 0 0 16px; border: 2px solid #71866d; border-top-color: #e4f1d2; border-radius: 50%; animation: spin 0.9s linear infinite; }
+.request-status.is-error { color: #edb0a6; background: #30202a; border-left-color: #edb0a6; }
 .sample-notice { padding: 9px 15px; font-size: 11px; color: #bac6a6; background: #18201f; border-bottom: 1px solid var(--border); }
 .send-notice { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 9px 15px; font-size: 11px; color: #edc6a2; background: #28222a; border-bottom: 1px solid var(--border); }
 .send-notice button { color: #e7c1a0; border-color: #635047; }
@@ -75,9 +82,11 @@ dialog .credential-hint { font-size: 11px; margin: 18px 0 0; }
 .credential-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .credential-actions button { font-size: 12px; padding: 8px 14px; border: 1px solid #354152; }
 #credential-connect { color: #0b0e14; background: var(--accent); border-color: var(--accent); }
-.status-separator { color: #475264; }
 @keyframes pulse { 50% { opacity: 0.25; } }
+@keyframes spin { to { transform: rotate(360deg); } }
 @media (min-width: 1000px) { .demo { height: 100dvh; max-height: 1150px; } }
 @media (max-width: 999px) { .demo { padding: 22px 20px 20px; } .terminal-window { height: calc(100dvh - 216px); flex: none; min-height: 440px; } .terminal-size { display: none; } }
 @media (max-width: 560px) { .demo { padding: 18px 10px; } .masthead { gap: 10px; padding: 0 5px 20px; } .runtime-badge { padding: 6px 8px; font-size: 9px; gap: 6px; } .brand-mark { font-size: 27px; } h1 { font-size: 21px; } .identity { gap: 10px; } .window-bar { padding: 8px; } .window-subtitle { display: none; } .window-actions { gap: 1px; } button { font-size: 10px; padding: 5px; } #terminal { inset: 10px 8px; } .key-guide { column-gap: 13px; row-gap: 10px; } }
-@media (prefers-reduced-motion: reduce) { .loading-dot { animation: none; } }
+@media (max-width: 560px) { .request-status { min-height: 80px; } .request-status-hint { min-height: 32px; } }
+@media (max-width: 360px) { .request-status { min-height: 114px; } .request-status-hint { min-height: 48px; } }
+@media (prefers-reduced-motion: reduce) { .loading-dot, .request-spinner { animation: none; } }

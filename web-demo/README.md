@@ -54,6 +54,11 @@ application, while this demo implements the subset described here. Actions
 outside the demo explain that they are unavailable. `T` opens the native theme
 picker; browser execution has no access to the desktop's theme files.
 
+Request activity appears in a prominent strip above the terminal, with a spinner
+and an explanation when keyboard input is paused. Ctrl+C cancels an active read;
+sending has its own countdown and confirmation captions. The strip reserves its
+space so a pending request does not move or clip the terminal.
+
 Focused synthetic checks:
 
 ```sh

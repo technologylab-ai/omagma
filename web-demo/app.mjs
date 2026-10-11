@@ -10,6 +10,9 @@ const terminalElement = select('#terminal');
 const message = select('#runtime-message');
 const messageText = select('#runtime-message-text');
 const runtimeStatus = select('#runtime-status');
+const requestStatus = select('#request-status');
+const requestHint = select('#request-status-hint');
+const requestSpinner = select('#request-status-spinner');
 const modeStatus = select('#session-status');
 const sizeLabel = select('#terminal-size');
 const resetButton = select('#demo-reset');
@@ -111,7 +114,27 @@ function updateControls() {
   select('#send-grace-cancel').disabled = info.sendPhase !== 'grace';
   select('#send-uncertainty').hidden = !pendingSend() || info.sendPhase === 'sending';
   select('#send-acknowledge').disabled = info.busy;
-  if (ready && !error) runtimeStatus.textContent = mode === 'connecting' ? 'Verifying accounts with Google…' : (info.busy ? 'Google request in progress…' : 'Running locally in WebAssembly');
+  const active = !error && (info.busy || mode === 'connecting' || credentialBusy || lifecycleBusy || !ready);
+  requestStatus.classList.toggle('is-busy', active);
+  requestStatus.classList.toggle('is-error', Boolean(error));
+  requestSpinner.hidden = !active;
+  terminalElement.setAttribute('aria-busy', String(!error && (info.busy || lifecycleBusy || !ready)));
+  requestHint.textContent = '';
+  if (!error) {
+    if (info.sendPhase === 'grace') {
+      runtimeStatus.textContent = `Sending in ${info.sendRemaining}s…`;
+      requestHint.textContent = 'Esc / Ctrl+C cancels before submission.';
+    } else if (info.sendPhase === 'sending') {
+      runtimeStatus.textContent = 'Sending mail to Google…';
+      requestHint.textContent = 'Waiting for Google to confirm the send.';
+    } else if (info.busy) {
+      runtimeStatus.textContent = mode === 'connecting' ? 'Connecting to Gmail…' : 'Google request in progress…';
+      requestHint.textContent = 'Keyboard input is paused. Ctrl+C cancels the request.';
+    } else if (credentialBusy) runtimeStatus.textContent = 'Loading your Omagma connection…';
+    else if (mode === 'connecting') runtimeStatus.textContent = 'Connecting to Gmail…';
+    else if (!ready || lifecycleBusy) runtimeStatus.textContent = 'Loading WebAssembly…';
+    else runtimeStatus.textContent = 'Running locally in WebAssembly';
+  }
   modeStatus.textContent = mode === 'demo' ? 'Sample mode · no Gmail connection' : (mode === 'connecting' ? 'Connecting · session memory only' : 'Live Gmail · session memory only');
   select('.window-subtitle').textContent = mode === 'demo' ? '/ sample inbox' : '/ live Gmail';
   select('#sample-notice').hidden = mode !== 'demo';

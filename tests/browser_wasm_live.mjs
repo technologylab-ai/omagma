@@ -230,7 +230,7 @@ try {
       socket.send(JSON.stringify({ id, method, params }));
     });
   }
-  async function respond({ requestId, request }) {
+  async function respond({ requestId, request, networkId }) {
     const url = new URL(request.url);
     if (url.origin === origin) return call("Fetch.continueRequest", { requestId });
     if (!["https://oauth2.googleapis.com", "https://gmail.googleapis.com"].includes(url.origin)) {
@@ -284,7 +284,7 @@ try {
           assert.equal(url.pathname.includes("ada-message"), accountIndex === 0, "account session requested another account's message id");
           if (holdNextFullRead && url.searchParams.get("format") === "full") {
             holdNextFullRead = false;
-            await new Promise((release) => heldReads.push({ requestId, url: request.url, release }));
+            await new Promise((release) => heldReads.push({ requestId, networkId, url: request.url, release }));
           }
           payload = providerMessage(accountIndex, index, url.searchParams.get("format"));
         } else if (url.pathname === "/gmail/v1/users/me/messages/send" && request.method === "POST") {
@@ -420,6 +420,50 @@ try {
     assert.equal(sends().length, before + 1, `${label}: browser submitted a duplicate send`);
     return sends().at(-1);
   }
+  async function activity() {
+    return evaluate(`(()=>{
+      const bar=document.querySelector('#request-status'),title=document.querySelector('#runtime-status'),hint=document.querySelector('#request-status-hint'),spinner=document.querySelector('#request-status-spinner');
+      const rect=element=>{const r=element.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}};
+      const heading=getComputedStyle(title),detail=getComputedStyle(hint),surface=getComputedStyle(bar),spin=getComputedStyle(spinner);
+      return {busy:bar.classList.contains('is-busy'),title:title.textContent.trim(),hint:hint.textContent.trim(),
+        spinnerVisible:spinner.checkVisibility(),spinnerAnimation:spin.animationName,spinnerDuration:spin.animationDuration,
+        ariaBusy:document.querySelector('#terminal').getAttribute('aria-busy'),fontSize:parseFloat(heading.fontSize),
+        hintFontSize:parseFloat(detail.fontSize),fontWeight:Number(heading.fontWeight),foreground:heading.color,
+        hintForeground:detail.color,background:surface.backgroundColor,banner:rect(bar),windowBar:rect(document.querySelector('.window-bar')),
+        terminal:rect(document.querySelector('#terminal')),titleRect:rect(title),hintRect:rect(hint),
+        viewport:{width:innerWidth,height:innerHeight}};
+    })()`);
+  }
+  function contrast(foreground, background) {
+    const parse = (color) => color.match(/[\d.]+/g).slice(0, 3).map(Number);
+    const luminance = (color) => parse(color).map((channel) => {
+      const value = channel / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    }).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+    const a = luminance(foreground), b = luminance(background);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  }
+  function assertBusyActivity(value, label) {
+    assert(value.busy && value.spinnerVisible, `${label}: visible request activity is missing`);
+    assert.equal(value.ariaBusy, "true", `${label}: terminal does not announce its busy state`);
+    assert.match(value.title, /Google request in progress/i, `${label}: headline does not explain the Google request`);
+    assert.match(value.hint, /Keyboard input is paused.*Ctrl\+C cancels/i, `${label}: paused input and cancellation are unexplained`);
+    assert(value.fontSize >= 14 && value.hintFontSize >= 12 && value.fontWeight >= 600, `${label}: request status text is too small or weak`);
+    assert(contrast(value.foreground, value.background) >= 4.5 && contrast(value.hintForeground, value.background) >= 4.5,
+      `${label}: request status text has insufficient contrast`);
+    assert(value.banner.top >= value.windowBar.bottom - 0.75 && value.banner.bottom <= value.terminal.top + 0.75,
+      `${label}: request status is not above the terminal and below its controls`);
+    assert(value.banner.left >= -0.75 && value.banner.right <= value.viewport.width + 0.75 && value.banner.top >= 0 && value.banner.bottom <= value.viewport.height,
+      `${label}: request status is outside the viewport`);
+    assert(value.titleRect.right <= value.banner.right + 0.75 && value.hintRect.right <= value.banner.right + 0.75,
+      `${label}: request text overflows its status row`);
+  }
+  function assertIdleActivity(value, label) {
+    assert(!value.busy && !value.spinnerVisible, `${label}: busy styling or spinner remains after the request`);
+    assert.equal(value.ariaBusy, "false", `${label}: terminal is still marked busy`);
+    assert.equal(value.hint, "", `${label}: pause/cancel guidance remains during idle`);
+    assert.match(value.title, /Running locally in WebAssembly/i, `${label}: idle status was not restored`);
+  }
   await call("Page.enable");
   await call("Runtime.enable");
   await call("Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -447,7 +491,85 @@ try {
   assert.equal(await evaluate("window.omagmaDemo.error"), null);
   assert(await evaluate("typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function'"), "owned browser lacks JSPI support");
   assert.equal(requests.length, 0, "default fictional demo unexpectedly connected Google");
-  if (args.get("--native-connect") === "true") {
+  if (args.get("--activity-only") === "true") {
+    assertIdleActivity(await activity(), "sample startup");
+    scopeMode = "readonly";
+    await importBundle(bundles.readonly);
+    await connected(1);
+    const idleDesktop = await activity();
+    assertIdleActivity(idleDesktop, "connected idle");
+    holdNextFullRead = true;
+    await key("j", "KeyJ");
+    await until(async () => heldReads.length === 1 && (await session()).busy && (await activity()).busy,
+      "held body read did not show request activity");
+    const desktop = await activity();
+    assertBusyActivity(desktop, "desktop body request");
+    for (const edge of ["top", "bottom", "height", "width"]) assert(Math.abs(desktop.terminal[edge] - idleDesktop.terminal[edge]) <= 0.75,
+      "request activity moved the terminal while its WASM stack was suspended");
+    await screenshot("activity-desktop.png");
+    await call("Emulation.setDeviceMetricsOverride", { width: 600, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    const narrow = await activity();
+    assertBusyActivity(narrow, "narrow body request");
+    await screenshot("activity-narrow.png");
+    await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    const reduced = await activity();
+    assert(reduced.spinnerAnimation === "none" || reduced.spinnerDuration.split(",").every((duration) => parseFloat(duration) === 0),
+      "reduced-motion preference did not stop the request spinner");
+    await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+    await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    heldReads[0].release();
+    await until(async () => !(await session()).busy && !(await activity()).busy, "completed read did not clear busy status");
+    await until(async () => (await screen()).includes("Literal HTML fixture"), "completed held read did not render its provider body");
+    assertIdleActivity(await activity(), "completed read");
+
+    await call("Emulation.setDeviceMetricsOverride", { width: 360, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    const idleSmall = await activity();
+    assertIdleActivity(idleSmall, "small viewport idle");
+    await focus();
+    holdNextFullRead = true;
+    await key("k", "KeyK");
+    await until(async () => heldReads.length === 2 && (await session()).busy && (await activity()).busy,
+      "second held body read did not enter busy state");
+    const small = await activity();
+    assertBusyActivity(small, "small request before keyboard cancellation");
+    for (const edge of ["top", "bottom", "height", "width"]) assert(Math.abs(small.terminal[edge] - idleSmall.terminal[edge]) <= 0.75,
+      "wrapped small-viewport pause guidance moved the terminal during a request");
+    await screenshot("activity-small.png");
+    canceledRequests.add(heldReads[1].requestId);
+    const cancelMarker = events.length;
+    await key("c", "KeyC", 2);
+    await until(async () => events.slice(cancelMarker).some((event) => event.method === "Network.loadingFailed" &&
+      event.params.requestId === heldReads[1].networkId && event.params.canceled === true),
+      "Ctrl+C did not abort the held Google request promptly", 2000);
+    heldReads[1].release();
+    await until(async () => !(await session()).busy && !(await activity()).busy, "Ctrl+C did not cancel and clear the busy request");
+    assertIdleActivity(await activity(), "cancelled read");
+    assert.equal(await evaluate("window.omagmaDemo.error"), null, "cancelled read stopped the browser application");
+    await screenshot("activity-after-cancel.png");
+    await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    await disconnect();
+    assertIdleActivity(await activity(), "disconnected sample");
+    await importBundle(bundles.readonly);
+    await connected(1);
+    assertIdleActivity(await activity(), "reconnected idle");
+    await disconnect();
+    assert.equal(sends().length, 0, "activity acceptance attempted a Gmail mutation");
+    assert.deepEqual(transportErrors, []); assert.deepEqual(unexpectedDestinations, []);
+    const report = { synthetic: true, desktopUsed: false, browser: version.product, origin,
+      realNativeServer: Boolean(suppliedOrigin), actualGoogleRequests: 0, googleSendRequests: 0,
+      prominentTopStatus: true, pausedInputExplained: true, ariaBusy: true, reservedRowKeepsTerminalStable: true,
+      desktop: { width: 1440, height: 1000, fontSize: desktop.fontSize, hintFontSize: desktop.hintFontSize,
+        contrast: contrast(desktop.foreground, desktop.background), hintContrast: contrast(desktop.hintForeground, desktop.background) },
+      narrow: { width: 600, height: 700, statusInViewport: true }, reducedMotion: true,
+      small: { width: 360, height: 700, statusInViewport: true, terminalStableWhileHintWraps: true },
+      clearedAfterCompletionAndCancellation: true, reconnectIdle: true, requestCount: requests.length, maximumActiveRequests };
+    await writeFile(join(work, "activity-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    console.log(JSON.stringify(report));
+  } else if (args.get("--native-connect") === "true") {
     assert((await evaluate("location.hash")) === "#omagma-session=" + localSessionNonce, "native launch capability is not retained in its intended fragment");
     const visibleURL = await evaluate("location.href");
     for (const secret of [clientSecret, ...refreshSecrets, ...accessSecrets]) assert(!visibleURL.includes(secret), "native URL contains OAuth credential material");

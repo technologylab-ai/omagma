@@ -188,7 +188,6 @@ try {
     assertGlyphWidths(value.glyphs, label);
     if (readerVisible) {
       assert(stars.some((glyph) => glyph.readerStatus), `${label}: reader Starred status has no width coverage`);
-      assert(value.glyphs.some((glyph) => glyph.chars === "こ"), `${label}: Japanese subject has no width coverage`);
     }
   }
   function assertGlyphWidths(glyphs, label) {
@@ -338,6 +337,9 @@ try {
   const unicodeMatch = await frameAfter(() => key("Enter", "Enter"));
   assert(unicodeMatch.includes("Unicode postcard") && unicodeMatch.includes("こんにちは"), "Unicode search did not match the fictional postcard");
   assert(!unicodeMatch.includes("Omagma, now in your browser"), "Unicode search did not filter the inbox");
+  const unicodeSearchCells = (await grid()).glyphs.filter((glyph) => "こんにちは".includes(glyph.chars));
+  assert([..."こんにちは"].every((char) => unicodeSearchCells.some((glyph) => glyph.chars === char)), "explicit Japanese search result has no complete CJK cell coverage");
+  assertGlyphWidths(unicodeSearchCells, "explicit Japanese search result");
   await frameAfter(() => text("q"));
 
   const below = await frameAfter(() => text("v"));
@@ -368,7 +370,7 @@ try {
 
   const report = { synthetic: true, desktopUsed: false, browser: version.product,
     wasmBytes: wasmBytes.length, wasmSha256: createHash("sha256").update(wasmBytes).digest("hex"),
-    exports, abi, palette, rendering, staticRequests, origin, realNativeServer: Boolean(suppliedOrigin), initialCols: await evaluate("window.omagmaDemo.cols"),
+    exports, abi, palette, rendering, unicodeSearchCells, staticRequests, origin, realNativeServer: Boolean(suppliedOrigin), initialCols: await evaluate("window.omagmaDemo.cols"),
     initialRows: await evaluate("window.omagmaDemo.rows"), arrowAndLetterNavigation: true,
     accountSeparation: true, localSearchAndReset: true, unicodeInputAndSearch: true,
     nativePaneLayout: true, expandedReader: true, nativeHelp: true, nativeThemePicker: true,
