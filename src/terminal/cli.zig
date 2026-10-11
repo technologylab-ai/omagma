@@ -47,11 +47,17 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
         if (eq(arg, "--help") or eq(arg, "-h")) {
             if (jsonl) {
                 const target = args.next();
-                return help_info.protocol(io, if (target != null and !std.mem.startsWith(u8, target.?, "-")) target else null);
+                return help_info.protocol(io, sa, if (target != null and !std.mem.startsWith(u8, target.?, "-")) target else null);
             }
             return if (operation) |verb| help_info.command(io, mode, verb) else help_info.family(io, mode);
         }
-        if (eq(arg, "--help-all")) return help(io);
+        if (eq(arg, "--help-all")) return if (jsonl) @import("cli_api.zig").full(io, sa) else help(io);
+        if (eq(arg, "--schema")) {
+            if (!jsonl) return error.UnknownOption;
+            const target = args.next();
+            if (args.next() != null) return error.UnknownOption;
+            return @import("cli_api.zig").schemas(io, sa, target);
+        }
         if (eq(arg, "--fixtures")) {
             options.fixtures = true;
             continue;

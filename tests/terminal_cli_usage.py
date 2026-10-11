@@ -152,8 +152,8 @@ def help_paths(runner):
     require(b"--message-id" in detailed and b"messageId" in detailed and b"draft queue" not in detailed,
             "message help omitted its fields or leaked unrelated command details")
     jsonl_help = runner.run(["cli", "--help", "mail.read"], without_home=True)
-    require(jsonl_help.returncode == 0 and jsonl_help.stdout == detailed and not jsonl_help.stderr,
-            "JSONL operation discovery differs from its one-shot help")
+    require(jsonl_help.returncode == 0 and b'"messageId"' in jsonl_help.stdout and not jsonl_help.stderr,
+            "JSONL operation discovery omitted its actual request field")
     runner.usage(["cli", "--help", "fictional.missing"], "UnknownCommand", without_home=True)
     runner.usage(["cli", "--help", "mail.compose"], "UnknownCommand", without_home=True)
     runner.usage(["cli", "--help", "mail.spam"], "UnknownCommand", without_home=True)
@@ -165,6 +165,91 @@ def help_paths(runner):
     full = runner.run(["--help-all"], without_home=True)
     require(full.returncode == 0 and b"recipients" in full.stdout and b"draft preview" in full.stdout,
             "extended help is unavailable without configuration")
+
+
+PUBLIC_JSONL = set("""
+accounts.list accounts.identities
+mail.list mail.search mail.sync mail.read mail.thread mail.recipients mail.refresh mail.prefetch mail.open
+mail.triage-scope mail.label-state mail.reply mail.forward mail.send mail.archive mail.trash mail.restore
+mail.mark mail.batch mail.undo mail.attachment mail.attachment-save
+labels.list labels.palette labels.create labels.rename labels.delete labels.color
+contacts.list contacts.search contacts.upsert
+cache.stats cache.clear cache.activity cache.refresh-status
+browser.open auth.status auth.authorize auth.revoke
+draft.list draft.read draft.create draft.update draft.recovery-save draft.preview draft.open-preview
+draft.discard draft.send draft.queue
+queue.list queue.read queue.cancel queue.resume queue.process queue.send-now
+attachment.import attachment.discard attachment.open
+invitation.inspect invitation.reply operation.list operation.read
+""".split())
+
+
+def discovery(runner):
+    result = runner.run(["cli", "--schema"], without_home=True)
+    require(result.returncode == 0 and not result.stderr, "schema discovery required account setup")
+    catalogue = json.loads(result.stdout)
+    commands = {s["properties"]["cmd"]["const"]: s for s in catalogue["oneOf"]}
+    require(set(commands) == PUBLIC_JSONL and len(commands) == len(catalogue["oneOf"]),
+            "JSONL catalogue omitted a public command, included an argv alias or repeated a command")
+    def references(value, definitions):
+        if isinstance(value, dict):
+            if "$ref" in value:
+                ref = value["$ref"]
+                require(ref.startswith("#/$defs/") and ref[8:] in definitions,
+                        "schema depends on an external or missing definition")
+            if "properties" in value:
+                require(all(k in value["properties"] for k in value.get("required", [])),
+                        "schema requires an undocumented property")
+            for child in value.values(): references(child, definitions)
+        elif isinstance(value, list):
+            for child in value: references(child, definitions)
+    references(catalogue, catalogue["$defs"])
+    for command in ("mail.read", "mail.list", "mail.send", "draft.update", "contacts.upsert", "invitation.reply"):
+        result = runner.run(["cli", "--config", str(runner.invalid_config), "--schema", command], without_home=True)
+        require(result.returncode == 0 and not result.stderr, "command schema loaded private configuration")
+        selected = json.loads(result.stdout)
+        require(selected["title"] == command and selected["properties"]["cmd"]["const"] == command,
+                "selected schema changed the requested method")
+        references(selected, selected.get("$defs", {}))
+        human = runner.run(["cli", "--help", command], without_home=True)
+        require(human.returncode == 0 and b"Complete request fields" in human.stdout and not human.stderr,
+                "human command help is not self-contained")
+    require("anchorMessageId" in commands["mail.list"]["properties"]
+            and "beforeMessageId" in commands["mail.list"]["properties"]
+            and "includeSpamTrash" in commands["mail.search"]["properties"],
+            "schema omitted ordinary optional navigation/search fields")
+    require("Draft" in catalogue["$defs"] and "Contact" in catalogue["$defs"]
+            and "original" in catalogue["$defs"]["Draft"]["properties"],
+            "schema omitted nested compose/contact/original fields")
+    listing = runner.run(["cli", "--help", "commands"], without_home=True)
+    require(listing.returncode == 0 and all(c.encode() in listing.stdout for c in PUBLIC_JSONL),
+            "human JSONL catalogue omitted actual cmd names")
+    family = runner.run(["cli", "--help", "mail"], without_home=True)
+    require(family.returncode == 0 and b"mail.read" in family.stdout and b"contacts.upsert" not in family.stdout,
+            "JSONL namespace help did not narrow the catalogue")
+    expanded = runner.run(["cli", "--help-all"], without_home=True)
+    require(expanded.returncode == 0 and b"$defs" in expanded.stdout
+            and all(c.encode() in expanded.stdout for c in PUBLIC_JSONL),
+            "offline full reference omitted commands or shared object fields")
+    # Every catalogue method reaches an actual executor branch, not UnknownCommand.
+    # Missing required values remain errors; requests use a disconnected fixture only.
+    frames = [{"id": str(i), "cmd": c, **({} if c == "accounts.list" else {"account": "personal@example.com"})}
+              for i, c in enumerate(sorted(PUBLIC_JSONL))]
+    for frame in frames:
+        if frame["cmd"] == "mail.recipients": frame["cacheOnly"] = True
+    frames.append({"id": "negative-control", "cmd": "fictional.not-a-command", "account": "personal@example.com"})
+    result = runner.run(["cli", "--fixtures", "--cache-dir", str(runner.directory / "catalogue-fixtures")],
+                        "".join(json.dumps(f) + "\n" for f in frames).encode())
+    replies = [json.loads(line) for line in result.stdout.splitlines()]
+    require(result.returncode == 0 and len(replies) == len(frames), "catalogue fixture dispatcher lost frames")
+    unsupported = {"UnknownCommand", "UnsupportedCommand"}
+    absent = {frame["cmd"]: reply["error"]["code"] for frame, reply in zip(frames[:-1], replies[:-1])
+              if reply.get("error", {}).get("code") in unsupported}
+    require(not absent, f"catalogue advertises a command absent from the public executor: {absent}")
+    require(replies[-1].get("error", {}).get("code") in unsupported,
+            "catalogue dispatcher oracle failed to detect its unknown-command control")
+    runner.usage(["cli", "--schema", "mail.spam"], "UnknownCommand", without_home=True)
+    runner.usage(["cli", "--help", "fictional_namespace"], "UnknownCommand", without_home=True)
 
 
 def help_examples(runner):
@@ -257,7 +342,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="omagma-cli-usage-") as temporary:
         runner = Runner(binary, Path(temporary))
-        for name, exercise in (("guidance", guidance), ("options", options), ("help", help_paths), ("help-examples", help_examples),
+        for name, exercise in (("guidance", guidance), ("options", options), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
                                ("protocol", protocol), ("version", lambda runner: version(runner, info["appVersion"]))):
             try:
                 exercise(runner)

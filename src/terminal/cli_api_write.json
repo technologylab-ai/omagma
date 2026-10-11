@@ -1,0 +1,2452 @@
+{
+  "commands": [
+    {
+      "cmd": "draft.list",
+      "summary": "List this account's local draft summaries.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Result data.drafts contains summaries: bodyText is empty and attachments omit content bytes; recoveryFields/original are omitted from this index. Use draft.read before editing or sending a saved draft.",
+        "At most 128 local drafts; this does not list Gmail server drafts."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.list",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.read",
+      "summary": "Read the complete saved local draft.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        }
+      },
+      "required": [
+        "draftId"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Returns full editable source, envelope/threading, attachments and any opaque original or unfinished recoveryFields. Keep returned original snapshots unchanged while editing the separate note."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.read",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.create",
+      "summary": "Save a new local draft without sending.",
+      "capabilities": [],
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/Draft"
+        }
+      },
+      "required": [
+        "draft"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Fields may be empty while composing; sending later requires at least one recipient and a finished draft. A new local ID is generated, regardless of draft.id.",
+        "Attachment blob handles must already exist in this account and match their declared size. Limit: 128 saved drafts, subject to private cache disk quota."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.create",
+          "account": "personal@example.com",
+          "draft": {
+            "to": [
+              {
+                "address": "alex@example.org",
+                "name": "Alex"
+              }
+            ],
+            "subject": "Project update",
+            "bodyText": "Hello, Alex."
+          }
+        }
+      ]
+    },
+    {
+      "cmd": "draft.update",
+      "summary": "Replace editable fields in an existing local draft.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "draft": {
+          "$ref": "#/$defs/Draft"
+        }
+      },
+      "required": [
+        "draftId",
+        "draft"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Read the complete draft first and submit the full desired source. This is replacement, not a partial patch: omitted recipients/body/subject/attachments become empty. Only omitted bodyFormat and original preserve their old values; original:null removes the original.",
+        "A normal update with recoveryFields omitted/null clears unfinished recovery state. Changed drafts cancel a queued countdown with DraftChanged. Editing drafts protected by an unknown/submitting outcome is refused."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.update",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID",
+          "draft": {
+            "to": [
+              {
+                "address": "alex@example.org"
+              }
+            ],
+            "subject": "Reviewed project update",
+            "bodyText": "Updated complete body.",
+            "bodyFormat": "plain"
+          }
+        }
+      ]
+    },
+    {
+      "cmd": "draft.recovery-save",
+      "summary": "Save incomplete composer fields as an unsendable local recovery draft.",
+      "capabilities": [],
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/WriteRecoveryDraft"
+        },
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        }
+      },
+      "required": [
+        "draft"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Omit draftId to create; provide it to replace an existing draft. Exactly five recoveryFields are required in To/Cc/Bcc/Subject/Body order. Recipient text may be unfinished; Subject remains a valid bounded header.",
+        "Ordinary draft.to/cc/bcc, subject and bodyText are ignored by this operation: the raw fields provide their recovery equivalents. Other Draft fields, including from/threading/attachments/original/bodyFormat, are accepted.",
+        "Existing drafts preserve omitted bodyFormat/original. Changed content cancels a queued countdown; uncertainty protections still apply. A finished normal draft.update must clear recoveryFields before queueing/sending."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.recovery-save",
+          "account": "personal@example.com",
+          "draft": {
+            "recoveryFields": [
+              "Alex <alex@example.org>",
+              "",
+              "",
+              "Unfinished note",
+              "Working text"
+            ],
+            "bodyFormat": "plain"
+          }
+        }
+      ]
+    },
+    {
+      "cmd": "draft.preview",
+      "summary": "Render provided or saved draft source locally without saving or sending.",
+      "capabilities": [],
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/Draft"
+        },
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        }
+      },
+      "required": [],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Supply draft or draftId. If both are present, draft takes precedence; an invalid provided draft does not fall back to the saved draft.",
+        "Result contains bodyFormat, exact bodyText source (or recoveryFields[4]), generated plainText and optional bodyHtml. Raw HTML in Markdown is escaped; external images/resources are never fetched.",
+        "Recipient emptiness and unfinished recovery are allowed for preview. Rendering and original-resource validation may refuse source that cannot fit the 2 MiB rendered/body bounds.",
+        "There is no JSONL browser boolean: use draft.open-preview with a saved draftId to launch the browser."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.preview",
+          "account": "personal@example.com",
+          "draft": {
+            "bodyText": "**Hello**, Alex.",
+            "bodyFormat": "markdown"
+          }
+        }
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "draft"
+          ]
+        },
+        {
+          "required": [
+            "draftId"
+          ]
+        }
+      ]
+    },
+    {
+      "cmd": "draft.open-preview",
+      "summary": "Write a private HTML preview for a saved draft and explicitly open Chrome.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        }
+      },
+      "required": [
+        "draftId"
+      ],
+      "notes": [
+        "Reads the saved draft, validates and renders it locally, writes a bounded private preview under this account's cache, and launches this account's configured Chrome profile. No mail is sent.",
+        "Requires mail-read for this explicit browser action. Result contains opened/path/url/profile; fixtures report opened:false and do not launch a browser.",
+        "The preview is a regenerable private artifact, not a Gmail server draft. Draft discard removes the account preview artifact."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.open-preview",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.discard",
+      "summary": "Discard a saved local draft, retaining provider mail.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        }
+      },
+      "required": [
+        "draftId"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Cancels any still-queued send for that draft and removes its private draft file and the account preview artifact. Discard is refused while an associated operation/queue state is unknown or submitting.",
+        "Does not revoke or delete already sent mail. Referenced attachment handles become eligible for attachment.discard only when no protected content uses them."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.discard",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.send",
+      "summary": "Submit a reviewed saved draft immediately with a stable operation identity.",
+      "capabilities": [
+        "mail-send"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        }
+      },
+      "required": [
+        "draftId",
+        "operationId"
+      ],
+      "notes": [
+        "Submits immediately. JSONL mail.send and draft.send have no sendDelay/delaySeconds field; the one-shot --send-delay convenience instead creates a draft.queue intent and explicitly processes it.",
+        "Always inspect the durable outcome (applied, rejected or unknown), not only the outer ok. Reusing the same operationId and unchanged content returns its recorded receipt. Changed content with that ID fails OperationConflict.",
+        "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
+        "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
+        "At most 32 recipients, 16 ordinary files and 32 original resources. All decoded attachment bytes total at most 25 MiB; embedded bytes/resources total at most 2 MiB. Body/rendered alternatives are bounded to 2 MiB. Requests are at most 3 MiB; blob-backed outgoing MIME is at most 35 MiB. Small inline sends can hit the smaller JSON/base64 transport bound.",
+        "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.send",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID",
+          "operationId": "reviewed-send-001"
+        }
+      ]
+    },
+    {
+      "cmd": "draft.queue",
+      "summary": "Stage a reviewed saved draft as a durable, unsent countdown intent.",
+      "capabilities": [
+        "mail-send"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        },
+        "delaySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30,
+          "default": 10,
+          "description": "Countdown duration in whole seconds; zero is explicit immediate eligibility, not automatic processing."
+        }
+      },
+      "required": [
+        "draftId",
+        "operationId"
+      ],
+      "notes": [
+        "Validates a finished/sendable draft and records its content hash, operation identity and due time. Staging alone sends nothing; call queue.process or queue.send-now explicitly.",
+        "Returns queueId, draftId, operationId, state, createdAtMs, dueAtMs, errorCode and optional operation receipt. Timestamps are Unix epoch milliseconds.",
+        "An identical repeated stage returns the existing intent. Changed content or a reused operation identity conflicts. A queued matching draft is refused as DraftQueued; unknown/submitting matching content remains fenced.",
+        "At most 32 active queued/submitting/unknown intents and 128 retained queue entries. Only terminal history can be evicted; uncertain entries stay protected.",
+        "No countdown is automatically processed after a process restart. Use queue.list/read, then explicitly resume/process/cancel after review."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.queue",
+          "account": "personal@example.com",
+          "draftId": "draft-RETURNED_ID",
+          "operationId": "reviewed-send-001",
+          "delaySeconds": 10
+        }
+      ]
+    },
+    {
+      "cmd": "queue.list",
+      "summary": "List retained send intents and their durable receipts.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Result data.queue includes queued/submitting/canceled/applied/rejected/unknown states, due time, errorCode and optional operation receipt. Listing does not resume or submit countdowns."
+      ],
+      "examples": [
+        {
+          "cmd": "queue.list",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "queue.read",
+      "summary": "Inspect one durable send intent and any submission receipt.",
+      "capabilities": [],
+      "properties": {
+        "queueId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Durable queue identity returned by draft.queue for this account."
+        }
+      },
+      "required": [
+        "queueId"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Inspect state, errorCode and operation.outcome. A state of submitting or unknown can mean the provider accepted the message; do not resubmit with a new identity."
+      ],
+      "examples": [
+        {
+          "cmd": "queue.read",
+          "account": "personal@example.com",
+          "queueId": "queue-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "queue.cancel",
+      "summary": "Cancel a queued send while keeping its unsent draft.",
+      "capabilities": [],
+      "properties": {
+        "queueId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Durable queue identity returned by draft.queue for this account."
+        }
+      },
+      "required": [
+        "queueId"
+      ],
+      "notes": [
+        "Local account cache operation; no provider call and no mail is sent.",
+        "All identities and content handles remain scoped to the explicit account.",
+        "Only state queued can be canceled; canceled is idempotent. Applied/rejected/unknown/submitting states fail SendAlreadySubmitted. Cancellation cannot recall a message already claimed for submission.",
+        "After a confirmed canceled receipt, the draft remains editable. A transport/protocol failure does not confirm cancellation; inspect queue.read before deciding what happened."
+      ],
+      "examples": [
+        {
+          "cmd": "queue.cancel",
+          "account": "personal@example.com",
+          "queueId": "queue-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "queue.resume",
+      "summary": "Reset the countdown of a still-queued intent after explicit review.",
+      "capabilities": [
+        "mail-send"
+      ],
+      "properties": {
+        "queueId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Durable queue identity returned by draft.queue for this account."
+        },
+        "delaySeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30,
+          "default": 10,
+          "description": "New whole-second countdown, measured from this request; this does not change the stored user/TUI delay preference."
+        }
+      },
+      "required": [
+        "queueId"
+      ],
+      "notes": [
+        "Only state queued can be resumed; canceled/applied/rejected/unknown/submitting states cannot be resumed. It resets createdAtMs/dueAtMs while retaining the original draft hash and operation identity.",
+        "Resume does not submit or start a background worker. Use queue.process or queue.send-now explicitly; a changed draft will be canceled by the hash check."
+      ],
+      "examples": [
+        {
+          "cmd": "queue.resume",
+          "account": "personal@example.com",
+          "queueId": "queue-RETURNED_ID",
+          "delaySeconds": 10
+        }
+      ]
+    },
+    {
+      "cmd": "queue.process",
+      "summary": "Submit a staged intent when due, optionally waiting for its current deadline.",
+      "capabilities": [
+        "mail-send"
+      ],
+      "properties": {
+        "queueId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Durable queue identity returned by draft.queue for this account."
+        },
+        "wait": {
+          "type": "boolean",
+          "description": "If false/omitted, a future deadline fails QueueNotDue. If true, release the cache lock and wait at most 30 seconds, then recheck state/deadline; an extended deadline can still return QueueNotDue and a clock jump can return QueueClockChanged.",
+          "default": false
+        }
+      },
+      "required": [
+        "queueId"
+      ],
+      "notes": [
+        "Uses the staged draftId, operationId, account and content hash. There is no new operationId or editable draft in this request.",
+        "Atomically records a durable submitting claim before sending. Concurrent/repeated requests and already-terminal/submitting states return the same receipt without another provider submission.",
+        "Changed draft content cancels the intent with errorCode DraftChanged. Inspect the returned state and nested operation outcome even when outer ok is true; canceled/rejected/unknown receipts do not mean mail was sent.",
+        "Unknown/submitting outcomes are never automatically retried. A fresh identity is not a safe retry. Inspect queue.read and operation.read/list to reconcile after an interrupted or uncertain request."
+      ],
+      "examples": [
+        {
+          "cmd": "queue.process",
+          "account": "personal@example.com",
+          "queueId": "queue-RETURNED_ID",
+          "wait": true
+        }
+      ]
+    },
+    {
+      "cmd": "queue.send-now",
+      "summary": "Submit the same reviewed intent immediately, skipping only its remaining delay.",
+      "capabilities": [
+        "mail-send"
+      ],
+      "properties": {
+        "queueId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Durable queue identity returned by draft.queue for this account."
+        },
+        "wait": {
+          "type": "boolean",
+          "const": false,
+          "default": false,
+          "description": "Only omitted/false is valid here; wait:true fails WaitRequiresQueueProcess. Waiting belongs to queue.process."
+        }
+      },
+      "required": [
+        "queueId"
+      ],
+      "notes": [
+        "Uses the staged draftId, operationId, account and content hash. There is no new operationId or editable draft in this request.",
+        "Atomically records a durable submitting claim before sending. Concurrent/repeated requests and already-terminal/submitting states return the same receipt without another provider submission.",
+        "Changed draft content cancels the intent with errorCode DraftChanged. Inspect the returned state and nested operation outcome even when outer ok is true; canceled/rejected/unknown receipts do not mean mail was sent.",
+        "Unknown/submitting outcomes are never automatically retried. A fresh identity is not a safe retry. Inspect queue.read and operation.read/list to reconcile after an interrupted or uncertain request.",
+        "Skips only this intent's countdown. It retains all account/hash/claim/operation/uncertainty checks and does not change the configured 10-second TUI preference."
+      ],
+      "examples": [
+        {
+          "cmd": "queue.send-now",
+          "account": "personal@example.com",
+          "queueId": "queue-RETURNED_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.reply",
+      "summary": "Create a local reply or reply-all draft from a received message.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Gmail/provider message ID returned by mail.list/read; not the RFC Message-ID header."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "true selects reply-all. false replies to the resolved sender/Reply-To. Self and verified aliases are excluded appropriately; Bcc is never promoted.",
+          "default": false
+        },
+        "bodyFormat": {
+          "type": "string",
+          "enum": [
+            "plain",
+            "markdown"
+          ],
+          "default": "plain",
+          "description": "Format for the new editable reply body/note; quoted incoming text is escaped when Markdown is chosen."
+        },
+        "preserveFormatting": {
+          "type": "boolean",
+          "description": "Capture the original HTML and related resources as an opaque Original snapshot, with a separately editable empty note.",
+          "default": false
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Creates a saved local draft and sends nothing. Reply planning honors Reply-To, aliases and original To/Cc; valid RFC Message-ID/References are required for threading.",
+        "Default text reply may reuse a cached body. preserveFormatting:true always fetches fresh full provider source, then validates HTML and downloads only selected original resources.",
+        "Formatting preservation requires a unique available HTML body with resolvable CID resources: at most 32 resources and 2 MiB decoded resource bytes. Oversized/ambiguous originals fail explicitly; a plain-text reply may remain available.",
+        "Read/edit/preview the returned full Draft before draft.send or draft.queue. Keep draft.original unchanged while editing draft.bodyText."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.reply",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "all": true,
+          "bodyFormat": "plain"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.forward",
+      "summary": "Create an unaddressed local forward draft from a received message.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Gmail/provider message ID returned by mail.list/read; not the RFC Message-ID header."
+        },
+        "bodyFormat": {
+          "type": "string",
+          "enum": [
+            "plain",
+            "markdown"
+          ],
+          "default": "plain",
+          "description": "Format of the new editable note/quoted body."
+        },
+        "preserveFormatting": {
+          "type": "boolean",
+          "description": "Retain original HTML and selected related resources inline; conflicts with original:true.",
+          "default": false
+        },
+        "original": {
+          "type": "boolean",
+          "description": "Attach the exact original message as original.eml; conflicts with preserveFormatting:true. It is not a request to send.",
+          "default": false
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Creates a saved local draft with no recipients and no inherited threadId/In-Reply-To/References. Fill recipients and review before sending.",
+        "Default text forwarding includes the original ordinary attachments. Missing/oversized files fail rather than being silently omitted; ordinary outgoing totals remain 16 files and 25 MiB.",
+        "preserveFormatting:true uses a fresh full read, a validated opaque Original snapshot (up to 32 related resources/2 MiB), and remaining ordinary files. It requires unambiguous supported HTML and resolvable local CID resources.",
+        "original:true downloads raw source and attaches unchanged original.eml, limited to 2 MiB decoded source. It may use message/rfc822, message/global or application/octet-stream according to encoding safety. It does not reuse the text-reader rendering.",
+        "No reply-all flag or recipient field is applied by mail.forward; use draft.update on the returned draft."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.forward",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "bodyFormat": "plain"
+        }
+      ],
+      "not": {
+        "required": [
+          "original",
+          "preserveFormatting"
+        ],
+        "properties": {
+          "original": {
+            "const": true
+          },
+          "preserveFormatting": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "cmd": "mail.send",
+      "summary": "Submit complete reviewed draft source immediately with a stable identity.",
+      "capabilities": [
+        "mail-send"
+      ],
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/WriteSendDraft"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        }
+      },
+      "required": [
+        "draft",
+        "operationId"
+      ],
+      "notes": [
+        "Submits immediately. JSONL mail.send and draft.send have no sendDelay/delaySeconds field; the one-shot --send-delay convenience instead creates a draft.queue intent and explicitly processes it.",
+        "Always inspect the durable outcome (applied, rejected or unknown), not only the outer ok. Reusing the same operationId and unchanged content returns its recorded receipt. Changed content with that ID fails OperationConflict.",
+        "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
+        "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
+        "At most 32 recipients, 16 ordinary files and 32 original resources. All decoded attachment bytes total at most 25 MiB; embedded bytes/resources total at most 2 MiB. Body/rendered alternatives are bounded to 2 MiB. Requests are at most 3 MiB; blob-backed outgoing MIME is at most 35 MiB. Small inline sends can hit the smaller JSON/base64 transport bound.",
+        "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.send",
+          "account": "personal@example.com",
+          "draft": {
+            "to": [
+              {
+                "address": "alex@example.org"
+              }
+            ],
+            "subject": "Reviewed project update",
+            "bodyText": "Approved text.",
+            "bodyFormat": "plain"
+          },
+          "operationId": "reviewed-send-001"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.archive",
+      "summary": "Remove one message from Inbox while retaining the mail.",
+      "capabilities": [
+        "mail-modify"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "unread": {
+          "type": "boolean",
+          "description": "true adds UNREAD; false removes it. Omission preserves current read state."
+        },
+        "starred": {
+          "type": "boolean",
+          "description": "true adds STARRED; false removes it. Omission preserves current star state."
+        },
+        "addLabels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/WriteLabelInput"
+          },
+          "description": "Existing system label names, custom label IDs or exact custom names to add. This never creates a label definition."
+        },
+        "removeLabels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/WriteLabelInput"
+          },
+          "description": "Existing system label names, custom label IDs or exact custom names to remove."
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Changes provider mailbox labels and invalidates affected cached metadata/views. This is a real write; a successful read alone is not authorization to perform it.",
+        "Acts only on messageId. A direct JSONL scope field does not expand to a conversation: call mail.triage-scope, review its messageIds, then use mail.batch.",
+        "No operationId-based durable replay contract is provided for this direct operation. A failure after dispatch can be UnknownOutcome; inspect current provider state before deciding whether to repeat.",
+        "Optional unread/starred/addLabels/removeLabels are combined with removing INBOX. At most 64 requested label additions/removals including built-in flags and the archive change.",
+        "Returns the updated full message. For per-item receipts and undoToken use mail.batch with action:archive."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.archive",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.trash",
+      "summary": "Move one message to Trash without permanent deletion.",
+      "capabilities": [
+        "mail-modify"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Changes provider mailbox labels and invalidates affected cached metadata/views. This is a real write; a successful read alone is not authorization to perform it.",
+        "Acts only on messageId. A direct JSONL scope field does not expand to a conversation: call mail.triage-scope, review its messageIds, then use mail.batch.",
+        "No operationId-based durable replay contract is provided for this direct operation. A failure after dispatch can be UnknownOutcome; inspect current provider state before deciding whether to repeat.",
+        "The live operation uses Gmail's Trash endpoint. unread/starred/addLabels/removeLabels are not applied by this direct command; use mail.batch for combined label changes.",
+        "Returns the updated full message. No permanent-delete API is exposed."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.trash",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.restore",
+      "summary": "Remove one message from Trash and add it to Inbox.",
+      "capabilities": [
+        "mail-modify"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Changes provider mailbox labels and invalidates affected cached metadata/views. This is a real write; a successful read alone is not authorization to perform it.",
+        "Acts only on messageId. A direct JSONL scope field does not expand to a conversation: call mail.triage-scope, review its messageIds, then use mail.batch.",
+        "No operationId-based durable replay contract is provided for this direct operation. A failure after dispatch can be UnknownOutcome; inspect current provider state before deciding whether to repeat.",
+        "The live operation untrashes, then adds INBOX. A failure after either write can leave an uncertain partial result. This is not the Not spam operation; use mail.batch action:unspam for that.",
+        "unread/starred/addLabels/removeLabels are not applied by this direct command. Returns the updated full message."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.restore",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.mark",
+      "summary": "Set one message's read/star state and existing label memberships.",
+      "capabilities": [
+        "mail-modify"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "unread": {
+          "type": "boolean",
+          "description": "true adds UNREAD; false removes it. Omission preserves current read state."
+        },
+        "starred": {
+          "type": "boolean",
+          "description": "true adds STARRED; false removes it. Omission preserves current star state."
+        },
+        "addLabels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/WriteLabelInput"
+          },
+          "description": "Existing system label names, custom label IDs or exact custom names to add. This never creates a label definition."
+        },
+        "removeLabels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/WriteLabelInput"
+          },
+          "description": "Existing system label names, custom label IDs or exact custom names to remove."
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Changes provider mailbox labels and invalidates affected cached metadata/views. This is a real write; a successful read alone is not authorization to perform it.",
+        "Acts only on messageId. A direct JSONL scope field does not expand to a conversation: call mail.triage-scope, review its messageIds, then use mail.batch.",
+        "No operationId-based durable replay contract is provided for this direct operation. A failure after dispatch can be UnknownOutcome; inspect current provider state before deciding whether to repeat.",
+        "Supply the changes you intend; omitting a flag preserves it. An otherwise empty direct request can make a no-op provider call. The combined requested label additions/removals and built-in flags are limited to 64.",
+        "Returns the updated full message. For reviewed bulk/conversation changes, conflict checks, per-item outcomes and undo, use mail.batch action:mark."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.mark",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "starred": true
+        }
+      ]
+    },
+    {
+      "cmd": "mail.batch",
+      "summary": "Apply reviewed label changes to explicit message IDs with per-item receipts and undo.",
+      "capabilities": [
+        "mail-modify"
+      ],
+      "properties": {
+        "messageIds": {
+          "$ref": "#/$defs/WriteMessageIds"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "archive",
+            "trash",
+            "restore",
+            "spam",
+            "unspam",
+            "mark"
+          ],
+          "description": "archive removes INBOX; trash/spam remove INBOX and add TRASH/SPAM; restore/unspam remove TRASH/SPAM and add INBOX; mark uses only explicit flags/labels."
+        },
+        "unread": {
+          "type": "boolean",
+          "description": "true adds UNREAD; false removes it. Omission preserves current read state."
+        },
+        "starred": {
+          "type": "boolean",
+          "description": "true adds STARRED; false removes it. Omission preserves current star state."
+        },
+        "addLabels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/WriteLabelInput"
+          },
+          "description": "Existing system label names, custom label IDs or exact custom names to add. This never creates a label definition."
+        },
+        "removeLabels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/WriteLabelInput"
+          },
+          "description": "Existing system label names, custom label IDs or exact custom names to remove."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "message",
+            "conversation"
+          ],
+          "default": "message",
+          "description": "Validated descriptive scope only. It never expands explicit target IDs; resolve a conversation with mail.triage-scope before constructing this request."
+        }
+      },
+      "required": [
+        "messageIds",
+        "action"
+      ],
+      "notes": [
+        "Mutates only the 1..100 distinct IDs supplied. It never expands a query/thread/scope, and later arrivals cannot join the reviewed target set.",
+        "unread/starred/addLabels/removeLabels can augment every action. The deduplicated combined delta is at most 64 labels; adding and removing the same resolved label fails ConflictingLabels. An empty mark delta fails EmptyMutation.",
+        "Names resolve to provider IDs before inverse changes are recorded. Returns undoToken, per-ID outcomes/errorCode, appliedCount, restoredCount and partial; inspect every item even when outer ok is true.",
+        "Each call creates its own undo receipt rather than using operationId deduplication. Unknown items can already have changed on the provider; do not blindly rerun the batch.",
+        "mail.spam and mail.unspam are one-shot conveniences, not JSONL commands: use this command with action:spam or action:unspam. Only the latest 16 undo receipts are retained."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.batch",
+          "account": "personal@example.com",
+          "messageIds": [
+            "RETURNED_MESSAGE_ID"
+          ],
+          "action": "mark",
+          "starred": true
+        }
+      ]
+    },
+    {
+      "cmd": "mail.undo",
+      "summary": "Restore only confirmed touched-label changes from a prior batch.",
+      "capabilities": [
+        "mail-modify"
+      ],
+      "properties": {
+        "undoToken": {
+          "type": "string",
+          "description": "Account-scoped token from mail.batch; copy it exactly.",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "messageIds": {
+          "$ref": "#/$defs/WriteMessageIds",
+          "description": "Optional explicit subset of that receipt's message IDs; omit to consider all receipt items."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "message",
+            "conversation"
+          ],
+          "default": "message",
+          "description": "Validated descriptive scope only. It never expands explicit target IDs; resolve a conversation with mail.triage-scope before constructing this request."
+        }
+      },
+      "required": [
+        "undoToken"
+      ],
+      "notes": [
+        "Restores only items whose prior outcome is applied, which are not already restored and have no uncertain undo result. Repeating a confirmed restoration does not apply it twice.",
+        "A subset must contain only IDs present in this receipt. Unrelated concurrent labels remain untouched. scope never adds targets.",
+        "Returns the same receipt shape as mail.batch with updated restoredCount/outcomes. An uncertain undo is not automatically retried; inspect per-item errorCode.",
+        "Undo tokens are local, account-scoped and bounded to the most recent 16 batches. These are label inverses, not restoration of permanently deleted messages."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.undo",
+          "account": "personal@example.com",
+          "undoToken": "undo-RETURNED_TOKEN"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.attachment",
+      "summary": "Retrieve one received attachment as inline bytes or an account content handle.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "attachmentId": {
+          "type": "string",
+          "description": "Exact attachment id returned by this message's attachments array. Treat it as an opaque provider token: preserve punctuation/percent signs and do not URL-encode it yourself.",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "messageId",
+        "attachmentId"
+      ],
+      "notes": [
+        "Reads the owning message and selects an attachment by its exact returned id. It does not accept arbitrary URLs, blob paths or a mismatched message/attachment pair.",
+        "Returns filename, mimeType, exact decoded size and data (base64url without padding) for smaller content, or blobId with empty data for larger content. Empty data beside a blobId does not mean an empty file.",
+        "Received attachments are individually limited to 50 MiB and private cache quotas. Data above 2 MiB is streamed to an account-owned immutable handle; ordinary text/rendered-body limits remain 2 MiB.",
+        "No mailbox labels change. To save without transporting bytes in JSON, use mail.attachment-save. A received handle above the 25 MiB outgoing limit is not automatically sendable."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.attachment",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "attachmentId": "RETURNED_ATTACHMENT_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.attachment-save",
+      "summary": "Stream a received attachment to an explicit new private file.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "attachmentId": {
+          "type": "string",
+          "description": "Exact attachment id returned by this message's attachments array. Treat it as an opaque provider token: preserve punctuation/percent signs and do not URL-encode it yourself.",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "path": {
+          "$ref": "#/$defs/WriteFilePath",
+          "description": "New destination filename, preferably absolute. Relative paths resolve against the CLI process working directory; parent directories must already exist. Basename cannot be empty, '.' or '..'. UTF-8 controls/bidi controls are rejected."
+        }
+      },
+      "required": [
+        "messageId",
+        "attachmentId",
+        "path"
+      ],
+      "notes": [
+        "Streams exactly the selected attachment's declared decoded bytes into a new file with mode 0600. Existing files are never overwritten, and parent/leaf symlink traversal is refused.",
+        "Received file limit is 50 MiB, independent of the 2 MiB text/body limit. External downloads use a bounded 180-second attachment-specific deadline; ordinary provider calls retain their shorter deadlines.",
+        "The destination is linked only after the complete content validates, flushes and syncs. Returns saved/path/filename/size; no mail is sent and no mailbox labels change.",
+        "There is no outputFile/blobId input field. attachment.open is a separate, explicit desktop launch after saving."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.attachment-save",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "attachmentId": "RETURNED_ATTACHMENT_ID",
+          "path": "/absolute/private/downloads/report.pdf"
+        }
+      ]
+    },
+    {
+      "cmd": "attachment.import",
+      "summary": "Copy a selected local file into immutable account attachment storage.",
+      "capabilities": [],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/WriteFilePath",
+          "description": "Existing literal regular-file path; absolute or relative to the CLI process working directory. No shell/tilde expansion. The leaf must not be a symlink."
+        },
+        "mimeType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WriteMimeType"
+            },
+            {
+              "const": ""
+            }
+          ],
+          "default": "application/octet-stream",
+          "description": "Explicit MIME type/subtype without parameters. Omitted or empty uses application/octet-stream; no content/extension sniffing."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "notes": [
+        "Local operation; no provider call or send. Opens a regular file without following its leaf symlink, verifies unchanged identity/size/timestamps and hashes content while copying to a 0600 account blob.",
+        "Maximum file size is 25 MiB. At most 128 stored blobs and the account's disk quota apply. Identical content can reuse a validated existing blob.",
+        "Returns a complete Attachment descriptor (id/filename/mimeType/size/blobId). Put that descriptor in Draft.attachments; never invent a blob ID or pass a filesystem path as an attachment.",
+        "The import basename may be up to 512 bytes, but Draft validation requires a safe filename at most 256 UTF-8 bytes before sending. Change only the descriptor's filename to a suitable basename when needed.",
+        "There is no mail-read/mail-send capability check for local importing; sending still checks mail-send and all outgoing limits."
+      ],
+      "examples": [
+        {
+          "cmd": "attachment.import",
+          "account": "personal@example.com",
+          "path": "/absolute/private/files/report.pdf",
+          "mimeType": "application/pdf"
+        }
+      ]
+    },
+    {
+      "cmd": "attachment.discard",
+      "summary": "Delete an unreferenced immutable account attachment handle.",
+      "capabilities": [],
+      "properties": {
+        "blobId": {
+          "$ref": "#/$defs/WriteBlobId"
+        }
+      },
+      "required": [
+        "blobId"
+      ],
+      "notes": [
+        "Local operation; no provider call. Removes only the selected account's stored blob, not the original imported file or a provider attachment.",
+        "Refuses AttachmentInUse while a draft or protected retained content references the blob; file mode/type and handle syntax are checked."
+      ],
+      "examples": [
+        {
+          "cmd": "attachment.discard",
+          "account": "personal@example.com",
+          "blobId": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    },
+    {
+      "cmd": "attachment.open",
+      "summary": "Explicitly launch a desktop viewer for an already saved private file.",
+      "capabilities": [],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/WriteFilePath",
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]*$",
+          "description": "Absolute path to a saved regular file with no group/other permission bits. Leaf symlinks, control characters and unsupported extensions are refused."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "notes": [
+        "Live requests launch /usr/bin/open on macOS or /usr/bin/xdg-open on Linux. Requires a working graphical session/desktop handler; fixtures do not launch it.",
+        "Allowed extensions, case-insensitive: .pdf, .txt, .md, .csv, .png, .jpg, .jpeg, .gif, .webp. Executable/other file types fail AttachmentOpenUnsupported.",
+        "Does not download an attachment or accept blobId. Use mail.attachment-save first; opening is a separate explicit user-visible side effect."
+      ],
+      "examples": [
+        {
+          "cmd": "attachment.open",
+          "account": "personal@example.com",
+          "path": "/absolute/private/downloads/report.pdf"
+        }
+      ]
+    },
+    {
+      "cmd": "labels.create",
+      "summary": "Create a custom label definition and return its stable ID.",
+      "capabilities": [
+        "mail-modify",
+        "mail-read"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/WriteLabelName"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        },
+        "color": {
+          "$ref": "#/$defs/Color",
+          "description": "Optional initial display color; omit for provider default. null is invalid."
+        }
+      },
+      "required": [
+        "name",
+        "operationId"
+      ],
+      "notes": [
+        "Mutates Gmail label definitions, not message contents. Uses a stable operationId and a durable outcome receipt (applied/rejected/unknown); inspect the outcome and errorCode even if outer ok is true.",
+        "Needs mail-modify and, for the backend's current fresh-definition preflight, mail-read. The current collection is fetched and validated before mutation.",
+        "System labels are immutable. Custom names must be unique ignoring case, and at most 512 definitions are handled.",
+        "Identical operation replay returns its recorded receipt; changed intent conflicts. Unknown label mutations remain fenced and must be explicitly reconciled, not retried with a new identity."
+      ],
+      "examples": [
+        {
+          "cmd": "labels.create",
+          "account": "personal@example.com",
+          "name": "Projects/Research",
+          "operationId": "label-create-001"
+        }
+      ]
+    },
+    {
+      "cmd": "labels.rename",
+      "summary": "Rename a custom label, optionally changing its color in the same operation.",
+      "capabilities": [
+        "mail-modify",
+        "mail-read"
+      ],
+      "properties": {
+        "labelId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Existing custom label ID from labels.list. System IDs/types/reserved names cannot be renamed, colored or deleted."
+        },
+        "name": {
+          "$ref": "#/$defs/WriteLabelName"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        },
+        "color": {
+          "$ref": "#/$defs/Color",
+          "description": "Optional color update in the same rename. Omission preserves the current color; null is invalid."
+        }
+      },
+      "required": [
+        "labelId",
+        "name",
+        "operationId"
+      ],
+      "notes": [
+        "Mutates Gmail label definitions, not message contents. Uses a stable operationId and a durable outcome receipt (applied/rejected/unknown); inspect the outcome and errorCode even if outer ok is true.",
+        "Needs mail-modify and, for the backend's current fresh-definition preflight, mail-read. The current collection is fetched and validated before mutation.",
+        "System labels are immutable. Custom names must be unique ignoring case, and at most 512 definitions are handled.",
+        "Identical operation replay returns its recorded receipt; changed intent conflicts. Unknown label mutations remain fenced and must be explicitly reconciled, not retried with a new identity.",
+        "Retains the label's ID and existing message memberships. Changing the name alone preserves its current color."
+      ],
+      "examples": [
+        {
+          "cmd": "labels.rename",
+          "account": "personal@example.com",
+          "labelId": "Label_RETURNED_ID",
+          "name": "Projects/Reviewed",
+          "operationId": "label-rename-001"
+        }
+      ]
+    },
+    {
+      "cmd": "labels.delete",
+      "summary": "Delete a custom label definition after exact-name confirmation.",
+      "capabilities": [
+        "mail-modify",
+        "mail-read"
+      ],
+      "properties": {
+        "labelId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Existing custom label ID from labels.list. System IDs/types/reserved names cannot be renamed, colored or deleted."
+        },
+        "confirmName": {
+          "type": "string",
+          "description": "Exact current name from a fresh labels.list result, matching case and whitespace. At most 512 UTF-8 bytes; header controls are rejected.",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        }
+      },
+      "required": [
+        "labelId",
+        "confirmName",
+        "operationId"
+      ],
+      "notes": [
+        "Mutates Gmail label definitions, not message contents. Uses a stable operationId and a durable outcome receipt (applied/rejected/unknown); inspect the outcome and errorCode even if outer ok is true.",
+        "Needs mail-modify and, for the backend's current fresh-definition preflight, mail-read. The current collection is fetched and validated before mutation.",
+        "System labels are immutable. Custom names must be unique ignoring case, and at most 512 definitions are handled.",
+        "Identical operation replay returns its recorded receipt; changed intent conflicts. Unknown label mutations remain fenced and must be explicitly reconciled, not retried with a new identity.",
+        "Deletes the definition and its memberships while preserving the emails. confirmName must exactly match the current definition; stale/wrong names fail before dispatch.",
+        "A color object is invalid on delete. This command does not trash or permanently delete mail."
+      ],
+      "examples": [
+        {
+          "cmd": "labels.delete",
+          "account": "personal@example.com",
+          "labelId": "Label_RETURNED_ID",
+          "confirmName": "Projects/Reviewed",
+          "operationId": "label-delete-001"
+        }
+      ]
+    },
+    {
+      "cmd": "labels.color",
+      "summary": "Set both supported display colors for an existing custom label.",
+      "capabilities": [
+        "mail-modify",
+        "mail-read"
+      ],
+      "properties": {
+        "labelId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Existing custom label ID from labels.list. System IDs/types/reserved names cannot be renamed, colored or deleted."
+        },
+        "color": {
+          "$ref": "#/$defs/Color"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        }
+      },
+      "required": [
+        "labelId",
+        "color",
+        "operationId"
+      ],
+      "notes": [
+        "Mutates Gmail label definitions, not message contents. Uses a stable operationId and a durable outcome receipt (applied/rejected/unknown); inspect the outcome and errorCode even if outer ok is true.",
+        "Needs mail-modify and, for the backend's current fresh-definition preflight, mail-read. The current collection is fetched and validated before mutation.",
+        "System labels are immutable. Custom names must be unique ignoring case, and at most 512 definitions are handled.",
+        "Identical operation replay returns its recorded receipt; changed intent conflicts. Unknown label mutations remain fenced and must be explicitly reconciled, not retried with a new identity.",
+        "Both backgroundColor and textColor are required. Supported palette values are fully enumerated in Color; letters are case-insensitive. Arbitrary RGB and null are rejected.",
+        "Preserves the existing name, ID and memberships. labels.palette also returns the current compiled write palette."
+      ],
+      "examples": [
+        {
+          "cmd": "labels.color",
+          "account": "personal@example.com",
+          "labelId": "Label_RETURNED_ID",
+          "color": {
+            "backgroundColor": "#a479e2",
+            "textColor": "#000000"
+          },
+          "operationId": "label-color-001"
+        }
+      ]
+    },
+    {
+      "cmd": "contacts.upsert",
+      "summary": "Create or edit a Google contact with an explicit version precondition.",
+      "capabilities": [
+        "contacts-write"
+      ],
+      "properties": {
+        "contact": {
+          "$ref": "#/$defs/Contact"
+        },
+        "expectedEtag": {
+          "type": "string",
+          "description": "For edits, this outer string takes precedence over contact.etag whenever present. It must be nonempty and exactly match the current CONTACT-source ETag. Omit on create."
+        }
+      },
+      "required": [
+        "contact"
+      ],
+      "notes": [
+        "Performs a real People API write. Omitted/empty contact.resourceName creates a new contact; a returned people/... identity selects an edit. There is no delete operation.",
+        "Edits fetch the current contact, require expectedEtag or contact.etag to match its CONTACT-source ETag, and update only changed name/emails. An explicit empty expectedEtag fails even if contact.etag is valid.",
+        "Live contact.emails must be an array of {address,name?} objects, not recipient-list strings or arrays of strings. Supply 1..32 unique addresses after merge; omission preserves all current addresses during an edit.",
+        "Omitted name/emails preserve freshly fetched values on edit. Empty name clears the name; an empty emails array is invalid. Unchanged edits return the current contact without a write.",
+        "contact.provider is opaque read metadata and is never trusted as a precondition or replacement body. Existing supported name/email/provider metadata is preserved from the freshly read contact.",
+        "No operationId deduplication is available. A failed create or lost mutation receipt may be UnknownOutcome; read/search and reconcile rather than blindly repeating the create. The contacts cache is invalidated before a live write."
+      ],
+      "examples": [
+        {
+          "cmd": "contacts.upsert",
+          "account": "personal@example.com",
+          "contact": {
+            "name": "Alex Fixture",
+            "emails": [
+              {
+                "address": "alex@example.org"
+              }
+            ]
+          }
+        },
+        {
+          "cmd": "contacts.upsert",
+          "account": "personal@example.com",
+          "expectedEtag": "RETURNED_CONTACT_ETAG",
+          "contact": {
+            "resourceName": "people/RETURNED_ID",
+            "name": "Alex Updated"
+          }
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "contact"
+            ],
+            "properties": {
+              "contact": {
+                "required": [
+                  "resourceName"
+                ],
+                "properties": {
+                  "resourceName": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "expectedEtag"
+                ],
+                "properties": {
+                  "expectedEtag": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "expectedEtag"
+                  ]
+                },
+                "properties": {
+                  "contact": {
+                    "required": [
+                      "etag"
+                    ],
+                    "properties": {
+                      "etag": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cmd": "invitation.inspect",
+      "summary": "Read validated invitation identities, local-time displays and joining details.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Reads the received message and parses an actual bounded iCalendar REQUEST attachment/source. It does not treat arbitrary body links or text as an invitation; calendar source is limited to 128 KiB.",
+        "If an old cached message only has calendar attachment metadata, this explicit inspection may fetch fresh provider source. Missing/unsupported/ambiguous invitations fail explicitly.",
+        "Validates organizer, selected account/aliases as attendee, UID, sequence and recurrence information. Returns uid/organizer/attendee/attendeeStatus, start, startDisplay/endDisplay/durationDisplay, location/joinUrl, recurrenceDisplay, allDay and timezoneUnavailable.",
+        "Does not send RSVP, open links or modify Google Calendar. Inspect timezoneUnavailable and preserve the displayed timezone context."
+      ],
+      "examples": [
+        {
+          "cmd": "invitation.inspect",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_INVITATION_MESSAGE_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "invitation.reply",
+      "summary": "Send a validated email RSVP for a received invitation.",
+      "capabilities": [
+        "calendar-rsvp",
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "tentative",
+            "declined"
+          ],
+          "description": "Requested attendee participation response."
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        }
+      },
+      "required": [
+        "messageId",
+        "status",
+        "operationId"
+      ],
+      "notes": [
+        "Real email send: reads and validates the received invitation, identifies this account/verified alias attendee and organizer, and generates a METHOD:REPLY message. This does not create/update a Google Calendar event.",
+        "Requires calendar-rsvp plus mail-read for the source/alias reads. It does not require the ordinary mail-send capability in place of calendar-rsvp.",
+        "No caller-supplied organizer, attendee, raw ICS, preparedCalendar, arbitrary draft or recipient field is applied by the public Session command. Use invitation.inspect first, then the same source messageId and selected status.",
+        "Uses the durable send operation journal. Inspect applied/rejected/unknown, retain the same operationId for the same reviewed RSVP, and reconcile unknown results instead of sending a second response with a new identity.",
+        "Does not use the queue/countdown API; submission starts immediately. Normal message, calendar, account and MIME bounds apply."
+      ],
+      "examples": [
+        {
+          "cmd": "invitation.reply",
+          "account": "personal@example.com",
+          "messageId": "RETURNED_INVITATION_MESSAGE_ID",
+          "status": "accepted",
+          "operationId": "reviewed-rsvp-001"
+        }
+      ]
+    },
+    {
+      "cmd": "operation.list",
+      "summary": "List this account's durable send and label-definition mutation records.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Local account-cache lookup; no provider request or mutation. Returns data.operations with stable IDs, content hashes, kind, outcomes, error codes and any recovery-draft/message/label references.",
+        "Up to 1000 operation records are retained. These records cover sending/RSVP/label definitions, not every direct mailbox or contact write; mail.batch returns a separate undo receipt.",
+        "An outer ok:true only means the lookup succeeded. The operation outcome can be unknown; do not infer that mail was or was not sent."
+      ],
+      "examples": [
+        {
+          "cmd": "operation.list",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "operation.read",
+      "summary": "Read one recorded send/RSVP/label mutation outcome.",
+      "capabilities": [],
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "description": "Exact operation identity originally supplied to a send, RSVP or label-definition mutation.",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "operationId"
+      ],
+      "notes": [
+        "Local account-cache lookup; no provider request. Unknown IDs fail OperationNotFound.",
+        "Inspect outcome, errorCode, kind and recovery draftId/RFC Message-ID or label receipt fields. A retained unknown record fences repeated content and needs explicit reconciliation.",
+        "The operation ID must belong to this account; neither looking it up nor changing its spelling resolves an uncertain provider result."
+      ],
+      "examples": [
+        {
+          "cmd": "operation.read",
+          "account": "personal@example.com",
+          "operationId": "reviewed-send-001"
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "WriteIdentifier": {
+      "type": "string",
+      "description": "Opaque account-scoped provider/local identifier. Copy the returned value; do not construct it.",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "WriteOperationId": {
+      "type": "string",
+      "description": "Caller-chosen stable identity for one reviewed send or label-definition mutation. Reusing it with changed content fails; an uncertain receipt must be reconciled instead of creating a new identity. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+      "maxLength": 256,
+      "minLength": 1
+    },
+    "WriteBlobId": {
+      "type": "string",
+      "description": "Immutable SHA-256 content handle returned by attachment.import or mail.attachment, scoped to the selected account. It is not a path.",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Address": {
+      "type": "object",
+      "description": "One outgoing mailbox. ASCII addr-spec supports quoted local parts and address literals; SMTPUTF8 mailbox addresses are unsupported. Display names may be UTF-8.",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "Mailbox addr-spec only, without a display name or angle brackets. Maximum 254 ASCII bytes and a 64-byte local part; full RFC mailbox syntax is validated by the backend.",
+          "minLength": 1,
+          "maxLength": 254,
+          "pattern": "^[\\u0020-\\u007e]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional UTF-8 display name; omitted means empty. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 256,
+          "default": ""
+        }
+      },
+      "required": [
+        "address"
+      ]
+    },
+    "Recipients": {
+      "description": "Recipient list: either one RFC address-list string or up to 32 entries, each an Address object or a bare addr-spec string. A string can contain quoted display names, groups and comments. Sending permits at most 32 total To+Cc+Bcc recipients. String parsing deduplicates addresses case-insensitively; do not depend on duplicate array entries.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "RFC address-list string; empty means no recipients. Outgoing mailbox and display-name limits apply after parsing."
+        },
+        {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Address"
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 254,
+                "pattern": "^[\\u0020-\\u007e]+$",
+                "description": "A bare mailbox addr-spec, not an RFC display-name expression."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "WriteSender": {
+      "description": "Optional From identity. Omitted/null uses the account primary address. A string must parse to exactly one mailbox. Every live send verifies a non-primary identity against current Gmail send-as identities.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Address"
+        },
+        {
+          "type": "string",
+          "description": "RFC address-list string containing exactly one mailbox."
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "WriteMimeType": {
+      "type": "string",
+      "description": "MIME type/subtype only, without parameters. Exactly one slash; each side is nonempty ASCII token text.",
+      "minLength": 3,
+      "maxLength": 127,
+      "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+$"
+    },
+    "WriteBase64Url": {
+      "type": "string",
+      "description": "Decoded bytes encoded as base64url without '=' padding or whitespace. size must equal the decoded length exactly.",
+      "pattern": "^[A-Za-z0-9_-]*$",
+      "default": ""
+    },
+    "WriteContentId": {
+      "type": "string",
+      "description": "MIME Content-ID. Canonical DTO values omit surrounding angle brackets; the parser also accepts a bracketed value and surrounding spaces/tabs. The normalized ID is 1..512 printable ASCII bytes excluding whitespace, angle brackets, double quotes and backslashes. Preserve returned original-resource IDs exactly so cid: references continue matching."
+    },
+    "Attachment": {
+      "type": "object",
+      "description": "Outgoing attachment descriptor. Supply the full descriptor returned by attachment.import for a file handle, or id:\"\" plus filename/size/data for inline bytes. No arbitrary filesystem path is accepted here. At most 16 ordinary files; decoded inline bytes across ordinary attachments and original resources total at most 2 MiB. All attachments total at most 25 MiB; larger received handles cannot be sent unchanged.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Returned attachment identity; use an empty string for newly authored inline data. It does not replace blobId and is not a filesystem path."
+        },
+        "filename": {
+          "type": "string",
+          "description": "Safe nonempty basename, excluding '/' and '\\\\'; '.' and '..' are invalid. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 256,
+          "minLength": 1,
+          "allOf": [
+            {
+              "not": {
+                "enum": [
+                  ".",
+                  ".."
+                ]
+              }
+            },
+            {
+              "pattern": "^[^/\\\\]+$"
+            }
+          ]
+        },
+        "mimeType": {
+          "$ref": "#/$defs/WriteMimeType",
+          "default": "application/octet-stream"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 26214400,
+          "default": 0,
+          "description": "Exact decoded content byte count. It must match data or the stored blob. Combined ordinary files plus preserved resources must stay within the outgoing 25 MiB limit."
+        },
+        "data": {
+          "$ref": "#/$defs/WriteBase64Url"
+        },
+        "blobId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WriteBlobId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omitted/null selects inline data; a non-null handle requires data to be omitted or empty and must already exist in this account."
+        },
+        "contentId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WriteContentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional received CID metadata. Ordinary file attachments are emitted as files; preserve related images through draft.original.resources."
+        },
+        "disposition": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "inline",
+            "attachment",
+            null
+          ],
+          "description": "Optional received disposition metadata; only these lowercase values are accepted. Ordinary draft attachments are still sent as attachments."
+        },
+        "contentLocation": {
+          "anyOf": [
+            {
+              "type": "string",
+              "description": "Optional nonempty Content-Location metadata. Preserve exact returned values for original resources. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "filename"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "blobId"
+            ],
+            "properties": {
+              "blobId": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "const": ""
+              }
+            }
+          }
+        }
+      ]
+    },
+    "WriteRecoveryFields": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "description": "Exactly five raw UTF-8 composer strings in To, Cc, Bcc, Subject, Body order. recovery-save accepts incomplete recipients. The first four fields allow at most 16 KiB each and body 2 MiB; Subject must additionally satisfy the normal 4096-byte header validation. These are unsendable until a normal update clears recoveryFields.",
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "Raw unfinished To field.",
+          "maxLength": 16384
+        },
+        {
+          "type": "string",
+          "description": "Raw unfinished Cc field.",
+          "maxLength": 16384
+        },
+        {
+          "type": "string",
+          "description": "Raw unfinished Bcc field.",
+          "maxLength": 16384
+        },
+        {
+          "type": "string",
+          "description": "Raw Subject field, still subject to normal header validation. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 4096
+        },
+        {
+          "type": "string",
+          "description": "Raw body source, interpreted using bodyFormat.",
+          "maxLength": 2097152
+        }
+      ]
+    },
+    "WriteOriginalAddress": {
+      "type": "object",
+      "description": "Received header mailbox summary inside an opaque original snapshot. Preserve returned fields, including an empty or non-outgoing address; this is not the new send envelope.",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "Received address summary, at most 254 UTF-8 bytes; controls except tab are refused.",
+          "maxLength": 254,
+          "default": "",
+          "pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f]*$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Received display name, at most 256 UTF-8 bytes; controls except tab are refused.",
+          "maxLength": 256,
+          "default": "",
+          "pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f]*$"
+        }
+      },
+      "required": [
+        "address"
+      ]
+    },
+    "WriteOriginalResource": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Attachment"
+        },
+        {
+          "properties": {
+            "blobId": {
+              "type": "null"
+            },
+            "size": {
+              "maximum": 2097152
+            },
+            "mimeType": {
+              "not": {
+                "pattern": "^[mM][eE][sS][sS][aA][gG][eE]/"
+              }
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "contentId"
+              ],
+              "properties": {
+                "contentId": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": [
+                "contentLocation"
+              ],
+              "properties": {
+                "contentLocation": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "description": "A fully loaded original HTML resource: inline base64url bytes only, never blobId. At least contentId or contentLocation is required; IDs/locations are unique within the original. message/* resource MIME types are unsupported. Combined resources remain at most 2 MiB and 32 parts."
+    },
+    "Original": {
+      "type": "object",
+      "description": "Frozen received-original snapshot returned by mail.reply/mail.forward with preserveFormatting:true. Treat HTML and resource data as opaque mail content: keep this object unchanged while editing the separate Draft.bodyText note. This interface does not authorize HTML execution or external resource fetching. Backend revalidates envelope/encoding insertion safety and every local CID reference.",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1,
+          "default": 1,
+          "description": "Snapshot format version."
+        },
+        "sourceMessageId": {
+          "type": "string",
+          "description": "Received message identity. Preserve returned data. Limit is UTF-8 bytes; controls except tab are rejected.",
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f]*$",
+          "default": ""
+        },
+        "from": {
+          "$ref": "#/$defs/WriteOriginalAddress",
+          "default": {
+            "address": "",
+            "name": ""
+          }
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WriteOriginalAddress"
+          },
+          "maxItems": 64,
+          "default": [],
+          "description": "Received To summaries; combined To+Cc count is at most 64."
+        },
+        "cc": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WriteOriginalAddress"
+          },
+          "maxItems": 64,
+          "default": [],
+          "description": "Received Cc summaries; combined To+Cc count is at most 64."
+        },
+        "subject": {
+          "type": "string",
+          "description": "Received subject. Preserve returned data. Limit is UTF-8 bytes; controls except tab are rejected.",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f]*$",
+          "default": ""
+        },
+        "date": {
+          "type": "string",
+          "description": "Received date header. Preserve returned data. Limit is UTF-8 bytes; controls except tab are rejected.",
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f]*$",
+          "default": ""
+        },
+        "bodyText": {
+          "type": "string",
+          "description": "Received decoded plain-text alternative, at most 2 MiB UTF-8 bytes, without NUL.",
+          "maxLength": 2097152,
+          "pattern": "^[^\\u0000]*$",
+          "default": ""
+        },
+        "bodyHtml": {
+          "type": "string",
+          "description": "Opaque received UTF-8 HTML, at most 2 MiB, without NUL. Retain exactly; every cid: reference must resolve to a supplied resource. Remote URLs are never fetched by preparing the draft.",
+          "maxLength": 2097152,
+          "pattern": "^[^\\u0000]*$",
+          "default": ""
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WriteOriginalResource"
+          },
+          "maxItems": 32,
+          "default": [],
+          "description": "Fully loaded related resources. Combined decoded bytes at most 2 MiB; do not replace them with filesystem paths or blob handles."
+        }
+      },
+      "required": []
+    },
+    "Draft": {
+      "type": "object",
+      "description": "Complete editable draft source. New drafts default to plain text, empty recipients/headers/body/attachments and no original. Updating replaces editable fields rather than applying a patch; omitted bodyFormat and original alone are preserved from the previous draft. All string length limits describe UTF-8 bytes.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Returned local draft ID. Omit for new content. Outer draftId chooses an existing draft; supplying this nested id does not select the update target.",
+          "default": ""
+        },
+        "from": {
+          "$ref": "#/$defs/WriteSender"
+        },
+        "recoveryFields": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WriteRecoveryFields"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omitted/null means a normal draft. A non-null recovery marker is never sendable; use draft.recovery-save to preserve incomplete fields and a normal draft.update with omitted/null recoveryFields to finish."
+        },
+        "to": {
+          "$ref": "#/$defs/Recipients",
+          "default": []
+        },
+        "cc": {
+          "$ref": "#/$defs/Recipients",
+          "default": []
+        },
+        "bcc": {
+          "$ref": "#/$defs/Recipients",
+          "default": []
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject header. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "bodyText": {
+          "type": "string",
+          "description": "Editable UTF-8 source or personal note above original. At most 2 MiB; plain is literal, markdown is rendered locally. Rendering and sending also reject NUL and enforce bounds on generated alternatives.",
+          "maxLength": 2097152,
+          "default": ""
+        },
+        "bodyFormat": {
+          "type": "string",
+          "enum": [
+            "plain",
+            "markdown"
+          ],
+          "default": "plain",
+          "description": "Interpretation of bodyText. New drafts/replies/forwards default plain. On draft.update or recovery-save of an existing draft, omission preserves the previous format. Markdown escapes raw HTML and never downloads images."
+        },
+        "threadId": {
+          "type": "string",
+          "description": "Gmail thread identity; keep returned threading fields for replies. Empty creates a new conversation. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected. A live send requires a nonempty thread ID to use 1..128 ASCII letters/digits/'_'/'-' and also requires a valid nonempty inReplyTo.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "default": ""
+        },
+        "inReplyTo": {
+          "type": "string",
+          "description": "RFC Message-ID of the replied-to message. Sending requires a valid angle-bracket Message-ID when nonempty. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected. Valid nonempty tokens are 5..512 ASCII bytes with outer angle brackets and an @.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "default": ""
+        },
+        "references": {
+          "type": "string",
+          "description": "Space-separated RFC Message-ID chain; validated again by MIME on send. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected. At most 32 valid 5..512-byte angle-bracket Message-ID tokens separated by spaces; a generated reply appends the source token within this same limit.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 8192,
+          "default": ""
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "maxItems": 16,
+          "default": [],
+          "description": "Ordinary outgoing files. Use attachment.import for larger content. Exact decoded bytes, account-owned blob handles and 25 MiB total are checked; inline decoded bytes plus original resources are limited to 2 MiB."
+        },
+        "original": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Original"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Frozen original snapshot. Omission preserves it when updating an existing draft; explicit null removes it. Keep returned snapshots unchanged while editing bodyText."
+        }
+      },
+      "required": []
+    },
+    "WriteRecoveryDraft": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Draft"
+        },
+        {
+          "required": [
+            "recoveryFields"
+          ],
+          "properties": {
+            "recoveryFields": {
+              "$ref": "#/$defs/WriteRecoveryFields"
+            }
+          }
+        }
+      ],
+      "description": "Input for draft.recovery-save. Raw recoveryFields supply Subject/Body and retain unfinished To/Cc/Bcc; ordinary to/cc/bcc, subject and bodyText fields are ignored by this command. Other Draft fields remain available. New recovery drafts default plain; updates preserve omitted bodyFormat/original."
+    },
+    "WriteSendDraft": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Draft"
+        },
+        {
+          "properties": {
+            "recoveryFields": {
+              "type": "null"
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "to"
+              ],
+              "properties": {
+                "to": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "minItems": 1
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "required": [
+                "cc"
+              ],
+              "properties": {
+                "cc": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "minItems": 1
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "required": [
+                "bcc"
+              ],
+              "properties": {
+                "bcc": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "minItems": 1
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "required": [
+              "threadId"
+            ],
+            "properties": {
+              "threadId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "inReplyTo"
+            ],
+            "properties": {
+              "threadId": {
+                "$ref": "#/$defs/WriteIdentifier"
+              },
+              "inReplyTo": {
+                "$ref": "#/$defs/WriteMessageId"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "inReplyTo"
+            ],
+            "properties": {
+              "inReplyTo": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "inReplyTo": {
+                "$ref": "#/$defs/WriteMessageId"
+              }
+            }
+          }
+        }
+      ],
+      "description": "A sendable complete draft: at least one actual recipient across To/Cc/Bcc, no unfinished recovery marker, at most 32 recipients total. All headers, MIME, verified From identity, original resources, blob hashes and final encoded size are checked before dispatch."
+    },
+    "WriteContactAddress": {
+      "type": "object",
+      "description": "Contact email entry. Live contacts.upsert requires objects rather than bare strings or RFC address-list text.",
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "Mailbox addr-spec only, without a display name or angle brackets. Maximum 254 ASCII bytes and a 64-byte local part; full RFC mailbox syntax is validated by the backend.",
+          "minLength": 1,
+          "maxLength": 254,
+          "pattern": "^[\\u0020-\\u007e]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional descriptive name retained in the local DTO; provider updates use address and preserve Google's existing email metadata. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "default": ""
+        }
+      },
+      "required": [
+        "address"
+      ]
+    },
+    "Contact": {
+      "type": "object",
+      "description": "Contact create/update input. Empty/omitted resourceName creates; a nonempty people/... identity updates. On update, omitted name and emails preserve the freshly fetched current values. On create, at least one email is required. No contact deletion is exposed.",
+      "properties": {
+        "resourceName": {
+          "type": "string",
+          "description": "Omit or use empty string to create. To edit, copy the returned people/ identifier; suffix uses 1..128 ASCII letters, digits, '_' or '-'.",
+          "pattern": "^(?:|people/[A-Za-z0-9_-]{1,128})$",
+          "default": ""
+        },
+        "etag": {
+          "type": "string",
+          "description": "Current CONTACT-source ETag from the returned contact. Required for updates unless outer expectedEtag is supplied. It is a compare precondition, not a new value to set.",
+          "default": ""
+        },
+        "name": {
+          "type": "string",
+          "description": "Contact display name. Omitted preserves it on edits; empty string explicitly clears it. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 256,
+          "default": ""
+        },
+        "emails": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/WriteContactAddress"
+          },
+          "description": "Full desired email list; omission preserves it on edits. At least one address is required after merge, and case-insensitive duplicates fail. Existing metadata for unchanged addresses is preserved."
+        },
+        "provider": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "readOnly": true,
+          "description": "Opaque returned People metadata (names, emailAddresses, metadata), at most 64 KiB when received. It may be passed back unchanged, but it is ignored as write authority: create discards it and update uses freshly fetched provider data. Do not construct or edit nested provider fields."
+        }
+      },
+      "required": [],
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "not": {
+                  "required": [
+                    "resourceName"
+                  ]
+                }
+              },
+              {
+                "properties": {
+                  "resourceName": {
+                    "const": ""
+                  }
+                },
+                "required": [
+                  "resourceName"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "emails"
+            ]
+          }
+        }
+      ]
+    },
+    "WritePaletteColor": {
+      "type": "string",
+      "description": "A supported Gmail write-palette value. Lowercase canonical values are listed; hexadecimal letters are accepted in either case. Optional inbound cosmetic colors are a different, more permissive read contract.",
+      "anyOf": [
+        {
+          "enum": [
+            "#000000",
+            "#434343",
+            "#666666",
+            "#999999",
+            "#cccccc",
+            "#efefef",
+            "#f3f3f3",
+            "#ffffff",
+            "#fb4c2f",
+            "#ffad47",
+            "#fad165",
+            "#16a766",
+            "#43d692",
+            "#4a86e8",
+            "#a479e2",
+            "#f691b3",
+            "#f6c5be",
+            "#ffe6c7",
+            "#fef1d1",
+            "#b9e4d0",
+            "#c6f3de",
+            "#c9daf8",
+            "#e4d7f5",
+            "#fcdee8",
+            "#efa093",
+            "#ffd6a2",
+            "#fce8b3",
+            "#89d3b2",
+            "#a0eac9",
+            "#a4c2f4",
+            "#d0bcf1",
+            "#fbc8d9",
+            "#e66550",
+            "#ffbc6b",
+            "#fcda83",
+            "#44b984",
+            "#68dfa9",
+            "#6d9eeb",
+            "#b694e8",
+            "#f7a7c0",
+            "#cc3a21",
+            "#eaa041",
+            "#f2c960",
+            "#149e60",
+            "#3dc789",
+            "#3c78d8",
+            "#8e63ce",
+            "#e07798",
+            "#ac2b16",
+            "#cf8933",
+            "#d5ae49",
+            "#0b804b",
+            "#2a9c68",
+            "#285bac",
+            "#653e9b",
+            "#b65775",
+            "#822111",
+            "#a46a21",
+            "#aa8831",
+            "#076239",
+            "#1a764d",
+            "#1c4587",
+            "#41236d",
+            "#83334c",
+            "#464646",
+            "#e7e7e7",
+            "#0d3472",
+            "#b6cff5",
+            "#0d3b44",
+            "#98d7e4",
+            "#3d188e",
+            "#e3d7ff",
+            "#711a36",
+            "#fbd3e0",
+            "#8a1c0a",
+            "#f2b2a8",
+            "#7a2e0b",
+            "#ffc8af",
+            "#7a4706",
+            "#ffdeb5",
+            "#594c05",
+            "#fbe983",
+            "#684e07",
+            "#fdedc1",
+            "#0b4f30",
+            "#b3efd3",
+            "#04502e",
+            "#a2dcc1",
+            "#c2c2c2",
+            "#4986e7",
+            "#2da2bb",
+            "#b99aff",
+            "#994a64",
+            "#f691b2",
+            "#ff7537",
+            "#ffad46",
+            "#662e37",
+            "#ebdbde",
+            "#cca6ac",
+            "#094228",
+            "#42d692",
+            "#16a765"
+          ]
+        },
+        {
+          "pattern": "^(?:#000000|#434343|#666666|#999999|#[cC][cC][cC][cC][cC][cC]|#[eE][fF][eE][fF][eE][fF]|#[fF]3[fF]3[fF]3|#[fF][fF][fF][fF][fF][fF]|#[fF][bB]4[cC]2[fF]|#[fF][fF][aA][dD]47|#[fF][aA][dD]165|#16[aA]766|#43[dD]692|#4[aA]86[eE]8|#[aA]479[eE]2|#[fF]691[bB]3|#[fF]6[cC]5[bB][eE]|#[fF][fF][eE]6[cC]7|#[fF][eE][fF]1[dD]1|#[bB]9[eE]4[dD]0|#[cC]6[fF]3[dD][eE]|#[cC]9[dD][aA][fF]8|#[eE]4[dD]7[fF]5|#[fF][cC][dD][eE][eE]8|#[eE][fF][aA]093|#[fF][fF][dD]6[aA]2|#[fF][cC][eE]8[bB]3|#89[dD]3[bB]2|#[aA]0[eE][aA][cC]9|#[aA]4[cC]2[fF]4|#[dD]0[bB][cC][fF]1|#[fF][bB][cC]8[dD]9|#[eE]66550|#[fF][fF][bB][cC]6[bB]|#[fF][cC][dD][aA]83|#44[bB]984|#68[dD][fF][aA]9|#6[dD]9[eE][eE][bB]|#[bB]694[eE]8|#[fF]7[aA]7[cC]0|#[cC][cC]3[aA]21|#[eE][aA][aA]041|#[fF]2[cC]960|#149[eE]60|#3[dD][cC]789|#3[cC]78[dD]8|#8[eE]63[cC][eE]|#[eE]07798|#[aA][cC]2[bB]16|#[cC][fF]8933|#[dD]5[aA][eE]49|#0[bB]804[bB]|#2[aA]9[cC]68|#285[bB][aA][cC]|#653[eE]9[bB]|#[bB]65775|#822111|#[aA]46[aA]21|#[aA][aA]8831|#076239|#1[aA]764[dD]|#1[cC]4587|#41236[dD]|#83334[cC]|#464646|#[eE]7[eE]7[eE]7|#0[dD]3472|#[bB]6[cC][fF][fF]5|#0[dD]3[bB]44|#98[dD]7[eE]4|#3[dD]188[eE]|#[eE]3[dD]7[fF][fF]|#711[aA]36|#[fF][bB][dD]3[eE]0|#8[aA]1[cC]0[aA]|#[fF]2[bB]2[aA]8|#7[aA]2[eE]0[bB]|#[fF][fF][cC]8[aA][fF]|#7[aA]4706|#[fF][fF][dD][eE][bB]5|#594[cC]05|#[fF][bB][eE]983|#684[eE]07|#[fF][dD][eE][dD][cC]1|#0[bB]4[fF]30|#[bB]3[eE][fF][dD]3|#04502[eE]|#[aA]2[dD][cC][cC]1|#[cC]2[cC]2[cC]2|#4986[eE]7|#2[dD][aA]2[bB][bB]|#[bB]99[aA][fF][fF]|#994[aA]64|#[fF]691[bB]2|#[fF][fF]7537|#[fF][fF][aA][dD]46|#662[eE]37|#[eE][bB][dD][bB][dD][eE]|#[cC][cC][aA]6[aA][cC]|#094228|#42[dD]692|#16[aA]765)$"
+        }
+      ]
+    },
+    "Color": {
+      "type": "object",
+      "description": "Requested label color. Both components are mandatory and must be selected from the complete write palette below; omit the whole color to preserve/default it. null and arbitrary RGB values fail.",
+      "properties": {
+        "backgroundColor": {
+          "$ref": "#/$defs/WritePaletteColor"
+        },
+        "textColor": {
+          "$ref": "#/$defs/WritePaletteColor"
+        }
+      },
+      "required": [
+        "backgroundColor",
+        "textColor"
+      ]
+    },
+    "WriteLabelName": {
+      "type": "string",
+      "description": "New UTF-8 custom label name, 1..256 bytes, no leading/trailing whitespace, controls, Unicode line separators or bidi controls. Reserved system names are forbidden case-insensitively; an existing label with the same name ignoring case is a conflict.",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]+$"
+    },
+    "WriteLabelInput": {
+      "type": "string",
+      "description": "Existing label ID or exact custom name. System label names are case-insensitive. Prefer returned IDs to avoid rename ambiguity. Length limits are UTF-8 bytes; ASCII controls including tabs, CR, LF and DEL are rejected.",
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+      "maxLength": 256,
+      "minLength": 1
+    },
+    "WriteMessageIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/WriteIdentifier"
+      },
+      "description": "An explicit, reviewed account-scoped target snapshot. All IDs must be distinct. No query, threadId or scope field expands this array."
+    },
+    "WriteFilePath": {
+      "type": "string",
+      "description": "Literal filesystem path, at most 4096 UTF-8 bytes. No shell or tilde expansion. Use an explicit absolute path for portable agent requests; command-specific rules below govern relative paths and symlinks.",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "WriteMessageId": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 512,
+      "pattern": "^<[^\\u0000-\\u0020\\u007f-\\uffff<>]*@[^\\u0000-\\u0020\\u007f-\\uffff<>]*>$",
+      "description": "RFC Message-ID token, including angle brackets, 5..512 ASCII bytes, with an @ and no whitespace or inner angle brackets. This differs from Gmail's provider messageId."
+    }
+  }
+}

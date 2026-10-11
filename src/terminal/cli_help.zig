@@ -133,7 +133,7 @@ fn spec(mode: []const u8, verb: []const u8) Spec {
     unreachable; // Every validated verb has contextual help.
 }
 fn reference(writer: anytype) !void {
-    try writer.writeAll("\nFull command fields and examples:\n  https://github.com/technologylab-ai/omagma/blob/main/docs/AGENT-CLI.md\n");
+    try writer.writeAll("\nComplete offline JSONL discovery:\n  omagma cli --help commands\n  omagma cli --help COMMAND\n  omagma cli --schema COMMAND\n  omagma cli --help-all\nAdditional documentation:\n  https://github.com/technologylab-ai/omagma/blob/main/docs/AGENT-CLI.md\n");
 }
 pub fn command(io: std.Io, mode: []const u8, verb: []const u8) !void {
     if (!knownVerb(mode, verb)) return error.UnknownCommand;
@@ -152,25 +152,8 @@ pub fn command(io: std.Io, mode: []const u8, verb: []const u8) !void {
     try reference(&writer.interface);
     try writer.interface.flush();
 }
-pub fn protocol(io: std.Io, target: ?[]const u8) !void {
-    if (target) |cmd| {
-        if (eq(cmd, "accounts.list")) {
-            var buffer: [1024]u8 = undefined;
-            var writer = std.Io.File.stdout().writer(io, &buffer);
-            try writer.interface.writeAll("Experimental terminal mail · accounts.list\nDiscover configured account addresses, enabled state and local capabilities.\n\nJSONL request:\n{\"id\":\"accounts\",\"cmd\":\"accounts.list\"}\n\nNo account field is required. Result: data.accounts[].\nConfigured capabilities are checked again before provider access.\n");
-            try writer.interface.flush();
-            return;
-        }
-        if (eq(cmd, "accounts.identities")) return command(io, "mail", "identities");
-        if (eq(cmd, "browser.open")) return command(io, "mail", "open-link");
-        const dot = std.mem.indexOfScalar(u8, cmd, '.') orelse return error.UnknownCommand;
-        const namespace = cmd[0..dot];
-        const mode = if (eq(namespace, "invitation")) "invitations" else if (eq(namespace, "auth")) "terminal-auth" else namespace;
-        const verb = cmd[dot + 1 ..];
-        if (eq(mode, "updates") or jsonAlias(mode, verb) != null) return error.UnknownCommand;
-        if (!knownVerb(mode, verb) or spec(mode, verb).json_cmd != null) return error.UnknownCommand;
-        return command(io, mode, verb);
-    }
+pub fn protocol(io: std.Io, a: std.mem.Allocator, target: ?[]const u8) !void {
+    if (target) |cmd| return @import("cli_api.zig").help(io, a, cmd);
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     try writer.interface.writeAll(
@@ -196,14 +179,15 @@ pub fn protocol(io: std.Io, target: ?[]const u8) !void {
         \\Sending requires a stable operationId; never automatically retry UnknownOutcome.
         \\
         \\3. Discover only the details you need:
-        \\   omagma mail --help                 Choose a mail operation
-        \\   omagma mail read --help            Flags, JSON fields and an example
-        \\   omagma cli --help mail.read        The same operation by its JSONL name
-        \\   omagma --help                      Other command families
-        \\   omagma --help-all                  Extended command overview
+        \\   omagma cli --help commands         Every supported JSONL cmd
+        \\   omagma cli --help mail             Commands in one namespace
+        \\   omagma cli --help mail.read        Complete fields, examples and constraints
+        \\   omagma cli --schema mail.read      Machine-readable request schema
+        \\   omagma cli --help-all              Complete offline JSONL reference
         \\Use --fixtures with a private --cache-dir for a disconnected demonstration.
         \\
     );
+    try @import("cli_api.zig").list(&writer.interface, a, null, true);
     try reference(&writer.interface);
     try writer.interface.flush();
 }

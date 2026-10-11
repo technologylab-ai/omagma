@@ -1,0 +1,1046 @@
+{
+  "commands": [
+    {
+      "cmd": "accounts.list",
+      "summary": "Discover configured accounts and recorded terminal capabilities.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "The only command that does not require account. Reads configuration and the local grant registry; it does not contact Google or prove that credentials/network access currently work.",
+        "Returns accounts with address, enabled, capabilities, senderName and signature. Disabled accounts are included. Without a terminal registry entry, mail-read describes the read-only fallback; it does not establish a connected account.",
+        "Every later account-scoped request must use its own explicit configured, enabled account."
+      ],
+      "examples": [
+        {
+          "cmd": "accounts.list",
+          "id": "accounts"
+        }
+      ]
+    },
+    {
+      "cmd": "accounts.identities",
+      "summary": "Read verified send-as identities and signatures for an account.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Default live mode fetches the account's Gmail send-as identities and saves the bounded result locally. It does not change Gmail settings.",
+        "cacheOnly:true returns downloaded identities without fetching, plus the configured primary identity if absent. Cached aliases are not fresh send authorization; each live send verifies its From identity again.",
+        "Returns identities with address, name, signature and isDefault, plus cached. The fetched alias list is limited to 32, identity names to 256 bytes and signatures to 8,192 bytes.",
+        "mail-read is checked in both live and cacheOnly:true paths; local cached results do not waive that recorded capability check."
+      ],
+      "examples": [
+        {
+          "cmd": "accounts.identities",
+          "account": "personal@example.com"
+        },
+        {
+          "cmd": "accounts.identities",
+          "account": "personal@example.com",
+          "cacheOnly": true
+        }
+      ]
+    },
+    {
+      "cmd": "mail.list",
+      "summary": "List one live or cached metadata page.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Page size 1–100. Default 30 for live mail.list/search/sync, 32 for cached mail.list/search. A page and the retained cache are bounded subsets of the mailbox.",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional Gmail query; default empty. At most 4,096 UTF-8 bytes. Live requests use Gmail syntax. Cached mail.list requires an exact previously recorded query view; cached mail.search evaluates its documented local subset.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional label ID or name; default empty. At most 256 UTF-8 bytes. Live requests resolve names through Gmail; cached requests use downloaded definitions/views. This filters messages, without changing labels.",
+          "maxLength": 256,
+          "default": ""
+        },
+        "cursor": {
+          "$ref": "#/$defs/ReadCursor"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
+          "default": false
+        },
+        "includeSpamTrash": {
+          "type": "boolean",
+          "description": "Live mail.list/search/sync only; default false. True includes Spam/Trash in Gmail enumeration. It is also enabled for label SPAM/TRASH or query text containing in:spam, in:trash or in:anywhere. Cached operations do not apply this switch; use their label/query filters.",
+          "default": false
+        },
+        "anchorMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Cached list/search only: select the page containing this retained message in the current account/query/label view. If it is not a candidate, the existing offset is retained. Do not combine with beforeMessageId or afterMessageId. Live list/search/sync do not use this field."
+        },
+        "beforeMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Requires cacheOnly:true. Return the adjacent newer retained window before this anchor, excluding the anchor. Conflicts with afterMessageId, a nonempty cursor or anchorMessageId."
+        },
+        "afterMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Requires cacheOnly:true. Return the adjacent older retained window after this anchor, excluding the anchor. Conflicts with beforeMessageId, a nonempty cursor or anchorMessageId."
+        },
+        "boundaryReceivedAt": {
+          "type": "integer",
+          "description": "Optional nonnegative receivedAt millisecond timestamp from the visible anchor message. Used with beforeMessageId/afterMessageId only when the ID cannot supply a retained boundary; recovery stays within this account/query/label view and reports boundaryFallback:true. It never fetches or imports the missing message.",
+          "minimum": 0
+        }
+      },
+      "required": [],
+      "notes": [
+        "Live mode enumerates one Gmail metadata page, saves metadata/view membership locally and returns messages plus nextCursor. It does not fetch full bodies or mark mail read.",
+        "cacheOnly:true reads retained metadata and reports cacheReady, partial, stale, viewIncomplete, generation, lastSyncAt and available cache/remote pagination. End of cached pagination is not the end of Gmail.",
+        "A cached mail.list query uses an exact recorded provider query view rather than guessing Gmail syntax locally; without that view, cacheReady is false. Use cached mail.search for local body/metadata predicates.",
+        "Pass returned cursors verbatim with the same account/query/label, includeSpamTrash choice and matching live/cache mode. Live L and cached C/K cursors are distinct; a generation/view change can invalidate them.",
+        "Relative cached windows exclude their before/after anchor and report cacheWindow, hasMoreCachedBefore/After and boundaryFallback. An evicted anchor without a usable retained boundary or boundaryReceivedAt fails CacheBoundaryGone.",
+        "With no label/query, cached mail.list excludes retained Spam and Trash. includeSpamTrash changes live enumeration only; cached results still reflect their selected view.",
+        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.list",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 30
+        },
+        {
+          "cmd": "mail.list",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "cacheOnly": true,
+          "limit": 32
+        },
+        {
+          "cmd": "mail.list",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "cacheOnly": true,
+          "beforeMessageId": "message_demo_2",
+          "boundaryReceivedAt": 1780871400000,
+          "limit": 32
+        }
+      ]
+    },
+    {
+      "cmd": "mail.search",
+      "summary": "Search Gmail or retained local metadata and downloaded bodies.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Page size 1–100. Default 30 for live mail.list/search/sync, 32 for cached mail.list/search. A page and the retained cache are bounded subsets of the mailbox.",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "query": {
+          "type": "string",
+          "description": "Default empty; at most 4,096 UTF-8 bytes. Live mode uses Gmail query syntax. cacheOnly:true evaluates retained metadata and already downloaded plaintext with at most 32 AND terms, quoted phrases and a leading - for negation; see command notes for all supported operators.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional label ID or name; default empty. At most 256 UTF-8 bytes. Live requests resolve names through Gmail; cached requests use downloaded definitions/views. This filters messages, without changing labels.",
+          "maxLength": 256,
+          "default": ""
+        },
+        "cursor": {
+          "$ref": "#/$defs/ReadCursor"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
+          "default": false
+        },
+        "includeSpamTrash": {
+          "type": "boolean",
+          "description": "Live mail.list/search/sync only; default false. True includes Spam/Trash in Gmail enumeration. It is also enabled for label SPAM/TRASH or query text containing in:spam, in:trash or in:anywhere. Cached operations do not apply this switch; use their label/query filters.",
+          "default": false
+        },
+        "anchorMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Cached list/search only: select the page containing this retained message in the current account/query/label view. If it is not a candidate, the existing offset is retained. Do not combine with beforeMessageId or afterMessageId. Live list/search/sync do not use this field."
+        },
+        "beforeMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Requires cacheOnly:true. Return the adjacent newer retained window before this anchor, excluding the anchor. Conflicts with afterMessageId, a nonempty cursor or anchorMessageId."
+        },
+        "afterMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Requires cacheOnly:true. Return the adjacent older retained window after this anchor, excluding the anchor. Conflicts with beforeMessageId, a nonempty cursor or anchorMessageId."
+        },
+        "boundaryReceivedAt": {
+          "type": "integer",
+          "description": "Optional nonnegative receivedAt millisecond timestamp from the visible anchor message. Used with beforeMessageId/afterMessageId only when the ID cannot supply a retained boundary; recovery stays within this account/query/label view and reports boundaryFallback:true. It never fetches or imports the missing message.",
+          "minimum": 0
+        }
+      },
+      "required": [],
+      "notes": [
+        "Default cacheOnly:false queries Gmail and saves the bounded metadata result. It does not mark mail read or automatically download bodies.",
+        "cacheOnly:true needs no recorded Gmail query view, sends no provider request and never downloads a missing body. It searches literal metadata and downloaded plain text, not raw HTML or encoded attachments.",
+        "Local predicates: from:, to:, cc:, subject:, body:, label:, in:, filename:, is:unread|read|starred|important, and has:attachment. Bare terms search metadata and available plaintext. Terms use AND; double quotes preserve phrases and - negates.",
+        "Local dates use after: (inclusive), before: (exclusive), on: (equal), and newer:/older: absolute-date aliases, with YYYY-MM-DD or YYYY/MM/DD in the local timezone. They are not relative-duration operators. Missing timezone data, unknown operators, unsupported values and invalid dates fail explicitly.",
+        "Local label names use downloaded account definitions; label IDs also work. Local in: supports normal labels plus anywhere, all (excluding Spam/Trash), archive and drafts.",
+        "Cached search returns searchMode:cache, searchScope:metadata-and-cached-bodies, matchedCachedCount, literal searchMatches/excerpts and highlightTerm, along with a partial cached page.",
+        "Keep account/query/label/cache mode and live includeSpamTrash choice fixed for each cursor. Cached K cursors are scoped to metadata generation and, when bodies are searched, body residency; do not reuse live L cursors or stale snapshots.",
+        "Relative cached windows exclude their before/after anchor and report cacheWindow, hasMoreCachedBefore/After and boundaryFallback. An evicted anchor without a usable retained boundary or boundaryReceivedAt fails CacheBoundaryGone.",
+        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.search",
+          "account": "personal@example.com",
+          "query": "from:alex@example.org subject:launch",
+          "limit": 10
+        },
+        {
+          "cmd": "mail.search",
+          "account": "personal@example.com",
+          "cacheOnly": true,
+          "query": "from:alex body:\"launch notes\" -is:read",
+          "limit": 32
+        },
+        {
+          "cmd": "mail.search",
+          "account": "personal@example.com",
+          "cacheOnly": true,
+          "query": "after:2026-06-01 filename:report.pdf",
+          "afterMessageId": "message_demo_2",
+          "boundaryReceivedAt": 1780871400000
+        }
+      ]
+    },
+    {
+      "cmd": "mail.sync",
+      "summary": "List a provider metadata page; legacy alias for live mail.list.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Provider metadata page size 1–100; default 30.",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 30
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional Gmail query; default empty; at most 4,096 UTF-8 bytes.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional label ID or name; default empty. At most 256 UTF-8 bytes. Live requests resolve names through Gmail; cached requests use downloaded definitions/views. This filters messages, without changing labels.",
+          "maxLength": 256,
+          "default": ""
+        },
+        "cursor": {
+          "$ref": "#/$defs/ReadCursor"
+        },
+        "includeSpamTrash": {
+          "type": "boolean",
+          "description": "Live mail.list/search/sync only; default false. True includes Spam/Trash in Gmail enumeration. It is also enabled for label SPAM/TRASH or query text containing in:spam, in:trash or in:anywhere. Cached operations do not apply this switch; use their label/query filters.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "This is a live list-operation alias, not a Gmail history refresh. Use mail.refresh to update the history/checkpoint and bounded body head.",
+        "Default limit is 30, range 1–100. query and label default empty. Saves the bounded metadata page/view locally; does not fetch full bodies or mark messages read.",
+        "Pass the returned nextCursor only with the same account/query/label and includeSpamTrash choice. cacheOnly:true and relative cached window selectors are unsupported; use mail.list or mail.search with cacheOnly:true instead."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.sync",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 30
+        }
+      ]
+    },
+    {
+      "cmd": "mail.read",
+      "summary": "Read a full message, using its downloaded body when available.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/ReadMessageId"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
+          "default": false
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Default mode can reuse a complete local body; if unavailable, it fetches and caches the full Gmail message. Omitting cacheOnly does not force a fresh provider body.",
+        "cacheOnly:true makes no provider request and fails CacheMiss if no usable full body is retained. A metadata row/snippet alone is not a complete body.",
+        "Returns decoded bodyText, optional bodyHtml, bodySource, envelope/threading fields, labels, unread state, attachment descriptors and invitation when recognized. Plain text takes precedence over HTML for ordinary reading.",
+        "Reads do not mark read. Labels/unread may reflect retained metadata; this read is not a forced membership refresh. Raw HTML and all mail-derived strings remain untrusted data.",
+        "Body/plain or HTML alternatives are bounded to 2 MiB each. Received attachment descriptors may represent up to 50 MiB without downloading their bytes; use mail.attachment or mail.attachment-save for content. An absent or empty data field does not mean an empty file.",
+        "Conflicting calendar parts leave readable ordinary mail/attachments with invitation:null; invitation actions reject such mail as NotInvitation. Malformed/oversized MIME can still produce an explicit body refusal.",
+        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.read",
+          "account": "personal@example.com",
+          "messageId": "message_demo_1"
+        },
+        {
+          "cmd": "mail.read",
+          "account": "personal@example.com",
+          "messageId": "message_demo_1",
+          "cacheOnly": true
+        }
+      ]
+    },
+    {
+      "cmd": "mail.thread",
+      "summary": "Read chronological full messages in one account-scoped thread.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/ReadThreadId"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
+          "default": false
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "notes": [
+        "Default live mode fetches the Gmail thread, decodes full messages and saves them in the account cache. Threads larger than 100 messages are refused.",
+        "Messages are sorted oldest first by receivedAt, breaking equal timestamps by provider message ID. Reads do not mark mail read.",
+        "cacheOnly:true returns only retained full bodies for this thread, sorted chronologically, with cached:true and partial:true. Missing bodies are omitted; no retained full body fails CacheMiss. It never proves thread completeness.",
+        "Message bodies, MIME decoding and attachments retain the same limits and descriptor semantics as mail.read.",
+        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.thread",
+          "account": "personal@example.com",
+          "threadId": "thread_demo_1"
+        },
+        {
+          "cmd": "mail.thread",
+          "account": "personal@example.com",
+          "threadId": "thread_demo_1",
+          "cacheOnly": true
+        }
+      ]
+    },
+    {
+      "cmd": "mail.recipients",
+      "summary": "Project recent recipient suggestions from retained account data.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Required true for this public JSONL command. Recipient suggestions are local-only and never fetch mail, bodies or contacts.",
+          "const": true
+        }
+      },
+      "required": [
+        "cacheOnly"
+      ],
+      "notes": [
+        "Returns up to 1,024 deduplicated/ranked recipients from retained From/To/Cc metadata, local sent-message records and permitted downloaded contacts.",
+        "Excludes the primary account and downloaded self aliases. contacts-read is optional: contacts are included only when that capability is allowed; the result reports contactsIncluded.",
+        "Returns recipients, cached:true and contactsIncluded. There is no query, limit or cursor field for this projection; callers filter its bounded result locally.",
+        "Omitting cacheOnly:true routes outside the cached dispatcher and does not provide this operation.",
+        "mail-read is checked even though this command is cached-only. contacts-read controls only optional contact inclusion; unavailable contacts permission does not discard retained mail participants."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.recipients",
+          "account": "personal@example.com",
+          "cacheOnly": true
+        }
+      ]
+    },
+    {
+      "cmd": "mail.refresh",
+      "summary": "Apply a bounded history update/resync and optionally fill recent bodies.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Requested returned metadata page size 1–100; default 32. Provider enumeration may be raised to the selected prefetchLimit to supply that bounded body head.",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 32
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional Gmail query for the refreshed view; default empty; at most 4,096 UTF-8 bytes. Refresh also maintains the account-wide history checkpoint, not just this view.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional label ID or name; default empty. At most 256 UTF-8 bytes. Live requests resolve names through Gmail; cached requests use downloaded definitions/views. This filters messages, without changing labels.",
+          "maxLength": 256,
+          "default": ""
+        },
+        "prefetchLimit": {
+          "type": "integer",
+          "description": "Full-body head size 0–64; zero performs metadata refresh only. Default min(limit,32), unless this CLI session explicitly set its body-prefetch policy (normally --prefetch-bodies). Already usable or recorded refused bodies are not repeatedly fetched.",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "anchorMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Optional retained-message anchor for the current account/query/label view. After refresh, select the returned cached page containing this message and use the anchor when selecting the bounded prefetch window. If no matching retained candidate exists, selection falls back to the head. This controls local viewport selection, not the Gmail history checkpoint or a complete-thread expansion."
+        }
+      },
+      "required": [],
+      "notes": [
+        "Updates private metadata, labels/deletions, view membership, body cache and successful history checkpoints. Initial or expired history uses a bounded recent resync; this never promises a complete mailbox download.",
+        "Refresh keeps account-wide retention separate from a selected query/label view. It respects the existing metadata/disk quotas and can evict old-tail mail while preserving protected local state.",
+        "The body head is selected from the refreshed view, with separate parsing/byte limits. Previously usable or refused bodies are skipped. Ordinary reads still do not mark messages read.",
+        "Concurrent account refreshes coalesce: a caller can receive the current cached page with coalesced:true, refreshInProgress:true and refreshed:false rather than launching a duplicate job.",
+        "Returns a cached view page with bounded changed/deleted counts, resync and refresh-state information. The operation has a 30-second deadline; partial local commits can exist after a canceled/failed attempt, while the successful history checkpoint advances only after completion.",
+        "This is a refresh operation, not provider cursor pagination. Use mail.list/search for further pages. cacheOnly:true is unsupported. Automatic timer/transport fields are not public request controls.",
+        "anchorMessageId selects a retained cached viewport after the refresh; it does not narrow the account-wide history update. The returned page and body-prefetch window use their own page sizes, so both are bounded windows around the anchor rather than a promise to hydrate every returned row."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.refresh",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 32,
+          "prefetchLimit": 32
+        },
+        {
+          "cmd": "mail.refresh",
+          "account": "personal@example.com",
+          "query": "subject:launch",
+          "limit": 10,
+          "prefetchLimit": 0
+        },
+        {
+          "cmd": "mail.refresh",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 32,
+          "prefetchLimit": 32,
+          "anchorMessageId": "message_demo_2"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.prefetch",
+      "summary": "Refresh metadata and fill a bounded recent full-body head.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Body head size 0–64; default is this session's body-prefetch policy, normally 32. Zero still refreshes metadata with a minimum page size of one but downloads no bodies. Also becomes the metadata page size, with minimum one.",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional Gmail query for the refreshed view; default empty; at most 4,096 UTF-8 bytes. Refresh also maintains the account-wide history checkpoint, not just this view.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional label ID or name; default empty. At most 256 UTF-8 bytes. Live requests resolve names through Gmail; cached requests use downloaded definitions/views. This filters messages, without changing labels.",
+          "maxLength": 256,
+          "default": ""
+        },
+        "anchorMessageId": {
+          "$ref": "#/$defs/ReadMessageId",
+          "description": "Optional retained-message anchor for the current account/query/label view. After refresh, select the returned cached page containing this message and use the anchor when selecting the bounded prefetch window. If no matching retained candidate exists, selection falls back to the head. This controls local viewport selection, not the Gmail history checkpoint or a complete-thread expansion."
+        }
+      },
+      "required": [],
+      "notes": [
+        "Delegates to mail.refresh with prefetchLimit set from limit and metadata limit=max(1,limit); it does not accept a separate effective prefetchLimit control.",
+        "Uses the same account-scoped refresh lease, history/resync, 30-second deadline, private cache updates and existing metadata/disk/body limits as mail.refresh.",
+        "Fills only missing usable full bodies in the selected bounded head; already downloaded or recorded refused bodies are not repeatedly fetched. It neither marks read nor downloads arbitrary attachment contents.",
+        "cacheOnly:true is unsupported. This is not cursor pagination or a complete-mailbox synchronization.",
+        "anchorMessageId selects a retained cached viewport after the refresh; it does not narrow the account-wide history update. The returned page and body-prefetch window use their own page sizes, so both are bounded windows around the anchor rather than a promise to hydrate every returned row."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.prefetch",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 64
+        },
+        {
+          "cmd": "mail.prefetch",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 0
+        },
+        {
+          "cmd": "mail.prefetch",
+          "account": "personal@example.com",
+          "label": "INBOX",
+          "limit": 32,
+          "anchorMessageId": "message_demo_2"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.open",
+      "summary": "Explicitly open Gmail Inbox or a message in the account's Chrome profile.",
+      "capabilities": [],
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "description": "Optional provider message ID from this account. Omit or use an empty string to open Inbox. A nonempty ID requires mail-read and uses retained metadata or fetches the message to construct its thread target.",
+          "maxLength": 128
+        }
+      },
+      "required": [],
+      "notes": [
+        "Launches the configured Chrome profile with account-specific Gmail routing; this is a browser action, not a CLI full-message response.",
+        "Opening Inbox needs no terminal mail capability. A message target requires mail-read and can read/cache the message if its metadata is missing. Reads by Omagma do not mark read, but subsequent behavior in the browser is controlled by Gmail.",
+        "Fixtures return the target with opened:false instead of launching a browser. cacheOnly:true is unsupported."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.open",
+          "account": "personal@example.com"
+        },
+        {
+          "cmd": "mail.open",
+          "account": "personal@example.com",
+          "messageId": "message_demo_1"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.triage-scope",
+      "summary": "Resolve a complete message/conversation target snapshot before review.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/ReadMessageId"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "message",
+            "conversation"
+          ],
+          "default": "message",
+          "description": "Default message. conversation resolves the complete provider thread containing messageId; it does not expand by subject or sender."
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "notes": [
+        "Live mode reads authoritative minimal provider IDs/thread identity, not cached full bodies. It returns scope, threadId, exact messageIds, count and complete:true without changing labels or marking read.",
+        "Conversation results refuse more than 100 messages, duplicate/mismatched IDs or a thread missing the anchor. Failure returns no certified complete target snapshot.",
+        "Review these exact IDs before a later batch action. JSONL actions do not automatically expand a scope; pass the returned messageIds to mail.batch or mail.label-state.",
+        "cacheOnly:true is unsupported because retained thread rows cannot certify a complete provider conversation."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.triage-scope",
+          "account": "personal@example.com",
+          "messageId": "message_demo_1",
+          "scope": "message"
+        },
+        {
+          "cmd": "mail.triage-scope",
+          "account": "personal@example.com",
+          "messageId": "message_demo_1",
+          "scope": "conversation"
+        }
+      ]
+    },
+    {
+      "cmd": "mail.label-state",
+      "summary": "Inspect label membership counts for explicit reviewed message IDs.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "messageIds": {
+          "$ref": "#/$defs/ReadMessageIds"
+        }
+      },
+      "required": [
+        "messageIds"
+      ],
+      "notes": [
+        "Fetches the account's current bounded label definitions (up to 512) and returns each definition's appliedCount across the exact requested IDs, plus messageIds, count and complete:true. Counts between zero and count represent mixed membership.",
+        "Memberships use retained message labels when available and not uncertain from a prior operation. Missing or uncertain rows fetch minimal provider memberships. This is not an unconditional fresh membership read for every target.",
+        "Metadata-only inspection; it does not download bodies, change labels or send mail. It may update downloaded label definitions locally.",
+        "Pass messageIds explicitly. JSONL messageId/scope are not substitutes; the one-shot CLI can resolve scope before constructing this request. cacheOnly:true is unsupported."
+      ],
+      "examples": [
+        {
+          "cmd": "mail.label-state",
+          "account": "personal@example.com",
+          "messageIds": [
+            "message_demo_1",
+            "message_demo_2"
+          ]
+        }
+      ]
+    },
+    {
+      "cmd": "labels.list",
+      "summary": "Read system/custom label definitions, names and optional colors.",
+      "capabilities": [
+        "mail-read"
+      ],
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Default mode fetches the account's current Gmail label definitions and saves them locally. Returns labels with id, name, type and optional color, plus cached:false.",
+        "cacheOnly:true reads only downloaded definitions with cached:true; an empty result can mean no definitions have been downloaded. It is not a provider freshness claim.",
+        "At most 512 definitions; label IDs are bounded identifiers and names at most 512 bytes. Color metadata may be absent and is not a request to change it.",
+        "JSONL labels.list does not inspect per-message membership or expand scope. Use mail.label-state with explicit messageIds for membership counts.",
+        "mail-read is checked in both live and cacheOnly:true paths; local cached results do not waive that recorded capability check."
+      ],
+      "examples": [
+        {
+          "cmd": "labels.list",
+          "account": "personal@example.com"
+        },
+        {
+          "cmd": "labels.list",
+          "account": "personal@example.com",
+          "cacheOnly": true
+        }
+      ]
+    },
+    {
+      "cmd": "labels.palette",
+      "summary": "Return the built-in allowed Gmail label color palette.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Returns colors as hexadecimal strings for reviewed labels.create/labels.color requests. No provider or credential request is made, and no labels are changed.",
+        "Still requires a configured enabled account. The palette is local compiled data, not a claim that account definitions/memberships were refreshed. cacheOnly:true is unsupported."
+      ],
+      "examples": [
+        {
+          "cmd": "labels.palette",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "contacts.list",
+      "summary": "Read one People API page or filter downloaded contacts locally.",
+      "capabilities": [
+        "contacts-read"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "Live page size 1–100; default 100. Ignored with cacheOnly:true, which returns all matching contacts in the retained bounded contact snapshot.",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 100
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Optional People API nextCursor for a live contacts.list page; default empty. Pass verbatim with the same account. Cached contact reads do not paginate or use this field.",
+          "default": ""
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional name/email substring filter only with cacheOnly:true, at most 4,096 UTF-8 bytes; default empty. Live contacts.list does not apply query; use live contacts.search for provider search.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True filters only previously downloaded account contacts without People API requests; returns cached/cacheReady and no pagination. Local contact results can be stale or incomplete.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Live mode returns contacts with resourceName, etag, name and emails, plus nextCursor. It lists Google contacts (not every arbitrary directory/profile person). Reads do not edit contacts.",
+        "A successful live read replaces the private downloaded contact snapshot with that page, rather than accumulating every page automatically. Retained contact data is bounded to 1,024 records; cached results may represent only the latest downloaded page/search.",
+        "cacheOnly:true matches names and email addresses case-insensitively and returns contacts, cached:true and cacheReady. It makes no provider request, ignores live pagination and may return an empty uninitialized cache.",
+        "contacts-read is checked for both live and cached paths. Mail-only grants do not permit contacts reads."
+      ],
+      "examples": [
+        {
+          "cmd": "contacts.list",
+          "account": "personal@example.com",
+          "limit": 100
+        },
+        {
+          "cmd": "contacts.list",
+          "account": "personal@example.com",
+          "cacheOnly": true,
+          "query": "Alex"
+        }
+      ]
+    },
+    {
+      "cmd": "contacts.search",
+      "summary": "Search People API contacts or the downloaded name/email snapshot.",
+      "capabilities": [
+        "contacts-read"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search text; optional and defaults empty. Live mode uses People API searchContacts; cached mode is a case-insensitive name/email substring. At most 4,096 UTF-8 bytes.",
+          "maxLength": 4096,
+          "default": ""
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Optional live validation range 1–100, default 100, but live search uses a fixed provider page size of 30 rather than this value. Ignored with cacheOnly:true, which returns all retained matches.",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 100
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Default false. True filters only previously downloaded account contacts without People API requests; returns cached/cacheReady and no pagination. Local contact results can be stale or incomplete.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Live mode warms the People API search cache and requests at most 30 search results, returning normalized contacts and optional nextCursor. It does not expose a paginated search cursor input.",
+        "A successful live search replaces the private downloaded contact snapshot with its result; it does not certify a complete address book. Reads do not create or update contacts.",
+        "cacheOnly:true filters only the downloaded snapshot, with no provider request, and returns cached:true/cacheReady. It ignores live limit and searches name/email case-insensitively.",
+        "Requires contacts-read in either mode. Empty query is accepted; do not assume it enumerates all provider contacts—use contacts.list for connection pages."
+      ],
+      "examples": [
+        {
+          "cmd": "contacts.search",
+          "account": "personal@example.com",
+          "query": "Alex"
+        },
+        {
+          "cmd": "contacts.search",
+          "account": "personal@example.com",
+          "query": "Alex",
+          "cacheOnly": true
+        }
+      ]
+    },
+    {
+      "cmd": "cache.stats",
+      "summary": "Inspect local account cache quotas, residency and refresh statistics.",
+      "capabilities": [],
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Optional; either value uses local account storage only. This command never requests provider data.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Always local; neither default mode nor cacheOnly:true requests Gmail or People data. Reports retained metadata count/limit, disk bytes/limit, body/runtime limits, allocation snapshots when available, refresh state, generation, history/checkpoint times and bounded sync counters.",
+        "Fixture counters are synthetic-provider diagnostics, not live mailbox totals. Missing allocator measurements are not zero memory use.",
+        "An ordinary local store open can enforce its configured quotas; cacheOnly:true uses the read-only cached opening path. This command does not mark read, send mail or prove that provider credentials are usable."
+      ],
+      "examples": [
+        {
+          "cmd": "cache.stats",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "cache.clear",
+      "summary": "Clear retained mail and history/view checkpoints for one account.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Local persistent change: removes retained mail metadata and downloaded bodies, clears saved views/history checkpoint and lastSyncAt, and advances the cache generation.",
+        "Preserves local drafts, contacts, operation receipts and send intents. It does not delete Gmail messages, revoke grants, send queued mail or remove explicit saved downloads.",
+        "Returns cleared:true, draftsPreserved:true and operationsPreserved:true. A later refresh can refill bounded recent mail. Existing cache cursors become stale.",
+        "No provider capability or request is needed; access to this account's private writable cache is required. cacheOnly:true is unsupported for this mutation."
+      ],
+      "examples": [
+        {
+          "cmd": "cache.clear",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "cache.activity",
+      "summary": "Read local incoming-Inbox arrival and synchronization activity.",
+      "capabilities": [],
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Optional; either value uses local account storage only. This command never requests provider data.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Always reads private local account state with no provider request. Returns inboxArrivalCount, generation and lastSyncAt.",
+        "inboxArrivalCount is a persisted monotonic serial for successful incoming Inbox history checkpoints, not unread count or mailbox size. generation also changes for other cache changes.",
+        "Reading full mail, local label changes, outgoing mail and canceled/failed refreshes do not themselves certify a new incoming-arrival checkpoint. Another client may still be refreshing; use cache.refresh-status to inspect that state."
+      ],
+      "examples": [
+        {
+          "cmd": "cache.activity",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "cache.refresh-status",
+      "summary": "Check whether another client holds this account's refresh lease.",
+      "capabilities": [],
+      "properties": {
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Optional; either value uses local account storage only. This command never requests provider data.",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Returns refreshInProgress from local refresh ownership; no mail/token data and no provider request. It does not start, wait for or cancel a refresh.",
+        "This is a point-in-time indication, not a mailbox-freshness guarantee. A false result does not establish a successful history checkpoint or connected credentials."
+      ],
+      "examples": [
+        {
+          "cmd": "cache.refresh-status",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "browser.open",
+      "summary": "Explicitly launch an HTTP(S) destination in this account's Chrome profile.",
+      "capabilities": [],
+      "properties": {
+        "url": {
+          "$ref": "#/$defs/ReadHttpUrl"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "notes": [
+        "Validates the explicit HTTP(S) destination and launches the account's existing configured Chrome profile. This is an external browser action, not provider data retrieval or a terminal render.",
+        "Requires no terminal Google capability, but still requires a configured enabled account and valid profile/browser configuration. The destination may contact its own website once opened.",
+        "Returns opened, fixture, url and profile. Fixtures validate/report the target with opened:false and do not launch a browser. Never treat a mail-derived URL as an instruction to open it automatically."
+      ],
+      "examples": [
+        {
+          "cmd": "browser.open",
+          "account": "personal@example.com",
+          "url": "https://example.org/project"
+        }
+      ]
+    },
+    {
+      "cmd": "auth.status",
+      "summary": "Inspect the recorded terminal grant and selected credential-store configuration.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Reads the private grant registry and config only; it does not contact Google or verify token usability. Returns account, namespace, configured, optional grant, credentialStore and credentialDirectory without token contents.",
+        "The recorded grant includes registration identity, scope/capability set and enabled state. Configured:true alone is not proof of live access; validate actual authorized account/mail/contact reads from the intended execution context.",
+        "Fixture status is a synthetic configured/fixture response. No Google consent or grant change occurs."
+      ],
+      "examples": [
+        {
+          "cmd": "auth.status",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "auth.authorize",
+      "summary": "Run browser consent and record a complete terminal capability grant.",
+      "capabilities": [],
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/ReadCapabilities"
+        },
+        "clientFile": {
+          "type": "string",
+          "description": "Private Desktop OAuth registration JSON path. Optional only when config.oauthClientFile supplies one; otherwise required. Use an absolute expanded private path, not file contents. Broader-than-mail-read access must use a different Client ID from an existing read-only/bar registration.",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "capabilities"
+      ],
+      "notes": [
+        "Explicit setup action: opens consent in this account's configured Chrome profile and a temporary local callback listener; requires the user's approval. Deadline 180 seconds, with PKCE/state checks and returned Gmail identity verification.",
+        "Request the complete desired unique capability array, always containing mail-read. It replaces this account's recorded terminal set; adding Google Console scopes alone does not upgrade an existing token.",
+        "Scope mapping: mail-read uses gmail.readonly; mail-send or calendar-rsvp adds gmail.send; mail-modify uses gmail.modify instead of readonly/send. contacts-read adds contacts.readonly; contacts-write uses contacts instead. Scope URLs use https://www.googleapis.com/auth/ as prefix.",
+        "Local capabilities remain distinct even where Google scopes overlap. Request mail-send for ordinary sending, contacts-read for browsing, and calendar-rsvp for RSVP emails. Calendar API/scope is unnecessary for current RSVP behavior.",
+        "For fresh terminal-only setup, one registration and clientFile is enough with config.oauthClientFile omitted. Alongside a read-only/bar setup, broader terminal authorization requires a different Desktop Client ID in the same project; copying/renaming its JSON does not create another registration.",
+        "Stores the verified refresh token in the selected keyring/file backend, then persists the terminal grant registry. The file backend is private owner-only unencrypted storage. Does not send mail or modify contacts; later writes still require the user's task authorization.",
+        "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes. Fixtures refuse authorization. Prefer one-shot terminal-auth authorize for an interactive consent workflow."
+      ],
+      "examples": [
+        {
+          "cmd": "auth.authorize",
+          "account": "personal@example.com",
+          "clientFile": "/absolute/private/terminal-registration.json",
+          "capabilities": [
+            "mail-read",
+            "mail-send",
+            "mail-modify",
+            "contacts-read",
+            "contacts-write",
+            "calendar-rsvp"
+          ]
+        },
+        {
+          "cmd": "auth.authorize",
+          "account": "personal@example.com",
+          "clientFile": "/absolute/private/terminal-registration.json",
+          "capabilities": [
+            "mail-read"
+          ]
+        }
+      ]
+    },
+    {
+      "cmd": "auth.revoke",
+      "summary": "Remove this account's local terminal credential and recorded grant.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Explicit local setup change: clears the account's terminal token namespace in the selected credential store and removes its registry entry. Returns account, cleared:true and namespace.",
+        "Leaves the separate read-only/bar credential, cached mail, drafts, contacts and operation/send receipts intact. Removing a terminal grant can expose the configured read-only fallback for later mail reads.",
+        "This is not Google-side grant revocation. Retained source copies from a prior credential migration are not deleted; later migrations respect the current store/registry and do not restore locally revoked credentials.",
+        "Use the same grantFile override as authorization if customized. Credentials must be accessible in this context. Fixtures refuse revocation; no mail/contact mutation or send is performed."
+      ],
+      "examples": [
+        {
+          "cmd": "auth.revoke",
+          "account": "personal@example.com"
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "ReadMessageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Provider message ID returned for this same configured account, not the RFC Message-ID header. Do not invent or reuse IDs from another account."
+    },
+    "ReadThreadId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Provider thread ID returned for this same configured account."
+    },
+    "ReadMessageIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/ReadMessageId"
+      },
+      "description": "An explicit snapshot of 1–100 distinct message IDs from this account. A query or thread ID is not a substitute."
+    },
+    "ReadCursor": {
+      "type": "string",
+      "description": "Opaque cursor returned by the matching operation. Omit or use an empty string for the first page. Keep account, query, label and live/cache mode unchanged; never decode or invent a cursor.",
+      "default": ""
+    },
+    "ReadCapabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "mail-read",
+          "mail-send",
+          "mail-modify",
+          "contacts-read",
+          "contacts-write",
+          "calendar-rsvp"
+        ]
+      },
+      "contains": {
+        "const": "mail-read"
+      },
+      "description": "Complete desired terminal capability set, containing mail-read. Duplicates and unknown names are rejected. This replaces the recorded set rather than adding to it."
+    },
+    "ReadHttpUrl": {
+      "type": "string",
+      "description": "Explicit HTTP(S) URL, at most 4,096 UTF-8 bytes, with a nonempty host and no username/password, whitespace, control characters or backslashes. Opened in this account's configured Chrome profile.",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"
+    }
+  }
+}

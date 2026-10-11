@@ -16,15 +16,24 @@ configuration, authorization or network access.
 | Command | Shows |
 | --- | --- |
 | `omagma --help` | Short overview of command families |
-| `omagma cli --help` | JSONL quickstart, account discovery, request/reply examples and further help |
+| `omagma cli --help` | JSONL quickstart and the actual command names grouped by namespace |
+| `omagma cli --help commands` | Every supported JSONL `cmd` with a description |
+| `omagma cli --help mail` | Only the JSONL commands in that namespace |
 | `omagma mail --help` | Mail operations with short descriptions |
 | `omagma mail read --help` | That operation's flags, JSONL fields and example |
-| `omagma cli --help mail.read` | The same details using the JSONL command name |
+| `omagma cli --help mail.read` | Complete request fields, nested objects, conditions, limits and examples |
+| `omagma cli --schema mail.read` | Machine-readable JSON Schema for that request, with all referenced types included |
+| `omagma cli --schema` | Machine-readable schemas for all public JSONL commands |
+| `omagma cli --help-all` | Complete offline JSONL reference, including shared object definitions |
 | `omagma --help-all` | Extended command overview |
 
 Start with `accounts.list`, then use a returned enabled account and its
 capabilities. Follow message IDs from list replies into read requests, and check
-`ok` on every response. The quickstart points to this complete command reference.
+`ok` on every response. The command catalogue and schemas are embedded in the
+executable and work offline without configuration or credentials; the printed
+documentation link supplies additional background. Command schemas describe
+the supported public request fields. Stateful permissions, byte quotas,
+content hashes and provider checks still apply when executing a request.
 CLI convenience operations can perform several JSONL calls: Spam/Not spam uses
 `mail.batch`, and conversation actions resolve `mail.triage-scope` before applying
 an explicit batch. Contextual help describes those differences.
