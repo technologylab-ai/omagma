@@ -41,6 +41,8 @@ assert(work !== site && !site.startsWith(work + sep), "browser scratch directory
 await mkdir(work, { recursive: true, mode: 0o700 });
 const readScope = "https://www.googleapis.com/auth/gmail.readonly";
 const sendScope = "https://www.googleapis.com/auth/gmail.send";
+const contactsScope = "https://www.googleapis.com/auth/contacts.readonly";
+const capabilitiesFor = (scopes) => ["mail-read", ...(scopes.includes(sendScope) ? ["mail-send"] : []), ...(scopes.includes(contactsScope) ? ["contacts-read"] : [])];
 const clientId = "synthetic-browser-test.apps.googleusercontent.com";
 const clientSecret = "synthetic-client-secret-never-valid";
 const accounts = ["ada.browser@example.test", "bea.browser@example.test"];
@@ -53,7 +55,7 @@ async function credentialFiles(name, address, scopes, changes = {}) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const grantId = hashParts(["omagma-terminal-grant-v1", ...scopes]);
   const grant = { account: address, clientFile: "synthetic-oauth-client.json", clientId,
-    grantId, capabilities: scopes.includes(sendScope) ? ["mail-read", "mail-send"] : ["mail-read"],
+    grantId, capabilities: capabilitiesFor(scopes),
     scopes, enabled: true, ...changes.grant };
   const tokenName = `terminal-${hashParts(["omagma-credential-value-v1", "terminal", address, grant.clientId, grant.grantId])}.token`;
   const oauth = { installed: { client_id: clientId, project_id: "synthetic-browser-project",
@@ -84,7 +86,7 @@ await writeFile(files.both[2], await readFile(files.ada[2]), { mode: 0o600 });
 await writeFile(files.both[3], await readFile(files.bea[2]), { mode: 0o600 });
 async function bundleRecord(address, scopes) {
   return { account: address, clientId, clientSecret, grantId: hashParts(["omagma-terminal-grant-v1", ...scopes]),
-    capabilities: scopes.includes(sendScope) ? ["mail-read", "mail-send"] : ["mail-read"],
+    capabilities: capabilitiesFor(scopes),
     scopes, refreshToken: refreshSecrets[accounts.indexOf(address)] };
 }
 const adaBundleRecord = await bundleRecord(accounts[0], [readScope, sendScope]);
@@ -100,6 +102,9 @@ const bundles = {
   both: await connectionBundle("both", [adaBundleRecord, beaBundleRecord]),
   ada: await connectionBundle("ada", [adaBundleRecord]),
   readonly: await connectionBundle("readonly", [await bundleRecord(accounts[0], [readScope])]),
+  workflows: await connectionBundle("workflows", await Promise.all(accounts.map(address => bundleRecord(address, [readScope, sendScope, contactsScope])))),
+  contactsReadonly: await connectionBundle("contacts-readonly", [await bundleRecord(accounts[0], [readScope, contactsScope])]),
+  workflowAda: await connectionBundle("workflow-ada", [await bundleRecord(accounts[0], [readScope, sendScope, contactsScope])]),
   invalid: [
     ["format", await connectionBundle("bad-format", [adaBundleRecord], { format: "unsupported-browser-format" })],
     ["version", await connectionBundle("bad-version", [adaBundleRecord], { version: 2 })],
@@ -119,7 +124,7 @@ function providerMessage(accountIndex, index, format) {
   const mimeType = index === 1 ? "text/html" : "text/plain";
   const body = index === 1 ? bodyHtml : bodyText(owner, index);
   return { id: `${owner.toLowerCase()}-message-${index}`, threadId: `${owner.toLowerCase()}-thread-${index}`,
-    labelIds: ["INBOX", "UNREAD"], snippet: `Synthetic ${owner} preview ${index}`, historyId: "1200",
+    labelIds: args.get("--workflows-only") === "true" ? (index === 2 ? [] : index === 3 ? ["UNREAD"] : index === 1 ? ["INBOX"] : ["INBOX", "UNREAD"]) : ["INBOX", "UNREAD"], snippet: `Synthetic ${owner} preview ${index}`, historyId: "1200",
     internalDate: "1791712800000", sizeEstimate: 600,
     payload: { partId: "", mimeType, filename: "", headers: [
       { name: "From", value: "Morgan Browser <morgan@example.test>" },
@@ -129,6 +134,22 @@ function providerMessage(accountIndex, index, format) {
       { name: "Reply-To", value: "reply.synthetic@example.test" },
       { name: "References", value: "<prior-thread@example.test>" },
     ], ...(format === "metadata" ? { body: { size: 0 } } : { body: { size: Buffer.byteLength(body), data: Buffer.from(body).toString("base64url") } }) } };
+}
+const contactNames = [["Ada Contact One", "Ada Café Contact"], ["Bea Contact One", "Bea Café Contact"]];
+const contactAddresses = [["ada.contact@example.test", "ada.cafe@example.test"], ["bea.contact@example.test", "bea.cafe@example.test"]];
+function providerContacts(accountIndex, query = "") {
+  const owner = accountIndex === 0 ? "ada" : "bea";
+  return contactNames[accountIndex].map((name, index) => ({
+    resourceName: `people/${owner}-contact-${index}`, etag: `synthetic-${owner}-person-etag-${index}`,
+    names: [{ displayName: name, givenName: name, metadata: { primary: true, source: { type: "CONTACT", id: `${owner}-contact-${index}` } } }],
+    emailAddresses: [{ value: contactAddresses[accountIndex][index], type: "work", metadata: { primary: true } }],
+    metadata: { sources: [{ type: "CONTACT", id: `${owner}-contact-${index}`, etag: `synthetic-${owner}-source-etag-${index}` }] },
+  })).filter(person => !query || JSON.stringify(person).toLowerCase().includes(query.toLowerCase()));
+}
+function providerRemoteContact(accountIndex) {
+  const owner = accountIndex === 0 ? "ada" : "bea";
+  return { resourceName: `people/${owner}-outside-first-page`, names: [{ displayName: `${owner.toUpperCase()} Contact Outside First Page`, metadata: { primary: true } }],
+    emailAddresses: [{ value: `remote.${owner}@example.test` }], metadata: { sources: [{ type: "CONTACT", etag: `outside-${owner}` }] } };
 }
 function outgoingMessage(record) {
   const separator = record.raw.indexOf("\r\n\r\n");
@@ -205,9 +226,12 @@ try {
   const unexpectedDestinations = [];
   let wrongProfile = false;
   let scopeMode = "send";
+  let mailVariant = "";
   let sendMode = "success";
   let listFailure = null;
   let holdNextFullRead = false;
+  let holdNextProfile = false;
+  const heldProfiles = [];
   const heldReads = [];
   const canceledRequests = new Set();
   let activeRequests = 0;
@@ -233,7 +257,7 @@ try {
   async function respond({ requestId, request, networkId }) {
     const url = new URL(request.url);
     if (url.origin === origin) return call("Fetch.continueRequest", { requestId });
-    if (!["https://oauth2.googleapis.com", "https://gmail.googleapis.com"].includes(url.origin)) {
+    if (!["https://oauth2.googleapis.com", "https://gmail.googleapis.com", "https://people.googleapis.com"].includes(url.origin)) {
       unexpectedDestinations.push(request.url);
       return call("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" });
     }
@@ -262,11 +286,33 @@ try {
         assert.equal(form.get("grant_type"), "refresh_token");
         record.accountIndex = accountIndex;
         payload = { access_token: accessSecrets[accountIndex], token_type: "Bearer", expires_in: 3600,
-          ...(scopeMode === "omitted" ? {} : { scope: (scopeMode === "readonly" ? [readScope] : [readScope, sendScope]).join(" ") }) };
+          ...(scopeMode === "omitted" ? {} : { scope: (scopeMode === "readonly" ? [readScope] : scopeMode === "workflows" ? [readScope, sendScope, contactsScope] : [readScope, sendScope]).join(" ") }) };
+      } else if (url.origin === "https://people.googleapis.com") {
+        assert(accountIndex >= 0, "People request used an unknown synthetic bearer");
+        assert.equal(request.method, "GET", "browser attempted a People mutation");
+        const expectedFields = "names,emailAddresses,metadata";
+        if (url.pathname === "/v1/people/me/connections") {
+          assert.equal(url.searchParams.get("personFields"), expectedFields);
+          assert.equal(url.searchParams.get("sources"), "READ_SOURCE_TYPE_CONTACT");
+          assert(Number(url.searchParams.get("pageSize")) >= 1 && Number(url.searchParams.get("pageSize")) <= 100, "People list exceeds its bounded contact limit");
+          assert(!url.searchParams.get("pageToken"), "browser followed unbounded People pagination");
+          payload = { connections: providerContacts(accountIndex), nextPageToken: "must-not-be-followed", totalPeople: 5000, totalItems: 5000 };
+        } else if (url.pathname === "/v1/people:searchContacts") {
+          assert.equal(url.searchParams.get("readMask"), expectedFields);
+          assert(Number(url.searchParams.get("pageSize")) >= 1 && Number(url.searchParams.get("pageSize")) <= 30, "People search exceeds the bounded page limit");
+          const query = url.searchParams.get("query") || "";
+          const outside = providerRemoteContact(accountIndex);
+          const matches = [...providerContacts(accountIndex, query), ...(JSON.stringify(outside).toLowerCase().includes(query.toLowerCase()) ? [outside] : [])];
+          payload = { results: matches.map(person => ({ person })), nextPageToken: "must-not-be-followed" };
+        } else throw new Error(`unhandled synthetic People request: ${request.method} ${url.pathname}`);
       } else {
         assert(accountIndex >= 0, "Gmail request used an unknown synthetic bearer");
         assert.equal(url.origin, "https://gmail.googleapis.com");
         if (url.pathname === "/gmail/v1/users/me/profile" && request.method === "GET") {
+          if (holdNextProfile) {
+            holdNextProfile = false;
+            await new Promise(release => heldProfiles.push({ requestId, networkId, release }));
+          }
           payload = { emailAddress: wrongProfile ? "wrong.browser@example.test" : accounts[accountIndex], messagesTotal: 30, threadsTotal: 30, historyId: "1200" };
         } else if (url.pathname === "/gmail/v1/users/me/messages" && request.method === "GET") {
           const limit = Number(url.searchParams.get("maxResults"));
@@ -278,7 +324,35 @@ try {
               responseCode = 403;
               payload = { error: { code: 403, message: "Synthetic forbidden response", status: "PERMISSION_DENIED" } };
             } else payload = { messages: [{ deliberatelyMissingMessageId: true }] };
-          } else payload = { messages: Array.from({ length: limit }, (_, index) => ({ id: `${owner}-message-${index}`, threadId: `${owner}-thread-${index}` })), nextPageToken: "must-not-be-followed", resultSizeEstimate: 5000 };
+          } else {
+            let indices = Array.from({ length: limit }, (_, index) => index);
+            if (args.get("--keyboard-only") === "true") {
+    await focus();
+    await evaluate(`(()=>{window.__omagmaKeyboardEvents=[];for(const type of ['keydown','keypress','keyup'])document.addEventListener(type,event=>window.__omagmaKeyboardEvents.push({type,key:event.key,code:event.code,keyCode:event.keyCode,charCode:event.charCode,which:event.which,ctrl:event.ctrlKey,target:event.target.className}),true);return true})()`);
+    await act(() => text("\\"));
+    await act(() => text("live"));
+    const beforeSpace = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    await act(() => key(" ", "Space"));
+    const afterSpace = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    await act(() => text("mailbox"));
+    const afterWord = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    await act(() => key("Escape", "Escape"));
+    await act(() => text("\\"));
+    await act(() => text("live mailbox"));
+    const afterFastWord = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    const report = { beforeSpace, afterSpace, afterWord, afterFastWord, events: await evaluate("window.__omagmaKeyboardEvents") };
+    await writeFile(join(work, "keyboard-diagnostic.json"), JSON.stringify(report, null, 2)+"\n", {mode:0o600});
+    console.log(JSON.stringify(report));
+  } else if (args.get("--workflows-only") === "true") {
+              const query = (url.searchParams.get("q") || "").trim();
+              const labels = url.searchParams.getAll("labelIds");
+              if (query.includes("-in:inbox")) indices = [2, 3];
+              else if (query === "is:unread" || labels.includes("UNREAD")) indices = indices.filter(index => index !== 1 && index !== 2);
+              else if (labels.includes("INBOX")) indices = indices.filter(index => index !== 2 && index !== 3);
+              if (query === "live mailbox") indices = [0];
+            }
+            payload = { messages: indices.map(index => ({ id: `${owner}-message-${index}`, threadId: `${owner}-thread-${index}` })), nextPageToken: "must-not-be-followed", resultSizeEstimate: 5000 };
+          }
         } else if (/^\/gmail\/v1\/users\/me\/messages\/(ada|bea)-message-\d+$/.test(url.pathname) && request.method === "GET") {
           const index = Number(url.pathname.match(/-(\d+)$/)[1]);
           assert.equal(url.pathname.includes("ada-message"), accountIndex === 0, "account session requested another account's message id");
@@ -287,6 +361,13 @@ try {
             await new Promise((release) => heldReads.push({ requestId, networkId, url: request.url, release }));
           }
           payload = providerMessage(accountIndex, index, url.searchParams.get("format"));
+          if (mailVariant && accountIndex === 0 && index === 0) {
+            payload.payload.headers.find(header => header.name === "Subject").value = `${mailVariant} Ada live mailbox`;
+            if (url.searchParams.get("format") === "full") {
+              const body = `${mailVariant} synthetic cache body.\n`;
+              payload.payload.body = { size: Buffer.byteLength(body), data: Buffer.from(body).toString("base64url") };
+            }
+          }
         } else if (url.pathname === "/gmail/v1/users/me/messages/send" && request.method === "POST") {
           const sent = JSON.parse(request.postData);
           assert(typeof sent.raw === "string" && sent.raw.length > 0, "send request has no RFC5322 message");
@@ -315,12 +396,21 @@ try {
   }
   const screen = () => evaluate("window.omagmaDemo.screenText()");
   async function key(key, code, modifiers = 0) {
-    const virtual = { Enter: 13, Escape: 27, Backspace: 8, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39 }[key] || (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+    const virtual = { Enter: 13, Escape: 27, Backspace: 8, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39,
+      "/": 191, "\\": 220, ".": 190, ",": 188, "-": 189, ";": 186, ":": 186, "'": 222, "=": 187 }[key] || (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
     const params = { key, code, modifiers, windowsVirtualKeyCode: virtual, nativeVirtualKeyCode: virtual };
-    await call("Input.dispatchKeyEvent", { ...params, type: "keyDown", ...(key === "Enter" ? { text: "\r", unmodifiedText: "\r" } : {}) });
+    const printable = key.length === 1 && !(modifiers & 7);
+    await call("Input.dispatchKeyEvent", { ...params, type: "keyDown", ...(key === "Enter" ? { text: "\r", unmodifiedText: "\r" } : printable ? { text: key, unmodifiedText: key } : {}) });
     await call("Input.dispatchKeyEvent", { ...params, type: "keyUp" });
   }
-  async function text(value) { await call("Input.insertText", { text: value }); }
+  async function text(value) {
+    // xterm's screenReaderMode deliberately ignores bare insertText input
+    // events. Real printable keydown/keyup events exercise its keyboard path.
+    for (const character of value) {
+      const code = /^[A-Za-z]$/.test(character) ? `Key${character.toUpperCase()}` : /^[0-9]$/.test(character) ? `Digit${character}` : character === " " ? "Space" : "";
+      await key(character, code);
+    }
+  }
   async function focus() { await evaluate("document.querySelector('.xterm-helper-textarea').focus();true"); }
   async function click(selector) {
     const rect = await evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'nearest',inline:'nearest'});const r=element.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
@@ -340,6 +430,7 @@ try {
   captureFailure = async (error) => {
     const stamp = Date.now();
     const details = { error: error.message, screen: await screen(), session: await evaluate("window.omagmaDemo?.sessionInfo?.()"),
+      inputState: await evaluate(`(()=>{const el=document.activeElement,ta=document.querySelector('.xterm-helper-textarea');return {active:{tagName:el?.tagName,className:el?.className,value:el?.value,disabled:el?.disabled,readOnly:el?.readOnly},textarea:{attributes:Object.fromEntries([...ta.attributes].map(a=>[a.name,a.value])),value:ta.value,disabled:ta.disabled,readOnly:ta.readOnly},runtime:document.querySelector('#runtime-status')?.textContent,hint:document.querySelector('#request-status-hint')?.textContent,cacheButtonDisabled:document.querySelector('#cache-clear')?.disabled}})()`),
       credentialError: await evaluate("document.querySelector('#credential-error')?.textContent"),
       requests: requests.map(({url,method,accountIndex})=>({url,method,accountIndex})), transportErrors: transportErrors.map(String) };
     details.networkFailures = events.filter((event) => event.method === "Network.loadingFailed").map((event) => event.params);
@@ -347,10 +438,35 @@ try {
     await writeFile(join(work, `failure-${stamp}.json`), redacted + "\n", { mode: 0o600 });
     await screenshot(`failure-${stamp}.png`);
   };
+  const peopleRequests = () => requests.filter(request => new URL(request.url).origin === "https://people.googleapis.com");
+  const gmailGets = () => requests.filter(request => request.method === "GET" && new URL(request.url).origin === "https://gmail.googleapis.com");
+  const fullReads = () => gmailGets().filter(request => new URL(request.url).searchParams.get("format") === "full");
   const sends = () => requests.filter((request) => request.method === "POST" && new URL(request.url).pathname.endsWith("/messages/send"));
   const session = () => evaluate("window.omagmaDemo.sessionInfo()");
   const credentialError = () => evaluate("document.querySelector('#credential-error').textContent.trim()");
+  const cacheDatabase = "omagma-browser-cache-v1";
+  async function cacheRows() {
+    return evaluate(`(async()=>{
+      if(!(await indexedDB.databases()).some(db=>db.name===${JSON.stringify(cacheDatabase)}))return [];
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(cacheDatabase)},1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+      try{return await new Promise((resolve,reject)=>{const tx=db.transaction('actors','readonly'),r=tx.objectStore('actors').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}finally{db.close()}
+    })()`);
+  }
+  async function putCacheRows(rows, replace = false) {
+    await evaluate(`(async()=>{
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(cacheDatabase)},1);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains('actors'))r.result.createObjectStore('actors',{keyPath:'key'})};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+      try{await new Promise((resolve,reject)=>{const tx=db.transaction('actors','readwrite'),store=tx.objectStore('actors');if(${JSON.stringify(replace)})store.clear();for(const row of ${JSON.stringify(rows)})store.put(row);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error)})}finally{db.close()};return true
+    })()`);
+  }
+  function assertCacheDatabases(databases) {
+    assert(databases.length <= 1 && databases.every(db => db.name === cacheDatabase && db.version === 1), "unexpected browser persistence database");
+  }
+  async function settled(message = "browser job did not settle") {
+    await until(async () => !(await session()).busy && await evaluate("document.querySelector('#terminal').getAttribute('aria-busy')==='false'"), message, 30000);
+  }
+
   async function act(action) {
+    await focus();
     const before = await evaluate("window.omagmaDemo.frameCount");
     await action();
     await until(async () => (await evaluate("window.omagmaDemo.frameCount")) > before, "terminal input did not complete a rendered frame", 20000);
@@ -382,7 +498,9 @@ try {
     }, "selected synthetic grants did not connect", 30000);
     await until(async () => evaluate("!document.querySelector('#credential-dialog').open"), "successful credential chooser did not close");
     assert.equal(await evaluate("window.omagmaDemo.error"), null);
+    await settled("connected account job/cache did not settle");
     await focus();
+    assert(await evaluate("document.activeElement===document.querySelector('.xterm-helper-textarea')"), "connected terminal input did not receive focus");
   }
   async function disconnect() {
     const info = await session();
@@ -491,15 +609,423 @@ try {
   assert.equal(await evaluate("window.omagmaDemo.error"), null);
   assert(await evaluate("typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function'"), "owned browser lacks JSPI support");
   assert.equal(requests.length, 0, "default fictional demo unexpectedly connected Google");
-  if (args.get("--activity-only") === "true") {
+  if (args.get("--keyboard-only") === "true") {
+    await focus();
+    await evaluate(`(()=>{window.__omagmaKeyboardEvents=[];for(const type of ['keydown','keypress','keyup'])document.addEventListener(type,event=>window.__omagmaKeyboardEvents.push({type,key:event.key,code:event.code,keyCode:event.keyCode,charCode:event.charCode,which:event.which,ctrl:event.ctrlKey,target:event.target.className}),true);return true})()`);
+    await act(() => text("\\"));
+    await act(() => text("live"));
+    const beforeSpace = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    await act(() => key(" ", "Space"));
+    const afterSpace = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    await act(() => text("mailbox"));
+    const afterWord = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    await act(() => key("Escape", "Escape"));
+    await act(() => text("\\"));
+    await act(() => text("live mailbox"));
+    const afterFastWord = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
+    const report = { beforeSpace, afterSpace, afterWord, afterFastWord, events: await evaluate("window.__omagmaKeyboardEvents") };
+    await writeFile(join(work, "keyboard-diagnostic.json"), JSON.stringify(report, null, 2)+"\n", {mode:0o600});
+    console.log(JSON.stringify(report));
+  } else if (args.get("--workflows-only") === "true") {
+    const checks = {};
+    const inputField = (label, terminalText) => {
+      const line = terminalText.split("\n").find(value => new RegExp(`\\b${label}:`).test(value));
+      assert(line, `composer ${label} field is not visible`);
+      return line.slice(line.indexOf(`${label}:`) + label.length + 1).split(/[│┃]/)[0].replaceAll("▏", "").trim();
+    };
+    scopeMode = "workflows";
+    await importBundle(bundles.workflows);
+    await connected(2);
+    await act(() => text("1"));
+    const firstPeople = peopleRequests().length;
+    const adaContacts = await act(() => text("a"));
+    assert(adaContacts.includes(contactNames[0][0]) && adaContacts.includes(contactAddresses[0][0]), "Ada's verified People contacts were not rendered");
+    assert(!adaContacts.includes(contactNames[1][0]) && !adaContacts.includes(contactAddresses[1][0]), "Ada's contact list contains Bea's contacts");
+    assert(peopleRequests().slice(firstPeople).some(request => request.accountIndex === 0 && new URL(request.url).pathname.endsWith("/connections")), "contacts did not use the active verified People session");
+    await screenshot("workflows-contacts-ada.png");
+    await act(() => text("q"));
+    await act(() => text("2"));
+    const beaContacts = await act(() => text("a"));
+    assert(beaContacts.includes(contactNames[1][0]) && beaContacts.includes(contactAddresses[1][0]), "Bea's People contacts were not rendered");
+    assert(!beaContacts.includes(contactNames[0][0]) && !beaContacts.includes(contactAddresses[0][0]), "switching account retained Ada's contact list");
+    assert(peopleRequests().some(request => request.accountIndex === 1), "Bea's contacts used the wrong verified session");
+    await act(() => text("q"));
+    await act(() => text("1"));
+    await act(() => text("a"));
+    const contactSearchBefore = peopleRequests().length;
+    await act(() => text("/"));
+    await act(() => text("Café"));
+    const searchedContact = await act(() => key("Enter", "Enter"));
+    assert(searchedContact.includes(contactNames[0][1]) && !searchedContact.includes(contactNames[0][0]), "contact search did not replace the People result list");
+    const contactSearchRequests = peopleRequests().slice(contactSearchBefore);
+    assert.equal(contactSearchRequests.length, 2, "People contact search lost its bounded warm-up/search pair");
+    assert.deepEqual(contactSearchRequests.map(request => new URL(request.url).searchParams.get("query")), ["", "Café"]);
+    const selectedContact = await act(() => key("Enter", "Enter"));
+    assert(/Compose/.test(selectedContact) && inputField("To", selectedContact).includes(contactAddresses[0][1]), "selecting a contact did not create an addressed composer");
+    assert.equal(sends().length, 0, "selecting a contact submitted a message");
+    checks.peopleListSearchSelectionAndAccountIsolation = true;
+    await settled();
+    const contactedRows = await cacheRows();
+    assert(contactedRows.some(row => row.key[0] === accounts[0] && row.snapshot.contactsLoaded && row.snapshot.contacts.some(contact => contact.name === contactNames[0][0])), "Google contacts were not retained in the actor-scoped browser cache");
+    assert(contactedRows.some(row => row.key[0] === accounts[1] && row.snapshot.contactsLoaded && row.snapshot.contacts.some(contact => contact.name === contactNames[1][0])), "second actor contacts were not independently retained");
+    await disconnect();
+
+    // The declared contact capability is insufficient if refresh narrows it.
+    scopeMode = "send";
+    await importBundle(bundles.workflowAda);
+    await connected(1);
+    const deniedPeopleBefore = peopleRequests().length;
+    const deniedContacts = await act(() => text("a"));
+    assert(/contacts?.*(permission|grant|access)|PermissionDenied|ContactsPermissionRequired/i.test(deniedContacts), "missing verified contact scope was not explained");
+    assert.equal(peopleRequests().length, deniedPeopleBefore, "a narrowed contact scope still called People");
+    assert(!deniedContacts.includes(contactNames[0][0]) && !deniedContacts.includes(contactNames[0][1]), "narrowed contact scope exposed previously cached contacts");
+    checks.narrowedContactsScopesGateNetworkAndCache = true;
+    await disconnect();
+
+    scopeMode = "workflows";
+    await importBundle(bundles.workflows);
+    await connected(2);
+    await act(() => text("1"));
+    await act(() => text("c"));
+    await act(() => text("ada.cont"));
+    const completion = await act(() => key(" ", "Space", 2));
+    assert(completion.includes("Recipients") && completion.includes(contactAddresses[0][0]), "real Ctrl+Space did not provide a contact recipient completion");
+    assert(!completion.includes(contactAddresses[1][0]), "recipient completion contains another account's contacts");
+    const acceptedCompletion = await act(() => key("Enter", "Enter"));
+    assert(inputField("To", acceptedCompletion).includes(contactAddresses[0][0]), "Enter did not accept the contact address into To");
+    assert(!inputField("To", acceptedCompletion).includes("ada.cont "), "completion left an invalid partial recipient");
+    await screenshot("workflows-recipient-completion.png");
+    assert.equal(sends().length, 0, "recipient completion sent mail");
+    checks.actualCtrlSpaceRecipientCompletion = true;
+    await act(() => key("Tab", "Tab"));
+    await act(() => text("remote.ada"));
+    const outsideBefore = peopleRequests().length;
+    const remoteCompletion = await act(() => key(" ", "Space", 2));
+    assert(remoteCompletion.includes("remote.ada@example.test"), "Ctrl+Space could not find a recipient outside the cached People page");
+    assert.deepEqual(peopleRequests().slice(outsideBefore).map(request => new URL(request.url).searchParams.get("query")), ["", "remote.ada"], "uncached recipient completion did not use the bounded People warm-up/search pair");
+    const remoteAccepted = await act(() => key("Enter", "Enter"));
+    assert(inputField("Cc", remoteAccepted).includes("remote.ada@example.test"), "remote recipient completion was not accepted into the selected Cc field");
+    checks.explicitCompletionFindsContactsBeyondCachedPage = true;
+    await act(() => key("Escape", "Escape"));
+    await act(() => key("Escape", "Escape"));
+    const differentIntent = await act(() => text("f"));
+    assert(differentIntent.includes("Keep this session draft?") && differentIntent.includes("Resume draft") && differentIntent.includes("Discard draft and continue") && differentIntent.includes("Cancel"), "a hidden draft silently replaced a different compose intent");
+    const resumedDraft = await act(() => key("Enter", "Enter"));
+    assert(inputField("To", resumedDraft).includes(contactAddresses[0][0]), "default Resume lost the hidden draft recipient");
+    await act(() => key("Escape", "Escape"));
+    const accountDecision = await act(() => text("2"));
+    assert(accountDecision.includes("Keep this session draft?"), "switching account silently changed an existing draft");
+    await act(() => key("Escape", "Escape"));
+    assert((await screen()).includes(accounts[0]) && !(await screen()).includes("Bea live mailbox"), "Cancel switched the hidden draft's account");
+    await act(() => text("2"));
+    await act(() => text("j"));
+    const discardedAccount = await act(() => key("Enter", "Enter"));
+    assert(discardedAccount.includes(accounts[1]) && discardedAccount.includes("Bea live mailbox"), "explicit Discard did not continue to the requested account");
+    const freshDraft = await act(() => text("c"));
+    assert.equal(inputField("To", freshDraft), "", "discarded draft recipients survived in another account's new composer");
+    checks.hiddenDraftResumeDiscardCancelAndActorBoundary = true;
+    await disconnect();
+
+    scopeMode = "workflows";
+    await importBundle(bundles.workflowAda);
+    await connected(1);
+    assert((await screen()).includes("Hello Ada,"), "forward source body was not loaded");
+    const forward = await act(() => text("f"));
+    assert(/Compose.*Forward|Forward.*Compose/i.test(forward), "f did not open a forward composer");
+    assert.equal(inputField("To", forward), "", "forward copied the original recipients");
+    assert.equal(inputField("Subject", forward), "Fwd: Ada live mailbox");
+    assert(forward.includes("Hello Ada,") && forward.includes("Morgan") && forward.includes("Ada live mailbox"), "plain forward omitted its source envelope or quoted body");
+    assert.equal(sends().length, 0, "forward submitted before review");
+    await act(() => text("forward.recipient@example.test"));
+    const forwardReview = await act(() => key("s", "KeyS", 2));
+    assert(forwardReview.includes("Review send") && forwardReview.includes("forward.recipient@example.test"), "forward did not show the exact send review");
+    assert.equal(sends().length, 0, "forward review itself submitted mail");
+    await screenshot("workflows-forward-review.png");
+    const forwardSend = await explicitSend("plain forward");
+    const forwardMail = outgoingMessage(forwardSend);
+    assert.equal(forwardMail.headers.subject, "Fwd: Ada live mailbox");
+    assert(forwardMail.headers.from.includes(accounts[0]) && forwardMail.headers.to.includes("forward.recipient@example.test"));
+    assert(forwardMail.body.includes("Hello Ada,") && forwardMail.body.includes("Morgan") && forwardMail.body.includes("Ada live mailbox"), "forward MIME lost its literal source content");
+    assert.equal(forwardSend.threadId ?? null, null, "forward joined the original Gmail thread");
+    assert.equal(forwardMail.headers["in-reply-to"], undefined, "forward retained reply threading");
+    assert.equal(forwardMail.headers.references, undefined, "forward retained source References");
+    assert.equal(sends().length, 1, "forward did not submit exactly one synthetic POST");
+    checks.plainForwardWithoutReplyThreading = true;
+    checks.tenSecondGraceAndExactOneSyntheticForwardPost = true;
+
+    // The same loaded body and a cache search must remain fully local.
+    await settled();
+    await act(() => text("j"));
+    const beforeBodyLoad = fullReads().length;
+    await act(() => key("Enter", "Enter"));
+    assert.equal(fullReads().length, beforeBodyLoad + 1, "Enter did not load the selected missing cached body");
+    await act(() => text("q"));
+    const beforeRevisit = gmailGets().length;
+    await act(() => text("k"));
+    await act(() => text("j"));
+    assert.equal(gmailGets().length, beforeRevisit, "revisiting a loaded message body fetched Gmail again");
+    assert((await screen()).includes("Literal HTML fixture"), "cached HTML body revisit lost the native semantic reader");
+    const beforeCacheSearch = gmailGets().length;
+    await act(() => text("/"));
+    await act(() => text("body:Hello"));
+    const cachedSearch = await act(() => key("Enter", "Enter"));
+    assert(cachedSearch.includes("Cache search") && cachedSearch.includes("Hello Ada,") && !cachedSearch.includes("Ada HTML-only mailbox"), "cache-only body search did not filter the retained bodies");
+    assert.equal(gmailGets().length, beforeCacheSearch, "slash cache search called Gmail");
+    await screenshot("workflows-cache-search.png");
+    await act(() => text("q"));
+    const beforeServerSearch = gmailGets().length;
+    const serverPrompt = await act(() => text("\\"));
+    assert.equal(serverPrompt.split("\n").find(line => line.startsWith("Gmail \\"))?.trim(), "Gmail \\ ▏", "Gmail search did not begin with an empty input");
+    await act(() => text("live"));
+    await act(() => key(" ", "Space"));
+    const typedServerQuery = await act(() => text("mailbox"));
+    assert.equal(typedServerQuery.split("\n").find(line => line.startsWith("Gmail \\"))?.trim(), "Gmail \\ live mailbox▏", "real keyboard typing changed the Gmail query");
+    const serverSearch = await act(() => key("Enter", "Enter"));
+    assert(serverSearch.includes("Gmail search") && serverSearch.includes("Ada live mailbox"), "backslash did not perform the Gmail search");
+    assert(gmailGets().slice(beforeServerSearch).some(request => new URL(request.url).searchParams.get("q")?.trim() === "live mailbox"), "Gmail search lost its provider query");
+    await act(() => text("q"));
+    checks.localBodyRevisitAndCacheSearchNoGET = true;
+    checks.explicitGmailSearchUsesGET = true;
+
+    const ax = await call("Accessibility.getFullAXTree");
+    const accessibleText = ax.nodes.filter(node => !node.ignored).map(node => `${node.name?.value || ""} ${node.value?.value || ""}`).join("\n");
+    assert(accessibleText.includes("Ada live mailbox") || accessibleText.includes("Hello Ada,"), "the accessible terminal tree does not expose synthetic mail text");
+    checks.screenReaderTerminalTextExposed = true;
+    const savedRows = await cacheRows();
+    const adaKey = [accounts[0], clientId, hashParts(["omagma-terminal-grant-v1", readScope, sendScope, contactsScope])];
+    const savedAda = savedRows.find(row => JSON.stringify(row.key) === JSON.stringify(adaKey));
+    assert(savedAda?.snapshot.messages.some(message => message.bodyCached && message.bodyText.includes("Hello Ada,")), "mail body was not persisted in the exact grant cache");
+    assert(savedRows.length <= 3 && savedRows.reduce((sum, row) => sum + row.byteLength, 0) <= 8 * 1024 * 1024, "browser cache exceeded its actor/byte quotas");
+    for (const row of savedRows) {
+      assert.deepEqual(Object.keys(row).sort(), ["byteLength", "key", "savedAt", "snapshot"]);
+      assert(row.byteLength <= 3 * 1024 * 1024 && row.snapshot.messages.length <= 300 && row.snapshot.contacts.length <= 100);
+      assert.deepEqual([row.snapshot.account, row.snapshot.clientId, row.snapshot.grantId], row.key, "stored snapshot is not bound to its exact actor tuple");
+    }
+    await disconnect();
+    const reloadBefore = requests.length;
+    const reloadMarker = events.length;
+    await call("Page.reload", { ignoreCache: true });
+    await until(async () => events.slice(reloadMarker).some(event => event.method === "Page.loadEventFired"), "cache reload did not create a new document");
+    await until(async () => evaluate("window.omagmaDemo?.ready === true"), "cache reload did not restore fictional mode");
+    assert.equal(requests.length, reloadBefore, "cache reload automatically connected Google");
+    assert.equal((await session()).mode, "demo");
+    assert(!(await screen()).includes("Hello Ada,"), "unverified cache data rendered before Connect");
+    holdNextProfile = true;
+    const verifiedRestoreBefore = requests.length;
+    await importBundle(bundles.workflowAda);
+    await until(async () => heldProfiles.length === 1, "cache restoration skipped Gmail profile verification");
+    assert(!(await screen()).includes("Hello Ada,") && !(await screen()).includes("Ada live mailbox"), "staged cache appeared while profile verification was suspended");
+    heldProfiles.at(-1).release();
+    await connected(1);
+    assert((await screen()).includes("Hello Ada,"), "verified exact-grant cache did not restore its loaded body");
+    const restoreRequests = requests.slice(verifiedRestoreBefore);
+    assert(restoreRequests.some(request => new URL(request.url).pathname.endsWith("/profile")));
+    assert(!restoreRequests.some(request => new URL(request.url).pathname.endsWith("/messages") || new URL(request.url).searchParams.get("format") === "full"), "verified cache restore fetched an already-retained mailbox/body");
+    const beforeRestoredContacts = peopleRequests().length;
+    const restoredContacts = await act(() => text("a"));
+    assert(restoredContacts.includes(contactNames[0][0]), "verified contact cache was not restored");
+    assert.equal(peopleRequests().length, beforeRestoredContacts, "restored contacts made a redundant People request");
+    await act(() => text("q"));
+    checks.reloadRequiresProfileBeforeExactGrantRestore = true;
+
+    // A different grant for the same email address gets a fresh provider view.
+    await disconnect();
+    scopeMode = "readonly";
+    mailVariant = "Different-grant";
+    const differentGrantBefore = gmailGets().length;
+    await importBundle(bundles.readonly);
+    await connected(1);
+    assert((await screen()).includes("Different-grant Ada live mailbox") && (await screen()).includes("Different-grant synthetic cache body."), "a different grant reused the previous account-only cache");
+    assert(gmailGets().slice(differentGrantBefore).some(request => new URL(request.url).pathname.endsWith("/messages")), "a different grant skipped its first mailbox load");
+    checks.sameAccountDifferentGrantDoesNotAliasCache = true;
+    await disconnect();
+    scopeMode = "workflows";
+    mailVariant = "";
+
+    // Strictly invalid metadata and an oversized passive snapshot are refused
+    // by the actual stored-row reader, then replaced by a verified fresh view.
+    const invalidSnapshots = [
+      { ...savedAda.snapshot, account: accounts[1] },
+      { ...savedAda.snapshot, grantId: "0".repeat(64) },
+      { ...savedAda.snapshot, clientId: "other-synthetic.apps.googleusercontent.com" },
+      { ...savedAda.snapshot, messages: savedAda.snapshot.messages.map((message, index) => index === 0 ? { ...message, bodyText: "X".repeat(3 * 1024 * 1024 + 1) } : message) },
+      { ...savedAda.snapshot, messages: Array.from({ length: 301 }, (_, index) => ({ ...savedAda.snapshot.messages[0], id: `invalid-inventory-${index}`, threadId: `invalid-thread-${index}` })) },
+    ];
+    for (let index = 0; index < invalidSnapshots.length; index++) {
+      const snapshot = invalidSnapshots[index];
+      await putCacheRows([{ ...savedAda, snapshot, byteLength: Buffer.byteLength(JSON.stringify(snapshot)) }], true);
+      const beforeInvalid = gmailGets().length;
+      await importBundle(bundles.workflowAda);
+      await connected(1);
+      assert(gmailGets().slice(beforeInvalid).some(request => new URL(request.url).pathname.endsWith("/messages")), "invalid/quota-exceeding stored cache bypassed a fresh mailbox load");
+      const validReplacement = (await cacheRows()).find(row => JSON.stringify(row.key) === JSON.stringify(adaKey));
+      assert(validReplacement?.snapshot.account === accounts[0] && validReplacement.snapshot.clientId === clientId && validReplacement.snapshot.grantId === adaKey[2] && validReplacement.byteLength <= 3 * 1024 * 1024, "invalid stored cache was retained instead of replaced");
+      await disconnect();
+    }
+    checks.invalidBindingAndOversizeStoredCacheRejected = invalidSnapshots.length;
+
+    // Exercise a real IndexedDB write refusal through the application's normal
+    // post-HTTP save path; current native mail remains usable in the tab.
+    await importBundle(bundles.workflowAda);
+    await connected(1);
+    await evaluate(`(()=>{const original=IDBObjectStore.prototype.put;window.__omagmaTestOriginalPut=original;IDBObjectStore.prototype.put=function(...args){if(this.name==='actors'&&this.transaction.db.name===${JSON.stringify(cacheDatabase)})throw new DOMException('Synthetic quota refusal','QuotaExceededError');return original.apply(this,args)};return true})()`);
+    await act(() => key("r", "KeyR", 2));
+    await settled();
+    assert.match(await evaluate("document.querySelector('#runtime-status').textContent"), /cache could not be saved/i, "IndexedDB quota failure was not reported");
+    assert((await screen()).includes("Ada live mailbox") && (await screen()).includes("Hello Ada,"), "storage quota failure discarded current native mail");
+    assert.equal(await evaluate("window.omagmaDemo.error"), null, "storage quota failure trapped the application");
+    await evaluate("IDBObjectStore.prototype.put=window.__omagmaTestOriginalPut;delete window.__omagmaTestOriginalPut;true");
+    checks.storageQuotaFailureKeepsCurrentMailReadable = true;
+
+    const beforeClear = gmailGets().length;
+    await act(() => click("#cache-clear"));
+    await settled();
+    assert.deepEqual(await cacheRows(), [], "Clear cache retained IndexedDB actor rows");
+    assert(!(await screen()).includes("Ada live mailbox") && !(await screen()).includes("Hello Ada,"), "Clear cache retained visible mailbox/body entries");
+    assert.equal(gmailGets().length, beforeClear, "Clear cache unexpectedly refreshed Gmail");
+    checks.clearCacheDeletesVisibleAndPersistedSnapshots = true;
+    await act(() => key("r", "KeyR", 2));
+    assert((await screen()).includes("Hello Ada,"), "explicit refresh could not repopulate the cleared cache");
+
+    // Navigation uses only real terminal keys. Folder changes clear the old
+    // projection before a failed remote list; clearing search keeps the folder.
+    async function chooseFolder(index) {
+      await act(() => text("1"));
+      await act(() => text("h"));
+      await act(() => text("j".repeat(index + 1)));
+      return act(() => key("Enter", "Enter"));
+    }
+    listFailure = { accountIndex: 0, mode: "forbidden" };
+    const failedArchive = await chooseFolder(3);
+    assert(failedArchive.includes("Archive") && !failedArchive.includes("Ada live mailbox") && !failedArchive.includes("Hello Ada,"), "failed Archive fetch relabeled the old Inbox body or list");
+    listFailure = null;
+    const archive = await chooseFolder(3);
+    assert(archive.includes("Ada bounded message 2") && archive.includes("Ada bounded message 3") && !archive.includes("Ada live mailbox"), "Archive fixture did not establish a distinct folder projection");
+    const archiveSearchBefore = gmailGets().length;
+    await act(() => text("/"));
+    await act(() => text("bounded"));
+    await act(() => key("Enter", "Enter"));
+    const archiveClear = await act(() => text("q"));
+    assert(archiveClear.includes("Archive") && archiveClear.includes("Ada bounded message 2") && !archiveClear.includes("Ada live mailbox"), "clearing Archive cache search restored Inbox rows");
+    assert.equal(gmailGets().length, archiveSearchBefore, "clearing Archive cache search called Gmail");
+    const unread = await chooseFolder(7);
+    assert(unread.includes("Unread") && unread.includes("Ada live mailbox") && !unread.includes("Ada HTML-only mailbox"), "Unread fixture retained read mail");
+    await act(() => text("/"));
+    await act(() => text("bounded"));
+    await act(() => key("Enter", "Enter"));
+    const unreadClear = await act(() => text("q"));
+    assert(unreadClear.includes("Unread") && unreadClear.includes("Ada live mailbox") && !unreadClear.includes("Ada HTML-only mailbox"), "clearing Unread cache search restored read Inbox rows");
+    checks.failedFolderDoesNotRelabelInboxAndSearchClearKeepsArchiveUnread = true;
+    await disconnect();
+    await putCacheRows([], true);
+    await importBundle(bundles.workflowAda);
+    await connected(1);
+    await act(() => text("1")); // Explicit cached view: missing bodies need Enter.
+
+    // While HTTP has suspended WASM, the browser keeps the old terminal grid
+    // intact and covers it until the queued native resize can render safely.
+    await act(() => text("j"));
+    holdNextFullRead = true;
+    await key("Enter", "Enter");
+    await until(async () => heldReads.length === 1 && (await session()).busy, "synthetic body read did not suspend for resize regression");
+    const heldGrid = await evaluate("({cols:window.omagmaDemo.cols,rows:window.omagmaDemo.rows,text:window.omagmaDemo.screenText()})");
+    await call("Emulation.setDeviceMetricsOverride", { width: 600, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    assert.deepEqual(await evaluate("({cols:window.omagmaDemo.cols,rows:window.omagmaDemo.rows,text:window.omagmaDemo.screenText()})"), heldGrid, "xterm resized or corrupted its old grid during a suspended native request");
+    assert(await evaluate("!document.querySelector('#runtime-message').hidden"), "suspended resize did not cover its temporarily clipped grid");
+    assert.match(await evaluate("document.querySelector('#runtime-message-text').textContent"), /Resizing|waiting/i);
+    await screenshot("workflows-held-resize.png");
+    heldReads[0].release();
+    await settled();
+    await until(async () => evaluate("document.querySelector('#runtime-message').hidden && window.omagmaDemo.cols<100"), "queued resize did not render and uncover the new native grid");
+    assert.equal(await evaluate("window.omagmaDemo.error"), null);
+    await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await until(async () => evaluate("window.omagmaDemo.cols>100"), "normal terminal dimensions did not restore after suspended resize");
+    await screenshot("workflows-cache-inbox.png");
+    checks.suspendedResizeDefersGridAndShowsCover = true;
+    await disconnect();
+
+    // An intercepted connection-close after dispatch exercises the native
+    // uncertain-outcome guard and host acknowledgement in this same instance.
+    await importBundle(bundles.workflowAda);
+    await connected(1);
+    await act(() => text("c"));
+    await act(() => text("unknown.workflow@example.test"));
+    for (let field = 0; field < 3; field++) await act(() => key("Tab", "Tab"));
+    await act(() => text("Workflow uncertain draft"));
+    await act(() => key("Tab", "Tab"));
+    await act(() => paste("Workflow protected draft body.\n"));
+    await act(() => key("s", "KeyS", 2));
+    sendMode = "uncertain";
+    const unknownSend = await explicitSend("workflow unknown outcome");
+    assert.equal(outgoingMessage(unknownSend).headers.subject, "Workflow uncertain draft", "real keyboard typing changed the outgoing subject");
+    assert.equal(outgoingMessage(unknownSend).body, "Workflow protected draft body.\n");
+    await until(async () => /outcome unknown|draft protected/i.test(await screen()), "uncertain workflow send did not protect its native draft");
+    await act(() => key("s", "KeyS", 2));
+    await act(() => text("y"));
+    assert.equal(sends().length, 2, "an uncertain native draft retried its Gmail mutation");
+    const unknownReceipt = await evaluate("JSON.parse(localStorage.getItem('omagma-browser-pending-send-v1'))");
+    assert.deepEqual(Object.keys(unknownReceipt).sort(), ["id", "startedAt"], "workflow pending receipt retained mail or credentials");
+    const beforeAcknowledgement = requests.length;
+    await act(() => click("#send-acknowledge"));
+    assert.equal(requests.length, beforeAcknowledgement, "Checked Sent acknowledgement itself called Google");
+    assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "Checked Sent acknowledgement retained the host receipt");
+    assert((await screen()).includes("Workflow uncertain draft"), "Checked Sent acknowledgement discarded the native draft");
+    await act(() => text("y"));
+    assert.equal((await session()).sendPhase, null, "acknowledgement reused the previous send review");
+    const freshReview = await act(() => key("s", "KeyS", 2));
+    assert(freshReview.includes("Review send"), "Checked Sent acknowledgement did not unlock a fresh explicit review without reconnect");
+    sendMode = "success";
+    await text("y");
+    await waitGrace();
+    await act(() => click("#send-grace-cancel"));
+    assert.equal(sends().length, 2, "acknowledged draft submitted without completing its new local cancellation window");
+    checks.actualUnknownOutcomeNoRetryAndAcknowledgementRequiresFreshReview = true;
+    await screenshot("workflows-unknown-acknowledged.png");
+    await disconnect();
+    const beforeGuardReload = requests.length;
+    const guardReloadMarker = events.length;
+    await call("Page.reload", { ignoreCache: true });
+    await until(async () => events.slice(guardReloadMarker).some(event => event.method === "Page.loadEventFired"), "workflow reload did not create a new document");
+    await until(async () => evaluate("window.omagmaDemo?.ready === true"), "workflow reload did not restore sample mode");
+    assert.equal((await session()).mode, "demo", "reload revived live credentials");
+    assert.equal(requests.length, beforeGuardReload, "reload replayed a Google operation");
+    checks.reloadNoCredentialsOrRetry = true;
+    const privacy = await evaluate(`(async()=>({
+      diagnostics:JSON.stringify(window.omagmaDemo),session:window.omagmaDemo.sessionInfo(),html:document.documentElement.outerHTML,
+      localStorage:Object.fromEntries(Object.keys(localStorage).map(key=>[key,localStorage.getItem(key)])),
+      sessionStorage:Object.fromEntries(Object.keys(sessionStorage).map(key=>[key,sessionStorage.getItem(key)])),
+      databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie
+    }))()`);
+    privacy.indexedDBRows = await cacheRows();
+    const privacyText = JSON.stringify(privacy) + JSON.stringify(events.filter(event => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
+    for (const secret of syntheticSecrets) assert(!privacyText.includes(secret), "workflow leaked credentials into diagnostics, logs or persistence");
+    assert.deepEqual(privacy.sessionStorage, {});
+    assertCacheDatabases(privacy.databases);
+    assert.deepEqual(privacy.caches, []);
+    assert.equal(privacy.cookies, "");
+    assert(!JSON.stringify(privacy.indexedDBRows).includes("Workflow protected draft body"), "browser snapshot persisted a session draft");
+    assert.deepEqual(privacy.localStorage, {}, "acknowledged workflow left unexpected localStorage data");
+    checks.noCredentialOrDraftPersistenceOrLogs = true;
+    assert.deepEqual(transportErrors, [], "synthetic workflow transport failed");
+    assert.deepEqual(unexpectedDestinations, [], "workflow attempted an unapproved external request");
+    const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product, origin,
+      realNativeServer: Boolean(suppliedOrigin), fixedGoogleAndPeopleUrlsIntercepted: true,
+      requestCount: requests.length, peopleRequestCount: peopleRequests().length, maximumActiveRequests,
+      syntheticSendRequests: sends().length, checks };
+    await writeFile(join(work, "workflows-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    console.log(JSON.stringify(report));
+  } else if (args.get("--activity-only") === "true") {
     assertIdleActivity(await activity(), "sample startup");
     scopeMode = "readonly";
     await importBundle(bundles.readonly);
     await connected(1);
     const idleDesktop = await activity();
     assertIdleActivity(idleDesktop, "connected idle");
+    await act(() => text("1"));
+    await act(() => key("j", "KeyJ"));
     holdNextFullRead = true;
-    await key("j", "KeyJ");
+    await key("Enter", "Enter");
     await until(async () => heldReads.length === 1 && (await session()).busy && (await activity()).busy,
       "held body read did not show request activity");
     const desktop = await activity();
@@ -522,6 +1048,7 @@ try {
     heldReads[0].release();
     await until(async () => !(await session()).busy && !(await activity()).busy, "completed read did not clear busy status");
     await until(async () => (await screen()).includes("Literal HTML fixture"), "completed held read did not render its provider body");
+    await until(async () => evaluate("document.querySelector('#runtime-message').hidden"), "completed read left the resizing cover over the terminal", 3000);
     assertIdleActivity(await activity(), "completed read");
 
     await call("Emulation.setDeviceMetricsOverride", { width: 360, height: 700, deviceScaleFactor: 1, mobile: false });
@@ -529,8 +1056,11 @@ try {
     const idleSmall = await activity();
     assertIdleActivity(idleSmall, "small viewport idle");
     await focus();
+    await act(() => text("q"));
+    await act(() => text("1"));
+    await act(() => text("jj"));
     holdNextFullRead = true;
-    await key("k", "KeyK");
+    await key("Enter", "Enter");
     await until(async () => heldReads.length === 2 && (await session()).busy && (await activity()).busy,
       "second held body read did not enter busy state");
     const small = await activity();
@@ -618,10 +1148,11 @@ try {
       sessionStorage:Object.fromEntries(Object.keys(sessionStorage).map(key=>[key,sessionStorage.getItem(key)])),
       databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie
     }))()`);
+    privacy.indexedDBRows = await cacheRows();
     const exposed = JSON.stringify(privacy) + JSON.stringify(events.filter((event) => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
     for (const secret of syntheticSecrets) assert(!exposed.includes(secret), "native connection leaked credentials or its launch secret into persistence or logs");
     assert.deepEqual(privacy.localStorage, {}); assert.deepEqual(privacy.sessionStorage, {});
-    assert.deepEqual(privacy.databases, []); assert.deepEqual(privacy.caches, []); assert.equal(privacy.cookies, "");
+    assertCacheDatabases(privacy.databases); assert.deepEqual(privacy.caches, []); assert.equal(privacy.cookies, "");
     assert((await evaluate("location.hash")) === "#omagma-session=" + localSessionNonce, "native Connect changed its launch capability");
     assert.deepEqual(transportErrors, []); assert.deepEqual(unexpectedDestinations, []);
     const report = { synthetic: true, desktopUsed: false, browser: version.product, origin,
@@ -741,11 +1272,12 @@ try {
       sessionStorage:Object.fromEntries(Object.keys(sessionStorage).map(key=>[key,sessionStorage.getItem(key)])),
       databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie
     }))()`);
+    privacy.indexedDBRows = await cacheRows();
     const exposed = JSON.stringify(privacy) + JSON.stringify(events.filter((event) => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
     for (const secret of syntheticSecrets) assert(!exposed.includes(secret), "connection-file credentials leaked into persistence or logs");
     assert.deepEqual(privacy.localStorage, {});
     assert.deepEqual(privacy.sessionStorage, {});
-    assert.deepEqual(privacy.databases, []);
+    assertCacheDatabases(privacy.databases);
     assert.deepEqual(privacy.caches, []);
     assert.equal(privacy.cookies, "");
     assert.deepEqual(transportErrors, []);
@@ -858,8 +1390,10 @@ try {
   assert.equal(await evaluate("window.omagmaDemo.state()"), null, "live diagnostics expose the native mailbox or credential state");
   await act(() => text("1"));
   assert((await screen()).includes("Ada live mailbox") && (await screen()).includes("Hello Ada,"), "first connected account did not render its own message and body");
+  await act(() => click("#cache-clear"));
   listFailure = { accountIndex: 1, mode: "malformed" };
-  const failedSwitch = await act(() => text("2"));
+  await act(() => text("2"));
+  const failedSwitch = await act(() => key("r", "KeyR", 2));
   assert(!failedSwitch.includes("Ada live mailbox") && !failedSwitch.includes("Hello Ada,"), "failed second-account list retained the first account's mail");
   const failedReply = await act(() => text("r"));
   assert(!failedReply.includes("Re: Ada live mailbox") && !failedReply.includes("> Hello Ada,"), "failed account switch retained another account's reply source");
@@ -868,10 +1402,13 @@ try {
   assert(bea.includes("Bea live mailbox") && bea.includes("Hello Bea,"), "second account did not recover its own mailbox after a failed list");
   assert(!bea.includes("Ada live mailbox") && !bea.includes("Hello Ada,"), "second account leaked first-account content");
   await act(() => text("1"));
-  const html = await act(() => key("j", "KeyJ"));
+  await act(() => key("r", "KeyR", 2));
+  await act(() => key("j", "KeyJ"));
+  const html = await act(() => key("Enter", "Enter"));
   assert(html.includes("Literal HTML fixture") && html.includes("safe café"), "HTML-only provider body did not use the native semantic reader");
   assert(!html.includes("window.mailInjected") && !html.includes("javascript:"), "semantic HTML reader retained active source instructions");
   assert.equal(await evaluate("typeof window.mailInjected"), "undefined", "received HTML executed in the browser");
+  await act(() => text("q"));
   await act(() => key("k", "KeyK"));
   await screenshot("live-inbox.png");
 
@@ -942,9 +1479,11 @@ try {
 
   // Pause a full-body request, then exercise resize/input/disconnect while
   // the WASM stack is suspended. Old responses may not revive that session.
-  holdNextFullRead = true;
   await focus();
-  await key("j", "KeyJ");
+  await act(() => text("1"));
+  await act(() => text("jj"));
+  holdNextFullRead = true;
+  await key("Enter", "Enter");
   await until(async () => heldReads.length === 1, "body request was not suspended by the synthetic transport");
   const heldRequestCount = requests.length;
   await text("jj");
@@ -1001,14 +1540,15 @@ try {
     sessionStorage:Object.fromEntries(Object.keys(sessionStorage).map(key=>[key,sessionStorage.getItem(key)])),
     databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie
   }))()`);
+  privacy.indexedDBRows = await cacheRows();
   const privacyText = JSON.stringify(privacy) + JSON.stringify(events.filter((event) => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
   for (const secret of syntheticSecrets) assert(!privacyText.includes(secret), "credentials leaked into browser diagnostics, logs or persistence");
   assert.deepEqual(privacy.sessionStorage, {});
-  assert.deepEqual(privacy.databases, []);
+  assertCacheDatabases(privacy.databases);
   assert.deepEqual(privacy.caches, []);
   assert.equal(privacy.cookies, "");
   assert.deepEqual(Object.keys(privacy.localStorage), ["omagma-browser-pending-send-v1"]);
-  assert(!JSON.stringify(privacy.localStorage).includes("Protected uncertain body") && !JSON.stringify(privacy.localStorage).includes(accounts[0]), "uncertain receipt retained mail content or account details");
+  assert(!JSON.stringify(receipt).includes("Protected uncertain body") && !JSON.stringify(receipt).includes(accounts[0]), "uncertain receipt retained mail content or account details");
   await click("#send-acknowledge");
   assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "explicit acknowledgement did not clear the generic receipt");
   assert.deepEqual(transportErrors, [], "synthetic transport handler failed");

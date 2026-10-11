@@ -9,7 +9,9 @@ The local Zig server can supply existing native credentials to the launched
 session; static hosting instead uses an exported connection file.
 
 This is a browser adapter for a focused set of terminal workflows. Start with
-inbox reading, plain-text composition and replies. The native disk cache,
+inbox reading, plain-text composition, replies and forwarding, Google contacts
+and recipient completion. A bounded IndexedDB cache retains mail/contact
+snapshots separately from credentials. The native disk cache,
 external editor, attachment files and background send queue are not part of
 this first live mode.
 
@@ -91,6 +93,23 @@ and reply-header rules. Send review displays the account and exact recipients.
 Review starts with Back selected; only explicit Send begins submission.
 The normal ten-second cancellation opportunity remains available before the
 HTTP request starts.
+
+`f` forwards the displayed message as plain text, preserving safe literal links
+from HTML-only mail and leaving reply/thread headers empty. Original attachments
+are not included; when present, send review shows that omission. Contacts need
+the existing contacts capability and matching Google scope; the browser never
+upgrades a grant. `a` opens the bounded contacts page, `/` searches contacts,
+and Enter selects an address. Recipient completion works while typing;
+Ctrl+Space searches Google when local choices do not match.
+
+`/` in the mailbox searches the local cache; `\\` searches Gmail and Ctrl+R
+refreshes. The cache merges current records across folders and searches, with
+up to 300 records per account and 30 visible matches. Body eviction, 3 MiB
+snapshot and 8 MiB total quotas bound persistence. Cached HTML is passive source
+for the native sanitized reader, never browser DOM. Restoring first verifies
+the Gmail profile and exact account/client/grant; contact scope loss hides cached
+contacts. Disconnect keeps these snapshots; **Clear cache** removes them.
+Drafts, OAuth credentials and uncertain-send state are excluded from this cache.
 
 Drafts stay in the tab. A failed or uncertain submission is not retried
 automatically. A small generic operation receipt records that an actual send

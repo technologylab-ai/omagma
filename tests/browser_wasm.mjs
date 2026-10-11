@@ -118,7 +118,15 @@ try {
     await call("Input.dispatchKeyEvent", { ...params, type: "keyDown", ...(key === "Enter" ? { text: "\r", unmodifiedText: "\r" } : {}) });
     await call("Input.dispatchKeyEvent", { ...params, type: "keyUp" });
   }
-  async function text(value) { await call("Input.insertText", { text: value }); }
+  async function text(value) {
+    for (const character of value) {
+      const punctuation = { '/': ["Slash",191], '\\': ["Backslash",220], '?': ["Slash",191], '.': ["Period",190], ',': ["Comma",188], ':': ["Semicolon",186], ';': ["Semicolon",186], ' ': ["Space",32] };
+      const [code, virtual] = punctuation[character] || (/^[A-Za-z]$/.test(character) ? [`Key${character.toUpperCase()}`, character.toUpperCase().charCodeAt(0)] : /^[0-9]$/.test(character) ? [`Digit${character}`,character.charCodeAt(0)] : ["",0]);
+      const params = { key:character, code, windowsVirtualKeyCode:virtual, nativeVirtualKeyCode:virtual };
+      await call('Input.dispatchKeyEvent', { ...params, type:'keyDown', text:character, unmodifiedText:character });
+      await call('Input.dispatchKeyEvent', { ...params, type:'keyUp' });
+    }
+  }
   async function focus() { await evaluate("document.querySelector('.xterm-helper-textarea').focus();true"); }
   async function click(selector) {
     const rect = await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);

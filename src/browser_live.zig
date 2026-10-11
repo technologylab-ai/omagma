@@ -15,6 +15,11 @@ const readonly_scope = "https://www.googleapis.com/auth/gmail.readonly";
 const send_scope = "https://www.googleapis.com/auth/gmail.send";
 const modify_scope = "https://www.googleapis.com/auth/gmail.modify";
 const full_scope = "https://mail.google.com/";
+const contacts_read_scope = "https://www.googleapis.com/auth/contacts.readonly";
+const contacts_write_scope = "https://www.googleapis.com/auth/contacts";
+pub const contacts_limit = 100;
+const people_list_url = "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,metadata&sources=READ_SOURCE_TYPE_CONTACT&pageSize=100&pageToken=";
+const people_search_prefix = "https://people.googleapis.com/v1/people:searchContacts?readMask=names,emailAddresses,metadata&pageSize=30&query=";
 
 fn timestamp(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
     const ms = now_ms();
@@ -34,7 +39,10 @@ pub const Session = struct {
     id: u32,
     nonce: []const u8,
     account: []const u8,
+    client_id: []const u8,
+    grant_id: []const u8,
     can_send: bool,
+    can_contacts: bool = false,
     pub fn capabilities(self: *const Session) []const []const u8 {
         return if (self.can_send) &.{ "mail-read", "mail-send" } else &.{"mail-read"};
     }
@@ -43,7 +51,10 @@ pub const Session = struct {
     }
     fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         const self: *Session = @ptrCast(@alignCast(ctx));
-        if (!std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/")) return error.InvalidHost;
+        const people = std.mem.eql(u8, url, people_list_url) or std.mem.startsWith(u8, url, people_search_prefix);
+        if (people) {
+            if (method != .GET or !self.can_contacts) return error.PermissionDenied;
+        } else if (!std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/")) return error.InvalidHost;
         if (method != .GET and !(method == .POST and self.can_send and std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"))) return error.PermissionDenied;
         const encoded = if (body) |value| try std.json.Stringify.valueAlloc(a, value, .{}) else "";
         if (encoded.len > types.Limits.request_bytes) return error.RequestTooLarge;
@@ -68,6 +79,33 @@ pub const Session = struct {
     }
     pub fn read(self: *Session, a: std.mem.Allocator, id: []const u8) !types.Message {
         return gmail.readAuthorizedMessage(a, self.account, self.capabilities(), self.transport(), id);
+    }
+    /// One bounded native-shaped People page, normalized with the same decoder
+    /// as the native client. Contacts stay read-only in the browser adapter.
+    pub fn contacts(self: *Session, a: std.mem.Allocator, query: []const u8) !j.Value {
+        if (!self.can_contacts) return error.PermissionDenied;
+        if (query.len > 4096) return error.QueryTooLarge;
+        var url_buffer: [3 * 4096 + 256]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&url_buffer);
+        const search = query.len > 0;
+        if (search) {
+            _ = try request(self, a, .GET, people_search_prefix, null);
+            try writer.writeAll(people_search_prefix);
+            try @import("oauth.zig").percent(&writer, query);
+        }
+        const value = try request(self, a, .GET, if (search) writer.buffered() else people_list_url, null);
+        const entries_value = j.get(value, if (search) "results" else "connections") orelse .null;
+        if (entries_value != .null and entries_value != .array) return error.InvalidProviderResponse;
+        const entries: []const j.Value = if (entries_value == .array) entries_value.array.items else &.{};
+        if (entries.len > (if (search) @as(usize, 30) else contacts_limit)) return error.InvalidPage;
+        var normalized: std.ArrayList(j.Value) = .empty;
+        for (entries) |entry| {
+            const person = if (search) j.get(entry, "person") orelse return error.InvalidProviderResponse else entry;
+            const contact = try @import("terminal/contact_record.zig").normalize(a, person);
+            // Do not retain raw People provider metadata in browser snapshots.
+            try normalized.append(a, try j.value(a, .{ .resourceName = contact.resourceName, .etag = contact.etag, .name = contact.name, .emails = contact.emails }));
+        }
+        return j.value(a, .{ .contacts = normalized.items, .hasMore = j.text(value, "nextPageToken").len > 0 });
     }
     pub fn send(self: *Session, a: std.mem.Allocator, draft: types.Draft, operation_id: []const u8) !j.Value {
         if (draft.attachments.len != 0 or draft.original != null) return error.BrowserAttachmentsUnavailable;
@@ -110,8 +148,9 @@ pub fn connect(a: std.mem.Allocator, bytes: []const u8) !Session {
     } else if (value.capabilities.len != 1 or !has(value.capabilities, "mail-read")) return error.PermissionDenied;
     const read_granted = has(value.actualScopes, readonly_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
     const send_granted = has(value.actualScopes, send_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
+    const contacts_granted = has(value.actualScopes, contacts_read_scope) or has(value.actualScopes, contacts_write_scope);
     if (!read_granted) return error.PermissionDenied;
-    var session: Session = .{ .id = value.session, .nonce = value.nonce, .account = value.account, .can_send = has(value.capabilities, "mail-send") and send_granted };
+    var session: Session = .{ .id = value.session, .nonce = value.nonce, .account = value.account, .client_id = value.clientId, .grant_id = value.grantId orelse "", .can_send = has(value.capabilities, "mail-send") and send_granted, .can_contacts = (has(value.capabilities, "contacts-read") or has(value.capabilities, "contacts-write")) and contacts_granted };
     const profile = try session.transport().requestFn(&session, a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", null);
     if (!std.ascii.eqlIgnoreCase(j.text(profile, "emailAddress"), value.account)) return error.WrongAccount;
     return session;

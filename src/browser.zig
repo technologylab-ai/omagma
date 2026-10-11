@@ -14,6 +14,9 @@ var initialized = false;
 var busy = false;
 var input_buffer: [1024]u8 = undefined;
 var connect_buffer: [16 * 1024]u8 = undefined;
+var cache_buffer: [3 * 1024 * 1024]u8 = undefined;
+var cache_length: usize = 0;
+var staged_cache_length: usize = 0;
 var output_buffer: [1024 * 1024]u8 = undefined;
 var output_length: usize = 0;
 var writer: std.Io.Writer = undefined;
@@ -87,6 +90,11 @@ export fn connect(length: usize) u32 {
     if (!initialized or length > connect_buffer.len) return 2;
     busy = true;
     defer busy = false;
+    demo.stageCache(cache_buffer[0..staged_cache_length]);
+    defer {
+        staged_cache_length = 0;
+        std.crypto.secureZero(u8, &cache_buffer);
+    }
     demo.connect(connect_buffer[0..length]) catch |err| {
         demo.failure(err);
         _ = redraw();
@@ -100,8 +108,60 @@ export fn live_accounts() u32 {
 export fn can_send() u32 {
     return @intFromBool(initialized and demo.canSend());
 }
+export fn can_contacts(index: usize) u32 {
+    return @intFromBool(initialized and index < demo.live_count and demo.live_sessions[index].can_contacts);
+}
 export fn send_status() u32 {
     return if (initialized) demo.last_send_status else 0;
+}
+export fn cache_input_ptr() usize {
+    return @intFromPtr(&cache_buffer);
+}
+export fn cache_input_capacity() usize {
+    return cache_buffer.len;
+}
+export fn cache_stage(length: usize) u32 {
+    if (busy or !initialized or length > cache_buffer.len) return 2;
+    staged_cache_length = length;
+    return 0;
+}
+export fn cache_export(index: usize) u32 {
+    if (busy or !initialized) return 4;
+    cache_length = 0;
+    const bytes = demo.cacheSnapshot(index, &cache_buffer) catch return 3;
+    cache_length = bytes.len;
+    return 0;
+}
+export fn cache_ptr() usize {
+    return @intFromPtr(&cache_buffer);
+}
+export fn cache_len() usize {
+    return cache_length;
+}
+export fn cache_revision(index: usize) u32 {
+    return if (initialized) demo.cacheRevision(index) else 0;
+}
+export fn cache_clear(index: usize) u32 {
+    if (busy or !initialized) return 4;
+    if (index == 0xffffffff) {
+        for (0..demo.live_count) |actor| demo.cacheClear(actor) catch |err| demo.failure(err);
+        return redraw();
+    }
+    demo.cacheClear(index) catch |err| {
+        demo.failure(err);
+        return redraw();
+    };
+    return redraw();
+}
+export fn acknowledge_unknown() u32 {
+    if (busy or !initialized) return 4;
+    demo.acknowledgeUnknown();
+    return redraw();
+}
+export fn contacts_permission(index: usize, allowed: u32) u32 {
+    if (busy or !initialized) return 4;
+    demo.restrictContacts(index, allowed != 0) catch |err| demo.failure(err);
+    return redraw();
 }
 fn redraw() u32 {
     writer = .fixed(&output_buffer);

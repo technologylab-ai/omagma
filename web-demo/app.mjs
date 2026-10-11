@@ -4,6 +4,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { boundedSize, BrowserWasmBridge } from './bridge.mjs';
 import { importCredentialFiles, importConnectionFile } from './credentials.mjs';
 import { SessionTransport, pendingSend, acknowledgePendingSend } from './transport.mjs';
+import { createBrowserCache } from './cache.mjs';
 
 const select = selector => document.querySelector(selector);
 const terminalElement = select('#terminal');
@@ -24,6 +25,8 @@ const form = select('#credential-form');
 const credentialError = select('#credential-error');
 const credentialSubmit = select('#credential-connect');
 const fileConnectButton = select('#connect-file-open');
+const cacheClearButton = select('#cache-clear');
+const browserCache = createBrowserCache();
 const sessionParameter = new URLSearchParams(location.hash.slice(1)).get('omagma-session');
 const serverSession = location.protocol === 'http:' && location.hostname === '127.0.0.1' && /^[a-f0-9]{64}$/.test(sessionParameter ?? '') ? sessionParameter : null;
 const encoder = new TextEncoder();
@@ -32,7 +35,7 @@ const terminal = new Terminal({
   cols: 100, rows: 30,
   fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
   fontSize: 13, lineHeight: 1.15, letterSpacing: 0, scrollback: 0,
-  cursorBlink: false, cursorStyle: 'block', allowProposedApi: true,
+  cursorBlink: false, cursorStyle: 'block', allowProposedApi: true, screenReaderMode: true,
   convertEol: false, overviewRuler: { width: 0 }, logLevel: 'off',
   theme: { background: '#0d1219', foreground: '#d1d9e6', cursor: '#b5cc90', selectionBackground: '#364258' },
 });
@@ -54,6 +57,10 @@ let activeJob = null;
 let lifecycleBusy = false;
 let credentialBusy = false;
 let credentialRequest = null;
+let cacheBusy = false;
+let cacheError = '';
+let cacheRevisions = [];
+let deferredFit = false;
 let resizeScheduled = false;
 let inputScheduled = false;
 let wasmCols = 0;
@@ -109,12 +116,14 @@ function updateControls() {
   disconnectButton.hidden = mode === 'demo';
   disconnectButton.disabled = mode === 'demo';
   credentialSubmit.disabled = credentialBusy || lifecycleBusy;
+  cacheClearButton.hidden = mode !== 'live';
+  cacheClearButton.disabled = !ready || Boolean(activeJob) || info.busy || cacheBusy || lifecycleBusy || credentialBusy;
   select('#send-grace').hidden = !info.sendPhase;
   select('#send-grace-text').textContent = info.sendPhase === 'grace' ? `Sending in ${info.sendRemaining}s · Esc / Ctrl+C cancels` : 'Submitting to Google…';
   select('#send-grace-cancel').disabled = info.sendPhase !== 'grace';
   select('#send-uncertainty').hidden = !pendingSend() || info.sendPhase === 'sending';
-  select('#send-acknowledge').disabled = info.busy;
-  const active = !error && (info.busy || mode === 'connecting' || credentialBusy || lifecycleBusy || !ready);
+  select('#send-acknowledge').disabled = info.busy || Boolean(activeJob) || cacheBusy;
+  const active = !error && (info.busy || mode === 'connecting' || credentialBusy || cacheBusy || lifecycleBusy || !ready);
   requestStatus.classList.toggle('is-busy', active);
   requestStatus.classList.toggle('is-error', Boolean(error));
   requestSpinner.hidden = !active;
@@ -130,12 +139,14 @@ function updateControls() {
     } else if (info.busy) {
       runtimeStatus.textContent = mode === 'connecting' ? 'Connecting to Gmail…' : 'Google request in progress…';
       requestHint.textContent = 'Keyboard input is paused. Ctrl+C cancels the request.';
-    } else if (credentialBusy) runtimeStatus.textContent = 'Loading your Omagma connection…';
+    } else if (cacheBusy) runtimeStatus.textContent = 'Updating browser cache…';
+    else if (credentialBusy) runtimeStatus.textContent = 'Loading your Omagma connection…';
     else if (mode === 'connecting') runtimeStatus.textContent = 'Connecting to Gmail…';
     else if (!ready || lifecycleBusy) runtimeStatus.textContent = 'Loading WebAssembly…';
+    else if (cacheError) { runtimeStatus.textContent = 'Browser cache could not be saved'; requestHint.textContent = cacheError; }
     else runtimeStatus.textContent = 'Running locally in WebAssembly';
   }
-  modeStatus.textContent = mode === 'demo' ? 'Sample mode · no Gmail connection' : (mode === 'connecting' ? 'Connecting · session memory only' : 'Live Gmail · session memory only');
+  modeStatus.textContent = mode === 'demo' ? 'Sample mode · no Gmail connection' : (mode === 'connecting' ? 'Connecting · credentials in session memory' : 'Live Gmail · bounded local mail cache');
   select('.window-subtitle').textContent = mode === 'demo' ? '/ sample inbox' : '/ live Gmail';
   select('#sample-notice').hidden = mode !== 'demo';
 }
@@ -157,22 +168,53 @@ function fitTerminal() {
   const proposed = fit.proposeDimensions();
   if (!proposed) return;
   const { cols, rows } = boundedSize(proposed.cols, proposed.rows);
+  if (activeJob && (cols !== terminal.cols || rows !== terminal.rows)) {
+    deferredFit = true;
+    if (!error && ready) { message.hidden = false; messageText.textContent = 'Resizing terminal… waiting for the current request. Ctrl+C cancels a read.'; }
+    return;
+  }
+  deferredFit = false;
   if (cols !== terminal.cols || rows !== terminal.rows) terminal.resize(cols, rows);
   sizeLabel.textContent = `${cols} × ${rows}`;
+}
+
+const bindingOf = record => ({ account: record.account, clientId: record.clientId, grantId: record.grantId });
+async function persistCaches(current, currentTransport, epoch) {
+  if (epoch !== generation || !current || !currentTransport || typeof current.exports.cache_revision !== 'function') return;
+  const records = currentTransport.cacheBindings();
+  let failed = '';
+  let attempted = false;
+  for (let index = 0; index < Math.min(records.length, current.exports.live_accounts?.() ?? 0); index++) {
+    if (epoch !== generation) return;
+    if (!records[index].canContacts && typeof current.exports.contacts_permission === 'function' && (!current.exports.can_contacts || current.exports.can_contacts(index))) { current.exports.contacts_permission(index, 0); current.frame(); }
+    const revision = current.exports.cache_revision(index);
+    if (cacheRevisions[index] === revision) continue;
+    attempted = true;
+    cacheBusy = true; updateControls();
+    try {
+      const snapshot = current.cacheSnapshot(index);
+      if (snapshot) await browserCache.save(bindingOf(records[index]), snapshot, { verified: true });
+      else await browserCache.clear(bindingOf(records[index]));
+    } catch { failed = 'The current tab keeps its mail. Local cache storage is unavailable or this snapshot exceeds its limits.'; }
+    finally { if (epoch === generation) cacheRevisions[index] = revision; }
+  }
+  if (epoch === generation) { cacheBusy = false; if (attempted) cacheError = failed; updateControls(); }
 }
 
 function runJob(action) {
   if (activeJob) return Promise.reject(new Error('Another terminal operation is running.'));
   const currentBridge = bridge;
   const currentTransport = transport;
+  const epoch = generation;
   currentTransport?.beginJob();
   const job = (async () => {
-    try { return await action(currentBridge, currentTransport); }
+    try { const result = await action(currentBridge, currentTransport); await persistCaches(currentBridge, currentTransport, epoch); return result; }
     finally { currentTransport?.finishSend(currentBridge?.exports.send_status?.() ?? 0); }
   })();
   activeJob = job;
   void job.finally(() => {
     if (activeJob === job) activeJob = null;
+    if (deferredFit && epoch === generation) fitTerminal();
     updateControls();
     drain();
   }).catch(() => {});
@@ -184,7 +226,7 @@ function drain() {
   const thisGeneration = generation;
   if (wasmCols !== terminal.cols || wasmRows !== terminal.rows) {
     const cols = terminal.cols, rows = terminal.rows;
-    void runJob(async current => { await current.resize(cols, rows); wasmCols = cols; wasmRows = rows; }).catch(reason => { if (generation === thisGeneration) fail(reason); });
+    void runJob(async current => { await current.resize(cols, rows); wasmCols = cols; wasmRows = rows; if (generation === thisGeneration && ready && !error) message.hidden = true; }).catch(reason => { if (generation === thisGeneration) fail(reason); });
     return;
   }
   if (pendingLength === 0) return;
@@ -247,6 +289,7 @@ async function start(nextMode = 'demo') {
   oldTransport?.close();
   bridge = null; transport = null; ready = false; error = null;
   mode = nextMode; lifecycleBusy = true;
+  cacheRevisions = []; cacheBusy = false; cacheError = ''; deferredFit = false;
   pendingInput.fill(0); pendingLength = 0;
   message.hidden = false; message.classList.remove('failed');
   messageText.textContent = 'Loading WebAssembly…';
@@ -367,7 +410,12 @@ function beginConnection(local = false) {
       await runJob(async (current, currentTransport) => {
         for (const record of records) {
           const [metadata] = await currentTransport.prepare([record]);
-          await current.connect(metadata);
+          const index = currentTransport.cacheBindings().length - 1;
+          const actor = currentTransport.cacheBindings()[index];
+          let cached = null;
+          try { cached = await browserCache.stage(bindingOf(actor), { contactsGranted: actor.canContacts }); }
+          catch { cacheError = 'A saved snapshot was refused. Gmail will load a fresh view.'; }
+          await current.connect(metadata, cached);
         }
       });
       if (attempt !== connectAttempt || generation !== connectingGeneration) return;
@@ -405,7 +453,14 @@ disconnectButton.addEventListener('click', stopConnection);
 focusButton.addEventListener('click', () => terminal.focus());
 resetButton.addEventListener('click', stopConnection);
 select('#send-grace-cancel').addEventListener('click', () => transport?.cancelSend());
-select('#send-acknowledge').addEventListener('click', () => { acknowledgePendingSend(); updateControls(); });
+select('#send-acknowledge').addEventListener('click', () => {
+  if (activeJob || !bridge) return;
+  void runJob(async current => { await current.acknowledgeUnknown(); acknowledgePendingSend(); }).catch(fail);
+});
+cacheClearButton.addEventListener('click', () => {
+  if (activeJob || !bridge) return;
+  void runJob(async current => { await current.clearCache(); await browserCache.clear(); cacheError = ''; }).catch(fail);
+});
 window.addEventListener('pagehide', () => {
   connectAttempt++; generation++; ready = false;
   credentialRequest?.abort(); transport?.close(); pendingInput.fill(0); pendingLength = 0;

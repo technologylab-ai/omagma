@@ -5,6 +5,9 @@ const browser_target = @import("builtin").cpu.arch == .wasm32 and @import("built
 const browser_live = if (browser_target) @import("../browser_live.zig") else struct {
     pub const Session = struct {};
 };
+const browser_cache = if (browser_target) @import("../browser_cache.zig") else struct {
+    pub const Store = struct {};
+};
 const vaxis = @import("vaxis");
 const types = @import("types.zig");
 const editor = @import("editor.zig");
@@ -251,7 +254,30 @@ fn setMouseReporting(vx: *vaxis.Vaxis, writer: *Io.Writer, enabled: bool) !void 
 const folders = [_][]const u8{ "Inbox", "Sent", "Drafts", "Archive", "Trash", "Spam", "All Mail", "Unread" };
 const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH", "SPAM", "", "UNREAD" };
 const HelpRow = struct { keys: []const u8 = "", action: []const u8 = "", section: []const u8 = "" };
-const help_rows = [_]HelpRow{
+const browser_help_rows = [_]HelpRow{
+    .{ .section = "Browser mail" },
+    .{ .keys = "j/k · arrows · Enter", .action = "Choose mail and focus its literal reader; Enter fetches a missing cached body" },
+    .{ .keys = "Tab / Shift+Tab · h/l", .action = "Move between accounts, message list and reader" },
+    .{ .keys = "1 / 2 / 3", .action = "Switch verified accounts; an unsent draft asks Resume, Discard or Cancel" },
+    .{ .keys = "/ · \\ · Ctrl+R", .action = "Search the retained cache, search Gmail, or refresh the current mailbox from Gmail" },
+    .{ .keys = "v · z · q / Esc", .action = "Change reader layout, expand the reader, or return and clear a search" },
+    .{ .action = "Cache: up to 300 retained messages per account, 30 visible results at a time. Contacts: first 100. Search Gmail or Google contacts for older entries." },
+    .{ .section = "Compose and recipients" },
+    .{ .keys = "c · r / R · f", .action = "New plain-text message, reply / reply-all, or text-only forward; sending requires an existing mail-send grant" },
+    .{ .keys = "i · Esc · Tab / Shift+Tab · d", .action = "Edit the focused field, leave insertion, move through fields and Review / Contacts / Discard buttons, or choose Discard in normal mode" },
+    .{ .keys = "Ctrl+Space · Up/Down · Enter", .action = "Recipients appear while typing in To, Cc or Bcc. Choose and accept a match; Esc closes only the popup. Ctrl+Space also searches Google when local matches are empty" },
+    .{ .keys = "a · / · Enter · q / Esc", .action = "Open contacts, search Google contacts, choose an address or return; requires contacts-read access" },
+    .{ .keys = "Ctrl+S · Tab · Enter · y", .action = "Review exact account, recipients and body. Back starts focused; an explicit later confirmation schedules send" },
+    .{ .action = "The host offers ten seconds to Cancel send before submitting. An unconfirmed send protects the draft; check Sent in Gmail and acknowledge it before another review." },
+    .{ .action = "Drafts remain in this tab. Disconnect or reload discards them. Forwarding omits attachments and does not join the original thread." },
+    .{ .section = "Browser limits and help" },
+    .{ .keys = "? · / · n / N · j/k · Esc/q", .action = "Open this searchable help, find keys or actions, move among matches and return" },
+    .{ .keys = "T", .action = "Show theme choices; this browser uses Omagma colors" },
+    .{ .action = "Attachments, native editor, aliases, formatting, label changes, contact writes and native command-line commands are unavailable in browser mode." },
+    .{ .action = "Before Connect, all sample accounts and mail are fictional and read-only. Network actions use only verified connected accounts." },
+};
+const help_rows: []const HelpRow = if (browser_target) &browser_help_rows else &native_help_rows;
+const native_help_rows = [_]HelpRow{
     .{ .keys = ":updates · Ctrl+P Updates", .action = "Check stable releases and see installation-specific upgrade instructions" },
     .{ .keys = "Tab / Shift+Tab on Upgrade available", .action = "Focus Dismiss or How to update without moving the selected mail; Enter activates" },
     .{ .keys = "Tab / Enter in Updates · Esc/q Back", .action = "Copy commands, open guides, check again, choose daily/manual checks or copy an agent request" },
@@ -968,6 +994,9 @@ const App = struct {
     recipient_values: []const Value = &.{},
     recipient_account: Field = .{},
     recipient_ready: bool = false,
+    browser_completion_open: bool = false,
+    browser_completion_dismissed: bool = false,
+    browser_forward_omits_attachments: bool = false,
     pending_recipient_cache: bool = false,
     pending_recipient_refresh: bool = false,
     recipient_refreshed: [3]bool = @splat(false),
@@ -2788,6 +2817,7 @@ const App = struct {
         };
     }
     fn uxInput(self: *const App) bool {
+        if (browser_target and self.ux_overlay == .contact_addresses) return false;
         return self.ux_overlay != .scope and self.ux_overlay != .discard and self.ux_overlay != .triage_review;
     }
     fn uxMatches(self: *const App, row: UxRow) bool {
@@ -3105,13 +3135,13 @@ const App = struct {
             try self.line(inner, position - first_position + 2, try self.fitLine(inner, label, inner.width), if (position == self.ux_selected) (if (self.ux_focus == 1) .selected else .subject) else .text);
             self.mouseRows(inner, position - first_position + 2, 1, .dialog_action, position + 100);
         }
-        const primary = if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
+        const primary = if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) (if (browser_target) "[Choose]" else "[Discard]") else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
         if (inner.height >= 6) if (self.uxAt(self.ux_selected)) |selected_row| {
             try self.line(inner, inner.height - 3, try self.fitLine(inner, selected_row.detail, inner.width), .muted);
         };
         const x = try self.actionButton(inner, inner.height - 2, 0, primary, self.ux_focus == 2, count > 0 or !self.uxFilter(), .dialog_action, 12);
         _ = try self.actionButton(inner, inner.height - 2, x, if (self.ux_overlay == .discard or self.ux_overlay == .triage_review) "[Cancel]" else "[Back]", self.ux_focus == 3, true, .dialog_action, 13);
-        try self.line(inner, inner.height - 1, try self.fitLine(inner, if (self.uxFilter()) "Type filter · Ctrl+N/P Choose · Tab Controls · Enter · Esc Back" else "Tab Controls · Enter Activate · Esc Back", inner.width), .muted);
+        try self.line(inner, inner.height - 1, try self.fitLine(inner, if (browser_target and self.ux_overlay == .contact_addresses) "j/k Address · Tab Controls · Enter Use · Esc Back" else if (self.uxFilter()) "Type filter · Ctrl+N/P Choose · Tab Controls · Enter · Esc Back" else "Tab Controls · Enter Activate · Esc Back", inner.width), .muted);
     }
     fn runExtendedAction(self: *App, action: action_palette.Id) !void {
         switch (action) {
@@ -5792,7 +5822,7 @@ const App = struct {
             self.dialog_focus.ensure(.preview, 0);
             const x = try self.actionButton(win, 0, 0, "[Preview p]", self.dialog_focus.index == 1, true, .compose_preview_toggle, 0);
             _ = try self.actionButton(win, 0, x, "[Back]", self.dialog_focus.index == 2, true, .compose_preview_back, 0);
-        } else try self.line(win, 0, if (self.compose.insert_mode or self.compose.attachment_focus) "Preview · Esc returns to normal controls" else if (self.compose_view == .original and self.compose.original == null and win.width >= 48) "p Preview · Ctrl+D/U Scroll · L Links · B Files" else if (win.width >= 34) "p Next preview · Ctrl+D/U Scroll" else "p Next preview", .accent);
+        } else try self.line(win, 0, if (browser_target) "Outgoing plain-text preview · Ctrl+S reviews" else if (self.compose.insert_mode or self.compose.attachment_focus) "Preview · Esc returns to normal controls" else if (self.compose_view == .original and self.compose.original == null and win.width >= 48) "p Preview · Ctrl+D/U Scroll · L Links · B Files" else if (win.width >= 34) "p Next preview · Ctrl+D/U Scroll" else "p Next preview", .accent);
         const body = win.child(.{ .y_off = @min(@as(u16, 2), win.height) });
         if (self.compose_view == .original and self.compose.original == null) return self.readerDraw(body);
         const scroll = if (self.compose_view == .plain) &self.compose_plain_scroll else if (self.compose_view == .original) &self.compose_snapshot_scroll else &self.compose_preview_scroll;
@@ -5858,7 +5888,23 @@ const App = struct {
     }
     fn composeCompletions(self: *const App) completion.Matches {
         if (!self.compose.insert_mode or self.compose.selected >= 3 or self.compose.unknown_outcome) return .{ .range = .{ .start = 0, .end = 0, .query = "" } };
+        if (browser_target and (self.browser_completion_dismissed or (!self.browser_completion_open and completion.token(self.compose.fields[self.compose.selected].value(), self.compose.fields[self.compose.selected].cursor).query.len == 0))) return .{ .range = .{ .start = 0, .end = 0, .query = "" } };
         const field = &self.compose.fields[self.compose.selected];
+        if (browser_target and completion.token(field.value(), field.cursor).query.len == 0) {
+            var matches: completion.Matches = .{ .range = completion.token(field.value(), field.cursor) };
+            if (same(self.recipient_account.value(), self.account())) for (self.recipient_values) |value| {
+                const address = text(get(value, "address"));
+                recipients.validateAddress(address) catch continue;
+                if (std.ascii.eqlIgnoreCase(address, self.account())) continue;
+                var duplicate = false;
+                for (matches.slice()) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous.address, address);
+                if (duplicate) continue;
+                matches.values[matches.len] = .{ .address = address, .name = text(get(value, "name")) };
+                matches.len += 1;
+                if (matches.len == completion.max_matches) break;
+            };
+            return matches;
+        }
         return completion.collectKnown(if (same(self.recipient_account.value(), self.account())) self.recipient_values else &.{}, if (same(self.contacts_account.value(), self.account()) and self.contacts_query.value().len == 0) self.contacts else &.{}, self.account(), field.value(), field.cursor);
     }
     fn acceptCompletion(self: *App, index: usize) !void {
@@ -9002,7 +9048,7 @@ const App = struct {
         const find_rows: u16 = if (copy_rows == 0 and browsing and self.reader_find_active and outer.height > 0) 1 else 0;
         const toolbar_rows: u16 = if (browsing and self.focus != .reader and !self.expanded and outer.height >= 18 and outer.width >= 60) 1 else 0;
         const summary_rows: u16 = if (browsing and self.thread.len > 1 and outer.height >= 6) 1 else 0;
-        if (toolbar_rows > 0) try self.line(outer, 0, try self.fitLine(outer, "l Focus reader · o Gmail · L Links · B Files", outer.width), .accent);
+        if (toolbar_rows > 0) try self.line(outer, 0, try self.fitLine(outer, if (browser_target) "l Focus reader · r Reply · f Forward" else "l Focus reader · o Gmail · L Links · B Files", outer.width), .accent);
         const partial_rows: u16 = if (self.reader_partial and outer.height >= 14) 1 else 0;
         if (partial_rows > 0) try self.line(outer, toolbar_rows + summary_rows, "Cached thread · partial", .muted);
         const invitation_index = self.readerInvitationIndex();
@@ -9022,7 +9068,7 @@ const App = struct {
                 try self.line(win, 1, if (refused) |reason| try std.fmt.allocPrint(self.frame.allocator(), "Body unavailable · {s}", .{reason}) else if (fetching or self.pending_read) try std.fmt.allocPrint(self.frame.allocator(), "{s} {s}", .{ loading.frame(self.loading_frame), if (fetching) "Fetching mail body…" else "Mail body queued…" }) else "Body not cached · Enter fetches full mail", if (refused != null) .warning else if (fetching or self.pending_read) .fetching else .muted);
                 if (self.selectedMessage()) |message| {
                     try self.line(win, 3, text(get(message, "subject")), .text);
-                    if (refused != null) try self.line(win, 4, "Snippet only · o Open in Gmail", .muted);
+                    if (refused != null) try self.line(win, 4, if (browser_target) "Snippet only · full body unavailable" else "Snippet only · o Open in Gmail", .muted);
                     _ = try self.flow(win, text(get(message, "snippet")), 0, 5);
                 }
             } else try self.line(win, 1, if (self.sync[self.account_index].state == .fetching) "Fetching mail · cached bodies appear here" else "Select mail · Enter opens the thread", .muted);
@@ -9309,15 +9355,15 @@ const App = struct {
             reader_tools.findLinks(text(get(message, "bodyText")), &links_in_text);
             if (links_in_text.count > 0 or std.mem.indexOf(u8, text(get(message, "bodyHtml")), "href=") != null) {
                 const block_start = row;
-                row = try self.flowTone(win, "Links · L chooses a literal URL to open", self.reader_scroll, row, .sender);
-                self.readerMouseRows(win, block_start, row - block_start, .reader_link, 0);
+                row = try self.flowTone(win, if (browser_target) "Links shown literally · opening is unavailable in browser mode" else "Links · L chooses a literal URL to open", self.reader_scroll, row, .sender);
+                if (!browser_target) self.readerMouseRows(win, block_start, row - block_start, .reader_link, 0);
             }
             for (items(get(message, "attachments"))) |attachment| {
                 attachment_number += 1;
-                const value_in = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} · B Save/open", .{ attachment_number, text(get(attachment, "filename")) });
+                const value_in = try std.fmt.allocPrint(self.frame.allocator(), if (browser_target) "Attachment {d}: {s} · browser access unavailable" else "Attachment {d}: {s} · B Save/open", .{ attachment_number, text(get(attachment, "filename")) });
                 const block_start = row;
                 row = try self.flowTone(win, value_in, self.reader_scroll, row, .sender);
-                self.readerMouseRows(win, block_start, row - block_start, .reader_attachment, attachment_number - 1);
+                if (!browser_target) self.readerMouseRows(win, block_start, row - block_start, .reader_attachment, attachment_number - 1);
             }
             row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
         }
@@ -9398,8 +9444,9 @@ const App = struct {
             const content = inner.child(.{ .height = inner.height -| 2 });
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
             var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            if (browser_target and self.browser_forward_omits_attachments) rows = try self.flowTone(content, "Text-only forward: original attachments are omitted.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.attachments.len == 0 and composer_hints.attachmentIntent(self.compose.fields[4].value())) {
-                rows = try self.flowTone(content, "⚠ Your note mentions an attachment; no files are attached.\nBack returns to the draft so you can add them.\n\n", self.compose_preview_scroll, rows, .warning);
+                rows = try self.flowTone(content, if (browser_target) "⚠ Your note mentions an attachment; no files are attached.\nAttachments are unavailable in browser mode. Back lets you revise the note.\n\n" else "⚠ Your note mentions an attachment; no files are attached.\nBack returns to the draft so you can add them.\n\n", self.compose_preview_scroll, rows, .warning);
             }
             if (self.compose.original) |original| {
                 const detail = try std.fmt.allocPrint(self.frame.allocator(), "Your note: {s} · branded\nOriginal: HTML retained · {d} embedded resources\nAttachments: {d} ordinary files\nMail apps may display the original differently.\n\n", .{ if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text", original.resources.len, self.compose.attachments.len });
@@ -9433,12 +9480,12 @@ const App = struct {
         const original_title: []const u8 = if (self.compose.original != null) " · formatted original" else if (self.compose_source_mode == .attached) " · original attached" else "";
         const title = try std.fmt.allocPrint(self.frame.allocator(), " Compose · {s}{s} · {s} ", .{ self.composeIntentLabel(), original_title, state_title });
         const left = self.panel(win, 0, left_width, title, true);
-        const alias_width: u16 = @min(@as(u16, 9), left.width);
+        const alias_width: u16 = if (browser_target) 0 else @min(@as(u16, 9), left.width);
         const alias_x = left.width - alias_width;
         try self.line(left.child(.{ .width = alias_x -| 1 }), 0, try std.fmt.allocPrint(self.frame.allocator(), "From: {s}", .{if (self.compose.from.value().len > 0) self.compose.from.value() else self.account()}), .text);
         const alias_action = left.child(.{ .x_off = alias_x, .width = alias_width, .height = 1 });
-        try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
-        if (!self.compose.unknown_outcome) self.mouseArea(alias_action, .compose_from, 0);
+        if (!browser_target) try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
+        if (!browser_target and !self.compose.unknown_outcome) self.mouseArea(alias_action, .compose_from, 0);
         if (self.compose.unknown_outcome) try self.line(left, 1, if (browser_target) "Send unconfirmed · draft protected in this tab" else try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
         const original_note = self.compose.original != null or self.compose_source_mode == .attached;
         if (original_note and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", .muted);
@@ -9454,7 +9501,7 @@ const App = struct {
         const body_tone: Tone = if (self.compose.selected == 4 and self.mode == .compose and !self.compose.attachment_focus) .selected else .muted;
         const body_caption = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ if (self.compose.body_format == .markdown) @as([]const u8, "MD") else "Plain", if (self.compose.selected == 4 and self.compose.insert_mode) @as([]const u8, "Body: INSERT") else "Body:" });
         try self.line(body_label, 0, body_caption, body_tone);
-        if (!self.compose.unknown_outcome) {
+        if (!browser_target and !self.compose.unknown_outcome) {
             const preview_width: u16 = @min(@as(u16, 12), body_label.width);
             const format_width: u16 = @min(@as(u16, 18), body_label.width -| preview_width);
             const format_area = body_label.child(.{ .x_off = body_label.width -| preview_width -| format_width, .width = format_width });
@@ -9483,7 +9530,11 @@ const App = struct {
         }
         const body_lines = if (editing_body) try self.flowCaret(body, value_in, cursor_at, self.compose.body_scroll) else try self.flow(body, value_in, self.compose.body_scroll, 0);
         self.compose.body_scroll = @min(self.compose.body_scroll, body_lines -| @as(usize, body.height));
-        try self.composeAttachmentsDraw(left, attachment_row, attachment_rows);
+        if (browser_target) {
+            const x = try self.actionButton(left, attachment_row, 0, "[Ctrl+S Review]", self.compose.attachment_focus and self.compose.attachment_cursor == 0, !self.compose.unknown_outcome, .dialog_action, 20);
+            const after_contacts = try self.actionButton(left, attachment_row, x, "[Contacts]", self.compose.attachment_focus and self.compose.attachment_cursor == 1, !self.compose.unknown_outcome, .dialog_action, 21);
+            _ = try self.actionButton(left, attachment_row, after_contacts, "[Discard]", self.compose.attachment_focus and self.compose.attachment_cursor == 2, !self.compose.unknown_outcome, .dialog_action, 22);
+        } else try self.composeAttachmentsDraw(left, attachment_row, attachment_rows);
         if (split) {
             const right = self.panel(win, left_width, win.width - left_width, if (self.compose.unknown_outcome) " Submission receipt " else self.composePreviewTitle(), false);
             if (self.compose.unknown_outcome) {
@@ -9522,7 +9573,7 @@ const App = struct {
             try self.line(inner, 4, "? Help · Esc / q Back · no consent starts here", .muted);
             return;
         }
-        if (self.contacts.len == 0 and self.contacts_cache_ready) try self.line(inner, 2, "No contacts · n Create contact", .muted);
+        if (self.contacts.len == 0 and self.contacts_cache_ready) try self.line(inner, 2, if (browser_target) "No matching contacts · / Search · Ctrl+R Refresh" else "No contacts · n Create contact", .muted);
         const first_row: usize = if (self.contacts_state == .current) 0 else 2;
         const stride: usize = if (inner.height >= 16) 3 else 2;
         const visible = @max((inner.height -| first_row) / stride, 1);
@@ -9541,6 +9592,20 @@ const App = struct {
         }
     }
     fn contextHints(self: *const App) []const u8 {
+        if (browser_target) {
+            if (self.ux_overlay == .discard) return " j/k Choose · Tab Controls · Enter Resume/Discard/Cancel · Esc Cancel";
+            if (self.ux_overlay == .contact_addresses) return " j/k Address · Tab Controls · Enter Use · Esc Back";
+            return switch (self.mode) {
+                .compose => if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · disconnect discards draft" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · q is text" else " i Edit · a Contacts · d Discard · Ctrl+S Review · Tab Controls · q Back · ? Help",
+                .review => " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
+                .contacts => " j/k Move · / Google search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back",
+                .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Cached subset · Enter Search · Esc Back · q is text" else " Gmail search · Enter Search · Esc Back · q is text",
+                .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Return",
+                .theme => " j/k Choice · Tab Controls · Enter Activate · Esc/q Back",
+                .browse => if (self.focus == .navigation) " j/k Navigate · Enter Choose · 1–3 Accounts · a Contacts · l/Esc/q Mail · ? Help" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · c Compose · v Layout · z Expand · q List · ? Help" else if (self.query.value().len > 0) " j/k Mail · r Reply · f Forward · c Compose · / Cache · \\ Gmail · Ctrl+R Refresh · q Clear · ? Help" else " j/k Mail · Enter Read · c Compose · r/R Reply · f Forward · a Contacts · / Cache · \\ Gmail · Ctrl+R Refresh · ? Help",
+                else => " Esc Back",
+            };
+        }
         if (self.readerCopyVisible()) return switch (self.reader_copy.mode) {
             .off, .cursor => " MOVE · h/j/k/l w/b/e 0/$ gg/G · V/Space Select from here · Esc Cancel",
             .character => " CHAR · h/j/k/l w/b/e 0/$ gg/G · o Swap · V Line · Space Move · y Copy · Esc Cancel",
@@ -9554,10 +9619,10 @@ const App = struct {
         if (self.mode == .compose and self.compose_preview_full) return " p Next preview · j/k Scroll · Ctrl+D/U Half · Esc/q Source";
         if (self.mode == .compose and self.compose.attachment_focus) return " Tab/Shift+Tab Buttons · Enter Activate · x Remove · A Add · Esc Body · Ctrl+S Review";
         return switch (self.mode) {
-            .contacts => " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
+            .contacts => if (browser_target) " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back" else " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.unknown_outcome) (if (browser_target) " Unconfirmed send · Check Sent in Gmail · q Return · disconnect discards draft" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
+            .compose => if (self.compose.unknown_outcome) (if (browser_target) " Unconfirmed send · Check Sent in Gmail · q Return · disconnect discards draft" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (browser_target) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
@@ -9567,6 +9632,16 @@ const App = struct {
         };
     }
     fn fittedHints(self: *const App, width: u16) []const u8 {
+        if (browser_target) {
+            if (width >= 100 or self.ux_overlay != .none) return self.contextHints();
+            return switch (self.mode) {
+                .compose => if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
+                .review => " Tab · Enter Activate · y Send · Esc Back",
+                .contacts => " Enter Choose · / Search · Ctrl+R Refresh · q Back",
+                .browse => if (self.focus == .navigation) " j/k Move · Enter Choose · 1–3 Accounts · a Contacts" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · q List · ? Help" else if (width < 60) " j/k Mail · Enter Read · / Cache · ? Help" else " j/k Mail · c New · r Reply · f Forward · / Cache · \\ Gmail · ? Help",
+                else => self.contextHints(),
+            };
+        }
         if (self.readerCopyVisible()) return if (width < 100) switch (self.reader_copy.mode) {
             .off, .cursor => "MOVE · V/Space Select · Esc Cancel · Tab Controls",
             .character => "CHAR · V Line · Space Move · y Copy · Esc Cancel",
@@ -9576,7 +9651,7 @@ const App = struct {
         if (self.compose_choice) return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         if (self.fileDialogActive()) return self.fileDialogHints(width);
         if (self.label_picker and width < 60) return "+ Add  - Remove  Esc/q Back";
-        if (self.mode == .contacts and width < 60) return "n New  e Edit  ? Help  q Back";
+        if (self.mode == .contacts and width < 60) return if (browser_target) "Enter Choose  / Search  q Back" else "n New  e Edit  ? Help  q Back";
         if (self.mode == .help and width < 80) return if (self.help_searching) "Enter Keep Esc Clear q is text" else "/ Find n/N Match Esc/q Back";
         if (self.mode == .browse and self.reader_overlay == .none and !self.label_picker and self.focus != .navigation and self.query.value().len == 0) {
             if (width < 48) return if (self.focus == .reader or self.expanded) " V Select  e Editor  ? Help" else " m Labels  T Theme  ? Help";
@@ -9972,7 +10047,7 @@ const App = struct {
             try self.drawUx(win);
             try self.drawGrace(win);
             try self.drawUpdates(win);
-        }
+        } else if (self.ux_overlay == .contact_addresses or self.ux_overlay == .discard) try self.drawUx(win);
     }
 };
 
@@ -14023,6 +14098,7 @@ test "reader copy: plain paragraph and folded placeholder projection preserve li
 /// with a deliberately reduced, in-memory input/provider adapter. Native TUI
 /// behavior and persistence never run in this freestanding build.
 pub const BrowserDemo = struct {
+    const DraftAction = union(enum) { none, account: usize, compose: PendingCompose, contact };
     app: App = undefined,
     vx: vaxis.Vaxis = undefined,
     tty: Tty = undefined,
@@ -14034,6 +14110,13 @@ pub const BrowserDemo = struct {
     send_sequence: u64 = 0,
     last_send_status: u32 = 0,
     review_drawn: bool = false,
+    draft_action: DraftAction = .none,
+    draft_source_id: @import("../bounded.zig").Text(128) = .{},
+    pending_contact: @import("../bounded.zig").Text(16 * 1024) = .{},
+    cache: browser_cache.Store = undefined,
+    pending_cache: []const u8 = "",
+    reader_network_allowed: bool = true,
+    draft_choice_drawn: bool = false,
 
     pub fn init(self: *BrowserDemo, allocator: Allocator, output: *Io.Writer, cols: u16, rows: u16) !void {
         if (!browser_target) @compileError("BrowserDemo requires wasm32-freestanding");
@@ -14042,6 +14125,13 @@ pub const BrowserDemo = struct {
         self.last_send_status = 0;
         self.review_drawn = false;
         self.draft_account = 0;
+        self.draft_action = .none;
+        self.draft_source_id = .{};
+        self.pending_contact = .{};
+        self.cache = browser_cache.Store.init(allocator);
+        self.pending_cache = "";
+        self.reader_network_allowed = true;
+        self.draft_choice_drawn = false;
         self.output = output;
         self.tty = .{ .output = output };
         self.vx = try vaxis.init(undefined, allocator, undefined, .{});
@@ -14130,7 +14220,43 @@ pub const BrowserDemo = struct {
     pub fn canSend(self: *const BrowserDemo) bool {
         return self.live_count > 0 and self.app.account_index < self.live_count and self.live_sessions[self.app.account_index].can_send;
     }
+    pub fn stageCache(self: *BrowserDemo, bytes: []const u8) void {
+        self.pending_cache = bytes;
+    }
+    pub fn cacheSnapshot(self: *BrowserDemo, index: usize, out: []u8) ![]u8 {
+        if (index >= self.live_count) return error.InvalidBrowserCache;
+        return self.cache.snapshot(index, out);
+    }
+    pub fn cacheRevision(self: *const BrowserDemo, index: usize) u32 {
+        return if (index < self.live_count) self.cache.revision(index) else 0;
+    }
+    pub fn cacheClear(self: *BrowserDemo, index: usize) !void {
+        if (index >= self.live_count) return error.InvalidBrowserCache;
+        self.cache.clear(index);
+        if (index == self.app.account_index) {
+            self.app.clearReader();
+            self.app.messages = &.{};
+            self.clearContacts();
+            self.app.recipient_values = &.{};
+            self.app.sync[index] = .{ .state = .cached };
+            self.app.say(false, "Local cache cleared · Ctrl+R refreshes Gmail", .{});
+        }
+    }
+    pub fn restrictContacts(self: *BrowserDemo, index: usize, allowed: bool) !void {
+        if (index >= self.live_count) return error.InvalidBrowserCache;
+        if (allowed or !self.live_sessions[index].can_contacts) return;
+        self.live_sessions[index].can_contacts = false;
+        self.cache.dropContacts(index) catch self.cache.clear(index);
+        if (index == self.app.account_index) {
+            if (self.app.ux_overlay == .contact_addresses) self.app.closeUx();
+            self.clearContacts();
+            self.app.contacts_state = .denied;
+            try self.rebuildRecipients();
+            self.app.say(true, "Contacts permission narrowed · saved contacts removed · mail recipients remain usable", .{});
+        }
+    }
     pub fn connect(self: *BrowserDemo, bytes: []const u8) !void {
+        defer self.pending_cache = "";
         if (self.live_count == 3) return error.TooManyAccounts;
         if (self.app.compose_active) return error.DraftAccountMismatch;
         var scratch: std.heap.ArenaAllocator = .init(self.app.allocator);
@@ -14140,11 +14266,17 @@ pub const BrowserDemo = struct {
         const a = self.app.account_arena.allocator();
         session.account = try a.dupe(u8, session.account);
         session.nonce = try a.dupe(u8, session.nonce);
+        session.client_id = try a.dupe(u8, session.client_id);
+        session.grant_id = try a.dupe(u8, session.grant_id);
         const index = self.live_count;
         const accounts = try a.alloc(Value, index + 1);
         if (index > 0) @memcpy(accounts[0..index], self.app.accounts);
         accounts[index] = try @import("json.zig").value(a, .{ .address = session.account });
         self.live_sessions[index] = session;
+        try self.cache.bind(index, .{ .account = session.account, .clientId = session.client_id, .grantId = session.grant_id });
+        if (self.pending_cache.len > 0) self.cache.restore(index, self.pending_cache, session.can_contacts) catch {
+            self.cache.clear(index);
+        };
         self.live_count += 1;
         // Drop the old actor's snapshot before exposing a newly verified
         // identity. A failed first fetch must never relabel retained mail.
@@ -14156,24 +14288,30 @@ pub const BrowserDemo = struct {
         self.app.accounts = accounts;
         self.app.options.fixtures = false;
         self.app.io = browser_live.io;
-        self.app.contacts = &.{};
+        self.clearContacts();
         self.app.mode = .browse;
         self.app.account_index = index;
         self.app.navigation = index;
         self.app.focus = .list;
         self.app.folder = 0;
         try self.app.query.set(self.app.allocator, "");
-        try self.reload();
-        self.app.say(false, "Connected · {s} · browser session memory only", .{if (session.can_send) @as([]const u8, "mail read + send") else "mail read only"});
+        self.app.query_scope = .cache;
+        if (self.cache.valid(index)) try self.cachedReload() else try self.liveReload();
+        self.app.say(false, "Connected · {s} · bounded browser cache · / Cache · \\ Gmail · Ctrl+R Refresh", .{if (session.can_send) @as([]const u8, "mail read + send") else "mail read only"});
     }
     fn liveReload(self: *BrowserDemo) !void {
         var next: std.heap.ArenaAllocator = .init(self.app.allocator);
         var transferred = false;
         errdefer if (!transferred) next.deinit();
         const app = &self.app;
-        const query = if (app.query_scope == .server) app.query.value() else if (app.folder == 3) "-in:inbox -in:sent -in:trash -in:spam" else if (app.folder == 7) "is:unread" else "";
+        const folder_query = if (app.folder == 3) "-in:inbox -in:sent -in:trash -in:spam" else if (app.folder == 7) "is:unread" else "";
+        const query = if (app.query_scope == .server and app.query.value().len > 0) try std.fmt.allocPrint(next.allocator(), "{s} {s}", .{ folder_query, app.query.value() }) else folder_query;
         const label = if (app.folder == 3 or app.folder == 6 or app.folder == 7) "" else folder_labels[app.folder];
-        const result = try self.live_sessions[app.account_index].list(next.allocator(), label, query);
+        const result = self.live_sessions[app.account_index].list(next.allocator(), label, query) catch |err| {
+            app.sync[app.account_index].state = if (app.messages.len > 0) .offline else .failed;
+            return err;
+        };
+        self.cache.replaceList(app.account_index, items(get(result, "messages")), Io.Timestamp.now(browser_live.io, .real).toMilliseconds()) catch |err| app.sayFailure("Cache retention failed; current mail remains readable", @errorName(err));
         app.clearReader();
         app.list_arena.deinit();
         app.list_arena = next;
@@ -14182,63 +14320,411 @@ pub const BrowserDemo = struct {
         if (app.messages.len > 30) return error.InvalidPage;
         app.selected = 0;
         app.top = 0;
-        app.sync[app.account_index] = .{ .state = .current, .cache_ready = true, .last_sync_at = Io.Timestamp.now(browser_live.io, .real).toMilliseconds() };
+        app.sync[app.account_index] = .{ .state = .current, .cache_ready = self.cache.valid(app.account_index), .last_sync_at = Io.Timestamp.now(browser_live.io, .real).toMilliseconds() };
+        self.reader_network_allowed = true;
         try self.preview();
+        try self.rebuildRecipients();
+        app.say(false, "Gmail mailbox · latest {d} messages (limit 30) · \\ searches older mail · / searches cache", .{app.messages.len});
     }
-    fn composeMessage(self: *BrowserDemo, reply_all: ?bool) !void {
+    fn cacheLabel(self: *const BrowserDemo) []const u8 {
+        return if (self.app.folder == 3) "ARCHIVE" else if (self.app.folder == 7) "UNREAD" else folder_labels[self.app.folder];
+    }
+    fn prepareCacheView(self: *BrowserDemo) !void {
+        const app = &self.app;
+        app.clearReader();
+        app.messages = &.{};
+        app.selected = 0;
+        app.top = 0;
+        var next: std.heap.ArenaAllocator = .init(app.allocator);
+        errdefer next.deinit();
+        const values = try self.cache.list(app.account_index, next.allocator(), self.cacheLabel(), if (app.query_scope == .cache) app.query.value() else "");
+        app.list_arena.deinit();
+        app.list_arena = next;
+        app.messages = values;
+        self.reader_network_allowed = false;
+        app.sync[app.account_index].state = .cached;
+        app.sync[app.account_index].cache_ready = self.cache.valid(app.account_index);
+        app.sync[app.account_index].last_sync_at = self.cache.updatedAt(app.account_index);
+    }
+    fn cachedReload(self: *BrowserDemo) !void {
+        try self.prepareCacheView();
+        try self.preview();
+        try self.rebuildRecipients();
+        self.app.say(false, "Cached subset · up to 300 retained, 30 visible · Ctrl+R refreshes Gmail · \\ searches older mail", .{});
+    }
+    pub fn acknowledgeUnknown(self: *BrowserDemo) void {
+        if (!self.app.compose.unknown_outcome and self.last_send_status != 2) return;
+        self.app.compose.unknown_outcome = false;
+        self.last_send_status = 0;
+        self.review_drawn = false;
+        self.app.mode = .compose;
+        self.app.compose.insert_mode = false;
+        self.app.compose.attachment_focus = false;
+        self.app.browser_completion_open = false;
+        self.app.say(false, "Checked Sent acknowledged · draft retained · fresh review required before any send", .{});
+    }
+    fn requestDraftAction(self: *BrowserDemo, action: DraftAction) !void {
+        if (self.app.compose.unknown_outcome or self.last_send_status == 2) {
+            self.app.say(true, "Unconfirmed send · check Sent and acknowledge it before discarding or switching account", .{});
+            return;
+        }
+        self.draft_action = action;
+        self.draft_choice_drawn = false;
+        try self.app.beginUx(.discard, " Keep this session draft? ");
+        try self.app.uxRow(.{ .label = "Resume draft", .value = "resume" });
+        try self.app.uxRow(.{ .label = "Discard draft and continue", .detail = "The draft in this tab will be lost.", .value = "discard" });
+        try self.app.uxRow(.{ .label = "Cancel", .value = "cancel" });
+        self.app.ux_selected = 0;
+        self.app.ux_focus = 1;
+    }
+    fn activateBrowserUx(self: *BrowserDemo) !void {
+        const app = &self.app;
+        if (app.ux_overlay == .contact_addresses) {
+            if (app.uxAt(app.ux_selected)) |choice| {
+                const display = try app.allocator.dupe(u8, choice.value);
+                defer app.allocator.free(display);
+                app.closeUx();
+                try self.useContactAddress(display);
+            }
+            return;
+        }
+        if (app.ux_overlay != .discard) return;
+        const choice = app.uxAt(app.ux_selected) orelse return;
+        if (same(choice.value, "cancel")) {
+            app.closeUx();
+            self.draft_action = .none;
+            return;
+        }
+        if (same(choice.value, "resume")) {
+            app.closeUx();
+            self.draft_action = .none;
+            app.mode = .compose;
+            return;
+        }
+        if (!same(choice.value, "discard")) return;
+        if (!self.draft_choice_drawn) return error.DraftReviewRequired;
+        if (app.compose.unknown_outcome or self.last_send_status == 2) return error.UnknownOutcome;
+        const action = self.draft_action;
+        self.draft_action = .none;
+        app.closeUx();
+        app.clearComposePreview();
+        app.compose.deinit(app.allocator);
+        app.compose = .{};
+        app.compose_active = false;
+        app.compose_intent = .none;
+        app.mode = .browse;
+        app.browser_completion_open = false;
+        app.browser_completion_dismissed = false;
+        app.browser_forward_omits_attachments = false;
+        self.draft_source_id = .{};
+        self.last_send_status = 0;
+        self.review_drawn = false;
+        switch (action) {
+            .none => {},
+            .account => |index| try self.switchAccount(index),
+            .compose => |intent| try self.composeMessage(intent),
+            .contact => {
+                try self.composeMessage(.new);
+                try self.useContactAddress(self.pending_contact.slice());
+                self.pending_contact = .{};
+            },
+        }
+    }
+    fn browserUxKey(self: *BrowserDemo, key_value: Key) !void {
+        const app = &self.app;
+        if (key_value.matches(Key.escape, .{}) or key_value.matches('q', .{})) {
+            app.closeUx();
+            self.draft_action = .none;
+            return;
+        }
+        if (tabDirection(key_value)) |backwards| {
+            app.ux_focus = if (backwards) (if (app.ux_focus == 1) 3 else app.ux_focus - 1) else (if (app.ux_focus == 3) 1 else app.ux_focus + 1);
+            return;
+        }
+        if (key_value.matches(Key.enter, .{})) {
+            if (app.ux_focus == 3) {
+                app.closeUx();
+                self.draft_action = .none;
+            } else try self.activateBrowserUx();
+            return;
+        }
+        if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{}) or key_value.matches('n', .{ .ctrl = true })) {
+            app.ux_focus = 1;
+            app.ux_selected = @min(app.ux_selected +| 1, app.uxCount() -| 1);
+        } else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{}) or key_value.matches('p', .{ .ctrl = true })) {
+            app.ux_focus = 1;
+            app.ux_selected -|= 1;
+        }
+    }
+    fn forwardSpan(a: Allocator, output: *std.ArrayList(u8), span: @import("html_document.zig").Span) !void {
+        try output.appendSlice(a, span.text);
+        if (span.link) |target| if (reader_tools.safeUrl(target) and !same(target, span.text)) {
+            try output.appendSlice(a, " (");
+            try output.appendSlice(a, target);
+            try output.append(a, ')');
+        };
+        if (output.items.len > types.Limits.body_bytes) return error.BodyTooLarge;
+    }
+    fn forwardText(_: *BrowserDemo, a: Allocator, message: Value) ![]const u8 {
+        const html = text(get(message, "bodyHtml"));
+        const plain = text(get(message, "bodyText"));
+        if (html.len == 0 or (!same(text(get(message, "bodySource")), "html") and plain.len > 0)) return plain;
+        const document = try @import("html_document.zig").parse(html, a);
+        var output: std.ArrayList(u8) = .empty;
+        for (document.blocks, 0..) |block, index| {
+            if (index > 0) try output.appendSlice(a, "\n\n");
+            if (block.kind == .table) {
+                if (block.table) |table| for (table.rows, 0..) |row, row_index| {
+                    if (row_index > 0) try output.append(a, '\n');
+                    for (row.cells, 0..) |cell, cell_index| {
+                        if (cell_index > 0) try output.append(a, '\t');
+                        for (cell.spans) |span| try forwardSpan(a, &output, span);
+                    }
+                };
+            } else {
+                if (block.kind == .list_item) try output.appendSlice(a, if (block.ordered) try std.fmt.allocPrint(a, "{d}. ", .{block.ordinal}) else "- ");
+                if (block.kind == .quote) try output.appendSlice(a, "> ");
+                if (block.kind == .rule) try output.appendSlice(a, "---");
+                for (block.spans) |span| try forwardSpan(a, &output, span);
+            }
+            if (output.items.len > types.Limits.body_bytes) return error.BodyTooLarge;
+        }
+        return output.items;
+    }
+    fn clearContacts(self: *BrowserDemo) void {
+        self.app.contacts = &.{};
+        _ = self.app.contact_arena.reset(.free_all);
+        self.app.contacts_cache_ready = false;
+        self.app.contacts_state = .cached;
+        self.app.contacts_selected = 0;
+        self.app.contacts_account.bytes.clearRetainingCapacity();
+        self.app.contacts_query.bytes.clearRetainingCapacity();
+        self.app.contacts_account.cursor = 0;
+        self.app.contacts_query.cursor = 0;
+        self.app.browser_completion_open = false;
+    }
+    fn rebuildRecipients(self: *BrowserDemo) !void {
+        const app = &self.app;
+        var arena: std.heap.ArenaAllocator = .init(app.allocator);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        var builder = @import("recipient_cache.zig").Builder.init(a, app.account());
+        defer builder.deinit();
+        for (app.messages) |message| try builder.mail(try std.json.parseFromValueLeaky(types.Message, a, message, .{ .ignore_unknown_fields = true }));
+        if (self.live_count > 0 and self.live_sessions[app.account_index].can_contacts and self.cache.contactsLoaded(app.account_index)) for (try self.cache.contacts(app.account_index, a)) |contact| try builder.contact(try std.json.parseFromValueLeaky(types.Contact, a, contact, .{ .ignore_unknown_fields = true }));
+        if (same(app.contacts_account.value(), app.account())) for (app.contacts) |contact| try builder.contact(try std.json.parseFromValueLeaky(types.Contact, a, contact, .{ .ignore_unknown_fields = true }));
+        const values = items(try @import("json.zig").value(a, try builder.result()));
+        if (app.recipient_arena) |*previous| previous.deinit();
+        app.recipient_arena = arena;
+        app.recipient_values = values;
+        try app.recipient_account.set(app.allocator, app.account());
+        app.recipient_ready = true;
+    }
+    fn loadBrowserContacts(self: *BrowserDemo, query: []const u8, force: bool) !void {
+        const app = &self.app;
+        if (self.live_count == 0) return;
+        if (!self.live_sessions[app.account_index].can_contacts) {
+            self.clearContacts();
+            app.contacts_state = .denied;
+            app.say(true, "Contacts permission required · existing grant needs contacts-read access", .{});
+            return;
+        }
+        if (!force and app.contacts_cache_ready and same(app.contacts_account.value(), app.account()) and same(app.contacts_query.value(), query)) return;
+        var next: std.heap.ArenaAllocator = .init(app.allocator);
+        var transferred = false;
+        errdefer if (!transferred) next.deinit();
+        const cached_contacts = !force and query.len == 0 and self.cache.contactsLoaded(app.account_index);
+        app.contacts_state = if (app.contacts.len > 0) .cached else .loading;
+        const result = if (cached_contacts) try @import("json.zig").value(next.allocator(), .{ .contacts = try self.cache.contacts(app.account_index, next.allocator()), .hasMore = false }) else self.live_sessions[app.account_index].contacts(next.allocator(), query) catch |err| {
+            app.contacts_state = .failed;
+            app.sayFailure("Contacts request failed; retained same-account entries remain usable", @errorName(err));
+            return err;
+        };
+        if (!cached_contacts and query.len == 0) self.cache.replaceContacts(app.account_index, items(get(result, "contacts"))) catch |err| app.sayFailure("Contacts displayed; cache retention failed", @errorName(err));
+        app.contacts = &.{};
+        app.contact_arena.deinit();
+        app.contact_arena = next;
+        transferred = true;
+        app.contacts = items(get(result, "contacts"));
+        try app.contacts_account.set(app.allocator, app.account());
+        try app.contacts_query.set(app.allocator, query);
+        app.contacts_selected = 0;
+        app.contacts_cache_ready = true;
+        app.contacts_state = if (cached_contacts) .cached else .current;
+        try self.rebuildRecipients();
+        app.say(false, "{s} contacts · first {d} (limit {d}) · {s} · / searches Google", .{ if (cached_contacts) @as([]const u8, "Cached") else "Google", app.contacts.len, if (query.len > 0) @as(usize, 30) else 100, if (truth(get(result, "hasMore"))) @as([]const u8, "more available") else "read-only" });
+    }
+    fn openBrowserContacts(self: *BrowserDemo, picker: bool) !void {
+        self.app.picker = picker;
+        self.app.previous_mode = if (picker) .compose else .browse;
+        self.app.mode = .contacts;
+        try self.loadBrowserContacts("", false);
+    }
+    fn leaveBrowserContacts(self: *BrowserDemo) void {
+        self.app.mode = if (self.app.picker) .compose else .browse;
+        self.app.picker = false;
+    }
+    fn useContactAddress(self: *BrowserDemo, display: []const u8) !void {
+        const app = &self.app;
+        if (!app.picker and app.compose_active and app.compose_intent != .new) {
+            try self.pending_contact.set(display);
+            return self.requestDraftAction(.contact);
+        }
+        if (!app.picker) try self.composeMessage(.new);
+        if (app.mode != .compose or app.ux_overlay != .none or app.compose.unknown_outcome) return;
+        const target = &app.compose.fields[if (app.compose.selected < 3) app.compose.selected else 0];
+        target.cursor = target.value().len;
+        if (target.value().len > 0) try target.insert(app.allocator, ", ", 16 * 1024);
+        try target.insert(app.allocator, display, 16 * 1024);
+        app.compose.revision +%= 1;
+        app.browser_completion_open = false;
+        app.compose.insert_mode = true;
+        app.compose.attachment_focus = false;
+        app.mode = .compose;
+        app.picker = false;
+        app.say(false, "Recipient chosen · Ctrl+S reviews before any send", .{});
+    }
+    fn chooseBrowserContact(self: *BrowserDemo) !void {
+        const app = &self.app;
+        if (self.live_count > 0 and !same(app.contacts_account.value(), app.account())) return error.MessageIdentityMismatch;
+        if (app.contacts_state == .denied or app.contacts_selected >= app.contacts.len) return;
+        const contact = app.contacts[app.contacts_selected];
+        const emails = items(get(contact, "emails"));
+        if (emails.len == 0) {
+            app.say(false, "This contact has no email address", .{});
+            return;
+        }
+        if (emails.len > 1) {
+            try app.beginUx(.contact_addresses, " Choose contact address ");
+            for (emails, 0..) |mailbox, index| {
+                const display = try recipients.formatDisplay(app.ux_arena.?.allocator(), text(get(mailbox, "address")), text(get(contact, "name")));
+                try app.uxRow(.{ .label = display, .value = display, .index = index });
+            }
+            app.ux_focus = 1;
+            return;
+        }
+        const display = try recipients.formatDisplay(app.frame.allocator(), text(get(emails[0], "address")), text(get(contact, "name")));
+        try self.useContactAddress(display);
+    }
+    fn openBrowserCompletion(self: *BrowserDemo) !void {
+        const app = &self.app;
+        if (app.compose.selected >= 3 or app.compose.unknown_outcome) return;
+        var lookup_failed = false;
+        if (self.live_count > 0 and self.live_sessions[app.account_index].can_contacts) self.loadBrowserContacts("", false) catch |err| {
+            lookup_failed = true;
+            app.sayFailure("Contacts unavailable; retained mail recipients remain usable", @errorName(err));
+        };
+        try self.rebuildRecipients();
+        app.browser_completion_open = true;
+        app.browser_completion_dismissed = false;
+        app.compose.completion_selected = 0;
+        if (app.composeCompletions().len == 0 and self.live_count > 0 and self.live_sessions[app.account_index].can_contacts) {
+            const query = completion.token(app.compose.fields[app.compose.selected].value(), app.compose.fields[app.compose.selected].cursor).query;
+            if (query.len > 0) {
+                self.loadBrowserContacts(query, true) catch |err| {
+                    lookup_failed = true;
+                    app.sayFailure("Google recipient search unavailable; retained recipients remain usable", @errorName(err));
+                };
+                try self.rebuildRecipients();
+            }
+        }
+        if (app.composeCompletions().len == 0 and !lookup_failed) app.say(false, "No matching recipient · type a name/address · Ctrl+Space tries again", .{});
+    }
+    fn acceptBrowserCompletion(self: *BrowserDemo, index: usize) !void {
+        const app = &self.app;
+        const matches = app.composeCompletions();
+        if (index >= matches.len) return;
+        const field = &app.compose.fields[app.compose.selected];
+        const suffix_length = field.value().len - matches.range.end;
+        const updated = try completion.replaceCandidate(app.allocator, field.value(), matches.range, matches.values[index]);
+        defer app.allocator.free(updated);
+        if (updated.len > 16 * 1024) return error.InputTooLarge;
+        try field.assign(app.allocator, updated);
+        field.cursor = updated.len - suffix_length;
+        app.compose.revision +%= 1;
+        app.compose.completion_selected = 0;
+        app.browser_completion_open = false;
+        app.browser_completion_dismissed = true;
+        app.say(false, "Recipient completion chosen · no mail sent", .{});
+    }
+    fn composeMessage(self: *BrowserDemo, intent: PendingCompose) !void {
         if (!self.canSend()) return error.PermissionDenied;
         const app = &self.app;
         if (app.compose_active) {
             if (self.draft_account != app.account_index) return error.DraftAccountMismatch;
-            app.mode = .compose;
-            return;
+            if (intent == app.compose_intent and (intent == .new or same(self.draft_source_id.slice(), app.messageId()))) {
+                app.mode = .compose;
+                return;
+            }
+            return self.requestDraftAction(.{ .compose = intent });
         }
         var arena: std.heap.ArenaAllocator = .init(app.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         var draft: types.Draft = .{ .bodyFormat = .plain };
-        if (reply_all) |all| {
+        if (intent == .reply or intent == .reply_all or intent == .forward) {
+            if (app.thread.len != 1 and app.selectedMessage() != null) {
+                const previous = self.reader_network_allowed;
+                self.reader_network_allowed = true;
+                defer self.reader_network_allowed = previous;
+                try self.preview();
+            }
             if (app.thread.len != 1) return error.MessageNotFound;
             if (!same(app.reader_account.value(), app.account()) or !same(text(get(app.thread[0], "id")), app.messageId())) return error.MessageIdentityMismatch;
             const source = app.thread[0];
-            var envelope: recipients.Envelope = .{};
-            const from = get(source, "from");
-            try recipients.replyIncoming(a, app.account(), &.{}, try recipients.formatIncomingDisplay(a, text(get(from, "address")), text(get(from, "name"))), try Compose.mailboxes(a, get(source, "replyTo")), try Compose.mailboxes(a, get(source, "to")), try Compose.mailboxes(a, get(source, "cc")), all, &envelope);
-            const to = try a.alloc(types.Address, envelope.to.count);
-            for (envelope.to.slice(), to) |*mailbox, *dest| dest.* = .{ .address = mailbox.address.slice(), .name = mailbox.name.slice() };
-            const cc = try a.alloc(types.Address, envelope.cc.count);
-            for (envelope.cc.slice(), cc) |*mailbox, *dest| dest.* = .{ .address = mailbox.address.slice(), .name = mailbox.name.slice() };
-            const threading = try mime.threading(text(get(source, "messageId")), text(get(source, "references")), text(get(source, "inReplyTo")), a);
-            const subject = text(get(source, "subject"));
-            draft.to = to;
-            draft.cc = cc;
-            draft.subject = if (std.ascii.startsWithIgnoreCase(subject, "Re:")) subject else try std.fmt.allocPrint(a, "Re: {s}", .{subject});
-            draft.threadId = text(get(source, "threadId"));
-            draft.inReplyTo = threading.in_reply_to;
-            draft.references = threading.references;
-            var body: std.ArrayList(u8) = .empty;
-            try body.appendSlice(a, "\n\n");
-            var lines = std.mem.splitScalar(u8, text(get(source, "bodyText")), '\n');
-            while (lines.next()) |line| {
-                if (line.len + 3 > types.Limits.body_bytes - body.items.len) return error.BodyTooLarge;
-                try body.appendSlice(a, "> ");
-                try body.appendSlice(a, line);
-                try body.append(a, '\n');
+            if (intent == .forward) {
+                const from = get(source, "from");
+                const subject = text(get(source, "subject"));
+                const forwarded = try std.fmt.allocPrint(a, "\n\n---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ text(get(from, "name")), text(get(from, "address")), subject, try self.forwardText(a, source) });
+                if (forwarded.len > types.Limits.body_bytes) return error.BodyTooLarge;
+                draft.subject = if (std.ascii.startsWithIgnoreCase(subject, "Fwd:")) subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{subject});
+                draft.bodyText = forwarded;
+            } else {
+                var envelope: recipients.Envelope = .{};
+                const from = get(source, "from");
+                try recipients.replyIncoming(a, app.account(), &.{}, try recipients.formatIncomingDisplay(a, text(get(from, "address")), text(get(from, "name"))), try Compose.mailboxes(a, get(source, "replyTo")), try Compose.mailboxes(a, get(source, "to")), try Compose.mailboxes(a, get(source, "cc")), intent == .reply_all, &envelope);
+                const to = try a.alloc(types.Address, envelope.to.count);
+                for (envelope.to.slice(), to) |*mailbox, *dest| dest.* = .{ .address = mailbox.address.slice(), .name = mailbox.name.slice() };
+                const cc = try a.alloc(types.Address, envelope.cc.count);
+                for (envelope.cc.slice(), cc) |*mailbox, *dest| dest.* = .{ .address = mailbox.address.slice(), .name = mailbox.name.slice() };
+                const threading = try mime.threading(text(get(source, "messageId")), text(get(source, "references")), text(get(source, "inReplyTo")), a);
+                const subject = text(get(source, "subject"));
+                draft.to = to;
+                draft.cc = cc;
+                draft.subject = if (std.ascii.startsWithIgnoreCase(subject, "Re:")) subject else try std.fmt.allocPrint(a, "Re: {s}", .{subject});
+                draft.threadId = text(get(source, "threadId"));
+                draft.inReplyTo = threading.in_reply_to;
+                draft.references = threading.references;
+                var body: std.ArrayList(u8) = .empty;
+                try body.appendSlice(a, "\n\n");
+                var lines = std.mem.splitScalar(u8, text(get(source, "bodyText")), '\n');
+                while (lines.next()) |line| {
+                    if (line.len + 3 > types.Limits.body_bytes - body.items.len) return error.BodyTooLarge;
+                    try body.appendSlice(a, "> ");
+                    try body.appendSlice(a, line);
+                    try body.append(a, '\n');
+                }
+                draft.bodyText = body.items;
             }
-            draft.bodyText = body.items;
         }
+        app.browser_forward_omits_attachments = intent == .forward and app.thread.len == 1 and items(get(app.thread[0], "attachments")).len > 0;
+        try self.draft_source_id.set(if (intent == .new) "" else app.messageId());
         app.clearComposePreview();
         try app.compose.load(app.allocator, try @import("json.zig").value(a, draft));
         try app.compose.from.set(app.allocator, app.account());
         app.compose_active = true;
         self.draft_account = app.account_index;
-        app.compose_intent = if (reply_all) |all| (if (all) .reply_all else .reply) else .new;
+        app.compose_intent = intent;
         app.compose_source_mode = .text;
-        app.compose.selected = if (reply_all != null) 4 else 0;
+        app.compose.selected = if (intent == .reply or intent == .reply_all) 4 else 0;
         app.compose.insert_mode = true;
+        app.compose.attachment_focus = false;
+        app.browser_completion_open = false;
+        app.browser_completion_dismissed = false;
         app.compose.fields[4].cursor = 0;
         app.mode = .compose;
-        app.say(false, "Session draft · Ctrl+S reviews · explicit y sends · closing/reset discards it", .{});
+        app.say(false, "Session draft · Ctrl+S reviews · explicit y sends · disconnect/reload discards it", .{});
+        if (intent == .forward and app.thread.len == 1 and items(get(app.thread[0], "attachments")).len > 0) app.say(true, "Text-only forward · source attachments are omitted · review before sending", .{});
     }
     fn reviewDraft(self: *BrowserDemo) !void {
         if (!self.canSend()) return error.PermissionDenied;
@@ -14305,8 +14791,49 @@ pub const BrowserDemo = struct {
             return;
         }
         if (key_value.matches('s', .{ .ctrl = true })) return self.reviewDraft();
+        if (app.compose.insert_mode and app.compose.selected < 3) {
+            if (key_value.matches(' ', .{ .ctrl = true }) or key_value.matches('@', .{ .ctrl = true }) or key_value.matches(0, .{})) return self.openBrowserCompletion();
+            const matches = app.composeCompletions();
+            if (app.browser_completion_open or matches.len > 0) {
+                if (key_value.matches(Key.escape, .{})) {
+                    app.browser_completion_open = false;
+                    app.browser_completion_dismissed = true;
+                    return;
+                }
+                if (matches.len > 0 and (key_value.matches(Key.down, .{}) or key_value.matches('n', .{ .ctrl = true }))) {
+                    app.compose.completion_selected = (app.compose.completion_selected + 1) % matches.len;
+                    return;
+                }
+                if (matches.len > 0 and (key_value.matches(Key.up, .{}) or key_value.matches('p', .{ .ctrl = true }))) {
+                    app.compose.completion_selected = (app.compose.completion_selected + matches.len - 1) % matches.len;
+                    return;
+                }
+                if (matches.len > 0 and key_value.matches(Key.enter, .{})) return self.acceptBrowserCompletion(@min(app.compose.completion_selected, matches.len - 1));
+            }
+        }
         if (tabDirection(key_value)) |backwards| {
-            app.compose.selected = (app.compose.selected + if (backwards) @as(usize, 4) else 1) % 5;
+            app.browser_completion_open = false;
+            app.browser_completion_dismissed = false;
+            var position: usize = if (app.compose.attachment_focus) 5 + app.compose.attachment_cursor else app.compose.selected;
+            position = (position + if (backwards) @as(usize, 7) else 1) % 8;
+            app.compose.attachment_focus = position >= 5;
+            if (position >= 5) {
+                app.compose.attachment_cursor = position - 5;
+                app.compose.insert_mode = false;
+            } else {
+                app.compose.selected = position;
+                app.compose.insert_mode = true;
+            }
+            return;
+        }
+        if (app.compose.attachment_focus) {
+            if (key_value.matches(Key.escape, .{})) {
+                app.compose.attachment_focus = false;
+                app.compose.selected = 4;
+                app.compose.insert_mode = false;
+            } else if (key_value.matches(Key.enter, .{})) {
+                if (app.compose.attachment_cursor == 0) try self.reviewDraft() else if (app.compose.attachment_cursor == 1) try self.openBrowserContacts(true) else try self.requestDraftAction(.none);
+            } else if (key_value.matches('q', .{})) app.mode = .browse;
             return;
         }
         if (key_value.matches(Key.escape, .{})) {
@@ -14316,22 +14843,40 @@ pub const BrowserDemo = struct {
         if (app.compose.insert_mode) {
             try app.compose.fields[app.compose.selected].handleKey(app.allocator, key_value, app.compose.selected == 4, if (app.compose.selected == 4) types.Limits.body_bytes else 16 * 1024);
             app.compose.revision +%= 1;
+            app.compose.completion_selected = 0;
+            app.browser_completion_dismissed = false;
             app.clearComposePreview();
             app.say(false, "Draft retained in session memory · Ctrl+S reviews · no mail sent", .{});
         } else if (key_value.matches('i', .{}) or key_value.matches(Key.enter, .{})) app.compose.insert_mode = true else if (key_value.matches('q', .{})) {
             app.mode = .browse;
-            app.say(false, "Session draft retained · c resumes it · reset discards it", .{});
-        } else if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{})) app.compose.selected = (app.compose.selected + 1) % 5 else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{})) app.compose.selected = (app.compose.selected + 4) % 5 else app.say(false, "Browser composer supports plain text and session drafts · files/editor are unavailable", .{});
+            app.say(false, "Session draft retained · c resumes it · disconnect/reload discards it", .{});
+        } else if (key_value.matches('d', .{})) return self.requestDraftAction(.none) else if (key_value.matches('a', .{})) return self.openBrowserContacts(true) else if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{})) app.compose.selected = (app.compose.selected + 1) % 5 else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{})) app.compose.selected = (app.compose.selected + 4) % 5 else app.say(false, "Browser composer supports plain text and session drafts · files/editor are unavailable", .{});
     }
     fn notice(self: *BrowserDemo) void {
-        self.app.say(false, "{s}", .{if (self.live_count > 0) @as([]const u8, "Live Gmail · Ctrl+R refresh · c compose · r reply · session memory only") else "Browser demo · synthetic read-only mail · j/k Enter / 1–3 v ?"});
+        self.app.say(false, "{s}", .{if (self.live_count > 0) @as([]const u8, "Live Gmail · bounded browser cache · / Cache · \\ Gmail · Ctrl+R Refresh · c compose · f forward") else "Browser demo · synthetic read-only mail · j/k Enter / 1–3 v ?"});
     }
     fn preview(self: *BrowserDemo) !void {
         self.app.clearReader();
         if (self.app.selectedMessage()) |message| {
             const a = self.app.read_arena.allocator();
+            var rendered = message;
+            if (self.live_count > 0) {
+                const cached = try self.cache.read(self.app.account_index, text(get(message, "id")));
+                if (cached != null and same(cached.?.threadId, text(get(message, "threadId")))) {
+                    rendered = try @import("json.zig").value(a, cached.?);
+                } else {
+                    if (!self.reader_network_allowed) {
+                        self.app.body_cache_miss = true;
+                        self.app.say(false, "Body not cached · Enter loads it from Gmail · cached search makes no requests", .{});
+                        return;
+                    }
+                    const full = try self.live_sessions[self.app.account_index].read(a, text(get(message, "id")));
+                    rendered = try @import("json.zig").value(a, full);
+                    self.cache.saveRead(self.app.account_index, full) catch |err| self.app.sayFailure("Body displayed; local cache retention failed", @errorName(err));
+                }
+            }
             const thread = try a.alloc(Value, 1);
-            thread[0] = if (self.live_count > 0) try @import("json.zig").value(a, try self.live_sessions[self.app.account_index].read(a, text(get(message, "id")))) else message;
+            thread[0] = rendered;
             self.app.thread = thread;
             self.app.markup = try self.app.prepareMarkup(a, thread);
             try self.app.reader_account.set(self.app.allocator, self.app.account());
@@ -14339,7 +14884,7 @@ pub const BrowserDemo = struct {
         }
     }
     fn reload(self: *BrowserDemo) !void {
-        if (self.live_count > 0) return self.liveReload();
+        if (self.live_count > 0) return if (self.app.query_scope == .server and self.app.query.value().len > 0) self.liveReload() else self.cachedReload();
         self.app.clearReader();
         _ = self.app.list_arena.reset(.retain_capacity);
         const a = self.app.list_arena.allocator();
@@ -14359,8 +14904,11 @@ pub const BrowserDemo = struct {
     }
     fn switchAccount(self: *BrowserDemo, index: usize) !void {
         if (index >= self.app.accounts.len) return;
-        if (self.app.compose_active and index != self.draft_account) return error.DraftAccountMismatch;
+        if (self.app.compose_active and index != self.draft_account) return self.requestDraftAction(.{ .account = index });
         if (self.live_count > 0 and index != self.app.account_index) {
+            self.clearContacts();
+            self.app.recipient_values = &.{};
+            self.app.recipient_account.bytes.clearRetainingCapacity();
             self.app.clearReader();
             self.app.messages = &.{};
             self.app.selected = 0;
@@ -14383,10 +14931,12 @@ pub const BrowserDemo = struct {
         self.vx.queueRefresh();
         try self.vx.render(self.output);
         self.review_drawn = self.app.mode == .review and self.vx.window().width >= 30 and self.vx.window().height >= 10;
+        self.draft_choice_drawn = self.app.ux_overlay == .discard and self.vx.window().width >= 30 and self.vx.window().height >= 10;
     }
     pub fn key(self: *BrowserDemo, key_value: Key) !void {
         const app = &self.app;
         if (app.paste) return self.pasteKey(key_value);
+        if (app.ux_overlay == .contact_addresses or app.ux_overlay == .discard) return self.browserUxKey(key_value);
         if (app.mode == .compose or app.mode == .review) return self.composerKey(key_value);
         if (app.mode == .help) return app.onHelpKey(key_value);
         if (app.mode == .theme) {
@@ -14398,36 +14948,49 @@ pub const BrowserDemo = struct {
             return;
         }
         if (app.mode == .search) {
-            if (key_value.matches(Key.escape, .{})) app.mode = .browse else if (key_value.matches(Key.enter, .{})) {
+            if (key_value.matches(Key.escape, .{})) app.mode = app.previous_mode else if (key_value.matches(Key.enter, .{})) {
+                if (app.previous_mode == .contacts) {
+                    app.mode = .contacts;
+                    try self.loadBrowserContacts(app.input.value(), true);
+                    return;
+                }
                 try app.query.set(app.allocator, app.input.value());
-                app.query_scope = .cache;
+                app.query_scope = app.input_query_scope;
                 app.mode = .browse;
                 app.focus = .list;
-                if (self.live_count > 0) {
-                    app.query_scope = .server;
-                    try self.reload();
+                if (self.live_count > 0 and app.query_scope == .server and app.query.value().len > 0) {
+                    app.clearReader();
+                    app.messages = &.{};
+                    app.selected = 0;
+                    app.top = 0;
+                    try self.liveReload();
                 } else try self.reload();
             } else try app.input.handleKey(app.allocator, key_value, false, 4096);
             return;
         }
         if (key_value.matches('?', .{})) return app.openHelp();
         if (app.mode == .contacts) {
-            if (key_value.matches('q', .{}) or key_value.matches(Key.escape, .{})) app.mode = .browse else if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{})) app.contacts_selected = @min(app.contacts_selected +| 1, app.contacts.len -| 1) else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{})) app.contacts_selected -|= 1 else app.say(false, "Contacts are synthetic · editing is unavailable in this browser demo", .{});
+            if (key_value.matches('q', .{}) or key_value.matches(Key.escape, .{})) self.leaveBrowserContacts() else if (key_value.matches('j', .{}) or key_value.matches(Key.down, .{})) app.contacts_selected = @min(app.contacts_selected +| 1, app.contacts.len -| 1) else if (key_value.matches('k', .{}) or key_value.matches(Key.up, .{})) app.contacts_selected -|= 1 else if (key_value.matches(Key.enter, .{})) try self.chooseBrowserContact() else if (key_value.matches('r', .{ .ctrl = true })) try self.loadBrowserContacts(app.contacts_query.value(), true) else if (key_value.matches('/', .{})) {
+                app.previous_mode = .contacts;
+                app.mode = .search;
+                try app.input.set(app.allocator, "");
+            } else app.say(false, "Contacts are read-only · Enter chooses a recipient · / Search · q Back", .{});
             return;
         }
         if (key_value.matches('1', .{})) return self.switchAccount(0);
         if (key_value.matches('2', .{})) return self.switchAccount(1);
         if (key_value.matches('3', .{})) return self.switchAccount(2);
         if (self.live_count > 0) {
-            if (key_value.matches('r', .{ .ctrl = true })) return self.reload();
-            if (key_value.matches('c', .{})) return self.composeMessage(null);
-            if (key_value.matches('r', .{})) return self.composeMessage(false);
-            if (key_value.matches('R', .{}) or key_value.matches('r', .{ .shift = true })) return self.composeMessage(true);
+            if (key_value.matches('r', .{ .ctrl = true })) return self.liveReload();
+            if (key_value.matches('c', .{})) return self.composeMessage(.new);
+            if (key_value.matches('r', .{})) return self.composeMessage(.reply);
+            if (key_value.matches('R', .{}) or key_value.matches('r', .{ .shift = true })) return self.composeMessage(.reply_all);
+            if (key_value.matches('f', .{}) or key_value.matches('F', .{}) or key_value.matches('f', .{ .shift = true })) return self.composeMessage(.forward);
         }
-        if (key_value.matches('/', .{})) {
+        if (key_value.matches('/', .{}) or key_value.matches('\\', .{})) {
             app.mode = .search;
             app.previous_mode = .browse;
-            app.input_query_scope = if (self.live_count > 0) .server else .cache;
+            app.input_query_scope = if (key_value.matches('\\', .{})) .server else .cache;
             try app.input.set(app.allocator, "");
             return;
         }
@@ -14442,9 +15005,7 @@ pub const BrowserDemo = struct {
             return;
         }
         if (key_value.matches('a', .{})) {
-            if (self.live_count > 0) return error.BrowserContactsUnavailable;
-            app.mode = .contacts;
-            return;
+            return self.openBrowserContacts(false);
         }
         if (tabDirection(key_value)) |backwards| {
             app.focus = switch (app.focus) {
@@ -14465,6 +15026,7 @@ pub const BrowserDemo = struct {
         if (key_value.matches('q', .{}) or key_value.matches(Key.escape, .{}) or key_value.matches('c', .{ .ctrl = true })) {
             if (app.expanded) app.expanded = false else if (app.focus != .list) app.focus = .list else if (app.query.value().len > 0) {
                 try app.query.set(app.allocator, "");
+                app.query_scope = .cache;
                 try self.reload();
             } else self.notice();
             return;
@@ -14474,10 +15036,18 @@ pub const BrowserDemo = struct {
                 if (app.navigation < app.accounts.len) try self.switchAccount(app.navigation) else if (app.navigation < app.accounts.len + folders.len) {
                     app.folder = app.navigation - app.accounts.len;
                     app.focus = .list;
-                    try self.reload();
-                } else if (self.live_count > 0) return error.BrowserContactsUnavailable else app.mode = .contacts;
+                    try app.query.set(app.allocator, "");
+                    app.query_scope = .cache;
+                    if (self.live_count > 0) {
+                        try self.prepareCacheView();
+                        try self.liveReload();
+                    } else try self.reload();
+                } else return self.openBrowserContacts(false);
             } else {
-                if (self.live_count > 0 and app.thread.len == 0 and app.messages.len > 0) try self.preview();
+                if (self.live_count > 0 and app.thread.len == 0 and app.messages.len > 0) {
+                    self.reader_network_allowed = true;
+                    try self.preview();
+                }
                 app.focus = .reader;
             }
             return;
@@ -14563,7 +15133,7 @@ pub const BrowserDemo = struct {
             }
             const previous = self.app.focus;
             if (self.app.mouse_hits.at(event.col, event.row)) |hit| {
-                if (hit.kind == .reader) self.app.focus = .reader;
+                if (hit.kind == .reader) self.app.focus = .reader else if (hit.kind == .mail or hit.kind == .mail_scroll) self.app.focus = .list;
             }
             try self.key(.{ .codepoint = if (event.button == .wheel_up) 'k' else 'j' });
             self.app.focus = previous;
@@ -14581,20 +15151,43 @@ pub const BrowserDemo = struct {
             .folder => {
                 self.app.folder = hit.index;
                 self.app.focus = .list;
-                try self.reload();
+                try self.app.query.set(self.app.allocator, "");
+                self.app.query_scope = .cache;
+                if (self.live_count > 0) {
+                    try self.prepareCacheView();
+                    try self.liveReload();
+                } else try self.reload();
             },
-            .contacts => if (self.live_count > 0) return error.BrowserContactsUnavailable else {
-                self.app.mode = .contacts;
+            .contacts => try self.openBrowserContacts(false),
+            .contact => {
+                self.app.contacts_selected = @min(hit.index, self.app.contacts.len -| 1);
+                try self.chooseBrowserContact();
             },
+            .compose_completion => try self.acceptBrowserCompletion(hit.index),
             .compose_field => {
                 if (hit.index < 5 and !self.app.compose.unknown_outcome) {
                     self.app.compose.selected = hit.index;
                     self.app.compose.insert_mode = true;
+                    self.app.compose.attachment_focus = false;
+                    self.app.browser_completion_open = false;
                 }
             },
             .dialog_action => {
-                if (self.app.mode == .review) {
+                if (self.app.ux_overlay == .discard or self.app.ux_overlay == .contact_addresses) {
+                    if (hit.index >= 100) {
+                        self.app.ux_selected = @min(hit.index - 100, self.app.uxCount() -| 1);
+                        self.app.ux_focus = 1;
+                    } else if (hit.index == 12) {
+                        self.app.ux_focus = 2;
+                        try self.activateBrowserUx();
+                    } else if (hit.index == 13) {
+                        self.app.closeUx();
+                        self.draft_action = .none;
+                    }
+                } else if (self.app.mode == .review) {
                     if (hit.index == 0) self.app.mode = .compose else if (hit.index == 1) try self.sendDraft();
+                } else if (self.app.mode == .compose and !self.app.compose.unknown_outcome) {
+                    if (hit.index == 20) try self.reviewDraft() else if (hit.index == 21) try self.openBrowserContacts(true) else if (hit.index == 22) try self.requestDraftAction(.none);
                 }
             },
             .theme_choice => self.app.theme_choice = if (hit.index == 0) .omagma else .follow_omarchy,

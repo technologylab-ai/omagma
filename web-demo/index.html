@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://oauth2.googleapis.com https://gmail.googleapis.com; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://oauth2.googleapis.com https://gmail.googleapis.com https://people.googleapis.com; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <meta name="description" content="An experimental Omagma terminal UI running as Zig WebAssembly, with fictional mail held in memory.">
     <title>Omagma · browser experiment</title>
     <link rel="icon" href="data:,">
@@ -29,6 +29,7 @@
             <button id="connect-open" type="button" disabled>Connect Gmail…</button>
             <button id="connect-file-open" type="button" hidden>Load file…</button>
             <button id="disconnect-session" type="button" hidden>Disconnect</button>
+            <button id="cache-clear" type="button" hidden>Clear cache</button>
             <button id="terminal-focus" type="button" title="F6 moves focus from the terminal to page controls" disabled>Focus terminal</button>
             <button id="demo-reset" type="button" disabled>Reset demo</button>
           </div>

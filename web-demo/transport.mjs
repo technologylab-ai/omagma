@@ -2,6 +2,7 @@ import { parseRefreshedToken, permissions } from './credentials.mjs';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GMAIL_ROOT = 'https://gmail.googleapis.com/gmail/v1/users/me/';
+const PEOPLE_ORIGIN = 'https://people.googleapis.com';
 const RECEIPT_KEY = 'omagma-browser-pending-send-v1';
 const MAX_RESPONSE = 3 * 1024 * 1024;
 const MAX_REQUEST = 3 * 1024 * 1024;
@@ -32,6 +33,23 @@ export function allowedGmailRequest(url, method) {
   return method === 'GET' || (method === 'POST' && parsed.pathname === '/gmail/v1/users/me/messages/send' && !parsed.search);
 }
 
+export function allowedPeopleRequest(url, method) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (method !== 'GET' || parsed.origin !== PEOPLE_ORIGIN || parsed.username || parsed.password || parsed.hash) return false;
+  if (!['/v1/people/me/connections', '/v1/people:searchContacts'].includes(parsed.pathname)) return false;
+  const allowed = parsed.pathname.endsWith('/connections') ? ['personFields', 'sources', 'pageSize', 'pageToken'] : ['readMask', 'pageSize', 'query'];
+  for (const name of parsed.searchParams.keys()) if (!allowed.includes(name) || parsed.searchParams.getAll(name).length !== 1) return false;
+  const limit = parsed.searchParams.get('pageSize');
+  if (!limit || !/^\d+$/.test(limit) || +limit < 1 || +limit > (parsed.pathname.endsWith('/connections') ? 100 : 30)) return false;
+  if (parsed.pathname.endsWith('/connections')) return parsed.searchParams.get('personFields') === 'names,emailAddresses,metadata' && parsed.searchParams.get('sources') === 'READ_SOURCE_TYPE_CONTACT' && !parsed.searchParams.get('pageToken');
+  return parsed.searchParams.get('readMask') === 'names,emailAddresses,metadata' && (parsed.searchParams.get('query')?.length ?? 0) <= 4096;
+}
+
+function contactsPermission(record) {
+  return record.capabilities.some(cap => cap === 'contacts-read' || cap === 'contacts-write') && record.actualScopes?.some(scope => ['https://www.googleapis.com/auth/contacts.readonly', 'https://www.googleapis.com/auth/contacts'].includes(scope));
+}
+
 export class SessionTransport {
   #sessions = new Map();
   #controller = null;
@@ -54,6 +72,7 @@ export class SessionTransport {
 
   beginJob() { this.#deadline = Date.now() + 30000; this.#jobPendingId = null; }
   info() { return { accountCount: this.#sessions.size, canSend: Array.from(this.#sessions.values(), record => record.canSend), busy: this.#active, sendPhase: this.#sendPhase, sendRemaining: this.#remaining }; }
+  cacheBindings() { return Array.from(this.#sessions.values(), record => ({ account: record.account, clientId: record.clientId, grantId: record.grantId, canContacts: Boolean(contactsPermission(record)) })); }
 
   close() {
     this.#closed = true;
@@ -220,12 +239,14 @@ export class SessionTransport {
       if (this.#closed || !record || !record.canRead) return 3;
       method = decoder.decode(this.#view(methodPtr, methodLength, 8));
       const url = decoder.decode(this.#view(urlPtr, urlLength, 16384));
-      if (!allowedGmailRequest(url, method) || (method === 'POST' && !record.canSend)) return 3;
+      const people = allowedPeopleRequest(url, method);
+      if ((!allowedGmailRequest(url, method) && !people) || (people && !contactsPermission(record)) || (method === 'POST' && !record.canSend)) return 3;
       this.#view(responsePtr, responseCapacity, MAX_RESPONSE);
       body = this.#view(bodyPtr, bodyLength, MAX_REQUEST).slice();
       if ((method === 'GET' && bodyLength !== 0) || (method === 'POST' && bodyLength === 0)) return 3;
       return await this.#operation(async () => {
         if (record.expiresAt - Date.now() < 60000) await this.#refresh(record);
+        if (people && !contactsPermission(record)) return 3;
         if (method === 'POST' && !record.canSend) return 3;
         if (method === 'POST') { await this.#sendGrace(); this.#startSend(); }
         submissionStarted = method === 'POST';

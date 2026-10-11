@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         browser.entry = .disabled;
         browser.rdynamic = true;
         browser.export_memory = true;
-        browser.initial_memory = 12 * 1024 * 1024;
+        browser.initial_memory = 20 * 1024 * 1024;
         browser.max_memory = 64 * 1024 * 1024;
         browser.stack_size = 2 * 1024 * 1024;
         browser_step.dependOn(&b.addInstallArtifact(browser, .{ .dest_dir = .{ .override = .{ .custom = "web-demo" } } }).step);
@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
         package.addArtifactArg(browser);
         package.addArg("--out-dir");
         browser_assets = package.addOutputDirectoryArg("site");
-        for ([_][]const u8{ "app.mjs", "credentials.mjs", "transport.mjs", "bridge.mjs", "index.html", "style.css", "package.json", "package-lock.json" }) |source| package.addFileInput(b.path(b.fmt("web-demo/{s}", .{source})));
+        for ([_][]const u8{ "app.mjs", "credentials.mjs", "transport.mjs", "bridge.mjs", "cache.mjs", "index.html", "style.css", "package.json", "package-lock.json" }) |source| package.addFileInput(b.path(b.fmt("web-demo/{s}", .{source})));
     }
     const vaxis = if (tui_enabled) b.lazyDependency("vaxis", .{ .target = target, .optimize = optimize }) else null;
     const m = b.createModule(.{
@@ -67,6 +67,8 @@ pub fn build(b: *std.Build) void {
     b.step("test-browser-export", "Check private browser export with synthetic file credentials").dependOn(&b.addRunArtifact(browser_export_tests).step);
     const browser_server_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_server_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     b.step("test-browser-server", "Check bounded browser static HTTP handling").dependOn(&b.addRunArtifact(browser_server_tests).step);
+    const browser_cache_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_cache_tests.zig"), .target = target, .optimize = optimize }) });
+    b.step("test-browser-cache", "Check bounded account-scoped browser snapshots").dependOn(&b.addRunArtifact(browser_cache_tests).step);
     if (vaxis) |v| m.addImport("vaxis", v.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "omagma", .root_module = m, .linkage = if (target.result.os.tag == .linux) .static else null, .use_llvm = if (vaxis != null) true else null });
     b.installArtifact(exe);

@@ -17,7 +17,7 @@ export class BrowserWasmBridge {
       if (typeof this.exports[name] !== 'function') throw new Error(`The browser module is missing ${name}().`);
     }
     this.calls = {};
-    for (const name of ['init', 'resize', 'input', 'connect']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
+    for (const name of ['init', 'resize', 'input', 'connect', 'cache_clear', 'acknowledge_unknown']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
   }
 
   async invoke(name, ...args) {
@@ -77,7 +77,7 @@ export class BrowserWasmBridge {
     }
   }
 
-  async connect(metadata) {
+  async connect(metadata, cached = null) {
     if (typeof this.exports.connect_ptr !== 'function' || typeof this.exports.connect_capacity !== 'function' || !this.calls.connect) throw new Error('This browser build does not include live mail support.');
     const bytes = new TextEncoder().encode(JSON.stringify(metadata));
     const capacity = this.exports.connect_capacity();
@@ -86,9 +86,26 @@ export class BrowserWasmBridge {
     const buffer = this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection');
     buffer.fill(0);
     buffer.set(bytes);
+    let cacheBytes;
+    if (typeof this.exports.cache_stage === 'function') {
+      cacheBytes = new TextEncoder().encode(cached ? JSON.stringify(cached) : '');
+      const cacheCapacity = this.exports.cache_input_capacity();
+      if (cacheBytes.length > cacheCapacity) throw new Error('The saved cache exceeds its bounded restore capacity.');
+      this.view(this.exports.cache_input_ptr(), cacheCapacity, 3 * 1024 * 1024, 'cache').set(cacheBytes);
+      if (this.exports.cache_stage(cacheBytes.length) !== 0) throw new Error('The saved cache cannot be staged while another operation is running.');
+    }
     try { await this.invoke('connect', bytes.length); }
-    finally { this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection').fill(0); bytes.fill(0); }
+    finally { this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection').fill(0); bytes.fill(0); cacheBytes?.fill(0); }
   }
+
+  cacheSnapshot(index) {
+    if (typeof this.exports.cache_export !== 'function' || this.exports.cache_export(index) !== 0) return null;
+    const bytes = this.view(this.exports.cache_ptr(), this.exports.cache_len(), 3 * 1024 * 1024, 'cache');
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    finally { bytes.fill(0); }
+  }
+  clearCache(index = 0xffffffff) { return this.invoke('cache_clear', index); }
+  acknowledgeUnknown() { return this.invoke('acknowledge_unknown'); }
 
   wipe() { new Uint8Array(this.exports.memory.buffer).fill(0); }
 

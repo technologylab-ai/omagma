@@ -4,7 +4,8 @@ This is an isolated showcase prototype, built from the native TUI source. Zig
 owns the screen, layout and mail interaction; xterm.js supplies the browser's
 terminal display and input. It starts with fictional mail and can connect
 existing grants through the local server or an exported connection file for live
-Gmail reading, plain composition and replies. See [live mail](LIVE-MAIL.md) for
+Gmail reading, plain composition, replies and forwarding, contacts and recipient
+completion, and a bounded browser mail cache. See [live mail](LIVE-MAIL.md) for
 credential loading and scope.
 
 The prototype runs client-side with browser HTTP and credential adapters. The
@@ -47,12 +48,21 @@ Reset demo creates fresh fictional state. **Connect Gmail** loads one exported
 connection file on a static host, or uses your configured native accounts when
 opened through the server's printed link. **Load file** remains available in
 server mode. Disconnect returns to fictional mode. In live mode, `c` composes,
-`r` replies, `R` replies to all, and Ctrl+S opens send review. Tab/Shift+Tab move
+`r` replies, `R` replies to all, `f` forwards, and Ctrl+S opens send review. Tab/Shift+Tab move
 between fields or review buttons. Explicit Send begins the ten-second local
 cancellation window. Native help documents the full
 application, while this demo implements the subset described here. Actions
 outside the demo explain that they are unavailable. `T` opens the native theme
 picker; browser execution has no access to the desktop's theme files.
+
+In live mode, `a` opens granted Google contacts. Recipient fields offer local
+suggestions while typing; Ctrl+Space also searches Google when a name is absent
+from the retained page. `/` searches cached mail and `\\` searches Gmail;
+Ctrl+R refreshes. The cache keeps up to 300 message records per account, shows
+30 matching rows, and enforces 3 MiB per snapshot / 8 MiB total. IndexedDB holds
+mail and contacts, while credentials and drafts stay in tab memory. Disconnect
+retains the cache; **Clear cache** removes it. Cached restores require a fresh
+account verification and the exact registration/grant. Date filters use UTC.
 
 Request activity appears in a prominent strip above the terminal, with a spinner
 and an explanation when keyboard input is paused. Ctrl+C cancels an active read;
@@ -147,7 +157,8 @@ delivery. Real verification occurs when the user loads their selected files.
 
 The browser adapter supplies token expiry handling and asynchronous HTTP
 completion through Promise Integration. One operation owns the request path;
-account views and drafts remain bounded in session memory. A generic pending
+account views and drafts remain bounded in session memory. Mail/contact
+snapshots have bounded IndexedDB persistence, with no tokens or draft state. A generic pending
 send receipt survives reload and carries no token or message body. Full draft
 recovery and queued-send persistence remain separate native/browser-storage
 work.
@@ -183,6 +194,7 @@ run the application on the companion rather than entirely in WebAssembly.
 Default fictional mode uses no real account or credential and makes no Google
 requests. Live mode uses only explicitly selected credentials and scopes;
 reading does not mark mail read, and sending requires explicit review and
-confirmation. No credential or mail body is persisted in browser storage.
+confirmation. Credentials stay in tab memory; bounded mail/contact snapshots
+are stored in the browser cache and can be cleared explicitly.
 Development checks use fictional grants and intercepted provider responses.
 Build output and dependency directories are local artifacts, not a release.
