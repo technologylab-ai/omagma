@@ -21,6 +21,7 @@ from terminal_integration import ACCOUNTS, ROOT, Client, require
 from terminal_pty import Terminal, retained_draft
 from terminal_status_screen import StatusScreen
 from terminal_help import scroll_help_to
+from terminal_reader import frame_title
 
 UI_FIXTURES = ROOT / "tests/fixtures/terminal/ui"
 CASES = ("layout-responsive", "preferences-private-safety", "reader-cached-next-previous", "theme-reload-no-color", "search-back-stack")
@@ -28,11 +29,11 @@ CASES = ("layout-responsive", "preferences-private-safety", "reader-cached-next-
 
 def mailbox_visible(terminal):
     header = terminal.text().splitlines()[0]
-    return terminal.screen.locate("Mail ·") is not None and "Cache search" not in header and "Gmail search" not in header
+    return frame_title(terminal.screen, "Mail ·") is not None and "Cache search" not in header and "Gmail search" not in header
 
 
 def pane_coordinates(terminal):
-    return terminal.screen.locate("Mail ·"), (terminal.screen.locate("Thread / full body") or terminal.screen.locate("Message ·"))
+    return frame_title(terminal.screen, "Mail ·"), (frame_title(terminal.screen, "Thread / full body") or frame_title(terminal.screen, "Message ·"))
 
 
 def layout(terminal, expected):

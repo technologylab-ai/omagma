@@ -1,8 +1,25 @@
 """Development-only extraction of current reader cells, excluding other panes."""
 
 
+def frame_title(screen, literal):
+    # Titles must belong to a top border. Hints such as "J/K Mail ·" and
+    # message text can repeat the words without creating a pane.
+    for y, row in enumerate(screen.cells):
+        for left, cell in enumerate(row):
+            if cell not in {"╭", "┌", "╔"}:
+                continue
+            right = next((x for x in range(left + 1, screen.columns)
+                          if row[x] in {"╮", "┐", "╗"}), None)
+            if right is None:
+                continue
+            for column in range(left + 1, right):
+                if "".join(row[column:right]).startswith(literal):
+                    return {"row": y, "column": column}
+    return None
+
+
 def reader_rectangle(screen):
-    title = screen.locate("Thread / full body") or screen.locate("Message ·")
+    title = frame_title(screen, "Thread / full body") or frame_title(screen, "Message ·")
     if title is None:
         return None
     y, column = title["row"], title["column"]
@@ -95,5 +112,15 @@ if __name__ == "__main__":
         def test_no_reader_never_uses_global_text(self):
             screen = self.make(["Synthetic personal@example.com message096."])
             self.assertFalse(reader_contains(screen, "Synthetic personal@example.com message096."))
+
+        def test_pane_titles_ignore_body_and_footer_words(self):
+            screen = self.make([
+                "╭─ Message · 100% ────────────────╮",
+                "│Mail · occurs in received text   │",
+                "╰────────────────────────────────╯",
+                "V Select · J/K Mail · r/R Reply · q Shrink",
+            ], 48)
+            self.assertIsNone(frame_title(screen, "Mail ·"))
+            self.assertEqual(frame_title(screen, "Message ·"), {"row": 0, "column": 3})
 
     unittest.main()

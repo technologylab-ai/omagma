@@ -284,8 +284,9 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Q / S", .action = "Fold quoted history or a standard signature" },
     .{ .keys = "L / B", .action = "Choose a URL or received attachment" },
     .{ .keys = "j / k in the reader", .action = "Scroll the current message" },
-    .{ .keys = "V in the reader", .action = "Select received body text; V again toggles character and whole-line Visual mode" },
-    .{ .keys = "h/j/k/l · w/b/e · 0/$ · gg/G in Visual", .action = "Extend a grapheme-safe selection; Ctrl+U/D moves half a page; o swaps its ends" },
+    .{ .keys = "V in the reader", .action = "Move a text cursor to your starting point; V or Space then starts character selection" },
+    .{ .keys = "V / Space in text selection", .action = "V switches CHAR/LINE; Space unmarks so you can move to another starting point" },
+    .{ .keys = "h/j/k/l · w/b/e · 0/$ · gg/G in text mode", .action = "Move the caret or extend a selection; Ctrl+U/D moves half a page; o swaps marked ends" },
     .{ .keys = "y · Tab/Shift+Tab · Enter in Visual", .action = "Copy selected text or reach Copy/Cancel controls; mouse drag selects, copying stays explicit" },
     .{ .keys = "Esc / Ctrl+C in Visual", .action = "Cancel text selection; mail editing/operator keys stay paused; Ctrl+V block mode is unavailable" },
     .{ .keys = "e / :view-editor in the reader", .action = "View a private received-mail copy with $EDITOR; saved edits are discarded, mail is unchanged" },
@@ -3112,7 +3113,7 @@ const App = struct {
             .find => try self.beginUx(.find, " Find in message "),
             .copy_message => try self.copyReaderMessage(),
             .view_editor => try self.viewReaderEditor(),
-            .select_text => try self.requestReaderCopy(.character, self.reader_scroll, 0),
+            .select_text => try self.requestReaderCopy(.cursor, self.reader_scroll, 0),
             .next_unread => try self.navigateUnread(true),
             .previous_unread => try self.navigateUnread(false),
             .resume_send => {
@@ -8504,9 +8505,19 @@ const App = struct {
     fn copyReaderSelection(self: *App) !void {
         self.reconcileReaderCopy();
         if (!self.reader_copy.active() or self.reader_copy_mark != null) return error.NoTextSelected;
+        if (!self.reader_copy.selecting()) {
+            self.say(false, "Move to the starting point · V or Space selects from here", .{});
+            return;
+        }
         const value = try self.reader_copy.copy(self.frame.allocator());
         try self.emitReaderCopy(value);
         self.clearReaderCopy();
+    }
+    fn activateReaderCopyPrimary(self: *App) !void {
+        if (self.reader_copy.active() and !self.reader_copy.selecting()) {
+            self.reader_copy.startSelection();
+            self.reader_copy_focus = 0;
+        } else try self.copyReaderSelection();
     }
     fn readerSnapshot(self: *App) ![]const u8 {
         const message = try self.readerCopyTarget();
@@ -8563,13 +8574,23 @@ const App = struct {
                 self.clearReaderCopy();
                 return false; // Normal v remains the layout shortcut.
             }
-            if (self.reader_copy_request != null or !self.reader_copy.active()) return true;
+            if (self.reader_copy_request) |*request| {
+                if (key.matches('V', .{}) or key.matches('v', .{ .shift = true })) {
+                    request.mode = switch (request.mode) {
+                        .off, .cursor => .character,
+                        .character => .line,
+                        .line => .character,
+                    };
+                } else if (key.matches(' ', .{})) request.mode = if (request.mode == .cursor) .character else .cursor;
+                return true;
+            }
+            if (!self.reader_copy.active()) return true;
             if (tabDirection(key)) |backwards| {
                 self.reader_copy_focus = @intCast((@as(usize, self.reader_copy_focus) + if (backwards) @as(usize, 2) else 1) % 3);
                 return true;
             }
             if (key.matches(Key.enter, .{})) {
-                if (self.reader_copy_focus == 1) try self.copyReaderSelection() else if (self.reader_copy_focus == 2) self.clearReaderCopy();
+                if (self.reader_copy_focus == 1) try self.activateReaderCopyPrimary() else if (self.reader_copy_focus == 2) self.clearReaderCopy();
                 return true;
             }
             if (key.matches('y', .{})) {
@@ -8577,7 +8598,12 @@ const App = struct {
                 return true;
             }
             if (key.matches('V', .{}) or key.matches('v', .{ .shift = true })) {
-                self.reader_copy.mode = if (self.reader_copy.mode == .character) .line else .character;
+                if (!self.reader_copy.selecting()) self.reader_copy.startSelection() else self.reader_copy.mode = if (self.reader_copy.mode == .character) .line else .character;
+                self.reader_copy_focus = 0;
+                return true;
+            }
+            if (key.matches(' ', .{})) {
+                if (self.reader_copy.selecting()) self.reader_copy.positionCursor() else self.reader_copy.startSelection();
                 self.reader_copy_focus = 0;
                 return true;
             }
@@ -8621,12 +8647,12 @@ const App = struct {
                 self.clearReaderCopy();
                 return false;
             }
-            self.say(false, "Visual selection · y Copy · Esc Cancel · mail actions are paused", .{});
+            self.say(false, "Text cursor/selection · V or Space marks · y Copy · Esc Cancel · mail actions are paused", .{});
             return true;
         }
         if (self.focus != .reader and !self.expanded) return false;
         if (key.matches('V', .{}) or key.matches('v', .{ .shift = true })) {
-            self.requestReaderCopy(.character, self.reader_scroll, 0) catch |err| switch (err) {
+            self.requestReaderCopy(.cursor, self.reader_scroll, 0) catch |err| switch (err) {
                 error.MessageRequired, error.ReaderMessageChanging => self.say(false, "Current message is still loading · wait for this preview", .{}),
                 else => return err,
             };
@@ -8640,19 +8666,19 @@ const App = struct {
             return true;
         }
         if (key.matches('y', .{})) {
-            self.say(false, "V selects text · y copies a selection · :copy-message copies the current mail", .{});
+            self.say(false, "V selects text · move to your start, then V/Space marks · :copy-message copies the current mail", .{});
             return true;
         }
         return false;
     }
     fn readerCopyStyle(self: *const App, original: vaxis.Style, row: usize, byte_start: usize, byte_end: usize) vaxis.Style {
         if (!self.reader_copy_paint or !self.reader_copy_scope) return original;
-        const selected = self.reader_copy.range(row) orelse return original;
-        if (byte_start >= selected.end or byte_end <= selected.start) return original;
         var style_in = original;
         const cursor_row = self.reader_copy.cursorRow();
         const cursor_line = if (self.reader_copy.active()) self.reader_copy.lines.items[self.reader_copy.cursor.line] else return original;
         const cursor = cursor_row != null and cursor_row.? == row and byte_start <= cursor_line.byte_base + self.reader_copy.cursor.byte and byte_end > cursor_line.byte_base + self.reader_copy.cursor.byte;
+        const selected = if (self.reader_copy.range(row)) |range| byte_start < range.end and byte_end > range.start else false;
+        if (!selected and !cursor) return original;
         if (self.mono) {
             style_in.reverse = true;
             if (cursor) {
@@ -8669,11 +8695,16 @@ const App = struct {
         if (!self.readerCopyVisible() or outer.height == 0) return;
         const bar = outer.child(.{ .y_off = outer.height - 1, .height = 1 });
         bar.fill(.{ .style = self.style(.text) });
-        const title = if (self.reader_copy.mode == .line) "V-LINE" else "VISUAL";
+        const title = switch (self.reader_copy.mode) {
+            .off, .cursor => "MOVE",
+            .character => "CHAR",
+            .line => "LINE",
+        };
         const controls: u16 = if (bar.width >= 28) 25 else 18;
         const title_width = bar.width -| controls;
         if (title_width > 0) try self.line(bar.child(.{ .width = title_width }), 0, title, .accent);
-        const x = try self.actionButton(bar, 0, title_width, if (bar.width >= 28) "[Copy y]" else "[y Copy]", self.reader_copy_focus == 1, self.reader_copy.active(), .dialog_action, 601);
+        const primary = if (self.reader_copy.selecting()) (if (bar.width >= 28) "[Copy y]" else "[y Copy]") else "[Select V]";
+        const x = try self.actionButton(bar, 0, title_width, primary, self.reader_copy_focus == 1, self.reader_copy.active(), .dialog_action, 601);
         _ = try self.actionButton(bar, 0, x, if (bar.width >= 28) "[Cancel Esc]" else "[Esc]", self.reader_copy_focus == 2, true, .dialog_action, 602);
     }
     fn onReaderCopyMouse(self: *App, mouse: vaxis.Mouse) !bool {
@@ -8682,7 +8713,7 @@ const App = struct {
         if (mouse.type == .press and mouse.button == .left) {
             if (self.reader_copy.active()) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| if (hit.kind == .dialog_action and (hit.index == 601 or hit.index == 602)) {
                 self.reader_copy_focus = if (hit.index == 601) 1 else 2;
-                if (hit.index == 601) try self.copyReaderSelection() else self.clearReaderCopy();
+                if (hit.index == 601) try self.activateReaderCopyPrimary() else self.clearReaderCopy();
                 return true;
             };
             if (self.reader_copy.active()) {
@@ -9070,6 +9101,24 @@ const App = struct {
             win.fill(.{ .style = self.style(.text) });
             self.mouse_hits.count = body_hit_start;
             self.reader_lines = try self.readerBodyDraw(win);
+        }
+        // Blank paragraphs still need a visible caret while positioning. They
+        // remain empty in the copied model; this is only a painted cursor cell.
+        if (self.reader_copy.active() and self.reader_copy.lineText(self.reader_copy.cursor.line).len == 0) {
+            const cursor_row = self.reader_copy.cursorRow().?;
+            const cursor_column = self.reader_copy.cursorColumn().?;
+            if (cursor_row >= self.reader_scroll and cursor_row - self.reader_scroll < win.height and cursor_column < win.width) {
+                var appearance = self.style(.text);
+                if (self.mono) {
+                    appearance.reverse = true;
+                    appearance.bold = true;
+                    appearance.ul_style = .single;
+                } else {
+                    appearance.bg = .{ .rgb = self.palette.accent };
+                    appearance.fg = .{ .rgb = self.palette.background };
+                }
+                win.writeCell(@intCast(cursor_column), @intCast(cursor_row - self.reader_scroll), .{ .char = .{ .grapheme = " ", .width = 1 }, .style = appearance });
+            }
         }
         if (!self.readerCopyVisible()) if (invitation_index) |index| if (self.reader_invitation_row) |logical_row| {
             // Follow the message's labels while its header is visible, then
@@ -9482,7 +9531,11 @@ const App = struct {
         }
     }
     fn contextHints(self: *const App) []const u8 {
-        if (self.readerCopyVisible()) return " VISUAL · h/j/k/l w/b/e 0/$ gg/G · o Swap · V Line/char · y Copy · Esc Cancel";
+        if (self.readerCopyVisible()) return switch (self.reader_copy.mode) {
+            .off, .cursor => " MOVE · h/j/k/l w/b/e 0/$ gg/G · V/Space Select from here · Esc Cancel",
+            .character => " CHAR · h/j/k/l w/b/e 0/$ gg/G · o Swap · V Line · Space Move · y Copy · Esc Cancel",
+            .line => " LINE · h/j/k/l w/b/e 0/$ gg/G · o Swap · V Chars · Space Move · y Copy · Esc Cancel",
+        };
         if (self.reader_overlay == .save_attachment or self.reader_overlay == .open_attachment) return " Tab Controls · Ctrl+F Complete · Enter Save · Esc Attachments · Ctrl+U Clear · q is text";
         if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
         if (self.reader_overlay == .attachments) return " Tab Controls · Enter Activate · j/k Choose · s Save · o Save & open · Esc/q Back";
@@ -9504,7 +9557,11 @@ const App = struct {
         };
     }
     fn fittedHints(self: *const App, width: u16) []const u8 {
-        if (self.readerCopyVisible()) return if (width < 64) "VISUAL · y Copy · Esc Cancel · Tab Controls" else self.contextHints();
+        if (self.readerCopyVisible()) return if (width < 100) switch (self.reader_copy.mode) {
+            .off, .cursor => "MOVE · V/Space Select · Esc Cancel · Tab Controls",
+            .character => "CHAR · V Line · Space Move · y Copy · Esc Cancel",
+            .line => "LINE · V Chars · Space Move · y Copy · Esc Cancel",
+        } else self.contextHints();
         if (self.grace_active) return if (width < 70) "Ctrl+Z Undo · Ctrl+S Send now" else if (self.grace_focus == 0) " Ctrl+Z Undo · Ctrl+S Send now · Tab Switch · Enter: Undo · Esc/q Undo" else " Ctrl+Z Undo · Ctrl+S Send now · Tab Switch · Enter: Send now · Esc/q Undo";
         if (self.compose_choice) return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         if (self.fileDialogActive()) return self.fileDialogHints(width);

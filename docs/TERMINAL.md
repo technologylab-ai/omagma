@@ -64,9 +64,17 @@ the controls. Opening, filtering and Back do not perform an action.
 
 ## Copying received mail
 
-Focus the reader with `l` or Tab, then press `V` to start character selection.
-Press `V` again while selecting to switch between character and line selection. Use `h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$`
-and `gg`/`G` to extend it; `y` copies, and Escape clears the selection.
+Focus the reader with `l` or Tab, then press `V` to enter **MOVE** with a text
+cursor. Use `h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$` and `gg`/`G` to
+reach your starting point. Press `V` or Space to mark it and enter **CHAR**;
+move to the end and press `y` to copy. The earlier text stays out of the selection.
+
+While selecting, `V` switches **CHAR** / **LINE**, with the current mode and
+the next action shown in the hints. Space unmarks and returns to **MOVE** at
+the same caret, so you can choose another starting point. Escape exits text mode.
+For example, after reaching a paragraph's first character, `Space`, `$`, `y`
+copies that paragraph without the preceding mail. **Select**, **Copy** and
+**Cancel** also support Tab and Enter.
 `o` swaps the two selection ends; Ctrl+D/U moves the caret half a page.
 The selected text is highlighted. Mouse dragging uses the same explicit
 `y`/Copy action; Tab and Enter can also reach the Copy and Cancel controls.
@@ -445,7 +453,9 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | :next-unread / :previous-unread | Adjacent unread cached mail in the current view |
 | :search-history / :saved-searches / :save-search NAME | Reuse or save account-specific queries |
 | v / z | Reader layout / expand |
-| V in the reader | Start character selection; repeat to switch character/line selection |
+| V in the reader | Move a text cursor to your chosen starting point |
+| V / Space in MOVE | Start character selection at the caret |
+| V / Space while selecting | Switch character/line mode / unmark and reposition |
 | y / Escape in visual selection | Copy / clear selection |
 | :copy-message / Ctrl+P Copy message | Copy focused received message with its envelope |
 | e / :view-editor in the reader | Open a temporary received-message copy in the external editor |

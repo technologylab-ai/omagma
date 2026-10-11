@@ -102,7 +102,7 @@ def start(binary, directory, extra, text="Alpha", columns=160, rows=42, environm
     return terminal
 
 
-def visual(terminal, keys=b"V"):
+def visual(terminal, keys=b"VV"):
     terminal.send(keys)
     terminal.until(lambda: not terminal.screen.frame_open and "[Copy y]" in terminal.text()
                    and "[Cancel Esc]" in terminal.text())
@@ -143,10 +143,10 @@ def keyboard_case(binary, directory, capture_dir=None):
         terminal.send(b"o")  # Restore swapped endpoints; selection is still the first character.
         terminal.send(b"\x1b")
         terminal.until(lambda: "[Copy y]" not in terminal.text())
-        visual(terminal, b"VV")
-        terminal.until(lambda: "V-LINE" in terminal.text())
+        visual(terminal, b"VVV")
+        terminal.until(lambda: "LINE" in terminal.text() and "V Chars" in terminal.text())
         first_line = copied(terminal, count=2)
-        require(first_line == BODY.splitlines()[0] + "\n", "VV/y did not copy a Unicode logical line exactly")
+        require(first_line == BODY.splitlines()[0] + "\n", "line mode did not copy a Unicode logical line exactly")
         visual(terminal)
         # gg/G and $ operate only on this message's body, never the pane chrome.
         terminal.send(b"ggG$")
@@ -168,6 +168,54 @@ def keyboard_case(binary, directory, capture_dir=None):
     except Exception:
         capture(terminal, capture_dir, "reader-copy-keyboard-failure")
         raise
+    finally:
+        terminal.close()
+
+
+def paragraph_position_case(binary, directory, capture_dir=None):
+    directory, extra, _ = prepare(binary, directory)
+    saved = baseline(binary, directory, extra)
+    terminal = start(binary, directory, extra)
+    try:
+        alpha = terminal.screen.locate("Alpha")
+        original_style = terminal.screen.styles[alpha["row"]][alpha["column"]]
+        terminal.send(b"V")
+        terminal.until(lambda: not terminal.screen.frame_open and "[Select V]" in terminal.text()
+                       and "MOVE" in terminal.text())
+        caret_style = terminal.screen.styles[alpha["row"]][alpha["column"]]
+        require(caret_style != original_style, "MOVE has no visible themed caret")
+        terminal.send(b"jj0")
+        def at_paragraph():
+            point = terminal.screen.locate("This paragraph")
+            return (point is not None and not terminal.screen.frame_open
+                    and terminal.screen.styles[point["row"]][point["column"]] == caret_style)
+        terminal.until(at_paragraph)
+        require(terminal.screen.styles[alpha["row"]][alpha["column"]] == original_style,
+                "moving to a paragraph left the earlier text selected")
+        terminal.send(b"y")
+        terminal.until(lambda: "Move to the starting point" in terminal.text())
+        require(not clips(terminal), "an unmarked cursor copied text")
+        terminal.send(b"\t\r")  # Select button marks the chosen start.
+        terminal.until(lambda: "[Copy y]" in terminal.text() and "CHAR" in terminal.text())
+        terminal.send(b"V")
+        terminal.until(lambda: not terminal.screen.frame_open and "LINE" in terminal.text()
+                       and "V Chars" in terminal.text())
+        terminal.send(b"V")
+        terminal.until(lambda: not terminal.screen.frame_open and "CHAR" in terminal.text()
+                       and "V Line" in terminal.text())
+        require(copied(terminal, b"$y") == PARAGRAPH, "keyboard copied text outside the chosen paragraph")
+        terminal.send(b"V")
+        terminal.until(lambda: "[Select V]" in terminal.text())
+        terminal.send(b"jj0w ")  # Move to paragraph's second word, Space marks.
+        terminal.until(lambda: "[Copy y]" in terminal.text() and "CHAR" in terminal.text())
+        require(copied(terminal, b"ey", count=2) == "paragraph",
+                "keyboard could not copy an interior word from a chosen start")
+        require(baseline(binary, directory, extra) == saved, "positioning or copying mutated mail")
+        capture(terminal, capture_dir, "reader-copy-chosen-paragraph")
+        terminal.finish()
+        return {"unmarkedCaret": True, "selectedMiddleParagraphExact": True,
+                "selectedInteriorWordExact": True, "modeSwitchesVisible": True,
+                "selectButtonKeyboardReachable": True, "noWrites": True}
     finally:
         terminal.close()
 
@@ -286,7 +334,8 @@ def narrow_mono_source_case(binary, directory, capture_dir=None):
     return {"narrowMonoExact": True, "sourceChangeClearsSelection": True, "noMouseBypass": True}
 
 
-CASES = (("reader-copy-keyboard", keyboard_case), ("reader-copy-mouse-theme", mouse_theme_case),
+CASES = (("reader-copy-keyboard", keyboard_case), ("reader-copy-paragraph-position", paragraph_position_case),
+         ("reader-copy-mouse-theme", mouse_theme_case),
          ("reader-copy-rich-resize", rich_resize_case), ("reader-copy-narrow-mono-source", narrow_mono_source_case))
 
 

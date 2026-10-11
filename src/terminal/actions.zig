@@ -88,7 +88,7 @@ pub const entries = [_]Entry{
     .{ .id = .manage_labels, .name = "Manage labels", .detail = "Create, rename, color and delete custom labels", .keys = ":labels" },
     .{ .id = .scope, .name = "Message or conversation", .detail = "Choose what mail actions affect", .keys = ":scope", .needs_mail = true },
     .{ .id = .find, .name = "Find in message", .detail = "Highlight and jump through visible text", .keys = ":find", .needs_mail = true },
-    .{ .id = .select_text, .name = "Select received text", .detail = "Visual character or line selection of this message's rendered body", .keys = "V", .needs_received = true },
+    .{ .id = .select_text, .name = "Select received text", .detail = "Move to your starting point, then mark characters or lines", .keys = "V", .needs_received = true },
     .{ .id = .copy_message, .name = "Copy message", .detail = "Copy this message's envelope and full plaintext body", .keys = ":copy-message", .needs_received = true },
     .{ .id = .view_editor, .name = "View in editor", .detail = "Open a private received-mail copy; edits never change mail", .keys = "e / :view-editor", .needs_received = true },
     .{ .id = .next_unread, .name = "Next unread", .detail = "Find the next unread cached message", .keys = ":next-unread" },

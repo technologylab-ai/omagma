@@ -9,7 +9,7 @@ const text_layout = @import("text_layout.zig");
 
 pub const max_text_bytes = 2 * 1024 * 1024;
 pub const max_lines = 65536;
-pub const Mode = enum { off, character, line };
+pub const Mode = enum { off, cursor, character, line };
 pub const Join = enum { separate, space, none };
 pub const Motion = enum { left, right, up, down, word_forward, word_backward, word_end, line_start, line_end, first, last };
 pub const Position = struct { line: usize = 0, byte: usize = 0 };
@@ -97,6 +97,25 @@ pub const Model = struct {
     }
     pub fn active(self: *const Model) bool {
         return self.mode != .off and self.ready and !self.failed and self.lines.items.len != 0;
+    }
+    pub fn selecting(self: *const Model) bool {
+        return self.active() and self.mode != .cursor;
+    }
+    /// Keep the caret while marking/unmarking. Moving without a mark never
+    /// includes text above the chosen starting point in a later copy.
+    pub fn startSelection(self: *Model) void {
+        if (!self.active()) return;
+        self.mode = .character;
+        self.anchor = self.cursor;
+        self.preferred_column = null;
+        self.prefer_end = false;
+    }
+    pub fn positionCursor(self: *Model) void {
+        if (!self.active()) return;
+        self.mode = .cursor;
+        self.anchor = self.cursor;
+        self.preferred_column = null;
+        self.prefer_end = false;
     }
     pub fn count(self: *const Model) usize {
         return self.lines.items.len;
@@ -225,11 +244,12 @@ pub const Model = struct {
     pub fn extend(self: *Model, row: usize, column: usize) void {
         if (!self.active()) return;
         self.cursor = self.positionAt(row, column) orelse return;
+        if (self.mode == .cursor) self.anchor = self.cursor;
         self.preferred_column = null;
         self.prefer_end = false;
     }
     pub fn swapEnds(self: *Model) void {
-        if (!self.active()) return;
+        if (!self.selecting()) return;
         std.mem.swap(Position, &self.anchor, &self.cursor);
         self.preferred_column = null;
         self.prefer_end = false;
@@ -304,7 +324,7 @@ pub const Model = struct {
         return true;
     }
     pub fn range(self: *const Model, row: usize) ?Range {
-        if (!self.active()) return null;
+        if (!self.selecting()) return null;
         const index = self.lowerRow(row);
         if (index == self.lines.items.len or self.lines.items[index].row != row) return null;
         const selected = self.bounds();
@@ -351,6 +371,7 @@ pub const Model = struct {
                 }
             },
         }
+        if (self.mode == .cursor) self.anchor = self.cursor;
         return !same(prior, self.cursor);
     }
     fn wordTarget(self: *const Model, motion: Motion) Position {
@@ -372,8 +393,8 @@ pub const Model = struct {
     /// Caller owns the returned bytes. Soft wraps use the layout's join, hard
     /// breaks use LF, and linewise copies end with LF. No padding is invented.
     pub fn copy(self: *Model, a: std.mem.Allocator) ![]u8 {
+        if (!self.selecting()) return error.NoReaderSelection;
         errdefer self.cancel();
-        if (!self.active()) return error.NoReaderSelection;
         const selected = self.bounds();
         var length: usize = 0;
         for (selected.start.line..selected.end.line + 1) |index| {
@@ -402,6 +423,38 @@ pub const Model = struct {
         return result;
     }
 };
+
+test "reader selection: unmarked cursor chooses a middle paragraph before selecting" {
+    const a = std.testing.allocator;
+    var model: Model = .{};
+    defer model.deinit(a);
+    model.reset(a, 1, 24, .unicode);
+    try model.addLine(a, 10, "Earlier paragraph", .{});
+    try model.addLine(a, 11, "", .{});
+    try model.addLine(a, 12, "Only this", .{});
+    try model.addLine(a, 13, "paragraph.", .{ .join = .space });
+    try model.addLine(a, 14, "Later paragraph", .{});
+    model.finish();
+    try std.testing.expect(model.begin(.cursor, 10, 0));
+    try std.testing.expect(model.move(.down));
+    try std.testing.expect(model.move(.down));
+    try std.testing.expectEqualDeep(model.cursor, model.anchor);
+    try std.testing.expect(model.range(10) == null and model.range(12) == null);
+    try std.testing.expectError(error.NoReaderSelection, model.copy(a));
+    try std.testing.expect(model.active() and !model.selecting());
+    model.startSelection();
+    try std.testing.expect(model.move(.line_end));
+    const excerpt = try model.copy(a);
+    defer a.free(excerpt);
+    try std.testing.expectEqualStrings("Only this paragraph.", excerpt);
+    model.positionCursor();
+    try std.testing.expect(model.range(13) == null);
+    try std.testing.expect(model.move(.first));
+    model.startSelection();
+    const letter = try model.copy(a);
+    defer a.free(letter);
+    try std.testing.expectEqualStrings("E", letter);
+}
 
 const WordClass = enum { space, word, punctuation };
 fn wordClass(text: []const u8) WordClass {
