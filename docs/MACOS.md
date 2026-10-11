@@ -4,6 +4,66 @@ The experimental TUI and agent CLI run natively on Apple Silicon and Intel Macs.
 The bar widget remains a Linux Omarchy integration. Mac terminal use needs no
 Omarchy, Quickshell, tmux, Python runtime or Zig compiler.
 
+## Choose Interactive or Agent-enabled setup
+
+For first-time Mac onboarding, choose the variant before connecting accounts.
+An agent starting from the repository URL should ask you this once and preserve
+your explicit choice during repairs.
+
+| Variant | Credential storage | Intended use |
+| --- | --- | --- |
+| **Interactive (default)** | Native Keychain (`credentialStore: "keyring"`) | TUI and CLI in a local unlocked terminal |
+| **Agent-enabled** | Private owner-only, **unencrypted token files** (`credentialStore: "file"`) | The same TUI and CLI binary, including agent subprocesses |
+
+Agent-enabled storage avoids Keychain audit-session restrictions. Your agent's
+sandbox must still allow access to the selected config, grants, cache and
+credential files and Google network access. Choosing the file store does not
+automatically grant those permissions.
+
+For a fresh Agent-enabled setup, add these fields to your private account
+configuration **before** consent; authorization stores new credentials there
+directly. Merge the fields into the existing config rather than replacing it:
+
+```json
+{
+  "credentialStore": "file",
+  "credentialDirectory": "/absolute/private/path/omagma-credentials"
+}
+```
+
+`credentialDirectory` must be an absolute canonical private directory, with
+mode `0700`; token files use `0600`. JSON does not expand `~` or `$HOME`.
+Fresh authorization or migration can create the leaf credential directory and
+account subdirectories when existing ancestors are safe. Unexpected existing
+owners, modes, ACLs or symlinks are refused rather than repaired automatically.
+Keep the directory outside Git and shared folders. These files contain grants
+that can authorize mailbox/contact access; anyone able to read them can use
+that authority. Interactive setup can omit `credentialStore`, which defaults
+to `keyring`. See [privacy](PRIVACY.md#credentials-and-consent).
+
+For existing authorized accounts, inspect the selected store and migrate from
+a context that can access the source, normally your local unlocked Mac terminal:
+
+```sh
+omagma credentials status --json --config /absolute/private/config.json
+omagma credentials migrate --to file \
+  --directory /absolute/private/path/omagma-credentials \
+  --config /absolute/private/config.json
+```
+
+Migration uses the existing registration and grants without another Google
+sign-in. It verifies private destination copies before atomically switching the
+config. For a file target, omitting `--directory` selects `credentials` under
+the canonical config directory. Status does not create credential directories.
+**Source copies are retained.** Later migrations respect the current store and
+grant registry rather than restoring locally revoked credentials from retained
+copies. Preserve a custom `--grant-file` when you use one. To switch back, use
+`omagma credentials migrate --to keyring` with
+the same config/grant options from a context with access to both stores.
+Restart open Omagma sessions after switching, then [verify actual agent CLI
+access](AGENT-CLI.md#verify-agent-access). Switching back does not remove or
+encrypt retained file copies.
+
 ## Install with Homebrew
 
 Homebrew is the preferred Mac installation:
@@ -93,7 +153,7 @@ path. The archive includes the audited source/docs tree; its Linux QML and
 systemd files do not need installing on a Mac. Raw `omagma-macos-arm64` and
 `omagma-macos-x86_64` executables are also available with `LICENSES.txt`.
 
-## Accounts, Chrome and Keychain
+## Accounts and Chrome
 
 Private configuration is at `$HOME/.config/omagma/config.json`, or
 `$XDG_CONFIG_HOME/omagma/config.json` when set. The terminal cache defaults to
@@ -112,8 +172,11 @@ actual named profile directory from `chrome://version`, such as `Profile 1`,
 for each account. Display labels are not directory names; `Default` is rejected
 to avoid ambiguous routing. Never put unexpanded `$HOME` or `~` inside JSON.
 
-Refresh tokens use the current default user Keychain, normally your login
-keychain. Terminal identity includes the account, Google registration and grant.
+### Interactive Keychain access
+
+With the default `keyring` store, refresh tokens use the current default user
+Keychain, normally your login keychain. Terminal identity includes the account,
+Google registration and grant.
 A binary upgrade retains those identities. Native checks suppress their own UI
 and refuse a known locked keychain. Apple's signed Keychain tool provides stable
 reads and a deletion fallback across re-signed upgrades; tokens stay on private
@@ -132,11 +195,13 @@ security unlock-keychain ~/Library/Keychains/login.keychain-db
 ```
 
 Do not put that password in a command argument or send it to an agent. A remote
-SSH login has its own security session and can see the Keychain as locked while
-the Mac desktop sees it as unlocked. If `omagma tui` reports
-`KeyringUnavailable` over SSH, quit it, run the same unlock command in that SSH
-shell, and reopen Omagma from that shell. A new SSH login may need its own
-unlock. This does not require another Google sign-in.
+SSH login or agent subprocess can have a different security/audit session and
+refuse Keychain access while the desktop sees it as unlocked. An unlocked
+interactive TUI does not prove that another context can read the same items.
+For Interactive use, unlock and retry in the terminal where you run Omagma.
+For agent use, follow the migration route above from a context able to access
+the existing Keychain credentials. Neither route requires another Google
+sign-in merely to change local credential storage.
 
 When using credentials imported from another computer, macOS may also ask you
 to approve the first read of an **Omagma account credential** by its signed
@@ -145,8 +210,9 @@ This Keychain approval is separate from Google consent and does not require
 reauthorizing the Gmail account.
 
 Follow [account setup](SETUP.md) for Google Console, per-account consent and
-reconnection. An agent can verify status and real mail/contact reads after
-consent; installation needs no test send, contact edit, fixture suite or GUI
+reconnection. Agent-enabled setup verifies status and real mail/contact reads
+through CLI subprocesses in the intended agent context after consent or
+migration. Installation needs no test send, contact edit, fixture suite or GUI
 qualification.
 
 ## Upgrade, remove and background fetching

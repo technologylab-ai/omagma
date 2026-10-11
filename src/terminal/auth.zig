@@ -142,9 +142,9 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
     const path = if (j.get(request, "grantFile")) |v| try j.string(v) else try defaultFile(a, env);
     var registry = try load(io, a, path);
     const current = find(&registry, account);
-    if (std.mem.eql(u8, command, "auth.status")) return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = current != null, .grant = current });
+    if (std.mem.eql(u8, command, "auth.status")) return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = current != null, .grant = current, .credentialStore = @tagName(config.credential_store), .credentialDirectory = config.credential_directory.slice() });
     if (std.mem.eql(u8, command, "auth.revoke")) {
-        try keyring.clearTerminal(io, account);
+        try keyring.clearTerminal(io, config.credentials(), account);
         var accounts: std.ArrayList(Grant) = .empty;
         for (registry.accounts) |grant| if (!std.mem.eql(u8, grant.account, account)) try accounts.append(a, grant);
         registry.accounts = accounts.items;
@@ -170,7 +170,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
         }
     }
     const identity = grantIdentity(scopes);
-    try platform.deadline(io, platform.seconds(180), oauth.authorizeScoped, .{ io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, @as(?oauth.TerminalCredential, .{ .grant_id = &identity }) });
+    try platform.deadline(io, platform.seconds(180), oauth.authorizeScoped, .{ io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, @as(?oauth.TerminalCredential, .{ .grant_id = &identity }), config.credentials() });
     const grant: Grant = .{ .account = try a.dupe(u8, account), .clientFile = try a.dupe(u8, client_file), .clientId = try a.dupe(u8, desktop.client_id.slice()), .grantId = try a.dupe(u8, &identity), .capabilities = caps, .scopes = scopes };
     var accounts: std.ArrayList(Grant) = .empty;
     for (registry.accounts) |old| if (!std.mem.eql(u8, old.account, account)) try accounts.append(a, old);

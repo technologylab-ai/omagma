@@ -52,6 +52,11 @@ fn usageError(err: anyerror) bool {
         error.Args,
         error.AccountRequired,
         error.ConfigRequired,
+        error.CredentialStoreRequired,
+        error.InvalidCredentialStore,
+        error.CredentialDirectoryRequired,
+        error.InvalidCredentialDirectory,
+        error.InvalidCredentialOption,
         error.UrlRequired,
         error.ValueOutOfRange,
         => true,
@@ -64,6 +69,7 @@ fn printHelp(io: std.Io) !void {
     try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
     try writer.interface.flush();
     try @import("terminal/cli.zig").help(io);
+    try @import("terminal/credential_cli.zig").help(io);
 }
 fn app(init: std.process.Init) !void {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
@@ -79,6 +85,7 @@ fn app(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.skip();
     const mode = args.next() orelse "help";
+    if (std.mem.eql(u8, mode, "credentials")) return @import("terminal/credential_cli.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "__wait-probe-child")) return @import("platform.zig").waitCancellationChild(io);
     if (std.mem.eql(u8, mode, "probe-keyring-upgrade")) {
         const phase = args.next() orelse return error.Args;
@@ -242,7 +249,7 @@ fn app(init: std.process.Init) !void {
         if (!a.enabled) return error.AccountDisabled;
         try @import("open_target.zig").checkProfile(io, &config, a);
         if (config.client_file.len == 0) return error.OAuthClientRequired;
-        try @import("platform.zig").deadline(io, @import("platform.zig").seconds(l.auth_seconds), oauth.authorize, .{ io, config.client_file.slice(), a.address.slice(), a.profile.slice(), config.chrome.slice() });
+        try @import("platform.zig").deadline(io, @import("platform.zig").seconds(l.auth_seconds), oauth.authorize, .{ io, config.client_file.slice(), a.address.slice(), a.profile.slice(), config.chrome.slice(), config.credentials() });
     } else if (std.mem.eql(u8, mode, "status")) {
         var buffer: [4096]u8 = undefined;
         var writer = std.Io.File.stdout().writer(io, &buffer);
@@ -273,6 +280,8 @@ test {
     std.testing.refAllDecls(@import("http_client.zig"));
     std.testing.refAllDecls(@import("oauth.zig"));
     std.testing.refAllDecls(@import("keyring.zig"));
+    std.testing.refAllDecls(@import("keyring_file.zig"));
+    std.testing.refAllDecls(@import("terminal/credential_cli.zig"));
     std.testing.refAllDecls(@import("terminal/capped_allocator.zig"));
     std.testing.refAllDecls(@import("terminal/core.zig"));
     std.testing.refAllDecls(@import("terminal/cli_plan.zig"));

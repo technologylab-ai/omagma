@@ -321,7 +321,7 @@ Alongside the bar, use a different registration; the bar continues using its
 single `gmail.readonly` permission.
 [Account setup](SETUP.md) is the canonical permission guide.
 
-Tokens stay in Secret Service on Linux or the default user Keychain on macOS; private terminal cache, drafts, contacts and
+Tokens use Secret Service on Linux or the default user Keychain on macOS by default. Explicit Agent-enabled setup uses owner-only credential files shared by the TUI and CLI; [Mac setup](MACOS.md#choose-interactive-or-agent-enabled-setup) explains the choice. Private terminal cache, drafts, contacts and
 receipts are plaintext protected by filesystem permissions. The bar's mail
 cache is memory-only. Accounts, credentials, message IDs and profile routing
 remain separate. [Privacy details](PRIVACY.md).

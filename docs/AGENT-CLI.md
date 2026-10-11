@@ -8,6 +8,52 @@ Authorize live features through [full TUI/CLI permissions](SETUP.md#full-tuicli-
 
 Fixture accounts expose mock send, mailbox-change, contact and RSVP capabilities without OAuth or Google access. Inspect `accounts.list` when selecting capabilities for an actual account.
 
+## Verify agent access
+
+On a new Mac setup, choose [Interactive or Agent-enabled](MACOS.md#choose-interactive-or-agent-enabled-setup)
+before consent. Interactive uses native Keychain by default in a local unlocked
+terminal. Agent-enabled uses the same executable with private owner-only,
+unencrypted token files. Preserve an existing explicit choice during repairs.
+Changing the store needs no Google reauthorization: use the documented
+credential migration from a context able to read the source, then restart open
+sessions. `omagma credentials status --json` reports the selected store without
+token contents; it is a standalone command, not a JSONL account operation.
+
+File credentials avoid Keychain audit-session restrictions, but the agent
+sandbox must still permit the selected config, grant registry, credential and
+cache files and Google network access. Setup does not grant those permissions
+automatically. Use the agent's supported permission mechanism when access is
+denied; a local TUI working in another terminal is insufficient evidence.
+
+For Agent-enabled setup, run real CLI subprocesses **from the intended agent
+context**, using the installed executable and actual private paths:
+
+```sh
+omagma credentials status --json --config /absolute/private/config.json
+omagma terminal-auth status --account personal@example.com \
+  --config /absolute/private/config.json
+omagma cli --config /absolute/private/config.json <<'EOF'
+{"id":"accounts","cmd":"accounts.list"}
+{"id":"mail","cmd":"mail.list","account":"personal@example.com","label":"INBOX","limit":1}
+{"id":"contacts","cmd":"contacts.list","account":"personal@example.com","limit":1}
+EOF
+omagma mail read --account personal@example.com --message-id RETURNED_MESSAGE_ID \
+  --config /absolute/private/config.json
+```
+
+Use a message ID returned by the live list. Repeat per requested account and
+include a custom `--grant-file` consistently when configured. Skip the mail
+read if the mailbox page is empty; skip contacts only when that access was not
+requested. A successful empty page is valid. `accounts.list` checks configured
+accounts/capabilities; successful live mail/contact responses establish provider
+access. Require `ok:true` for each JSONL response; process exit alone does not
+prove that every request succeeded. Do not use `--fixtures`, `--cached` or
+`cacheOnly:true` for this check.
+Keep stdout and agent logs private because successful responses contain real
+mail/contact data. Verification uses reads and needs no test send or mutation.
+For Interactive setup, verify in the user's local unlocked terminal and state
+when agent subprocess access has not been checked.
+
 ## CLI and TUI coverage
 
 The JSONL agent CLI and TUI share the same backend operations, terminal grant,

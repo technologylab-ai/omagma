@@ -30,7 +30,7 @@ release qualification have their own instructions in `AGENTS.md`.
   terminal-only use with its accompanying license notices.
 - Release installation needs no Zig compiler. Check the requested interface's
   dependencies: Omarchy/Quickshell for the bar; a UTF-8 terminal for the TUI;
-  Secret Service/`secret-tool` on Linux, the default unlocked user Keychain on Mac, and Chrome for live Gmail. Only the Linux bar requires Omarchy/Quickshell; do not install it for a Mac terminal request.
+  Chrome for live Gmail; Secret Service/`secret-tool` on Linux or the default unlocked user Keychain on Mac when using the default `keyring` store. Only the Linux bar requires Omarchy/Quickshell; do not install it for a Mac terminal request.
 - If a matching release is unavailable, use the source-build instructions in
   [DEVELOPMENT.md](../../docs/DEVELOPMENT.md#build-from-source) and the exact
   compiler pin in `build.zig.zon`. Select that
@@ -52,9 +52,49 @@ release qualification have their own instructions in `AGENTS.md`.
   `docs/INSTALL.md#other-linux-desktops` only if the user wants one; never
   install the Omarchy `assets/omagma.desktop` there.
 
+## Choose the Mac setup variant
+
+For a new Mac setup, ask which variant the user wants before authorization:
+
+- **Interactive (default):** native Keychain credentials, with TUI/CLI use from
+  a local unlocked terminal.
+- **Agent-enabled:** the same TUI/CLI executable, with refresh tokens stored in
+  private owner-only, **unencrypted files**. This avoids Keychain audit-session
+  restrictions for agent subprocesses.
+
+Reuse the user's existing explicit choice during repairs. Inspect their private
+config and `omagma credentials status --json`; do not ask again or silently
+change the store. Interactive uses `credentialStore: "keyring"` (the default).
+Agent-enabled uses `credentialStore: "file"` and `credentialDirectory` set to an
+absolute canonical private directory outside Git. Keep the directory mode 0700
+and token files 0600; explain that anyone able to read those files can use their
+grants. Fresh authorization/migration may create the leaf and account
+directories when ancestors are safe; existing unsafe owners, modes, ACLs and
+symlinks are refused. Status does not create directories. See
+`docs/MACOS.md#choose-interactive-or-agent-enabled-setup`.
+
+For fresh agent-enabled setup, configure the file store before Google consent;
+authorization writes directly to that store. For existing grants, use
+`omagma credentials migrate --to file --directory /absolute/private/credentials`
+with the existing `--config` and, if customized, `--grant-file`. Run migration
+from a context able to read the source, normally the user's local unlocked Mac
+terminal. It reuses existing grants without another Google sign-in, verifies
+private copies before switching the config, and retains source copies. Later
+migrations respect the current store/registry and do not restore locally revoked
+credentials from retained copies. Omitting `--directory` for a file target uses
+the canonical config directory's `credentials` child. Use `--to keyring` to
+migrate back. Restart open Omagma sessions after switching.
+
+File storage does not grant sandbox permissions. The intended agent context
+still needs access to the selected config, grant registry, cache and credential
+files, and network access to Google. Report a denied path or network request
+and use the agent's supported permission mechanism; do not instruct the user to
+disable the sandbox. Keep tokens out of messages, logs and shared artifacts.
+
 ## Configure accounts
 
-- Reuse the user's existing choices and private config. Ask only for missing
+- Reuse the user's existing choices and private config. After the Mac variant
+  choice, ask only for missing
   account addresses, Chrome profile directories, registration JSON paths and
   background-refresh preference. Configure only requested accounts.
 - Store config under `${XDG_CONFIG_HOME:-$HOME/.config}/omagma/config.json`
@@ -119,15 +159,24 @@ agent-owned consent tabs when finished, preserving unrelated browser tabs.
 
 ## Verify and hand off
 
-Check authorization status and show the user real mail for each requested
-account. Check requested contacts access with a read, too. Use reads for setup
-verification; a test send or contact/mail mutation needs its own user request.
+Check credential and authorization status and show the user real mail for each
+requested account. For agent-enabled setup, run actual CLI subprocesses from
+the intended agent context: JSONL `accounts.list`, live `mail.list`, a
+`mail.read` using a returned ID when mail exists, and live `contacts.list` when
+contacts access was requested. Do not use fixtures or cached-only reads as
+evidence of live access. A successful empty mailbox/contact page is valid;
+an interactive TUI working in another terminal does not prove agent access.
+Follow `docs/AGENT-CLI.md#verify-agent-access` for commands. Keep verification
+output private. For Interactive setup, verify reads in the user's local
+unlocked terminal and state that agent subprocess access has not been checked.
+Use reads for setup verification; a test send or contact/mail mutation needs
+its own user request.
 Have them open a message/Inbox link to confirm its Chrome profile.
 Explain any browser click in advance and keep the verification brief. Restart
-an already open TUI after its grant changes; refresh or restart a disconnected
+an already open TUI after its grant or credential store changes; refresh or restart a disconnected
 bar service after onboarding.
 
-Summarize the launch command/bar action/launcher entry and any shortcut, account/profile mapping, permissions,
+Summarize the selected credential variant, launch command/bar action/launcher entry and any shortcut, account/profile mapping, permissions,
 background behavior and reconnection command. Keep credentials and real mail
 out of public artifacts. Installation does not imply permission to send mail
 or edit contacts; those actions require the user's own request or explicit

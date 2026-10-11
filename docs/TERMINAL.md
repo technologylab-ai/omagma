@@ -2,7 +2,7 @@
 
 **Experimental:** Omagma's TUI and agent CLI are under active development. This guide describes the current application. See the tiered [feature catalogue](FEATURES.md) and [installation](INSTALL.md).
 
-The TUI and CLI run natively on Linux and macOS; only the Linux Omarchy bar needs Quickshell. The terminal needs a UTF-8 terminal, Chrome and your private account configuration. Linux uses unlocked Secret Service with `secret-tool`; Mac uses the unlocked default user Keychain. A release binary needs no Zig compiler. [Mac installation](MACOS.md) covers Homebrew and native bundles.
+The TUI and CLI run natively on Linux and macOS; only the Linux Omarchy bar needs Quickshell. The terminal needs a UTF-8 terminal, Chrome and your private account configuration. System credentials use unlocked Secret Service with `secret-tool` on Linux or the default user Keychain on Mac. Mac setup offers Interactive (Keychain) and Agent-enabled (private credential files), with the same TUI and CLI in both modes. A release binary needs no Zig compiler. [Mac installation](MACOS.md) covers the choice, Homebrew and native bundles.
 
 ## Start
 

@@ -1036,6 +1036,8 @@ test "refresh lease rejects symlink directory fifo and public mode before blocki
     try std.testing.expectError(error.InsecureRefreshLease, RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
     try dir.deleteFile(std.testing.io, "refresh.lock");
     const file = try dir.createFile(std.testing.io, "refresh.lock", .{ .permissions = .fromMode(0o644) });
+    // Creation is affected by the caller's umask; exercise the unsafe mode explicitly.
+    try file.setPermissions(std.testing.io, .fromMode(0o644));
     file.close(std.testing.io);
     try std.testing.expectError(error.InsecureRefreshLease, RefreshLease.acquire(std.testing.io, root, "fictional@example.test", .{ .fixtures = true }));
 }

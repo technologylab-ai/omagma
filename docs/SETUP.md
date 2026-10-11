@@ -10,6 +10,11 @@ Chrome profile. You complete the Google registration and approval clicks.
 Tell it whether you want read-only browsing or full TUI/CLI access. The steps
 below also work for manual setup.
 
+On a new Mac setup, also choose [Interactive or Agent-enabled](MACOS.md#choose-interactive-or-agent-enabled-setup).
+Interactive defaults to native Keychain for a local unlocked terminal;
+Agent-enabled uses the same executable with private owner-only, unencrypted
+token files. An existing explicit choice is preserved during repairs.
+
 Choose the access you want before connecting an account:
 
 | Interface | Google permissions | Google OAuth registration |
@@ -76,13 +81,33 @@ Each account may also set `"senderName": "Alex Example"` and
 characters. Signatures are plain text; newlines and tabs are allowed, while
 other ASCII controls are rejected.
 
+### Credential storage
+
+`credentialStore` is `"keyring"` by default: Secret Service on Linux and the
+current default user Keychain on macOS. The keyring must be available and
+unlocked in the context running Omagma. To authorize directly into the file
+store, add `"credentialStore": "file"` and set `credentialDirectory` to an
+absolute canonical private directory before consent. The directory uses mode
+`0700`, token files use `0600`, and **tokens are not encrypted at rest**. Keep
+them outside Git and shared folders. The agent sandbox still needs the selected
+file permissions and Google network access. Authorization/migration may create
+the leaf directory and account subdirectories when ancestors are safe; unsafe
+existing owners, modes, ACLs or symlinks are refused.
+
+Inspect the selected store with `omagma credentials status --json`, using your
+usual `--config` and custom `--grant-file` when applicable. For existing grants,
+use [credential migration](MACOS.md#choose-interactive-or-agent-enabled-setup)
+from a context able to read the source. Migration needs no new Google consent,
+verifies private destination copies before switching the config, and retains
+source copies. Restart open sessions after switching stores.
+
 ## Connect each enabled account
 
 ```sh
 zig-out/bin/omagma auth --account personal@example.com --config "${XDG_CONFIG_HOME:-$HOME/.config}/omagma/config.json"
 ```
 
-Complete Google consent in the opened Chrome profile within **180 seconds**. omagma checks the returned Gmail identity against the configured address before storing a refresh token in the platform keyring: Secret Service on Linux or the current default user Keychain on macOS. Repeat the command for each other enabled address. The keyring must be available and unlocked.
+Complete Google consent in the opened Chrome profile within **180 seconds**. omagma checks the returned Gmail identity against the configured address before storing a refresh token in the selected credential store. Repeat the command for each other enabled address. With the default `keyring` store, the platform keyring must be available and unlocked.
 
 For the bar, use the live entry in [installation](INSTALL.md) and refresh the account after connecting. If you previously chose its optional demo mode, set `fixtures` to `false`. If consent expires or access is revoked, run `auth` again for that account. There is currently no in-dropdown Connect action. Verify that **Open inbox** and message links reach the intended account in the intended profile.
 
@@ -118,7 +143,7 @@ On Mac, and on Linux without the bar, one Google OAuth registration is enough:
 2. Configure the Google Auth consent screen. Use **External** for accounts from different Workspace organizations and add intended accounts as test users while in **Testing**.
 3. In **Data access**, add the two full scope URLs above.
 4. In **Clients → Create client**, select **Application type → Desktop app**, name it `Omagma Terminal`, create it and download the JSON to a private local file with mode `0600`.
-5. Configure your requested accounts and existing Chrome profiles. Omit `oauthClientFile` or leave it empty; there is no read-only bar registration to preserve.
+5. Configure your requested accounts, existing Chrome profiles and chosen credential store before consent. Omit `oauthClientFile` or leave it empty; there is no read-only bar registration to preserve.
 6. Run the six-capability authorization command below with `--client-file`, then check status and real mail/contacts with reads. Homebrew users invoke `omagma` instead of `zig-out/bin/omagma`.
 
 Do not create or authorize a bar registration solely to use the TUI or CLI. If you later add a Linux bar, give it its own read-only registration.
@@ -179,8 +204,9 @@ permissions. Repeat authorization for each additional configured account
 completion before opening the next account's consent; credentials remain
 separate per account. An agent can confirm the recorded capabilities and read
 mail/contacts to check access; setup does not require sending a test message or
-changing your data.
-Tokens live in Secret Service on Linux and the current default user Keychain on macOS. The private grant registry defaults to
+changing your data. For Agent-enabled setup, [verify live CLI subprocess reads](AGENT-CLI.md#verify-agent-access)
+from the intended agent context rather than relying on an interactive TUI.
+Tokens live in the selected credential store. The private grant registry defaults to
 `${XDG_CONFIG_HOME:-$HOME/.config}/omagma/terminal-grants.json`; if you choose a
 custom `--grant-file`, use it consistently for consent, status, TUI and CLI.
 
@@ -227,7 +253,7 @@ the read-only bar grant. To enable that timer, configure the bar's read-only
 registration and run `auth` for each requested account even if you never install the
 bar widget. The full terminal grant alone does not authorize automatic cache
 fetching. Both credentials can coexist in the same private account config and
-separate keyring namespaces. This optional background setup is not a prerequisite
+separate credential namespaces. This optional background setup is not a prerequisite
 for interactive terminal use. Mac installation does not install the supplied
 Linux systemd units or create a Mac background service.
 

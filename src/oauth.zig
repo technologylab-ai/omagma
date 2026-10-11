@@ -265,11 +265,11 @@ var auth_url: [8192]u8 = undefined;
 var auth_header: [8192]u8 = undefined;
 var auth_desktop: DesktopClient = .{};
 
-pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8) !void {
-    try authorizeScoped(io, client_file, address, profile, chrome, &.{readonly_scope}, null);
+pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, credentials: keyring.Settings) !void {
+    try authorizeScoped(io, client_file, address, profile, chrome, &.{readonly_scope}, null, credentials);
 }
 pub const TerminalCredential = struct { grant_id: []const u8 };
-pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, terminal: ?TerminalCredential) !void {
+pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, terminal: ?TerminalCredential, credentials: keyring.Settings) !void {
     try validateScopeSet(scopes);
     if (terminal == null and (scopes.len != 1 or !std.mem.eql(u8, scopes[0], readonly_scope))) return error.UnexpectedScope;
     try b.address(address);
@@ -346,7 +346,7 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     const identity = try client.request("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, tokens.access_token, null, &token_body);
     try verifyProfile(identity.status, identity.body, address);
     const refresh_token = std.mem.sliceTo(&auth_refresh, 0);
-    if (terminal) |credential| try keyring.storeTerminal(io, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token) else try keyring.store(io, address, refresh_token);
+    if (terminal) |credential| try keyring.storeTerminal(io, credentials, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token) else try keyring.store(io, credentials, address, auth_desktop.client_id.slice(), refresh_token);
 }
 fn acceptCallback(io: std.Io, listener: *std.Io.net.Server, callback: *Callback) anyerror![]const u8 {
     for (0..2) |_| {
@@ -515,5 +515,5 @@ test "terminal scopes match complete returned grant without relaxing bar policy"
     try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, missing, &access, null, &expected));
     const repeated = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-access\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.readonly\"}";
     try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, repeated, &access, null, &expected));
-    try std.testing.expectError(error.UnexpectedScope, authorizeScoped(std.testing.io, "/nonexistent-synthetic-client", "synthetic@example.test", "synthetic-profile", "/usr/bin/true", &expected, null));
+    try std.testing.expectError(error.UnexpectedScope, authorizeScoped(std.testing.io, "/nonexistent-synthetic-client", "synthetic@example.test", "synthetic-profile", "/usr/bin/true", &expected, null, .{}));
 }

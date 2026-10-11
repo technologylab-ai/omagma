@@ -12,15 +12,42 @@ Gmail links open in the account’s configured Chrome profile. Reading a message
 
 ## Credentials and consent
 
-Refresh tokens are stored in Secret Service on Linux or the current default user Keychain on macOS, using Omagma’s service namespace and verified account identity. Token contents never go in command-line arguments. Access tokens remain in backend memory. Neither token type is sent to the bar UI or terminal client’s response frames.
+Refresh tokens use the configured credential store. The default
+`credentialStore: "keyring"` uses Secret Service on Linux or the current default
+user Keychain on macOS, with Omagma’s service namespace and verified account
+identity. The explicitly chosen `"file"` store uses `credentialDirectory`, an
+absolute canonical private directory with mode `0700` and owner-only `0600`
+token files. **File-store refresh tokens are unencrypted on disk.** Anyone
+able to read them can use the corresponding grants; keep them outside Git,
+shared folders and public artifacts. Access tokens remain in backend memory.
+Token contents never go in command-line arguments or the bar UI/terminal
+response frames.
 
-Mac entries trust Omagma and Apple’s signed `/usr/bin/security` helper, allowing reads and scoped deletion fallback after a re-signed binary upgrade. Native checks target the exact default keychain and account/grant, suppress their own UI, and refuse a known locked keychain before starting a signed helper. If the lock state changes during handoff or an item’s ACL was edited, the operating system may still request permission. A blocked helper is canceled at Omagma’s finite deadline. Unlock the keychain explicitly and retry if Omagma reports `KeyringUnavailable`. This is per-user credential storage, consistent with Linux Secret Service, rather than isolation from programs with equivalent user access.
+With the Mac keyring store, entries trust Omagma and Apple’s signed `/usr/bin/security` helper, allowing reads and scoped deletion fallback after a re-signed binary upgrade. Native checks target the exact default keychain and account/grant, suppress their own UI, and refuse a known locked keychain before starting a signed helper. If the lock state changes during handoff or an item’s ACL was edited, the operating system may still request permission. A blocked helper is canceled at Omagma’s finite deadline. Unlock the keychain explicitly and retry if Omagma reports `KeyringUnavailable`. This is per-user credential storage, consistent with Linux Secret Service, rather than isolation from programs with equivalent user access.
+
+Mac [Agent-enabled setup](MACOS.md#choose-interactive-or-agent-enabled-setup)
+uses the same binary with file credentials to avoid Keychain audit-session
+restrictions. It does not grant an agent sandbox access to config, grants,
+cache, credentials or Google network endpoints; those permissions remain
+necessary. A working local TUI does not establish that an agent subprocess can
+read the account.
+
+`omagma credentials status --json` reports credential-store status without token
+contents. `omagma credentials migrate --to file --directory ABS` or
+`--to keyring` reuses existing config and grants without Google reauthorization.
+Run migration where the source is accessible. Destination copies are verified
+before the config switches atomically, and **source copies are retained**.
+Later migrations respect the current store and grant registry, so retained
+copies do not restore locally revoked credentials.
+Restart open sessions after switching. Migration back to Keychain does not
+encrypt or remove retained file copies; account for them when removing local
+credentials.
 
 Consent opens your configured Chrome profile and returns through a temporary local IPv4 callback listener. Omagma verifies the random state, PKCE exchange and returned Gmail identity before accepting the grant. The consent command has a 180-second deadline. Keep the downloaded Google OAuth registration JSON and account configuration private, outside Git. Google treats installed applications as unable to keep registration secrets confidential; refresh tokens still need protection. [Google’s installed-app model](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 ## Terminal client
 
-The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate namespace on either platform. If you use a bar/read-only registration, broader terminal access uses a different Google OAuth registration so the read-only authorization remains intact. Terminal-only setup needs just one registration. Installation or read access alone does not authorize an agent to send mail or change contacts.
+The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate namespace in the selected credential store. If you use a bar/read-only registration, broader terminal access uses a different Google OAuth registration so the read-only authorization remains intact. Terminal-only setup needs just one registration. Installation or read access alone does not authorize an agent to send mail or change contacts.
 
 Terminal modes save cached mail, local drafts, contacts and operation receipts in owner-only directories and files. The defaults are `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; directories use mode 0700 and files use 0600. Live and fixture data have separate namespaces, and account/message filename components are hashes. **Mail and drafts are plaintext on disk, not encrypted at rest.** Filesystem permissions restrict access; a backup or administrator with file access can still read them.
 
@@ -43,7 +70,7 @@ autosaving do not send mail.
 
 The reader’s link chooser opens only an explicitly selected HTTP(S) URL in the account’s Chrome profile. Received attachments are saved only after you choose a destination; existing files are not overwritten. Its Open action delegates a saved, private file of a supported document/image type to the desktop viewer. Reading mail does not automatically launch a link or attachment.
 
-Fixture providers make no Gmail API or keyring requests. You can try fictional mail with `omagma tui --fixtures`; this is optional and does not grant live permissions.
+Fixture providers make no Gmail API or credential-store requests. You can try fictional mail with `omagma tui --fixtures`; this is optional and does not grant live permissions.
 
 ## Release checks
 
@@ -56,6 +83,6 @@ times, retry delays, dismissal and this preference; see [updates](UPDATES.md).
 
 ## Disconnect or remove
 
-Removing the Linux widget, uninstalling Homebrew’s `omagma` formula, or removing a manually installed executable leaves your private configuration, cache and keyring credentials available for later use. The bar protocol’s `disconnect` command removes its local account token and clears its memory cache. `omagma terminal-auth revoke --account ACCOUNT` removes the terminal token and registry entry; use your usual `--config` and `--grant-file` options when you selected non-default paths.
+Removing the Linux widget, uninstalling Homebrew’s `omagma` formula, or removing a manually installed executable leaves your private configuration, cache and credentials available for later use. The bar protocol’s `disconnect` command removes its local account token from the selected store and clears its memory cache. `omagma terminal-auth revoke --account ACCOUNT` removes the terminal token from the selected store and its registry entry; use your usual `--config` and `--grant-file` options when you selected non-default paths. Local removal from the active store does not remove source copies retained by an earlier migration.
 
 These local removals do not revoke Google’s grant or erase terminal cache files. To invalidate Google-side access, revoke Omagma in your Google Account. To delete local mail, review the private cache directory and any files you explicitly saved. Keep real mail, addresses, message IDs, OAuth downloads and callback URLs out of public issues, screenshots and shared logs.

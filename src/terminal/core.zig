@@ -222,7 +222,9 @@ pub const Session = struct {
     }
     fn errorMessage(err: anyerror) []const u8 {
         return switch (err) {
-            error.PermissionDenied => "This account lacks the required capability; authorize terminal access separately",
+            error.PermissionDenied => "Permission denied: check the account capability and the agent's access to Omagma files and network",
+            error.CredentialStorageAccessDenied => "The OS or sandbox denied access to the configured private credential files",
+            error.KeyringUnavailable => "The selected system credential store is unavailable in this process session; use an unlocked session or explicitly migrate to file storage",
             error.UnknownAccount => "Choose an explicitly configured account",
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
             error.OperationConflict => "This operation identity was already used for different content",

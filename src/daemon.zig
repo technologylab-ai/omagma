@@ -201,7 +201,7 @@ const Daemon = struct {
                 worker.cancel_event.set(self.io);
             }
             a.pending = false;
-            if (!self.options.fixtures) try keyring.clear(self.io, a.address.slice());
+            if (!self.options.fixtures) try keyring.clear(self.io, self.config.credentials(), a.address.slice());
             a.snapshot = .{};
             a.state = .disconnected;
             a.error_code = .{};

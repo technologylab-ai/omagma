@@ -14,9 +14,35 @@ The root `AGENTS.md` directs installation/onboarding requests to `skills/omagma-
 
 Add your account addresses, existing Chrome profile directories, and whether you want five-minute background refresh. Provide a downloaded Google OAuth registration JSON's local path when available; do not paste its contents or account tokens into chat. The agent can prepare and validate local configuration while you approve Google consent in Chrome.
 
-The preferred installation needs no Zig compiler. On Mac, use `brew install renerocksai/tap/omagma`; the [Mac guide](MACOS.md) also covers verified Apple Silicon/Intel bundles. Linux x86_64 and arm64 bundles include the static musl backend and bar UI. Only the Linux bar requires Omarchy/Quickshell. Live mail uses Chrome and an unlocked platform keyring. ARM backend build/test checks do not establish ARM desktop integration.
+The preferred installation needs no Zig compiler. On Mac, use `brew install renerocksai/tap/omagma`; the [Mac guide](MACOS.md) also covers verified Apple Silicon/Intel bundles. Linux x86_64 and arm64 bundles include the static musl backend and bar UI. Only the Linux bar requires Omarchy/Quickshell. Live authorization uses Chrome; the default credential store needs an unlocked platform keyring. ARM backend build/test checks do not establish ARM desktop integration.
 
 If no compatible release asset exists, use a source checkout with exact Zig **0.17.0**. Omarchy may still ship 0.16.x: download the verified 0.17.0 archive matching the host OS/CPU from [the versioned release directory](https://ziglang.org/download/0.17.0/), extract it, prepend its directory to the task's `PATH`, and confirm `zig version`. Keep the system compiler unchanged, follow [the source-build instructions](DEVELOPMENT.md#build-from-source) using `safe`, and verify the resulting binary's version.
+
+## Mac setup choice
+
+Starting from the public URL is enough. On a new Mac setup, the agent asks which
+variant you want before connecting accounts:
+
+- **Interactive (default):** native Keychain, for the TUI/CLI in a local
+  unlocked terminal.
+- **Agent-enabled:** the same TUI/CLI binary, with private owner-only,
+  **unencrypted token files**, avoiding Keychain audit-session restrictions for
+  agent subprocesses.
+
+An existing explicit choice persists during repairs; the agent does not ask
+again or silently change it. File credentials still require your agent sandbox
+to allow the selected config, grants, cache and credential files and Google
+network access. This choice does not grant those permissions automatically.
+See [Mac setup and migration](MACOS.md#choose-interactive-or-agent-enabled-setup)
+for `credentialStore`, `credentialDirectory` and the credential commands.
+
+For fresh Agent-enabled setup, configure the file store before consent.
+For existing grants, run migration from a context that can access the source,
+normally a local unlocked Mac terminal. Migration verifies private copies
+before switching the config, retains the source copies and needs no new Google
+sign-in. Restart open sessions after switching. The agent then [verifies live
+account/mail/contact reads through CLI subprocesses](AGENT-CLI.md#verify-agent-access)
+in its actual execution context; a working interactive TUI alone is insufficient.
 
 ## Optional setup skill
 
@@ -52,4 +78,4 @@ For `omagma tui`, the JSONL agent client, cached full mail, drafts and scoped wr
 
 For a fresh Mac/Linux terminal installation, or full access alongside an existing bar, use:
 
-> Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Install Omagma’s experimental TUI and CLI on my computer; prefer brew install renerocksai/tap/omagma on macOS, or download and verify the matching Linux bundle. Follow skills/omagma-setup/SKILL.md and the full TUI/CLI permissions section of docs/SETUP.md. Reuse my existing Google project and private configuration where available. For terminal-only setup, use one Google OAuth registration without creating a bar setup; if I already use the bar, preserve it and use a different terminal registration. Walk me through Gmail/People APIs, scopes and the registration JSON one step at a time, waiting for my feedback. Open each account’s consent sequentially in its existing Chrome profile. Confirm grants and mail/contact reads without sending or changing data, then give me launch and reconnect instructions.
+> Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Install Omagma’s experimental TUI and CLI on my computer; prefer brew install renerocksai/tap/omagma on macOS, or download and verify the matching Linux bundle. Follow skills/omagma-setup/SKILL.md and the full TUI/CLI permissions section of docs/SETUP.md. On a new Mac setup, ask whether I want Interactive (default Keychain) or Agent-enabled (the same binary with private owner-only, unencrypted token files); retain an existing explicit choice during repairs. Reuse my existing Google project and private configuration where available. For terminal-only setup, use one Google OAuth registration without creating a bar setup; if I already use the bar, preserve it and use a different terminal registration. Walk me through Gmail/People APIs, scopes and the registration JSON one step at a time, waiting for my feedback. Open each account’s consent sequentially in its existing Chrome profile. For Agent-enabled setup, verify grants and live account/mail/contact reads through CLI subprocesses in the intended agent context, including its file/network permissions. Do not send or change data during verification. Give me launch and reconnect instructions.

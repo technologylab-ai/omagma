@@ -9,6 +9,11 @@ pub const Config = struct {
     chrome: b.Text(4096) = .{},
     chrome_data: b.Text(4096) = .{},
     refresh_seconds: u32 = 0,
+    credential_store: @import("keyring.zig").Kind = .keyring,
+    credential_directory: b.Text(4096) = .{},
+    pub fn credentials(self: *const Config) @import("keyring.zig").Settings {
+        return .{ .kind = self.credential_store, .directory = self.credential_directory.slice() };
+    }
     pub fn defaults(self: *Config, home: []const u8) !void {
         self.* = .{};
         try self.chrome.set(if (@import("builtin").os.tag == .macos) "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" else "/usr/bin/google-chrome-stable");
@@ -27,9 +32,19 @@ pub const Config = struct {
     pub fn load(self: *Config, io: std.Io, path: []const u8, allocator: std.mem.Allocator, storage: []u8) !void {
         const text = try std.Io.Dir.cwd().readFile(io, path, storage);
         if (text.len == storage.len) return error.ConfigTooLarge;
+        return self.parse(allocator, text);
+    }
+    pub fn parse(self: *Config, allocator: std.mem.Allocator, text: []const u8) !void {
         const parsed = try b.parse(allocator, text);
         defer parsed.deinit();
         const root = parsed.value;
+        if (b.optional(root, "credentialStore")) |v| self.credential_store = std.meta.stringToEnum(@import("keyring.zig").Kind, try b.string(v)) orelse return error.InvalidCredentialStore;
+        if (b.optional(root, "credentialDirectory")) |v| {
+            const directory = try b.string(v);
+            if (directory.len < 2 or directory[0] != '/' or std.mem.indexOfScalar(u8, directory, 0) != null) return error.InvalidCredentialDirectory;
+            try self.credential_directory.set(directory);
+        }
+        if (self.credential_store == .file and self.credential_directory.len == 0) return error.CredentialDirectoryRequired;
         if (b.optional(root, "refreshIntervalSeconds")) |v| {
             if (v != .integer) return error.InvalidRefreshInterval;
             const seconds = v.integer;

@@ -164,7 +164,7 @@ pub const NetworkSession = struct {
         errdefer std.crypto.secureZero(u8, refresh);
         const access = try a.alloc(u8, 4096);
         errdefer std.crypto.secureZero(u8, access);
-        const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (if (bar_only) try keyring.lookupAutomatic(io, account, refresh) else try keyring.lookup(io, account, refresh)) orelse return error.NotConnected;
+        const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, config.credentials(), account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (if (bar_only) try keyring.lookupAutomatic(io, config.credentials(), account, self.desktop.client_id.slice(), refresh) else try keyring.lookup(io, config.credentials(), account, self.desktop.client_id.slice(), refresh)) orelse return error.NotConnected;
         // One absolute attachment deadline covers token refresh, the profile
         // check, the streamed download and its single 401 retry. Every other
         // command keeps the ordinary client deadline.
