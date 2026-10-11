@@ -11296,6 +11296,8 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = Key.enter });
     try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
@@ -11311,6 +11313,12 @@ test "local UI: help search matches actions keys and sections and cycles without
     try std.testing.expectEqualStrings("Ctrl+F / Ctrl+Shift+F", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Ctrl+S / :send", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings("Tab · Ctrl+S · Esc", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
+    try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
 
     try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
     try app.onHelpKey(.{ .codepoint = 'p', .text = "personalize" });
