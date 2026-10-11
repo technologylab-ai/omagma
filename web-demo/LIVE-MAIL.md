@@ -14,18 +14,37 @@ this first live mode.
 
 ## Load existing credentials
 
-Use the local credential controls to select the files from an existing Omagma
-file-backed setup:
+Export one connection file using the prototype's native command:
 
-- The Google OAuth client JSON, containing the `installed` client object.
-- `terminal-grants.json`, containing the account/client identity and explicitly
-  granted capabilities.
-- The matching owner-side `.token` files from the private credential directory.
-  A token-folder chooser can locate the hashed account subdirectories.
+```sh
+zig build -Doptimize=debug -Dtui=false -j2 --prefix .development-export
+.development-export/bin/omagma credentials export --format browser \
+  --output "$HOME/.config/omagma/browser/connection.json"
+```
+
+Then choose **Connect Gmail → Select connection file** and select that file.
+The command reads the existing enabled terminal grants and their credentials
+from the selected native store, including Secret Service or Keychain. It makes
+no Google requests and leaves that store and configuration unchanged. The
+export contains refresh tokens; its canonical parent must be private, the
+file is created with owner-only permissions, and an existing output is never
+overwritten. Output inside a repository is refused. Custom setups can pass
+`--config` and `--grant-file`.
+
+The separate `credentials migrate --to file` command copies and verifies
+credentials before switching the native store. Exporting for the browser does
+not require that migration. The installed release must gain this command
+before its ordinary `omagma` executable can be used; the example above builds
+and uses a separate development executable.
+
+For an existing file-backed setup, the collapsed **Use separate files**
+controls also accept the Google OAuth client JSON, `terminal-grants.json` and
+the matching `.token` files or token folder.
 
 The page reads selected files locally. It does not upload them to the static
-server or follow paths embedded in those files. Each token is paired with the
-account, client and grant from its exact native filename namespace. The Google
+server or follow paths embedded in those files. The bundle carries the account,
+client, grant and capabilities together; separate token files are paired by
+their exact native filename namespace. The Google
 token endpoint verifies the refresh credentials, and the Zig adapter verifies
 the Gmail account profile before exposing that account's messages.
 
@@ -33,12 +52,11 @@ Existing grants are preserved. A read-only grant permits reading; a reply or
 new message requires an explicitly declared send capability and a token with
 the necessary Gmail scope. The browser does not upgrade permissions or start a
 new consent flow. The native Secret Service and Keychain cannot be read by a
-webpage. If credentials currently live only in either store, an explicit
-native export/migration or a later browser OAuth flow is needed.
+webpage; the explicit native export supplies the selected credentials.
 
 Credentials stay in the current browser session. Disconnect clears the active
 connection and invalidates pending results. Reloading requires loading the
-files again. Browser JavaScript can access the credentials it reads, so use the
+connection file again. Browser JavaScript can access the credentials it reads, so use the
 controlled local page or a deployment you trust.
 
 ## Read and reply

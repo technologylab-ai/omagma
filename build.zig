@@ -45,6 +45,13 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "version", @import("build.zig.zon").version);
     options.addOption(bool, "tui", vaxis != null);
     m.addOptions("build_options", options);
+    const browser_export_module = b.createModule(.{ .root_source_file = b.path("src/browser_export_main.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos });
+    if (macos_sdk) |sdk| linkNativeKeychain(browser_export_module, sdk);
+    const browser_export = b.addExecutable(.{ .name = "omagma-browser-export", .root_module = browser_export_module, .linkage = if (target.result.os.tag == .linux) .static else null });
+    b.step("browser-export", "Build the offline private browser connection exporter").dependOn(&b.addInstallArtifact(browser_export, .{}).step);
+    const browser_export_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_export_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
+    if (macos_sdk) |sdk| linkNativeKeychain(browser_export_tests.root_module, sdk);
+    b.step("test-browser-export", "Check private browser export with synthetic file credentials").dependOn(&b.addRunArtifact(browser_export_tests).step);
     if (vaxis) |v| m.addImport("vaxis", v.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "omagma", .root_module = m, .linkage = if (target.result.os.tag == .linux) .static else null, .use_llvm = if (vaxis != null) true else null });
     b.installArtifact(exe);

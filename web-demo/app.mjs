@@ -2,7 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { boundedSize, BrowserWasmBridge } from './bridge.mjs';
-import { importCredentialFiles } from './credentials.mjs';
+import { importCredentialFiles, importConnectionFile } from './credentials.mjs';
 import { SessionTransport, pendingSend, acknowledgePendingSend } from './transport.mjs';
 
 const select = selector => document.querySelector(selector);
@@ -96,7 +96,7 @@ function updateControls() {
   resetButton.disabled = !ready || lifecycleBusy || mode !== 'demo';
   connectButton.hidden = mode !== 'demo';
   connectButton.disabled = !ready || lifecycleBusy || credentialBusy || !canConnect;
-  connectButton.title = canConnect ? 'Select existing Omagma file credentials' : 'Live mail requires a JSPI-capable browser and the live browser build';
+  connectButton.title = canConnect ? 'Load your existing Omagma accounts' : 'Live mail requires a JSPI-capable browser and the live browser build';
   disconnectButton.hidden = mode === 'demo';
   disconnectButton.disabled = mode === 'demo';
   credentialSubmit.disabled = credentialBusy || lifecycleBusy;
@@ -106,8 +106,9 @@ function updateControls() {
   select('#send-uncertainty').hidden = !pendingSend() || info.sendPhase === 'sending';
   select('#send-acknowledge').disabled = info.busy;
   if (ready && !error) runtimeStatus.textContent = mode === 'connecting' ? 'Verifying accounts with Google…' : (info.busy ? 'Google request in progress…' : 'Running locally in WebAssembly');
-  modeStatus.textContent = mode === 'demo' ? 'Fictional mail · in memory only' : (mode === 'connecting' ? 'Connecting · session memory only' : 'Live Gmail · session memory only');
-  select('.window-subtitle').textContent = mode === 'demo' ? '/ fictional inboxes' : '/ live Gmail';
+  modeStatus.textContent = mode === 'demo' ? 'Sample mode · no Gmail connection' : (mode === 'connecting' ? 'Connecting · session memory only' : 'Live Gmail · session memory only');
+  select('.window-subtitle').textContent = mode === 'demo' ? '/ sample inbox' : '/ live Gmail';
+  select('#sample-notice').hidden = mode !== 'demo';
 }
 
 function fail(reason) {
@@ -270,7 +271,8 @@ function selectedFiles(selector, limit) {
   if (files.length > limit) throw new Error('Too many credential files were selected.');
   return Array.from(files);
 }
-function clearSelectedFiles() { form.reset(); }
+function updateConnectionSelection() { select('#credential-selection').textContent = select('#credential-bundle').files.length ? 'Connection file selected' : 'No connection file selected'; }
+function clearSelectedFiles() { form.reset(); select('#credential-separate').open = false; updateConnectionSelection(); }
 function stopConnection() {
   connectAttempt++;
   credentialBusy = false;
@@ -290,10 +292,14 @@ form.addEventListener('submit', event => {
     let records = [];
     let connectingGeneration = null;
     try {
-      const clients = selectedFiles('#credential-clients', 3);
-      const grants = selectedFiles('#credential-grants', 1)[0];
-      const tokens = [...selectedFiles('#credential-tokens', 128), ...selectedFiles('#credential-folder', 128)];
-      records = await importCredentialFiles(clients, grants, tokens);
+      const bundle = selectedFiles('#credential-bundle', 1)[0];
+      if (bundle) records = await importConnectionFile(bundle);
+      else if (select('#credential-separate').open) {
+        const clients = selectedFiles('#credential-clients', 3);
+        const grants = selectedFiles('#credential-grants', 1)[0];
+        const tokens = [...selectedFiles('#credential-tokens', 128), ...selectedFiles('#credential-folder', 128)];
+        records = await importCredentialFiles(clients, grants, tokens);
+      } else throw new Error('Select an Omagma connection file first.');
       if (attempt !== connectAttempt) return;
       await start('connecting');
       connectingGeneration = generation;
@@ -317,16 +323,24 @@ form.addEventListener('submit', event => {
     } finally {
       for (const record of records) { record.refreshToken = ''; record.clientSecret = ''; }
       records = [];
+      if (attempt === connectAttempt) { select('#credential-bundle').value = ''; updateConnectionSelection(); }
     }
   })();
 });
 
 connectButton.addEventListener('click', () => { credentialError.textContent = ''; dialog.showModal(); });
+select('#credential-select').addEventListener('click', () => select('#credential-bundle').click());
+select('#credential-bundle').addEventListener('change', () => {
+  for (const selector of ['#credential-clients', '#credential-grants', '#credential-tokens', '#credential-folder']) select(selector).value = '';
+  select('#credential-separate').open = false;
+  updateConnectionSelection();
+});
+for (const selector of ['#credential-clients', '#credential-grants', '#credential-tokens', '#credential-folder']) select(selector).addEventListener('change', () => { select('#credential-bundle').value = ''; updateConnectionSelection(); });
 select('#credential-cancel').addEventListener('click', stopConnection);
 dialog.addEventListener('cancel', event => { event.preventDefault(); stopConnection(); });
 disconnectButton.addEventListener('click', stopConnection);
 focusButton.addEventListener('click', () => terminal.focus());
-resetButton.addEventListener('click', () => { void start().catch(() => {}); });
+resetButton.addEventListener('click', stopConnection);
 select('#send-grace-cancel').addEventListener('click', () => transport?.cancelSend());
 select('#send-acknowledge').addEventListener('click', () => { acknowledgePendingSend(); updateControls(); });
 window.addEventListener('pagehide', () => { transport?.close(); pendingInput.fill(0); });

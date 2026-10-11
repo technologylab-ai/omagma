@@ -52,6 +52,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 kbd { min-width: 19px; text-align: center; border: 1px solid #303a4a; border-bottom-width: 2px; border-radius: 4px; background: #151c27; color: #c7d0df; padding: 2px 5px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: 10px; line-height: 1.2; }
 .demo-status { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; font-size: 10px; color: #6f7a8d; }
 #runtime-status { color: #96a580; }
+.sample-notice { padding: 9px 15px; font-size: 11px; color: #bac6a6; background: #18201f; border-bottom: 1px solid var(--border); }
 .send-notice { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 9px 15px; font-size: 11px; color: #edc6a2; background: #28222a; border-bottom: 1px solid var(--border); }
 .send-notice button { color: #e7c1a0; border-color: #635047; }
 dialog { width: min(480px, calc(100% - 32px)); max-height: calc(100dvh - 36px); padding: 25px; border: 1px solid #354152; border-radius: 10px; background: var(--panel); color: var(--text); box-shadow: 0 25px 90px #0008; }
@@ -63,6 +64,13 @@ dialog input { display: block; width: 100%; margin-top: 7px; font: inherit; colo
 dialog input::file-selector-button { font: inherit; color: var(--text); background: #202b3b; border: 1px solid #354152; border-radius: 4px; padding: 6px 8px; margin-right: 9px; cursor: pointer; }
 dialog input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 dialog .credential-hint { font-size: 11px; margin: 18px 0 0; }
+.connection-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 15px; border: 1px solid var(--border); border-radius: 6px; }
+.connection-label { display: block; width: 100%; font-size: 12px; color: #c6d0df; }
+#credential-select { color: var(--text); border: 1px solid #354152; background: #202b3b; padding: 8px 11px; font-size: 12px; }
+#credential-selection { color: var(--muted); font-size: 11px; }
+#credential-separate { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+#credential-separate summary { color: var(--muted); font-size: 11px; cursor: pointer; }
+#credential-separate summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 2px; }
 #credential-error { color: #edb0a6; margin: 12px 0 0; min-height: 16px; font-size: 11px; }
 .credential-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .credential-actions button { font-size: 12px; padding: 8px 14px; border: 1px solid #354152; }

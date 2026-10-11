@@ -145,12 +145,14 @@ pub fn run(init: std.process.Init, io: std.Io, args: *std.process.Args.Iterator)
     const a = arena.allocator();
     const verb = args.next() orelse "status";
     if (std.mem.eql(u8, verb, "--help") or std.mem.eql(u8, verb, "-h")) return help(io);
-    if (!std.mem.eql(u8, verb, "status") and !std.mem.eql(u8, verb, "migrate")) return error.UnknownCommand;
+    if (!std.mem.eql(u8, verb, "status") and !std.mem.eql(u8, verb, "migrate") and !std.mem.eql(u8, verb, "export")) return error.UnknownCommand;
     var path: ?[]const u8 = null;
     var grants: ?[]const u8 = null;
     var destination: ?keyring.Kind = null;
     var directory_path: ?[]const u8 = null;
     var json = false;
+    var export_format: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
     while (args.next()) |option| {
         if (std.mem.eql(u8, option, "--help") or std.mem.eql(u8, option, "-h")) return help(io);
         if (std.mem.eql(u8, option, "--json")) {
@@ -158,10 +160,22 @@ pub fn run(init: std.process.Init, io: std.Io, args: *std.process.Args.Iterator)
             continue;
         }
         const value = args.next() orelse return error.ValueRequired;
-        if (std.mem.eql(u8, option, "--config")) path = value else if (std.mem.eql(u8, option, "--grant-file")) grants = value else if (std.mem.eql(u8, option, "--directory")) directory_path = value else if (std.mem.eql(u8, option, "--to")) destination = std.meta.stringToEnum(keyring.Kind, value) orelse return error.InvalidCredentialStore else return error.UnknownOption;
+        if (std.mem.eql(u8, option, "--format")) export_format = value else if (std.mem.eql(u8, option, "--output")) output_path = value else if (std.mem.eql(u8, option, "--config")) path = value else if (std.mem.eql(u8, option, "--grant-file")) grants = value else if (std.mem.eql(u8, option, "--directory")) directory_path = value else if (std.mem.eql(u8, option, "--to")) destination = std.meta.stringToEnum(keyring.Kind, value) orelse return error.InvalidCredentialStore else return error.UnknownOption;
     }
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     const config_path = path orelse try std.fmt.allocPrint(a, "{s}/omagma/config.json", .{init.environ_map.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{home})});
+    if (std.mem.eql(u8, verb, "export")) {
+        if (destination != null or directory_path != null) return error.InvalidCredentialOption;
+        if (!std.mem.eql(u8, export_format orelse return error.ExportFormatRequired, "browser")) return error.UnsupportedExportFormat;
+        const exported = try @import("../browser_export.zig").run(io, a, home, config_path, grants orelse try auth.defaultFile(a, init.environ_map), output_path orelse return error.OutputRequired);
+        var buffer: [4096]u8 = undefined;
+        var writer = std.Io.File.stdout().writer(io, &buffer);
+        if (json) try std.json.Stringify.value(exported, .{}, &writer.interface) else try writer.interface.print("Exported browser connection file for {d} account(s).\nFile: {s}\nKeep this file private; it contains existing connection credentials.\n", .{ exported.exportedAccounts, exported.outputFile });
+        try writer.interface.writeByte('\n');
+        try writer.interface.flush();
+        return;
+    }
+    if (export_format != null or output_path != null) return error.InvalidCredentialOption;
     var result: Result = undefined;
     if (std.mem.eql(u8, verb, "status")) {
         if (destination != null or directory_path != null) return error.InvalidCredentialOption;
@@ -188,7 +202,7 @@ pub fn run(init: std.process.Init, io: std.Io, args: *std.process.Args.Iterator)
 pub fn help(io: std.Io) !void {
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
-    try writer.interface.writeAll("Credentials (no mail/network operation)\n  omagma credentials status [--config FILE] [--json]\n  omagma credentials migrate --to file|keyring [--directory ABS] [--config FILE] [--grant-file FILE] [--json]\nFile mode uses unencrypted owner-only credentials. Migration copies and verifies existing credentials without Google consent, then changes configuration; source copies remain. Restart running sessions afterward.\n");
+    try writer.interface.writeAll("Credentials (no mail/network operation)\n  omagma credentials status [--config FILE] [--json]\n  omagma credentials migrate --to file|keyring [--directory ABS] [--config FILE] [--grant-file FILE] [--json]\n  omagma credentials export --format browser --output ABS [--config FILE] [--grant-file FILE] [--json]\nExport writes one private browser connection file from the current store, without changing configuration or contacting Google.\nFile mode uses unencrypted owner-only credentials. Migration copies and verifies existing credentials without Google consent, then changes configuration; source copies remain. Restart running sessions afterward.\n");
     try writer.interface.flush();
 }
 

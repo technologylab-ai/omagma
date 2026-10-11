@@ -47,7 +47,7 @@ pub fn overview(io: std.Io) !void {
     try writer.interface.print("omagma {s} (Zig {s})\nExperimental terminal mail and Gmail bar\n\nUsage: omagma COMMAND [OPTIONS]\n\n", .{ @import("build_options").version, @import("builtin").zig_version_string });
     try writer.interface.writeAll("  tui                 Interactive mail client\n  cli | agent         JSONL requests on stdin, replies on stdout\n");
     for (families) |f| try writer.interface.print("  {s:<19} {s}\n", .{ f.name, f.summary });
-    try writer.interface.writeAll("  credentials         Inspect or migrate keyring/file storage\n  cache-refresh       Refresh enabled account caches without the TUI\n  daemon | auth | status  Read-only Gmail bar and its authorization\n  version | --version Show the installed version\n  build-info | budget Build and allocation diagnostics\n\nStart with omagma cli --help for agent examples.\nUse omagma mail --help to choose an operation, then omagma mail read --help.\nUse omagma --help-all for the extended command overview.\n");
+    try writer.interface.writeAll("  credentials         Inspect, migrate or export existing credentials\n  cache-refresh       Refresh enabled account caches without the TUI\n  daemon | auth | status  Read-only Gmail bar and its authorization\n  version | --version Show the installed version\n  build-info | budget Build and allocation diagnostics\n\nStart with omagma cli --help for agent examples.\nUse omagma mail --help to choose an operation, then omagma mail read --help.\nUse omagma --help-all for the extended command overview.\n");
     try writer.interface.flush();
 }
 pub fn family(io: std.Io, mode: []const u8) !void {

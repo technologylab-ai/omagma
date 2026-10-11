@@ -64,6 +64,35 @@ await writeFile(files.both[1], JSON.stringify({ version: 1, accounts: [
 ] }) + "\n", { mode: 0o600 });
 await writeFile(files.both[2], await readFile(files.ada[2]), { mode: 0o600 });
 await writeFile(files.both[3], await readFile(files.bea[2]), { mode: 0o600 });
+async function bundleRecord(address, scopes) {
+  return { account: address, clientId, clientSecret, grantId: hashParts(["omagma-terminal-grant-v1", ...scopes]),
+    capabilities: scopes.includes(sendScope) ? ["mail-read", "mail-send"] : ["mail-read"],
+    scopes, refreshToken: refreshSecrets[accounts.indexOf(address)] };
+}
+const adaBundleRecord = await bundleRecord(accounts[0], [readScope, sendScope]);
+const beaBundleRecord = await bundleRecord(accounts[1], [readScope, sendScope]);
+async function connectionBundle(name, entries, changes = {}) {
+  const directory = join(work, "synthetic-credentials", "bundles");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${name}.json`);
+  await writeFile(path, JSON.stringify({ format: "omagma-browser-connection", version: 1, accounts: entries, ...changes }) + "\n", { mode: 0o600 });
+  return path;
+}
+const bundles = {
+  both: await connectionBundle("both", [adaBundleRecord, beaBundleRecord]),
+  ada: await connectionBundle("ada", [adaBundleRecord]),
+  readonly: await connectionBundle("readonly", [await bundleRecord(accounts[0], [readScope])]),
+  invalid: [
+    ["format", await connectionBundle("bad-format", [adaBundleRecord], { format: "unsupported-browser-format" })],
+    ["version", await connectionBundle("bad-version", [adaBundleRecord], { version: 2 })],
+    ["grant identity", await connectionBundle("bad-grant", [{ ...adaBundleRecord, grantId: "0".repeat(64) }])],
+    ["capabilities", await connectionBundle("bad-capabilities", [{ ...adaBundleRecord, capabilities: ["mail-send"] }])],
+    ["scope binding", await connectionBundle("bad-scopes", [{ ...adaBundleRecord, scopes: [readScope] }])],
+    ["client", await connectionBundle("bad-client", [{ ...adaBundleRecord, clientId: "unrecognized-client.example.test" }])],
+    ["missing token", await connectionBundle("missing-token", [{ ...adaBundleRecord, refreshToken: "" }])],
+    ["account limit", await connectionBundle("too-many-accounts", Array.from({ length: 4 }, () => adaBundleRecord))],
+  ],
+};
 const bodyText = (owner, index) => index === 0 ? `Hello ${owner},\n\nSynthetic live read in WebAssembly.\nNothing touched Google.\n` : `Synthetic ${owner} message ${index}.\n`;
 const bodyHtml = '<!doctype html><html><body><h1>Literal HTML fixture</h1><p>A safe café and Japanese 日本語.</p><script>window.mailInjected = "must-never-run";</script><img src="https://invalid-resource.example.test/never-fetch.png"><a href="javascript:alert(1)">Unsafe link text</a></body></html>';
 const subject = (owner, index) => index === 0 ? `${owner} live mailbox` : index === 1 ? `${owner} HTML-only mailbox` : `${owner} bounded message ${index}`;
@@ -313,9 +342,19 @@ try {
   async function importFiles(paths) {
     if (!(await evaluate("document.querySelector('#credential-dialog').open"))) await click("#connect-open");
     await until(async () => evaluate("document.querySelector('#credential-dialog').open"), "credential chooser did not open");
+    if (await evaluate("Boolean(document.querySelector('#credential-bundle'))")) {
+      await choose("#credential-bundle", []);
+      if (!(await evaluate("document.querySelector('#credential-separate').open"))) await click("#credential-separate > summary");
+    }
     await choose("#credential-clients", [paths[0]]);
     await choose("#credential-grants", [paths[1]]);
     await choose("#credential-tokens", paths.slice(2));
+    await click("#credential-connect");
+  }
+  async function importBundle(path) {
+    if (!(await evaluate("document.querySelector('#credential-dialog').open"))) await click("#connect-open");
+    await until(async () => evaluate("document.querySelector('#credential-dialog').open"), "single-file connection chooser did not open");
+    await choose("#credential-bundle", [path]);
     await click("#credential-connect");
   }
   async function connected(count) {
@@ -390,6 +429,134 @@ try {
   assert.equal(await evaluate("window.omagmaDemo.error"), null);
   assert(await evaluate("typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function'"), "owned browser lacks JSPI support");
   assert.equal(requests.length, 0, "default fictional demo unexpectedly connected Google");
+  if (args.get("--connect-only") === "true") {
+    const sample = await evaluate("document.body.innerText");
+    assert(/Sample inbox/i.test(sample), "default screen does not clearly identify the sample inbox");
+    assert.match(await evaluate("document.querySelector('#connect-open').textContent"), /Connect Gmail/i);
+    await screenshot("connect-sample-inbox.png");
+    await click("#connect-open");
+    await until(async () => evaluate("document.querySelector('#credential-dialog').open"), "primary connection dialog did not open");
+    assert.equal(await evaluate("document.querySelector('#credential-separate').open"), false, "legacy separate-file controls are open by default");
+    const chooser = await evaluate(`(()=>{
+      const dialog=document.querySelector('#credential-dialog');
+      const primary=document.querySelector('#credential-select');const bundle=document.querySelector('#credential-bundle');
+      return {text:dialog.innerText,inputs:[...dialog.querySelectorAll('input[type=file]')].filter(input=>input.checkVisibility()).map(input=>input.id),
+        singleBundle:bundle?.type==='file'&&!bundle.multiple,primaryVisible:primary?.checkVisibility(),primaryCaption:primary?.textContent};
+    })()`);
+    assert.deepEqual(chooser.inputs, [], "default dialog exposes legacy separate-file fields");
+    assert(chooser.singleBundle && chooser.primaryVisible, "default dialog has no single-file connection chooser");
+    assert.match(chooser.primaryCaption, /Select connection file/i);
+    assert.match(chooser.text, /connection file/i, "primary chooser does not use the plain connection-file label");
+    await screenshot("connect-single-file-dialog.png");
+    await call("Page.setInterceptFileChooserDialog", { enabled: true });
+    const chooserMarker = events.length;
+    await click("#credential-select");
+    let openedChooser;
+    await until(async () => {
+      openedChooser = events.slice(chooserMarker).find((event) => event.method === "Page.fileChooserOpened")?.params;
+      return Boolean(openedChooser);
+    }, "visible connection-file button did not open the native file chooser");
+    assert.equal(openedChooser.mode, "selectSingle", "primary connection picker accepts multiple files");
+    const description = await call("DOM.describeNode", { backendNodeId: openedChooser.backendNodeId });
+    const attributes = Object.fromEntries(Array.from({ length: description.node.attributes.length / 2 }, (_, index) => description.node.attributes.slice(index * 2, index * 2 + 2)));
+    assert.equal(attributes.id, "credential-bundle", "visible chooser button targets a legacy credential field");
+    await call("DOM.setFileInputFiles", { backendNodeId: openedChooser.backendNodeId, files: [bundles.ada] });
+    assert.equal(requests.length, 0, "choosing a connection file implicitly contacted Google");
+    await screenshot("connect-selected-file-dialog.png");
+    await choose("#credential-bundle", []);
+    for (const [label, path] of bundles.invalid) {
+      const before = requests.length;
+      await importBundle(path);
+      await until(async () => (await credentialError()).length > 0, `invalid ${label} connection file was not refused`);
+      assert.equal(requests.length, before, `invalid ${label} connection file reached Google`);
+      assert.equal((await session()).mode, "demo", `invalid ${label} changed the current session`);
+      const exposed = (await credentialError()) + await evaluate("JSON.stringify(window.omagmaDemo)");
+      for (const secret of syntheticSecrets) assert(!exposed.includes(secret), `invalid ${label} exposed credential contents`);
+    }
+    await disconnect();
+    wrongProfile = true;
+    const wrongStart = requests.length;
+    await importBundle(bundles.ada);
+    await until(async () => (await credentialError()).length > 0, "single-file wrong profile identity was not rejected", 30000);
+    assert(requests.slice(wrongStart).some((request) => new URL(request.url).pathname.endsWith("/profile")), "single-file connection did not verify its Google profile");
+    assert(!requests.slice(wrongStart).some((request) => new URL(request.url).pathname.endsWith("/messages")), "wrong single-file profile read mailbox rows");
+    wrongProfile = false;
+    await disconnect();
+
+    scopeMode = "readonly";
+    await importBundle(bundles.readonly);
+    await connected(1);
+    assert.deepEqual((await session()).canSend, [false], "read-only connection file enabled sending");
+    assert((await screen()).includes("Ada live mailbox") && (await screen()).includes("Hello Ada,"), "single-file read-only connection did not read the verified mailbox");
+    const denied = await act(() => text("c"));
+    assert(/PermissionDenied|read.only|read only/i.test(denied), "single-file read-only account accepted compose");
+    await disconnect();
+    await importBundle(bundles.ada);
+    await connected(1);
+    assert.deepEqual((await session()).canSend, [false], "narrowed Google scope overrode single-file capability checks");
+    await disconnect();
+
+    scopeMode = "omitted";
+    await importBundle(bundles.ada);
+    await connected(1);
+    assert.deepEqual((await session()).canSend, [true], "single-file send grant did not survive valid omitted-scope refresh");
+    assert((await screen()).includes("Ada live mailbox"), "single-file send grant did not complete native mail loading");
+    const diagnostics = await evaluate("JSON.stringify({diagnostics:window.omagmaDemo,session:window.omagmaDemo.sessionInfo(),state:window.omagmaDemo.state()})");
+    for (const secret of syntheticSecrets) assert(!diagnostics.includes(secret), "single-file active diagnostics exposed credentials");
+    await disconnect();
+
+    scopeMode = "send";
+    await importBundle(bundles.both);
+    await connected(2);
+    assert.deepEqual((await session()).canSend, [true, true]);
+    const ada = await act(() => text("1"));
+    assert(ada.includes("Ada live mailbox") && ada.includes("Hello Ada,"), "first bundled account rendered the wrong mailbox");
+    const bea = await act(() => text("2"));
+    assert(bea.includes("Bea live mailbox") && bea.includes("Hello Bea,"), "second bundled account rendered the wrong mailbox");
+    assert(!bea.includes("Ada live mailbox") && !bea.includes("Hello Ada,"), "bundled account switch leaked mail");
+    await screenshot("connect-two-account-inbox.png");
+    await disconnect();
+
+    scopeMode = "readonly";
+    await importFiles(files.readonly);
+    await connected(1);
+    assert.deepEqual((await session()).canSend, [false], "legacy separate-file permissions changed");
+    assert((await screen()).includes("Ada live mailbox"), "legacy separate-file import no longer reads its mailbox");
+    await disconnect();
+    assert.equal(sends().length, 0, "connection-only acceptance attempted a Gmail mutation");
+    assert.equal(await evaluate("document.querySelector('#credential-bundle').files.length"), 0, "disconnect retained the selected connection file");
+    const beforeReload = requests.length;
+    const marker = events.length;
+    await call("Page.reload", { ignoreCache: true });
+    await until(async () => events.slice(marker).some((event) => event.method === "Page.loadEventFired"), "connection-only reload did not load a new document");
+    await until(async () => evaluate("window.omagmaDemo?.ready === true"), "connection-only reload did not restore sample mode");
+    assert.equal((await session()).accountCount, 0, "reload restored single-file credentials");
+    assert.equal(requests.length, beforeReload, "reload automatically reused connection-file credentials");
+    const privacy = await evaluate(`(async()=>({
+      diagnostics:JSON.stringify(window.omagmaDemo),html:document.documentElement.outerHTML,
+      localStorage:Object.fromEntries(Object.keys(localStorage).map(key=>[key,localStorage.getItem(key)])),
+      sessionStorage:Object.fromEntries(Object.keys(sessionStorage).map(key=>[key,sessionStorage.getItem(key)])),
+      databases:await indexedDB.databases(),caches:await caches.keys(),cookies:document.cookie
+    }))()`);
+    const exposed = JSON.stringify(privacy) + JSON.stringify(events.filter((event) => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
+    for (const secret of syntheticSecrets) assert(!exposed.includes(secret), "connection-file credentials leaked into persistence or logs");
+    assert.deepEqual(privacy.localStorage, {});
+    assert.deepEqual(privacy.sessionStorage, {});
+    assert.deepEqual(privacy.databases, []);
+    assert.deepEqual(privacy.caches, []);
+    assert.equal(privacy.cookies, "");
+    assert.deepEqual(transportErrors, []);
+    assert.deepEqual(unexpectedDestinations, []);
+    const report = { synthetic: true, desktopUsed: false, browser: version.product, actualGoogleRequests: 0,
+      primaryFileChooser: "credential-bundle", visibleChooserButton: chooser.primaryCaption.trim(), invalidBundlesRejectedBeforeNetwork: bundles.invalid.length,
+      nativeChooserButtonVerified: true,
+      profileIdentityVerified: true, readonlyAndNarrowedScopes: true, omittedScopeRefresh: true,
+      twoAccountsReadAndIsolated: true, legacySeparateFiles: true, selectedFilesCleared: true,
+      credentialsInPersistenceOrLogs: 0, googleSendRequests: sends().length,
+      requestCount: requests.length, maximumActiveRequests };
+    await writeFile(join(work, "connect-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    console.log(JSON.stringify(report));
+  } else {
   const nativeGrant = JSON.parse(await readFile(files.ada[1], "utf8")).accounts[0];
   const packetReview = await evaluate(`(async()=>{
     const encoder=new TextEncoder(),decoder=new TextDecoder();let instance;let posted=0;
@@ -655,6 +822,7 @@ try {
     credentialPersistenceOrLogLeaks: 0 };
   await writeFile(join(work, "live-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
   console.log(JSON.stringify(report));
+  }
 } catch (error) {
   try { await captureFailure?.(error); } catch {}
   throw error;

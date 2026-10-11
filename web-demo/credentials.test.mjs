@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { identityHash, tokenFilename, importCredentialFiles, scopesFor, parseRefreshedToken, permissions } from './credentials.mjs';
+import { identityHash, tokenFilename, importCredentialFiles, importConnectionFile, scopesFor, parseRefreshedToken, permissions } from './credentials.mjs';
 
 export async function fixture(capabilities = ['mail-read', 'mail-send']) {
   const grant = { account: 'ada@example.test', clientFile: '/private/OAuth client.json', clientId: 'synthetic.apps.googleusercontent.com', capabilities, scopes: scopesFor(capabilities) };
@@ -47,4 +47,43 @@ test('reported narrower scopes disable send; omitted scopes preserve the origina
   const unchanged = parseRefreshedToken(base, original);
   assert.deepEqual(permissions(['mail-read', 'mail-send'], unchanged.actualScopes), { canRead: true, canSend: true });
   assert.deepEqual(permissions(['mail-read'], unchanged.actualScopes), { canRead: true, canSend: false });
+});
+
+async function connectionFixture() {
+  const { grant } = await fixture();
+  const { clientFile, ...metadata } = grant;
+  return { format: 'omagma-browser-connection', version: 1, accounts: [{ ...metadata, clientSecret: 'synthetic-secret', refreshToken: 'synthetic-refresh' }] };
+}
+function connectionFile(data) { return new File([JSON.stringify(data)], 'connection.json'); }
+
+test('one connection file imports validated account credentials and strips unknown fields', async () => {
+  const data = await connectionFixture();
+  data.accounts[0].tokenUrl = 'https://attacker.invalid/token';
+  data.accounts[0].privatePath = '/private/ignored';
+  const [account] = await importConnectionFile(connectionFile(data));
+  assert.equal(account.account, 'ada@example.test');
+  assert.equal(account.refreshToken, 'synthetic-refresh');
+  assert.equal('tokenUrl' in account, false);
+  assert.equal('privatePath' in account, false);
+  assert.equal('clientFile' in account, false);
+});
+
+test('connection file format, version and total size are bounded before import', async () => {
+  const data = await connectionFixture();
+  await assert.rejects(() => importConnectionFile(connectionFile({ ...data, version: 2 })), /exported by Omagma/);
+  await assert.rejects(() => importConnectionFile(connectionFile({ ...data, format: 'unknown' })), /exported by Omagma/);
+  await assert.rejects(() => importConnectionFile(new File(['x'.repeat(65537)], 'connection.json')), /size limit/);
+});
+
+test('connection file rejects duplicate accounts and scope identity changes', async () => {
+  const data = await connectionFixture();
+  await assert.rejects(() => importConnectionFile(connectionFile({ ...data, accounts: [...data.accounts, ...data.accounts] })), /duplicate account/);
+  data.accounts[0].grantId = '0'.repeat(64);
+  await assert.rejects(() => importConnectionFile(connectionFile(data)), /identity does not match/);
+});
+
+test('connection file rejects invalid credential bytes without reflecting secrets', async () => {
+  const data = await connectionFixture();
+  data.accounts[0].refreshToken = 'fictional-secret\n';
+  await assert.rejects(() => importConnectionFile(connectionFile(data)), error => /invalid credentials/.test(error.message) && !error.message.includes('fictional-secret'));
 });

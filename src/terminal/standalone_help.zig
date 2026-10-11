@@ -10,12 +10,13 @@ const credentials_family =
     \\Usage: omagma credentials OPERATION [OPTIONS]
     \\  status   Report the selected local credential store; no token lookup.
     \\  migrate  Copy existing grants to file/keyring storage, then switch config.
+    \\  export   Write one private browser connection file from the current store.
     \\Without an operation, credentials defaults to status.
     \\
     \\Shared options:
     \\  --config FILE      Private config; default $XDG_CONFIG_HOME/omagma/config.json
     \\                     or $HOME/.config/omagma/config.json.
-    \\  --grant-file FILE  Terminal registry override for migration; default
+    \\  --grant-file FILE  Terminal registry override for migration/export; default
     \\                     $XDG_CONFIG_HOME/omagma/terminal-grants.json or
     \\                     $HOME/.config/omagma/terminal-grants.json.
     \\  --json             JSON output instead of human-readable status.
@@ -28,6 +29,7 @@ const credentials_family =
     \\Choose scoped help before changing storage:
     \\  omagma credentials status --help
     \\  omagma credentials migrate --help
+    \\  omagma credentials export --help
     \\
     \\Example (private path; no mailbox operation):
     \\  omagma credentials status --config /absolute/private/config.json --json
@@ -96,6 +98,32 @@ const credentials_migrate =
     \\  omagma credentials migrate --to file --config /absolute/private/config.json
     \\  omagma credentials migrate --to file --directory /absolute/private/credentials --config /absolute/private/config.json --grant-file /absolute/private/grants.json --json
     \\  omagma credentials migrate --to keyring --config /absolute/private/config.json
+    \\
+;
+
+const credentials_export =
+    \\Export a browser connection file
+    \\
+    \\Usage: omagma credentials export --format browser --output ABS [OPTIONS]
+    \\  --format browser   Required export format.
+    \\  --output ABS       New JSON file in a canonical, owner-only 0700 directory.
+    \\                     Existing files and symlinks are never replaced.
+    \\  --config FILE      Reuse your private account config; default is unchanged.
+    \\  --grant-file FILE  Reuse your terminal grant registry; default is unchanged.
+    \\  --json             Print a summary only, never the exported credentials.
+    \\
+    \\Exports enabled, configured terminal grants and matching OAuth clients from
+    \\the current keyring/file credential store. The output is one unencrypted
+    \\owner-only 0600 file containing connection credentials. Keep it outside Git
+    \\and shared folders; select it in the browser's Connect Gmail screen.
+    \\
+    \\No Google requests, consent, mail operations, migration or config changes.
+    \\The selected store remains unchanged. On Mac with native Keychain storage,
+    \\run in an unlocked local terminal. Existing explicit file storage also works.
+    \\Use credentials migrate --to file only when you want to change native storage.
+    \\
+    \\Example:
+    \\  omagma credentials export --format browser --output /absolute/private/browser/connection.json
     \\
 ;
 
@@ -391,6 +419,7 @@ fn content(mode: []const u8, verb: ?[]const u8) ![]const u8 {
         const operation = verb orelse return credentials_family;
         if (eq(operation, "status")) return credentials_status;
         if (eq(operation, "migrate")) return credentials_migrate;
+        if (eq(operation, "export")) return credentials_export;
         return error.UnknownCommand;
     }
     if (verb != null) return error.UnknownCommand;

@@ -16,7 +16,7 @@ function uniqueStrings(values, allowed, max) {
 }
 
 export function scopesFor(caps) {
-  if (!uniqueStrings(caps, capabilities, 6) || !caps.includes('mail-read')) reject('A terminal grant must include a valid mail-read capability.');
+  if (!uniqueStrings(caps, capabilities, 6) || !caps.includes('mail-read')) reject('The account permissions must include Gmail reading access.');
   const result = [caps.includes('mail-modify') ? MODIFY : READ];
   if ((caps.includes('mail-send') || caps.includes('calendar-rsvp')) && !caps.includes('mail-modify')) result.push(SEND);
   if (caps.includes('contacts-write')) result.push(CONTACTS);
@@ -52,6 +52,33 @@ function client(data) {
   return { clientId: value.client_id, clientSecret: value.client_secret };
 }
 
+async function validatedGrant(grant, seen) {
+  if (!grant || typeof grant !== 'object' || Array.isArray(grant)) reject('The connection contains invalid account data.');
+  if (!printable(grant.account, 254) || !grant.account.includes('@') || seen.has(grant.account.toLowerCase())) reject('The connection has an invalid or duplicate account.');
+  seen.add(grant.account.toLowerCase());
+  if (!printable(grant.clientId) || !grant.clientId.endsWith('.apps.googleusercontent.com') || !uniqueStrings(grant.scopes, scopes, 5)) reject('The connection has an invalid registration or scope set.');
+  const expectedScopes = scopesFor(grant.capabilities);
+  if (expectedScopes.length !== grant.scopes.length || expectedScopes.some((scope, index) => scope !== grant.scopes[index])) reject('The account permissions and recorded scopes do not match.');
+  const identity = await identityHash(['omagma-terminal-grant-v1', ...grant.scopes]);
+  if (grant.grantId !== identity) reject('The account grant identity does not match its recorded scopes.');
+  return { account: grant.account, clientId: grant.clientId, grantId: grant.grantId, capabilities: [...grant.capabilities], scopes: [...grant.scopes] };
+}
+
+export async function importConnectionFile(file) {
+  const bundle = await jsonFile(file, 64 * 1024, 'Omagma connection');
+  if (bundle?.format !== 'omagma-browser-connection' || bundle.version !== 1 || !Array.isArray(bundle.accounts) || bundle.accounts.length === 0 || bundle.accounts.length > 3) reject('Choose an Omagma connection file exported by Omagma, containing one to three accounts.');
+  const seen = new Set();
+  const result = [];
+  for (const account of bundle.accounts) {
+    const grant = await validatedGrant(account, seen);
+    if (!printable(account.clientSecret) || !printable(account.refreshToken)) reject('The connection file contains invalid credentials. Export a new connection file from Omagma.');
+    // Only the defined fields enter the session. Unknown URLs, paths and
+    // metadata in the file cannot add browser transport capabilities.
+    result.push({ ...grant, clientSecret: account.clientSecret, refreshToken: account.refreshToken });
+  }
+  return result;
+}
+
 export async function importCredentialFiles(clientFiles, grantFile, tokenFiles) {
   if (clientFiles.length === 0 || clientFiles.length > 3) reject('Choose one to three OAuth client JSON files.');
   if (tokenFiles.length === 0 || tokenFiles.length > 128) reject('Choose token files, or a credential folder containing at most 128 files.');
@@ -66,14 +93,9 @@ export async function importCredentialFiles(clientFiles, grantFile, tokenFiles) 
   const seen = new Set();
   const result = [];
   for (const grant of registry.accounts) {
-    if (!printable(grant.account, 254) || !grant.account.includes('@') || seen.has(grant.account.toLowerCase())) reject('The terminal grant registry has an invalid or duplicate account.');
-    seen.add(grant.account.toLowerCase());
-    if (!printable(grant.clientId) || !grant.clientId.endsWith('.apps.googleusercontent.com') || typeof grant.clientFile !== 'string' || grant.clientFile.length === 0 || grant.clientFile.length > 4096 || !uniqueStrings(grant.scopes, scopes, 5)) reject('The terminal grant registry has an invalid registration or scope set.');
+    const validated = await validatedGrant(grant, seen);
+    if (typeof grant.clientFile !== 'string' || grant.clientFile.length === 0 || grant.clientFile.length > 4096) reject('The terminal grant registry has an invalid registration path.');
     if (grant.enabled !== undefined && typeof grant.enabled !== 'boolean') reject('The terminal grant registry has an invalid enabled flag.');
-    const expectedScopes = scopesFor(grant.capabilities);
-    if (expectedScopes.length !== grant.scopes.length || expectedScopes.some((scope, index) => scope !== grant.scopes[index])) reject('The terminal grant capabilities and recorded scopes do not match.');
-    const identity = await identityHash(['omagma-terminal-grant-v1', ...grant.scopes]);
-    if (grant.grantId !== identity) reject('The terminal grant identity does not match its recorded scopes.');
     if (grant.enabled === false || !registrations.has(grant.clientId)) continue;
     const filename = await tokenFilename(grant);
     const matching = tokenFiles.filter(file => file.name === filename);
@@ -83,7 +105,7 @@ export async function importCredentialFiles(clientFiles, grantFile, tokenFiles) 
     if (file.size === 0 || file.size > 4096) reject('A matched token file exceeds the supported size.');
     const refreshToken = await file.text();
     if (!printable(refreshToken)) reject('A matched token file must contain the unmodified refresh token.');
-    result.push({ account: grant.account, ...registrations.get(grant.clientId), grantId: grant.grantId, capabilities: [...grant.capabilities], scopes: [...grant.scopes], refreshToken });
+    result.push({ ...validated, clientSecret: registrations.get(grant.clientId).clientSecret, refreshToken });
   }
   registrations.clear();
   if (result.length === 0) reject('No selected terminal token matches an enabled grant and OAuth client. Choose the matching client, grants and token files.');

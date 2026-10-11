@@ -96,6 +96,14 @@ fn private(io: std.Io, fd: std.posix.fd_t, is_directory: bool) !void {
 pub fn privateFile(io: std.Io, file: std.Io.File) !void {
     try private(io, file.handle, false);
 }
+/// An atomic output may still be unnamed (link count zero). All owner, type,
+/// mode and ACL checks remain identical to published credential files.
+pub fn privateAtomicFile(io: std.Io, file: std.Io.File) !void {
+    var value = try metadata(io, file.handle);
+    if (value.links == 0) value.links = 1;
+    try validateMetadata(value, uid(), false);
+    try noAcl(io, file.handle, false);
+}
 fn failure(err: anyerror) anyerror {
     return switch (err) {
         error.AccessDenied, error.PermissionDenied => error.CredentialStorageAccessDenied,

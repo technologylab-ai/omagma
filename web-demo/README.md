@@ -3,7 +3,7 @@
 This is an isolated showcase prototype, built from the native TUI source. Zig
 owns the screen, layout and mail interaction; xterm.js supplies the browser's
 terminal display and input. It starts with fictional mail and can connect
-existing file-backed grants for live Gmail reading, plain composition and
+existing grants through an exported connection file for live Gmail reading, plain composition and
 replies. See [live mail](LIVE-MAIL.md) for credential loading and scope.
 
 The prototype runs client-side with browser HTTP and credential adapters. The
@@ -37,8 +37,8 @@ not work because the browser needs to fetch the WASM module.
 Try `j` / `k`, Enter, `1` / `2` / `3` to switch accounts, `/` for a local
 substring search, `v` for right/below layouts, `z` to expand the reader, `a` for
 fictional contacts, and `?` for the native help overlay. Escape backs out;
-Reset demo creates fresh fictional state. Connect loads existing local file
-credentials; Disconnect returns to fictional mode. In live mode, `c` composes,
+Reset demo creates fresh fictional state. **Connect Gmail** loads one exported
+connection file; Disconnect returns to fictional mode. In live mode, `c` composes,
 `r` replies, `R` replies to all, and Ctrl+S opens send review. Tab/Shift+Tab move
 between fields or review buttons. Explicit Send begins the ten-second local
 cancellation window. Native help documents the full
@@ -97,16 +97,15 @@ filesystem. File input does not give the page general access to the machine's
 files, Secret Service or Keychain. A WASM linear-memory buffer is also visible
 to its host JavaScript; it is not a separate secret vault.
 
-Omagma's desktop OAuth client file, grant metadata and refresh-token files have
-different roles. Loading the client file alone does not authorize a mailbox.
-Loading the other files would still require replacing the native credential
-lookup, HTTP transport and token-refresh paths, and verifying that the chosen
-OAuth client/flow works from the browser origin. The native file backend's
-ownership, permissions and canonical-path checks have no direct equivalent in
-a user-selected browser file.
+The prototype's `credentials export --format browser --output /absolute/path`
+command combines enabled terminal grants, their OAuth client and refresh
+tokens into one private connection file. It reads the existing selected store
+and leaves native credentials and configuration unchanged. See
+[the export instructions](LIVE-MAIL.md#load-existing-credentials) for the
+development build command and output requirements.
 
-The Connect dialog reads selected Desktop OAuth client JSON, terminal-grant
-metadata and exact matching token files into session memory. Browser `fetch`
+The Connect dialog reads that connection file into session memory. Existing
+file-backed setups can also use the collapsed separate-file controls. Browser `fetch`
 exchanges the refresh token; Zig verifies the Gmail profile before exposing
 the account. File selection is sufficient; the files do not need to be
 uploaded to a server. Read-only terminal grants permit reading, while replying

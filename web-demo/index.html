@@ -23,15 +23,16 @@
 
       <section class="terminal-window" aria-label="Omagma terminal demonstration">
         <div class="window-bar">
-          <div class="window-title"><span class="tab-mark" aria-hidden="true">&gt;_</span>omagma <span class="window-subtitle">/ fictional inboxes</span></div>
+          <div class="window-title"><span class="tab-mark" aria-hidden="true">&gt;_</span>omagma <span class="window-subtitle">/ sample inbox</span></div>
           <div class="window-actions">
             <span id="terminal-size" class="terminal-size" aria-hidden="true"></span>
-            <button id="connect-open" type="button" disabled>Connect…</button>
+            <button id="connect-open" type="button" disabled>Connect Gmail…</button>
             <button id="disconnect-session" type="button" hidden>Disconnect</button>
             <button id="terminal-focus" type="button" title="F6 moves focus from the terminal to page controls" disabled>Focus terminal</button>
             <button id="demo-reset" type="button" disabled>Reset demo</button>
           </div>
         </div>
+        <div id="sample-notice" class="sample-notice" role="status">Sample inbox · Connect to load your Gmail</div>
         <div id="send-grace" class="send-notice" role="status" hidden><span id="send-grace-text"></span><button id="send-grace-cancel" type="button">Cancel send</button></div>
         <div id="send-uncertainty" class="send-notice" role="status" hidden><span>A previous send has no confirmation. Check Sent before sending again.</span><button id="send-acknowledge" type="button">I checked Sent</button></div>
         <div class="terminal-stage">
@@ -51,18 +52,28 @@
           <span><kbd>?</kbd> help</span>
           <span><kbd>F6</kbd> page controls</span>
         </div>
-        <div class="demo-status"><span id="runtime-status" role="status">Starting the TUI</span><span class="status-separator" aria-hidden="true">·</span><span id="session-status">Fictional mail · in memory only</span></div>
+        <div class="demo-status"><span id="runtime-status" role="status">Starting the TUI</span><span class="status-separator" aria-hidden="true">·</span><span id="session-status">Sample mode · no Gmail connection</span></div>
       </footer>
     </main>
     <dialog id="credential-dialog" aria-labelledby="credential-title">
       <form id="credential-form">
-        <h2 id="credential-title">Connect existing Omagma grants</h2>
-        <p>Selected files stay in this tab. Google requests go directly to Google.</p>
-        <label>Desktop OAuth client JSON<input id="credential-clients" type="file" accept=".json,application/json" multiple></label>
-        <label>Terminal grants JSON<input id="credential-grants" type="file" accept=".json,application/json"></label>
-        <label>Matching terminal token files<input id="credential-tokens" type="file" accept=".token" multiple></label>
-        <label>Or choose the credential folder<input id="credential-folder" type="file" webkitdirectory multiple></label>
-        <p class="credential-hint">Use your existing Desktop registration, terminal-grants.json and file-store tokens. Up to three matched accounts connect; sending needs their mail-send grant.</p>
+        <h2 id="credential-title">Load an Omagma connection file</h2>
+        <p>Export it from Omagma, then select it here.</p>
+        <div class="connection-picker">
+          <span class="connection-label">Omagma connection file</span>
+          <input id="credential-bundle" type="file" accept=".json,application/json" aria-label="Omagma connection file" hidden>
+          <button id="credential-select" type="button">Select connection file</button>
+          <span id="credential-selection" role="status">No connection file selected</span>
+        </div>
+        <p class="credential-hint">Load your existing Omagma accounts. The connection stays in this tab; Google requests go directly to Google.</p>
+        <details id="credential-separate">
+          <summary>Use separate files</summary>
+          <label>OAuth client JSON<input id="credential-clients" type="file" accept=".json,application/json" multiple></label>
+          <label>Account grants JSON<input id="credential-grants" type="file" accept=".json,application/json"></label>
+          <label>Credential folder<input id="credential-folder" type="file" webkitdirectory multiple></label>
+          <label>Or matching token files<input id="credential-tokens" type="file" accept=".token" multiple></label>
+          <p class="credential-hint">Select your registration, terminal-grants.json and credential folder, or its matching token files.</p>
+        </details>
         <p id="credential-error" role="status"></p>
         <div class="credential-actions"><button id="credential-cancel" type="button">Cancel</button><button id="credential-connect" type="submit">Connect</button></div>
       </form>

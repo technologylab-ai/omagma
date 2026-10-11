@@ -43,7 +43,7 @@ fn contextHelpHint(arguments: std.process.Args) void {
     const verb = args.next();
     if (info.knownFamily(mode)) {
         if (verb != null and info.knownVerb(mode, verb.?)) std.debug.print("Details: omagma {s} {s} --help.\n", .{ mode, verb.? }) else std.debug.print("Details: omagma {s} --help.\n", .{mode});
-    } else if (std.mem.eql(u8, mode, "credentials") and verb != null and (std.mem.eql(u8, verb.?, "status") or std.mem.eql(u8, verb.?, "migrate"))) {
+    } else if (std.mem.eql(u8, mode, "credentials") and verb != null and (std.mem.eql(u8, verb.?, "status") or std.mem.eql(u8, verb.?, "migrate") or std.mem.eql(u8, verb.?, "export"))) {
         std.debug.print("Details: omagma credentials {s} --help.\n", .{verb.?});
     } else if (@import("terminal/standalone_help.zig").known(mode) or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "tui")) std.debug.print("Details: omagma {s} --help.\n", .{mode});
 }
@@ -70,6 +70,9 @@ fn usageError(err: anyerror) bool {
         error.CredentialStoreRequired,
         error.InvalidCredentialStore,
         error.CredentialDirectoryRequired,
+        error.OutputRequired,
+        error.ExportFormatRequired,
+        error.UnsupportedExportFormat,
         error.InvalidCredentialDirectory,
         error.InvalidCredentialOption,
         error.UrlRequired,
@@ -106,7 +109,7 @@ fn standaloneHelpRequested(mode: []const u8, args: *std.process.Args.Iterator) ?
     if (std.mem.eql(u8, mode, "credentials")) {
         const first = scan.next() orelse return null;
         if (std.mem.eql(u8, first, "--help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help-all")) return "";
-        if (!std.mem.eql(u8, first, "status") and !std.mem.eql(u8, first, "migrate")) return null;
+        if (!std.mem.eql(u8, first, "status") and !std.mem.eql(u8, first, "migrate") and !std.mem.eql(u8, first, "export")) return null;
         verb = first;
     }
     while (scan.next()) |arg| {
@@ -115,7 +118,7 @@ fn standaloneHelpRequested(mode: []const u8, args: *std.process.Args.Iterator) ?
         // Standalone value flags (including probe positional arguments) are
         // data. Recognized value options consume their value before help scan.
         var value_flag = false;
-        for ([_][]const u8{ "--config", "--account", "--grant-file", "--to", "--directory", "--cache-dir", "--interval", "--prefetch-bodies", "--metadata-limit", "--disk-limit-bytes", "--fixture-root", "--fixture-scenario", "--fixture-delay-ms", "--fixture-fail-account", "--fixture-empty-account", "--fixture-rows", "--fixture-fail-after", "--fixture-auto-refresh-ms" }) |flag| if (std.mem.eql(u8, arg, flag)) {
+        for ([_][]const u8{ "--config", "--account", "--grant-file", "--to", "--directory", "--format", "--output", "--cache-dir", "--interval", "--prefetch-bodies", "--metadata-limit", "--disk-limit-bytes", "--fixture-root", "--fixture-scenario", "--fixture-delay-ms", "--fixture-fail-account", "--fixture-empty-account", "--fixture-rows", "--fixture-fail-after", "--fixture-auto-refresh-ms" }) |flag| if (std.mem.eql(u8, arg, flag)) {
             value_flag = true;
             break;
         };
