@@ -90,6 +90,8 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 
 - One-shot commands and a JSONL client (`omagma cli` / `omagma agent`) use the
   same account-scoped executor as the TUI.
+- Progressive help: a short overview, JSONL quickstart, operation catalogues
+  and command-specific flags/fields/examples, with an extended reference.
 - Up to 100 messages per requested page, explicit continuation cursors and
   cache-only versus server search.
 - Decoded body/envelope/thread/attachment data, immutable account-local file

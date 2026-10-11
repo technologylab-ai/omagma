@@ -64,6 +64,9 @@ fn usageError(err: anyerror) bool {
     };
 }
 fn printHelp(io: std.Io) !void {
+    return @import("terminal/cli_help.zig").overview(io);
+}
+fn printFullHelp(io: std.Io) !void {
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     try writer.interface.print("omagma {s} (Zig {s})\n  version | --version\n  daemon [--config FILE] [--fixtures] [--dry-run-open]\n  auth --account ADDRESS --config FILE\n  status [--config FILE]\n  probe-http http://127.0.0.1:PORT/PATH\n  probe-https\n", .{ @import("build_options").version, builtin.zig_version_string });
@@ -149,6 +152,7 @@ fn app(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, mode, "help") or std.mem.eql(u8, mode, "--help") or std.mem.eql(u8, mode, "-h")) return printHelp(io);
+    if (std.mem.eql(u8, mode, "--help-all")) return printFullHelp(io);
     if (std.mem.eql(u8, mode, "probe-label-http")) {
         const method = std.meta.stringToEnum(std.http.Method, args.next() orelse return error.InvalidProbeMethod) orelse return error.InvalidProbeMethod;
         const url = args.next() orelse return error.UrlRequired;

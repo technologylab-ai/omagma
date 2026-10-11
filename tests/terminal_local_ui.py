@@ -107,7 +107,15 @@ def help_case(binary, directory, config, capture_dir=None):
         for keys, action in (("j / k · arrows", "Move through the focused pane"),
                              ("h / l · Tab", "Change pane; Shift+Tab goes back"),
                              ("Enter", "Open mail or choose the focused item")):
-            key_at, action_at = terminal.screen.locate(keys), terminal.screen.locate(action)
+            # Actions above NAVIGATION also mention keys, including Tab/Enter.
+            # Find the literal key in this section's key column independently
+            # of its action row, so the alignment assertions still catch drift.
+            key_at = next(({"row": row, "column": heading["column"]}
+                           for row in range(heading["row"] + 1, terminal.screen.rows)
+                           if "".join(terminal.screen.cells[row][heading["column"]:
+                               heading["column"] + len(keys)]) == keys
+                           and terminal.screen.cells[row][heading["column"] + len(keys)] == " "), None)
+            action_at = terminal.screen.locate(action)
             require(key_at is not None and action_at is not None and key_at["row"] == action_at["row"],
                     "wide help key/action row is not aligned")
             require(action_at["column"] > key_at["column"] + len(keys), "help action overlaps its key")

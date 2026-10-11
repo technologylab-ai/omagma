@@ -2,6 +2,7 @@ const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
 const core = @import("core.zig");
+const help_info = @import("cli_help.zig");
 const files = @import("files.zig");
 const CappedAllocator = @import("capped_allocator.zig").CappedAllocator;
 const HtmlMetrics = struct {
@@ -30,22 +31,27 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     var browser_preview = false;
     const interactive = std.mem.eql(u8, mode, "tui");
     const jsonl = std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent");
+    var operation: ?[]const u8 = null;
     if (!interactive and !jsonl) {
         const verb = args.next() orelse return error.CommandRequired;
         if (eq(verb, "--help") or eq(verb, "-h")) {
-            try help(io);
-            return;
+            return help_info.family(io, mode);
         }
+        if (eq(verb, "--help-all")) return help(io);
         if (!knownVerb(mode, verb)) return error.UnknownCommand;
-        const family = if (std.mem.eql(u8, mode, "invitations")) "invitation" else if (std.mem.eql(u8, mode, "terminal-auth")) "auth" else mode;
-        const command = if (eq(family, "mail") and eq(verb, "drafts")) "draft.list" else if (eq(family, "mail") and eq(verb, "compose")) "draft.create" else if (eq(family, "mail") and eq(verb, "labels")) "labels.list" else if (eq(family, "mail") and eq(verb, "identities")) "accounts.identities" else if (eq(family, "mail") and eq(verb, "open-link")) "browser.open" else if (eq(family, "mail") and eq(verb, "open-attachment")) "attachment.open" else try std.fmt.allocPrint(sa, "{s}.{s}", .{ family, verb });
+        operation = verb;
+        const command = help_info.jsonAlias(mode, verb) orelse try std.fmt.allocPrint(sa, "{s}.{s}", .{ help_info.jsonFamily(mode), verb });
         try req.object.put(sa, "cmd", .{ .string = command });
     }
     while (args.next()) |arg| {
         if (eq(arg, "--help") or eq(arg, "-h")) {
-            try help(io);
-            return;
+            if (jsonl) {
+                const target = args.next();
+                return help_info.protocol(io, if (target != null and !std.mem.startsWith(u8, target.?, "-")) target else null);
+            }
+            return if (operation) |verb| help_info.command(io, mode, verb) else help_info.family(io, mode);
         }
+        if (eq(arg, "--help-all")) return help(io);
         if (eq(arg, "--fixtures")) {
             options.fixtures = true;
             continue;
@@ -273,23 +279,7 @@ fn eq(a: []const u8, b: []const u8) bool {
 // Reject misspelled one-shot verbs before loading configuration, accounts or
 // credentials. JSONL command frames retain the shared executor's error contract.
 fn knownVerb(mode: []const u8, verb: []const u8) bool {
-    const families = [_]struct { name: []const u8, verbs: []const []const u8 }{
-        .{ .name = "mail", .verbs = &.{ "list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients", "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch", "drafts", "compose", "labels", "identities", "open-link", "open-attachment" } },
-        .{ .name = "draft", .verbs = &.{ "list", "read", "create", "update", "preview", "open-preview", "recovery-save", "send", "queue", "discard" } },
-        .{ .name = "queue", .verbs = &.{ "list", "read", "cancel", "resume", "process", "send-now" } },
-        .{ .name = "attachment", .verbs = &.{ "import", "discard", "open" } },
-        .{ .name = "contacts", .verbs = &.{ "list", "search", "upsert" } },
-        .{ .name = "labels", .verbs = &.{ "list", "create", "rename", "delete", "color", "palette" } },
-        .{ .name = "invitations", .verbs = &.{ "inspect", "reply" } },
-        .{ .name = "cache", .verbs = &.{ "stats", "clear", "activity", "refresh-status" } },
-        .{ .name = "operation", .verbs = &.{ "list", "read" } },
-        .{ .name = "terminal-auth", .verbs = &.{ "status", "authorize", "revoke" } },
-    };
-    for (families) |family| if (eq(mode, family.name)) {
-        for (family.verbs) |candidate| if (eq(verb, candidate)) return true;
-        return false;
-    };
-    return false;
+    return help_info.knownVerb(mode, verb);
 }
 // Boolean flags have already been handled above. Check the name before taking
 // a value so an unknown final flag stays UnknownOption rather than ValueRequired.
@@ -334,7 +324,7 @@ fn readStdin(io: std.Io, a: std.mem.Allocator, limit: usize) ![]const u8 {
 pub fn help(io: std.Io) !void {
     var buf: [2048]u8 = undefined;
     var w = std.Io.File.stdout().writer(io, &buf);
-    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|attachment-save|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|spam|unspam|mark|batch|undo|triage-scope|label-state|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|open-preview|create|update|send|queue|discard --account ADDRESS ...\n  omagma queue list|read|cancel|resume|process|send-now --account ADDRESS [--queue-id ID]\n  omagma attachment import|discard|open --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|spam|unspam|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN [--message-ids ID,ID].\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd and account; accounts.list discovers accounts.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 25MiB decoded total, 35MiB MIME). Larger files use private account handles; JSON stays bounded to3MiB.\nLocal cache and drafts are private. No permanent-delete command exists.\n");
+    try w.interface.writeAll("Experimental terminal mail (account-scoped)\n  omagma tui [--fixtures] [--account ADDRESS] [--cache-dir DIR] [--ui-file FILE]\n  omagma cli|agent [--fixtures] [--fixture-root DIR] [--cache-dir DIR]\n  omagma mail list|search|read|thread|attachment|attachment-save|open|sync|refresh|recipients|compose|reply|forward|send|archive|trash|restore|spam|unspam|mark|batch|undo|triage-scope|label-state|labels|identities|prefetch --account ADDRESS ...\n  omagma draft list|read|preview|open-preview|create|update|send|queue|discard --account ADDRESS ...\n  omagma queue list|read|cancel|resume|process|send-now --account ADDRESS [--queue-id ID]\n  omagma attachment import|discard|open --account ADDRESS ...\n  omagma contacts list|search|upsert --account ADDRESS ...\n  omagma invitations inspect|reply --account ADDRESS --message-id ID --status accepted|tentative|declined --operation-id ID\n  omagma operation list|read --account ADDRESS [--operation-id ID]\n  omagma terminal-auth status|authorize|revoke --account ADDRESS ...\nBulk: mail batch --action archive|trash|restore|spam|unspam|mark --message-ids ID,ID (max100); mail undo --undo-token TOKEN [--message-ids ID,ID].\nBodies: --prefetch-bodies N (0..64, default32) works in tui/cli/cache-refresh.\nJSONL requests require cmd; all except accounts.list require account. Use omagma cli --help for examples.\nSearch: --cached searches local mail; --server searches Gmail. JSONL uses cacheOnly:true/false.\nUse --cached for local list/read/thread/contacts/cache-stats.\nSend requires an operation ID. Unknown outcomes are never retried automatically.\nUse --from ADDRESS (verified Gmail send-as alias), --body-file FILE or --body-stdin; --to/--cc/--bcc accept address lists.\nRepeat --attach-file FILE to attach files (up to16, 25MiB decoded total, 35MiB MIME). Larger files use private account handles; JSON stays bounded to3MiB.\nLocal cache and drafts are private. No permanent-delete command exists.\n");
     try w.interface.writeAll("Updates (no account/OAuth required): omagma updates status|check|guide|dismiss [--json]\n  status reads cached metadata; check requests official stable release metadata.\n  guide shows instructions for the running installation, never installs files.\n  omagma updates automatic on|off controls the daily TUI background check.\n");
     try w.interface.writeAll("Outgoing bodies: --format markdown|plain (default plain) on compose/create/update/send/reply/forward.\nDraft source stays in bodyText; JSONL uses draft.bodyFormat (reply/forward: bodyFormat).\nReview rendered alternatives with draft preview --draft-id ID, or --body-file FILE --format markdown.\n");
     try w.interface.writeAll("Reply/forward: --preserve-formatting retains original HTML and embedded images inline; bodyText is your separate note.\nForward: --original encloses the exact original as a separate .eml file. These modes cannot be combined.\nJSONL uses preserveFormatting:true on mail.reply/mail.forward, or original:true on mail.forward.\n");
@@ -360,17 +350,19 @@ pub fn help(io: std.Io) !void {
 fn runUpdates(io: std.Io, a: std.mem.Allocator, environ: *const std.process.Environ.Map, args: *std.process.Args.Iterator) !void {
     const updates = @import("updates.zig");
     const verb = args.next() orelse "status";
-    if (eq(verb, "--help") or eq(verb, "-h")) return help(io);
+    if (eq(verb, "--help") or eq(verb, "-h")) return help_info.family(io, "updates");
+    if (eq(verb, "--help-all")) return help(io);
     if (!eq(verb, "status") and !eq(verb, "check") and !eq(verb, "guide") and !eq(verb, "dismiss") and !eq(verb, "automatic")) return error.UnknownCommand;
     var automatic: ?bool = null;
     if (eq(verb, "automatic")) {
         const choice = args.next() orelse return error.ValueRequired;
+        if (eq(choice, "--help") or eq(choice, "-h")) return help_info.command(io, "updates", verb);
         automatic = if (eq(choice, "on")) true else if (eq(choice, "off")) false else return error.InvalidUpdatePreference;
     }
     var fixtures = false;
     var json = false;
     while (args.next()) |arg| {
-        if (eq(arg, "--help") or eq(arg, "-h")) return help(io);
+        if (eq(arg, "--help") or eq(arg, "-h")) return help_info.command(io, "updates", verb);
         if (eq(arg, "--fixtures")) fixtures = true else if (eq(arg, "--json")) json = true else return error.UnknownOption;
     }
     var snapshot = try updates.init(io, a, environ, fixtures);

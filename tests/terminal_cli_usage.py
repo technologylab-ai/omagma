@@ -24,10 +24,13 @@ HINT = b"Try omagma --help for available commands and options."
 CANARY = "fictional-private-argument-canary"
 LEGACY_MODES = ("daemon", "auth", "status")
 FAMILIES = {
-    "mail": ("list", "search", "read", "thread", "attachment", "open", "sync", "refresh", "recipients",
-             "reply", "forward", "send", "archive", "trash", "restore", "mark", "batch", "undo", "prefetch",
+    "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
+             "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
              "drafts", "compose", "labels", "identities", "open-link", "open-attachment"),
-    "draft": ("list", "read", "create", "update", "preview", "recovery-save", "send", "discard"),
+    "draft": ("list", "read", "create", "update", "preview", "open-preview", "recovery-save", "send", "queue", "discard"),
+    "queue": ("list", "read", "cancel", "resume", "process", "send-now"),
+    "attachment": ("import", "discard", "open"),
+    "labels": ("list", "create", "rename", "delete", "color", "palette"),
     "contacts": ("list", "search", "upsert"),
     "invitations": ("inspect", "reply"),
     "cache": ("stats", "clear", "activity", "refresh-status"),
@@ -131,15 +134,67 @@ def help_paths(runner):
             result = runner.run([mode, flag], without_home=True)
             require(result.returncode == 0 and not result.stderr and b"Experimental terminal mail" in result.stdout,
                     "terminal mode help required a configured account")
-            lines = result.stdout.splitlines()
-            require(any(b"omagma mail " in line and b"recipients" in line for line in lines)
-                    and any(b"omagma draft " in line and b"preview" in line for line in lines),
-                    "terminal help command listing omitted recipients or draft preview")
+            if mode in ("cli", "agent"):
+                require(b'"cmd":"accounts.list"' in result.stdout and b"omagma cli --help mail.read" in result.stdout,
+                        "agent quickstart lost account discovery or contextual JSONL help")
+            elif mode in FAMILIES:
+                require(all(verb.encode() in result.stdout for verb in FAMILIES[mode]),
+                        "family help omitted an available operation")
     for family, verbs in FAMILIES.items():
         for verb in verbs:
             result = runner.run([family, verb, "--config", str(runner.invalid_config), "--help"])
             require(result.returncode == 0 and not result.stderr and b"Experimental terminal mail" in result.stdout,
                     f"supported one-shot {family}/{verb} was denied or loaded configuration before help")
+    root = runner.run(["--help"]).stdout
+    require(len(root.splitlines()) <= 35 and b"omagma cli --help" in root and b"--help-all" in root,
+            "root help is not a compact entry point with next steps")
+    detailed = runner.run(["mail", "read", "--help"]).stdout
+    require(b"--message-id" in detailed and b"messageId" in detailed and b"draft queue" not in detailed,
+            "message help omitted its fields or leaked unrelated command details")
+    jsonl_help = runner.run(["cli", "--help", "mail.read"], without_home=True)
+    require(jsonl_help.returncode == 0 and jsonl_help.stdout == detailed and not jsonl_help.stderr,
+            "JSONL operation discovery differs from its one-shot help")
+    runner.usage(["cli", "--help", "fictional.missing"], "UnknownCommand", without_home=True)
+    runner.usage(["cli", "--help", "mail.compose"], "UnknownCommand", without_home=True)
+    runner.usage(["cli", "--help", "mail.spam"], "UnknownCommand", without_home=True)
+    runner.usage(["cli", "--help", "mail.unspam"], "UnknownCommand", without_home=True)
+    for verb in ("status", "check", "guide", "dismiss", "automatic"):
+        result = runner.run(["updates", verb, "--help"], without_home=True)
+        require(result.returncode == 0 and not result.stderr and verb.encode() in result.stdout,
+                "update help entered its runtime or omitted its own operation")
+    full = runner.run(["--help-all"], without_home=True)
+    require(full.returncode == 0 and b"recipients" in full.stdout and b"draft preview" in full.stdout,
+            "extended help is unavailable without configuration")
+
+
+def help_examples(runner):
+    # Execute the help's literal JSON examples through the real fixture dispatcher.
+    # Feed returned message IDs into later examples instead of inventing provider IDs.
+    common = ["--fixtures", "--cache-dir", str(runner.directory / "help-example-cache")]
+    quickstart = runner.run(["cli", "--help"], without_home=True).stdout.decode()
+    discovery = next(line for line in quickstart.splitlines() if "printf '%s" in line)
+    request = json.loads(discovery.split("'", 3)[3].split("'", 1)[0])
+    result = runner.run(["cli", *common], (json.dumps(request) + "\n").encode())
+    discovered = json.loads(result.stdout)
+    require(discovered["ok"] and discovered["data"]["accounts"], "help's account-discovery example failed")
+    account = discovered["data"]["accounts"][0]["address"]
+    returned_id = None
+    for family, verb in (("mail", "list"), ("mail", "read"), ("mail", "search"), ("draft", "preview")):
+        text = runner.run([family, verb, "--help"], without_home=True).stdout.decode()
+        example = next(json.loads(line) for line in text.splitlines() if line.startswith('{"id"'))
+        example["account"] = account
+        if family == "mail" and verb == "read":
+            require(returned_id is not None, "help's list example returned no usable message")
+            example["messageId"] = returned_id
+        result = runner.run(["cli", *common], (json.dumps(example) + "\n").encode())
+        response = json.loads(result.stdout)
+        require(result.returncode == 0 and response["ok"] and response["id"] == example["id"],
+                f"help's {family}/{verb} example is not executable")
+        if family == "mail" and verb == "list":
+            returned_id = response["data"]["messages"][0]["id"]
+        if family == "draft":
+            require("<strong>Hello</strong>" in response["data"]["bodyHtml"],
+                    "help's Markdown preview example did not render")
 
 
 def protocol(runner):
@@ -202,7 +257,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="omagma-cli-usage-") as temporary:
         runner = Runner(binary, Path(temporary))
-        for name, exercise in (("guidance", guidance), ("options", options), ("help", help_paths),
+        for name, exercise in (("guidance", guidance), ("options", options), ("help", help_paths), ("help-examples", help_examples),
                                ("protocol", protocol), ("version", lambda runner: version(runner, info["appVersion"]))):
             try:
                 exercise(runner)

@@ -8,6 +8,27 @@ Authorize live features through [full TUI/CLI permissions](SETUP.md#full-tuicli-
 
 Fixture accounts expose mock send, mailbox-change, contact and RSVP capabilities without OAuth or Google access. Inspect `accounts.list` when selecting capabilities for an actual account.
 
+## Discover commands
+
+The executable reveals details as you ask for them. Help needs no account
+configuration, authorization or network access.
+
+| Command | Shows |
+| --- | --- |
+| `omagma --help` | Short overview of command families |
+| `omagma cli --help` | JSONL quickstart, account discovery, request/reply examples and further help |
+| `omagma mail --help` | Mail operations with short descriptions |
+| `omagma mail read --help` | That operation's flags, JSONL fields and example |
+| `omagma cli --help mail.read` | The same details using the JSONL command name |
+| `omagma --help-all` | Extended command overview |
+
+Start with `accounts.list`, then use a returned enabled account and its
+capabilities. Follow message IDs from list replies into read requests, and check
+`ok` on every response. The quickstart points to this complete command reference.
+CLI convenience operations can perform several JSONL calls: Spam/Not spam uses
+`mail.batch`, and conversation actions resolve `mail.triage-scope` before applying
+an explicit batch. Contextual help describes those differences.
+
 ## Verify agent access
 
 On a new Mac setup, choose [Interactive or Agent-enabled](MACOS.md#choose-interactive-or-agent-enabled-setup)
