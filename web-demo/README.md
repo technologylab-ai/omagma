@@ -4,7 +4,7 @@ This is an isolated showcase prototype, built from the native TUI source. Zig
 owns the screen, layout and mail interaction; xterm.js supplies the browser's
 terminal display and input. It starts with fictional mail and can connect
 existing grants through the local server or an exported connection file for live
-Gmail reading, plain composition, replies and forwarding, contacts and recipient
+Gmail reading, plain or Markdown composition, replies and forwarding, contacts and recipient
 completion, and a bounded browser mail cache. See [live mail](LIVE-MAIL.md) for
 credential loading and scope.
 
@@ -41,26 +41,27 @@ For static hosting, build the standalone module with `zig build browser
 "$PWD/zig-out/web-demo/omagma.wasm"`. Any static HTTP host can serve the generated
 `web-demo/dist/` folder. A `file:` URL cannot load the WASM module.
 
-Try `j` / `k`, Enter, `1` / `2` / `3` to switch accounts, `/` for a local
-substring search, `v` for right/below layouts, `z` to expand the reader, `a` for
+Try `j` / `k`, Enter, `1` / `2` / `3` to switch accounts, `/` for bounded cache
+search, `v` for right/below layouts, `z` to expand the reader, `a` for
 fictional contacts, and `?` for the native help overlay. Escape backs out;
 Reset demo creates fresh fictional state. **Connect Gmail** loads one exported
 connection file on a static host, or uses your configured native accounts when
 opened through the server's printed link. **Load file** remains available in
 server mode. Disconnect returns to fictional mode. In live mode, `c` composes,
-`r` replies, `R` replies to all, `f` forwards, and Ctrl+S opens send review. Tab/Shift+Tab move
-between fields or review buttons. Explicit Send begins the ten-second local
-cancellation window. Native help documents the full
-application, while this demo implements the subset described here. Actions
-outside the demo explain that they are unavailable. `T` opens the native theme
+`r` replies, `R` replies to all, and `f` forwards. Reply/forward offers the shared
+source chooser; choose Text quote. Compose starts in normal mode: `i` edits, Esc
+returns to normal mode, Ctrl+T switches plain/Markdown, and Ctrl+S opens send review.
+Tab/Shift+Tab move between fields or review buttons. Explicit Send begins the ten-second local
+cancellation window. The shared help and action palette show the current platform capabilities. `T` opens the native theme
 picker; browser execution has no access to the desktop's theme files.
 
 In live mode, `a` opens granted Google contacts. Recipient fields offer local
 suggestions while typing; Ctrl+Space also searches Google when a name is absent
-from the retained page. `/` searches cached mail and `\\` searches Gmail;
+from the retained page. `/` searches cached mail and `\` searches Gmail;
 Ctrl+R refreshes. The cache keeps up to 300 message records per account, shows
 30 matching rows, and enforces 3 MiB per snapshot / 8 MiB total. IndexedDB holds
-mail and contacts, while credentials and drafts stay in tab memory. Disconnect
+mail and contacts, while credentials and drafts stay in tab memory. Leaving a composer saves a session
+draft; open Drafts to resume it. Reload/disconnect discards session drafts. Disconnect
 retains the cache; **Clear cache** removes it. Cached restores require a fresh
 account verification and the exact registration/grant. Date filters use UTC.
 
@@ -89,15 +90,18 @@ port fallback from an empty working directory.
 
 ## What is reused
 
-The boundary is the native TUI's screen renderer plus bounded
-synthetic state, with a browser-specific entry point and event adapter.
+The browser runs the native `App` workflow controller, screen renderer and
+bounded state with platform and provider adapters.
 Browser glue passes terminal bytes and resize events into WebAssembly, and
 passes the resulting terminal frame to xterm.js. It does not recreate the mail
 interface in HTML.
 
-`src/browser.zig` exports the browser ABI; `BrowserDemo` in
-`src/terminal/tui.zig` owns the synthetic fixture adapter and calls the shared
-`App.draw`. The pinned libvaxis parser, screen, text layout and renderer run in
+`src/browser.zig` exports the browser ABI. The thin `BrowserSession` in
+`src/terminal/tui.zig` supplies the terminal surface and delegates input, jobs
+and drawing to `App`. `src/browser_provider.zig` implements the existing
+`types.Client` command envelopes for browser transport, cache and session drafts.
+Native and browser providers share draft builders, validation, MIME and send
+outcome rules. [Architecture and extension guidance](../docs/BROWSER-ARCHITECTURE.md). The pinned libvaxis parser, screen, text layout and renderer run in
 WASM. The freestanding module imports only `env.http_request` and `env.now_ms`.
 The HTTP call is suspended while browser `fetch` runs, then returns status and
 bounded response bytes to the same Zig request/decoder code. OAuth credentials

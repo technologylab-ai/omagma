@@ -680,6 +680,7 @@ pub const Store = struct {
         var draft_value = try j.value(s.allocator, d);
         // Keep an unchanged legacy uncertain draft byte-for-byte compatible.
         if (d.bodyFormat == .plain) _ = draft_value.object.orderedRemove("bodyFormat");
+        if (d.omittedAttachments == 0) _ = draft_value.object.orderedRemove("omittedAttachments");
         const raw = try std.json.Stringify.valueAlloc(s.allocator, draft_value, .{ .emit_null_optional_fields = false });
         const name = try s.fileName("draft", d.id);
         const previous = if (index != null) try readPrivate(s.dir, s.io, s.allocator, name, 4 * t.Limits.body_bytes) else null;
@@ -1346,6 +1347,27 @@ test "wishlist: legacy protected draft retains literal bytes with primary sender
     try std.testing.expectEqualStrings(old, try readPrivate(store.dir, store.io, a, name, t.Limits.body_bytes));
     draft.from = .{ .address = "different@example.test" };
     try std.testing.expectError(error.UnknownOutcome, store.putDraft(draft, draft.id));
+}
+
+test "draft omission metadata persists and remains protected after an uncertain send" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/omitted-draft", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    var draft = try store.putDraft(.{ .bodyText = "Forwarded note", .omittedAttachments = 2 }, null);
+    try std.testing.expectEqual(@as(usize, 2), (try store.draft(draft.id)).omittedAttachments);
+    store.state.operations = try a.dupe(Operation, &.{.{ .id = "uncertain-operation", .hash = "fingerprint", .draftId = draft.id, .outcome = "unknown" }});
+    _ = try store.putDraft(draft, draft.id);
+    const name = try store.fileName("draft", draft.id);
+    const protected = try readPrivate(store.dir, store.io, a, name, t.Limits.body_bytes);
+    draft.omittedAttachments = 0;
+    try std.testing.expectError(error.UnknownOutcome, store.putDraft(draft, draft.id));
+    try std.testing.expectEqualStrings(protected, try readPrivate(store.dir, store.io, a, name, t.Limits.body_bytes));
+    try std.testing.expectEqual(@as(usize, 2), (try store.draft(draft.id)).omittedAttachments);
 }
 
 test "cache activity: legacy indexes baseline zero and secure stamps never parse or wait" {

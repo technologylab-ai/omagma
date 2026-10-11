@@ -171,6 +171,11 @@ pub const Store = struct {
     pub fn updatedAt(self: *const Store, index: usize) i64 {
         return if (index < 3) self.entries[index].updated_at else 0;
     }
+    /// Borrowed current inventory, for local recipient building and bounded
+    /// native-protocol pagination. It never includes historical snapshots.
+    pub fn retained(self: *const Store, index: usize) []const types.Message {
+        return if (index < 3) self.entries[index].messages else &.{};
+    }
     fn copyEntry(self: *Store, index: usize) !Entry {
         if (index >= 3 or self.bindings[index] == null) return error.InvalidBrowserCache;
         var next: Entry = .{ .arena = .init(self.allocator), .updated_at = self.entries[index].updated_at, .loaded = true, .contacts_loaded = self.entries[index].contacts_loaded };
@@ -250,6 +255,12 @@ pub const Store = struct {
         self.entries[index] = next.*;
     }
     pub fn replaceList(self: *Store, index: usize, values: []const j.Value, updated_at: i64) !void {
+        return self.replaceView(index, values, updated_at, "", false);
+    }
+    /// A complete, unfiltered provider folder enumerates membership exactly.
+    /// Reconcile that known label while retaining bodies for other cached views.
+    /// An incomplete head never proves an older message has left its folder.
+    pub fn replaceView(self: *Store, index: usize, values: []const j.Value, updated_at: i64, label: []const u8, complete: bool) !void {
         if (values.len > 30 or updated_at < 0 or updated_at > 253402300800000) return error.InvalidBrowserCache;
         var next = try self.copyEntry(index);
         errdefer next.arena.deinit();
@@ -282,7 +293,14 @@ pub const Store = struct {
                 break;
             };
             if (!found and count < messages.len) {
-                messages[count] = old;
+                var retained_message = old;
+                if (complete and label.len > 0) {
+                    var labels: std.ArrayList([]const u8) = .empty;
+                    for (old.labels) |previous| if (!std.mem.eql(u8, previous, label)) try labels.append(a, previous);
+                    retained_message.labels = labels.items;
+                    if (std.mem.eql(u8, label, "UNREAD")) retained_message.unread = false;
+                }
+                messages[count] = retained_message;
                 count += 1;
             }
         }
@@ -340,6 +358,10 @@ pub const Store = struct {
         return result;
     }
     pub fn list(self: *const Store, index: usize, a: std.mem.Allocator, label: []const u8, needle: []const u8) ![]const j.Value {
+        const values = try self.listAll(index, a, label, needle);
+        return values[0..@min(values.len, 30)];
+    }
+    pub fn listAll(self: *const Store, index: usize, a: std.mem.Allocator, label: []const u8, needle: []const u8) ![]const j.Value {
         if (index >= 3) return error.InvalidBrowserCache;
         try query.validate(needle);
         var matches: std.ArrayList(types.Message) = .empty;
@@ -358,7 +380,7 @@ pub const Store = struct {
             }
         }.less);
         var result: std.ArrayList(j.Value) = .empty;
-        for (matches.items[0..@min(matches.items.len, 30)]) |message| try result.append(a, try j.value(a, message));
+        for (matches.items) |message| try result.append(a, try j.value(a, message));
         return result.toOwnedSlice(a);
     }
     pub fn snapshot(self: *Store, index: usize, output: []u8) ![]u8 {

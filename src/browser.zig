@@ -9,7 +9,7 @@ fn trap(_: []const u8, _: ?usize) noreturn {
 pub const std_options: std.Options = .{ .log_level = .err, .logFn = quietLog };
 fn quietLog(comptime _: std.log.Level, comptime _: @TypeOf(.enum_literal), comptime _: []const u8, _: anytype) void {}
 const allocator = std.heap.wasm_allocator;
-var demo: tui.BrowserDemo = undefined;
+var demo: tui.BrowserSession = undefined;
 var initialized = false;
 var busy = false;
 var input_buffer: [1024]u8 = undefined;
@@ -103,16 +103,19 @@ export fn connect(length: usize) u32 {
     return redraw();
 }
 export fn live_accounts() u32 {
-    return if (initialized) @intCast(demo.live_count) else 0;
+    return if (initialized) @intCast(demo.accountCount()) else 0;
+}
+export fn draft_count() u32 {
+    return if (initialized) @intCast(demo.draftCount()) else 0;
 }
 export fn can_send() u32 {
     return @intFromBool(initialized and demo.canSend());
 }
 export fn can_contacts(index: usize) u32 {
-    return @intFromBool(initialized and index < demo.live_count and demo.live_sessions[index].can_contacts);
+    return @intFromBool(initialized and index < demo.accountCount() and demo.canContacts(index));
 }
 export fn send_status() u32 {
-    return if (initialized) demo.last_send_status else 0;
+    return if (initialized) demo.sendStatus() else 0;
 }
 export fn cache_input_ptr() usize {
     return @intFromPtr(&cache_buffer);
@@ -144,7 +147,7 @@ export fn cache_revision(index: usize) u32 {
 export fn cache_clear(index: usize) u32 {
     if (busy or !initialized) return 4;
     if (index == 0xffffffff) {
-        for (0..demo.live_count) |actor| demo.cacheClear(actor) catch |err| demo.failure(err);
+        for (0..demo.accountCount()) |actor| demo.cacheClear(actor) catch |err| demo.failure(err);
         return redraw();
     }
     demo.cacheClear(index) catch |err| {
@@ -160,6 +163,8 @@ export fn acknowledge_unknown() u32 {
 }
 export fn contacts_permission(index: usize, allowed: u32) u32 {
     if (busy or !initialized) return 4;
+    busy = true;
+    defer busy = false;
     demo.restrictContacts(index, allowed != 0) catch |err| demo.failure(err);
     return redraw();
 }

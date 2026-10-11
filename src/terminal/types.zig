@@ -5,6 +5,8 @@ pub const Limits = struct {
     pub const body_bytes: usize = 2 * 1024 * 1024;
     pub const attachments: usize = 16;
     pub const related_resources: usize = 32;
+    /// Informational source files excluded from a text-only forward.
+    pub const omitted_attachment_count: usize = 64;
     /// Combined decoded ordinary outgoing files. Incoming saves have their own cap.
     pub const attachment_bytes: usize = 25 * 1024 * 1024;
     pub const incoming_attachment_bytes: usize = @import("../attachment_limits.zig").incoming_bytes;
@@ -69,6 +71,10 @@ pub const Client = struct {
     cachedFn: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror![]const u8 = null,
     cacheStampFn: ?*const fn (*anyopaque, []const u8) anyerror!?CacheStamp = null,
     callProgressFn: ?*const fn (*anyopaque, std.mem.Allocator, []const u8, ProgressSink) anyerror![]const u8 = null,
+    /// A receipt is accepted only after its consumer has safely applied it.
+    /// This acknowledges consumption, not provider delivery; the request is
+    /// borrowed only for this synchronous, non-fallible callback.
+    sendReceiptFn: ?*const fn (*anyopaque, []const u8, bool) void = null,
     pub fn cacheStamp(self: Client, account: []const u8) !?CacheStamp {
         return (self.cacheStampFn orelse return error.CacheUnsupported)(self.ctx, account);
     }
@@ -80,6 +86,9 @@ pub const Client = struct {
     }
     pub fn callWithProgress(self: Client, allocator: std.mem.Allocator, request: []const u8, sink: ProgressSink) ![]const u8 {
         return if (self.callProgressFn) |function| function(self.ctx, allocator, request, sink) else self.callFn(self.ctx, allocator, request);
+    }
+    pub fn sendReceipt(self: Client, request: []const u8, accepted: bool) void {
+        if (self.sendReceiptFn) |function| function(self.ctx, request, accepted);
     }
 };
 pub const Address = struct { address: []const u8, name: []const u8 = "" };
@@ -159,6 +168,9 @@ pub const Draft = struct {
     references: []const u8 = "",
     attachments: []const Attachment = &.{},
     original: ?Original = null,
+    /// Informational warning retained through review of a text-only forward.
+    /// These files are absent from the draft and never submitted to the sender.
+    omittedAttachments: usize = 0,
 };
 pub const LabelColor = struct { backgroundColor: []const u8, textColor: []const u8 };
 pub const Contact = struct {

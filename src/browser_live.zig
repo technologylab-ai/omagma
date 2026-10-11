@@ -63,7 +63,7 @@ pub const Session = struct {
         const result = http_request(self.id, @intFromPtr(method_name.ptr), method_name.len, @intFromPtr(url.ptr), url.len, @intFromPtr(encoded.ptr), encoded.len, @intFromPtr(&response_buffer), response_buffer.len, @intFromPtr(&response_metadata));
         const mutating = method != .GET;
         // The host reports these only before initiating a provider request.
-        if (result == 4) return error.Canceled;
+        if (result == 4) return if (mutating) error.SendCanceledBeforeSubmission else error.Canceled;
         if (result == 3) return error.NotConnected;
         if (result != 0) return if (mutating) error.UnknownOutcome else switch (result) {
             2 => error.ResponseTooLarge,
@@ -109,7 +109,6 @@ pub const Session = struct {
     }
     pub fn send(self: *Session, a: std.mem.Allocator, draft: types.Draft, operation_id: []const u8) !j.Value {
         if (draft.attachments.len != 0 or draft.original != null) return error.BrowserAttachmentsUnavailable;
-        if (draft.bodyFormat != .plain) return error.BrowserPlainTextRequired;
         const clock = now_ms();
         if (!std.math.isFinite(clock) or clock <= 0 or clock >= 253402300800000) return error.InvalidDate;
         return gmail.sendAuthorized(io, a, self.account, self.capabilities(), self.transport(), try j.value(a, .{ .draft = draft, .operationId = operation_id }));

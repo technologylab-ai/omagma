@@ -4,8 +4,7 @@ const storage = @import("store.zig");
 const mime = @import("mime.zig");
 
 pub fn validateId(id: []const u8) !void {
-    if (id.len != 64) return error.InvalidAttachmentHandle;
-    for (id) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidAttachmentHandle;
+    return @import("draft_codec.zig").validateAttachmentHandle(id);
 }
 pub fn filename(a: std.mem.Allocator, id: []const u8) ![]const u8 {
     try validateId(id);

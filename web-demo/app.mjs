@@ -68,6 +68,8 @@ let wasmCols = 0;
 let wasmRows = 0;
 const pendingInput = new Uint8Array(64 * 1024);
 let pendingLength = 0;
+let inputNotice = '';
+const sessionDraftCount = () => bridge?.exports.draft_count?.() ?? 0;
 
 function screenText() {
   const buffer = terminal.buffer.active;
@@ -98,6 +100,7 @@ Object.defineProperty(window, 'omagmaDemo', { value: Object.freeze({
   get ready() { return ready; }, get error() { return error; },
   get cols() { return terminal.cols; }, get rows() { return terminal.rows; },
   get frameCount() { return frameCount; }, get unicodeVersion() { return terminal.unicode.activeVersion; },
+  get inputNotice() { return inputNotice; },
   screenText, cellStyle, cell, geometry, sessionInfo,
   exports() { return bridge ? Object.keys(bridge.exports).sort() : []; },
   state() { return mode === 'demo' ? bridge?.state() ?? null : null; },
@@ -147,7 +150,11 @@ function updateControls() {
     else if (cacheError) { runtimeStatus.textContent = 'Browser cache could not be saved'; requestHint.textContent = cacheError; }
     else runtimeStatus.textContent = 'Running locally in WebAssembly';
   }
-  modeStatus.textContent = mode === 'demo' ? 'Sample mode · no Gmail connection' : (mode === 'connecting' ? 'Connecting · credentials in session memory' : 'Live Gmail · bounded local mail cache');
+  if (!error && inputNotice && !active) {
+    runtimeStatus.textContent = inputNotice;
+    requestHint.textContent = 'Your session is kept. Paste smaller chunks, up to 64 KiB.';
+  }
+  modeStatus.textContent = mode === 'demo' ? 'Sample mode · no Gmail connection' : (mode === 'connecting' ? 'Connecting · credentials in session memory' : 'Live Gmail · bounded cache · live queries show up to 30 messages');
   select('.window-subtitle').textContent = mode === 'demo' ? '/ sample inbox' : '/ live Gmail';
   select('#sample-notice').hidden = mode !== 'demo';
 }
@@ -188,7 +195,7 @@ async function persistCaches(current, currentTransport, epoch) {
   let attempted = false;
   for (let index = 0; index < Math.min(records.length, current.exports.live_accounts?.() ?? 0); index++) {
     if (epoch !== generation) return;
-    if (!records[index].canContacts && typeof current.exports.contacts_permission === 'function' && (!current.exports.can_contacts || current.exports.can_contacts(index))) { current.exports.contacts_permission(index, 0); current.frame(); }
+    if (!records[index].canContacts && typeof current.exports.contacts_permission === 'function' && (!current.exports.can_contacts || current.exports.can_contacts(index))) await current.restrictContacts(index, false);
     const revision = current.exports.cache_revision(index);
     if (cacheRevisions[index] === revision) continue;
     attempted = true;
@@ -250,7 +257,8 @@ new ResizeObserver(resize).observe(terminalElement);
 
 function queueInput(bytes) {
   if (!ready) return;
-  if (bytes.length > pendingInput.length - pendingLength) { fail(new Error('This experiment accepts up to 64 KiB of input at a time.')); return; }
+  if (bytes.length > pendingInput.length - pendingLength) { inputNotice = 'Input too large · paste was skipped'; updateControls(); return; }
+  inputNotice = '';
   pendingInput.set(bytes, pendingLength);
   pendingLength += bytes.length;
   if (!inputScheduled) {
@@ -259,7 +267,7 @@ function queueInput(bytes) {
   }
 }
 function queueText(data, binary = false) {
-  if (data.length > pendingInput.length) { fail(new Error('This experiment accepts up to 64 KiB of input at a time.')); return; }
+  if (data.length > pendingInput.length) { inputNotice = 'Input too large · paste was skipped'; updateControls(); return; }
   queueInput(binary ? Uint8Array.from(data, character => character.charCodeAt(0)) : encoder.encode(data));
 }
 terminal.onData(data => queueText(data));
@@ -277,7 +285,7 @@ terminal.attachCustomKeyEventHandler(event => {
   }
   if (transport?.info().busy && event.ctrlKey && event.key.toLowerCase() === 'c') {
     event.preventDefault();
-    if (event.type === 'keydown') transport.abort();
+    if (event.type === 'keydown' && transport.info().sendPhase !== 'sending') transport.abort();
     return false;
   }
   return true;
@@ -451,7 +459,10 @@ select('#credential-bundle').addEventListener('change', () => {
 for (const selector of ['#credential-clients', '#credential-grants', '#credential-tokens', '#credential-folder']) select(selector).addEventListener('change', () => { select('#credential-bundle').value = ''; updateConnectionSelection(); });
 select('#credential-cancel').addEventListener('click', stopConnection);
 dialog.addEventListener('cancel', event => { event.preventDefault(); stopConnection(); });
-disconnectButton.addEventListener('click', stopConnection);
+disconnectButton.addEventListener('click', () => {
+  if (sessionDraftCount() && !window.confirm('Disconnect and discard the drafts saved in this tab?')) return;
+  void stopConnection();
+});
 focusButton.addEventListener('click', () => terminal.focus());
 resetButton.addEventListener('click', stopConnection);
 select('#send-grace-cancel').addEventListener('click', () => transport?.cancelSend());
@@ -466,6 +477,11 @@ cacheClearButton.addEventListener('click', () => {
 window.addEventListener('pagehide', () => {
   connectAttempt++; generation++; ready = false;
   credentialRequest?.abort(); transport?.close(); pendingInput.fill(0); pendingLength = 0;
+});
+window.addEventListener('beforeunload', event => {
+  if (!sessionDraftCount()) return;
+  event.preventDefault();
+  event.returnValue = '';
 });
 window.addEventListener('pageshow', event => { if (event.persisted) stopConnection(); });
 void start().catch(() => {});

@@ -10,6 +10,8 @@ const batch = @import("batch.zig");
 const markdown_mail = @import("markdown_mail.zig");
 const label_collection = @import("labels.zig");
 const send_queue = @import("send_queue.zig");
+const conversation_draft = @import("conversation_draft.zig");
+const draft_codec = @import("draft_codec.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
 const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
@@ -51,19 +53,7 @@ fn requestedPrefetch(options: t.Options, request: Value) !i64 {
     return limit;
 }
 fn operationPayload(a: std.mem.Allocator, draft: t.Draft, account: []const u8, calendar: ?[]const u8) ![]const u8 {
-    var canonical = draft;
-    canonical.id = "";
-    if (canonical.from) |sender| if (sender.name.len == 0 and std.ascii.eqlIgnoreCase(sender.address, account)) {
-        canonical.from = null;
-    };
-    // Preserve legacy outer calendar:null; omit only the newly optional draft
-    // fields so an unchanged old uncertain operation keeps its fingerprint.
-    const bytes = try std.json.Stringify.valueAlloc(a, canonical, .{ .emit_null_optional_fields = false });
-    var value = try std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_if_needed });
-    // Plain is the legacy wire/source interpretation. Keep historical uncertain
-    // fingerprints identical when an older draft gains the default field.
-    if (canonical.bodyFormat == .plain) _ = value.object.orderedRemove("bodyFormat");
-    return std.json.Stringify.valueAlloc(a, .{ .draft = value, .calendar = if (calendar) |ics| try calendarIdentity(a, ics) else null }, .{});
+    return @import("send_outcome.zig").payload(a, draft, account, if (calendar) |ics| try calendarIdentity(a, ics) else null);
 }
 const CacheWindow = struct { start: usize, end: usize, direction: []const u8 = "head", fallback: bool = false };
 fn adjacentCacheWindow(store: *storage.Store, candidates: []const t.Message, request: Value, limit: usize, offset: usize) !CacheWindow {
@@ -182,7 +172,7 @@ pub const Session = struct {
         var req = request.?;
         if (cached_only) {
             const command = j.text(req, "cmd");
-            if (!std.mem.eql(u8, command, "labels.list") and !std.mem.eql(u8, command, "accounts.identities") and !std.mem.eql(u8, command, "mail.list") and !std.mem.eql(u8, command, "mail.recipients") and !std.mem.eql(u8, command, "mail.search") and !std.mem.eql(u8, command, "mail.read") and !std.mem.eql(u8, command, "mail.thread") and !std.mem.eql(u8, command, "cache.stats") and !std.mem.eql(u8, command, "cache.activity") and !std.mem.eql(u8, command, "cache.refresh-status") and !std.mem.eql(u8, command, "contacts.list") and !std.mem.eql(u8, command, "contacts.search")) return error.CacheUnsupported;
+            if (!@import("client_contract.zig").cachedCommand(command)) return error.CacheUnsupported;
             try req.object.put(a, "cacheOnly", .{ .bool = true });
         }
         const account = j.text(req, "account");
@@ -421,11 +411,8 @@ pub const Session = struct {
             // always captures the provider's current FULL source read-only.
             const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
             const original: ?t.Original = if (preserve) try s.captureOriginal(a, &store, req, message) else null;
-            const threading = try @import("mime.zig").threading(message.messageId, message.references, message.inReplyTo, a);
-            var envelope: recipients.Envelope = .{};
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
-            try recipients.replyIncoming(a, address, aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), try j.boolean(req, "all", false), &envelope);
-            const d: t.Draft = .{ .to = try listAddresses(a, &envelope.to), .cc = try listAddresses(a, &envelope.cc), .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}), .bodyText = if (preserve) "" else try quote(a, if (format == .markdown) try markdown_mail.escapeSource(a, message.bodyText) else message.bodyText), .bodyFormat = format, .threadId = message.threadId, .inReplyTo = threading.in_reply_to, .references = threading.references, .original = original };
+            const d = try conversation_draft.reply(a, message, .{ .account = address, .aliases = aliases, .all = try j.boolean(req, "all", false), .format = format, .original = original });
             try validateDraft(d, false);
             if (preserve) _ = try markdown_mail.prepare(a, d);
             return j.value(a, try store.putDraft(d, null));
@@ -461,7 +448,7 @@ pub const Session = struct {
                     for (snapshot.resources) |resource| related = related or std.mem.eql(u8, attachment.id, resource.id);
                     if (!related) try files.append(a, attachment);
                 }
-                const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}), .bodyFormat = format, .attachments = files.items, .original = snapshot };
+                const draft = try conversation_draft.forward(a, message, .{ .format = format, .attachments = files.items, .original = snapshot });
                 try validateDraft(draft, false);
                 _ = try markdown_mail.prepare(a, draft);
                 return j.value(a, try store.putDraft(draft, null));
@@ -472,9 +459,7 @@ pub const Session = struct {
                 attachment.contentLocation = null;
             }
             // A forward is a new conversation, not a reply to the old thread.
-            const original = try std.fmt.allocPrint(a, "---------- Forwarded message ----------\nFrom: {s} <{s}>\nSubject: {s}\n\n{s}", .{ message.from.name, message.from.address, message.subject, message.bodyText });
-            const body = if (format == .markdown) try quote(a, try markdown_mail.escapeSource(a, original)) else try std.fmt.allocPrint(a, "\n\n{s}", .{original});
-            const draft: t.Draft = .{ .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}), .bodyText = body, .bodyFormat = format, .attachments = attachments };
+            const draft = try conversation_draft.forward(a, message, .{ .format = format, .attachments = attachments });
             try validateDraft(draft, false);
             return j.value(a, try store.putDraft(draft, null));
         }
@@ -2419,10 +2404,7 @@ pub const Session = struct {
             if (calendar) |ics| try request.object.put(a, "preparedCalendar", .{ .string = ics });
             const result = (if (spool) |*file| @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeSpool, .{ s.io, a, &s.config, store.state.account, request, draft, file, operation.rfcMessageId }) else s.remote(a, store.state.account, if (calendar != null) "invitation.reply" else "mail.send", request)) catch |err| {
                 operation.errorCode = @errorName(err);
-                operation.outcome = switch (err) {
-                    error.UnverifiedSender, error.FormTooLarge, error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.OAuthClientRequired, error.WrongAccount, error.InvalidGrant, error.UnexpectedScope, error.GrantClientMismatch, error.MessageNotFound, error.ContactConflict, error.RateLimited => "rejected",
-                    else => "unknown",
-                };
+                operation.outcome = if (@import("send_outcome.zig").rejected(err)) "rejected" else "unknown";
                 store.save() catch {
                     operation.outcome = "unknown";
                 };
@@ -2468,155 +2450,17 @@ fn array(v: Value, key: []const u8) ![]Value {
 fn valueArray(v: Value) ![]Value {
     return if (v == .array) v.array.items else error.InvalidRequest;
 }
-pub fn decodeAddresses(a: std.mem.Allocator, v: Value) ![]const t.Address {
-    var list: std.ArrayList(t.Address) = .empty;
-    if (v == .string) {
-        var parsed: recipients.List = .{};
-        try recipients.parse(v.string, &parsed);
-        return listAddresses(a, &parsed);
-    }
-    const values = try valueArray(v);
-    if (values.len > t.Limits.recipients) return error.TooManyRecipients;
-    for (values) |item| {
-        const address = if (item == .string) item.string else try j.required(item, "address");
-        if (item == .object) if (j.get(item, "name")) |field| {
-            if (field != .string) return error.InvalidRequest;
-        };
-        const name = if (item == .string) "" else j.text(item, "name");
-        try recipients.validateAddress(address);
-        try recipients.validateHeader(name);
-        if (name.len > 256) return error.InvalidAddress;
-        try list.append(a, .{ .address = address, .name = name });
-    }
-    return list.items;
+pub fn decodeAddresses(a: std.mem.Allocator, value: Value) ![]const t.Address {
+    return draft_codec.decodeAddresses(a, value);
 }
-pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
-    if (v != .object) return error.InvalidRequest;
-    for ([_][]const u8{ "id", "subject", "bodyText", "threadId", "inReplyTo", "references" }) |key| if (j.get(v, key)) |field| {
-        if (field != .string) return error.InvalidRequest;
-    };
-    var draft = try j.decode(t.Draft, a, try j.value(a, .{ .id = j.text(v, "id"), .subject = j.text(v, "subject"), .bodyText = j.text(v, "bodyText"), .threadId = j.text(v, "threadId"), .inReplyTo = j.text(v, "inReplyTo"), .references = j.text(v, "references") }));
-    draft.bodyFormat = try requestBodyFormat(v);
-    draft.to = if (j.get(v, "to")) |x| try decodeAddresses(a, x) else &.{};
-    draft.cc = if (j.get(v, "cc")) |x| try decodeAddresses(a, x) else &.{};
-    draft.bcc = if (j.get(v, "bcc")) |x| try decodeAddresses(a, x) else &.{};
-    if (j.get(v, "from")) |sender| if (sender != .null) {
-        if (sender == .string) {
-            const addresses = try decodeAddresses(a, sender);
-            if (addresses.len != 1) return error.InvalidSender;
-            draft.from = addresses[0];
-        } else draft.from = try j.decode(t.Address, a, sender);
-    };
-    if (j.get(v, "recoveryFields")) |fields| if (fields != .null) {
-        draft.recoveryFields = try j.decode([]const []const u8, a, fields);
-        if (draft.recoveryFields.?.len != 5) return error.InvalidRecovery;
-    };
-    draft.attachments = if (j.get(v, "attachments")) |x| try j.decode([]const t.Attachment, a, x) else &.{};
-    if (j.get(v, "original")) |original| {
-        if (original != .null) draft.original = try j.decode(t.Original, a, original);
-    }
-    for (draft.attachments) |attachment| if (attachment.blobId == null) {
-        _ = try @import("mime.zig").composeAttachments(&.{attachment}, a);
-    };
-    if (draft.original) |original| _ = try @import("mime.zig").composeAttachments(original.resources, a);
-    return draft;
+pub fn decodeDraft(a: std.mem.Allocator, value: Value) !t.Draft {
+    return draft_codec.decodeDraft(a, value);
 }
-fn requestBodyFormat(v: Value) !t.BodyFormat {
-    const field = j.get(v, "bodyFormat") orelse return .plain;
-    const text = try j.string(field);
-    return std.meta.stringToEnum(t.BodyFormat, text) orelse error.InvalidBodyFormat;
+fn requestBodyFormat(value: Value) !t.BodyFormat {
+    return draft_codec.requestBodyFormat(value);
 }
-pub fn validateDraft(d: t.Draft, send: bool) !void {
-    if (send and d.recoveryFields != null) return error.UnfinishedDraft;
-    if (d.from) |sender| {
-        try recipients.validateAddress(sender.address);
-        try recipients.validateHeader(sender.name);
-        if (sender.name.len > 256) return error.InvalidSender;
-    }
-    if (d.to.len + d.cc.len + d.bcc.len > t.Limits.recipients) return error.TooManyRecipients;
-    if (send and d.to.len + d.cc.len + d.bcc.len == 0) return error.MissingRecipient;
-    if (d.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
-    if (!std.unicode.utf8ValidateSlice(d.bodyText)) return error.InvalidUtf8;
-    const related = if (d.original) |original| original.resources else &.{};
-    if (d.attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
-    if (d.original) |original| try @import("original_mail.zig").validate(original);
-    var attachment_bytes: usize = 0;
-    var embedded_bytes: usize = 0;
-    for ([_][]const t.Attachment{ d.attachments, related }) |list| for (list) |attachment| {
-        if (attachment.filename.len == 0 or attachment.filename.len > 256 or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
-        try recipients.validateHeader(attachment.filename);
-        try recipients.validateHeader(attachment.mimeType);
-        if (attachment.mimeType.len == 0 or attachment.mimeType.len > 128 or std.mem.indexOfScalar(u8, attachment.mimeType, '/') == null) return error.InvalidAttachment;
-        const n = if (attachment.blobId) |id| blk: {
-            try @import("attachment_blob.zig").validateId(id);
-            if (attachment.data.len != 0) return error.InvalidAttachmentHandle;
-            break :blk attachment.size;
-        } else std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(attachment.data) catch return error.InvalidAttachment;
-        attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
-        if (attachment_bytes > t.Limits.attachment_bytes or n != attachment.size) return error.InvalidAttachment;
-        if (attachment.blobId == null) {
-            embedded_bytes = std.math.add(usize, embedded_bytes, n) catch return error.BodyTooLarge;
-            if (embedded_bytes > t.Limits.body_bytes) return error.InvalidAttachment;
-        }
-        // Validate every encoded byte without allocating a second binary copy.
-        for (attachment.data) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return error.InvalidAttachment;
-        try @import("mime.zig").validateAttachment(attachment.filename, attachment.mimeType);
-        if (attachment.contentId) |id| _ = try @import("mime.zig").contentId(id);
-        if (attachment.disposition) |value| if (!std.mem.eql(u8, value, "inline") and !std.mem.eql(u8, value, "attachment")) return error.InvalidDisposition;
-        if (attachment.contentLocation) |value| {
-            try recipients.validateHeader(value);
-            if (value.len == 0 or value.len > 2048) return error.InvalidContentLocation;
-        }
-    };
-    for (related, 0..) |resource, index| {
-        if (resource.blobId != null) return error.InvalidOriginalResource;
-        if (std.ascii.startsWithIgnoreCase(resource.mimeType, "message/")) return error.UnsupportedRelatedType;
-        if (resource.contentId == null and resource.contentLocation == null) return error.MissingRelatedIdentity;
-        for (related[0..index]) |previous| {
-            if (resource.contentId) |id| if (previous.contentId) |other| if (std.mem.eql(u8, id, other)) return error.AmbiguousContentId;
-            if (resource.contentLocation) |location| if (previous.contentLocation) |other| if (std.mem.eql(u8, location, other)) return error.AmbiguousContentId;
-        }
-    }
-    try recipients.validateHeader(d.subject);
-    try recipients.validateHeader(d.inReplyTo);
-    try recipients.validateHeader(d.references);
-    try recipients.validateHeader(d.threadId);
-    if (d.subject.len > 4096 or d.references.len > 8192) return error.HeaderTooLarge;
-    for ([_][]const t.Address{ d.to, d.cc, d.bcc }) |list| for (list) |address| {
-        try recipients.validateAddress(address.address);
-        try recipients.validateHeader(address.name);
-    };
-}
-fn listAddresses(a: std.mem.Allocator, list: *const recipients.List) ![]const t.Address {
-    const result = try a.alloc(t.Address, list.count);
-    for (list.slice(), result) |*src, *dst| dst.* = .{ .address = try a.dupe(u8, src.address.slice()), .name = try a.dupe(u8, src.name.slice()) };
-    return result;
-}
-fn addressHeader(a: std.mem.Allocator, list: []const t.Address) ![]const u8 {
-    var bytes: std.ArrayList(u8) = .empty;
-    for (list, 0..) |address, i| {
-        if (i > 0) try bytes.appendSlice(a, ", ");
-        if (address.name.len == 0) {
-            try bytes.appendSlice(a, address.address);
-        } else {
-            const display = try recipients.formatIncomingDisplay(a, address.address, address.name);
-            defer a.free(display);
-            try bytes.appendSlice(a, display);
-        }
-    }
-    return bytes.items;
-}
-fn quote(a: std.mem.Allocator, body: []const u8) ![]const u8 {
-    var bytes: std.ArrayList(u8) = .empty;
-    try bytes.appendSlice(a, "\n\n");
-    var lines = std.mem.splitScalar(u8, body, '\n');
-    while (lines.next()) |line| {
-        if (line.len + 3 > t.Limits.body_bytes - bytes.items.len) return error.BodyTooLarge;
-        try bytes.appendSlice(a, "> ");
-        try bytes.appendSlice(a, line);
-        try bytes.append(a, '\n');
-    }
-    return bytes.items;
+pub fn validateDraft(draft: t.Draft, send: bool) !void {
+    return draft_codec.validateDraft(draft, send);
 }
 fn hasLabel(m: t.Message, label: []const u8) bool {
     for (m.labels) |l| if (std.mem.eql(u8, l, label)) return true;
@@ -2920,6 +2764,8 @@ test "wishlist: old primary draft operation wire keeps optional nulls absent" {
     var draft: t.Draft = .{ .id = "local-id", .to = &.{.{ .address = "peer@example.test" }}, .subject = "Hi", .bodyText = "Body" };
     try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
     draft.from = .{ .address = "SELF@example.test" };
+    try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
+    draft.omittedAttachments = 2;
     try std.testing.expectEqualStrings(literal, try operationPayload(a, draft, "self@example.test", null));
 }
 

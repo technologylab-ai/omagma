@@ -17,7 +17,7 @@ export class BrowserWasmBridge {
       if (typeof this.exports[name] !== 'function') throw new Error(`The browser module is missing ${name}().`);
     }
     this.calls = {};
-    for (const name of ['init', 'resize', 'input', 'connect', 'cache_clear', 'acknowledge_unknown']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
+    for (const name of ['init', 'resize', 'input', 'connect', 'cache_clear', 'acknowledge_unknown', 'contacts_permission']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
   }
 
   async invoke(name, ...args) {
@@ -106,6 +106,7 @@ export class BrowserWasmBridge {
   }
   clearCache(index = 0xffffffff) { return this.invoke('cache_clear', index); }
   acknowledgeUnknown() { return this.invoke('acknowledge_unknown'); }
+  restrictContacts(index, allowed) { return this.invoke('contacts_permission', index, Number(Boolean(allowed))); }
 
   wipe() { new Uint8Array(this.exports.memory.buffer).fill(0); }
 

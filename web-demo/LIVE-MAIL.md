@@ -1,6 +1,8 @@
 # Live mail in the browser prototype
 
-The browser mode uses the same Zig Gmail request builder, message decoder,
+The browser runs the same `App` workflow controller as the native TUI, with
+platform adapters for the terminal, networking and storage. It uses the same Zig
+Gmail request builder, message decoder,
 recipient validation and MIME encoder as the native application. JavaScript
 supplies HTTPS through `fetch` and keeps OAuth credentials in session memory.
 WebAssembly Promise Integration suspends the Zig request while the browser
@@ -9,9 +11,10 @@ The local Zig server can supply existing native credentials to the launched
 session; static hosting instead uses an exported connection file.
 
 This is a browser adapter for a focused set of terminal workflows. Start with
-inbox reading, plain-text composition, replies and forwarding, Google contacts
+inbox reading, plain/Markdown composition, replies and forwarding, Google contacts
 and recipient completion. A bounded IndexedDB cache retains mail/contact
-snapshots separately from credentials. The native disk cache,
+snapshots separately from credentials. Live queries fetch up to 30 messages; refine Gmail search to reach older mail.
+Cache search pages through the retained 300-record inventory. The native disk cache,
 external editor, attachment files and background send queue are not part of
 this first live mode.
 
@@ -102,7 +105,7 @@ upgrades a grant. `a` opens the bounded contacts page, `/` searches contacts,
 and Enter selects an address. Recipient completion works while typing;
 Ctrl+Space searches Google when local choices do not match.
 
-`/` in the mailbox searches the local cache; `\\` searches Gmail and Ctrl+R
+`/` in the mailbox searches the local cache; `\` searches Gmail and Ctrl+R
 refreshes. The cache merges current records across folders and searches, with
 up to 300 records per account and 30 visible matches. Body eviction, 3 MiB
 snapshot and 8 MiB total quotas bound persistence. Cached HTML is passive source
@@ -149,3 +152,11 @@ provider responses. It verifies file pairing, account identity, scope
 restrictions, body decoding, reply MIME, explicit review/cancellation, exact
 send count and uncertain-result protection. Private screenshots and receipts
 belong under a scratch directory, outside the tracked source tree.
+
+Session drafts survive leaving the composer and switching accounts within the
+tab. Successful sends retire their drafts only after the shared controller
+consumes the receipt. Reload and Disconnect discard remaining drafts, with a
+warning when drafts exist. Pasted input is limited to 64 KiB per event; oversized
+paste is skipped while keeping the session. Paste autosave happens after the
+complete paste. Ctrl+C cancels reads and the send countdown; it does not abort
+an already submitted send.
