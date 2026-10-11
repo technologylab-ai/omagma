@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Upgrade notice and guidance in owned synthetic PTYs; never opens a desktop."""
 import argparse
+from functools import lru_cache
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 
@@ -26,10 +28,23 @@ def capture(terminal, directory, name):
         (directory / f"{name}.json").write_text(json.dumps(screen_capture(terminal)) + "\n")
 
 
+@lru_cache(maxsize=8)
+def fixture_versions(binary):
+    result = subprocess.run([str(binary), "updates", "status", "--fixtures", "--json"],
+                            capture_output=True, text=True, timeout=5)
+    require(result.returncode == 0, "fixture update status failed")
+    status = json.loads(result.stdout)
+    running, newer = status["running"], status["state"]["latest"]
+    require(tuple(map(int, newer.split('.'))) > tuple(map(int, running.split('.')))
+            and status["available"], "update fixture must offer a release newer than the tested binary")
+    return running, newer
+
+
 def wait_card(terminal):
+    _, newer = fixture_versions(terminal.binary)
     terminal.until(lambda: all(value in terminal.text() for value in
-                   ("Upgrade available", "0.2.8", "[How to update]", "[Dismiss]")))
-    require("0.2.8" in terminal.text(), "fixture newer release is not visible")
+                   ("Upgrade available", newer, "[How to update]", "[Dismiss]")))
+    require(newer in terminal.text(), "fixture newer release is not visible")
     require("Operation failed" not in terminal.text(), "release load leaked a mail error")
 
 
@@ -121,7 +136,8 @@ def card_and_guide(binary, directory, capture_dir):
                     "focused": "updates-card-focused.json", "after": "updates-guide.json",
                     "events": ["Tab", "Tab", "Enter"],
                     "columns": 160, "rows": 40,
-                    "runningVersion": "0.2.7", "illustrativeAvailableVersion": "0.2.8",
+                    "runningVersion": fixture_versions(binary)[0],
+                    "illustrativeAvailableVersion": fixture_versions(binary)[1],
                     "automaticInstallation": False}}
     except Exception:
         print(terminal.text(), file=sys.stderr)

@@ -214,7 +214,7 @@ pub const Session = struct {
     }
     fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, fixtures: bool, data: Value) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
-            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color" }) |mutation| {
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -2280,13 +2280,18 @@ pub const Session = struct {
             try s.capability(a, store.state.account, req, "mail-send");
             return send_queue.receipt(a, store, (try send_queue.resumeEntry(store, id, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), try send_queue.delay(req))).*);
         }
-        if (!std.mem.eql(u8, cmd, "queue.process")) return error.UnsupportedCommand;
+        const send_now = std.mem.eql(u8, cmd, "queue.send-now");
+        if (!send_now and !std.mem.eql(u8, cmd, "queue.process")) return error.UnsupportedCommand;
         const wait_for_due = try j.boolean(req, "wait", false);
+        if (send_now and wait_for_due) return error.WaitRequiresQueueProcess;
         try s.capability(a, store.state.account, req, "mail-send");
         var entry = try send_queue.find(store, id);
         if (entry.state != .queued) return send_queue.receipt(a, store, entry.*);
         const remaining = entry.dueAtMs - std.Io.Timestamp.now(s.io, .real).toMilliseconds();
-        if (remaining > 0) {
+        // Send now claims the same reviewed intent through the normal durable
+        // submission path. It skips only the countdown, never the draft hash,
+        // account capability, claim or uncertain-outcome protections.
+        if (remaining > 0 and !send_now) {
             if (!wait_for_due) return error.QueueNotDue;
             if (remaining > 30000) return error.QueueClockChanged;
             store.release();
@@ -2708,7 +2713,7 @@ test "post-dispatch allocation failure preserves live mutation ambiguity" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const a = failing.allocator();
     const receipt: Value = .{ .string = "applied-provider-receipt" };
-    for ([_][]const u8{ "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "invitation.reply" }) |cmd| {
+    for ([_][]const u8{ "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply" }) |cmd| {
         try std.testing.expectError(error.UnknownOutcome, Session.successResponse(a, .null, "self@example.test", cmd, false, receipt));
     }
     try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "mail.read", false, receipt));
@@ -3130,6 +3135,97 @@ test "UX backend: send grace cancel edit restart and uncertainty never duplicate
     try std.testing.expectError(error.SendAlreadySubmitted, session.dispatch(a, try j.value(a, .{ .cmd = "queue.cancel", .account = account, .queueId = j.text(interrupted, "queueId") })));
     try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = j.text(interrupted_draft, "id") })));
     try std.testing.expectEqual(@as(i64, 1), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+}
+
+test "send grace: send now preserves the reviewed intent and fences repeats cancellation and uncertainty" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/send-now", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    const account = "personal@example.com";
+    const draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Reviewed note" } }));
+    const queued = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-reviewed", .delaySeconds = 30 }));
+    const queue_id = j.text(queued, "queueId");
+    const request = try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = queue_id });
+    const due_request = try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = queue_id });
+    try std.testing.expectError(error.QueueNotDue, session.dispatch(a, due_request));
+    try std.testing.expectError(error.QueueNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = "work@example.com", .queueId = queue_id })));
+    try std.testing.expectError(error.WaitRequiresQueueProcess, session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = queue_id, .wait = true })));
+    const sent = try session.dispatch(a, request);
+    try std.testing.expectEqualStrings("applied", j.text(sent, "state"));
+    try std.testing.expectEqualStrings(queue_id, j.text(sent, "queueId"));
+    try std.testing.expectEqualStrings("send-now-reviewed", j.text(sent, "operationId"));
+    try std.testing.expectEqual(try j.integer(queued, "dueAtMs", 0), try j.integer(sent, "dueAtMs", 0));
+    for ([_]Value{ request, due_request, request }) |replay| try std.testing.expectEqualStrings("applied", j.text(try session.dispatch(a, replay), "state"));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+
+    const canceled = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-canceled", .delaySeconds = 30 }));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.cancel", .account = account, .queueId = j.text(canceled, "queueId") }));
+    try std.testing.expectEqualStrings("canceled", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(canceled, "queueId") })), "state"));
+
+    session.options.fixture_scenario = "unknown-send";
+    const uncertain = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-unknown", .delaySeconds = 30 }));
+    const unknown_request = try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(uncertain, "queueId") });
+    try std.testing.expectEqualStrings("unknown", j.text(try session.dispatch(a, unknown_request), "state"));
+    session.deinit();
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    try std.testing.expectEqualStrings("unknown", j.text(try session.dispatch(a, unknown_request), "state"));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = j.text(draft, "id") })));
+}
+
+test "send grace: send now checks content hash and a submitting claim before sending" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/send-now-claim", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    const account = "personal@example.com";
+    const draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Reviewed content" } }));
+    const queued = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-hash", .delaySeconds = 30 }));
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, options);
+        defer store.close();
+        // Modify the complete draft record, bypassing putDraft's automatic
+        // cancellation, so this reaches the reviewed-content hash guard.
+        var changed = try store.draft(j.text(draft, "id"));
+        changed.subject = "Changed outside the reviewed intent";
+        try store.write(try store.fileName("draft", changed.id), try std.json.Stringify.valueAlloc(a, changed, .{}));
+        try std.testing.expectEqualStrings(changed.subject, (try store.draft(changed.id)).subject);
+    }
+    const rejected = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(queued, "queueId") }));
+    try std.testing.expectEqualStrings("canceled", j.text(rejected, "state"));
+    try std.testing.expectEqualStrings("DraftChanged", j.text(rejected, "errorCode"));
+    const claimed = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-claimed", .delaySeconds = 30 }));
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, options);
+        defer store.close();
+        (try send_queue.find(&store, j.text(claimed, "queueId"))).state = .submitting;
+        try store.save();
+    }
+    session.deinit();
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    try std.testing.expectEqualStrings("submitting", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(claimed, "queueId") })), "state"));
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
 }
 
 test "UX backend: formatted forward preserves 32 CID resources and an ordinary PDF through MIME" {

@@ -232,10 +232,15 @@ invent missing files. Quoted history, fenced code and standard signatures do
 not trigger this advisory.
 
 The default cancellation period is ten seconds. `:send-grace 0..30` changes it;
-zero deliberately selects immediate submission after review. While **Sending
-in … · nothing sent yet** is visible, Ctrl+Z, Enter, Escape/`q` or clicking the
-Undo control cancels and returns to the editable draft. Normal close cancels
-an unsent countdown. Once submission starts there is no send recall or Undo.
+zero deliberately selects immediate submission after review. During the
+countdown, **Undo** and **Send now** are visible together. Ctrl+Z or
+Escape/`q` cancels and returns to the editable draft; Ctrl+S sends the reviewed
+message immediately without changing the default delay for future messages.
+Tab/Shift+Tab switches buttons and Enter activates the focused button; Undo is
+focused initially. Both buttons are clickable and remain in place as the timer
+ticks, including in narrow terminals. Pasted text cannot activate either action.
+Normal close cancels an unsent countdown. Once submission starts there is no
+send recall or Undo; the draft stays protected if its outcome is uncertain.
 
 After an interrupted process, a pending send remains paused. Reopen its local
 draft and use `:resume-send` to start a fresh countdown or `:cancel-send` to
@@ -426,7 +431,9 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+S / :send in compose | Open outgoing send review |
 | y in send review | Confirm the reviewed draft and start the local send countdown |
 | :send-grace 0..30 | Cancellation period in seconds; default 10, explicit 0 means immediate |
-| Ctrl+Z / Enter / Undo during countdown | Cancel before submission and return to editing |
+| Ctrl+S during the countdown | Send now for this reviewed message; the default delay remains unchanged |
+| Ctrl+Z / Undo during countdown | Cancel before submission and return to editing |
+| Tab/Shift+Tab, then Enter during countdown | Choose Undo or Send now; Undo is focused initially |
 | :resume-send / :cancel-send | Explicitly handle a recovered paused send |
 | A in normal compose | Add outgoing attachment |
 | L / B | Links / received-file picker |

@@ -394,6 +394,13 @@ then returns its result. `queue resume --queue-id ID --delay-seconds 10` resets
 the deadline but still needs explicit processing. Another authorized client
 can inspect or cancel the queued item while a processor waits.
 
+To skip the remaining countdown for one already reviewed intent, use
+`queue.send-now` or `omagma queue send-now --account personal@example.com
+--queue-id RETURNED_QUEUE_ID`. It claims the same queue and operation identity,
+checks the reviewed content and submits immediately. Replaying a final,
+canceled, submitting or unknown item returns its status without another send.
+This leaves the default cancellation period unchanged.
+
 No process startup automatically processes a pending item. Reopening a queued
 draft in the TUI first checks queue state and exposes `:resume-send` or
 `:cancel-send`. Normal TUI close cancels its unsent countdown; a crashed queued

@@ -323,10 +323,14 @@ pub fn fixture(io: std.Io) Snapshot {
     result.install.method = .omarchy_source;
     result.install.os.set("linux") catch unreachable;
     result.install.arch.set("x86_64") catch unreachable;
-    result.state.latest.set("0.2.8") catch unreachable;
+    const running = Version.parse(@import("build_options").version) catch unreachable;
+    var version_buffer: [64]u8 = undefined;
+    const newer = std.fmt.bufPrint(&version_buffer, "{d}.{d}.{d}", .{ running.major, running.minor, running.patch + 1 }) catch unreachable;
+    result.state.latest.set(newer) catch unreachable;
     result.state.title.set("A little more lava") catch unreachable;
     result.state.notes.set("New features and quality-of-life improvements. Update when convenient.") catch unreachable;
-    result.state.releaseUrl.set("https://github.com/technologylab-ai/omagma/releases/tag/v0.2.8") catch unreachable;
+    var url_buffer: [256]u8 = undefined;
+    result.state.releaseUrl.set(std.fmt.bufPrint(&url_buffer, "https://github.com/technologylab-ai/omagma/releases/tag/v{s}", .{newer}) catch unreachable) catch unreachable;
     result.state.checkedAt = now(io);
     result.state.lastSuccessAt = result.state.checkedAt;
     result.state.nextCheckAt = result.state.checkedAt + daily_seconds;

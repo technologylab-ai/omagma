@@ -69,7 +69,7 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   multi-label assignment. The custom-label manager also sets label colors.
 - Deliberate message/conversation action scope, with exact reviewed target IDs,
   per-item outcomes and undo for confirmed touched-label changes.
-- A cancellable local send countdown after explicit review, paused pending-send
+- A cancellable local send countdown with an explicit Send now action after review, paused pending-send
   recovery after restart, and reviewed local draft discard.
 - Inspect calendar invitations and send accept/tentative/decline RSVP emails.
   There are no calendar views.
@@ -262,9 +262,11 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   100 complete resolved targets and reviewing the actual account/count.
 - `:spam`/`:unspam` expose shared mailbox actions, and `:discard-draft` reviews
   removal of a local draft and recovery copies without changing Gmail.
-- Send confirmation starts a default ten-second local countdown. Ctrl+Z,
-  Enter or Undo cancels before submission. `:send-grace 0..30` controls the
-  delay; pending sends recovered after restart require explicit resume/cancel.
+- Send confirmation starts a default ten-second local countdown. Ctrl+Z or
+  Undo cancels before submission; Ctrl+S or Send now submits the reviewed
+  message immediately. Tab/Shift+Tab chooses a button and Enter activates it;
+  Undo is initially focused. `:send-grace 0..30` controls the delay for future
+  messages; pending sends recovered after restart require explicit resume/cancel.
   Submitting and uncertain sends are never offered as reversible mailbox undo.
 - Dialog controls support Tab/Shift+Tab and Enter, including label actions,
   received attachment saving, contact editing and compose aliases. Submission

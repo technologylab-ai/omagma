@@ -138,7 +138,7 @@ jobs:
             terminal_label_management terminal_label_transport terminal_label_manager \
             terminal_help_search terminal_dialog_controls terminal_theme_picker \
             terminal_forward_original terminal_invitation_banner \
-            terminal_ux_backend_cli terminal_ux_batch_navigation \
+            terminal_ux_backend_cli terminal_queue_send_now terminal_ux_batch_navigation \
             terminal_ux_batch_compose terminal_ux_batch_files_contacts \
             terminal_ux_helpers_ui terminal_ux_adversarial updates terminal_updates
           do
@@ -211,7 +211,7 @@ jobs:
             terminal_label_management terminal_label_transport terminal_label_manager \
             terminal_help_search terminal_dialog_controls terminal_theme_picker \
             terminal_forward_original terminal_invitation_banner \
-            terminal_ux_backend_cli terminal_ux_batch_navigation \
+            terminal_ux_backend_cli terminal_queue_send_now terminal_ux_batch_navigation \
             terminal_ux_batch_compose terminal_ux_batch_files_contacts \
             terminal_ux_helpers_ui terminal_ux_adversarial updates terminal_updates
           do
@@ -326,6 +326,7 @@ jobs:
           python3 tests/terminal_label_management.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_label_transport.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_ux_backend_cli.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_queue_send_now.py --binary .verification-macos-debug/bin/omagma
           python3 tests/updates.py --binary .verification-macos-debug/bin/omagma
       - name: Debug native terminal, Keychain and detached lifecycle
         run: |
@@ -384,6 +385,7 @@ jobs:
           python3 tests/terminal_label_management.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/terminal_label_transport.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/terminal_ux_backend_cli.py --binary dist/omagma-macos-$RELEASE_ARCH
+          python3 tests/terminal_queue_send_now.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/updates.py --binary dist/omagma-macos-$RELEASE_ARCH
       - name: Native Keychain survives the packaged binary upgrade
         run: |

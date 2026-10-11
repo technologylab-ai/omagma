@@ -255,7 +255,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Space in attachment file list", .action = "Select several files across folders before attaching once" },
     .{ .keys = ":save-all DIRECTORY", .action = "Save received attachments privately without overwriting existing files" },
     .{ .keys = ":add-contact / :discard-draft / :spam / :unspam", .action = "Complete contact, local draft and Spam workflows with explicit actions" },
-    .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo", .action = "Configure send cancellation; Undo cancels before submission begins" },
+    .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", .action = "During the countdown, Undo keeps the draft; Send now skips this wait; Tab/Enter chooses" },
     .{ .section = "NAVIGATION" },
     .{ .keys = "j / k · arrows", .action = "Move through the focused pane" },
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
@@ -1132,6 +1132,7 @@ const App = struct {
     triage_for_labels: bool = false,
     action_using_pinned: bool = false,
     grace_active: bool = false,
+    grace_focus: u1 = 0,
     grace_pending: std.atomic.Value(bool) = .init(false),
     grace_queue: Field = .{},
     grace_account: Field = .{},
@@ -4498,6 +4499,10 @@ const App = struct {
             if (self.page_loading and self.page_loading_account == self.job.account_index and self.page_loading_generation == self.job.generation) self.completePageLoad();
             if (self.job.kind == .triage_scope) self.triage_waiting = false;
         } else if (self.job.failure) |err| {
+            if (self.job.kind == .grace_cancel) {
+                self.graceCancelUnconfirmed(@errorName(err));
+                return;
+            }
             if (self.job.kind == .attachments_save) {
                 self.abortSaveAll(@errorName(err));
                 return;
@@ -4616,6 +4621,15 @@ const App = struct {
     fn apply(self: *App, kind: JobKind, response: []const u8) !void {
         // Validate the envelope before replacing a valid cached view.
         _ = self.data(self.job_arena.allocator(), response) catch |err| {
+            if (kind == .grace_cancel) {
+                self.graceCancelUnconfirmed(if (err == error.OperationRejected) self.status_error_code[0..self.status_error_len] else @errorName(err));
+                return;
+            }
+            if (kind == .grace_process and err != error.OperationRejected) {
+                self.compose.operation_error.set(self.allocator, @errorName(err)) catch {};
+                self.markUnknown(.send);
+                return;
+            }
             if (err == error.OperationRejected) {
                 if (kind == .attachments_save) self.abortSaveAll(self.status_error_code[0..self.status_error_len]);
                 if (kind == .attachment_import) self.pending_file_count = 0;
@@ -4751,14 +4765,19 @@ const App = struct {
                 try self.grace_account.set(self.allocator, self.account());
                 self.grace_due = integer(get(result, "dueAtMs"));
                 self.grace_active = true;
+                self.grace_focus = 0;
                 self.grace_recovery = false;
                 self.grace_pending.store(true, .release);
                 self.mode = .compose;
                 self.compose.insert_mode = false;
-                self.say(false, "Queued · nothing sent yet · Ctrl+Z Undo", .{});
+                self.say(false, "Queued · nothing sent yet · Ctrl+Z Undo · Ctrl+S Send now", .{});
             },
             .grace_cancel => {
-                _ = try self.data(self.job_arena.allocator(), response);
+                const result = try self.data(self.job_arena.allocator(), response);
+                if (!same(text(get(result, "state")), "canceled")) {
+                    self.graceCancelUnconfirmed("InvalidQueueState");
+                    return;
+                }
                 self.grace_active = false;
                 self.grace_recovery = false;
                 self.grace_pending.store(false, .release);
@@ -6537,21 +6556,35 @@ const App = struct {
         self.grace_pending.store(false, .release);
     }
     fn cancelGrace(self: *App, close: bool) !void {
-        if (!self.grace_active) return;
-        self.grace_close = close;
-        self.grace_pending.store(false, .release);
+        if (!self.grace_active or !self.grace_pending.load(.acquire)) return;
         self.preemptReadOnly();
         if (self.job.future != null) return error.OperationPending;
         try self.start(.grace_cancel, .{ .cmd = "queue.cancel", .account = self.grace_account.value(), .queueId = self.grace_queue.value() });
+        self.grace_close = close;
+        self.grace_pending.store(false, .release);
     }
     fn graceTick(self: *App) !void {
-        if (!self.grace_active or !self.grace_pending.load(.acquire) or self.grace_close) return;
-        if (Io.Timestamp.now(self.io, .real).toMilliseconds() < self.grace_due) return;
-        self.preemptReadOnly();
-        if (self.job.future != null) return;
+        try self.processGrace(false);
+    }
+    fn graceCancelUnconfirmed(self: *App, code: []const u8) void {
         self.grace_active = false;
         self.grace_pending.store(false, .release);
-        try self.start(.grace_process, .{ .cmd = "queue.process", .account = self.grace_account.value(), .queueId = self.grace_queue.value() });
+        self.grace_recovery = false;
+        self.compose.operation_error.set(self.allocator, code) catch {};
+        self.markUnknown(.send);
+        self.say(true, "Undo unconfirmed · draft protected · :receipt checks queue", .{});
+        self.status_kind = .unknown;
+        if (self.grace_close) self.quit = true;
+    }
+    fn processGrace(self: *App, send_now: bool) !void {
+        if (!self.grace_active or !self.grace_pending.load(.acquire) or self.grace_close) return;
+        if (!send_now and Io.Timestamp.now(self.io, .real).toMilliseconds() < self.grace_due) return;
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        try self.start(.grace_process, .{ .cmd = if (send_now) @as([]const u8, "queue.send-now") else "queue.process", .account = self.grace_account.value(), .queueId = self.grace_queue.value() });
+        self.grace_active = false;
+        self.grace_pending.store(false, .release);
+        self.grace_rect = null;
         self.say(false, "Submitting · waiting for the provider receipt", .{});
     }
     fn applyGraceResult(self: *App, response: []const u8) !void {
@@ -6565,6 +6598,11 @@ const App = struct {
             self.mode = .browse;
             self.sayAction(false, "Send complete · provider accepted", .{});
             try self.resumeMailboxReader();
+        } else if (same(state, "canceled")) {
+            self.grace_recovery = false;
+            self.compose.unknown_outcome = false;
+            self.mode = .compose;
+            self.say(false, "{s}", .{if (same(text(get(result, "errorCode")), "DraftChanged")) @as([]const u8, "Draft changed · send cancelled · review before sending again") else "Send cancelled · draft retained"});
         } else if (same(state, "rejected")) {
             self.mode = .compose;
             self.sayFailure("Submission rejected · draft retained", text(get(result, "errorCode")));
@@ -6583,10 +6621,21 @@ const App = struct {
         self.grace_rect = null;
         if (!self.grace_active or win.height < 3) return;
         const remaining = @max(self.grace_due - Io.Timestamp.now(self.io, .real).toMilliseconds(), 0);
-        const line_text = try std.fmt.allocPrint(self.frame.allocator(), "Sending in {d}s · nothing sent yet · [Undo Ctrl+Z]", .{@divFloor(remaining + 999, 1000)});
         const bar = win.child(.{ .y_off = 1, .height = 1 });
         bar.fill(.{ .style = self.style(.selected) });
-        try self.line(bar, 0, try self.fitLine(bar, line_text, bar.width), .selected);
+        const pending = self.grace_pending.load(.acquire);
+        if (!pending) {
+            try self.line(bar, 0, "Cancelling send · draft kept", .selected);
+            return;
+        }
+        // Reserve the prefix slot rather than deriving hit positions from the
+        // current digits: 10 -> 9 must never move a button under the pointer.
+        const prefix_width: u16 = if (win.width >= 70) 36 else if (win.width >= 55) 34 else if (win.width >= 36) 18 else 12;
+        const seconds = @divFloor(remaining + 999, 1000);
+        const prefix = if (win.width >= 55) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s · nothing sent yet", .{seconds}) else if (win.width >= 36) try std.fmt.allocPrint(self.frame.allocator(), " Sending in {d}s", .{seconds}) else try std.fmt.allocPrint(self.frame.allocator(), " Sending {d}s", .{seconds});
+        try self.line(bar.child(.{ .width = @min(prefix_width, bar.width) }), 0, prefix, .selected);
+        const x = try self.actionButton(bar, 0, prefix_width, if (win.width >= 70) "[Undo Ctrl+Z]" else "[Undo]", self.grace_focus == 0, true, .dialog_action, 0);
+        _ = try self.actionButton(bar, 0, x, if (win.width >= 70) "[Send now Ctrl+S]" else "[Send now]", self.grace_focus == 1, true, .dialog_action, 1);
         self.grace_rect = .{ .x = 0, .y = 1, .width = win.width, .height = 1 };
     }
     fn inspectDraftOperations(self: *App) !void {
@@ -6921,7 +6970,15 @@ const App = struct {
     }
     fn onMouse(self: *App, mouse: vaxis.Mouse) !void {
         if (self.grace_active) {
-            if (mouse.type == .press and mouse.button == .left) if (self.grace_rect) |rect| if (mouse.col >= rect.x and mouse.col < rect.x + rect.width and mouse.row >= rect.y and mouse.row < rect.y + rect.height) try self.cancelGrace(false);
+            if (!self.options.no_mouse and mouse.type == .press and mouse.button == .left and !mouse.mods.shift and !mouse.mods.alt and !mouse.mods.ctrl) if (self.grace_rect) |rect| if (mouse.col >= rect.x and mouse.col < rect.x + rect.width and mouse.row >= rect.y and mouse.row < rect.y + rect.height) {
+                if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                    if (hit.kind == .dialog_action and hit.index == 1) {
+                        try self.processGrace(true);
+                        return;
+                    }
+                }
+                try self.cancelGrace(false);
+            };
             return;
         }
         if (!self.options.no_mouse and mouse.type == .press and !mouse.mods.shift and !mouse.mods.alt and !mouse.mods.ctrl) {
@@ -7489,7 +7546,15 @@ const App = struct {
         } else self.update_card_focus = null;
         if (self.job.future != null and updateJob(self.job.kind)) self.preemptReadOnly();
         if (self.grace_active) {
-            if (key.matches('c', .{ .ctrl = true }) or key.matches('q', .{ .ctrl = true })) try self.cancelGrace(true) else if (key.matches('z', .{ .ctrl = true }) or key.matches(Key.enter, .{}) or key.matches(Key.escape, .{}) or key.matches('q', .{})) try self.cancelGrace(false);
+            if (self.paste) return;
+            if (!self.grace_pending.load(.acquire)) return;
+            if (tabDirection(key) != null) self.grace_focus ^= 1 else if (key.matches('s', .{ .ctrl = true })) try self.processGrace(true) else if (key.matches('c', .{ .ctrl = true }) or key.matches('q', .{ .ctrl = true })) try self.cancelGrace(true) else if (key.matches(Key.enter, .{})) {
+                if (self.grace_focus == 1) try self.processGrace(true) else try self.cancelGrace(false);
+            } else if (key.matches('z', .{ .ctrl = true }) or key.matches(Key.escape, .{}) or key.matches('q', .{})) try self.cancelGrace(false);
+            return;
+        }
+        if (!self.paste and self.job.future != null and self.job.kind == .grace_process and (key.matches('z', .{ .ctrl = true }) or key.matches(Key.escape, .{}) or key.matches('q', .{}))) {
+            self.say(false, "Already submitting · cannot undo · waiting for receipt", .{});
             return;
         }
         if (self.ux_overlay != .none) return self.onUxKey(key);
@@ -8969,7 +9034,7 @@ const App = struct {
         };
     }
     fn fittedHints(self: *const App, width: u16) []const u8 {
-        if (self.grace_active) return if (width < 50) "Ctrl+Z / Enter / Esc Undo send" else " Ctrl+Z / Enter / Esc / q Undo send · draft kept · Ctrl+Q Cancel and quit";
+        if (self.grace_active) return if (width < 70) "Ctrl+Z Undo · Ctrl+S Send now" else if (self.grace_focus == 0) " Ctrl+Z Undo · Ctrl+S Send now · Tab Switch · Enter: Undo · Esc/q Undo" else " Ctrl+Z Undo · Ctrl+S Send now · Tab Switch · Enter: Send now · Esc/q Undo";
         if (self.compose_choice) return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         if (self.fileDialogActive()) return self.fileDialogHints(width);
         if (self.label_picker and width < 60) return "+ Add  - Remove  Esc/q Back";
@@ -9343,7 +9408,8 @@ const App = struct {
             const prompt = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}▏", .{ if (self.mode == .command) ":" else if (self.mode == .labels) "Label (name adds, -name removes): " else if (self.mode == .attachment) "Attach file path: " else if (self.previous_mode == .contacts) "Contacts / " else if (self.input_query_scope == .cache) "Cache / " else "Gmail \\ ", self.input.value() });
             try self.line(win, win.height - 2, prompt, .selected);
         } else try self.line(win, win.height - 2, try self.fitLine(win, if (self.updateVisible()) try std.fmt.allocPrint(self.frame.allocator(), "Tab Updates · {s}", .{self.fittedHints(win.width)}) else self.fittedHints(win.width), win.width), .muted);
-        try self.line(win, win.height - 1, try self.fitLine(win, self.status[0..self.status_len], win.width), if (self.warning) .warning else .muted);
+        const status_line = if (self.grace_active and self.grace_pending.load(.acquire) and win.width < 70) (if (self.grace_focus == 0) "Tab Switch · Enter: Undo" else "Tab Switch · Enter: Send now") else self.status[0..self.status_len];
+        try self.line(win, win.height - 1, try self.fitLine(win, status_line, win.width), if (self.warning) .warning else .muted);
         try self.drawReaderOverlay(win);
         try self.drawFileDialog(win);
         try self.drawLabelPicker(win);
@@ -10102,6 +10168,118 @@ const CacheTestClient = struct {
         };
     }
 };
+
+test "send grace UX: countdown focus paste stable hit targets and submission fence" {
+    const a = std.testing.allocator;
+    const Transport = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+        fn call(ctx: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"state\":\"applied\"}}");
+        }
+    };
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    for (0..4) |action| {
+        var transport: Transport = .{};
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        app.client = .{ .ctx = &transport, .callFn = Transport.call };
+        app.loop = loop;
+        defer app.deinit();
+        app.mode = .compose;
+        app.compose_active = true;
+        app.grace_active = true;
+        app.grace_pending.store(true, .release);
+        app.grace_due = Io.Timestamp.now(app.io, .real).toMilliseconds() + 10000;
+        try app.grace_queue.set(a, "reviewed-queue");
+        try app.grace_account.set(a, "pinned@example.test");
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"visible@example.test\"}]", .{}));
+        app.paste = true;
+        for ([_]Key{ .{ .codepoint = Key.tab }, .{ .codepoint = Key.enter }, .{ .codepoint = 's', .mods = .{ .ctrl = true } }, .{ .codepoint = 'z', .mods = .{ .ctrl = true } } }) |key| try app.onKey(key);
+        try std.testing.expectEqual(@as(u1, 0), app.grace_focus);
+        try std.testing.expect(app.grace_pending.load(.acquire) and app.job.future == null);
+        app.paste = false;
+        var screen = try vaxis.Screen.init(a, .{ .cols = 160, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        for ([_]u16{ 30, 36, 54, 55, 69, 70, 160 }) |width| {
+            if (width < 70) try std.testing.expectEqualStrings("Ctrl+Z Undo · Ctrl+S Send now", app.fittedHints(width));
+            const win: vaxis.Window = .{ .width = width, .height = 10, .screen = &screen, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 };
+            app.mouse_hits.clear();
+            try app.drawGrace(win);
+            try std.testing.expectEqual(@as(usize, 2), app.mouse_hits.count);
+            const before = app.mouse_hits.areas[0..2].*;
+            for (before) |hit| try std.testing.expect(hit.rect.x + hit.rect.width <= width);
+            try std.testing.expectEqual(@as(u16, if (width >= 70) 17 else 10), before[1].rect.width);
+            app.grace_due -= 1000;
+            app.mouse_hits.clear();
+            try app.drawGrace(win);
+            for (app.mouse_hits.areas[0..2], before) |after, original| try std.testing.expectEqual(original.rect, after.rect);
+            app.grace_due += 1000;
+        }
+        if (action == 0) {
+            try app.onKey(.{ .codepoint = 's', .mods = .{ .ctrl = true } });
+        } else if (action == 1) {
+            try app.onKey(.{ .codepoint = Key.tab });
+            try std.testing.expectEqual(@as(u1, 1), app.grace_focus);
+            try app.onKey(.{ .codepoint = Key.enter });
+        } else if (action == 2) {
+            try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expectEqual(@as(u1, 1), app.grace_focus);
+            const rect = app.mouse_hits.areas[1].rect;
+            try app.onMouse(.{ .type = .release, .button = .left, .col = @intCast(rect.x), .row = @intCast(rect.y), .mods = .{} });
+            try std.testing.expect(app.job.future == null);
+            try app.onMouse(.{ .type = .press, .button = .left, .col = @intCast(rect.x), .row = @intCast(rect.y), .mods = .{} });
+        } else try app.onKey(.{ .codepoint = Key.enter });
+        const request = try std.json.parseFromSlice(Value, a, app.job.request, .{});
+        defer request.deinit();
+        try std.testing.expectEqualStrings(if (action == 3) "queue.cancel" else "queue.send-now", text(get(request.value, "cmd")));
+        try std.testing.expectEqualStrings("pinned@example.test", text(get(request.value, "account")));
+        try std.testing.expectEqualStrings("reviewed-queue", text(get(request.value, "queueId")));
+        try std.testing.expectEqual(@as(u8, 10), app.ui_preferences.sendGraceSeconds);
+        try app.onKey(.{ .codepoint = 's', .mods = .{ .ctrl = true } });
+        try app.graceTick();
+        try app.onKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+        app.job.future.?.await(app.io);
+        app.job.future = null;
+        try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+    }
+}
+
+test "send grace UX: definite cancellation remains editable and unconfirmed undo stays usable and protected" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.compose_active = true;
+    try app.compose.fields[4].set(a, "Retained authored note");
+    app.grace_active = true;
+    app.grace_pending.store(true, .release);
+    try app.applyGraceResult("{\"ok\":true,\"data\":{\"state\":\"canceled\",\"errorCode\":\"DraftChanged\"}}");
+    try std.testing.expect(!app.grace_active and !app.compose.unknown_outcome);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Draft changed") != null);
+    app.grace_active = true;
+    app.grace_pending.store(false, .release);
+    try app.apply(.grace_cancel, "{\"ok\":false,\"error\":{\"code\":\"SendAlreadySubmitted\"}}");
+    try std.testing.expect(!app.grace_active and app.compose.unknown_outcome);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Undo unconfirmed") != null);
+    try std.testing.expectEqualStrings("Retained authored note", app.compose.fields[4].value());
+    app.grace_active = true;
+    app.grace_close = true;
+    app.graceCancelUnconfirmed("CacheBusy");
+    try std.testing.expect(app.quit and !app.grace_active and app.compose.unknown_outcome);
+    app.quit = false;
+    app.compose.unknown_outcome = false;
+    try app.apply(.grace_process, "malformed result");
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
 
 test "send grace UX: paused controls require the current draft and account" {
     const allocator = std.testing.allocator;
