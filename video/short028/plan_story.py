@@ -12,7 +12,7 @@ def main():
  add('intro',0,2.5,0,'reader.context',editorial='intro',editorialText='What’s new in v0.2.8')
  add('mac-setup',2.5,7,1,None,'macOS setup: two options',editorial='mac-choices')
  add('cli-discover',7,9.8,2,'cli.overview_story','Progressive CLI discovery for agents')
- add('cli-narrow',9.8,12,2,'cli.mail_story','Discover only the commands you need')
+ add('cli-narrow',9.8,12,2,'cli.mail_story','Agents discover only the commands they need')
  add('cli-json',12,14,2,'cli.json_recut','Machine-readable commands for agents')
  add('copy-select',14,19.5,3,'reader.move','Copy text from emails','With the keyboard or mouse.',camera=cam('full','focus',.8),sequence=[{'offset':0,'asset':'reader.move'},{'offset':1,'asset':'reader.at_paragraph'},{'offset':1.7,'asset':'reader.marked'},{'offset':2.1,'asset':'reader.excerpt'}])
  add('copy-done',19.5,21.5,3,'reader.copied','Copy text from emails','Ready to paste into your agent chat.',camera=cam('focus','focus',0))
