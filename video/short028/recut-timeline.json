@@ -1,0 +1,615 @@
+{
+  "schema": "omagma.video.timeline.v1",
+  "revision": "short028-recut",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "chapters": [
+    {
+      "number": 1,
+      "title": "Your Mac. Your agents."
+    },
+    {
+      "number": 2,
+      "title": "Agent-ready CLI."
+    },
+    {
+      "number": 3,
+      "title": "Take just the part you need."
+    },
+    {
+      "number": 4,
+      "title": "Open mail in your editor."
+    },
+    {
+      "number": 5,
+      "title": "Ready? Send now."
+    },
+    {
+      "number": 6,
+      "title": "Omagma, in your browser."
+    }
+  ],
+  "parts": [
+    {
+      "id": "intro",
+      "name": "intro",
+      "frameIn": 0,
+      "frameOut": 90,
+      "chapter": 0,
+      "asset": "reader.context",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "intro",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "editorialText": "Six improvements. One smoother flow."
+    },
+    {
+      "id": "mac-choices",
+      "name": "mac-choices",
+      "frameIn": 90,
+      "frameOut": 300,
+      "chapter": 1,
+      "asset": null,
+      "subtitle": "Keychain for your terminal. Private files for agents and SSH.",
+      "transition": 0.3,
+      "editorial": "mac-choices",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "cli-overview",
+      "name": "cli-overview",
+      "frameIn": 300,
+      "frameOut": 381,
+      "chapter": 2,
+      "asset": "cli.overview_recut",
+      "subtitle": "Progressive discovery, built into the CLI.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "cli-scope",
+      "name": "cli-scope",
+      "frameIn": 381,
+      "frameOut": 450,
+      "chapter": 2,
+      "asset": "cli.mail_recut",
+      "subtitle": "Ask for a namespace. Get just the matching commands.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "cli-json",
+      "name": "cli-json",
+      "frameIn": 450,
+      "frameOut": 540,
+      "chapter": 2,
+      "asset": "cli.json_recut",
+      "subtitle": "Human-readable help. Machine-readable JSON.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "reader-select",
+      "name": "reader-select",
+      "frameIn": 540,
+      "frameOut": 690,
+      "chapter": 3,
+      "asset": "reader.move",
+      "subtitle": "Select a paragraph. Copy it into your agent chat.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.8,
+        "freeCenter": false
+      },
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "reader.move"
+        },
+        {
+          "offset": 1.2,
+          "asset": "reader.at_paragraph"
+        },
+        {
+          "offset": 1.9,
+          "asset": "reader.marked"
+        },
+        {
+          "offset": 2.4,
+          "asset": "reader.excerpt"
+        }
+      ]
+    },
+    {
+      "id": "reader-copy",
+      "name": "reader-copy",
+      "frameIn": 690,
+      "frameOut": 750,
+      "chapter": 3,
+      "asset": "reader.copied",
+      "subtitle": "V \u00b7 Space \u00b7 y. Mouse selection works too.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "editor-open",
+      "name": "editor-open",
+      "frameIn": 750,
+      "frameOut": 813,
+      "chapter": 4,
+      "asset": "editor.view",
+      "subtitle": "e opens the message in $EDITOR.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "body",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "editor-search",
+      "name": "editor-search",
+      "frameIn": 813,
+      "frameOut": 900,
+      "chapter": 4,
+      "asset": "editor.paragraph",
+      "subtitle": "Search, select and copy with your familiar tools.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "body",
+        "to": "body",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "send-review",
+      "name": "send-review",
+      "frameIn": 900,
+      "frameOut": 963,
+      "chapter": 5,
+      "asset": "send.review",
+      "subtitle": "Review. Confirm.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.5,
+        "freeCenter": false
+      }
+    },
+    {
+      "id": "send-countdown",
+      "name": "send-countdown",
+      "frameIn": 963,
+      "frameOut": 1029,
+      "chapter": 5,
+      "asset": "send.countdown",
+      "subtitle": "Ten seconds to undo \u2014 or send immediately.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "send.countdown"
+        },
+        {
+          "offset": 0.8,
+          "asset": "send.countdown_nine"
+        },
+        {
+          "offset": 1.6,
+          "asset": "send.countdown_eight"
+        }
+      ]
+    },
+    {
+      "id": "send-now",
+      "name": "send-now",
+      "frameIn": 1029,
+      "frameOut": 1140,
+      "chapter": 5,
+      "asset": "send.button_recut",
+      "subtitle": "Ctrl+S \u00b7 Send now.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "frame": [
+        485,
+        450,
+        950,
+        180
+      ],
+      "backgroundAsset": "send.now_focus",
+      "backgroundCamera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "backgroundDim": 0.2
+    },
+    {
+      "id": "send-sent",
+      "name": "send-sent",
+      "frameIn": 1140,
+      "frameOut": 1200,
+      "chapter": 5,
+      "asset": "send.status_recut",
+      "subtitle": "Sent.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true
+      },
+      "frame": [
+        300,
+        500,
+        1320,
+        180
+      ],
+      "backgroundAsset": "send.receipt",
+      "backgroundCamera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "backgroundDim": 0.3
+    },
+    {
+      "id": "browser-real-accounts",
+      "name": "browser-real-accounts",
+      "frameIn": 1200,
+      "frameOut": 1410,
+      "chapter": 6,
+      "asset": "browser.context",
+      "subtitle": "Full circle. Powered by Zig + WebAssembly.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "browser.context"
+        },
+        {
+          "offset": 2.3,
+          "asset": "browser.account2"
+        },
+        {
+          "offset": 4.6,
+          "asset": "browser.account3"
+        }
+      ]
+    },
+    {
+      "id": "browser-real-read",
+      "name": "browser-real-read",
+      "frameIn": 1410,
+      "frameOut": 1545,
+      "chapter": 6,
+      "asset": "browser.reader",
+      "subtitle": "Three accounts. One familiar way to read.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-real-compose",
+      "name": "browser-real-compose",
+      "frameIn": 1545,
+      "frameOut": 1620,
+      "chapter": 6,
+      "asset": "browser.composer-empty",
+      "subtitle": "Reply with the original formatting intact.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-real-type",
+      "name": "browser-real-type",
+      "frameIn": 1620,
+      "frameOut": 1815,
+      "chapter": 6,
+      "asset": "browser.composer-empty",
+      "subtitle": "Write. See the outgoing result.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "browser.composer-empty"
+        },
+        {
+          "offset": 0.3,
+          "asset": "browser.typing-0017"
+        },
+        {
+          "offset": 0.6929,
+          "asset": "browser.typing-0018"
+        },
+        {
+          "offset": 1.0857,
+          "asset": "browser.typing-0019"
+        },
+        {
+          "offset": 1.4786,
+          "asset": "browser.typing-0020"
+        },
+        {
+          "offset": 1.8714,
+          "asset": "browser.typing-0021"
+        },
+        {
+          "offset": 2.2643,
+          "asset": "browser.typing-0022"
+        },
+        {
+          "offset": 2.6571,
+          "asset": "browser.typing-0023"
+        },
+        {
+          "offset": 3.05,
+          "asset": "browser.typing-0024"
+        },
+        {
+          "offset": 3.4429,
+          "asset": "browser.typing-0025"
+        },
+        {
+          "offset": 3.8357,
+          "asset": "browser.typing-0026"
+        },
+        {
+          "offset": 4.2286,
+          "asset": "browser.typing-0027"
+        },
+        {
+          "offset": 4.6214,
+          "asset": "browser.typing-0028"
+        },
+        {
+          "offset": 5.0143,
+          "asset": "browser.typing-0029"
+        },
+        {
+          "offset": 5.4071,
+          "asset": "browser.typing-0030"
+        },
+        {
+          "offset": 5.8,
+          "asset": "browser.typing-0031"
+        }
+      ]
+    },
+    {
+      "id": "browser-real-saved",
+      "name": "browser-real-saved",
+      "frameIn": 1815,
+      "frameOut": 1935,
+      "chapter": 6,
+      "asset": "browser.autosaved",
+      "subtitle": "Your draft is saved locally.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-real-recovery",
+      "name": "browser-real-recovery",
+      "frameIn": 1935,
+      "frameOut": 2070,
+      "chapter": 6,
+      "asset": "browser.reloaded",
+      "subtitle": "Reload. Pick up where you left off.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-real-observation",
+      "name": "browser-real-observation",
+      "frameIn": 2070,
+      "frameOut": 2205,
+      "chapter": 6,
+      "asset": "browser.reloaded",
+      "subtitle": "Three accounts, one browser tab.",
+      "transition": 0.3,
+      "editorial": "browser-observation",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "browser": true,
+      "memoryQualifier": "Different sessions, not a benchmark."
+    },
+    {
+      "id": "recap",
+      "name": "recap",
+      "frameIn": 2205,
+      "frameOut": 2370,
+      "chapter": 0,
+      "asset": null,
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "recap",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "editorialTitle": "The little things, done better.",
+      "editorialRows": [
+        "Readable names and international text",
+        "A bad contact no longer breaks the list",
+        "Ctrl+Space works in classic terminals",
+        "Review label changes. Undo when needed."
+      ]
+    },
+    {
+      "id": "outro",
+      "name": "outro",
+      "frameIn": 2370,
+      "frameOut": 2527,
+      "chapter": 0,
+      "asset": null,
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "outro",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6,
+        "freeCenter": false
+      },
+      "editorialTitle": "Omagma v0.2.8",
+      "editorialText": "Linux \u00b7 macOS \u00b7 TUI + agent CLI"
+    }
+  ]
+}

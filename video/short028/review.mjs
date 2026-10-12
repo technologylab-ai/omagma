@@ -1,11 +1,14 @@
 // Actual encoded video at normal speed. This verifies playback, not listening.
 import {mkdirSync,writeFileSync} from 'node:fs';
-import {join} from 'node:path';
+import {join,resolve} from 'node:path';
+import {parseArgs} from 'node:util';
 import {browser,reservation,root} from './cdp.mjs';
-await reservation();const out=join(root,'video/cache/short028/playback-review');mkdirSync(out,{recursive:true});
+const {values:o}=parseArgs({options:{out:{type:'string'},movie:{type:'string',default:'final-review.mp4'}}});
+if(!/^[a-z0-9][a-z0-9.-]*\.mp4$/.test(o.movie)||o.movie.includes('..'))throw Error('invalid movie filename');
+await reservation();const out=resolve(o.out||join(root,'video/cache/short028/playback-review'));if(!out.startsWith(join(root,'video/cache/short028')+'/'))throw Error('owned review directory required');mkdirSync(out,{recursive:true});
 const b=await browser(),sleep=ms=>new Promise(r=>setTimeout(r,ms)),samples=[];
 try{
- const p=await b.page('video/short028/review-player.html',{width:1280,height:720});
+ const p=await b.page('video/short028/review-player.html?movie='+encodeURIComponent(o.movie),{width:1280,height:720});
  if(Math.abs(p.info.duration-2527/30)>.1)throw Error('wrong encoded duration');
  await p.evaluate(`(()=>{const v=document.getElementById('movie');window.decoded=[];const c=document.createElement('canvas');c.width=96;c.height=54;const x=c.getContext('2d',{willReadFrequently:true});const frame=(now,m)=>{x.drawImage(v,0,0,96,54);const d=x.getImageData(0,0,96,54).data;const corner=[];for(const i of [0,95,53*96,54*96-1])corner.push(...d.slice(i*4,i*4+3));window.decoded.push({time:m.mediaTime,presented:m.presentedFrames,wall:performance.now(),corner});if(!v.ended)v.requestVideoFrameCallback(frame);};v.requestVideoFrameCallback(frame);v.playbackRate=1;return v.play();})()`);
  const wallStart=Date.now();

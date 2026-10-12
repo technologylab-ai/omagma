@@ -2,9 +2,10 @@ import {mkdirSync,writeFileSync,existsSync,readdirSync,readFileSync} from 'node:
 import {resolve,join} from 'node:path';
 import {parseArgs} from 'node:util';
 import {browser,reservation,root} from './cdp.mjs';
-const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'}}});
+const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},film:{type:'string',default:'film.html'},timeline:{type:'string',default:'timeline.json'},manifest:{type:'string',default:'assets-manifest.json'}}});
+if(!['film.html','film-recut.html'].includes(o.film)||!['timeline.json','recut-timeline.json'].includes(o.timeline)||!['assets-manifest.json','recut-assets-manifest.json'].includes(o.manifest))throw Error('unknown owned film source');
 await reservation();
-const plan=JSON.parse(readFileSync(join(root,'video/short028/timeline.json'),'utf8'));
+const plan=JSON.parse(readFileSync(join(root,'video/short028',o.timeline),'utf8'));
 const out=resolve(o.out||join(root,'video/cache/short028/frames'));
 if(!out.startsWith(join(root,'video/cache/short028')+'/'))throw Error('output must be owned short028 cache subdirectory');
 if(existsSync(out)&&readdirSync(out).length)throw Error('preserve previous render directory');
@@ -13,7 +14,7 @@ const scale=Number(o.scale),workers=Number(o.workers),step=Number(o.step);
 if(!(scale>=.1&&scale<=2&&Number.isInteger(workers)&&workers>=1&&workers<=4&&Number.isInteger(step)&&step>=1))throw Error('bad render options');
 const b=await browser();
 try{
- const pages=await Promise.all(Array.from({length:workers},()=>b.page('video/short028/film.html?timeline=timeline.json',{scale})));
+ const pages=await Promise.all(Array.from({length:workers},()=>b.page('video/short028/'+o.film+'?timeline='+o.timeline+'&manifest=/video/cache/short028/'+o.manifest,{scale})));
  const film=await pages[0].evaluate('window.FILM');
  if(!film||film.fps!==30||film.width!==1920||film.height!==1080||Math.round(film.duration*film.fps)!==2527)throw Error('film dimensions/timing differ from approved audio');
  const start=o.from===undefined?0:Number(o.from),end=o.to===undefined?film.duration:Number(o.to);

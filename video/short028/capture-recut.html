@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#111620}
+#host{position:absolute}.term-grid{position:relative;font-family:"JetBrainsMono Nerd Font","Noto Color Emoji",monospace;font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;color:#e8ebf1}
+.term-text .run{position:absolute;white-space:pre;overflow:visible;height:inherit}.term-text .run.wide{text-align:center}.term-lines{position:absolute;left:0;top:0;overflow:visible}.term-cursor{display:none}
+</style></head><body><div id="host"></div><script type="module">
+import {Tape,TermView} from '/video/web/term.js';const tapes={};let view;const host=document.querySelector('#host');
+window.READY=(async()=>{await document.fonts.ready;for(const n of ['reader','editor','send','cli-overview-recut','cli-mail-recut','cli-json-recut'])tapes[n]=new Tape(await(await fetch('/video/cache/short028/'+n+'.json')).json());view=new TermView(host,{cellW:11,cellH:22,columns:160,rows:42});return true;})();
+window.capture=(name,mark)=>{const t=tapes[name],index=t.mark(mark).frame;view.show(t,index,{blink:false});const left=(1920-t.columns*11)/2,top=(1080-t.rows*22)/2;host.style.left=left+'px';host.style.top=top+'px';return{left,top,columns:t.columns,rows:t.rows,cellW:11,cellH:22};};
+</script></body></html>
