@@ -284,8 +284,8 @@ def main():
         raise ValueError(f"Use Zig {zig_version}; found {actual_zig}")
     prefix = ROOT / (".verification-release-" + ("macos-" if args.os_name == "macos" else "") + args.arch)
     targets = MACOS_TARGETS if args.os_name == "macos" else TARGETS
-    subprocess.run(["zig", "build", "-Dtarget=" + targets[args.arch][0], "-Dcpu=baseline",
-                    "-Doptimize=safe", "-Dstrip=true", "--prefix", str(prefix)], cwd=ROOT, check=True)
+    subprocess.run(["zig", "build", "install", "browser", "-Dtarget=" + targets[args.arch][0], "-Dcpu=baseline",
+                    "-Doptimize=safe", "-Dstrip=true", "-Dbrowser=true", "--prefix", str(prefix)], cwd=ROOT, check=True)
     binary = prefix / "bin/omagma"
     report = verify_binary(binary, args.arch, args.os_name)
     if is_native(args.arch, args.os_name):

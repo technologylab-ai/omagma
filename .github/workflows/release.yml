@@ -72,6 +72,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared Zig compiler
         run: python3 .github/install_zig.py
+      - name: Select the browser packaging toolchain
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.21.0
+          cache: npm
+          cache-dependency-path: web-demo/package-lock.json
+          package-manager-cache: false
+      - name: Install pinned browser build dependencies and check host adapters
+        run: |
+          npm ci --prefix web-demo --ignore-scripts --no-audit --no-fund
+          npm test --prefix web-demo
       - name: Release format and architecture oracles
         run: |
           python3 tests/release_binary.py
@@ -144,6 +155,10 @@ jobs:
           do
             python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
           done
+      - name: Shared mail, contacts and browser adapter correctness
+        run: |
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
       - name: Safe correctness and standalone probes
         run: |
           zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe
@@ -190,6 +205,18 @@ jobs:
             .verification-debug/bin/auth_probe keyring
             .verification-safe/bin/auth_probe keyring
           '
+      - name: Verify the packaged browser server and synthetic browser workflows
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          node web-demo/build.mjs --wasm ".verification-release-$RELEASE_ARCH/web-demo/omagma.wasm" --out-dir .verification-browser-site
+          task_browser_checks=none
+          task_chromium_args=()
+          if [ "$RELEASE_ARCH" = x86_64 ]; then
+            task_browser_checks=both
+            task_chromium_args=(--chromium "$(command -v google-chrome)")
+          fi
+          node tests/browser_server.mjs --binary "dist/omagma-linux-$RELEASE_ARCH" --site-dir .verification-browser-site --work-dir tests/results/browser-safe-server --browser-checks "$task_browser_checks" "${task_chromium_args[@]}"
       - name: Safe current terminal and agent feature acceptance
         env:
           RELEASE_ARCH: ${{ matrix.arch }}
@@ -279,6 +306,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared native Zig compiler
         run: python3 .github/install_zig.py
+      - name: Select the browser packaging toolchain
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.21.0
+          cache: npm
+          cache-dependency-path: web-demo/package-lock.json
+          package-manager-cache: false
+      - name: Install pinned browser build dependencies and check host adapters
+        run: |
+          npm ci --prefix web-demo --ignore-scripts --no-audit --no-fund
+          npm test --prefix web-demo
       - name: Release format and architecture oracles
         run: |
           python3 tests/release_binary.py
@@ -347,6 +385,10 @@ jobs:
           .verification-macos-debug/bin/auth_probe callback
           .verification-macos-debug/bin/callback_budget
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode debug
+      - name: Shared mail, contacts and browser adapter correctness
+        run: |
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
       - name: Safe native correctness and standalone probes
         run: |
           zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe
@@ -365,6 +407,12 @@ jobs:
           /usr/bin/otool -L dist/omagma-macos-${{ matrix.arch }}
           /usr/bin/xcrun vtool -show-build dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} build-info
+      - name: Verify the packaged macOS browser server
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          node web-demo/build.mjs --wasm ".verification-release-macos-$RELEASE_ARCH/web-demo/omagma.wasm" --out-dir .verification-browser-site
+          node tests/browser_server.mjs --binary "dist/omagma-macos-$RELEASE_ARCH" --site-dir .verification-browser-site --work-dir tests/results/browser-safe-server
       - name: Safe packaged CLI, transport and native lifecycle
         run: |
           python3 tests/terminal_integration.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/macos-safe-cli.json

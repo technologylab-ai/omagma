@@ -16,6 +16,11 @@ that feature is absent.
 
 ## Build and try it
 
+The v0.2.8 release bundles include this tech demo. Run `omagma server` with the
+installed native executable and open its printed URL; no compiler, Node.js or
+separate assets are needed. This demonstration is not intended for everyday use.
+The following instructions are for building it from source.
+
 Use exactly Zig 0.17.0, as required by the main application. The browser assets
 are embedded in the native executable; no application backend is needed. From the
 repository root, with that compiler selected on `PATH`:

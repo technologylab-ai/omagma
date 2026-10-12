@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, builtin.zig_version_string, "0.17.0")) @panic("Use exact Zig 0.17.0");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Strip debug information from native and browser binaries") orelse false;
     const macos_sdk = if (target.result.os.tag == .macos) b.option([]const u8, "macos-sdk", "Path to the macOS SDK for explicit deployment targets") orelse if (builtin.os.tag == .macos) std.mem.trim(u8, b.run(&.{ "/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path" }), " \r\n\t") else @panic("macOS targets require -Dmacos-sdk=/absolute/SDK/path") else null;
     const test_filter = b.option([]const u8, "test-filter", "Run only correctness tests containing this text");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
@@ -18,6 +19,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/browser.zig"),
             .target = browser_target,
             .optimize = optimize,
+            .strip = strip,
         });
         browser_module.addImport("vaxis", v.module("vaxis"));
         const browser_options = b.addOptions();
@@ -47,7 +49,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = target.result.abi == .musl or target.result.os.tag == .macos,
-        .strip = b.option(bool, "strip", "Strip debug information from the binary") orelse false,
+        .strip = strip,
     });
     if (macos_sdk) |sdk| linkNativeKeychain(m, sdk);
     const options = b.addOptions();

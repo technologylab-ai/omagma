@@ -39,6 +39,14 @@ python3 tests/release_check.py --os macos --arch arm64
 
 The packager builds stripped `safe` backends (`-Doptimize=safe`) with baseline CPUs. Linux defaults remain static musl and require static ELF output. `--os macos` requires a matching native Mac, targets macOS 13.0 explicitly and validates thin Mach-O CPU subtype, minimum OS/platform, system-only dependencies, loader/search-path bounds and stripped/private-path constraints. The observed direct libraries are libSystem, libobjc, Security and CoreFoundation; no Homebrew dylibs are bundled. Output goes to `dist/` by default; `--output-dir` chooses another directory. Linux writes `SHA256SUMS-x86_64` or `SHA256SUMS-arm64`; Mac writes `SHA256SUMS-macos-x86_64` or `SHA256SUMS-macos-arm64`. Publication combines all platform fragments and the license notice into `SHA256SUMS`. `--print-version` and `--print-zig-version` report the values read from `build.zig.zon`. These are build-time tools, not installed runtime helpers. Packaging does not edit an installed desktop configuration or private credentials.
 
+Release builds include the browser tech demo (`-Dbrowser=true`), with stripped
+WebAssembly, its page and pinned JavaScript dependencies embedded in the native
+executable. Maintainers need Node.js and must first run
+`npm ci --prefix web-demo --ignore-scripts --no-audit --no-fund`.
+Users can run `omagma server` without Node.js or a separate asset directory.
+Qualification checks the actual packaged server on all four platforms; Linux
+x86_64 also runs the synthetic demo and Gmail-connect browser workflows.
+
 Each OS/architecture produces a raw binary and complete audited-source bundle:
 
 | Asset | Contents |

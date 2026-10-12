@@ -108,7 +108,7 @@ async function browser(script, origin, name, extra = [], launchURL = null) {
   const output = join(work, name);
   await mkdir(output, { recursive: true, mode: 0o700 });
   const browserProcess = spawn(process.execPath, [join(root, "tests", script), "--origin", origin,
-    "--work-dir", output, ...extra], { cwd: root, env: { ...environment,
+    "--work-dir", output, ...(args.get("--chromium") ? ["--chromium", args.get("--chromium")] : []), ...extra], { cwd: root, env: { ...environment,
       ...(launchURL ? { OMAGMA_TEST_LAUNCH_URL: launchURL } : {}) }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";
   browserProcess.stdout.on("data", (bytes) => { out += bytes; });
