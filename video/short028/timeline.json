@@ -1,0 +1,1006 @@
+{
+  "schema": "omagma.video.timeline.v1",
+  "revision": "short028",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "chapters": [
+    {
+      "number": 1,
+      "title": "Your Mac. Your agent."
+    },
+    {
+      "number": 2,
+      "title": "Know what to ask."
+    },
+    {
+      "number": 3,
+      "title": "Select what matters."
+    },
+    {
+      "number": 4,
+      "title": "A private copy in your editor."
+    },
+    {
+      "number": 5,
+      "title": "Ready? Send now."
+    },
+    {
+      "number": 6,
+      "title": "Omagma comes full circle."
+    }
+  ],
+  "parts": [
+    {
+      "id": "intro",
+      "name": "intro",
+      "frameIn": 0,
+      "frameOut": 90,
+      "chapter": 0,
+      "asset": "reader.context",
+      "subtitle": "Native first. A new canvas.",
+      "transition": 0,
+      "editorial": "intro",
+      "readableHold": 2.6,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 1.0
+      },
+      "focus": null
+    },
+    {
+      "id": "mac-context",
+      "name": "mac-context",
+      "frameIn": 90,
+      "frameOut": 156,
+      "chapter": 1,
+      "asset": "mac.context",
+      "subtitle": "The same native TUI and CLI on your Mac.",
+      "transition": 0.35,
+      "editorial": null,
+      "readableHold": 1.85,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 0.35
+      },
+      "focus": null
+    },
+    {
+      "id": "mac-choices",
+      "name": "mac-choices",
+      "frameIn": 156,
+      "frameOut": 306,
+      "chapter": 1,
+      "asset": "mac.context",
+      "subtitle": "Choose the setup that fits your workflow.",
+      "transition": 0,
+      "editorial": "mac-choices",
+      "readableHold": 4.6,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 1.2
+      },
+      "focus": null
+    },
+    {
+      "id": "mac-result",
+      "name": "mac-result",
+      "frameIn": 306,
+      "frameOut": 450,
+      "chapter": 1,
+      "asset": "mac.ssh_result",
+      "subtitle": "Native Mac TUI over SSH \u00b7 fictional mail.",
+      "transition": 0.35,
+      "editorial": null,
+      "readableHold": 3.6,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0.35,
+        "moveUntil": 1.2
+      },
+      "focus": null
+    },
+    {
+      "id": "cli-index",
+      "name": "cli-index",
+      "frameIn": 450,
+      "frameOut": 552,
+      "chapter": 2,
+      "asset": "cli.help_index",
+      "subtitle": "omagma cli --help commands \u00b7 complete command discovery",
+      "transition": 0.35,
+      "editorial": null,
+      "readableHold": 2.55,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0.35,
+        "moveUntil": 0.85
+      },
+      "focus": null
+    },
+    {
+      "id": "cli-command",
+      "name": "cli-command",
+      "frameIn": 552,
+      "frameOut": 660,
+      "chapter": 2,
+      "asset": "cli.help_command",
+      "subtitle": "omagma cli --help mail.read \u00b7 every field, offline",
+      "transition": 0.2,
+      "editorial": null,
+      "readableHold": 3.4,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null
+    },
+    {
+      "id": "cli-schema",
+      "name": "cli-schema",
+      "frameIn": 660,
+      "frameOut": 810,
+      "chapter": 2,
+      "asset": "cli.help_schema",
+      "subtitle": "omagma cli --schema mail.send \u00b7 nested Draft fields",
+      "transition": 0.2,
+      "editorial": null,
+      "readableHold": 4.8,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null
+    },
+    {
+      "id": "reader-context",
+      "name": "reader-context",
+      "frameIn": 810,
+      "frameOut": 864,
+      "chapter": 3,
+      "asset": "reader.context",
+      "subtitle": "Open the received message before choosing a passage.",
+      "transition": 0.25,
+      "editorial": null,
+      "readableHold": 1.55,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 0.35
+      },
+      "focus": null
+    },
+    {
+      "id": "reader-move",
+      "name": "reader-move",
+      "frameIn": 864,
+      "frameOut": 936,
+      "chapter": 3,
+      "asset": "reader.move",
+      "subtitle": "V enters MOVE \u00b7 choose where the excerpt begins.",
+      "transition": 0.15,
+      "editorial": null,
+      "readableHold": 1.55,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.85
+      },
+      "focus": null,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "reader.move"
+        },
+        {
+          "offset": 1.05,
+          "asset": "reader.at_paragraph"
+        }
+      ]
+    },
+    {
+      "id": "reader-marked",
+      "name": "reader-marked",
+      "frameIn": 936,
+      "frameOut": 990,
+      "chapter": 3,
+      "asset": "reader.marked",
+      "subtitle": "V or Space marks CHAR \u00b7 move to the end.",
+      "transition": 0.1,
+      "editorial": null,
+      "readableHold": 1.7,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null
+    },
+    {
+      "id": "reader-excerpt",
+      "name": "reader-excerpt",
+      "frameIn": 990,
+      "frameOut": 1086,
+      "chapter": 3,
+      "asset": "reader.excerpt",
+      "subtitle": "The highlighted passage is ready.",
+      "transition": 0.1,
+      "editorial": null,
+      "readableHold": 3.1,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": "passage"
+    },
+    {
+      "id": "reader-copied",
+      "name": "reader-copied",
+      "frameIn": 1086,
+      "frameOut": 1170,
+      "chapter": 3,
+      "asset": "reader.copied",
+      "subtitle": "y copies only your excerpt.",
+      "transition": 0.1,
+      "editorial": null,
+      "readableHold": 2.7,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null
+    },
+    {
+      "id": "editor-view",
+      "name": "editor-view",
+      "frameIn": 1170,
+      "frameOut": 1368,
+      "chapter": 4,
+      "asset": "editor.view",
+      "subtitle": "e opens the full decoded message in $EDITOR.",
+      "transition": 0.35,
+      "editorial": null,
+      "readableHold": 5.4,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0.35,
+        "moveUntil": 1.2
+      },
+      "focus": "focus",
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "editor.view"
+        },
+        {
+          "offset": 2.6,
+          "asset": "editor.paragraph"
+        }
+      ]
+    },
+    {
+      "id": "editor-return",
+      "name": "editor-return",
+      "frameIn": 1368,
+      "frameOut": 1470,
+      "chapter": 4,
+      "asset": "editor.returned",
+      "subtitle": "Disposable snapshot. The received mail stays unchanged.",
+      "transition": 0.35,
+      "editorial": null,
+      "readableHold": 3.05,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": "focus"
+    },
+    {
+      "id": "send-review",
+      "name": "send-review",
+      "frameIn": 1470,
+      "frameOut": 1548,
+      "chapter": 5,
+      "asset": "send.review",
+      "subtitle": "Review the message first.",
+      "transition": 0.1,
+      "editorial": null,
+      "readableHold": 2.5,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null
+    },
+    {
+      "id": "send-countdown",
+      "name": "send-countdown",
+      "frameIn": 1548,
+      "frameOut": 1620,
+      "chapter": 5,
+      "asset": "send.countdown",
+      "subtitle": "A local grace countdown \u00b7 Undo stays the safe default.",
+      "transition": 0.15,
+      "editorial": null,
+      "readableHold": 2.25,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "send.countdown"
+        },
+        {
+          "offset": 0.8,
+          "asset": "send.countdown_nine"
+        },
+        {
+          "offset": 1.6,
+          "asset": "send.countdown_eight"
+        }
+      ]
+    },
+    {
+      "id": "send-now",
+      "name": "send-now",
+      "frameIn": 1620,
+      "frameOut": 1695,
+      "chapter": 5,
+      "asset": "send.now_focus",
+      "subtitle": "Choose Send now or press Ctrl+S.",
+      "transition": 0.15,
+      "editorial": null,
+      "readableHold": 2.35,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": "control",
+      "highlightPadding": [
+        4,
+        0
+      ]
+    },
+    {
+      "id": "send-receipt",
+      "name": "send-receipt",
+      "frameIn": 1695,
+      "frameOut": 1785,
+      "chapter": 5,
+      "asset": "send.receipt",
+      "subtitle": "Send complete \u00b7 the fictional provider accepted it.",
+      "transition": 0.15,
+      "editorial": null,
+      "readableHold": 2.2,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.8
+      },
+      "focus": "focus"
+    },
+    {
+      "id": "browser-context",
+      "name": "browser-context",
+      "frameIn": 1785,
+      "frameOut": 1908,
+      "chapter": 6,
+      "asset": "browser.context",
+      "subtitle": "Three accounts. The same Zig TUI, running in the browser.",
+      "transition": 0,
+      "editorial": null,
+      "readableHold": 3.55,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 1.2
+      },
+      "focus": null,
+      "sequence": [
+        {
+          "offset": 0.0,
+          "asset": "browser.frame-00000"
+        },
+        {
+          "offset": 0.0696322,
+          "asset": "browser.frame-00001"
+        },
+        {
+          "offset": 0.133643,
+          "asset": "browser.frame-00002"
+        },
+        {
+          "offset": 0.1994709,
+          "asset": "browser.frame-00003"
+        },
+        {
+          "offset": 0.2645093,
+          "asset": "browser.frame-00004"
+        },
+        {
+          "offset": 0.3290602,
+          "asset": "browser.frame-00005"
+        },
+        {
+          "offset": 0.3973032,
+          "asset": "browser.frame-00006"
+        },
+        {
+          "offset": 0.4751669,
+          "asset": "browser.frame-00007"
+        },
+        {
+          "offset": 0.5278044,
+          "asset": "browser.frame-00008"
+        },
+        {
+          "offset": 0.5940699,
+          "asset": "browser.frame-00009"
+        },
+        {
+          "offset": 0.6551214,
+          "asset": "browser.frame-00010"
+        },
+        {
+          "offset": 0.7220596,
+          "asset": "browser.frame-00011"
+        },
+        {
+          "offset": 0.788244,
+          "asset": "browser.frame-00012"
+        },
+        {
+          "offset": 0.8536931,
+          "asset": "browser.frame-00013"
+        },
+        {
+          "offset": 0.9169979,
+          "asset": "browser.frame-00014"
+        },
+        {
+          "offset": 0.9833333,
+          "asset": "browser.frame-00015"
+        },
+        {
+          "offset": 1.0,
+          "asset": "browser.frame-00016"
+        },
+        {
+          "offset": 1.0642388,
+          "asset": "browser.frame-00017"
+        },
+        {
+          "offset": 1.1316179,
+          "asset": "browser.frame-00018"
+        },
+        {
+          "offset": 1.1924851,
+          "asset": "browser.frame-00019"
+        },
+        {
+          "offset": 1.2519944,
+          "asset": "browser.frame-00020"
+        },
+        {
+          "offset": 1.3170678,
+          "asset": "browser.frame-00021"
+        },
+        {
+          "offset": 1.380885,
+          "asset": "browser.frame-00022"
+        },
+        {
+          "offset": 1.4429862,
+          "asset": "browser.frame-00023"
+        },
+        {
+          "offset": 1.5058865,
+          "asset": "browser.frame-00024"
+        },
+        {
+          "offset": 1.5683212,
+          "asset": "browser.frame-00025"
+        },
+        {
+          "offset": 1.6344017,
+          "asset": "browser.frame-00026"
+        },
+        {
+          "offset": 1.6952285,
+          "asset": "browser.frame-00027"
+        },
+        {
+          "offset": 1.7576838,
+          "asset": "browser.frame-00028"
+        },
+        {
+          "offset": 1.8232058,
+          "asset": "browser.frame-00029"
+        },
+        {
+          "offset": 1.8841058,
+          "asset": "browser.frame-00030"
+        },
+        {
+          "offset": 1.944803,
+          "asset": "browser.frame-00031"
+        },
+        {
+          "offset": 1.9833333,
+          "asset": "browser.frame-00032"
+        },
+        {
+          "offset": 2.0,
+          "asset": "browser.frame-00033"
+        },
+        {
+          "offset": 2.0644837,
+          "asset": "browser.frame-00034"
+        },
+        {
+          "offset": 2.1206928,
+          "asset": "browser.frame-00035"
+        },
+        {
+          "offset": 2.1816906,
+          "asset": "browser.frame-00036"
+        },
+        {
+          "offset": 2.2456705,
+          "asset": "browser.frame-00037"
+        },
+        {
+          "offset": 2.3087524,
+          "asset": "browser.frame-00038"
+        },
+        {
+          "offset": 2.3641619,
+          "asset": "browser.frame-00039"
+        },
+        {
+          "offset": 2.4269391,
+          "asset": "browser.frame-00040"
+        },
+        {
+          "offset": 2.4876382,
+          "asset": "browser.frame-00041"
+        },
+        {
+          "offset": 2.5444287,
+          "asset": "browser.frame-00042"
+        },
+        {
+          "offset": 2.5841115,
+          "asset": "browser.frame-00043"
+        },
+        {
+          "offset": 2.6445849,
+          "asset": "browser.frame-00044"
+        },
+        {
+          "offset": 2.7046082,
+          "asset": "browser.frame-00045"
+        },
+        {
+          "offset": 2.7626442,
+          "asset": "browser.frame-00046"
+        },
+        {
+          "offset": 2.8002534,
+          "asset": "browser.frame-00047"
+        },
+        {
+          "offset": 2.8601328,
+          "asset": "browser.frame-00048"
+        },
+        {
+          "offset": 2.9224102,
+          "asset": "browser.frame-00049"
+        },
+        {
+          "offset": 2.9833333,
+          "asset": "browser.frame-00050"
+        },
+        {
+          "offset": 3.0,
+          "asset": "browser.frame-00052"
+        },
+        {
+          "offset": 3.0650762,
+          "asset": "browser.frame-00053"
+        },
+        {
+          "offset": 3.1046108,
+          "asset": "browser.frame-00054"
+        },
+        {
+          "offset": 3.1467661,
+          "asset": "browser.frame-00055"
+        },
+        {
+          "offset": 3.2155373,
+          "asset": "browser.frame-00056"
+        },
+        {
+          "offset": 3.282358,
+          "asset": "browser.frame-00057"
+        },
+        {
+          "offset": 3.3459936,
+          "asset": "browser.frame-00058"
+        },
+        {
+          "offset": 3.3887181,
+          "asset": "browser.frame-00059"
+        },
+        {
+          "offset": 3.4525604,
+          "asset": "browser.frame-00060"
+        },
+        {
+          "offset": 3.4923601,
+          "asset": "browser.frame-00061"
+        },
+        {
+          "offset": 3.5380593,
+          "asset": "browser.frame-00062"
+        },
+        {
+          "offset": 3.6003926,
+          "asset": "browser.frame-00063"
+        },
+        {
+          "offset": 3.6527002,
+          "asset": "browser.frame-00064"
+        },
+        {
+          "offset": 3.6932823,
+          "asset": "browser.frame-00065"
+        },
+        {
+          "offset": 3.7326822,
+          "asset": "browser.frame-00066"
+        },
+        {
+          "offset": 3.7760782,
+          "asset": "browser.frame-00067"
+        },
+        {
+          "offset": 3.8400945,
+          "asset": "browser.frame-00068"
+        },
+        {
+          "offset": 3.8813886,
+          "asset": "browser.frame-00069"
+        },
+        {
+          "offset": 3.9509145,
+          "asset": "browser.frame-00070"
+        },
+        {
+          "offset": 4.0175186,
+          "asset": "browser.frame-00071"
+        },
+        {
+          "offset": 4.0833333,
+          "asset": "browser.frame-00072"
+        }
+      ]
+    },
+    {
+      "id": "browser-format",
+      "name": "browser-format",
+      "frameIn": 1908,
+      "frameOut": 1968,
+      "chapter": 6,
+      "asset": "browser.frame-00073",
+      "subtitle": "Reply in the browser. Keep the original formatting.",
+      "transition": 0,
+      "editorial": null,
+      "readableHold": 1.5,
+      "camera": {
+        "from": "full",
+        "to": "format",
+        "moveFrom": 0,
+        "moveUntil": 0.5
+      },
+      "focus": null,
+      "sequence": [
+        {
+          "offset": 0.0,
+          "asset": "browser.frame-00073"
+        },
+        {
+          "offset": 0.0876269,
+          "asset": "browser.frame-00074"
+        },
+        {
+          "offset": 0.1927712,
+          "asset": "browser.frame-00075"
+        },
+        {
+          "offset": 0.3122228,
+          "asset": "browser.frame-00076"
+        },
+        {
+          "offset": 0.3788678,
+          "asset": "browser.frame-00077"
+        },
+        {
+          "offset": 0.4806579,
+          "asset": "browser.frame-00078"
+        },
+        {
+          "offset": 0.5824481,
+          "asset": "browser.frame-00079"
+        },
+        {
+          "offset": 0.6463296,
+          "asset": "browser.frame-00080"
+        },
+        {
+          "offset": 0.7084032,
+          "asset": "browser.frame-00081"
+        },
+        {
+          "offset": 0.7733409,
+          "asset": "browser.frame-00082"
+        },
+        {
+          "offset": 0.8807621,
+          "asset": "browser.frame-00083"
+        },
+        {
+          "offset": 0.9823156,
+          "asset": "browser.frame-00084"
+        },
+        {
+          "offset": 1.0888718,
+          "asset": "browser.frame-00085"
+        },
+        {
+          "offset": 1.1923074,
+          "asset": "browser.frame-00086"
+        },
+        {
+          "offset": 1.2806096,
+          "asset": "browser.frame-00087"
+        },
+        {
+          "offset": 1.3820574,
+          "asset": "browser.frame-00088"
+        },
+        {
+          "offset": 1.4884537,
+          "asset": "browser.frame-00089"
+        },
+        {
+          "offset": 1.5903811,
+          "asset": "browser.frame-00090"
+        },
+        {
+          "offset": 1.689555,
+          "asset": "browser.frame-00091"
+        },
+        {
+          "offset": 1.7999524,
+          "asset": "browser.frame-00092"
+        },
+        {
+          "offset": 1.9833333,
+          "asset": "browser.frame-00093"
+        }
+      ]
+    },
+    {
+      "id": "browser-draft",
+      "name": "browser-draft",
+      "frameIn": 1968,
+      "frameOut": 2016,
+      "chapter": 6,
+      "asset": "browser.frame-00096",
+      "subtitle": "A short note. The preview updates as you type.",
+      "transition": 0.15,
+      "editorial": null,
+      "readableHold": 1.6,
+      "camera": {
+        "from": "format",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.45
+      },
+      "focus": null,
+      "sequence": [
+        {
+          "offset": 0.0,
+          "asset": "browser.frame-00096"
+        },
+        {
+          "offset": 0.0863607,
+          "asset": "browser.frame-00097"
+        },
+        {
+          "offset": 0.1668024,
+          "asset": "browser.frame-00098"
+        },
+        {
+          "offset": 0.2162478,
+          "asset": "browser.frame-00099"
+        },
+        {
+          "offset": 0.269094,
+          "asset": "browser.frame-00100"
+        },
+        {
+          "offset": 0.3215654,
+          "asset": "browser.frame-00101"
+        },
+        {
+          "offset": 0.4082745,
+          "asset": "browser.frame-00102"
+        },
+        {
+          "offset": 0.4768866,
+          "asset": "browser.frame-00103"
+        },
+        {
+          "offset": 0.562879,
+          "asset": "browser.frame-00104"
+        },
+        {
+          "offset": 0.6494331,
+          "asset": "browser.frame-00105"
+        },
+        {
+          "offset": 0.7321147,
+          "asset": "browser.frame-00106"
+        },
+        {
+          "offset": 0.8154752,
+          "asset": "browser.frame-00107"
+        },
+        {
+          "offset": 0.8850734,
+          "asset": "browser.frame-00108"
+        },
+        {
+          "offset": 0.9373567,
+          "asset": "browser.frame-00109"
+        },
+        {
+          "offset": 1.0114565,
+          "asset": "browser.frame-00110"
+        },
+        {
+          "offset": 1.090296,
+          "asset": "browser.frame-00111"
+        },
+        {
+          "offset": 1.1454071,
+          "asset": "browser.frame-00112"
+        },
+        {
+          "offset": 1.227997,
+          "asset": "browser.frame-00113"
+        },
+        {
+          "offset": 1.2833333,
+          "asset": "browser.frame-00114"
+        },
+        {
+          "offset": 1.3,
+          "asset": "browser.frame-00115"
+        },
+        {
+          "offset": 1.4129647,
+          "asset": "browser.frame-00116"
+        },
+        {
+          "offset": 1.5833333,
+          "asset": "browser.frame-00117"
+        }
+      ]
+    },
+    {
+      "id": "browser-recovered",
+      "name": "browser-recovered",
+      "frameIn": 2016,
+      "frameOut": 2205,
+      "chapter": 6,
+      "asset": "browser.reloaded",
+      "subtitle": "Reload. Your draft is recovered.",
+      "transition": 0,
+      "editorial": "browser-observation",
+      "readableHold": 5.9,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      },
+      "focus": null,
+      "editorialDelay": 2
+    },
+    {
+      "id": "recap",
+      "name": "recap",
+      "frameIn": 2205,
+      "frameOut": 2370,
+      "chapter": 0,
+      "asset": "browser.reloaded",
+      "subtitle": "The smaller everyday wins.",
+      "transition": 0.4,
+      "editorial": "recap",
+      "readableHold": 5.1,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 1.2
+      },
+      "focus": null
+    },
+    {
+      "id": "outro",
+      "name": "outro",
+      "frameIn": 2370,
+      "frameOut": 2527,
+      "chapter": 0,
+      "asset": null,
+      "subtitle": "",
+      "transition": 0.4,
+      "editorial": "outro",
+      "readableHold": 4.8333,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0.35,
+        "moveUntil": 1.2
+      },
+      "focus": null
+    }
+  ],
+  "soundtrack": {
+    "source": "video/out/omagma-v0.2.7-flow.mp4",
+    "policy": "Reuse exact approved AAC packets; no retiming, splice, gain, pitch, tempo or fade change.",
+    "audioPacketSha256": "34cb70a377dd3d5525139858ffebfac10673a1e4ff8dba0b129c90ad6bc152a9"
+  },
+  "capturePolicy": "Actual synthetic native/editor/browser captures and genuine offline help only. Editorial Mac setup cards are not application UI. No production sends.",
+  "publication": "held",
+  "browserScope": "Experimental showcase, not intended for everyday use."
+}
