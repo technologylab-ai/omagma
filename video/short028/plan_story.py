@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit feature headlines; browser launch/connect shown as a surprise experiment."""
+"""Explicit feature headlines; browser launch/connect shown as a surprise tech demo."""
 import json
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2];CACHE=ROOT/'video/cache/short028'
@@ -13,7 +13,7 @@ def main():
  add('mac-setup',2.5,7,1,None,'macOS setup: two options',editorial='mac-choices')
  add('cli-discover',7,9.8,2,'cli.overview_story','Progressive CLI discovery for agents')
  add('cli-narrow',9.8,12,2,'cli.mail_story','Discover only the commands you need')
- add('cli-json',12,14,2,'cli.json_recut','Get examples as JSON, too')
+ add('cli-json',12,14,2,'cli.json_recut','Machine-readable commands for agents')
  add('copy-select',14,19.5,3,'reader.move','Copy text from emails','With the keyboard or mouse.',camera=cam('full','focus',.8),sequence=[{'offset':0,'asset':'reader.move'},{'offset':1,'asset':'reader.at_paragraph'},{'offset':1.7,'asset':'reader.marked'},{'offset':2.1,'asset':'reader.excerpt'}])
  add('copy-done',19.5,21.5,3,'reader.copied','Copy text from emails','Ready to paste into your agent chat.',camera=cam('focus','focus',0))
  add('editor-open',21.5,23.6,4,'editor.view','Open emails in your editor','e → $EDITOR',camera=cam('full','body',.6))
@@ -34,18 +34,18 @@ def main():
   connect_keys={'button':'browser.server-connect-button','loading':'browser.server-connect-loading','connected':'browser.server-connected-three'}
  else:raise AssertionError('Actual native Connect Gmail capture required')
  a[connect_keys['button']]['rois']['connect']=[.69,.227,.068,.028]
- add('browser-connect-button',44,46.2,6,connect_keys['button'],'Connect Gmail — this works, too.',browser=True,focus='connect',highlightPadding=[8,4])
+ add('browser-connect-button',44,46.2,6,connect_keys['button'],'Connect Gmail in the browser',browser=True,focus='connect',highlightPadding=[8,4])
  add('browser-connect-load',46.2,48.2,6,connect_keys['loading'],'Connecting your accounts…',browser=True)
- add('browser-connected',48.2,51.2,6,connect_keys['connected'],'Gmail connected. In the browser.',browser=True)
- add('browser-read',51.2,55,6,'browser.reader','Reading mail works, too.',browser=True)
- add('browser-compose',55,57.5,6,'browser.composer-empty','Writing mail works, too.',browser=True)
+ add('browser-connected',48.2,51.2,6,connect_keys['connected'],'Connected. Your inbox is here.',browser=True)
+ add('browser-read',51.2,55,6,'browser.reader','Open a message',browser=True)
+ add('browser-compose',55,57.5,6,'browser.composer-empty','Start a reply',browser=True)
  old=json.loads((CACHE/'browser/chrome-assets-passed.json').read_text());typed=next(p['sequence'] for p in old['filmParts'] if p['id']=='browser-real-type');last=typed[-1]['offset']
  fast=[{'offset':round(s['offset']/last*1.15,6),'asset':s['asset']} for s in typed]
- add('browser-type',57.5,59,6,'browser.composer-empty','Writing mail works, too.',browser=True,sequence=fast)
- add('browser-preview',59,62,6,'browser.draft','And the preview works, too.',browser=True)
- add('browser-saved',62,65,6,'browser.autosaved','Your draft saves itself, too.',browser=True)
- add('browser-recovery',65,69,6,'browser.reloaded','Your draft survives a reload, too.',browser=True)
- add('browser-memory',69,73.5,6,'browser.reloaded','3 accounts. About 125 MB.',browser=True)
+ add('browser-type',57.5,59,6,'browser.composer-empty','Type a note. Watch it render.',browser=True,sequence=fast)
+ add('browser-preview',59,62,6,'browser.draft','See the live preview',browser=True)
+ add('browser-saved',62,65,6,'browser.autosaved','Draft saved',browser=True)
+ add('browser-recovery',65,69,6,'browser.reloaded','Reload. Your draft is still here.',browser=True)
+ add('browser-memory',69,73.5,6,'browser.reloaded','3 accounts. About 125 MB.','Gone are the days of 2 GB browser tabs per account.',browser=True,subtitleLarge=True)
  add('recap',73.5,79,0,editorial='recap',editorialTitle='The little things, done better.',editorialRows=['Readable names and international text','A bad contact no longer breaks the list','Ctrl+Space works in classic terminals','Review label changes. Undo when needed.'])
  add('outro',79,2527/30,0,editorial='outro',editorialTitle='Omagma v0.2.8',editorialText='Linux · macOS · TUI + agent CLI')
  for p in parts:

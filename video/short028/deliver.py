@@ -13,7 +13,7 @@ def main():
  movie=args.movie.resolve();report=json.loads(movie.with_suffix('.report.json').read_text())
  playback=json.loads((args.review/'receipt.json').read_text());assert playback['passed'] and report['musicCopiedExactly'] and sha(movie)==report['sha256']
  hashes=json.loads(args.hashes.read_text());assert all(sha(ROOT/p)==h for p,h in hashes.items())
- assert args.tag in ['whats-new','whats-new-recut','whats-new-story']
+ assert args.tag in ['whats-new','whats-new-recut','whats-new-story','whats-new-copy']
  stamp=datetime.datetime.now().astimezone().strftime('%Y%m%d-%H%M%S');stem='omagma-v0.2.8-'+args.tag+'-'+stamp
  dest=Path.home()/'Videos/Omagma';dest.mkdir(parents=True,exist_ok=True);target=dest/(stem+'.mp4');assert not target.exists();shutil.copy2(movie,target);assert sha(target)==sha(movie)
  poster=dest/(stem+'-poster.png')
@@ -27,7 +27,8 @@ def main():
  watch.write_text('<!doctype html><html><head><meta charset="utf-8"><title>Omagma v0.2.8 · What’s new</title><style>body{margin:0;padding:32px;background:#07090d;color:#f3f5f7;font:18px system-ui}main{max-width:1600px;margin:auto}h1{color:#ff9e61}video{width:100%;display:block;border-radius:12px}p{color:#adb8c6}</style></head><body><main><h1>Omagma v0.2.8 · What’s new</h1><video controls playsinline preload="metadata" poster="'+html.escape(poster.name)+'" src="'+html.escape(target.name)+'"></video><p>v0.2.8 review copy · publication held. Browser tech demo · not for everyday use.</p></main></body></html>')
  public={k:report[k] for k in ['sha256','durationSeconds','frames','musicCopiedExactly','approvedSourceSha256','audioPacketAndTimestampSha256','faststart','publicationHeld']}
  public.update(width=1920,height=1080,fps=30,normalSpeedPlaybackPassed=True,observedDecodedFrames=playback['decodedFrames'],maxOuterCornerStep=playback['maxOuterCornerStep'],fictionalAccountsOnly=True,productionProviderWrites=0,sourceAppCommit='226365a295d2fcf2fc21fa0a559f62cc74faa9fb',pictureSourceHashes=hashes,browserTechDemo=True,memoryFigure='3 accounts · ~125 MB',visualReview='Actual Claude Opus5.5 review of story sources/stills with requested xhigh effort; root encoded playback and transition checks',realBrowserChrome=args.tag!='whats-new')
+ if args.tag=='whats-new-copy':public.update(memoryComparison='Gone are the days of 2 GB browser tabs per account.',visualReview='Base story reviewed with actual Claude Opus5.5; current caption-only revision checked by root with rendered stills and encoded playback')
  proof=dest/(stem+'-report.json');proof.write_text(json.dumps(public,indent=2)+'\n')
  result={'movie':str(target),'watch':str(watch),'poster':str(poster),'contactSheet':str(sheet),'report':str(proof),'sha256':public['sha256']}
- (CACHE/({'whats-new-recut':'recut-delivery.json','whats-new-story':'story-delivery.json'}.get(args.tag,'delivery.json'))).write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+ (CACHE/({'whats-new-recut':'recut-delivery.json','whats-new-story':'story-delivery.json','whats-new-copy':'copy-polish-delivery.json'}.get(args.tag,'delivery.json'))).write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
 if __name__=='__main__':main()
