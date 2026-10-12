@@ -22,7 +22,10 @@ pub fn integer(v: Value, key: []const u8, default: i64) !i64 {
 }
 pub fn value(a: std.mem.Allocator, v: anytype) !Value {
     const raw = try std.json.Stringify.valueAlloc(a, v, .{ .emit_null_optional_fields = false });
-    return std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_always });
+    // The serialized bytes already belong to this allocator and remain alive
+    // with the returned value. Borrow unescaped strings from that owned copy
+    // instead of duplicating every large attachment's base64 payload again.
+    return std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed });
 }
 pub fn decode(comptime T: type, a: std.mem.Allocator, v: Value) !T {
     return std.json.parseFromValueLeaky(T, a, v, .{ .ignore_unknown_fields = true });
@@ -55,4 +58,20 @@ test "copied request map growth preserves original account query and label" {
     try std.testing.expectEqualStrings("STARRED", text(original, "label"));
     try std.testing.expectEqual(@as(usize, 4), original.object.count());
     try std.testing.expectEqualStrings("INBOX", text(copied, "label"));
+}
+
+test "JSON values own caller text and escaped data for the allocator lifetime" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var plain = "Source bytes".*;
+    var escaped = "quote \" café\n".*;
+    const result = try value(arena.allocator(), .{ .plain = &plain, .escaped = &escaped, .items = [_]u32{ 7, 12 } });
+    @memset(&plain, 'x');
+    @memset(&escaped, 'x');
+    try std.testing.expectEqualStrings("Source bytes", text(result, "plain"));
+    try std.testing.expectEqualStrings("quote \" café\n", text(result, "escaped"));
+    const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), result, .{});
+    const roundtrip = try std.json.parseFromSliceLeaky(Value, arena.allocator(), encoded, .{});
+    try std.testing.expectEqualStrings("Source bytes", text(roundtrip, "plain"));
+    try std.testing.expectEqual(@as(i64, 12), get(roundtrip, "items").?.array.items[1].integer);
 }

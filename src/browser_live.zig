@@ -47,16 +47,19 @@ pub const Session = struct {
         return if (self.can_send) &.{ "mail-read", "mail-send" } else &.{"mail-read"};
     }
     pub fn transport(self: *Session) gmail.Transport {
-        return .{ .context = self, .requestFn = request };
+        return .{ .context = self, .requestFn = request, .preparedRequestFn = requestPrepared };
     }
     fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+        const encoded = if (body) |value| try std.json.Stringify.valueAlloc(a, value, .{}) else "";
+        return requestPrepared(ctx, a, method, url, encoded);
+    }
+    fn requestPrepared(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, encoded: []const u8) !j.Value {
         const self: *Session = @ptrCast(@alignCast(ctx));
         const people = std.mem.eql(u8, url, people_list_url) or std.mem.startsWith(u8, url, people_search_prefix);
         if (people) {
             if (method != .GET or !self.can_contacts) return error.PermissionDenied;
         } else if (!std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/")) return error.InvalidHost;
         if (method != .GET and !(method == .POST and self.can_send and std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"))) return error.PermissionDenied;
-        const encoded = if (body) |value| try std.json.Stringify.valueAlloc(a, value, .{}) else "";
         if (encoded.len > types.Limits.request_bytes) return error.RequestTooLarge;
         const method_name = @tagName(method);
         response_metadata = .{ 0, 0 };
@@ -79,6 +82,20 @@ pub const Session = struct {
     }
     pub fn read(self: *Session, a: std.mem.Allocator, id: []const u8) !types.Message {
         return gmail.readAuthorizedMessage(a, self.account, self.capabilities(), self.transport(), id);
+    }
+    pub fn raw(self: *Session, a: std.mem.Allocator, id: []const u8) ![]const u8 {
+        return gmail.readAuthorizedRawMessage(a, self.account, self.capabilities(), self.transport(), id);
+    }
+    pub fn aliases(self: *Session, a: std.mem.Allocator) ![]const []const u8 {
+        const value = try gmail.dispatchAuthorized(io, a, self.account, self.capabilities(), self.transport(), "accounts.aliases", j.object(a));
+        return j.decode([]const []const u8, a, j.get(value, "aliases") orelse return error.InvalidProviderResponse);
+    }
+    pub fn attachmentSource(self: *Session) @import("terminal/conversation_source.zig").Attachments {
+        return .{ .context = self, .fetchFn = fetchAttachment, .max_bytes = types.Limits.body_bytes };
+    }
+    fn fetchAttachment(ctx: *anyopaque, a: std.mem.Allocator, message: types.Message, expected: types.Attachment) !types.Attachment {
+        const self: *Session = @ptrCast(@alignCast(ctx));
+        return gmail.attachmentAuthorized(a, self.account, self.capabilities(), self.transport(), message.id, expected);
     }
     /// One bounded native-shaped People page, normalized with the same decoder
     /// as the native client. Contacts stay read-only in the browser adapter.
@@ -107,11 +124,13 @@ pub const Session = struct {
         }
         return j.value(a, .{ .contacts = normalized.items, .hasMore = j.text(value, "nextPageToken").len > 0 });
     }
-    pub fn send(self: *Session, a: std.mem.Allocator, draft: types.Draft, operation_id: []const u8) !j.Value {
-        if (draft.attachments.len != 0 or draft.original != null) return error.BrowserAttachmentsUnavailable;
+    pub fn prepareSend(self: *Session, a: std.mem.Allocator, draft: types.Draft, operation_id: []const u8) !gmail.PreparedSend {
         const clock = now_ms();
         if (!std.math.isFinite(clock) or clock <= 0 or clock >= 253402300800000) return error.InvalidDate;
-        return gmail.sendAuthorized(io, a, self.account, self.capabilities(), self.transport(), try j.value(a, .{ .draft = draft, .operationId = operation_id }));
+        return gmail.prepareDraftAuthorized(io, a, self.account, self.capabilities(), self.transport(), draft, operation_id);
+    }
+    pub fn submitPrepared(self: *Session, a: std.mem.Allocator, prepared: gmail.PreparedSend) !j.Value {
+        return gmail.sendPrepared(a, self.transport(), prepared);
     }
 };
 const Connect = struct {

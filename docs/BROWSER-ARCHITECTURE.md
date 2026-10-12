@@ -35,12 +35,18 @@ views, read-only contacts, session drafts and send receipts. It never receives
 keyboard events. `src/browser_live.zig` supplies the bounded HTTPS transport to
 the ordinary Gmail/People decoders. Tokens remain in the JavaScript host.
 
-Both providers use `conversation_draft.zig`, `draft_codec.zig`,
-`send_outcome.zig` and `client_contract.zig`. These modules define reply/forward
+Both providers use `conversation_draft.zig`, `conversation_source.zig`,
+`draft_codec.zig`, `draft_summary.zig`, `send_outcome.zig` and `client_contract.zig`.
+These modules define reply/forward
 construction, draft validation, content identity, conservative uncertain-send
 classification and the strictly read-only cache command contract. Storage and
 transport remain separate because native files and browser storage have
 different lifetimes and capabilities.
+
+Draft lists carry compact shared summaries; explicit draft reads carry full
+content. The controller sends edited fields without retransmitting the immutable
+stored original and requests an ID-only save acknowledgement. Both adapters
+retain full responses by default for existing API clients.
 
 ## Extending a workflow
 
@@ -51,12 +57,24 @@ boundary; expose capabilities and use the existing common help/action filtering
 when a platform cannot support an action yet.
 
 Native capability defaults preserve existing behavior. Browser capabilities
-currently support reading, cache search, contacts and completion, session
-drafts, plain/Markdown compose, text-quoted reply/forward and reviewed sending.
-Native filesystem attachments, external editors, original-message resource
-capture, aliases, contact mutations, desktop preferences and background send
-queues remain unavailable in the browser. Text forwarding explicitly reports
-omitted source attachments through the draft and send review.
+support reading, cache search, contacts and completion, session drafts,
+plain/Markdown compose, text-quoted or formatted reply/reply-all/forward,
+original `.eml` forwarding, source attachment retention and reviewed sending.
+Replies exclude the account's verified aliases. Source capture uses fresh FULL
+metadata, the shared original-resource plan and an injected attachment source;
+cached reader snapshots never stand in for a complete formatted source.
+Native filesystem dialogs, external editors, sender-alias selection, contact
+mutations, desktop preferences and background send queues remain unavailable.
+
+Browser source files use the existing portable inline tier: at most 2 MiB of
+decoded attachment data in a draft, a bounded 3 MiB JSON envelope, and the
+aggregate session draft quota. The exact MIME/base64 envelope can impose a
+smaller send limit. Oversized captures and sends fail explicitly without
+dropping files. For over-quota sources the shared chooser explicitly offers
+Text quote with omitted files, and the omission remains visible through review.
+Native blob-backed files retain their separate 25 MiB decoded /
+35 MiB MIME spool tier. A future browser blob/upload adapter can supply the
+shared byte-source encoder without changing the workflow controller.
 
 Normal native builds do not need browser dependencies. `-Dbrowser=true` builds
 the WASM module and packages pinned browser assets into the native executable;
@@ -73,10 +91,22 @@ under an aggregate 8 MiB draft quota, and 64 send records. Persisted mail has a
 verification and exact account/client/grant binding. Cache contains no tokens,
 drafts, native handles or provider metadata. Browser date filters use UTC.
 
-An uncertain send is recorded before provider dispatch. The host fence remains
+The browser uses a 48 MiB coalescing heap within a fixed 64 MiB WASM memory,
+which also contains static buffers, tables and stack. Temporary download and
+validation arenas release their buffers before draft serialization. This
+platform allocator reuses freed blocks across sizes; native allocation is
+unchanged. Allocator correctness runs with the ordinary native Debug checks.
+
+The shared Gmail preparation phase renders and freezes the exact MIME and host
+JSON payload before an uncertain send is recorded. Local preparation failures
+return a rejected receipt without starting a provider request. If even that
+local rejection cannot be allocated, a proven-before-submission signal keeps
+the shared composer editable without allocating a receipt. The host fence remains
 unconfirmed until the shared controller acknowledges consumption of the exact
-receipt. Any provider, envelope or UI allocation failure retains uncertainty;
+receipt. Any provider, envelope or UI allocation failure after submission retains uncertainty;
 only consumed successful sends retire their drafts and free active draft slots.
+Quota admission can reclaim these confirmed retired draft bytes across accounts;
+active drafts, uncertain sends and receipts awaiting consumption stay protected.
 Native clients can omit this callback because their durable receipt log remains
 available for reconciliation. Editing, discarding or
 resubmitting its protected draft is refused until explicit acknowledgement;

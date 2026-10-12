@@ -8,7 +8,10 @@ fn trap(_: []const u8, _: ?usize) noreturn {
 }
 pub const std_options: std.Options = .{ .log_level = .err, .logFn = quietLog };
 fn quietLog(comptime _: std.log.Level, comptime _: @TypeOf(.enum_literal), comptime _: []const u8, _: anytype) void {}
-const allocator = std.heap.wasm_allocator;
+const BrowserHeap = @import("browser_heap.zig").Heap;
+var heap_buffer: [48 * 1024 * 1024]u8 align(16) = undefined;
+var heap: BrowserHeap = undefined;
+var heap_initialized = false;
 var demo: tui.BrowserSession = undefined;
 var initialized = false;
 var busy = false;
@@ -25,8 +28,12 @@ var decoder: @import("terminal/input.zig").Decoder = .{};
 export fn init(cols: u32, rows: u32) u32 {
     if (busy) return 4;
     if (initialized) return resize(cols, rows);
+    if (!heap_initialized) {
+        heap = .init(&heap_buffer);
+        heap_initialized = true;
+    }
     writer = .fixed(&output_buffer);
-    demo.init(allocator, &writer, dimension(cols, 240), dimension(rows, 80)) catch return 1;
+    demo.init(heap.allocator(), &writer, dimension(cols, 240), dimension(rows, 80)) catch return 1;
     initialized = true;
     return redraw();
 }

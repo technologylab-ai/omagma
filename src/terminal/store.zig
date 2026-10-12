@@ -1,12 +1,9 @@
 const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
+const draft_summary = @import("draft_summary.zig");
 pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "", bodyError: []const u8 = "" };
-fn attachmentMetadata(a: std.mem.Allocator, attachments: []const t.Attachment) ![]const t.Attachment {
-    const result = try a.dupe(t.Attachment, attachments);
-    for (result) |*attachment| attachment.data = "";
-    return result;
-}
+const attachmentMetadata = draft_summary.attachmentMetadata;
 // Address count alone allows tens of KiB per broad inbound header. Bound the
 // compact To/Cc index independently; immutable full messages retain all data.
 const participant_bytes = 4096;
@@ -693,11 +690,7 @@ pub const Store = struct {
         errdefer {
             if (previous) |old| s.write(name, old) catch {} else s.dir.deleteFile(s.io, name) catch {};
         }
-        var preview = d;
-        preview.bodyText = "";
-        preview.attachments = try attachmentMetadata(s.allocator, d.attachments);
-        preview.recoveryFields = null;
-        preview.original = null;
+        const preview = try draft_summary.fromDraft(s.allocator, d);
         if (index) |i| s.state.drafts[i] = preview else {
             var list: std.ArrayList(t.Draft) = .empty;
             try list.appendSlice(s.allocator, s.state.drafts);

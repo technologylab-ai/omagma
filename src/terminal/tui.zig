@@ -123,6 +123,9 @@ fn attachmentSizeLabel(a: Allocator, bytes: u64) ![]const u8 {
     const tenths: u64 = (remainder * 10 + unit / 2) / unit;
     return std.fmt.allocPrint(a, "{d}.{d} {s}", .{ bytes / unit + tenths / 10, tenths % 10, if (unit == 1000) @as([]const u8, "kB") else "MB" });
 }
+fn originalAttachment(attachment: types.Attachment) bool {
+    return std.mem.endsWith(u8, attachment.filename, ".eml") and (same(attachment.mimeType, "message/rfc822") or same(attachment.mimeType, "message/global") or same(attachment.mimeType, "application/octet-stream"));
+}
 fn humanError(code: []const u8) []const u8 {
     const Label = struct { code: []const u8, label: []const u8 };
     const labels = [_]Label{
@@ -254,7 +257,7 @@ fn setMouseReporting(vx: *vaxis.Vaxis, writer: *Io.Writer, enabled: bool) !void 
 }
 const folders = [_][]const u8{ "Inbox", "Sent", "Drafts", "Archive", "Trash", "Spam", "All Mail", "Unread" };
 const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH", "SPAM", "", "UNREAD" };
-const HelpFeature = enum { always, files, editor, clipboard, aliases, updates, durable_drafts, mail_changes, contacts_write, invitations, open_urls, session_drafts };
+const HelpFeature = enum { always, files, attachments, editor, clipboard, aliases, updates, durable_drafts, mail_changes, contacts_write, invitations, open_urls, session_drafts };
 const HelpRow = struct { keys: []const u8 = "", action: []const u8 = "", section: []const u8 = "", requires: HelpFeature = .always };
 const help_rows = [_]HelpRow{
     .{ .keys = ":updates · Ctrl+P Updates", .action = "Check stable releases and see installation-specific upgrade instructions", .requires = .updates },
@@ -342,8 +345,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Ctrl+Space in To/Cc/Bcc", .action = "Open recent recipients; when no local match exists, search contacts and replace this token" },
     .{ .keys = "f · click From", .action = "Choose a verified sending identity in normal mode", .requires = .aliases },
     .{ .keys = "A · click Add", .action = "Attach a file using its literal path", .requires = .files },
-    .{ .keys = ":detach N · click [x]", .action = "Remove attachment N; wheel scrolls the list", .requires = .files },
-    .{ .keys = "x in compose buttons", .action = "Remove the focused outgoing file; Enter also activates its removal", .requires = .files },
+    .{ .keys = ":detach N · click [x]", .action = "Remove attachment N; wheel scrolls the list", .requires = .attachments },
+    .{ .keys = "x in compose buttons", .action = "Remove the focused outgoing file; Enter also activates its removal", .requires = .attachments },
     .{ .keys = "Ctrl+N / Ctrl+P in compose buttons", .action = "Move through attachment, format, preview and alias controls" },
     .{ .keys = "Ctrl+S / :send", .action = "Save the draft and review before sending" },
     .{ .keys = "y in send review", .action = "Explicitly send; Esc / q returns to the draft" },
@@ -357,7 +360,7 @@ const help_rows = [_]HelpRow{
     .{ .action = "Draft changes autosave locally after a short pause.", .requires = .durable_drafts },
     .{ .action = "Drafts are retained in this session; the Drafts mailbox reopens them. Reload or disconnect discards them.", .requires = .session_drafts },
     .{ .action = "Unconfirmed sends protect their drafts. Check Sent in Gmail and acknowledge the result before a new review.", .requires = .session_drafts },
-    .{ .action = "Text quote forwards omit original attachments when files are unavailable. The composer and send review show that omission.", .requires = .session_drafts },
+    .{ .action = "Replies and forwards can keep original formatting. Forward also offers an attached original .eml." },
     .{ .action = "No editor save or paste sends mail." },
     .{ .action = "Autosave only saves locally; it never sends mail." },
     .{ .action = "In a text field, q is text." },
@@ -774,6 +777,13 @@ const Compose = struct {
             .bodyFormat = self.body_format,
         };
     }
+    fn updateValue(self: *const Compose, allocator: Allocator, input: types.Draft) !Value {
+        var edited = input;
+        // The received original is immutable and already stored under this
+        // draft ID. Both providers preserve it when this field is absent.
+        if (self.id.value().len != 0) edited.original = null;
+        return @import("json.zig").value(allocator, edited);
+    }
     fn replaceAttachments(self: *Compose, allocator: Allocator, input_attachments: []const types.Attachment) !void {
         if (input_attachments.len > 16) return error.TooManyAttachments;
         var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -1002,6 +1012,8 @@ const App = struct {
     compose_source_mode: ComposeSourceMode = .choose,
     compose_source_ready: bool = false,
     compose_source_html: bool = false,
+    compose_source_omit_files: bool = false,
+    compose_source_forward_over_quota: bool = false,
     compose_source_probe: bool = false,
     compose_source_subject: Field = .{},
     compose_source_resources: usize = 0,
@@ -4719,6 +4731,20 @@ const App = struct {
         try self.dispatchPending();
     }
     fn finishSend(self: *App) !void {
+        // A provider may explicitly prove that preparation failed before any
+        // submission. Handle that phase without allocating a receipt copy.
+        if (self.job.failure) |failure| {
+            if (failure == error.SendNotStarted) {
+                self.client.sendReceipt(self.job.request, true);
+                if (self.job.account_index == self.account_index and self.job.generation == self.generation and self.compose_active and same(self.job.draft_target.slice(), self.compose.id.value())) {
+                    self.compose.unknown_outcome = false;
+                    self.review_ready = false;
+                    self.mode = .compose;
+                    self.say(true, "Send did not start · draft retained · review again", .{});
+                }
+                return;
+            }
+        }
         // Applying the receipt can replace job_arena with a mailbox follow-up.
         // Pin its original identity before any parsing or state allocation.
         const request = self.allocator.dupe(u8, self.job.request) catch |err| {
@@ -5113,7 +5139,7 @@ const App = struct {
                 if (kind == .draft_read and self.compose.original == null) {
                     self.compose_source_mode = .text;
                     for (self.compose.attachments) |attachment| {
-                        if (std.mem.endsWith(u8, attachment.filename, ".eml") and (same(attachment.mimeType, "message/rfc822") or same(attachment.mimeType, "message/global"))) {
+                        if (originalAttachment(attachment)) {
                             self.compose_source_mode = .attached;
                             self.compose_intent = .forward;
                             break;
@@ -5239,11 +5265,11 @@ const App = struct {
                     self.markUnknown(kind);
                 } else if (same(outcome, "rejected")) {
                     if (kind == .send) self.compose.unknown_outcome = false else self.invitation_unknown = false;
+                    self.mode = if (kind == .send) .compose else .browse;
                     if (kind == .send and same(self.compose.operation_error.value(), "SendCanceledBeforeSubmission")) {
                         self.review_ready = false;
                         self.say(false, "Send canceled · draft retained", .{});
                     } else self.say(true, "{s} · {s}", .{ if (kind == .send) "Submission rejected · draft retained" else "RSVP submission rejected", if (kind == .send) self.compose.operation_error.value() else self.invitation_operation_error.value() });
-                    self.mode = if (kind == .send) .compose else .browse;
                 } else {
                     self.mode = .browse;
                     if (kind == .send) self.compose_active = false;
@@ -5596,6 +5622,8 @@ const App = struct {
         // The RAW original contains every file. This is only a definite lower
         // bound; a smaller descriptor total does not promise a usable .eml.
         self.compose_source_original_too_large = lower_bound > types.Limits.body_bytes;
+        self.compose_source_omit_files = lower_bound > self.capabilities.source_attachment_bytes or values.len > types.Limits.attachments;
+        self.compose_source_forward_over_quota = lower_bound > self.capabilities.source_attachment_bytes or values.len > types.Limits.attachments + types.Limits.related_resources;
         if (self.compose_source_html) preflight: {
             if (truth(get(message, "bodyHtmlAmbiguous"))) {
                 self.compose_source_format_error = error.AmbiguousOriginalHtml;
@@ -5627,6 +5655,7 @@ const App = struct {
                 break :preflight;
             };
             self.compose_source_resources = plan.count;
+            self.compose_source_forward_over_quota = self.compose_source_forward_over_quota or values.len - plan.count > types.Limits.attachments;
         }
         try self.compose_source_subject.set(self.allocator, text(get(message, "subject")));
         self.compose_source_ready = true;
@@ -5685,7 +5714,7 @@ const App = struct {
                 };
                 return;
             }
-            if (self.compose_source_html) {
+            if (self.compose_source_html or (self.pending_compose == .forward and self.capabilities.original_attachment)) {
                 self.compose_choice = true;
                 self.dialog_focus.reset(.compose_format, self.composeChoiceInitial());
                 self.say(false, "Choose original format · Tab controls · Enter chooses · Esc Back", .{});
@@ -5698,7 +5727,7 @@ const App = struct {
         const pinned_account = self.pending_compose_account[0..self.pending_compose_account_len];
         const id = self.pending_compose_id[0..self.pending_compose_id_len];
         if (intent == .forward) {
-            try self.start(.compose, .{ .account = pinned_account, .cmd = "mail.forward", .messageId = id, .bodyFormat = "markdown", .preserveFormatting = self.compose_source_mode == .formatted, .original = self.compose_source_mode == .attached });
+            try self.start(.compose, .{ .account = pinned_account, .cmd = "mail.forward", .messageId = id, .bodyFormat = "markdown", .preserveFormatting = self.compose_source_mode == .formatted, .original = self.compose_source_mode == .attached, .omitAttachments = self.compose_source_mode == .text and self.compose_source_omit_files });
         } else try self.start(.compose, .{ .account = pinned_account, .cmd = "mail.reply", .messageId = id, .all = intent == .reply_all, .bodyFormat = "markdown", .preserveFormatting = self.compose_source_mode == .formatted });
     }
     fn onComposeChoiceKey(self: *App, key: Key) !void {
@@ -5757,10 +5786,10 @@ const App = struct {
         const first: usize = if (inner.height >= count + 3) 2 else 0;
         if (first != 0) {
             try self.line(inner, 0, try self.fitLine(inner, self.compose_source_subject.value(), inner.width), .subject);
-            try self.line(inner, 1, if (self.compose_source_format_error != null) "HTML · Keep formatting unavailable" else try std.fmt.allocPrint(self.frame.allocator(), "HTML · {d} embedded resources", .{self.compose_source_resources}), .muted);
+            try self.line(inner, 1, if (!self.compose_source_html) "Plain text · original .eml available" else if (self.compose_source_format_error != null) "HTML · Keep formatting unavailable" else try std.fmt.allocPrint(self.frame.allocator(), "HTML · {d} embedded resources", .{self.compose_source_resources}), .muted);
         }
         for (0..count) |index| {
-            const label: []const u8 = if (index == 0) "[Keep formatting k]" else if (index == 1) "[Text quote t]" else if (forward and index == 2) "[Attach original .eml e]" else "[Back Esc/q]";
+            const label: []const u8 = if (index == 0) "[Keep formatting k]" else if (index == 1) (if (forward and self.compose_source_omit_files) "[Text quote · omit files t]" else "[Text quote t]") else if (forward and index == 2) "[Attach original .eml e]" else "[Back Esc/q]";
             _ = try self.actionButton(inner, @intCast(first + index), 0, label, self.dialog_focus.index == index, self.composeChoiceEnabled(index), .dialog_action, index);
         }
         if (self.composeChoiceReason(0) orelse self.composeChoiceReason(2)) |reason| {
@@ -5771,7 +5800,7 @@ const App = struct {
             if (next < inner.height) try self.line(inner, next, "Tab / Shift+Tab · Enter", .muted);
             return;
         }
-        const explanation: []const u8 = if (self.dialog_focus.index == 0) "Original HTML below your Omagma-styled note" else if (self.dialog_focus.index == 1) "Editable text copy of the original" else if (forward and self.dialog_focus.index == 2) "Recipient opens the attached email" else "Return without creating a draft";
+        const explanation: []const u8 = if (self.dialog_focus.index == 0) "Original HTML below your Omagma-styled note" else if (self.dialog_focus.index == 1) (if (forward and self.compose_source_omit_files) "Source files exceed this platform's limit; files will be omitted" else "Editable text copy of the original") else if (forward and self.dialog_focus.index == 2) "Recipient opens the attached email" else "Return without creating a draft";
         if (first + count < inner.height) try self.line(inner, first + count, try self.fitLine(inner, explanation, inner.width), .muted);
         if (first + count + 1 < inner.height) try self.line(inner, first + count + 1, "Tab / Shift+Tab · Enter", .muted);
     }
@@ -5779,7 +5808,7 @@ const App = struct {
         return if (self.composeChoiceEnabled(0)) 0 else 1;
     }
     fn composeChoiceEnabled(self: *const App, index: usize) bool {
-        return if (index == 0) self.capabilities.original_formatting and self.compose_source_format_error == null else if (index == 2 and self.compose_intent == .forward) self.capabilities.original_attachment and !self.compose_source_original_too_large else true;
+        return if (index == 0) self.capabilities.original_formatting and self.compose_source_html and self.compose_source_format_error == null and !(self.compose_intent == .forward and self.compose_source_forward_over_quota) else if (index == 2 and self.compose_intent == .forward) self.capabilities.original_attachment and !self.compose_source_original_too_large else true;
     }
     fn composeChoiceMask(self: *const App) u8 {
         var mask: u8 = 0;
@@ -5790,6 +5819,7 @@ const App = struct {
     }
     fn composeChoiceReason(self: *const App, index: usize) ?[]const u8 {
         if (index == 0 and !self.capabilities.original_formatting) return "Original formatting unavailable here · choose Text quote";
+        if (index == 0 and !self.compose_source_html) return "Plain-text source · choose Text quote or .eml";
         if (index == 2 and self.compose_intent == .forward and !self.capabilities.original_attachment) return "Original attachment unavailable here · choose Text quote";
         if (index == 0) if (self.compose_source_format_error) |err| return switch (err) {
             error.AttachmentsTooLarge => "Embedded images exceed 2 MiB · choose Text quote",
@@ -5800,6 +5830,7 @@ const App = struct {
             error.BodyTooLarge => "Original HTML exceeds 2 MiB · choose Text quote",
             else => "Original formatting is unavailable · choose Text quote",
         };
+        if (index == 0 and self.compose_intent == .forward and self.compose_source_forward_over_quota) return "Forward files exceed this platform's limit · Text quote omits files";
         if (index == 2 and self.compose_intent == .forward and self.compose_source_original_too_large) return "Original email exceeds 2 MiB · choose Text quote";
         return null;
     }
@@ -6019,8 +6050,10 @@ const App = struct {
         }
         self.autosave_due = false;
         var fields: [5][]const u8 = undefined;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
         self.autosave_revision = self.compose.revision;
-        try self.start(.autosave, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = self.compose.recovery(&fields) });
+        try self.start(.autosave, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true });
         self.say(false, "{s}", .{if (self.capabilities.durable_drafts) "Saving draft locally… · typing remains available" else "Saving draft in this tab…"});
     }
     fn composeCompletions(self: *const App) completion.Matches {
@@ -6241,10 +6274,10 @@ const App = struct {
         const draft_value = self.compose.draft(arena.allocator()) catch |err| {
             if (kind == .save_review) return err;
             var fields: [5][]const u8 = undefined;
-            try self.start(kind, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = self.compose.recovery(&fields) });
+            try self.start(kind, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true });
             return;
         };
-        try self.start(kind, .{ .account = self.account(), .cmd = "draft.update", .draftId = self.compose.id.value(), .draft = draft_value });
+        try self.start(kind, .{ .account = self.account(), .cmd = "draft.update", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), draft_value), .acknowledgementOnly = true });
     }
     fn persistDraftAtExit(self: *App) !void {
         if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.unknown_outcome) return;
@@ -6691,6 +6724,7 @@ const App = struct {
         try self.line(inner, inner.height - 1, if (self.path_candidates.truncated) "First matches · scan limit reached · Esc Back" else "Tab Next match · Enter Attach · Esc Back", .muted);
     }
     fn composeControlEnabled(self: *const App, index: usize) bool {
+        if (index == 0) return self.capabilities.attachments and self.capabilities.files;
         if (index <= self.compose.attachments.len) return self.capabilities.attachments;
         if (index == self.compose.attachments.len + 1) return self.capabilities.markdown;
         if (index == self.compose.attachments.len + 2) return true;
@@ -6746,6 +6780,11 @@ const App = struct {
             count += 1;
         };
         try self.compose.replaceAttachments(self.allocator, retained[0..count]);
+        if (self.compose_source_mode == .attached) {
+            var has_original = false;
+            for (self.compose.attachments) |attachment| has_original = has_original or originalAttachment(attachment);
+            if (!has_original) self.compose_source_mode = .text;
+        }
         self.compose.attachment_scroll = @min(self.compose.attachment_scroll, count -| self.compose.attachment_height);
         if (self.compose.attachment_focus) self.compose.attachment_cursor = @min(self.compose.attachment_cursor, count);
         try self.composerChanged();
@@ -9690,16 +9729,16 @@ const App = struct {
         const viewport = win.child(.{ .y_off = @intCast(row), .height = @intCast(visible + 1) });
         self.mouseArea(viewport, .compose_attachment_scroll, 0);
         const can_edit = self.canEditAttachments();
-        const add = "[Add A]";
+        const add = if (self.capabilities.files) "[Add A]" else "";
         const add_width: u16 = @intCast(@min(add.len, win.width));
         const add_x = win.width - add_width;
         var attachment_bytes: usize = 0;
         for (self.compose.attachments) |attachment| attachment_bytes +|= attachment.size;
-        const title = try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s} / {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes), try attachmentSizeLabel(self.frame.allocator(), types.Limits.attachment_bytes) });
+        const title = if (self.capabilities.files) try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s} / {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes), try attachmentSizeLabel(self.frame.allocator(), types.Limits.attachment_bytes) }) else try std.fmt.allocPrint(self.frame.allocator(), "Attachments {d} · {s}", .{ self.compose.attachments.len, try attachmentSizeLabel(self.frame.allocator(), attachment_bytes) });
         try self.line(viewport.child(.{ .width = add_x -| 1 }), 0, title, .muted);
         const add_button = viewport.child(.{ .x_off = add_x, .width = add_width, .height = 1 });
-        try self.line(add_button, 0, add, if (!can_edit) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == 0) .selected else .accent);
-        if (can_edit) self.mouseArea(add_button, .compose_attachment_add, 0);
+        try self.line(add_button, 0, add, if (!can_edit or !self.capabilities.files) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == 0) .selected else .accent);
+        if (can_edit and self.capabilities.files) self.mouseArea(add_button, .compose_attachment_add, 0);
         const end = @min(self.compose.attachment_scroll + visible, self.compose.attachments.len);
         for (self.compose.attachments[self.compose.attachment_scroll..end], self.compose.attachment_scroll..) |attachment, index| {
             const file_row = viewport.child(.{ .y_off = @intCast(index - self.compose.attachment_scroll + 1), .height = 1 });
@@ -9755,7 +9794,7 @@ const App = struct {
             var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
             if (self.compose.omitted_attachments > 0) rows = try self.flowTone(content, "Text-only forward: original attachments are omitted.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.attachments.len == 0 and composer_hints.attachmentIntent(self.compose.fields[4].value())) {
-                rows = try self.flowTone(content, if (!self.capabilities.attachments) "⚠ Your note mentions an attachment; no files are attached.\nAttachments are unavailable in browser mode. Back lets you revise the note.\n\n" else "⚠ Your note mentions an attachment; no files are attached.\nBack returns to the draft so you can add them.\n\n", self.compose_preview_scroll, rows, .warning);
+                rows = try self.flowTone(content, if (!self.capabilities.attachments) "⚠ Your note mentions an attachment; no files are attached.\nAttachments are unavailable here. Back lets you revise the note.\n\n" else if (!self.capabilities.files) "⚠ Your note mentions an attachment; no files are attached.\nBack lets you revise the note.\n\n" else "⚠ Your note mentions an attachment; no files are attached.\nBack returns to the draft so you can add them.\n\n", self.compose_preview_scroll, rows, .warning);
             }
             if (self.compose.original) |original| {
                 const detail = try std.fmt.allocPrint(self.frame.allocator(), "Your note: {s} · branded\nOriginal: HTML retained · {d} embedded resources\nAttachments: {d} ordinary files\nMail apps may display the original differently.\n\n", .{ if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text", original.resources.len, self.compose.attachments.len });
@@ -10044,6 +10083,7 @@ const App = struct {
         return switch (entry.requires) {
             .always => true,
             .files => self.capabilities.files,
+            .attachments => self.capabilities.attachments,
             .editor => self.capabilities.editor,
             .clipboard => self.capabilities.clipboard,
             .aliases => self.capabilities.aliases,
@@ -11118,6 +11158,138 @@ const AccountSwitchTestClient = struct {
         return std.json.Stringify.valueAlloc(a, .{ .ok = true, .account = account_address, .data = .{ .messages = rows, .cacheReady = true, .cached = true } }, .{});
     }
 };
+
+test "local UI: plain forward offers original attachment and browser files remain removable without native Add" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.capabilities = platform.browser_capabilities;
+    try app.pinComposeTarget(.forward, "plain-original");
+    app.compose_intent = .forward;
+    app.compose_source_mode = .choose;
+    const message: types.Message = .{ .id = "plain-original", .threadId = "plain-thread", .bodyText = "Plain source", .attachments = &.{.{ .id = "source-file", .filename = "source.pdf", .mimeType = "application/pdf", .size = 4 }} };
+    try app.inspectComposeSource(try @import("json.zig").value(app.frame.allocator(), message));
+    try app.dispatchConversationCompose();
+    try std.testing.expect(app.compose_choice);
+    try std.testing.expectEqual(@as(u8, 0b1110), app.composeChoiceMask());
+    try std.testing.expectEqualStrings("Plain-text source · choose Text quote or .eml", app.composeChoiceReason(0).?);
+    try app.onComposeChoiceKey(.{ .codepoint = 'k' });
+    try std.testing.expect(app.compose_choice and app.pending_compose == .forward);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    try app.onComposeChoiceKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(!app.compose_choice);
+    try app.compose.replaceAttachments(a, &.{.{ .id = "source-file", .filename = "source.pdf", .mimeType = "application/pdf", .size = 4, .data = "JVBERg" }});
+    try std.testing.expect(!app.composeControlEnabled(0));
+    try std.testing.expect(app.composeControlEnabled(1));
+    app.focusComposeAttachments(0);
+    try std.testing.expectEqual(@as(usize, 1), app.compose.attachment_cursor);
+    try std.testing.expect(app.helpAvailable(.{ .requires = .attachments }));
+    try std.testing.expect(!app.helpAvailable(.{ .requires = .files }));
+    try app.compose.replaceAttachments(a, &.{ .{ .id = "", .filename = "original.eml", .mimeType = "application/octet-stream", .size = 3, .data = "AP8K" }, .{ .id = "source-file", .filename = "source.pdf", .mimeType = "application/pdf", .size = 4, .data = "JVBERg" } });
+    app.compose_source_mode = .attached;
+    try std.testing.expect(originalAttachment(app.compose.attachments[0]));
+    try app.detachAttachment(1);
+    try std.testing.expectEqual(ComposeSourceMode.attached, app.compose_source_mode);
+    app.review_ready = true;
+    try app.detachAttachment(0);
+    try std.testing.expectEqual(ComposeSourceMode.text, app.compose_source_mode);
+    try std.testing.expect(!app.review_ready);
+    try std.testing.expectEqual(@as(usize, 0), app.compose.attachments.len);
+    try app.pinComposeTarget(.forward, "large-source");
+    const large: types.Message = .{ .id = "large-source", .threadId = "large-thread", .bodyHtml = "<p>Body</p>", .attachments = &.{.{ .id = "source-file", .filename = "large.pdf", .mimeType = "application/pdf", .size = types.Limits.body_bytes + 1 }} };
+    try app.inspectComposeSource(try @import("json.zig").value(app.frame.allocator(), large));
+    try std.testing.expect(app.compose_source_omit_files and app.compose_source_forward_over_quota);
+    try std.testing.expect(!app.composeChoiceEnabled(0));
+    try std.testing.expectEqualStrings("Forward files exceed this platform's limit · Text quote omits files", app.composeChoiceReason(0).?);
+    try std.testing.expect(app.composeChoiceEnabled(1));
+}
+
+test "local UI: send refusals and cancellations remain visible after returning to the composer" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.compose_active = true;
+    try app.compose.id.set(a, "retained-draft");
+    for ([_][]const u8{ "FormTooLarge", "SendCanceledBeforeSubmission" }) |code| {
+        app.mode = .review;
+        const response = try std.json.Stringify.valueAlloc(app.frame.allocator(), .{ .ok = true, .data = .{ .id = "operation-id", .draftId = "retained-draft", .outcome = "rejected", .errorCode = code } }, .{});
+        try app.apply(.send, response);
+        try std.testing.expectEqual(Mode.compose, app.mode);
+        const caption = try a.dupe(u8, app.status[0..app.status_len]);
+        defer a.free(caption);
+        app.clearObsoleteStatus();
+        try std.testing.expectEqualStrings(caption, app.status[0..app.status_len]);
+        try std.testing.expect(std.mem.indexOf(u8, caption, if (same(code, "FormTooLarge")) "FormTooLarge" else "Send canceled") != null);
+        try std.testing.expect(!app.compose.unknown_outcome);
+    }
+}
+
+test "local UI: saved draft updates omit frozen originals while preserving edited fields and file changes" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var compose: Compose = .{};
+    defer compose.deinit(a);
+    try compose.id.set(a, "known-original");
+    try compose.fields[0].set(a, "peer@example.test");
+    try compose.fields[4].set(a, "Edited note");
+    const large = try a.alloc(u8, 1024 * 1024);
+    defer a.free(large);
+    @memset(large, 'A');
+    compose.original = .{ .bodyHtml = "<p>Frozen original</p>", .resources = &.{.{ .id = "image", .filename = "image.png", .mimeType = "image/png", .size = 768 * 1024, .data = large, .contentId = "image" }} };
+    var buffer: [16 * 1024]u8 = undefined;
+    var small: std.heap.FixedBufferAllocator = .init(&buffer);
+    const update = try compose.updateValue(small.allocator(), try compose.draft(arena.allocator()));
+    try std.testing.expect(get(update, "original") == .null);
+    try std.testing.expectEqualStrings("Edited note", text(get(update, "bodyText")));
+    try std.testing.expectEqualStrings("peer@example.test", text(get(items(get(update, "to"))[0], "address")));
+    try std.testing.expectEqual(@as(usize, 0), items(get(update, "attachments")).len);
+    try std.testing.expectEqual(large.len, compose.original.?.resources[0].data.len);
+    var fields: [5][]const u8 = undefined;
+    const recovery = try compose.updateValue(small.allocator(), compose.recovery(&fields));
+    try std.testing.expect(get(recovery, "original") == .null);
+    try std.testing.expectEqualStrings("Edited note", text(items(get(recovery, "recoveryFields"))[4]));
+}
+
+test "local UI: proven preparation failure keeps the draft editable even when no receipt allocation is possible" {
+    const Observer = struct {
+        consumed: usize = 0,
+        fn call(_: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+            return error.ProviderMustNotRun;
+        }
+        fn receipt(ctx: *anyopaque, _: []const u8, accepted: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (accepted) self.consumed += 1;
+        }
+    };
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var observer: Observer = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.client = .{ .ctx = &observer, .callFn = Observer.call, .sendReceiptFn = Observer.receipt };
+    try app.compose.id.set(a, "prepared-draft");
+    app.compose_active = true;
+    app.review_ready = true;
+    app.mode = .review;
+    app.job.account_index = app.account_index;
+    app.job.generation = app.generation;
+    try app.job.draft_target.set("prepared-draft");
+    app.job.failure = error.SendNotStarted;
+    app.job.request = "{\"cmd\":\"draft.send\"}";
+    var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    app.allocator = failing.allocator();
+    defer app.allocator = a;
+    try app.finishSend();
+    try std.testing.expectEqual(@as(usize, 1), observer.consumed);
+    try std.testing.expect(!app.compose.unknown_outcome and !app.review_ready);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqualStrings("prepared-draft", app.compose.id.value());
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+}
 
 test "local UI: cache-only account switching never fetches metadata or a missing body" {
     const a = std.testing.allocator;
@@ -14437,8 +14609,8 @@ test "formatted chooser: shared metadata plan rejects large images before keys t
     try std.testing.expectEqual(@as(usize, 1), app.compose_source_resources);
     try std.testing.expect(app.compose_source_original_too_large);
     app.compose_intent = .forward;
-    try std.testing.expectEqual(@as(u8, 0b1011), app.composeChoiceMask());
-    try std.testing.expect(app.composeChoiceEnabled(0));
+    try std.testing.expectEqual(@as(u8, 0b1010), app.composeChoiceMask());
+    try std.testing.expect(!app.composeChoiceEnabled(0));
 
     photo.size = 5 * 1024 * 1024;
     message.attachments = &.{photo};
@@ -14488,6 +14660,7 @@ test "formatted chooser: every action fits narrow modal and reverse Back creates
     var factory: CacheTestClient = .{};
     var app = factory.app(a);
     defer app.deinit();
+    app.compose_source_html = true;
     for ([_]u16{ 30, 80 }) |width| {
         var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
         defer screen.deinit(a);
@@ -14777,10 +14950,13 @@ pub const BrowserSession = struct {
     pub fn init(self: *BrowserSession, allocator: Allocator, output: *Io.Writer, cols: u16, rows: u16) !void {
         if (!browser_target) @compileError("BrowserSession requires wasm32-freestanding");
         self.provider = browser_provider.Provider.init(allocator);
+        errdefer self.provider.deinit();
         self.environ = std.process.Environ.Map.init(allocator);
+        errdefer self.environ.deinit();
         self.pending_cache = "";
         self.tty = .{ .output = output };
         self.vx = try vaxis.init(browser_live.io, allocator, &self.environ, .{});
+        errdefer self.vx.deinit(allocator, output);
         self.vx.caps.rgb = true;
         self.vx.sgr = .legacy;
         self.vx.state.alt_screen = true;
@@ -14804,6 +14980,7 @@ pub const BrowserSession = struct {
             .theme_choice = .omagma,
             .update_loaded = true,
         };
+        errdefer self.app.deinit();
         try self.app.boot();
         self.updateIdentity();
         try self.resize(cols, rows);

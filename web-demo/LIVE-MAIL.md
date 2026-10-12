@@ -15,8 +15,8 @@ inbox reading, plain/Markdown composition, replies and forwarding, Google contac
 and recipient completion. A bounded IndexedDB cache retains mail/contact
 snapshots separately from credentials. Live queries fetch up to 30 messages; refine Gmail search to reach older mail.
 Cache search pages through the retained 300-record inventory. The native disk cache,
-external editor, attachment files and background send queue are not part of
-this first live mode.
+external editor, local filesystem dialogs and background send queue are not part
+of this browser mode. Forwarding retains bounded source files and embedded resources.
 
 ## Load existing credentials
 
@@ -97,9 +97,24 @@ Review starts with Back selected; only explicit Send begins submission.
 The normal ten-second cancellation opportunity remains available before the
 HTTP request starts.
 
-`f` forwards the displayed message as plain text, preserving safe literal links
-from HTML-only mail and leaving reply/thread headers empty. Original attachments
-are not included; when present, send review shows that omission. Contacts need
+`r` replies and `R` replies to all, excluding the account's verified aliases.
+HTML sources offer **Keep formatting** or **Text quote**. `f` forwards with the
+same choices plus **Attach original .eml**, also available for plain-text sources.
+Formatted originals preserve their HTML, styling and embedded CID/Content-Location
+resources below the editable note. Preview uses the shared passive semantic reader;
+it never executes source HTML or retrieves remote resources. Text quotes preserve
+safe literal links. Forwards retain source files and leave reply/thread headers empty.
+The composer and send review show the outgoing files; `[x]` removes a file.
+
+Source files use bounded inline storage: 2 MiB decoded data per draft, a 3 MiB
+JSON envelope and an 8 MiB aggregate session draft quota. MIME/base64 overhead can
+lower the effective send limit. An oversized capture or send is refused without
+silently omitting files. For over-quota forward sources, **Text quote · omit files**
+explicitly creates a quote without files; the omission warning stays in send review.
+`.eml` sources retain the shared 2 MiB raw-message limit.
+Local MIME preparation finishes before any send request or cancellation window.
+
+Contacts need
 the existing contacts capability and matching Google scope; the browser never
 upgrades a grant. `a` opens the bounded contacts page, `/` searches contacts,
 and Enter selects an address. Recipient completion works while typing;

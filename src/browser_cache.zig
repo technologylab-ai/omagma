@@ -8,7 +8,7 @@ const query = @import("terminal/cache_query.zig");
 pub const snapshot_limit = 3 * 1024 * 1024;
 pub const total_limit = 8 * 1024 * 1024;
 pub const Binding = struct { account: []const u8, clientId: []const u8, grantId: []const u8 };
-const Attachment = struct { id: []const u8, filename: []const u8, mimeType: []const u8 = "application/octet-stream", size: usize = 0, contentId: ?[]const u8 = null, disposition: ?[]const u8 = null };
+const Attachment = struct { id: []const u8, filename: []const u8, mimeType: []const u8 = "application/octet-stream", size: usize = 0, contentId: ?[]const u8 = null, disposition: ?[]const u8 = null, contentLocation: ?[]const u8 = null };
 const Message = struct {
     id: []const u8,
     threadId: []const u8,
@@ -78,6 +78,9 @@ fn validateMessage(value: types.Message) !void {
         try bounded(file.id, 4096);
         try bounded(file.filename, 4096);
         try bounded(file.mimeType, 256);
+        if (file.contentId) |id| try bounded(id, 1024);
+        if (file.disposition) |kind| try bounded(kind, 32);
+        if (file.contentLocation) |location| try bounded(location, 4096);
     }
 }
 fn copyAddress(a: std.mem.Allocator, value: types.Address) !types.Address {
@@ -102,7 +105,7 @@ fn copyMessage(a: std.mem.Allocator, value: types.Message) !types.Message {
     for (value.labels, labels) |label, *dest| dest.* = try a.dupe(u8, label);
     result.labels = labels;
     const files = try a.alloc(types.Attachment, value.attachments.len);
-    for (value.attachments, files) |file, *dest| dest.* = .{ .id = try a.dupe(u8, file.id), .filename = try a.dupe(u8, file.filename), .mimeType = try a.dupe(u8, file.mimeType), .size = file.size, .contentId = if (file.contentId) |id| try a.dupe(u8, id) else null, .disposition = if (file.disposition) |kind| try a.dupe(u8, kind) else null };
+    for (value.attachments, files) |file, *dest| dest.* = .{ .id = try a.dupe(u8, file.id), .filename = try a.dupe(u8, file.filename), .mimeType = try a.dupe(u8, file.mimeType), .size = file.size, .contentId = if (file.contentId) |id| try a.dupe(u8, id) else null, .disposition = if (file.disposition) |kind| try a.dupe(u8, kind) else null, .contentLocation = if (file.contentLocation) |location| try a.dupe(u8, location) else null };
     result.attachments = files;
     result.fixtureRaw = null;
     result.invitation = null;
@@ -192,7 +195,7 @@ pub const Store = struct {
         const messages = try a.alloc(Message, entry.messages.len);
         for (entry.messages, messages) |m, *dest| {
             const files = try a.alloc(Attachment, m.attachments.len);
-            for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition };
+            for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition, .contentLocation = file.contentLocation };
             dest.* = .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .attachments = files };
         }
         const contact_values = try a.alloc(Contact, entry.contacts.len);
@@ -405,7 +408,7 @@ pub const Store = struct {
         for (doc.messages, next.messages, 0..) |m, *dest, row| {
             for (doc.messages[0..row]) |old| if (std.mem.eql(u8, old.id, m.id)) return error.InvalidBrowserCache;
             const files = try a.alloc(types.Attachment, m.attachments.len);
-            for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition };
+            for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition, .contentLocation = file.contentLocation };
             dest.* = try copyMessage(a, .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .attachments = files });
         }
         if (can_contacts and doc.contactsLoaded) {

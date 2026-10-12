@@ -21,12 +21,15 @@ test('snapshot binding requires every exact actor and grant component', () => {
 test('canonical mail bodies, passive HTML and attachment metadata survive validation', () => {
   const data = snapshot();
   data.messages[0].bodyHtml = '<p>Literal <b>markup</b><img src="https://remote.invalid/image"></p>';
-  data.messages[0].attachments = [{ id: 'attachment-1', filename: 'report.pdf', mimeType: 'application/pdf', size: 12, contentId: null, disposition: 'attachment' }];
+  data.messages[0].attachments = [{ id: 'attachment-1', filename: 'report.pdf', mimeType: 'application/pdf', size: 12, contentId: null, disposition: 'attachment', contentLocation: 'https://example.test/report.pdf' }];
   const result = validateCacheSnapshot(binding, data);
   assert.equal(result.messages[0].bodyHtml, data.messages[0].bodyHtml);
   assert.equal(result.messages[0].bodyText, message.bodyText);
   assert.equal(result.contacts[0].emails[0].address, contact.emails[0].address);
   assert.equal(result.messages[0].attachments[0].filename, 'report.pdf');
+  assert.equal(result.messages[0].attachments[0].contentLocation, 'https://example.test/report.pdf');
+  assert(!('data' in result.messages[0].attachments[0]));
+  assert(!('blobId' in result.messages[0].attachments[0]));
 });
 
 test('passive HTML preserves RTL formatting and controls but requires valid bounded UTF-8', () => {

@@ -52,6 +52,11 @@
       "properties": {
         "draft": {
           "$ref": "#/$defs/Draft"
+        },
+        "acknowledgementOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
         }
       },
       "required": [
@@ -91,6 +96,11 @@
         },
         "draft": {
           "$ref": "#/$defs/Draft"
+        },
+        "acknowledgementOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
         }
       },
       "required": [
@@ -132,6 +142,11 @@
         "draftId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Local draft identity returned by this account's draft/reply/forward operations."
+        },
+        "acknowledgementOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
         }
       },
       "required": [
@@ -596,6 +611,11 @@
           "type": "boolean",
           "description": "Attach the exact original message as original.eml; conflicts with preserveFormatting:true. It is not a request to send.",
           "default": false
+        },
+        "omitAttachments": {
+          "type": "boolean",
+          "description": "Explicitly create a text quote without source files. The draft and send review retain the omitted-file count. Conflicts with original:true and preserveFormatting:true.",
+          "default": false
         }
       },
       "required": [
@@ -604,6 +624,7 @@
       "notes": [
         "Creates a saved local draft with no recipients and no inherited threadId/In-Reply-To/References. Fill recipients and review before sending.",
         "Default text forwarding includes the original ordinary attachments. Missing/oversized files fail rather than being silently omitted; ordinary outgoing totals remain 16 files and 25 MiB.",
+        "omitAttachments:true skips source file downloads and explicitly retains the omission warning; it never implies sending the draft.",
         "preserveFormatting:true uses a fresh full read, a validated opaque Original snapshot (up to 32 related resources/2 MiB), and remaining ordinary files. It requires unambiguous supported HTML and resolvable local CID resources.",
         "original:true downloads raw source and attaches unchanged original.eml, limited to 2 MiB decoded source. It may use message/rfc822, message/global or application/octet-stream according to encoding safety. It does not reuse the text-reader rendering.",
         "No reply-all flag or recipient field is applied by mail.forward; use draft.update on the returned draft."

@@ -1,5 +1,6 @@
 const std = @import("std");
 test {
+    std.testing.refAllDecls(@import("browser_heap.zig"));
     std.testing.refAllDecls(@import("terminal/platform.zig"));
     std.testing.refAllDecls(@import("terminal/conversation_draft.zig"));
     std.testing.refAllDecls(@import("terminal/draft_codec.zig"));

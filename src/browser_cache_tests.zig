@@ -89,6 +89,28 @@ test "browser cache: independent literal snapshot restores passive bodies and ca
     try std.testing.expectEqualStrings("The violet lantern arrives.\nSecond literal line.", j.text(listed[0], "bodyText"));
 }
 
+test "browser cache: original resource metadata survives snapshots while source bytes and handles stay private" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    const source = try parse(a, "{\"id\":\"resource-source\",\"threadId\":\"resource-thread\",\"bodyText\":\"Source\",\"attachments\":[{\"id\":\"style\",\"filename\":\"style.css\",\"mimeType\":\"text/css\",\"size\":3,\"data\":\"YWJj\",\"blobId\":\"native-private\",\"contentLocation\":\"https://example.test/style.css\",\"disposition\":\"inline\"}]}");
+    try store.saveRead(0, try j.decode(types.Message, a, source));
+    const bytes = try snapshot(a, &store, 0);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "https://example.test/style.css") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "native-private") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "YWJj") == null);
+    var restored = cache.Store.init(std.testing.allocator);
+    defer restored.deinit();
+    try restored.bind(0, actor);
+    try restored.restore(0, bytes, true);
+    const message = (try restored.read(0, "resource-source")).?;
+    try std.testing.expectEqualStrings("https://example.test/style.css", message.attachments[0].contentLocation.?);
+    try std.testing.expect(message.attachments[0].blobId == null and message.attachments[0].data.len == 0);
+}
+
 test "browser cache: every exact actor component is required for restore" {
     for ([_]cache.Binding{
         .{ .account = "bea@example.test", .clientId = actor.clientId, .grantId = actor.grantId },
@@ -336,14 +358,14 @@ test "browser cache: persistence rejects credentials provider JSON drafts and na
         try expectRejected(store.restore(0, try document(a, messages, "[]", false), true));
     }
     try expectRejected(store.restore(0, try document(a, "[]", "[{\"resourceName\":\"people/p\",\"provider\":{}}]", true), true));
-    for ([_][]const u8{ "data", "blobId", "contentLocation", "path" }) |key| {
+    for ([_][]const u8{ "data", "blobId", "path" }) |key| {
         const messages = try std.mem.concat(a, u8, &.{ "[{\"id\":\"m\",\"threadId\":\"t\",\"attachments\":[{\"id\":\"a\",\"filename\":\"report.pdf\",\"", key, "\":\"SYNTHETIC_PRIVATE_VALUE\"}]}]" });
         try expectRejected(store.restore(0, try document(a, messages, "[]", false), true));
     }
     try std.testing.expect(!store.valid(0));
 }
 
-test "browser cache: live typed reads strip transient provider and native attachment fields" {
+test "browser cache: live typed reads strip transient provider and native handles while preserving MIME metadata" {
     var store = cache.Store.init(std.testing.allocator);
     defer store.deinit();
     try store.bind(0, actor);
@@ -357,12 +379,13 @@ test "browser cache: live typed reads strip transient provider and native attach
         .bodyText = "A new independently fetched body.",
         .fixtureRaw = "SYNTHETIC_RAW_MIME",
         .invitation = "SYNTHETIC_INVITATION",
-        .attachments = &.{.{ .id = "attachment-live", .filename = "live.pdf", .data = "SYNTHETIC_ENCODED_DATA", .blobId = "SYNTHETIC_NATIVE_HANDLE", .contentLocation = "/synthetic/native/location" }},
+        .attachments = &.{.{ .id = "attachment-live", .filename = "live.pdf", .data = "SYNTHETIC_ENCODED_DATA", .blobId = "SYNTHETIC_NATIVE_HANDLE", .contentLocation = "https://example.test/source/location" }},
     });
     try store.replaceContacts(0, try array(a, "[{\"resourceName\":\"people/live\",\"name\":\"Live contact\",\"provider\":{\"metadata\":\"SYNTHETIC_PROVIDER_JSON\"}}]"));
     const raw = try snapshot(a, &store, 0);
-    for ([_][]const u8{ "SYNTHETIC_RAW_MIME", "SYNTHETIC_INVITATION", "SYNTHETIC_ENCODED_DATA", "SYNTHETIC_NATIVE_HANDLE", "/synthetic/native/location", "SYNTHETIC_PROVIDER_JSON", "fixtureRaw", "blobId", "contentLocation", "provider" }) |excluded| try std.testing.expect(std.mem.indexOf(u8, raw, excluded) == null);
+    for ([_][]const u8{ "SYNTHETIC_RAW_MIME", "SYNTHETIC_INVITATION", "SYNTHETIC_ENCODED_DATA", "SYNTHETIC_NATIVE_HANDLE", "SYNTHETIC_PROVIDER_JSON", "fixtureRaw", "blobId", "provider" }) |excluded| try std.testing.expect(std.mem.indexOf(u8, raw, excluded) == null);
     try std.testing.expectEqualStrings("A new independently fetched body.", (try store.read(0, "mail-inbox")).?.bodyText);
+    try std.testing.expectEqualStrings("https://example.test/source/location", (try store.read(0, "mail-inbox")).?.attachments[0].contentLocation.?);
     try std.testing.expectEqualStrings("Live contact", j.text((try store.contacts(0, a))[0], "name"));
 }
 

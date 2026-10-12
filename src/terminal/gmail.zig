@@ -22,6 +22,9 @@ test {
 pub const Transport = struct {
     context: *anyopaque,
     requestFn: *const fn (*anyopaque, std.mem.Allocator, std.http.Method, []const u8, ?j.Value) anyerror!j.Value,
+    /// Hosts that suspend during an HTTP request can use a pre-encoded body.
+    /// Its allocation and size checks finish before recording send uncertainty.
+    preparedRequestFn: ?*const fn (*anyopaque, std.mem.Allocator, std.http.Method, []const u8, []const u8) anyerror!j.Value = null,
     progress_sink: ?types.ProgressSink = null,
     fn request(self: Transport, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         return try self.requestFn(self.context, a, method, url, body);
@@ -679,7 +682,17 @@ pub fn executeSpool(io: std.Io, a: std.mem.Allocator, config: *const Config, acc
     b.identifier(id) catch return error.UnknownOutcome;
     return j.value(a, .{ .outcome = "applied", .messageId = id, .threadId = j.text(value, "threadId"), .rfcMessageId = rfc_id }) catch return error.UnknownOutcome;
 }
+pub const PreparedSend = struct {
+    body: j.Value,
+    encoded: ?[]const u8,
+    rfcMessageId: []const u8,
+};
+
 fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transport, request: j.Value, draft: types.Draft, calendar: ?[]const u8, sender: ?[]const u8) !j.Value {
+    return sendPrepared(a, transport, try prepareSend(io, a, account, transport, request, draft, calendar, sender));
+}
+
+fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transport, request: j.Value, draft: types.Draft, calendar: ?[]const u8, sender: ?[]const u8) !PreparedSend {
     const operation = try j.required(request, "operationId");
     if (operation.len > 256) return error.InvalidOperationId;
     try recipients.validateHeader(operation);
@@ -712,6 +725,7 @@ fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transp
         try b.identifier(draft.threadId);
         if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
     }
+    try minimumSendForm(draft);
     const bytes = try a.alloc(u8, types.Limits.request_bytes);
     const attachments = try mime.composeAttachments(draft.attachments, a);
     const prepared = try @import("markdown_mail.zig").prepare(a, draft);
@@ -720,13 +734,39 @@ fn send(io: std.Io, a: std.mem.Allocator, account: []const u8, transport: Transp
     if (encoded_size > types.Limits.request_bytes - 1024) return error.FormTooLarge;
     const encoded = try a.alloc(u8, encoded_size);
     const body = try j.value(a, .{ .raw = try mime.base64Url(raw, encoded), .threadId = if (draft.threadId.len > 0) draft.threadId else @as(?[]const u8, null) });
-    const value = transport.request(a, .POST, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", body) catch |err| {
-        if (err == error.UnknownOutcome) return j.value(a, .{ .outcome = "unknown", .rfcMessageId = rfc_id, .errorCode = @errorName(err) });
+    const json_bytes = if (transport.preparedRequestFn != null) try std.json.Stringify.valueAlloc(a, body, .{}) else null;
+    if (json_bytes) |payload| if (payload.len > types.Limits.request_bytes) return error.FormTooLarge;
+    return .{ .body = body, .encoded = json_bytes, .rfcMessageId = rfc_id };
+}
+
+/// Refuse an impossible JSON send before allocating binary/MIME copies. This
+/// counts only attachment content, so omitted headers, boundaries, line breaks
+/// and authored text can only increase the exact encoded size checked below.
+fn minimumSendForm(draft: types.Draft) !void {
+    var minimum_raw: usize = 0;
+    const resources = if (draft.original) |original| original.resources else &.{};
+    for ([_][]const types.Attachment{ draft.attachments, resources }) |files| for (files) |file| {
+        if (file.size > types.Limits.request_bytes) return error.FormTooLarge;
+        const identity = std.ascii.eqlIgnoreCase(file.mimeType, "message/rfc822") or std.ascii.eqlIgnoreCase(file.mimeType, "message/global");
+        const part_size = if (identity) file.size else std.base64.standard.Encoder.calcSize(file.size);
+        minimum_raw = std.math.add(usize, minimum_raw, part_size) catch return error.FormTooLarge;
+        if (minimum_raw > types.Limits.request_bytes) return error.FormTooLarge;
+    };
+    if (std.base64.url_safe_no_pad.Encoder.calcSize(minimum_raw) > types.Limits.request_bytes - 1024) return error.FormTooLarge;
+}
+
+/// Dispatch only a frozen, validated payload. Every rendering, MIME and host
+/// body allocation belongs to preparation, before the caller's send fence.
+pub fn sendPrepared(a: std.mem.Allocator, transport: Transport, prepared: PreparedSend) !j.Value {
+    const url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+    const result = if (transport.preparedRequestFn) |request_fn| request_fn(transport.context, a, .POST, url, prepared.encoded orelse return error.InvalidPreparedSend) else transport.request(a, .POST, url, prepared.body);
+    const value = result catch |err| {
+        if (err == error.UnknownOutcome) return j.value(a, .{ .outcome = "unknown", .rfcMessageId = prepared.rfcMessageId, .errorCode = @errorName(err) });
         return err;
     };
-    const id = j.required(value, "id") catch return j.value(a, .{ .outcome = "unknown", .rfcMessageId = rfc_id, .errorCode = "InvalidProviderReceipt" });
-    b.identifier(id) catch return j.value(a, .{ .outcome = "unknown", .rfcMessageId = rfc_id, .errorCode = "InvalidProviderReceipt" });
-    return j.value(a, .{ .outcome = "applied", .messageId = id, .threadId = j.text(value, "threadId"), .rfcMessageId = rfc_id }) catch return error.UnknownOutcome;
+    const id = j.required(value, "id") catch return j.value(a, .{ .outcome = "unknown", .rfcMessageId = prepared.rfcMessageId, .errorCode = "InvalidProviderReceipt" });
+    b.identifier(id) catch return j.value(a, .{ .outcome = "unknown", .rfcMessageId = prepared.rfcMessageId, .errorCode = "InvalidProviderReceipt" });
+    return j.value(a, .{ .outcome = "applied", .messageId = id, .threadId = j.text(value, "threadId"), .rfcMessageId = prepared.rfcMessageId }) catch return error.UnknownOutcome;
 }
 
 pub const RefreshPlan = struct {
@@ -998,12 +1038,76 @@ pub fn listAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, cap
 /// The browser adapter uses the same validation, MIME encoder, threading and
 /// uncertain-result policy as native mail.send, after its own profile check.
 pub fn sendAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value) !j.Value {
+    return sendPrepared(a, transport, try prepareAuthorized(io, a, account, capabilities, transport, request));
+}
+
+pub fn prepareAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value) !PreparedSend {
     try recipients.validateAddress(account);
     if (!permits(capabilities, "mail-send")) return error.PermissionDenied;
     const draft = try j.decode(types.Draft, a, j.get(request, "draft") orelse return error.MissingField);
     try @import("core.zig").validateDraft(draft, true);
     if (j.get(request, "icalendar") != null or j.get(request, "preparedCalendar") != null) return error.InvalidInvitationCommand;
-    return try send(io, a, account, transport, request, draft, null, null);
+    return prepareSend(io, a, account, transport, request, draft, null, null);
+}
+
+/// Typed adapters already own a validated draft. Preserve the common rules
+/// without serializing and then reparsing its frozen attachment payloads.
+pub fn prepareDraftAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, draft: types.Draft, operation_id: []const u8) !PreparedSend {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-send")) return error.PermissionDenied;
+    try @import("draft_codec.zig").validateDraft(draft, true);
+    return prepareSend(io, a, account, transport, try j.value(a, .{ .operationId = operation_id }), draft, null, null);
+}
+
+test "send preparation: attachment expansion refuses impossible forms without allocating or rejecting legal original identity data" {
+    try std.testing.expectError(error.FormTooLarge, minimumSendForm(.{ .attachments = &.{.{ .id = "impossible", .filename = "impossible.bin", .size = std.math.maxInt(usize) }} }));
+    try std.testing.expectError(error.FormTooLarge, minimumSendForm(.{ .original = .{ .resources = &.{.{ .id = "image", .filename = "image.png", .mimeType = "image/png", .size = 1850 * 1024 }} } }));
+    try minimumSendForm(.{ .attachments = &.{.{ .id = "original", .filename = "original.eml", .mimeType = "message/rfc822", .size = types.Limits.body_bytes }} });
+    try minimumSendForm(.{ .attachments = &.{.{ .id = "original", .filename = "original.eml", .mimeType = "message/global", .size = types.Limits.body_bytes }} });
+    try std.testing.expectError(error.FormTooLarge, minimumSendForm(.{ .attachments = &.{.{ .id = "original", .filename = "original.eml", .mimeType = "application/octet-stream", .size = types.Limits.body_bytes }} }));
+}
+
+test "send preparation: frozen host body is ready before submission and oversized MIME never reaches transport" {
+    const Oracle = struct {
+        sends: usize = 0,
+        fn unexpected(_: *anyopaque, _: std.mem.Allocator, _: std.http.Method, _: []const u8, _: ?j.Value) !j.Value {
+            return error.UnexpectedProviderRequest;
+        }
+        fn prepared(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, bytes: []const u8) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.sends += 1;
+            try std.testing.expectEqual(std.http.Method.POST, method);
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", url);
+            const value = try std.json.parseFromSliceLeaky(j.Value, a, bytes, .{});
+            try std.testing.expectEqualStrings("source-thread", j.text(value, "threadId"));
+            const raw = try mime.decodeBase64Url(try j.required(value, "raw"), a);
+            const message = try mime.parse(raw, a);
+            try std.testing.expectEqualStrings("Frozen source", message.subject);
+            try std.testing.expectEqualStrings("Original note", message.body_text);
+            try std.testing.expectEqualStrings("<source@example.test>", message.in_reply_to);
+            return std.json.parseFromSliceLeaky(j.Value, a, "{\"id\":\"synthetic-send\",\"threadId\":\"source-thread\"}", .{});
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.unexpected, .preparedRequestFn = Oracle.prepared };
+    var draft: types.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Frozen source", .bodyText = "Original note", .threadId = "source-thread", .inReplyTo = "<source@example.test>" };
+    const ready = try prepareAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, try j.value(a, .{ .draft = draft, .operationId = "prepared-fixture" }));
+    try std.testing.expect(ready.encoded != null);
+    try std.testing.expectEqual(@as(usize, 0), oracle.sends);
+    draft.subject = "Changed later";
+    draft.bodyText = "Changed note";
+    const receipt = try sendPrepared(a, transport, ready);
+    try std.testing.expectEqualStrings("applied", j.text(receipt, "outcome"));
+    try std.testing.expectEqual(@as(usize, 1), oracle.sends);
+    const binary = try a.alloc(u8, types.Limits.body_bytes);
+    @memset(binary, 0x5a);
+    const data = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(binary.len));
+    draft.attachments = &.{.{ .id = "", .filename = "bounded.bin", .size = binary.len, .data = std.base64.url_safe_no_pad.Encoder.encode(data, binary) }};
+    try std.testing.expectError(error.FormTooLarge, prepareAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, try j.value(a, .{ .draft = draft, .operationId = "oversized-fixture" })));
+    try std.testing.expectEqual(@as(usize, 1), oracle.sends);
 }
 
 pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {

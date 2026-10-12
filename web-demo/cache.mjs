@@ -67,10 +67,10 @@ function address(value, contact = false) {
   return { address, name: text(value.name ?? '', 4096) };
 }
 function attachment(value) {
-  record(value, ['id', 'filename', 'mimeType', 'size', 'contentId', 'disposition']);
+  record(value, ['id', 'filename', 'mimeType', 'size', 'contentId', 'disposition', 'contentLocation']);
   const filename = text(value.filename, 4096);
   if (filename.includes('/') || filename.includes('\\') || /^[a-z]:/i.test(filename) || filename === '.' || filename === '..') invalid();
-  return { id: text(value.id, 4096), filename, mimeType: text(value.mimeType ?? 'application/octet-stream', 256), size: integer(value.size, 50 * 1024 * 1024), contentId: value.contentId === null || value.contentId === undefined ? null : text(value.contentId, 1024), disposition: value.disposition === null || value.disposition === undefined ? null : text(value.disposition, 256) };
+  return { id: text(value.id, 4096), filename, mimeType: text(value.mimeType ?? 'application/octet-stream', 256), size: integer(value.size, 50 * 1024 * 1024), contentId: value.contentId === null || value.contentId === undefined ? null : text(value.contentId, 1024), disposition: value.disposition === null || value.disposition === undefined ? null : text(value.disposition, 32), contentLocation: value.contentLocation === null || value.contentLocation === undefined ? null : text(value.contentLocation, 4096) };
 }
 function message(value) {
   record(value, ['id', 'threadId', 'from', 'replyTo', 'to', 'cc', 'subject', 'snippet', 'bodyText', 'bodyHtml', 'bodyHtmlAmbiguous', 'bodySource', 'messageId', 'references', 'inReplyTo', 'labels', 'receivedAt', 'sentDate', 'unread', 'bodyCached', 'bodyCacheError', 'attachments']);

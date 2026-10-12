@@ -30,11 +30,20 @@ pub fn decodeAddresses(a: std.mem.Allocator, v: Value) ![]const t.Address {
         try recipients.validateAddress(address);
         try recipients.validateHeader(name);
         if (name.len > 256) return error.InvalidAddress;
-        try list.append(a, .{ .address = address, .name = name });
+        try list.append(a, .{ .address = try a.dupe(u8, address), .name = try a.dupe(u8, name) });
     }
     return list.items;
 }
 pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
+    return decodeDraftAllocators(a, null, v);
+}
+/// Retain the decoded DTO in a, but release binary validation copies as soon
+/// as they have been checked. The browser supplies its backing allocator so
+/// those temporary bytes do not accumulate in a command's response arena.
+pub fn decodeDraftWithScratch(a: std.mem.Allocator, backing: std.mem.Allocator, v: Value) !t.Draft {
+    return decodeDraftAllocators(a, backing, v);
+}
+fn decodeDraftAllocators(a: std.mem.Allocator, backing: ?std.mem.Allocator, v: Value) !t.Draft {
     if (v != .object) return error.InvalidRequest;
     for ([_][]const u8{ "id", "subject", "bodyText", "threadId", "inReplyTo", "references" }) |key| if (j.get(v, key)) |field| {
         if (field != .string) return error.InvalidRequest;
@@ -62,11 +71,18 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
     if (j.get(v, "original")) |original| {
         if (original != .null) draft.original = try j.decode(t.Original, a, original);
     }
+    if (backing) |allocator| {
+        var scratch: std.heap.ArenaAllocator = .init(allocator);
+        defer scratch.deinit();
+        try validateInlineBytes(scratch.allocator(), draft);
+    } else try validateInlineBytes(a, draft);
+    return draft;
+}
+fn validateInlineBytes(a: std.mem.Allocator, draft: t.Draft) !void {
     for (draft.attachments) |attachment| if (attachment.blobId == null) {
         _ = try @import("mime.zig").composeAttachments(&.{attachment}, a);
     };
     if (draft.original) |original| _ = try @import("mime.zig").composeAttachments(original.resources, a);
-    return draft;
 }
 pub fn requestBodyFormat(v: Value) !t.BodyFormat {
     const field = j.get(v, "bodyFormat") orelse return .plain;
@@ -152,4 +168,38 @@ test "draft codec: incomplete recipients stay editable and send validation remai
     try std.testing.expectError(error.TooManyAttachments, decodeDraft(a, try j.value(a, .{ .omittedAttachments = @as(i64, -1) })));
     try std.testing.expectError(error.InvalidAttachmentHandle, validateAttachmentHandle("not-a-blob"));
     try std.testing.expectError(error.HeaderInjection, validateDraft(.{ .subject = "Hi\r\nInjected: no" }, false));
+}
+
+test "draft codec: temporary attachment validation releases bytes without borrowing draft data" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const decoded_size = 64 * 1024;
+    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(decoded_size));
+    @memset(encoded, 'A');
+    const input = try j.value(a, t.Draft{
+        .to = &.{.{ .address = "peer@example.test" }},
+        .subject = "Owned draft",
+        .attachments = &.{.{ .id = "file", .filename = "file.txt", .mimeType = "text/plain", .size = 3, .data = "YWJj" }},
+        .original = .{
+            .bodyHtml = "<img src=\"cid:logo\">",
+            .resources = &.{.{ .id = "logo", .filename = "logo.png", .mimeType = "image/png", .size = decoded_size, .data = encoded, .contentId = "logo" }},
+        },
+    });
+    var scratch: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    const decoded = try decodeDraftWithScratch(a, scratch.allocator(), input);
+    try std.testing.expect(scratch.allocated_bytes >= decoded_size);
+    try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
+    try validateDraft(decoded, true);
+    try std.testing.expectEqualStrings("Owned draft", decoded.subject);
+    try std.testing.expectEqualStrings("YWJj", decoded.attachments[0].data);
+    try std.testing.expectEqualStrings(encoded, decoded.original.?.resources[0].data);
+    // Both entry points keep precisely the same strict binary validation.
+    const invalid = try j.value(a, t.Draft{ .attachments = &.{.{ .id = "bad", .filename = "bad.bin", .size = 3, .data = "!!!!" }} });
+    try std.testing.expectError(error.InvalidBase64, decodeDraft(a, invalid));
+    try std.testing.expectError(error.InvalidBase64, decodeDraftWithScratch(a, scratch.allocator(), invalid));
+    try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, decodeDraftWithScratch(a, failing.allocator(), input));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

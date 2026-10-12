@@ -6,7 +6,9 @@ const j = @import("terminal/json.zig");
 const live = @import("browser_live.zig");
 const cache_module = @import("browser_cache.zig");
 const codec = @import("terminal/draft_codec.zig");
+const draft_summary = @import("terminal/draft_summary.zig");
 const conversation = @import("terminal/conversation_draft.zig");
+const conversation_source = @import("terminal/conversation_source.zig");
 const bounded = @import("bounded.zig");
 const Allocator = std.mem.Allocator;
 const Value = j.Value;
@@ -46,9 +48,11 @@ pub const Provider = struct {
     operations: [64]Operation = undefined,
     operation_count: usize = 0,
     last_send_status: u32 = 0,
+    local_send_rejection: bool = false,
     acknowledgement_operation: ?usize = null,
     views: [3][8]View = @splat(@splat(.{})),
     view_next: [3]usize = @splat(0),
+    verified_aliases: [3]?[]const []const u8 = @splat(null),
 
     pub fn init(a: Allocator) Provider {
         return .{ .allocator = a, .arena = .init(a), .cache = cache_module.Store.init(a) };
@@ -206,6 +210,7 @@ pub const Provider = struct {
         };
     }
     fn execute(self: *Provider, out: Allocator, raw: []const u8, cached: bool) ![]const u8 {
+        self.local_send_rejection = false;
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
         defer scratch.deinit();
         const a = scratch.allocator();
@@ -217,6 +222,7 @@ pub const Provider = struct {
         const cache_only = cached or try j.boolean(request, "cacheOnly", false);
         self.acknowledgement_operation = null;
         const data = self.dispatch(a, request, cached) catch |err| {
+            if (self.local_send_rejection) return error.SendNotStarted;
             const failure = if (!cache_only and std.mem.eql(u8, j.text(request, "cmd"), "draft.send") and self.failedAcknowledgement()) error.UnknownOutcome else err;
             return std.json.Stringify.valueAlloc(out, .{ .version = @as(u8, 1), .id = id, .ok = false, .account = account, .@"error" = .{ .code = @errorName(failure), .message = @errorName(failure) } }, .{}) catch |encoding_error| {
                 if (failure == error.UnknownOutcome) return error.UnknownOutcome;
@@ -226,6 +232,7 @@ pub const Provider = struct {
         return std.json.Stringify.valueAlloc(out, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
             // Failure to encode a post-write acknowledgement cannot claim rejection.
             if (!cache_only and std.mem.eql(u8, j.text(request, "cmd"), "draft.send")) {
+                if (self.local_send_rejection) return error.SendNotStarted;
                 _ = self.failedAcknowledgement();
                 return error.UnknownOutcome;
             }
@@ -332,9 +339,12 @@ pub const Provider = struct {
             return result;
         }
         if (std.mem.eql(u8, cmd, "draft.list")) {
-            var drafts: std.ArrayList(Value) = .empty;
+            var drafts: std.ArrayList(t.Draft) = .empty;
             for (self.drafts[index]) |slot| if (!slot.retired) {
-                if (slot.raw) |raw| try drafts.append(a, try std.json.parseFromSliceLeaky(Value, a, raw, .{}));
+                if (slot.raw) |raw| {
+                    const stored = try std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed });
+                    try drafts.append(a, try draft_summary.fromValue(a, stored));
+                }
             };
             return j.value(a, .{ .drafts = drafts.items });
         }
@@ -360,13 +370,14 @@ pub const Provider = struct {
         }
         if (std.mem.eql(u8, cmd, "queue.list")) return j.value(a, .{ .queue = [_]Value{} });
         if (std.mem.eql(u8, cmd, "draft.preview")) {
-            const draft = try codec.decodeDraft(a, j.get(request, "draft") orelse try self.draftValue(a, index, try j.required(request, "draftId")));
+            const draft = try codec.decodeDraftWithScratch(a, self.allocator, j.get(request, "draft") orelse try self.draftValue(a, index, try j.required(request, "draftId")));
             try codec.validateDraft(draft, false);
             const prepared = try @import("terminal/markdown_mail.zig").prepare(a, draft);
             return j.value(a, .{ .bodyFormat = draft.bodyFormat, .bodyText = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText, .plainText = prepared.plain, .bodyHtml = prepared.html });
         }
         if (std.mem.eql(u8, cmd, "draft.create") or std.mem.eql(u8, cmd, "draft.update") or std.mem.eql(u8, cmd, "draft.recovery-save")) {
             if (!self.canSend(index)) return error.PermissionDenied;
+            const acknowledgement_only = try j.boolean(request, "acknowledgementOnly", false);
             const input = j.get(request, "draft") orelse return error.MissingField;
             var clean = input;
             var recovery: ?[]const []const u8 = null;
@@ -379,27 +390,83 @@ pub const Provider = struct {
                 try clean.object.put(a, "subject", .{ .string = recovery.?[3] });
                 try clean.object.put(a, "bodyText", .{ .string = "" });
             }
-            var draft = try codec.decodeDraft(a, clean);
+            var draft = try codec.decodeDraftWithScratch(a, self.allocator, clean);
             draft.recoveryFields = recovery;
             const existing = j.text(request, "draftId");
             if (existing.len > 0) {
-                const previous = try codec.decodeDraft(a, try self.draftValue(a, index, existing));
+                const previous = try codec.decodeDraftWithScratch(a, self.allocator, try self.draftValue(a, index, existing));
                 if (j.get(input, "bodyFormat") == null) draft.bodyFormat = previous.bodyFormat;
+                if (j.get(input, "original") == null) draft.original = previous.original;
                 if (j.get(input, "omittedAttachments") == null) draft.omittedAttachments = previous.omittedAttachments;
             }
-            return j.value(a, try self.putDraft(a, index, draft, if (existing.len > 0) existing else null));
+            return draft_summary.savedResponse(a, try self.putDraft(a, index, draft, if (existing.len > 0) existing else null), acknowledgement_only);
         }
         if (std.mem.eql(u8, cmd, "mail.reply") or std.mem.eql(u8, cmd, "mail.forward")) {
             if (!self.canSend(index)) return error.PermissionDenied;
-            if (try j.boolean(request, "original", false) or try j.boolean(request, "preserveFormatting", false)) return error.BrowserOriginalUnavailable;
-            const message = try self.read(a, index, try j.required(request, "messageId"), false);
+            const session = &self.live_sessions[index];
+            const forward = std.mem.eql(u8, cmd, "mail.forward");
             const format = try codec.requestBodyFormat(request);
-            var draft = if (std.mem.eql(u8, cmd, "mail.reply")) try conversation.reply(a, message, .{ .account = self.address(index), .all = try j.boolean(request, "all", false), .format = format }) else try conversation.forward(a, message, .{ .format = format, .body_text = try conversation.plainText(a, message) });
-            if (std.mem.eql(u8, cmd, "mail.forward")) draft.omittedAttachments = message.attachments.len;
+            const id = try j.required(request, "messageId");
+            const omit = try j.boolean(request, "omitAttachments", false);
+            if (forward and try j.boolean(request, "original", false)) {
+                if (omit) return error.InvalidForwardOptions;
+                const draft = capture: {
+                    var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+                    defer scratch.deinit();
+                    break :capture try conversation_source.forwardRaw(a, try session.raw(scratch.allocator(), id), format);
+                };
+                return j.value(a, try self.putDraft(a, index, draft, null));
+            }
+            const preserve = try j.boolean(request, "preserveFormatting", false);
+            if (forward and omit and preserve) return error.InvalidForwardOptions;
+            // Persisted reader snapshots deliberately strip attachment bytes
+            // and some MIME metadata. Capture every forward and formatted
+            // reply from a fresh FULL response, without weakening that cache.
+            const message = if (forward or preserve) try session.read(a, id) else try self.read(a, index, id, false);
+            var attachments: ConversationAttachments = .{ .session = session, .allocator = self.allocator };
+            const draft = if (forward)
+                try conversation_source.forward(a, message, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit, .body_text = if (preserve) null else try conversation.plainText(a, message), .temporary_allocator = self.allocator }, attachments.source())
+            else
+                try conversation.reply(a, message, .{ .account = self.address(index), .aliases = try self.replyAliases(a, index), .all = try j.boolean(request, "all", false), .format = format, .original = if (preserve) try conversation_source.captureOriginal(a, message, attachments.source()) else null });
+            if (preserve and !forward) try conversation_source.validateFormatting(self.allocator, draft);
             return j.value(a, try self.putDraft(a, index, draft, null));
         }
         if (std.mem.eql(u8, cmd, "draft.send")) return self.send(a, index, request);
         return error.BrowserCapabilityUnavailable;
+    }
+    const ConversationAttachments = struct {
+        session: *live.Session,
+        allocator: Allocator,
+        fn source(self: *@This()) conversation_source.Attachments {
+            return .{ .context = self, .fetchFn = fetch, .max_bytes = t.Limits.body_bytes };
+        }
+        fn fetch(ctx: *anyopaque, a: Allocator, message: t.Message, expected: t.Attachment) !t.Attachment {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+            defer scratch.deinit();
+            const source_adapter = self.session.attachmentSource();
+            const downloaded = try source_adapter.fetchFn(source_adapter.context, scratch.allocator(), message, expected);
+            // Attachment decoding and token-refresh metadata are temporary.
+            // Only the complete, validated DTO survives until response encoding.
+            var result = downloaded;
+            result.id = try a.dupe(u8, downloaded.id);
+            result.filename = try a.dupe(u8, downloaded.filename);
+            result.mimeType = try a.dupe(u8, downloaded.mimeType);
+            result.data = try a.dupe(u8, downloaded.data);
+            result.blobId = if (downloaded.blobId) |value| try a.dupe(u8, value) else null;
+            result.contentId = if (downloaded.contentId) |value| try a.dupe(u8, value) else null;
+            result.disposition = if (downloaded.disposition) |value| try a.dupe(u8, value) else null;
+            result.contentLocation = if (downloaded.contentLocation) |value| try a.dupe(u8, value) else null;
+            return result;
+        }
+    };
+    fn replyAliases(self: *Provider, a: Allocator, index: usize) ![]const []const u8 {
+        if (self.verified_aliases[index]) |aliases| return aliases;
+        const aliases = try self.live_sessions[index].aliases(a);
+        const stored = try self.arena.allocator().alloc([]const u8, aliases.len);
+        for (aliases, stored) |alias, *copy| copy.* = try self.arena.allocator().dupe(u8, alias);
+        self.verified_aliases[index] = stored;
+        return stored;
     }
     fn cachedList(self: *Provider, a: Allocator, index: usize, request: Value) !Value {
         if (!self.cache.valid(index)) return error.CacheMiss;
@@ -492,15 +559,19 @@ pub const Provider = struct {
         return error.DraftNotFound;
     }
     fn draftValue(self: *Provider, a: Allocator, index: usize, id: []const u8) !Value {
-        return std.json.parseFromSliceLeaky(Value, a, (try self.draftSlot(a, index, id)).raw.?, .{ .allocate = .alloc_always });
+        // Read responses serialize before this immutable slot can change.
+        // Mutating callers decode an owning Draft before replacing its bytes.
+        return std.json.parseFromSliceLeaky(Value, a, (try self.draftSlot(a, index, id)).raw.?, .{ .allocate = .alloc_if_needed });
     }
     fn putDraft(self: *Provider, a: Allocator, index: usize, input: t.Draft, id: ?[]const u8) !t.Draft {
         if (id) |draft_id| try self.requireEditableDraft(index, draft_id);
         var draft = input;
         try codec.validateDraft(draft, false);
-        if (draft.attachments.len > 0 or draft.original != null) return error.BrowserAttachmentsUnavailable;
+        // Session drafts retain inline bytes; native filesystem blob handles
+        // cannot be interpreted by this portable storage adapter.
+        for (draft.attachments) |attachment| if (attachment.blobId != null) return error.BrowserAttachmentsUnavailable;
         const slot = if (id) |value| try self.draftSlot(a, index, value) else find: {
-            for (&self.drafts[index]) |*candidate| if (candidate.raw == null or candidate.retired) break :find candidate;
+            for (&self.drafts[index]) |*candidate| if (candidate.raw == null or self.reclaimableDraft(index, candidate)) break :find candidate;
             return error.BrowserDraftLimit;
         };
         if (id != null and slot.retired) return error.DraftAlreadySent;
@@ -513,13 +584,43 @@ pub const Provider = struct {
         const raw = try std.json.Stringify.valueAlloc(self.allocator, draft, .{ .emit_null_optional_fields = false });
         errdefer self.allocator.free(raw);
         const previous_bytes = if (slot.raw) |previous| previous.len else 0;
-        if (raw.len > 3 * 1024 * 1024 or self.draft_bytes - previous_bytes + raw.len > draft_bytes_limit) return error.BrowserDraftQuota;
-        self.draft_bytes = self.draft_bytes - previous_bytes + raw.len;
+        // Leave room for the shared request/response identity envelope.
+        if (raw.len > t.Limits.request_bytes - 16 * 1024) return error.BrowserDraftQuota;
+        var admitted_bytes = self.draft_bytes - previous_bytes + raw.len;
+        var victims: [3 * draft_limit]*DraftSlot = undefined;
+        var victim_count: usize = 0;
+        // Confirmed sent drafts are only a bounded replay convenience. Their
+        // hidden bytes must not consume another account's active-draft quota.
+        // Plan first, so an insufficient quota never partially evicts data.
+        for (&self.drafts, 0..) |*actor_slots, actor_index| for (actor_slots) |*candidate| {
+            if (admitted_bytes <= draft_bytes_limit) break;
+            if (candidate == slot or !self.reclaimableDraft(actor_index, candidate)) continue;
+            victims[victim_count] = candidate;
+            victim_count += 1;
+            admitted_bytes -= candidate.raw.?.len;
+        };
+        if (admitted_bytes > draft_bytes_limit) return error.BrowserDraftQuota;
+        // All validation and allocation precedes this non-fallible commit.
+        for (victims[0..victim_count]) |victim| {
+            self.allocator.free(victim.raw.?);
+            victim.* = .{};
+        }
+        self.draft_bytes = admitted_bytes;
         if (slot.raw) |previous| self.allocator.free(previous);
         slot.raw = raw;
         slot.id = identity;
         slot.retired = false;
         return draft;
+    }
+    fn reclaimableDraft(self: *const Provider, index: usize, slot: *const DraftSlot) bool {
+        if (slot.raw == null or !slot.retired) return false;
+        var confirmed = false;
+        for (self.operations[0..self.operation_count]) |operation| {
+            if (operation.account_index != index or !std.mem.eql(u8, operation.draft_id.slice(), slot.id.slice())) continue;
+            if (operation.awaiting_receipt or (operation.outcome == .unknown and !operation.acknowledged)) return false;
+            confirmed = confirmed or operation.outcome == .applied;
+        }
+        return confirmed;
     }
     fn requireEditableDraft(self: *const Provider, index: usize, draft_id: []const u8) !void {
         for (self.operations[0..self.operation_count]) |operation| if (operation.account_index == index and (operation.awaiting_receipt or (operation.outcome == .unknown and !operation.acknowledged)) and std.mem.eql(u8, operation.draft_id.slice(), draft_id)) return error.UnknownOutcome;
@@ -529,7 +630,7 @@ pub const Provider = struct {
     }
     fn send(self: *Provider, a: Allocator, index: usize, request: Value) !Value {
         if (!self.canSend(index)) return error.PermissionDenied;
-        const draft = try codec.decodeDraft(a, try self.draftValue(a, index, try j.required(request, "draftId")));
+        const draft = try codec.decodeDraftWithScratch(a, self.allocator, try self.draftValue(a, index, try j.required(request, "draftId")));
         try codec.validateDraft(draft, true);
         const operation_id = try j.required(request, "operationId");
         if (operation_id.len > 256) return error.InvalidOperationId;
@@ -558,13 +659,21 @@ pub const Provider = struct {
         var operation: Operation = .{ .account_index = index, .hash = digest };
         try operation.id.set(operation_id);
         try operation.draft_id.set(draft.id);
+        const prepared = self.live_sessions[index].prepareSend(a, draft, operation_id) catch |err| {
+            // Preparation has not submitted a provider write. A recognized
+            // rejected receipt keeps local MIME/size failures editable without
+            // weakening the existing replay/conflict and unknown-outcome gates.
+            self.last_send_status = 3;
+            self.local_send_rejection = true;
+            return j.value(a, .{ .id = operation_id, .draftId = draft.id, .outcome = "rejected", .errorCode = @errorName(err) });
+        };
         // Record uncertainty before crossing the provider boundary.
         self.operations[self.operation_count] = operation;
         const record = &self.operations[self.operation_count];
         self.acknowledgement_operation = self.operation_count;
         self.operation_count += 1;
         self.last_send_status = 2;
-        const result = self.live_sessions[index].send(a, draft, operation_id) catch |err| {
+        const result = self.live_sessions[index].submitPrepared(a, prepared) catch |err| {
             record.outcome = if (@import("terminal/send_outcome.zig").rejected(err)) .rejected else .unknown;
             record.error_code.set(@errorName(err)) catch {};
             self.last_send_status = 2;

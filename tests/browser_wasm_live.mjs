@@ -10,12 +10,14 @@ import { createServer } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { originalFixture, originalProviderMessage, originalAttachment, originalRecipients, decodeOutgoingOriginal } from "./browser_originals_fixtures.mjs";
 
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
   assert(process.argv[index].startsWith("--") && process.argv[index + 1], `invalid argument ${process.argv[index]}`);
   args.set(process.argv[index], process.argv[index + 1]);
 }
+const originalsFixtureEnabled = args.get("--originals-only") === "true" || args.get("--originals-size-only") === "true" || args.get("--originals-medium-only") === "true";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const site = resolve(args.get("--site-dir") || join(root, "web-demo/dist"));
 const work = resolve(args.get("--work-dir") || "/tmp/omagma-wasm-browser-live");
@@ -120,6 +122,7 @@ const bodyText = (owner, index) => index === 0 ? `Hello ${owner},\n\nSynthetic l
 const bodyHtml = '<!doctype html><html><body><h1>Literal HTML fixture</h1><p>A safe café and Japanese 日本語.</p><script>window.mailInjected = "must-never-run";</script><img src="https://invalid-resource.example.test/never-fetch.png"><a href="javascript:alert(1)">Unsafe link text</a></body></html>';
 const subject = (owner, index) => index === 0 ? `${owner} live mailbox` : index === 1 ? `${owner} HTML-only mailbox` : `${owner} bounded message ${index}`;
 function providerMessage(accountIndex, index, format) {
+  if (originalsFixtureEnabled && [0, 2, 3, 4, 5, 6, 8].includes(index)) return originalProviderMessage(accountIndex, format, index);
   const owner = accountIndex === 0 ? "Ada" : "Bea";
   const mimeType = index === 1 ? "text/html" : "text/plain";
   const body = index === 1 ? bodyHtml : bodyText(owner, index);
@@ -259,11 +262,13 @@ try {
   const transportErrors = [];
   const requests = [];
   const unexpectedDestinations = [];
+  const linearMemorySamples = [];
   let wrongProfile = false;
   let scopeMode = "send";
   let mailVariant = "";
   let sendMode = "success";
   let listFailure = null;
+  let originalAttachmentFailure = null;
   let holdNextFullRead = false;
   let holdNextProfile = false;
   const heldProfiles = [];
@@ -325,6 +330,9 @@ try {
       { name: "Cache-Control", value: "no-store" },
     ];
     if (request.method === "OPTIONS") return call("Fetch.fulfillRequest", { requestId, responseCode: 204, responseHeaders: headers, body: "" });
+    if (originalsFixtureEnabled && /\/(messages\/ada-message-[48]|threads\/ada-thread-[48])(\/attachments\/[^/?]+)?$/.test(url.pathname) && url.searchParams.get("format") !== "metadata") {
+      await sampleMemory(`GET ${url.pathname.split("/").slice(-2).join("/")} before response`);
+    }
     activeRequests++;
     maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
     try {
@@ -383,24 +391,7 @@ try {
             } else payload = { messages: [{ deliberatelyMissingMessageId: true }] };
           } else {
             let indices = Array.from({ length: limit }, (_, index) => index);
-            if (args.get("--keyboard-only") === "true") {
-    await focus();
-    await evaluate(`(()=>{window.__omagmaKeyboardEvents=[];for(const type of ['keydown','keypress','keyup'])document.addEventListener(type,event=>window.__omagmaKeyboardEvents.push({type,key:event.key,code:event.code,keyCode:event.keyCode,charCode:event.charCode,which:event.which,ctrl:event.ctrlKey,target:event.target.className}),true);return true})()`);
-    await act(() => text("\\"));
-    await act(() => text("live"));
-    const beforeSpace = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
-    await act(() => key(" ", "Space"));
-    const afterSpace = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
-    await act(() => text("mailbox"));
-    const afterWord = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
-    await act(() => key("Escape", "Escape"));
-    await act(() => text("\\"));
-    await act(() => text("live mailbox"));
-    const afterFastWord = (await screen()).split("\n").find(line => line.includes("Gmail \\"));
-    const report = { beforeSpace, afterSpace, afterWord, afterFastWord, events: await evaluate("window.__omagmaKeyboardEvents") };
-    await writeFile(join(work, "keyboard-diagnostic.json"), JSON.stringify(report, null, 2)+"\n", {mode:0o600});
-    console.log(JSON.stringify(report));
-  } else if (args.get("--workflows-only") === "true") {
+            if (args.get("--workflows-only") === "true") {
               const query = (url.searchParams.get("q") || "").trim();
               const labels = url.searchParams.getAll("labelIds");
               if (query.includes("-in:inbox")) indices = [2, 3];
@@ -411,6 +402,17 @@ try {
             }
             payload = { messages: indices.map(index => ({ id: `${owner}-message-${index}`, threadId: `${owner}-thread-${index}` })), nextPageToken: "must-not-be-followed", resultSizeEstimate: 5000 };
           }
+        } else if (url.pathname === "/gmail/v1/users/me/settings/sendAs" && request.method === "GET") {
+          const owner = accountIndex === 0 ? "ada" : "bea";
+          payload = { sendAs: [
+            { sendAsEmail: accounts[accountIndex], displayName: "Synthetic Browser", signature: "", isPrimary: true, isDefault: true, verificationStatus: "accepted" },
+            { sendAsEmail: `${owner}.alias@example.test`, displayName: "Verified synthetic alias", signature: "", isPrimary: false, isDefault: false, verificationStatus: "accepted" },
+            { sendAsEmail: `${owner}.unverified@example.test`, displayName: "Unverified synthetic alias", signature: "", isPrimary: false, isDefault: false, verificationStatus: "pending" },
+          ] };
+        } else if (originalsFixtureEnabled && /^\/gmail\/v1\/users\/me\/messages\/(ada|bea)-message-[0234568]\/attachments\/(ada|bea)-source-(image|style|document)(-[234568](-\d+)?)?$/.test(url.pathname) && request.method === "GET") {
+          assert.equal(url.pathname.includes("ada-message"), accountIndex === 0, "source attachment request crossed account ownership");
+          payload = originalAttachment(accountIndex, url.pathname.split("/").at(-1), Number(url.pathname.match(/-message-(\d+)\//)[1]));
+          if (originalAttachmentFailure === url.pathname.split("/").at(-1)) payload.data = Buffer.from(payload.data, "base64url").subarray(0, -1).toString("base64url");
         } else if (/^\/gmail\/v1\/users\/me\/messages\/(ada|bea)-message-\d+$/.test(url.pathname) && request.method === "GET") {
           const index = Number(url.pathname.match(/-(\d+)$/)[1]);
           assert.equal(url.pathname.includes("ada-message"), accountIndex === 0, "account session requested another account's message id");
@@ -437,7 +439,8 @@ try {
         } else if (url.pathname === "/gmail/v1/users/me/messages/send" && request.method === "POST") {
           const sent = JSON.parse(request.postData);
           assert(typeof sent.raw === "string" && sent.raw.length > 0, "send request has no RFC5322 message");
-          record.raw = Buffer.from(sent.raw, "base64url").toString("utf8");
+          record.rawBytes = Buffer.from(sent.raw, "base64url");
+          record.raw = record.rawBytes.toString("utf8"); // Existing text-only oracles; original MIME uses rawBytes.
           record.threadId = sent.threadId;
           if (sendMode === "uncertain") return call("Fetch.failRequest", { requestId, errorReason: "ConnectionClosed" });
           payload = { id: "synthetic-sent-message", threadId: sent.threadId || "synthetic-new-thread", labelIds: ["SENT"] };
@@ -459,6 +462,12 @@ try {
     const response = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     assert(!response.exceptionDetails, JSON.stringify(response.exceptionDetails));
     return response.result.value;
+  }
+  async function sampleMemory(stage) {
+    if (!originalsFixtureEnabled || linearMemorySamples.length >= 128) return;
+    const bytes = await evaluate("window.__omagmaTestWasmMemory?.buffer.byteLength ?? 0");
+    assert(Number.isInteger(bytes) && bytes >= 0 && bytes <= 64 * 1024 * 1024, "WASM linear memory exceeded its unchanged 64 MiB maximum");
+    linearMemorySamples.push({ stage, bytes, requestCount: requests.length });
   }
   const screen = () => evaluate("window.omagmaDemo.screenText()");
   async function key(key, code, modifiers = 0) {
@@ -494,10 +503,11 @@ try {
     await writeFile(join(work, name), Buffer.from(result.data, "base64"), { mode: 0o600 });
   }
   captureFailure = async (error) => {
+    await sampleMemory("failure");
     const stamp = Date.now();
     const details = { error: error.message, screen: await screen(), session: await evaluate("window.omagmaDemo?.sessionInfo?.()"),
       inputState: await evaluate(`(()=>{const el=document.activeElement,ta=document.querySelector('.xterm-helper-textarea');return {active:{tagName:el?.tagName,className:el?.className,value:el?.value,disabled:el?.disabled,readOnly:el?.readOnly},textarea:{attributes:Object.fromEntries([...ta.attributes].map(a=>[a.name,a.value])),value:ta.value,disabled:ta.disabled,readOnly:ta.readOnly},runtime:document.querySelector('#runtime-status')?.textContent,hint:document.querySelector('#request-status-hint')?.textContent,cacheButtonDisabled:document.querySelector('#cache-clear')?.disabled}})()`),
-      credentialError: await evaluate("document.querySelector('#credential-error')?.textContent"),
+      credentialError: await evaluate("document.querySelector('#credential-error')?.textContent"), linearMemorySamples,
       requests: requests.map(({url,method,accountIndex})=>({url,method,accountIndex})), transportErrors: transportErrors.map(String) };
     details.networkFailures = events.filter((event) => event.method === "Network.loadingFailed").map((event) => event.params);
     const redacted = syntheticSecrets.reduce((text, secret) => text.replaceAll(secret, "[synthetic credential]"), JSON.stringify(details, null, 2));
@@ -675,6 +685,8 @@ try {
   // Force that boundary deterministically without altering UUID generation,
   // credentials, transport destinations, or the production application.
   await call("Page.addScriptToEvaluateOnNewDocument", { source: `(()=>{
+    const remember=result=>{const instance=result instanceof WebAssembly.Instance?result:result?.instance;if(instance?.exports.memory)window.__omagmaTestWasmMemory=instance.exports.memory;return result};
+    for(const name of ['instantiate','instantiateStreaming']){const native=WebAssembly[name].bind(WebAssembly);WebAssembly[name]=async(...args)=>remember(await native(...args))}
     const native=crypto.getRandomValues.bind(crypto);let handle=0x80000001;
     Object.defineProperty(crypto,'getRandomValues',{value:function(array){
       if(array instanceof Uint32Array&&array.length===1){array[0]=handle++;return array}
@@ -901,6 +913,368 @@ try {
       appSha256: createHash("sha256").update(await readFile(join(site, "app.mjs"))).digest("hex") };
     await writeFile(join(work, "account-switch-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
     console.log(JSON.stringify(report));
+  } else if (originalsFixtureEnabled) {
+    const checks = {}, submitted = [];
+    const source = originalFixture(0);
+    const field = (label, value) => {
+      const line = value.split("\n").find(line => new RegExp(`\\b${label}:`).test(line));
+      assert(line, `original composer ${label} is not visible`);
+      return line.slice(line.indexOf(label + ":") + label.length + 1).split(/[│┃]/)[0].replaceAll("▏", "").trim();
+    };
+    const addressesIn = value => [...(value || "").matchAll(/[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9.-]+/g)].map(match => match[0].toLowerCase());
+    const expectRecipients = (mail, all) => {
+      assert.deepEqual(addressesIn(mail.headers.to), [originalRecipients.reply], "reply did not honor Reply-To");
+      assert.deepEqual(addressesIn(mail.headers.cc), all ? [originalRecipients.toPeer, originalRecipients.ccPeer] : [], "reply-all did not exclude self and deduplicate original To/Cc");
+      assert.equal(mail.headers.bcc, undefined, "conversation reply invented Bcc");
+      assert.equal(mail.headers["in-reply-to"], "<ada-original-source@example.test>");
+      assert.equal(mail.headers.references, "<prior-original-thread@example.test> <ada-original-source@example.test>");
+      assert.equal(mail.headers.subject, "Re: Ada original formatting");
+    };
+    function expectForward(mail, record, messageIndex = 0) {
+      const fixture = originalFixture(0, messageIndex);
+      assert.equal(mail.headers.subject, "Fwd: " + fixture.headers.find(header => header.name === "Subject").value);
+      assert.equal(record.threadId ?? null, null, "forward joined the source Gmail thread");
+      assert.equal(mail.headers["in-reply-to"], undefined, "forward retained source reply identity");
+      assert.equal(mail.headers.references, undefined, "forward retained source References");
+      assert.deepEqual(addressesIn(mail.headers.to), ["original.recipient@example.test"]);
+      assert.deepEqual(addressesIn(mail.headers.cc), []);
+    }
+    function expectFile(mail, expected) {
+      const matches = mail.leaves.filter(part => part.filename === expected.filename);
+      assert.equal(matches.length, 1, `${expected.filename}: file was lost or duplicated`);
+      assert.equal(matches[0].type, expected.mimeType);
+      assert(matches[0].bytes.equals(expected.bytes), `${expected.filename}: decoded MIME bytes differ from the provider fixture`);
+      return matches[0];
+    }
+    function expectFormatting(mail, fixture = source, { ordinary = false } = {}) {
+      assert(mail.html?.includes(fixture.inlineStyle) && mail.html.includes(fixture.table), "original HTML/CSS layout was rewritten or lost");
+      assert(mail.html.includes('data-conditional="original"') && mail.html.includes('data-original-tail="ada"'), "original conditional markup or document tail was lost");
+      assert(mail.html.includes('window.__originalInjected="must-never-run"'), "opaque source script bytes were rewritten instead of retained as mail data");
+      const image = expectFile(mail, fixture.files[0]), style = expectFile(mail, fixture.files[1]);
+      assert.equal(image.contentId, fixture.cid, "source CID image identity changed");
+      assert.equal(style.contentLocation, fixture.location, "source stylesheet Content-Location changed");
+      if (ordinary) expectFile(mail, fixture.files[2]);
+      else assert(!mail.leaves.some(part => part.filename === fixture.files[2].filename), "reply copied an ordinary source attachment");
+      const expectedFiles = new Set(fixture.files.slice(0, ordinary ? 3 : 2).map(file => file.filename));
+      assert(mail.leaves.every(part => ["text/plain", "text/html"].includes(part.type) || expectedFiles.has(part.filename) || /omagma.*logo/i.test(part.contentId)), "formatted MIME contains an unexpected file");
+    }
+    async function passive() {
+      assert(await evaluate("window.__originalInjected===undefined"), "received original HTML executed in the browser");
+      assert(await evaluate("!document.querySelector('table[data-layout],link[href*=\"invalid-resource\"],img[src*=\"invalid-resource\"]')"), "received original markup entered the browser DOM");
+      assert.deepEqual(unexpectedDestinations, [], "original HTML fetched a remote resource");
+      assert.equal(await evaluate("window.omagmaDemo.error"), null, "original workflow trapped the WASM session");
+    }
+    async function selectSource(messageIndex = 0) {
+      await chooseNativeFolder(1, 2, 0); // Explicit Inbox selection is allowed to refresh.
+      await act(() => text("/"));
+      const title = originalFixture(0, messageIndex).headers.find(header => header.name === "Subject").value;
+      await act(() => text(`subject:"${title}"`));
+      const selected = await act(() => key("Enter", "Enter"));
+      assert(selected.includes(title), "cache search did not select the exact original fixture");
+      await act(() => key("Enter", "Enter"));
+      await passive();
+    }
+    async function chooseSource(intent, mode, messageIndex = 0) {
+      await selectSource(messageIndex);
+      const before = sends().length;
+      const chooser = await act(() => text(intent));
+      assert(chooser.includes("original format") && chooser.includes("Text quote"), "conversation action skipped the shared source chooser");
+      if (intent === "f") assert(chooser.includes("Attach original .eml"), "forward source chooser has no original-message option");
+      if (messageIndex === 2 || messageIndex === 3) assert.match(chooser, /Plain.text source|Plain text.*original/i, "non-HTML source did not explain unavailable formatting");
+      if (messageIndex === 4 || messageIndex === 8) await sampleMemory(`fixture${messageIndex} chooser before Keep formatting`);
+      const drafted = await act(() => text(mode));
+      assert(/Compose/.test(drafted) && /Subject:/.test(drafted), "source selection did not create the shared composer");
+      assert.equal(sends().length, before, "source selection submitted without an explicit review");
+      if (intent === "f") assert.equal(field("To", drafted), "", "forward inherited the source recipients");
+      await passive();
+      return drafted;
+    }
+    async function note(value) {
+      await act(() => key("g", "KeyG", 2));
+      if (!/INSERT/.test(await screen())) await act(() => text("i"));
+      await act(() => paste(value));
+      await act(() => key("Escape", "Escape"));
+    }
+    async function recipient(value = "original.recipient@example.test") {
+      await act(() => key("g", "KeyG", 2));
+      for (let index = 0; index < 4; index++) await act(() => key("Tab", "Tab", 8));
+      const previous = field("To", await screen());
+      if (!/INSERT/.test(await screen())) await act(() => text("i"));
+      await act(() => key("e", "KeyE", 2));
+      for (const character of previous) await act(() => key("Backspace", "Backspace"));
+      await act(() => text(value));
+      await act(() => key("Escape", "Escape"));
+      assert.equal(field("To", await screen()), value, "real recipient editing did not replace the exact To field");
+    }
+    async function reviewSend(label) {
+      const before = sends().length;
+      const reviewed = await act(() => key("s", "KeyS", 2));
+      assert(reviewed.includes("Review send"), `${label}: outgoing review is missing`);
+      assert.equal(sends().length, before, `${label}: opening review submitted mail`);
+      await passive();
+      const record = await explicitSend(label);
+      const mail = decodeOutgoingOriginal(record.rawBytes);
+      assert.match(mail.headers["message-id"], /^<omagma-[a-f0-9]{64}@mail\.invalid>$/);
+      assert.match(mail.headers.date, /\+0000$/);
+      assert.equal(record.accountIndex, 0, `${label}: send crossed account ownership`);
+      submitted.push({ label, account: 1, parts: mail.leaves.map(part => ({ type: part.type, filename: part.filename, bytes: part.bytes.length, sha256: createHash("sha256").update(part.bytes).digest("hex"), contentId: part.contentId, contentLocation: part.contentLocation })) });
+      await writeFile(join(work, "originals-progress.json"), JSON.stringify({ synthetic: true, actualGoogleRequests: 0, submitted, linearMemorySamples }, null, 2) + "\n", { mode: 0o600 });
+      await passive();
+      return { record, mail };
+    }
+
+    await importBundle(bundles.both);
+    await connected(2);
+    await sampleMemory("connected");
+    if (args.get("--originals-medium-only") === "true") {
+      const medium = originalFixture(0, 8);
+      await sampleMemory("before medium fixture8");
+      await chooseSource("f", "k", 8);
+      await sampleMemory("medium draft created");
+      await recipient();
+      await note("Medium original forward note.\n");
+      const result = await reviewSend("medium formatted original forward");
+      expectForward(result.mail, result.record, 8);
+      expectFormatting(result.mail, medium, { ordinary: true });
+      assert(result.mail.body.includes("Medium original forward note."));
+      assert.equal(sends().length, 1, "legal medium original did not submit exactly once");
+      await sampleMemory("medium send applied");
+      checks.legal1200KiBOriginalSendsExactResourcesAndOrdinaryFile = true;
+      await screenshot("originals-medium-applied.png");
+    } else {
+      if (args.get("--originals-size-only") !== "true") {
+        await selectSource();
+        await act(() => text("r"));
+        originalAttachmentFailure = source.files[0].id;
+        const failedHydrationBefore = sends().length;
+        await act(() => text("k"));
+        await settled();
+        assert.equal(sends().length, failedHydrationBefore, "failed resource hydration submitted a partial original");
+        assert(!/\bSubject:/.test(await screen()), "failed resource hydration created a partial composer");
+        assert.match(await screen(), /BodySizeMismatch|size mismatch|Attachment|attachment|InvalidProvider|unavailable|failed/i, "resource hydration failure had no readable refusal");
+        originalAttachmentFailure = null;
+        await passive();
+        checks.hydrationFailureRefusesPartialOriginalAndCanRecover = true;
+        await chooseSource("r", "k");
+        await note("Original reply note café.\n");
+        const reply = await reviewSend("formatted original reply");
+        expectRecipients(reply.mail, false);
+        assert.equal(reply.record.threadId, "ada-thread-0");
+        expectFormatting(reply.mail);
+        assert(reply.mail.body.includes("Original reply note café."), "reply note did not survive native MIME assembly");
+        const savedOriginal = (await cacheRows()).find(row => row.snapshot.account === accounts[0])?.snapshot.messages.find(message => message.id === "ada-message-0");
+        assert.equal(savedOriginal?.attachments.find(file => file.filename === source.files[1].filename)?.contentLocation, source.location, "persisted source metadata lost its Content-Location identity");
+        checks.formattedReplyResourcesAndThreading = true;
+
+        await chooseSource("R", "k");
+        await note("Original reply-all note.\n");
+        const replyAll = await reviewSend("formatted original reply-all");
+        expectRecipients(replyAll.mail, true);
+        assert.equal(replyAll.record.threadId, "ada-thread-0");
+        expectFormatting(replyAll.mail);
+        checks.replyAllSelfExclusionDeduplicationAndThreading = true;
+
+        // Deliberately incomplete addressing exercises the shared recovery-save
+        // path, including the immutable original and ordinary attachment bytes.
+        await chooseSource("f", "k");
+        await recipient("partial-recipient");
+        await note("Recovered original forward note.\n");
+        await act(() => text("q"));
+        await act(() => text("2"));
+        assert(!(await screen()).includes("Recovered original forward note."), "account switch exposed another actor's recovery draft");
+        const drafts = await chooseNativeFolder(1, 2, 2);
+        assert(drafts.includes("Fwd: Ada original formatting"), "incomplete original forward was not retained in native Drafts");
+        const recovered = await act(() => key("Enter", "Enter"));
+        assert.equal(field("To", recovered), "partial-recipient", "recovery dropped the incomplete recipient field");
+        assert(recovered.includes("Recovered original forward note."), "recovery dropped the authored note");
+        assert(recovered.includes(source.files[2].filename), "recovery dropped the ordinary source file");
+        await recipient();
+        const cancelBefore = sends().length;
+        await act(() => key("s", "KeyS", 2));
+        await text("y");
+        await waitGrace();
+        await act(() => click("#send-grace-cancel"));
+        assert.equal(sends().length, cancelBefore, "canceling an original forward's grace window submitted it");
+        assert((await screen()).includes("Recovered original forward note."), "grace cancellation discarded the recovered note");
+        await screenshot("originals-forward-recovered.png");
+        const formattedForward = await reviewSend("formatted original forward with ordinary file");
+        expectForward(formattedForward.mail, formattedForward.record);
+        expectFormatting(formattedForward.mail, source, { ordinary: true });
+        checks.originalRecoveryAccountIsolationGraceCancelAndOrdinaryFile = true;
+
+        await chooseSource("f", "t");
+        await recipient();
+        const textForward = await reviewSend("text quote forward with ordinary file");
+        expectForward(textForward.mail, textForward.record);
+        for (const file of source.files) assert.equal(expectFile(textForward.mail, file).disposition, "attachment", "text quote did not retain source files as ordinary attachments");
+        assert(textForward.mail.body.includes("Original café") && textForward.mail.body.includes("https://example.test/source-link"), "text quote lost the semantic source or safe link target");
+        assert(!textForward.mail.html.includes(source.inlineStyle) && !textForward.mail.html.includes("window.__originalInjected"), "text quote reused opaque original HTML");
+        assert(!textForward.mail.leaves.some(part => part.contentId === source.cid || part.contentLocation === source.location), "text quote retained unnecessary original resources");
+        checks.textQuoteSemanticSourceAndOrdinaryFile = true;
+
+        await chooseSource("f", "e");
+        await recipient();
+        await note("Removed original attachment review.\n");
+        const removeBefore = sends().length;
+        const removeTarget = await evaluate(`(()=>{
+          const api=window.omagmaDemo,r=document.querySelector('.xterm-screen').getBoundingClientRect();
+          for(let row=0;row<api.rows;row++){
+            let line='';for(let col=0;col<api.cols;col++)line+=api.cell(col,row).chars;
+            if(!line.includes('.eml'))continue;
+            for(let col=0;col<api.cols-2;col++)if(api.cell(col,row).chars==='['&&api.cell(col+1,row).chars==='x'&&api.cell(col+2,row).chars===']')return {x:r.left+(col+1.5)*r.width/api.cols,y:r.top+(row+0.5)*r.height/api.rows};
+          }return null;
+        })()`);
+        assert(removeTarget, "attached original has no visible mouse removal control");
+        await act(async () => {
+          await call("Input.dispatchMouseEvent", { type: "mousePressed", ...removeTarget, button: "left", clickCount: 1 });
+          await call("Input.dispatchMouseEvent", { type: "mouseReleased", ...removeTarget, button: "left", clickCount: 1 });
+        });
+        const removedReview = await act(() => key("s", "KeyS", 2));
+        assert(removedReview.includes("Review send"), "removed-original note could not be reviewed");
+        assert(!removedReview.includes("Original attached as .eml") && !removedReview.includes("original attached") && !/Attachment \d+:/i.test(removedReview), "review still claimed the removed original was attached");
+        assert.equal(sends().length, removeBefore, "removing an original or reviewing the remaining note submitted it");
+        await act(() => key("Escape", "Escape"));
+        await act(() => text("d"));
+        await act(() => key("Tab", "Tab", 8));
+        await act(() => key("Enter", "Enter"));
+        checks.removedOriginalStopsAttachmentClaimInReview = true;
+
+        for (const messageIndex of [5, 6]) {
+          await selectSource(messageIndex);
+          const omitChooser = await act(() => text("f"));
+          assert(omitChooser.includes("Text quote · omit files t"), "oversized ordinary forward did not expose its explicit omit-files choice");
+          const omitFilesBefore = gmailGets().filter(request => new URL(request.url).pathname.includes("/attachments/")).length;
+          const omitSendsBefore = sends().length;
+          const omitted = await act(() => text("t"));
+          assert.match(omitted, /original attachments are omitted/i, "explicit omit-files draft had no warning");
+          assert(!omitted.includes("design-notes-ada.pdf"), "omitted ordinary file remained in the draft");
+          await recipient();
+          await note("Explicitly omitted oversized source file.\n");
+          const omitReview = await act(() => key("s", "KeyS", 2));
+          assert(omitReview.includes("Review send") && /original attachments are omitted/i.test(omitReview), "send review lost the explicit omitted-files warning");
+          assert(!/Attachment \d+:/i.test(omitReview), "omit-files review claimed an outgoing attachment");
+          await act(() => key("Escape", "Escape"));
+          await act(() => text("q"));
+          const omitDrafts = await chooseNativeFolder(1, 2, 2);
+          assert(omitDrafts.includes("Fwd: " + originalFixture(0, messageIndex).headers.find(header => header.name === "Subject").value));
+          const reopenedOmit = await act(() => key("Enter", "Enter"));
+          assert.match(reopenedOmit, /original attachments are omitted/i, "retained draft lost its deliberate omission warning");
+          assert.equal(gmailGets().filter(request => new URL(request.url).pathname.includes("/attachments/")).length, omitFilesBefore, "explicit omission downloaded the oversized file");
+          assert.equal(sends().length, omitSendsBefore, "omission/retention checks submitted mail");
+          await act(() => text("d"));
+          await act(() => key("Tab", "Tab", 8));
+          await act(() => key("Enter", "Enter"));
+        }
+        checks.oversizedOrdinaryFilesExplicitOmissionWarnsAndStaysLocal = true;
+        checks.tooManyOrdinaryFilesExplicitOmissionWarnsAndStaysLocal = true;
+
+        // All three source shapes reach the same common .eml choice. Its bytes
+        // must match the literal RAW provider response, not a reconstruction.
+        for (const messageIndex of [0, 2, 3]) {
+          const fixture = originalFixture(0, messageIndex);
+          const beforeRaw = gmailGets().filter(request => new URL(request.url).searchParams.get("format") === "raw").length;
+          await chooseSource("f", "e", messageIndex);
+          assert(gmailGets().filter(request => new URL(request.url).searchParams.get("format") === "raw").length > beforeRaw, ".eml mode did not request original RAW bytes");
+          await recipient();
+          await note(`Attached original ${messageIndex} note.\n`);
+          const originalForward = await reviewSend(`attached .eml source ${messageIndex}`);
+          expectForward(originalForward.mail, originalForward.record, messageIndex);
+          const eml = originalForward.mail.leaves.filter(part => part.type === "message/rfc822");
+          assert.equal(eml.length, 1, "original forward did not contain exactly one .eml");
+          assert(eml[0].bytes.equals(fixture.raw), "attached .eml bytes differ from the provider RAW response");
+          assert.match(eml[0].filename, /\.eml$/i);
+          assert(!originalForward.mail.leaves.some(part => fixture.files.some(file => file.filename === part.filename)), ".eml forward duplicated its contained files as separate outgoing attachments");
+        }
+        checks.htmlPlainAndAttachmentOnlyOriginalEmlExactBytes = true;
+      }
+
+      // The decoded source resource is legal (<2 MiB), but nested MIME/base64
+      // expansion cannot fit the bounded send form. This is a definite local
+      // refusal before POST, and must leave an editable, retained draft.
+      await sampleMemory("before fixture4");
+      await chooseSource("f", "k", 4);
+      await sampleMemory("fixture4 draft created");
+      await recipient();
+      await note("Locally rejected oversized formatted note.\n");
+      const quotaBefore = sends().length;
+      const quotaReview = await act(() => key("s", "KeyS", 2));
+      await writeFile(join(work, "originals-size-review.txt"), quotaReview + "\n", { mode: 0o600 });
+      await screenshot("originals-size-review.png");
+      const sizeReviewVisible = quotaReview.includes("Review send") && quotaReview.includes("Sending account:");
+      await sampleMemory(sizeReviewVisible ? "fixture4 Ctrl+S modal review visible" : "fixture4 Ctrl+S refused before modal review");
+      if (sizeReviewVisible) {
+        await act(() => text("y"));
+        await sampleMemory("fixture4 explicit confirmation complete");
+      }
+      await settled();
+      assert.equal(sends().length, quotaBefore, "locally oversized original reached Gmail POST");
+      assert.equal((await session()).sendPhase, null, "locally oversized original entered a submission phase");
+      assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "local form-size refusal created an uncertain-send receipt");
+      assert.match(await screen(), /FormTooLarge|form.*large|size limit|too large|RequestTooLarge/i, "oversized send form had no visible local refusal");
+      assert(!/outcome unknown|draft protected/i.test(await screen()), "local form-size refusal poisoned the draft as unknown");
+      if ((await screen()).includes("Review send")) await act(() => key("Escape", "Escape"));
+      await note("Still editable after local refusal.\n");
+      assert((await screen()).includes("Still editable after local refusal."), "local size refusal froze the authored note");
+      await act(() => text("q"));
+      const oversizedDrafts = await chooseNativeFolder(1, 2, 2);
+      assert(oversizedDrafts.includes("Fwd: Ada oversized original resource"), "local size refusal lost the retained original draft");
+      checks.sendFormExpansionRejectedLocallyWithoutUnknown = true;
+      await sampleMemory("local form refusal and editable retained draft");
+
+      if (args.get("--originals-size-only") !== "true") {
+        await chooseSource("f", "k");
+        await recipient();
+        await note("Uncertain original forward protected note.\n");
+        sendMode = "uncertain";
+        const uncertain = await reviewSend("uncertain formatted original forward");
+        expectForward(uncertain.mail, uncertain.record);
+        expectFormatting(uncertain.mail, source, { ordinary: true });
+        await until(async () => /outcome unknown|draft protected/i.test(await screen()), "uncertain original send did not protect its draft");
+        const uncertainCount = sends().length;
+        await act(() => key("s", "KeyS", 2));
+        await act(() => text("y"));
+        assert.equal(sends().length, uncertainCount, "uncertain original replayed its Gmail mutation");
+        const receipt = await evaluate("JSON.parse(localStorage.getItem('omagma-browser-pending-send-v1'))");
+        assert.deepEqual(Object.keys(receipt).sort(), ["id", "startedAt"]);
+        await act(() => click("#send-acknowledge"));
+        assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null);
+        const reReviewed = await act(() => key("s", "KeyS", 2));
+        assert(reReviewed.includes("Review send"), "acknowledged original could not receive a fresh explicit review");
+        sendMode = "success";
+        await text("y");
+        await waitGrace();
+        await act(() => click("#send-grace-cancel"));
+        assert.equal(sends().length, uncertainCount, "acknowledged original submitted without its new grace window");
+        checks.uncertainOriginalNoRetryAcknowledgementRequiresFreshReview = true;
+        await screenshot("originals-unknown-recovered.png");
+      }
+    }
+    await passive();
+    await disconnect();
+
+    const privacy = await evaluate("(async()=>({localStorage:{...localStorage},sessionStorage:{...sessionStorage},databases:await indexedDB.databases(),cookies:document.cookie,caches:await caches.keys()}))()");
+    const persisted = await cacheRows();
+    assert.deepEqual(privacy.localStorage, {});
+    assert.deepEqual(privacy.sessionStorage, {});
+    assertCacheDatabases(privacy.databases);
+    assert.deepEqual(privacy.caches, []);
+    assert.equal(privacy.cookies, "");
+    const storedText = JSON.stringify(persisted);
+    assert(!storedText.includes("Recovered original forward note.") && !storedText.includes("Uncertain original forward protected note."), "browser cache persisted original draft notes");
+    const diagnosticText = storedText + JSON.stringify(privacy) + JSON.stringify(events.filter(event => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
+    for (const secret of syntheticSecrets) assert(!diagnosticText.includes(secret), "original workflow leaked credentials");
+    assert(maximumActiveRequests <= 1, "original hydration bypassed the serial network worker");
+    assert.deepEqual(transportErrors, [], "original fixture transport failed");
+    assert.deepEqual(unexpectedDestinations, [], "original source requested an unapproved external resource");
+    checks.sourceNeverExecutesOrLoadsRemoteResources = true;
+    checks.noCredentialsOrOriginalDraftPersistence = true;
+    const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product, origin,
+      fixedGoogleUrlsIntercepted: true, requestCount: requests.length, maximumActiveRequests, syntheticSendRequests: sends().length,
+      attachmentRequests: gmailGets().filter(request => new URL(request.url).pathname.includes("/attachments/")).length,
+      rawOriginalRequests: gmailGets().filter(request => new URL(request.url).searchParams.get("format") === "raw").length, submitted, checks, linearMemorySamples,
+      wasmSha256: createHash("sha256").update(await readFile(join(site, "omagma.wasm"))).digest("hex") };
+    await writeFile(join(work, args.get("--originals-size-only") === "true" ? "originals-size-acceptance.json" : args.get("--originals-medium-only") === "true" ? "originals-medium-acceptance.json" : "originals-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    console.log(JSON.stringify({ ...report, submitted: submitted.map(({ label, account, parts }) => ({ label, account, parts: parts.length })) }));
   } else if (args.get("--workflows-only") === "true") {
     const checks = {};
     const inputField = (label, terminalText) => {
@@ -1036,7 +1410,8 @@ try {
     await importBundle(bundles.workflowAda);
     await connected(1);
     assert((await screen()).includes("Hello Ada,"), "forward source body was not loaded");
-    const forward = await act(() => text("f"));
+    let forward = await act(() => text("f"));
+    if (forward.includes("original format") && forward.includes("Text quote")) forward = await act(() => text("t"));
     assert(/Compose.*Forward|Forward.*Compose/i.test(forward), "f did not open a forward composer");
     assert.equal(inputField("To", forward), "", "forward copied the original recipients");
     assert.equal(inputField("Subject", forward), "Fwd: Ada live mailbox");

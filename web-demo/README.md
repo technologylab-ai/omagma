@@ -49,7 +49,11 @@ connection file on a static host, or uses your configured native accounts when
 opened through the server's printed link. **Load file** remains available in
 server mode. Disconnect returns to fictional mode. In live mode, `c` composes,
 `r` replies, `R` replies to all, and `f` forwards. Reply/forward offers the shared
-source chooser; choose Text quote. Compose starts in normal mode: `i` edits, Esc
+source chooser: Keep formatting preserves original HTML and embedded resources,
+Text quote makes an editable copy, and forwarding also offers Attach original
+`.eml`, including plain-text sources. Forwarded source files are retained within
+the portable inline quotas described in [live mail](LIVE-MAIL.md); they can be
+removed in the composer. Compose starts in normal mode: `i` edits, Esc
 returns to normal mode, Ctrl+T switches plain/Markdown, and Ctrl+S opens send review.
 Tab/Shift+Tab move between fields or review buttons. Explicit Send begins the ten-second local
 cancellation window. The shared help and action palette show the current platform capabilities. `T` opens the native theme

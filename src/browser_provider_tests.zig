@@ -17,6 +17,7 @@ const client_id = "synthetic.apps.googleusercontent.com";
 const nonce = "12345678-1234-4234-8234-123456789abc";
 const send_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
 const profile_url = "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress";
+const aliases_url = "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,displayName,signature,isPrimary,isDefault,verificationStatus)";
 const snapshot_head = "{\"version\":1,\"account\":\"ada@example.test\",\"clientId\":\"synthetic.apps.googleusercontent.com\",\"grantId\":\"\",\"updatedAt\":1791730000000,";
 const snapshot_row = "{\"id\":\"old-inbox\",\"threadId\":\"thread-old\",\"subject\":\"Synthetic retained mail\",\"bodyText\":\"An independently authored cached body\",\"bodyCached\":true,\"receivedAt\":1000,\"labels\":[\"INBOX\"]}";
 const fixture_snapshot = snapshot_head ++ "\"messages\":[" ++ snapshot_row ++ "],\"contacts\":[{\"resourceName\":\"people/peer\",\"name\":\"Peer\",\"emails\":[{\"address\":\"peer@example.test\"}]}],\"contactsLoaded\":true}";
@@ -42,6 +43,8 @@ const Host = struct {
     expected_draft: []const u8 = "",
     armed_allocator: ?*std.testing.FailingAllocator = null,
     fail_after_post: ?usize = null,
+    capture_body: ?[]u8 = null,
+    captured_bytes: usize = 0,
 };
 var host: Host = .{};
 
@@ -59,6 +62,12 @@ export fn http_request(session: u32, method_ptr: usize, method_len: usize, url_p
     if (is_post) {
         host.posts += 1;
         if (body_len == 0 or body_ptr == 0) host.violation = true;
+        if (host.capture_body) |buffer| {
+            if (body_len > buffer.len) host.violation = true else {
+                @memcpy(buffer[0..body_len], @as([*]const u8, @ptrFromInt(body_ptr))[0..body_len]);
+                host.captured_bytes = body_len;
+            }
+        }
         if (host.provider) |provider| {
             const pending = provider.pendingUnknown();
             if (provider.sendStatus() != 2 or pending == null) host.violation = true else if (!std.mem.eql(u8, pending.?.draft_id, host.expected_draft)) host.violation = true;
@@ -646,4 +655,603 @@ test "browser provider: allocator failure after synthetic POST retains the uncer
     }
     try expect(observed_post_failure);
     try expect(completed);
+}
+
+const source_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/source?format=full";
+const source_raw_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/source?format=raw&fields=id,raw";
+const source_image_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/source/attachments/image";
+const source_style_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/source/attachments/style";
+const source_file_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/source/attachments/file";
+const source_body = "<!-- exact source --><div class=\"source\"><img src=\"cid:source-image\"><img src=\"https://example.test/source.css\"><p>Received source</p></div>";
+const source_html = "<!DOCTYPE html><html><head><style>.source{color:#123456}</style></head><body>" ++ source_body ++ "</body></html>";
+const source_aliases = "{\"sendAs\":[{\"sendAsEmail\":\"ada@example.test\",\"isPrimary\":true},{\"sendAsEmail\":\"alias@example.test\",\"verificationStatus\":\"accepted\"},{\"sendAsEmail\":\"unverified@example.test\",\"verificationStatus\":\"pending\"}]}";
+const image_response = "{\"size\":3,\"data\":\"AAH_\"}";
+const style_response = "{\"size\":3,\"data\":\"YWJj\"}";
+const file_response = "{\"size\":3,\"data\":\"AP8N\"}";
+
+fn base64(a: A, bytes: []const u8) ![]const u8 {
+    const buffer = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(bytes.len));
+    return std.base64.url_safe_no_pad.Encoder.encode(buffer, bytes);
+}
+fn sourceMessage(a: A, id: []const u8, image_id: []const u8) ![]const u8 {
+    // Provider-shaped input is authored independently of the Gmail decoder.
+    return std.json.Stringify.valueAlloc(a, .{
+        .id = id,
+        .threadId = "source-thread",
+        .internalDate = "1791799200000",
+        .labelIds = [_][]const u8{"INBOX"},
+        .payload = .{
+            .mimeType = "multipart/mixed",
+            .headers = [_]struct { name: []const u8, value: []const u8 }{
+                .{ .name = "From", .value = "Sender <sender@example.test>" },
+                .{ .name = "Reply-To", .value = "Reply <reply@example.test>" },
+                .{ .name = "To", .value = "Ada <ada@example.test>, Alias <alias@example.test>, Peer <peer@example.test>" },
+                .{ .name = "Cc", .value = "ADA@EXAMPLE.TEST, PEER@example.test, Copy <copy@example.test>" },
+                .{ .name = "Subject", .value = "Source conversation" },
+                .{ .name = "Date", .value = "Mon, 12 Oct 2026 10:00:00 +0000" },
+                .{ .name = "Message-ID", .value = "<source@example.test>" },
+                .{ .name = "References", .value = "<earlier@example.test>" },
+            },
+            .parts = .{
+                .{ .mimeType = "text/html", .body = .{ .size = source_html.len, .data = try base64(a, source_html) } },
+                .{ .mimeType = "image/png", .filename = "source.png", .headers = .{ .{ .name = "Content-ID", .value = "<source-image>" }, .{ .name = "Content-Disposition", .value = "inline" } }, .body = .{ .size = 3, .attachmentId = image_id } },
+                .{ .mimeType = "text/css", .filename = "source.css", .headers = .{ .{ .name = "Content-Location", .value = "https://example.test/source.css" }, .{ .name = "Content-Disposition", .value = "inline" } }, .body = .{ .size = 3, .attachmentId = "style" } },
+                .{ .mimeType = "application/octet-stream", .filename = "source.bin", .headers = .{.{ .name = "Content-Disposition", .value = "attachment" }}, .body = .{ .size = 3, .attachmentId = "file" } },
+            },
+        },
+    }, .{});
+}
+fn original(value: Value) !Value {
+    const captured = j.get(value, "original") orelse return error.MissingOriginal;
+    try strings(source_html, j.text(captured, "bodyHtml"));
+    const resources = j.get(captured, "resources") orelse return error.MissingResources;
+    try equal(@as(usize, 2), resources.array.items.len);
+    try strings("AAH_", j.text(resources.array.items[0], "data"));
+    try strings("YWJj", j.text(resources.array.items[1], "data"));
+    try strings("https://example.test/source.css", j.text(resources.array.items[1], "contentLocation"));
+    return captured;
+}
+fn decodeWirePart(a: A, wire: []const u8, header: []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, wire, header) orelse return error.MissingWirePart;
+    const header_end = std.mem.indexOfPos(u8, wire, start, "\r\n\r\n") orelse return error.InvalidWirePart;
+    const end = std.mem.indexOfPos(u8, wire, header_end + 4, "\r\n--") orelse return error.InvalidWirePart;
+    const encoded = wire[header_end + 4 .. end];
+    if (std.mem.indexOf(u8, wire[start..header_end], "quoted-printable") != null) {
+        var decoded: std.ArrayList(u8) = .empty;
+        var index: usize = 0;
+        while (index < encoded.len) {
+            if (encoded[index] == '=') {
+                if (index + 2 >= encoded.len) return error.InvalidQuotedPrintable;
+                if (!(encoded[index + 1] == '\r' and encoded[index + 2] == '\n')) try decoded.append(a, try std.fmt.parseInt(u8, encoded[index + 1 ..][0..2], 16));
+                index += 3;
+            } else {
+                try decoded.append(a, encoded[index]);
+                index += 1;
+            }
+        }
+        return decoded.toOwnedSlice(a);
+    }
+    if (std.mem.indexOf(u8, wire[start..header_end], "base64") != null) {
+        var compact: std.ArrayList(u8) = .empty;
+        for (encoded) |byte| if (!std.ascii.isWhitespace(byte)) try compact.append(a, byte);
+        const bytes = try a.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(compact.items));
+        try std.base64.standard.Decoder.decode(bytes, compact.items);
+        return bytes;
+    }
+    return a.dupe(u8, encoded);
+}
+
+test "browser provider: formatted reply all uses fresh source verified aliases and frozen recovery" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    try actor(&provider, 1, "second@example.test", true, false);
+    try provider.cache.saveRead(0, .{ .id = "source", .threadId = "stale-thread", .bodyText = "Stale cached source", .bodyCached = true });
+    const full = try sourceMessage(a, "source", "image");
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .body = full },
+        .{ .url = aliases_url, .body = source_aliases },
+        .{ .url = source_image_url, .body = image_response },
+        .{ .url = source_style_url, .body = style_response },
+    });
+    const draft = try data(try invoke(&provider, a, .{ .cmd = "mail.reply", .account = account, .messageId = "source", .preserveFormatting = true, .all = true }, false));
+    const id = try j.required(draft, "id");
+    const frozen = try std.json.Stringify.valueAlloc(a, try original(draft), .{});
+    const to = j.get(draft, "to").?.array.items;
+    const cc = j.get(draft, "cc").?.array.items;
+    try equal(@as(usize, 1), to.len);
+    try strings("reply@example.test", j.text(to[0], "address"));
+    try equal(@as(usize, 2), cc.len);
+    try strings("peer@example.test", j.text(cc[0], "address"));
+    try strings("copy@example.test", j.text(cc[1], "address"));
+    try strings("source-thread", j.text(draft, "threadId"));
+    try strings("<source@example.test>", j.text(draft, "inReplyTo"));
+    try strings("<earlier@example.test> <source@example.test>", j.text(draft, "references"));
+    try verifyHost();
+    resetHost(&.{});
+    const changed = try data(try invoke(&provider, a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = .{ .to = "reply@example.test", .subject = "My note", .bodyText = "Edited note" } }, false));
+    try strings(frozen, try std.json.Stringify.valueAlloc(a, try original(changed), .{}));
+    const recovered = try data(try invoke(&provider, a, .{ .cmd = "draft.recovery-save", .account = account, .draftId = id, .draft = .{ .recoveryFields = [_][]const u8{ "unfinished@", "", "", "Unfinished subject", "Unfinished note" } } }, false));
+    try strings(frozen, try std.json.Stringify.valueAlloc(a, try original(recovered), .{}));
+    try strings("Unfinished note", j.get(recovered, "recoveryFields").?.array.items[4].string);
+    _ = try data(try invoke(&provider, a, .{ .cmd = "accounts.list" }, true));
+    _ = try data(try invoke(&provider, a, .{ .cmd = "accounts.identities", .account = "second@example.test" }, true));
+    _ = try data(try invoke(&provider, a, .{ .cmd = "accounts.identities", .account = account }, true));
+    try verifyHost();
+    // A second reply reuses only this actor's already verified aliases.
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .body = full },
+        .{ .url = source_image_url, .body = image_response },
+        .{ .url = source_style_url, .body = style_response },
+    });
+    _ = try data(try invoke(&provider, a, .{ .cmd = "mail.reply", .account = account, .messageId = "source", .preserveFormatting = true }, false));
+    try verifyHost();
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .session = 12, .body = full },
+        .{ .url = aliases_url, .session = 12, .body = "{\"sendAs\":[{\"sendAsEmail\":\"second@example.test\",\"isPrimary\":true}]}" },
+        .{ .url = source_image_url, .session = 12, .body = image_response },
+        .{ .url = source_style_url, .session = 12, .body = style_response },
+    });
+    const other = try data(try invoke(&provider, a, .{ .cmd = "mail.reply", .account = "second@example.test", .messageId = "source", .preserveFormatting = true, .all = true }, false));
+    try equal(@as(usize, 4), j.get(other, "cc").?.array.items.len);
+    try verifyHost();
+}
+
+test "browser provider: formatted forward preserves complete MIME and all source files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const full = try sourceMessage(a, "source", "image");
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .body = full },
+        .{ .url = source_image_url, .body = image_response },
+        .{ .url = source_style_url, .body = style_response },
+        .{ .url = source_file_url, .body = file_response },
+    });
+    const forward = try data(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .preserveFormatting = true }, false));
+    _ = try original(forward);
+    const files = j.get(forward, "attachments").?;
+    try equal(@as(usize, 1), files.array.items.len);
+    try strings("AP8N", j.text(files.array.items[0], "data"));
+    try strings("", j.text(forward, "threadId"));
+    try equal(@as(usize, 0), j.get(forward, "to").?.array.items.len);
+    try equal(@as(i64, 0), try j.integer(forward, "omittedAttachments", 0));
+    const id = try j.required(forward, "id");
+    _ = try data(try invoke(&provider, a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = .{ .to = "peer@example.test", .subject = "Forwarded source", .bodyText = "My new note", .attachments = files } }, false));
+    try verifyHost();
+    resetHost(&.{.{ .method = "POST", .url = send_url, .body = "{\"id\":\"sent-source\"}" }});
+    host.provider = &provider;
+    host.expected_draft = id;
+    host.capture_body = try a.alloc(u8, t.Limits.request_bytes);
+    try outcome(try send(&provider, a, id, "send-original-source"), "applied");
+    const sent = try parse(a, host.capture_body.?[0..host.captured_bytes]);
+    const encoded = try j.required(sent, "raw");
+    const wire = try a.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded));
+    try std.base64.url_safe_no_pad.Decoder.decode(wire, encoded);
+    const html = try decodeWirePart(a, wire, "Content-Type: text/html");
+    try expect(std.mem.indexOf(u8, html, "<style>.source{color:#123456}</style>") != null);
+    try expect(std.mem.indexOf(u8, html, source_body) != null);
+    try expect(std.mem.indexOf(u8, html, "My new note") != null);
+    try strings("\x00\x01\xff", try decodeWirePart(a, wire, "Content-ID: <source-image>"));
+    try strings("abc", try decodeWirePart(a, wire, "Content-Location: https://example.test/source.css"));
+    try strings("\x00\xff\r", try decodeWirePart(a, wire, "Content-Type: application/octet-stream"));
+    try acknowledgeReceipt(&provider, a, id, "send-original-source", true);
+    try equal(@as(usize, 0), provider.draftCount());
+    try verifyHost();
+}
+
+test "browser provider: raw forward is byte exact and failed hydration never creates a partial draft" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const raw = "From: Sender <sender@example.test>\r\nSubject: Opaque original\r\nContent-Type: application/octet-stream\r\n\r\n\x00\xff\r\n";
+    resetHost(&.{.{ .url = source_raw_url, .body = try std.json.Stringify.valueAlloc(a, .{ .id = "source", .raw = try base64(a, raw) }, .{}) }});
+    const draft = try data(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .original = true }, false));
+    const file = j.get(draft, "attachments").?.array.items[0];
+    try strings("original.eml", j.text(file, "filename"));
+    const encoded = try j.required(file, "data");
+    const decoded = try a.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded));
+    try std.base64.url_safe_no_pad.Decoder.decode(decoded, encoded);
+    try strings(raw, decoded);
+    try verifyHost();
+    const id = try j.required(draft, "id");
+    _ = try data(try invoke(&provider, a, .{ .cmd = "draft.discard", .account = account, .draftId = id }, false));
+    const full = try sourceMessage(a, "source", "image");
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .body = full },
+        .{ .url = source_image_url, .status = 404 },
+        .{ .url = source_url, .prefix = true, .body = try sourceMessage(a, "different-source", "rotated") },
+    });
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .preserveFormatting = true }, false), "MessageIdentityMismatch");
+    try equal(@as(usize, 0), provider.draftCount());
+    try verifyHost();
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .body = full },
+        .{ .url = source_image_url, .body = "{\"size\":3,\"data\":\"AA\"}" },
+    });
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .preserveFormatting = true }, false), "BodySizeMismatch");
+    try equal(@as(usize, 0), provider.draftCount());
+    try verifyHost();
+    resetHost(&.{
+        .{ .url = source_url, .prefix = true, .body = full },
+        .{ .url = source_image_url, .status = 404 },
+        .{ .url = source_url, .prefix = true, .body = try sourceMessage(a, "source", "rotated") },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/source/attachments/rotated", .body = image_response },
+        .{ .url = source_style_url, .body = style_response },
+        .{ .url = source_file_url, .body = file_response },
+    });
+    const retried = try data(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source" }, false));
+    const files = j.get(retried, "attachments").?.array.items;
+    try equal(@as(usize, 3), files.len);
+    try strings("rotated", j.text(files[0], "id"));
+    try strings("AAH_", j.text(files[0], "data"));
+    for (files) |attachment| {
+        try expect(j.get(attachment, "contentId") == null);
+        try expect(j.get(attachment, "contentLocation") == null);
+        try expect(j.get(attachment, "disposition") == null);
+    }
+    try verifyHost();
+}
+
+test "browser provider: local MIME expansion rejection has no POST or uncertain record and permits reviewed retry" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const resource = try a.alloc(u8, 1850 * 1024);
+    @memset(resource, 0xa5);
+    const captured: t.Original = .{ .sourceMessageId = "large-source", .bodyHtml = "<p>Large resource</p><img src=\"cid:large\">", .resources = &.{.{ .id = "large", .filename = "large.png", .mimeType = "image/png", .size = resource.len, .data = try base64(a, resource), .contentId = "large", .disposition = "inline" }} };
+    resetHost(&.{});
+    const value = try data(try invoke(&provider, a, .{ .cmd = "draft.create", .account = account, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Oversized portable MIME", .bodyText = "Retain my note", .original = captured } }, false));
+    const id = try j.required(value, "id");
+    const receipt = try send(&provider, a, id, "local-size-rejection");
+    try outcome(receipt, "rejected");
+    const result = try data(receipt);
+    try strings("local-size-rejection", j.text(result, "id"));
+    try strings(id, j.text(result, "draftId"));
+    try strings("FormTooLarge", j.text(result, "errorCode"));
+    try equal(@as(u32, 3), provider.sendStatus());
+    try equal(@as(usize, 0), (try operations(&provider, a)).len);
+    try expect(provider.pendingUnknown() == null);
+    try acknowledgeReceipt(&provider, a, id, "local-size-rejection", true);
+    const request = try std.json.Stringify.valueAlloc(a, .{ .cmd = "draft.send", .account = account, .draftId = id, .operationId = "local-rejection-output-failure" }, .{});
+    var failing_output: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.SendNotStarted, provider.client().call(failing_output.allocator(), request));
+    try expect(failing_output.has_induced_failure);
+    try equal(@as(usize, 0), (try operations(&provider, a)).len);
+    try expect(provider.pendingUnknown() == null);
+    try equal(@as(usize, 0), host.posts);
+    // Replacing a source is an explicit edit. Failed preparation must not
+    // leave a storage fence which blocks that correction or a new review.
+    _ = try data(try invoke(&provider, a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = .{ .to = "peer@example.test", .subject = "Reviewed correction", .bodyText = "Edited after local refusal", .original = @as(?t.Original, null) } }, false));
+    try equal(@as(usize, 0), host.posts);
+    try verifyHost();
+    resetHost(&.{.{ .method = "POST", .url = send_url, .body = "{\"id\":\"reviewed-retry\"}" }});
+    host.provider = &provider;
+    host.expected_draft = id;
+    try outcome(try send(&provider, a, id, "explicit-reviewed-retry"), "applied");
+    try acknowledgeReceipt(&provider, a, id, "explicit-reviewed-retry", true);
+    try equal(@as(usize, 1), host.posts);
+    try verifyHost();
+}
+
+test "browser provider: omitting oversized source files is explicit retains the quote and never downloads files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const input = try parse(a, try sourceMessage(a, "source", "image"));
+    var large_file = j.get(j.get(input, "payload").?, "parts").?.array.items[3];
+    var body = j.get(large_file, "body").?;
+    try body.object.put(a, "size", .{ .integer = t.Limits.body_bytes + 1 });
+    try large_file.object.put(a, "body", body);
+    const full = try std.json.Stringify.valueAlloc(a, input, .{});
+    resetHost(&.{.{ .url = source_url, .prefix = true, .body = full }});
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source" }, false), "AttachmentsTooLarge");
+    try equal(@as(usize, 0), provider.draftCount());
+    try verifyHost();
+    resetHost(&.{.{ .url = source_url, .prefix = true, .body = full }});
+    const draft = try data(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .omitAttachments = true }, false));
+    try equal(@as(i64, 3), try j.integer(draft, "omittedAttachments", 0));
+    try equal(@as(usize, 0), j.get(draft, "attachments").?.array.items.len);
+    try expect(std.mem.indexOf(u8, j.text(draft, "bodyText"), "Received source") != null);
+    try expect(std.mem.indexOf(u8, j.text(draft, "bodyText"), "<div") == null);
+    const id = try j.required(draft, "id");
+    const retained = try data(try invoke(&provider, a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = .{ .to = "peer@example.test", .bodyText = "Edited note" } }, false));
+    try equal(@as(i64, 3), try j.integer(retained, "omittedAttachments", 0));
+    try verifyHost();
+    resetHost(&.{});
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .omitAttachments = true, .preserveFormatting = true }, false), "InvalidForwardOptions");
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.forward", .account = account, .messageId = "source", .omitAttachments = true, .original = true }, false), "InvalidForwardOptions");
+    try verifyHost();
+}
+
+fn frozenDraft(provider: *Provider, a: A, address: []const u8, tag: []const u8, bytes: []const u8) ![]const u8 {
+    const captured: t.Original = .{ .sourceMessageId = tag, .bodyHtml = "<p>Retained source</p><img src=\"cid:retained\">", .resources = &.{.{ .id = "retained", .filename = "retained.png", .mimeType = "image/png", .size = bytes.len, .data = try base64(a, bytes), .contentId = "retained", .disposition = "inline" }} };
+    return j.required(try data(try invoke(provider, a, .{ .cmd = "draft.create", .account = address, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .subject = tag, .bodyText = "An active note must survive quota pressure", .original = captured } }, false)), "id");
+}
+fn storedDraftHash(provider: *const Provider, index: usize, id: []const u8) ![32]u8 {
+    for (provider.drafts[index]) |slot| if (slot.raw) |raw| if (std.mem.eql(u8, slot.id.slice(), id)) {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(raw, &hash, .{});
+        return hash;
+    };
+    return error.DraftNotFound;
+}
+fn storedDraftBytes(provider: *const Provider) usize {
+    var bytes: usize = 0;
+    for (provider.drafts) |slots| for (slots) |slot| if (slot.raw) |raw| {
+        bytes += raw.len;
+    };
+    return bytes;
+}
+
+test "browser provider: compact save acknowledgements retain original bytes and reject invalid flags before mutation" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const resource = try a.alloc(u8, 256 * 1024);
+    @memset(resource, 0xa5);
+    const resource_data = try base64(a, resource);
+    const received_original: t.Original = .{ .sourceMessageId = "frozen-source", .bodyHtml = "<p>Frozen source</p><img src=\"cid:frozen\">", .resources = &.{.{ .id = "frozen", .filename = "frozen.png", .mimeType = "image/png", .size = resource.len, .data = resource_data, .contentId = "frozen" }} };
+    const files: []const t.Attachment = &.{.{ .id = "file", .filename = "file.bin", .size = 3, .data = "AP-A" }};
+    resetHost(&.{});
+    const created = try data(try invoke(&provider, a, .{ .cmd = "draft.create", .account = account, .acknowledgementOnly = true, .draft = t.Draft{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "First note", .bodyFormat = .markdown, .attachments = files, .original = received_original } }, false));
+    try equal(@as(usize, 1), created.object.count());
+    const id = try j.required(created, "id");
+    const updated = try data(try invoke(&provider, a, .{ .cmd = "draft.update", .account = account, .draftId = id, .acknowledgementOnly = true, .draft = .{ .to = "peer@example.test", .bodyText = "Edited note", .attachments = files } }, false));
+    try equal(@as(usize, 1), updated.object.count());
+    try strings(id, j.text(updated, "id"));
+    var saved = try data(try invoke(&provider, a, .{ .cmd = "draft.read", .account = account, .draftId = id }, false));
+    try strings("Edited note", j.text(saved, "bodyText"));
+    try strings("markdown", j.text(saved, "bodyFormat"));
+    try strings(resource_data, j.text(j.get(j.get(saved, "original").?, "resources").?.array.items[0], "data"));
+    try strings(files[0].data, j.text(j.get(saved, "attachments").?.array.items[0], "data"));
+    const recovery_fields = [_][]const u8{ "unfinished address", "", "", "Recovery", "Unfinished note" };
+    const recovered = try data(try invoke(&provider, a, .{ .cmd = "draft.recovery-save", .account = account, .draftId = id, .acknowledgementOnly = true, .draft = .{ .recoveryFields = recovery_fields, .attachments = files } }, false));
+    try equal(@as(usize, 1), recovered.object.count());
+    try strings(id, j.text(recovered, "id"));
+    saved = try data(try invoke(&provider, a, .{ .cmd = "draft.read", .account = account, .draftId = id }, false));
+    try strings(recovery_fields[4], j.get(saved, "recoveryFields").?.array.items[4].string);
+    try strings(resource_data, j.text(j.get(j.get(saved, "original").?, "resources").?.array.items[0], "data"));
+    try strings(files[0].data, j.text(j.get(saved, "attachments").?.array.items[0], "data"));
+    const before_hash = try storedDraftHash(&provider, 0, id);
+    const before_bytes = provider.draft_bytes;
+    const before_sequence = provider.sequence;
+    for ([_][]const u8{ "draft.create", "draft.update", "draft.recovery-save" }) |cmd| {
+        try failure(try invoke(&provider, a, .{ .cmd = cmd, .account = account, .draftId = id, .acknowledgementOnly = "true", .draft = .{ .to = "peer@example.test", .bodyText = "Must not replace saved content", .recoveryFields = recovery_fields, .attachments = files } }, false), "InvalidRequest");
+        try equal(before_hash, try storedDraftHash(&provider, 0, id));
+        try equal(before_bytes, provider.draft_bytes);
+        try equal(before_sequence, provider.sequence);
+    }
+    try failure(try invoke(&provider, a, .{ .cmd = "draft.update", .account = account, .draftId = id, .acknowledgementOnly = true, .draft = .{ .subject = "Invalid\r\nHeader", .attachments = files } }, false), "HeaderInjection");
+    try equal(before_hash, try storedDraftHash(&provider, 0, id));
+    // Omitted and explicit false preserve the full CLI response contract.
+    for ([_]bool{ false, true }) |explicit_false| {
+        var request = try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = .{ .to = "peer@example.test", .bodyText = "Finished note", .attachments = files } });
+        if (explicit_false) try request.object.put(a, "acknowledgementOnly", .{ .bool = false });
+        const response = try data(try invoke(&provider, a, request, false));
+        try strings("Finished note", j.text(response, "bodyText"));
+        try strings(resource_data, j.text(j.get(j.get(response, "original").?, "resources").?.array.items[0], "data"));
+        try strings(files[0].data, j.text(j.get(response, "attachments").?.array.items[0], "data"));
+    }
+    try equal(@as(usize, 1), provider.draftCount());
+    try equal(@as(usize, 0), provider.operation_count);
+    try equal(@as(usize, 0), host.requests);
+    try verifyHost();
+}
+
+test "browser provider: large original draft lists are compact read-only summaries and full reads retain exact files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const bytes = try a.alloc(u8, 2000 * 1024);
+    @memset(bytes, 0xa5);
+    const resource_data = try base64(a, bytes);
+    const file_data = try base64(a, "Ordinary source bytes");
+    const received_original: t.Original = .{
+        .sourceMessageId = "large-original",
+        .subject = "Frozen source subject",
+        .bodyText = "Frozen source text",
+        .bodyHtml = "<p>Frozen source text</p><img src=\"cid:retained\">",
+        .resources = &.{.{ .id = "retained", .filename = "retained.png", .mimeType = "image/png", .size = bytes.len, .data = resource_data, .contentId = "retained", .disposition = "inline" }},
+    };
+    const file: t.Attachment = .{ .id = "ordinary", .filename = "source.txt", .mimeType = "text/plain", .size = "Ordinary source bytes".len, .data = file_data, .disposition = "attachment" };
+    var ids: [3][]const u8 = undefined;
+    var hashes: [3][32]u8 = undefined;
+    resetHost(&.{});
+    for (&ids, &hashes, 0..) |*id, *hash, index| {
+        var command: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer command.deinit();
+        const ca = command.allocator();
+        const created = try data(try invoke(&provider, ca, .{
+            .cmd = "draft.create",
+            .account = account,
+            .draft = t.Draft{
+                .to = &.{.{ .address = "peer@example.test" }},
+                .subject = try std.fmt.allocPrint(ca, "Large draft {d}", .{index}),
+                .bodyText = "Editable note remains in the full draft",
+                .bodyFormat = .markdown,
+                .omittedAttachments = 1,
+                .attachments = &.{file},
+                .original = received_original,
+            },
+        }, false));
+        id.* = try a.dupe(u8, try j.required(created, "id"));
+        hash.* = try storedDraftHash(&provider, 0, id.*);
+    }
+    try expect(provider.draft_bytes > 7 * 1024 * 1024);
+    try expect(provider.draft_bytes < 8 * 1024 * 1024);
+    const stored_bytes = provider.draft_bytes;
+    // Removing send permission must not remove access to local recovery data.
+    provider.live_sessions[0].can_send = false;
+    const request = try std.json.Stringify.valueAlloc(a, .{ .cmd = "draft.list", .account = account }, .{});
+    const listed_raw = try provider.client().call(a, request);
+    try expect(listed_raw.len < 16 * 1024);
+    try expect(listed_raw.len < t.Limits.request_bytes);
+    try expect(std.mem.indexOf(u8, listed_raw, resource_data[0..64]) == null);
+    const listed = j.get(try data(try parse(a, listed_raw)), "drafts").?.array.items;
+    try equal(@as(usize, 3), listed.len);
+    for (listed, ids, hashes) |summary, id, hash| {
+        try strings(id, j.text(summary, "id"));
+        try strings("", j.text(summary, "bodyText"));
+        try strings("markdown", j.text(summary, "bodyFormat"));
+        try equal(@as(i64, 1), try j.integer(summary, "omittedAttachments", 0));
+        if (j.get(summary, "original")) |value| try expect(value == .null);
+        if (j.get(summary, "recoveryFields")) |value| try expect(value == .null);
+        const files = j.get(summary, "attachments").?.array.items;
+        try equal(@as(usize, 1), files.len);
+        try strings(file.filename, j.text(files[0], "filename"));
+        try equal(@as(i64, @intCast(file.size)), try j.integer(files[0], "size", -1));
+        try strings("", j.text(files[0], "data"));
+        var read_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer read_arena.deinit();
+        const read = try data(try invoke(&provider, read_arena.allocator(), .{ .cmd = "draft.read", .account = account, .draftId = id }, false));
+        try strings("Editable note remains in the full draft", j.text(read, "bodyText"));
+        const retained = j.get(read, "original").?;
+        try strings(received_original.bodyHtml, j.text(retained, "bodyHtml"));
+        try strings(resource_data, j.text(j.get(retained, "resources").?.array.items[0], "data"));
+        try strings(file_data, j.text(j.get(read, "attachments").?.array.items[0], "data"));
+        try equal(hash, try storedDraftHash(&provider, 0, id));
+    }
+    try equal(stored_bytes, provider.draft_bytes);
+    try equal(stored_bytes, storedDraftBytes(&provider));
+    try equal(@as(usize, 0), provider.operation_count);
+    try equal(@as(usize, 0), host.requests);
+    try verifyHost();
+}
+
+test "browser provider: shared quota reclaims confirmed retired originals across actors without touching active or unknown drafts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const other = "bea@example.test";
+    try actor(&provider, 1, other, true, false);
+    const large = try a.alloc(u8, 1536 * 1024);
+    @memset(large, 0xa5);
+    // Create both originals before sending, so both confirmed drafts retain
+    // their roughly 2 MiB JSON snapshots in separate slots.
+    const first = try frozenDraft(&provider, a, account, "First confirmed original", large);
+    const second = try frozenDraft(&provider, a, account, "Second confirmed original", large);
+    const active = try frozenDraft(&provider, a, account, "Ada active original", large);
+    const unknown = try frozenDraft(&provider, a, other, "Bea unresolved original", large[0 .. 100 * 1024]);
+    resetHost(&.{
+        .{ .method = "POST", .url = send_url, .body = "{\"id\":\"confirmed-one\"}" },
+        .{ .method = "POST", .url = send_url, .body = "{\"id\":\"confirmed-two\"}" },
+        .{ .method = "POST", .url = send_url, .session = 12, .result = 1 },
+    });
+    host.provider = &provider;
+    host.expected_draft = first;
+    try outcome(try send(&provider, a, first, "quota-confirmed-one"), "applied");
+    try acknowledgeReceipt(&provider, a, first, "quota-confirmed-one", true);
+    host.expected_draft = second;
+    try outcome(try send(&provider, a, second, "quota-confirmed-two"), "applied");
+    try acknowledgeReceipt(&provider, a, second, "quota-confirmed-two", true);
+    host.expected_draft = unknown;
+    try outcome(try invoke(&provider, a, .{ .cmd = "draft.send", .account = other, .draftId = unknown, .operationId = "quota-unknown" }, false), "unknown");
+    const unknown_request = try std.json.Stringify.valueAlloc(a, .{ .cmd = "draft.send", .account = other, .draftId = unknown, .operationId = "quota-unknown" }, .{});
+    provider.client().sendReceipt(unknown_request, true);
+    const active_hash = try storedDraftHash(&provider, 0, active);
+    const unknown_hash = try storedDraftHash(&provider, 1, unknown);
+    try verifyHost();
+
+    resetHost(&.{});
+    const admitted = try frozenDraft(&provider, a, other, "Bea new original", large);
+    try expect(provider.draft_bytes <= 8 * 1024 * 1024);
+    try equal(provider.draft_bytes, storedDraftBytes(&provider));
+    try equal(@as(usize, 3), provider.draftCount());
+    try std.testing.expectError(error.DraftNotFound, storedDraftHash(&provider, 0, first));
+    _ = try storedDraftHash(&provider, 0, second);
+    _ = try storedDraftHash(&provider, 1, admitted);
+    try equal(active_hash, try storedDraftHash(&provider, 0, active));
+    try equal(unknown_hash, try storedDraftHash(&provider, 1, unknown));
+    const pending = provider.pendingUnknown() orelse return error.MissingUncertainFence;
+    try equal(@as(usize, 1), pending.account_index);
+    try strings(unknown, pending.draft_id);
+    const receipts = try operations(&provider, a);
+    try equal(@as(usize, 2), receipts.len);
+    for (receipts) |receipt| try strings("applied", j.text(receipt, "outcome"));
+    // Eviction has the same replay lifetime as reuse of a sent slot: the
+    // ledger remains, and a stale draft ID cannot submit another message.
+    try failure(try send(&provider, a, first, "quota-confirmed-one"), "DraftNotFound");
+    try equal(@as(usize, 2), (try operations(&provider, a)).len);
+    try failure(try invoke(&provider, a, .{ .cmd = "draft.discard", .account = other, .draftId = unknown }, false), "UnknownOutcome");
+    try verifyHost();
+}
+
+test "browser provider: unsuccessful quota admission preserves retired active and unconsumed originals atomically" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    var provider = Provider.init(failing.allocator());
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    const other = "bea@example.test";
+    try actor(&provider, 1, other, true, false);
+    const bytes = try a.alloc(u8, t.Limits.body_bytes);
+    @memset(bytes, 0xa5);
+    const retired = try frozenDraft(&provider, a, account, "Small confirmed original", bytes[0 .. 64 * 1024]);
+    const active = try frozenDraft(&provider, a, account, "Ada still editing", bytes[0 .. 1536 * 1024]);
+    const other_active = try frozenDraft(&provider, a, other, "Bea still editing", bytes[0 .. 1536 * 1024]);
+    const unconsumed = try frozenDraft(&provider, a, other, "Bea awaiting consumer", bytes[0 .. 1536 * 1024]);
+    resetHost(&.{
+        .{ .method = "POST", .url = send_url, .body = "{\"id\":\"confirmed-small\"}" },
+        .{ .method = "POST", .url = send_url, .session = 12, .body = "{\"id\":\"unconsumed-large\"}" },
+    });
+    host.provider = &provider;
+    host.expected_draft = retired;
+    try outcome(try send(&provider, a, retired, "small-confirmed"), "applied");
+    try acknowledgeReceipt(&provider, a, retired, "small-confirmed", true);
+    host.expected_draft = unconsumed;
+    try outcome(try invoke(&provider, a, .{ .cmd = "draft.send", .account = other, .draftId = unconsumed, .operationId = "awaiting-consumer" }, false), "applied");
+    try verifyHost();
+    const before_bytes = provider.draft_bytes;
+    const hashes = [_][32]u8{ try storedDraftHash(&provider, 0, retired), try storedDraftHash(&provider, 0, active), try storedDraftHash(&provider, 1, other_active), try storedDraftHash(&provider, 1, unconsumed) };
+
+    resetHost(&.{});
+    const captured: t.Original = .{ .sourceMessageId = "too-large-for-remaining-quota", .bodyHtml = "<img src=\"cid:retained\">", .resources = &.{.{ .id = "retained", .filename = "retained.png", .mimeType = "image/png", .size = bytes.len, .data = try base64(a, bytes), .contentId = "retained" }} };
+    try failure(try invoke(&provider, a, .{ .cmd = "draft.create", .account = other, .draft = t.Draft{ .subject = "Cannot fit", .original = captured } }, false), "BrowserDraftQuota");
+    try equal(before_bytes, provider.draft_bytes);
+    try equal(hashes[0], try storedDraftHash(&provider, 0, retired));
+    try equal(hashes[1], try storedDraftHash(&provider, 0, active));
+    try equal(hashes[2], try storedDraftHash(&provider, 1, other_active));
+    try equal(hashes[3], try storedDraftHash(&provider, 1, unconsumed));
+    try equal(provider.draft_bytes, storedDraftBytes(&provider));
+    try equal(@as(usize, 2), provider.operation_count);
+    try expect(provider.operations[1].awaiting_receipt);
+    // Allocation failure before admission is equally non-destructive.
+    const request = try std.json.Stringify.valueAlloc(a, .{ .cmd = "draft.create", .account = other, .draft = .{ .subject = "Allocation failure", .bodyText = "New note" } }, .{});
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectError(error.OutOfMemory, provider.client().call(a, request));
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try equal(before_bytes, provider.draft_bytes);
+    try equal(hashes[0], try storedDraftHash(&provider, 0, retired));
+    try equal(hashes[3], try storedDraftHash(&provider, 1, unconsumed));
+    try failure(try invoke(&provider, a, .{ .cmd = "draft.discard", .account = other, .draftId = unconsumed }, false), "UnknownOutcome");
+    try verifyHost();
 }

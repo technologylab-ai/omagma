@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         browser.entry = .disabled;
         browser.rdynamic = true;
         browser.export_memory = true;
-        browser.initial_memory = 20 * 1024 * 1024;
+        browser.initial_memory = 64 * 1024 * 1024;
         browser.max_memory = 64 * 1024 * 1024;
         browser.stack_size = 2 * 1024 * 1024;
         browser_step.dependOn(&b.addInstallArtifact(browser, .{ .dest_dir = .{ .override = .{ .custom = "web-demo" } } }).step);
