@@ -128,8 +128,33 @@ const longIncomingAddresses = incomingAddressFields.map((field, index) => {
 });
 const incomingSubject = index => `Ada incoming ${incomingAddressFields[index]} address`;
 const incomingBody = index => `Incoming ${incomingAddressFields[index]} header remains readable.\nLiteral cached body ${index}.\n`;
+const readerBorderWidths = [
+  ["wizard", "🧙", 2], ["wizard_vs", "🧙️", 2], ["wizard_zwj", "🧙‍♂️", 3],
+  ["volcano", "🌋", 2], ["wand", "🪄", 2], ["melting", "🫠", 2],
+  ["separator", "\u2063", 1], ["arabic_prefix", "\u0600", 1], ["hangul_filler", "\u1160", 1],
+  ["mongolian", "\u180e", 1], ["emoji_tag", "\u{e0067}", 1],
+];
+const readerBorderSubject = "Ada reader border 🪄 🫠 🧙️ 🌋\u2063 fixture";
+const readerBorderBody = ["BORDER_START · literal synthetic mail", ...readerBorderWidths.map(([name, glyph]) => `WIDTH_${name} P${glyph}X`),
+  "URL_STYLE https://example.test/long-reader-link/" + "synthetic-path/".repeat(14) + "?emoji=🪄&wizard=🧙️&tail=RIGHT",
+  ...Array.from({ length: 32 }, (_, index) => `EDGE_${String(index).padStart(2, "0")} ` + "a".repeat(34 + index) + (index % 2 ? "🪄" : "🧙️") + "X"),
+  "> Quoted reply with a long https://example.test/quoted/" + "wrapped-reply/".repeat(9) + "🫠 end.",
+  "> A second quoted line containing invisible\u2063separator and Japanese 日本語.",
+  "-- ", "Synthetic Wizard 🧙‍♂️ · Volcano 🌋 · New wand 🪄 · Melting 🫠", "BORDER_END",
+].join("\n") + "\n";
 function providerMessage(accountIndex, index, format) {
   if (originalsFixtureEnabled && [0, 2, 3, 4, 5, 6, 8].includes(index)) return originalProviderMessage(accountIndex, format, index);
+  if (args.get("--reader-borders-only") === "true" && accountIndex === 0 && index === 0) {
+    return { id: "ada-message-0", threadId: "ada-thread-0", labelIds: ["INBOX", "UNREAD", "STARRED"],
+      snippet: "Synthetic wizard 🧙️, wand 🪄, melting 🫠 and separator\u2063 border preview", historyId: "1200",
+      internalDate: "1791802800000", sizeEstimate: Buffer.byteLength(readerBorderBody) + 500,
+      payload: { partId: "", mimeType: "text/plain", filename: "", headers: [
+        { name: "From", value: "Synthetic Wizard 🧙️ 🪄 🫠 🌋\u2063 <wizard@example.test>" },
+        { name: "To", value: accounts[0] }, { name: "Subject", value: readerBorderSubject },
+        { name: "Message-ID", value: "<synthetic-reader-borders@example.test>" },
+        { name: "Date", value: "Mon, 12 Oct 2026 10:00:00 +0000" },
+      ], body: format === "metadata" ? { size: 0 } : { size: Buffer.byteLength(readerBorderBody), data: Buffer.from(readerBorderBody).toString("base64url") } } };
+  }
   if (args.get("--incoming-addresses-only") === "true" && accountIndex === 0 && index < incomingAddressFields.length) {
     const field = incomingAddressFields[index] === "From254" ? "From" : incomingAddressFields[index];
     const headers = [
@@ -746,6 +771,195 @@ try {
     const report = { beforeSpace, afterSpace, afterWord, afterFastWord, events: await evaluate("window.__omagmaKeyboardEvents") };
     await writeFile(join(work, "keyboard-diagnostic.json"), JSON.stringify(report, null, 2)+"\n", {mode:0o600});
     console.log(JSON.stringify(report));
+  } else if (args.get("--reader-borders-only") === "true") {
+    const stages = [], discrepancies = [], widthChecks = [], edgeCoverage = [], styledLinks = [];
+    async function cells() {
+      return evaluate(`(async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        const api=window.omagmaDemo,domMarkers=[],domCornerRuns=[],domRows=[...document.querySelectorAll('.xterm-rows > div')].map(element=>{
+          const result=[],markers=[],walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);let node;
+          while(node=walker.nextNode())for(let index=0;index<node.textContent.length;index++){
+            const chars=node.textContent[index];if(!'╭╮╰╯│PX'.includes(chars))continue;
+            const range=document.createRange();range.setStart(node,index);range.setEnd(node,index+1);const r=range.getBoundingClientRect();
+            ('PX'.includes(chars)?markers:result).push({chars,left:r.left,right:r.right,width:r.width});
+          }domMarkers.push(markers);
+          domCornerRuns.push([...element.children].filter(span=>/[╭╮]/.test(span.textContent)).map(span=>{
+            const range=document.createRange();range.selectNodeContents(span);const textRect=range.getBoundingClientRect(),r=span.getBoundingClientRect();
+            return {text:span.textContent,styleLeft:span.style.left,styleWidth:span.style.width,letterSpacing:getComputedStyle(span).letterSpacing,
+              left:r.left,width:r.width,textLeft:textRect.left,textWidth:textRect.width};
+          }));return result;
+        });return {cols:api.cols,rows:api.rows,unicodeVersion:api.unicodeVersion,domRows,domMarkers,domCornerRuns,
+        geometry:api.geometry(),viewport:{width:innerWidth,height:innerHeight},documentWidth:document.documentElement.scrollWidth,
+        cells:Array.from({length:api.rows},(_,row)=>Array.from({length:api.cols},(_,col)=>({...api.cell(col,row),...api.cellStyle(col,row)})))}})()`);
+    }
+    async function inspect(label, { widths = false } = {}) {
+      const value = await cells(), paneSpans = [], failures = [];
+      const lines = value.cells.map(row => row.map(cell => cell.chars).join(""));
+      // Pane corners establish the expected columns independently of body
+      // contents; every vertical side cell must remain at those columns.
+      for (let top = 0; top < value.rows; top++) {
+        for (let left = 0; left < value.cols; left++) {
+          if (value.cells[top][left].chars !== "╭") continue;
+          const right = value.cells[top].findIndex((cell, col) => col > left && cell.chars === "╮");
+          if (right < 0) { failures.push({ kind: "border", row: top, col: left, expected: "╮", actual: "missing top right corner" }); continue; }
+          const bottom = value.cells.findIndex((row, index) => index > top && row[left].chars === "╰");
+          if (bottom < 0) { failures.push({ kind: "border", row: top, col: left, expected: "╰", actual: "missing bottom left corner" }); continue; }
+          const reader = value.cells[top].slice(left + 1, right).map(cell => cell.chars).join("").includes("Message");
+          paneSpans.push({ left, right, top, bottom, reader, ...(reader ? { cornerRuns: value.domCornerRuns[top] } : {}) });
+          if (value.cells[bottom][right].chars !== "╯") failures.push({ kind: "border", row: bottom, col: right, expected: "╯", actual: value.cells[bottom][right].chars });
+          for (let row = top + 1; row < bottom; row++) for (const col of [left, right]) {
+            if (value.cells[row][col].chars !== "│") failures.push({ kind: "border", row, col, expected: "│", actual: value.cells[row][col].chars });
+          }
+          // A shifted new border can leave the previous frame's side intact.
+          // The literal source contains no box-drawing characters, so an
+          // additional interior side is corruption, even if the old side stays.
+          if (reader) for (let row = top + 1; row < bottom; row++) for (let col = left + 1; col < right; col++) {
+            if (value.cells[row][col].chars === "│") failures.push({ kind: "border", row, col, expected: "reader content, no stray pane side", actual: "│" });
+          }
+          if (reader) {
+            assert.equal(value.domRows.length, value.rows, `${label}: actual rendered DOM rows are unavailable`);
+            const anchors = [value.domRows[top].filter(item => item.chars === "╭").at(-1), value.domRows[top].filter(item => item.chars === "╮").at(-1)];
+            assert(anchors.every(Boolean), `${label}: actual rendered reader corners are unavailable`);
+            for (let row = top + 1; row < bottom; row++) {
+              const sides = value.domRows[row].filter(item => item.chars === "│").slice(-2);
+              for (let side = 0; side < 2; side++) if (!sides[side] || Math.abs(sides[side].left - anchors[side].left) > 0.75)
+                failures.push({ kind: "rendered-border", row, col: side === 0 ? left : right,
+                  expectedLeft: anchors[side].left, actualLeft: sides[side]?.left ?? null });
+            }
+          }
+        }
+      }
+      assert(paneSpans.length > 0, `${label}: no native pane corners were rendered`);
+      const { terminal, screen: rect } = value.geometry;
+      if (rect.right > terminal.right + 0.75 || rect.bottom > terminal.bottom + 0.75 || rect.left < terminal.left - 0.75 || rect.top < terminal.top - 0.75 || value.documentWidth > value.viewport.width + 1)
+        failures.push({ kind: "geometry", expected: "terminal grid entirely within host and viewport", terminal, screen: rect });
+      if (widths) for (const [name, glyph, width] of readerBorderWidths) {
+        const rowIndex = lines.findIndex(line => line.includes(`WIDTH_${name} `));
+        assert(rowIndex >= 0, `${label}: mandatory width fixture ${name} is not visible`);
+        const row = value.cells[rowIndex];
+        const anchor = row.findIndex((cell, index) => index > lines[rowIndex].indexOf(`WIDTH_${name}`) && cell.chars.startsWith("P"));
+        assert(anchor >= 0, `${label}: width anchor ${name} is missing`);
+        const sentinel = row.findIndex((cell, index) => index > anchor && cell.chars.startsWith("X"));
+        const paintedP = value.domMarkers[rowIndex]?.filter(item => item.chars === "P").at(-1);
+        const paintedX = value.domMarkers[rowIndex]?.filter(item => item.chars === "X").at(-1);
+        assert(paintedP && paintedX, `${label}: painted width sentinels ${name} are unavailable`);
+        const columnPixels = value.geometry.screen.width / value.cols;
+        const expectedPixels = (width + 1) * columnPixels, actualPixels = paintedX.left - paintedP.left;
+        widthChecks.push({ label, name, glyph, expected: width, actual: sentinel - anchor - 1, row: rowIndex, anchor, sentinel,
+          expectedPixels, actualPixels, sentinelPixels: paintedX.width });
+        if (sentinel !== anchor + width + 1) failures.push({ kind: "width", name, row: rowIndex, anchor, expectedSentinel: anchor + width + 1, actualSentinel: sentinel });
+        if (Math.abs(actualPixels - expectedPixels) > 0.75 || Math.abs(paintedX.width - columnPixels) > 0.75)
+          failures.push({ kind: "rendered-width", name, row: rowIndex, expectedPixels, actualPixels, sentinelPixels: paintedX.width, columnPixels });
+        if (["wand", "melting", "wizard", "volcano"].includes(name)) {
+          const first = row[anchor + 1], continuation = row[anchor + 2];
+          if (first.width !== 2 || continuation.width !== 0 || continuation.chars !== "") failures.push({ kind: "continuation", name, row: rowIndex, first, continuation });
+        }
+      }
+      for (const pane of paneSpans) for (let row = pane.top + 1; row < pane.bottom; row++) {
+        // The shared native panel reserves one padding cell inside each side.
+        // Its final body column is right-2, followed by padding, then border.
+        const glyph = value.cells[row][pane.right - 4], continuation = value.cells[row][pane.right - 3], tail = value.cells[row][pane.right - 2];
+        if (glyph.width === 2 && continuation.width === 0 && continuation.chars === "" && tail.chars === "X" && value.cells[row][pane.right - 1].chars === " ")
+          edgeCoverage.push({ label, row, right: pane.right, contentRight: pane.right - 2, glyph: glyph.chars });
+        const linkStart = value.cells[row].findIndex((cell, col) => col > pane.left && col < pane.right && cell.chars === "h" && value.cells[row][col + 1]?.chars === "t" && value.cells[row][col + 2]?.chars === "t" && value.cells[row][col + 3]?.chars === "p");
+        if (linkStart >= 0) styledLinks.push({ label, row, col: linkStart, fg: value.cells[row][linkStart].fg, bg: value.cells[row][linkStart].bg });
+      }
+      discrepancies.push(...failures.map(failure => ({ label, ...failure })));
+      stages.push({ label, cols: value.cols, rows: value.rows, paneSpans, failureCount: failures.length });
+      return { value, lines, failures };
+    }
+    async function resize(width, height, targetRows) {
+      await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+      await pause(100); await settled();
+      if (targetRows) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const value = await cells();
+          if (value.rows === targetRows) break;
+          const rowHeight = value.geometry.screen.height / value.rows;
+          height += Math.round((targetRows - value.rows) * rowHeight);
+          await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+          await pause(100); await settled();
+        }
+        assert.equal((await cells()).rows, targetRows, "could not reproduce the synthetic screenshot terminal row count");
+      }
+    }
+    await resize(1920, 1150);
+    await importBundle(bundles.ada); await connected(1);
+    await resize(1920, 1150, 46);
+    assert.equal((await cells()).cols, 177, "reader-border regression must reproduce the 177-column grid");
+    await act(() => key("Enter", "Enter")); await settled();
+    assert((await screen()).includes("BORDER_START"), "synthetic border source body was not read");
+    const topFrame = await inspect("177×46 reader top", { widths: true });
+    await screenshot("reader-borders-177x46.png");
+    if (args.get("--expect-border-failure") !== "true") {
+      const pitch = { x: topFrame.value.geometry.screen.width / topFrame.value.cols, y: topFrame.value.geometry.screen.height / topFrame.value.rows };
+      const point = (col, row) => ({ x: topFrame.value.geometry.screen.left + (col + 0.5) * pitch.x, y: topFrame.value.geometry.screen.top + (row + 0.5) * pitch.y });
+      assert(styledLinks.length > 0, "initial reader has no safe URL hover target");
+      await call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point(styledLinks[0].col, styledLinks[0].row) });
+      await inspect("177×46 after URL hover", { widths: true });
+      await key("F6", "F6");
+      assert(await evaluate("document.activeElement!==document.querySelector('.xterm-helper-textarea')"), "F6 did not move focus to page controls");
+      await inspect("177×46 after terminal blur", { widths: true });
+      await focus(); await inspect("177×46 after terminal refocus", { widths: true });
+      const selectionRow = widthChecks.find(item => item.name === "wand").row;
+      const start = point(112, selectionRow), end = point(128, selectionRow);
+      await call("Input.dispatchMouseEvent", { type: "mousePressed", ...start, button: "left", modifiers: 8, clickCount: 1 });
+      await call("Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1, modifiers: 8 });
+      await call("Input.dispatchMouseEvent", { type: "mouseReleased", ...end, button: "left", modifiers: 8, clickCount: 1 });
+      await until(async () => evaluate("Boolean(document.querySelector('.xterm-selection > div'))"), "actual terminal text-selection overlay did not render");
+      await inspect("177×46 after shifted text selection", { widths: true });
+      for (let index = 0; index < 9; index++) {
+        await act(() => text("j".repeat(9)));
+        await inspect(`177×46 reader scroll ${index + 1}`);
+      }
+      assert((await screen()).includes("BORDER_END"), "scrolling did not reach the synthetic signature and quoted history");
+      await screenshot("reader-borders-signature.png");
+      // Native gg returns to the first cached list row; Enter restores reader
+      // focus without changing the selected fixture or fetching a cached body.
+      await act(() => text("gg")); await act(() => key("Enter", "Enter"));
+      await inspect("177×46 reader restored", { widths: true });
+      await act(() => text("v")); await inspect("reader below");
+      await act(() => text("v")); await inspect("reader right restored", { widths: true });
+      await act(() => text("z")); await inspect("reader expanded");
+      await act(() => text("z")); await inspect("reader unexpanded", { widths: true });
+      await resize(1440, 1000); await inspect("1440×1000");
+      await resize(1060, 850); await inspect("compact reader width");
+      await screenshot("reader-borders-compact.png");
+      await resize(600, 700); await inspect("600×700 reader-only");
+      await screenshot("reader-borders-narrow.png");
+      await resize(1920, 1150, 46); await inspect("177×46 after narrow resize", { widths: true });
+      await writeFile(join(work, "reader-borders-render-diagnostic.json"), JSON.stringify({ stages, widthChecks, edgeCoverage, styledLinks, discrepancies }, null, 2) + "\n", { mode: 0o600 });
+      assert.deepEqual(discrepancies, [], "native pane borders or Unicode columns shifted during reader redraw");
+      assert(edgeCoverage.length > 0, "fixture never exercised a two-cell emoji and its continuation immediately before the right interior sentinel");
+      assert(styledLinks.length > 0 && styledLinks.some(link => link.fg !== 0xe8ebf1), "wrapped safe URL styling was not rendered");
+      await disconnect();
+      await click("#demo-reset");
+      await until(async () => evaluate("window.omagmaDemo?.ready===true"), "Reset did not reinitialize the sample TUI");
+      await settled();
+      await importBundle(bundles.ada); await connected(1); await resize(1920, 1150, 46);
+      await act(() => key("Enter", "Enter")); await inspect("177×46 after reset and reconnect", { widths: true });
+      await disconnect();
+      const beforeReload = requests.length, marker = events.length;
+      await call("Page.reload", { ignoreCache: true });
+      await until(async () => events.slice(marker).some(event => event.method === "Page.loadEventFired"), "reader-border reload did not complete");
+      await until(async () => evaluate("window.omagmaDemo?.ready===true"), "reader-border reload did not load the sample inbox");
+      assert.equal(requests.length, beforeReload, "reader-border reload automatically contacted Google");
+      await importBundle(bundles.ada); await connected(1); await resize(1920, 1150, 46);
+      await act(() => key("Enter", "Enter")); await inspect("177×46 after reload and verified cache restore", { widths: true });
+      await screenshot("reader-borders-restored.png");
+    }
+    assert.equal(sends().length, 0, "reading synthetic mail submitted a Gmail write");
+    assert(maximumActiveRequests <= 1, "border fixture bypassed the single network worker");
+    assert.deepEqual(transportErrors, []); assert.deepEqual(unexpectedDestinations, []);
+    assert.equal(await evaluate("window.mailInjected"), undefined);
+    const expectedFailure = args.get("--expect-border-failure") === "true";
+    const report = { synthetic: true, actualGoogleRequests: 0, syntheticSendRequests: 0, browser: version.product,
+      wasmSha256: createHash("sha256").update(await readFile(join(site, "omagma.wasm"))).digest("hex"),
+      requestCount: requests.length, maximumActiveRequests, expectedFailure, stages, widthChecks, edgeCoverage, styledLinks, discrepancies };
+    await writeFile(join(work, expectedFailure ? "reader-borders-negative.json" : "reader-borders-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+    if (expectedFailure) assert(discrepancies.some(failure => failure.kind === "border" || failure.kind === "rendered-border"), "negative control did not reproduce an actual shifted buffer or painted border");
+    else assert.deepEqual(discrepancies, [], "native pane borders or Unicode columns shifted during reader redraw");
+    console.log(JSON.stringify({ synthetic: true, expectedFailure, actualGoogleRequests: 0, syntheticSendRequests: 0, stageCount: stages.length,
+      discrepancyCount: discrepancies.length, firstFailure: discrepancies[0], edgeCount: edgeCoverage.length, requestCount: requests.length }));
   } else if (args.get("--incoming-addresses-only") === "true") {
     const checks = {}, localSelections = [];
     assert(longIncomingAddresses.every(address => address.split("@")[0].length === 65));

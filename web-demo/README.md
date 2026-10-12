@@ -115,10 +115,15 @@ stay in the host transport, outside WASM and diagnostics. The build requires
 explicit `-Dbrowser=true`; ordinary native builds keep their existing entry
 point and dependency selection. No WASI runtime or remote PTY is involved.
 
-The browser uses xterm's pinned Unicode 11 width provider so stars, rockets,
-CJK text and combining accents agree with the native renderer's current
-`wcwidth` mode in these fixtures. This does not establish complete agreement
-with the native library's newer Unicode tables. The terminal host's inset box
+The browser terminal queries the WASM renderer's scalar-width policy through
+`codepoint_width`, so xterm and the shared TUI use the same Unicode tables in
+the browser's additive `wcwidth` mode. This also covers newer emoji and invisible
+characters that differ from older terminal width tables. A small DOM placement
+adapter gives xterm's existing styled spans their declared column positions,
+including characters whose fonts ignore letter-spacing. It preserves their
+text and styles, pins box-drawing glyphs individually without splitting normal
+text shaping, and observes row replacements from focus, selection and hover.
+The host's inset box
 defines the usable grid size; margins are excluded from fitting so the right
 and bottom borders remain visible.
 

@@ -1,7 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { boundedSize, BrowserWasmBridge } from './bridge.mjs';
+import { boundedSize, BrowserWasmBridge, terminalUnicode, alignTerminalRows } from './bridge.mjs';
 import { importCredentialFiles, importConnectionFile } from './credentials.mjs';
 import { SessionTransport, pendingSend, acknowledgePendingSend } from './transport.mjs';
 import { createBrowserCache } from './cache.mjs';
@@ -41,10 +40,9 @@ const terminal = new Terminal({
 });
 const fit = new FitAddon();
 terminal.loadAddon(fit);
-terminal.loadAddon(new Unicode11Addon());
-terminal.unicode.activeVersion = '11';
 terminal.open(terminalElement);
 let bridge = null;
+let terminalWidths = null;
 let transport = null;
 let module = null;
 let ready = false;
@@ -70,6 +68,12 @@ const pendingInput = new Uint8Array(64 * 1024);
 let pendingLength = 0;
 let inputNotice = '';
 const sessionDraftCount = () => bridge?.exports.draft_count?.() ?? 0;
+const terminalRows = terminalElement.querySelector('.xterm-rows');
+terminal.onRender(({ start, end }) => alignTerminalRows(terminalRows, terminal.cols, terminalWidths, start, end));
+// Selection, focus and link hover can replace DOM rows outside onRender.
+// Observe only child lists, so our own geometry attributes cannot feed back.
+new MutationObserver(() => alignTerminalRows(terminalRows, terminal.cols, terminalWidths))
+  .observe(terminalRows, { childList: true, subtree: true });
 
 function screenText() {
   const buffer = terminal.buffer.active;
@@ -307,6 +311,10 @@ async function start(nextMode = 'demo') {
   updateControls();
   try {
     if (oldJob) { try { await oldJob; } catch {} }
+    // Pending old output must never query a width export after its memory wipe.
+    // The next instance installs its own provider before emitting any frame.
+    terminal.unicode.activeVersion = '6';
+    terminalWidths = null;
     oldBridge?.wipe();
     if (thisGeneration !== generation) return;
     terminal.reset();
@@ -324,6 +332,10 @@ async function start(nextMode = 'demo') {
     instance = await WebAssembly.instantiate(module, { env: { http_request: hasJSPI ? new WebAssembly.Suspending(http) : () => 3, now_ms: () => Date.now() } });
     if (thisGeneration !== generation) { currentTransport.close(); new Uint8Array(instance.exports.memory.buffer).fill(0); return; }
     transport = currentTransport;
+    const unicode = terminalUnicode(instance.exports);
+    terminal.unicode.register(unicode);
+    terminal.unicode.activeVersion = unicode.version;
+    terminalWidths = unicode;
     let firstFrame;
     const displayed = new Promise(resolve => { firstFrame = resolve; });
     bridge = new BrowserWasmBridge(instance, bytes => {

@@ -15,7 +15,7 @@ const wasm = options.has('--wasm') ? resolve(process.cwd(), options.get('--wasm'
 const module = await WebAssembly.compile(await readFile(wasm));
 for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms'].includes(entry.name) || entry.kind !== 'function') throw new Error('The browser module imports an unsupported host capability.');
 const exports = new Set(WebAssembly.Module.exports(module).map(({ name }) => name));
-for (const name of ['memory', 'init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len']) {
+for (const name of ['memory', 'init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width']) {
   if (!exports.has(name)) throw new Error(`Missing browser WASM export: ${name}`);
 }
 const out = options.has('--out-dir') ? resolve(process.cwd(), options.get('--out-dir')) : resolve(here, 'dist');
@@ -36,7 +36,6 @@ await Promise.all([
   cp(resolve(here, 'node_modules/@xterm/xterm/css/xterm.css'), resolve(out, 'xterm.css')),
   cp(resolve(here, 'node_modules/@xterm/xterm/LICENSE'), resolve(out, 'LICENSE-xterm.txt')),
   cp(resolve(here, 'node_modules/@xterm/addon-fit/LICENSE'), resolve(out, 'LICENSE-xterm-addon-fit.txt')),
-  cp(resolve(here, 'node_modules/@xterm/addon-unicode11/LICENSE'), resolve(out, 'LICENSE-xterm-addon-unicode11.txt')),
   cp(wasm, resolve(out, 'omagma.wasm')),
 ]);
 console.log(`Built static browser experiment: ${out}`);

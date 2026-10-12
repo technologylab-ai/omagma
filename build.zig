@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
 fn embeddedAssetSource(enabled: bool) []const u8 {
     if (!enabled) return "pub fn assets(comptime Asset: type) [0]Asset { return .{}; }\n";
     return
-    \\pub fn assets(comptime Asset: type) [9]Asset {
+    \\pub fn assets(comptime Asset: type) [8]Asset {
     \\    return .{
     \\        .{ .path = "/index.html", .mime = "text/html; charset=utf-8", .bytes = @embedFile("assets/index.html") },
     \\        .{ .path = "/app.mjs", .mime = "text/javascript; charset=utf-8", .bytes = @embedFile("assets/app.mjs") },
@@ -116,7 +116,6 @@ fn embeddedAssetSource(enabled: bool) []const u8 {
     \\        .{ .path = "/app.mjs.LEGAL.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/app.mjs.LEGAL.txt") },
     \\        .{ .path = "/LICENSE-xterm.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/LICENSE-xterm.txt") },
     \\        .{ .path = "/LICENSE-xterm-addon-fit.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/LICENSE-xterm-addon-fit.txt") },
-    \\        .{ .path = "/LICENSE-xterm-addon-unicode11.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/LICENSE-xterm-addon-unicode11.txt") },
     \\    };
     \\}
     \\

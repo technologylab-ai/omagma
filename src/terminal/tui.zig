@@ -14982,6 +14982,51 @@ test "local UI: narrowing contacts clears the owning account while another draft
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+const browser_width_method: vaxis.gwidth.Method = .wcwidth;
+
+/// The browser terminal consumes the same scalar widths used to lay out and
+/// render its cells. Keep Unicode tables in libvaxis rather than maintaining a
+/// separate host table, which can shift later borders when versions differ.
+pub fn browserCodepointWidth(codepoint: u32) u8 {
+    if (codepoint > 0x10ffff or (codepoint >= 0xd800 and codepoint <= 0xdfff)) return 1;
+    var bytes: [4]u8 = undefined;
+    const length = std.unicode.utf8Encode(@intCast(codepoint), &bytes) catch return 1;
+    return @intCast(vaxis.gwidth.gwidth(bytes[0..length], browser_width_method));
+}
+
+test "browser cell widths: scalar policy includes current emoji invisible marks and invalid input" {
+    const Case = struct { codepoint: u32, columns: u8 };
+    const cases = [_]Case{
+        .{ .codepoint = 0, .columns = 0 },
+        .{ .codepoint = '\n', .columns = 0 },
+        .{ .codepoint = 0x1b, .columns = 0 },
+        .{ .codepoint = 0x7f, .columns = 0 },
+        .{ .codepoint = ' ', .columns = 1 },
+        .{ .codepoint = 'A', .columns = 1 },
+        .{ .codepoint = 0xe9, .columns = 1 },
+        .{ .codepoint = 0x301, .columns = 0 },
+        .{ .codepoint = 0xad, .columns = 0 },
+        .{ .codepoint = 0x200d, .columns = 0 },
+        .{ .codepoint = 0xfe0f, .columns = 0 },
+        .{ .codepoint = 0x2b50, .columns = 2 },
+        .{ .codepoint = 0x754c, .columns = 2 },
+        .{ .codepoint = 0x1f3fb, .columns = 2 },
+        .{ .codepoint = 0x1f9d9, .columns = 2 },
+        .{ .codepoint = 0x1fa84, .columns = 2 },
+        .{ .codepoint = 0x1fae0, .columns = 2 },
+        .{ .codepoint = 0x600, .columns = 1 },
+        .{ .codepoint = 0x1160, .columns = 1 },
+        .{ .codepoint = 0x180e, .columns = 1 },
+        .{ .codepoint = 0x2063, .columns = 1 },
+        .{ .codepoint = 0xe0067, .columns = 1 },
+        .{ .codepoint = 0xd800, .columns = 1 },
+        .{ .codepoint = 0xdfff, .columns = 1 },
+        .{ .codepoint = 0x110000, .columns = 1 },
+        .{ .codepoint = 0xffffffff, .columns = 1 },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.columns, browserCodepointWidth(case.codepoint));
+}
+
 /// Browser runtime adapter for the same App controller used by run().
 /// Provider owns sessions, bounded persistence and command execution; this
 /// shell only owns the terminal surface and serial completion pump.
@@ -15005,6 +15050,7 @@ pub const BrowserSession = struct {
         self.vx = try vaxis.init(browser_live.io, allocator, &self.environ, .{});
         errdefer self.vx.deinit(allocator, output);
         self.vx.caps.rgb = true;
+        self.vx.caps.unicode = browser_width_method;
         self.vx.sgr = .legacy;
         self.vx.state.alt_screen = true;
         self.app = .{

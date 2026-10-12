@@ -25,6 +25,12 @@ var output_length: usize = 0;
 var writer: std.Io.Writer = undefined;
 var decoder: @import("terminal/input.zig").Decoder = .{};
 
+// A synchronous, allocation-free query for the terminal host. It is safe
+// before init and while another operation is suspended; it touches no session.
+export fn codepoint_width(codepoint: u32) u32 {
+    return tui.browserCodepointWidth(codepoint);
+}
+
 export fn init(cols: u32, rows: u32) u32 {
     if (busy) return 4;
     if (initialized) return resize(cols, rows);

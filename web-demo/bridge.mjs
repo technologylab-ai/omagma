@@ -1,9 +1,92 @@
-const requiredFunctions = ['init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len'];
+const requiredFunctions = ['init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width'];
 const MAX_INPUT_EVENT = 64 * 1024;
 const MAX_OUTPUT_FRAME = 2 * 1024 * 1024;
 
 export function boundedSize(cols, rows) {
   return { cols: Math.min(240, Math.max(2, Math.floor(cols) || 2)), rows: Math.min(80, Math.max(2, Math.floor(rows) || 2)) };
+}
+
+// xterm consumes additive scalar widths, just like the browser Vaxis adapter.
+// The Unicode tables and width policy live only in the Zig renderer.
+export function terminalUnicode(exports) {
+  if (typeof exports.codepoint_width !== 'function') throw new Error('The browser module is missing codepoint_width().');
+  const width = codepoint => {
+    const columns = exports.codepoint_width(codepoint);
+    if (columns !== 0 && columns !== 1 && columns !== 2) throw new Error('The WebAssembly TUI returned an invalid character width.');
+    return columns;
+  };
+  return {
+    version: 'omagma-wcwidth',
+    wcwidth: width,
+    charProperties(codepoint, preceding) {
+      let columns = width(codepoint);
+      const previousColumns = (preceding >> 1) & 3;
+      const joins = columns === 0 && preceding !== 0 && previousColumns > 0;
+      if (joins) columns = previousColumns;
+      // Public xterm 6 Unicode provider properties: width bits 1–2, join bit 0.
+      return (columns << 1) | Number(joins);
+    },
+  };
+}
+
+function borderParts(text, unicode) {
+  const parts = [];
+  let current = '', border = false;
+  for (const character of text) {
+    const codepoint = character.codePointAt(0);
+    const width = unicode.wcwidth(codepoint);
+    const nextBorder = codepoint >= 0x2500 && codepoint <= 0x257f;
+    if (current && (nextBorder || (border && width > 0))) {
+      parts.push(current);
+      current = '';
+    }
+    current += character;
+    if (width > 0) border = nextBorder;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+// The pinned DOM renderer relies on letter-spacing for cell geometry, which
+// some invisible/shaping characters ignore. Position styled spans by declared
+// columns; split border glyphs to avoid accumulated internal spacing error.
+// Normal text stays merged, retaining its existing shaping and Unicode data.
+export function alignTerminalRows(rows, columns, unicode, start = 0, end = rows.children.length - 1) {
+  if (!unicode || !Number.isInteger(columns) || columns < 2 || columns > 240) return;
+  for (let index = Math.max(0, start); index <= end && index < rows.children.length && index < 80; index++) {
+    const row = rows.children[index];
+    const cellWidth = Number.parseFloat(row.style.width) / columns;
+    if (!Number.isFinite(cellWidth) || cellWidth <= 0) continue;
+    row.style.position = 'relative';
+    const spans = [];
+    for (const span of Array.from(row.children)) {
+      const text = span.textContent ?? '';
+      if (text.length > 1 && /[\u2500-\u257f]/u.test(text)) {
+        const parts = borderParts(text, unicode);
+        if (parts.length > 1) {
+          const cells = parts.map(part => {
+            const cell = span.cloneNode(false);
+            cell.textContent = part;
+            return cell;
+          });
+          span.replaceWith(...cells);
+          spans.push(...cells);
+          continue;
+        }
+      }
+      spans.push(span);
+    }
+    let column = 0;
+    for (const span of spans) {
+      let width = 0;
+      for (const character of span.textContent ?? '') width += unicode.wcwidth(character.codePointAt(0));
+      span.style.position = 'absolute';
+      span.style.top = '0px';
+      span.style.left = `${column * cellWidth}px`;
+      span.style.width = `${width * cellWidth}px`;
+      column += width;
+    }
+  }
 }
 
 export class BrowserWasmBridge {
