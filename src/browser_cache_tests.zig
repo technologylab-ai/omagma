@@ -57,6 +57,67 @@ fn repeatedRows(a: std.mem.Allocator, count: usize, contacts: bool) ![]const u8 
     return std.mem.concat(a, u8, &.{ "[", try std.mem.join(a, ",", rows), "]" });
 }
 
+test "browser cache: received long local parts survive list full read and snapshot without granting send permission" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Literal received mailbox, independent of cache output or parser helpers.
+    const received = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.test";
+    const peers = [_]types.Address{.{ .address = received, .name = "Received peer" }};
+    const message: types.Message = .{
+        .id = "long-address-mail",
+        .threadId = "long-address-thread",
+        .from = peers[0],
+        .to = &peers,
+        .cc = &peers,
+        .replyTo = &peers,
+        .subject = "Long received address",
+        .labels = &.{"INBOX"},
+        .bodyText = "A readable received message.",
+        .receivedAt = 1791730000000,
+    };
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.replaceView(0, &.{try j.value(a, message)}, message.receivedAt, "INBOX", true);
+    try std.testing.expectEqualStrings(received, store.retained(0)[0].from.address);
+    try store.saveRead(0, message);
+    const bytes = try snapshot(a, &store, 0);
+    var restored = cache.Store.init(std.testing.allocator);
+    defer restored.deinit();
+    try restored.bind(0, actor);
+    try restored.restore(0, bytes, true);
+    const read = (try restored.read(0, message.id)).?;
+    try std.testing.expectEqualStrings(message.bodyText, read.bodyText);
+    try std.testing.expectEqualStrings(received, read.from.address);
+    try std.testing.expectEqualStrings(received, read.to[0].address);
+    try std.testing.expectEqualStrings(received, read.cc[0].address);
+    try std.testing.expectEqualStrings(received, read.replyTo[0].address);
+    try std.testing.expectError(error.InvalidAddress, @import("terminal/recipients.zig").validateAddress(read.replyTo[0].address));
+    // Contacts retain their existing sending-address admission policy.
+    const contact = try j.value(a, types.Contact{ .resourceName = "people/long-contact", .emails = &peers });
+    try std.testing.expectError(error.InvalidAddress, restored.replaceContacts(0, &.{contact}));
+    try std.testing.expectEqualStrings(received, (try restored.read(0, message.id)).?.from.address);
+}
+
+test "browser cache: incoming syntax and total bounds still reject unsafe addresses atomically" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.restore(0, fixture, true);
+    const before = try snapshot(a, &store, 0);
+    const oversized_local: [242]u8 = @splat('a');
+    const too_long = try std.mem.concat(a, u8, &.{ &oversized_local, "@example.test" });
+    for ([_][]const u8{ "a..b@example.test", "peer@example.test\r\nBcc: hidden@example.test", too_long }) |invalid| {
+        const bad: types.Message = .{ .id = "invalid-address-mail", .threadId = "invalid-address-thread", .from = .{ .address = invalid } };
+        try std.testing.expectError(if (invalid.len > 254) error.InvalidBrowserCache else error.InvalidAddress, store.saveRead(0, bad));
+        try std.testing.expectEqualStrings(before, try snapshot(a, &store, 0));
+    }
+}
+
 test "browser cache: independent literal snapshot restores passive bodies and caller-owned contacts" {
     var store = cache.Store.init(std.testing.allocator);
     defer store.deinit();

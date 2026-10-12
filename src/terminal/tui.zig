@@ -234,6 +234,18 @@ fn readerEnvelope(allocator: Allocator, to: []const u8, cc: []const u8, stamp: [
     return if (cc.len > 0) std.fmt.allocPrint(allocator, "To: {s}\nCc: {s}\n{s}", .{ to, cc, stamp }) else std.fmt.allocPrint(allocator, "To: {s}\n{s}", .{ to, stamp });
 }
 
+fn displayMailboxes(allocator: Allocator, value: Value, comptime format: anytype) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (items(value), 0..) |mailbox, index| {
+        if (index > 0) try out.appendSlice(allocator, ", ");
+        const display = try format(allocator, text(get(mailbox, "address")), text(get(mailbox, "name")));
+        defer allocator.free(display);
+        try out.appendSlice(allocator, display);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn readerEnd(lines: usize, height: usize) usize {
     return lines -| @max(height, 1);
 }
@@ -678,15 +690,7 @@ const Compose = struct {
         self.original = null;
     }
     fn mailboxes(allocator: Allocator, value: Value) ![]const u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-        for (items(value), 0..) |mailbox, index| {
-            if (index > 0) try out.appendSlice(allocator, ", ");
-            const display = try recipients.formatDisplay(allocator, text(get(mailbox, "address")), text(get(mailbox, "name")));
-            defer allocator.free(display);
-            try out.appendSlice(allocator, display);
-        }
-        return out.toOwnedSlice(allocator);
+        return displayMailboxes(allocator, value, recipients.formatDisplay);
     }
     fn load(self: *Compose, allocator: Allocator, value_in: Value) !void {
         self.deinit(allocator);
@@ -8920,8 +8924,8 @@ const App = struct {
     fn readerSnapshot(self: *App) ![]const u8 {
         const message = try self.readerCopyTarget();
         const from = get(message, "from");
-        const to = try Compose.mailboxes(self.frame.allocator(), get(message, "to"));
-        const cc = try Compose.mailboxes(self.frame.allocator(), get(message, "cc"));
+        const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), recipients.formatIncomingDisplay);
+        const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), recipients.formatIncomingDisplay);
         const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
         const body = text(get(message, "bodyText"));
         if (body.len > types.Limits.body_bytes) return error.BodyTooLarge;
@@ -9631,8 +9635,8 @@ const App = struct {
                 }
             }
             const compact = natural_height <= 12 or win.width < 60;
-            const to = try Compose.mailboxes(self.frame.allocator(), get(message, "to"));
-            const cc = try Compose.mailboxes(self.frame.allocator(), get(message, "cc"));
+            const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), recipients.formatIncomingDisplay);
+            const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), recipients.formatIncomingDisplay);
             const subject = text(get(message, "subject"));
             const shown_subject = if (subject.len == 0) "(no subject)" else subject;
             row = try self.flowTone(win, if (compact) try self.fitLine(win, shown_subject, win.width) else shown_subject, self.reader_scroll, row, .subject);
@@ -14231,6 +14235,49 @@ test "local UI: unread stars and bulk marks stay independent on focused narrow m
         try std.testing.expectEqualStrings("S", screen.readCell(3, 4).?.char.grapheme);
         try std.testing.expect(screen.readCell(3, 3).?.style.bold);
     }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: received long local parts render and copy while compose recipients stay strict" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"received-long\"}]}}");
+    const long_to = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.test";
+    const long_cc = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb@example.test";
+    try std.testing.expectEqual(@as(usize, 65), std.mem.indexOfScalar(u8, long_to, '@').?);
+    try std.testing.expectEqual(@as(usize, 65), std.mem.indexOfScalar(u8, long_cc, '@').?);
+    const message: types.Message = .{
+        .id = "received-long",
+        .threadId = "received-thread",
+        .from = .{ .address = "sender@example.test", .name = "Sender" },
+        .to = &.{.{ .address = long_to, .name = "Doe, Jane" }},
+        .cc = &.{.{ .address = long_cc }},
+        .subject = "Received address boundary",
+        .bodyText = "The delivered body remains readable.",
+    };
+    const response = try std.json.Stringify.valueAlloc(app.frame.allocator(), .{ .ok = true, .data = .{ .messages = [_]types.Message{message} } }, .{});
+    try app.replaceReader(true, response, true);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 24, .screen = &screen };
+    _ = try app.readerBodyDraw(win);
+    const rendered = try markdownTestScreenText(a, &screen);
+    defer a.free(rendered);
+    const expected_to = "To: \"Doe, Jane\" <" ++ long_to ++ ">";
+    const expected_cc = "Cc: " ++ long_cc;
+    try std.testing.expect(std.mem.indexOf(u8, rendered, expected_to) != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, expected_cc) != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, message.bodyText) != null);
+    try app.copyReaderMessage();
+    const copied = app.reader_copy_test_value.value();
+    try std.testing.expect(std.mem.indexOf(u8, copied, expected_to ++ "\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, copied, expected_cc ++ "\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, copied, message.bodyText));
+    try std.testing.expectError(error.InvalidAddress, Compose.mailboxes(a, get(app.thread[0], "to")));
+    try std.testing.expectError(error.InvalidAddress, Compose.mailboxes(a, get(app.thread[0], "cc")));
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 

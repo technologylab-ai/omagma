@@ -45,7 +45,7 @@ pub fn formatDisplay(allocator: std.mem.Allocator, address: []const u8, name: []
 /// have different size bounds; only selected outgoing recipients use SMTP
 /// validation in addIncomingExternal.
 pub fn formatIncomingDisplay(allocator: std.mem.Allocator, address: []const u8, name: []const u8) ![]u8 {
-    try validateAddressSyntax(address, true);
+    try validateIncomingAddress(address);
     return formatDisplayName(allocator, address, name);
 }
 
@@ -75,6 +75,11 @@ fn formatDisplayName(allocator: std.mem.Allocator, address: []const u8, name: []
 /// mailboxes are rejected explicitly; UTF-8 display names are supported.
 pub fn validateAddress(address: []const u8) !void {
     return validateAddressSyntax(address, false);
+}
+/// A received header is not an outgoing SMTP envelope. Preserve the address
+/// grammar and total bound without imposing SMTP's 64-byte local-part limit.
+pub fn validateIncomingAddress(address: []const u8) !void {
+    return validateAddressSyntax(address, true);
 }
 /// RFC 5322 address headers do not impose SMTP's 64-octet local-part limit.
 /// Retain the 254-byte address bound and all syntax/injection checks. Only an
@@ -542,6 +547,9 @@ test "incoming local parts preserve header syntax while outgoing SMTP limits rem
     try std.testing.expectEqual(@as(usize, 64), std.mem.indexOfScalar(u8, boundary, '@').?);
     try validateAddress(boundary);
     try std.testing.expectError(error.InvalidAddress, validateAddress(long));
+    try validateIncomingAddress(long);
+    try std.testing.expectError(error.InvalidAddress, validateIncomingAddress("a..b@example.test"));
+    try std.testing.expectError(error.InvalidAddress, validateIncomingAddress("peer@example.test\r\nBcc: hidden@example.test"));
     const incoming = try parseIncoming("Reply person <" ++ long ++ ">", std.testing.allocator);
     defer deinitIncoming(incoming, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), incoming.len);

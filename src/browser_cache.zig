@@ -48,23 +48,27 @@ const Entry = struct {
 fn bounded(value: []const u8, limit: usize) !void {
     if (value.len > limit or !std.unicode.utf8ValidateSlice(value)) return error.InvalidBrowserCache;
 }
-fn address(value: types.Address) !void {
+fn address(value: types.Address, incoming: bool) !void {
     try bounded(value.name, 4096);
     try bounded(value.address, 254);
-    if (value.address.len > 0) try recipients.validateAddress(value.address);
+    if (value.address.len > 0) {
+        if (incoming) try recipients.validateIncomingAddress(value.address) else try recipients.validateAddress(value.address);
+    }
 }
-fn addresses(values: []const types.Address) !void {
+fn addresses(values: []const types.Address, incoming: bool) !void {
     if (values.len > 1024) return error.InvalidBrowserCache;
-    for (values) |value| try address(value);
+    for (values) |value| try address(value, incoming);
 }
 fn validateMessage(value: types.Message) !void {
     if (value.id.len == 0 or value.attachments.len > 49 or value.labels.len > 128) return error.InvalidBrowserCache;
     try bounded(value.id, 128);
     try bounded(value.threadId, 128);
-    try address(value.from);
-    try addresses(value.to);
-    try addresses(value.cc);
-    try addresses(value.replyTo);
+    // Shared MIME decoding already distinguishes received header syntax from
+    // sending limits. Cache admission must preserve that same distinction.
+    try address(value.from, true);
+    try addresses(value.to, true);
+    try addresses(value.cc, true);
+    try addresses(value.replyTo, true);
     try bounded(value.subject, 16 * 1024);
     try bounded(value.snippet, 16 * 1024);
     try bounded(value.bodyText, 2 * 1024 * 1024);
@@ -115,7 +119,7 @@ fn copyContact(a: std.mem.Allocator, value: types.Contact) !types.Contact {
     try bounded(value.resourceName, 256);
     try bounded(value.etag, 4096);
     try bounded(value.name, 4096);
-    try addresses(value.emails);
+    try addresses(value.emails, false);
     return .{ .resourceName = try a.dupe(u8, value.resourceName), .etag = try a.dupe(u8, value.etag), .name = try a.dupe(u8, value.name), .emails = try copyAddresses(a, value.emails) };
 }
 pub const Store = struct {

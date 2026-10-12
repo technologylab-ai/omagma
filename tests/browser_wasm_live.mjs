@@ -121,8 +121,34 @@ const bundles = {
 const bodyText = (owner, index) => index === 0 ? `Hello ${owner},\n\nSynthetic live read in WebAssembly.\nNothing touched Google.\n` : `Synthetic ${owner} message ${index}.\n`;
 const bodyHtml = '<!doctype html><html><body><h1>Literal HTML fixture</h1><p>A safe café and Japanese 日本語.</p><script>window.mailInjected = "must-never-run";</script><img src="https://invalid-resource.example.test/never-fetch.png"><a href="javascript:alert(1)">Unsafe link text</a></body></html>';
 const subject = (owner, index) => index === 0 ? `${owner} live mailbox` : index === 1 ? `${owner} HTML-only mailbox` : `${owner} bounded message ${index}`;
+const incomingAddressFields = ["From", "To", "Cc", "Reply-To", "From254"];
+const longIncomingAddresses = incomingAddressFields.map((field, index) => {
+  const local = `${field.toLowerCase().replace(/[^a-z]/g, "")}-`.padEnd(65, String(index + 1));
+  return local + "@" + (index === 4 ? "d".repeat(63) + "." + "e".repeat(63) + "." + "f".repeat(60) : "example.test");
+});
+const incomingSubject = index => `Ada incoming ${incomingAddressFields[index]} address`;
+const incomingBody = index => `Incoming ${incomingAddressFields[index]} header remains readable.\nLiteral cached body ${index}.\n`;
 function providerMessage(accountIndex, index, format) {
   if (originalsFixtureEnabled && [0, 2, 3, 4, 5, 6, 8].includes(index)) return originalProviderMessage(accountIndex, format, index);
+  if (args.get("--incoming-addresses-only") === "true" && accountIndex === 0 && index < incomingAddressFields.length) {
+    const field = incomingAddressFields[index] === "From254" ? "From" : incomingAddressFields[index];
+    const headers = [
+      { name: "From", value: "Morgan Browser <morgan@example.test>" },
+      { name: "To", value: accounts[0] },
+      { name: "Cc", value: "CC Peer <cc.peer@example.test>" },
+      { name: "Reply-To", value: "Replies <reply.synthetic@example.test>" },
+      { name: "Subject", value: incomingSubject(index) },
+      { name: "Message-ID", value: `<ada-incoming-source-${index}@example.test>` },
+      { name: "References", value: "<prior-incoming-thread@example.test>" },
+      { name: "Date", value: "Mon, 12 Oct 2026 10:00:00 +0000" },
+    ];
+    headers.find(header => header.name === field).value = `Long ${field} fixture <${longIncomingAddresses[index]}>`;
+    const body = incomingBody(index);
+    return { id: `ada-message-${index}`, threadId: `ada-thread-${index}`, labelIds: ["INBOX", "UNREAD"],
+      snippet: `Incoming ${field} fixture preview`, historyId: "1200", internalDate: String(1791802800000 - index * 60000), sizeEstimate: 1000,
+      payload: { partId: "", mimeType: "text/plain", filename: "", headers,
+        body: format === "metadata" ? { size: 0 } : { size: Buffer.byteLength(body), data: Buffer.from(body).toString("base64url") } } };
+  }
   const owner = accountIndex === 0 ? "Ada" : "Bea";
   const mimeType = index === 1 ? "text/html" : "text/plain";
   const body = index === 1 ? bodyHtml : bodyText(owner, index);
@@ -720,6 +746,126 @@ try {
     const report = { beforeSpace, afterSpace, afterWord, afterFastWord, events: await evaluate("window.__omagmaKeyboardEvents") };
     await writeFile(join(work, "keyboard-diagnostic.json"), JSON.stringify(report, null, 2)+"\n", {mode:0o600});
     console.log(JSON.stringify(report));
+  } else if (args.get("--incoming-addresses-only") === "true") {
+    const checks = {}, localSelections = [];
+    assert(longIncomingAddresses.every(address => address.split("@")[0].length === 65));
+    assert.equal(longIncomingAddresses[4].length, 254, "incoming total-length boundary fixture is wrong");
+    const googlePauses = () => events.filter(event => event.method === "Fetch.requestPaused" && ["https://oauth2.googleapis.com", "https://gmail.googleapis.com", "https://people.googleapis.com"].includes(new URL(event.params.request.url).origin)).length;
+    async function local(action, label) {
+      const before = requests.length, pausedBefore = googlePauses();
+      const value = await act(action);
+      await settled(); await pause(100);
+      assert.equal(requests.length, before, `${label}: cached navigation called Google/OAuth`);
+      assert.equal(googlePauses(), pausedBefore, `${label}: cached navigation emitted a provider preflight`);
+      localSelections.push(label);
+      return value;
+    }
+    async function selectCase(index) {
+      await local(() => text("1"), `select Ada before ${incomingAddressFields[index]}`);
+      await local(() => text("/"), "open local subject search");
+      await local(() => text(`subject:"${incomingSubject(index)}"`), "type local subject search");
+      const selected = await local(() => key("Enter", "Enter"), `show cached ${incomingAddressFields[index]} row`);
+      assert(selected.includes(incomingSubject(index)), "local list lost the incoming-address fixture");
+      return selected;
+    }
+    function assertCachedAddresses(rows) {
+      const row = rows.find(row => row.snapshot.account === accounts[0]);
+      assert(row, "incoming address actor snapshot was not persisted");
+      for (let index = 0; index < incomingAddressFields.length; index++) {
+        const message = row.snapshot.messages.find(message => message.id === `ada-message-${index}`);
+        const field = incomingAddressFields[index];
+        const stored = field.startsWith("From") ? message?.from.address : field === "To" ? message?.to[0]?.address : field === "Cc" ? message?.cc[0]?.address : message?.replyTo[0]?.address;
+        assert.equal(stored, longIncomingAddresses[index], `${field}: cache changed or rejected the literal incoming address`);
+      }
+      return row;
+    }
+    await importBundle(bundles.both);
+    await connected(2);
+    assert(requests.some(request => request.accountIndex === 0 && new URL(request.url).pathname.endsWith("/messages")), "first Connect did not perform the first actor's mailbox refresh");
+    const bea = await local(() => text("2"), "second actor cached selection");
+    assert(bea.includes("Bea live mailbox") && bea.includes("Hello Bea,"), "short-address control actor did not connect/read");
+    let ada = await act(() => text("1"));
+    if (args.get("--expect-invalid-incoming") === "true") {
+      await act(() => key("r", "KeyR", 2)); await settled();
+      ada = await screen();
+      assert.match(ada, /InvalidAddress/, "old-site control did not reproduce the exact incoming InvalidAddress failure");
+      assert(!ada.includes(incomingSubject(0)) && !ada.includes(incomingBody(0).split("\n")[0]), "old-site control unexpectedly retained the rejected actor's mailbox");
+      assert.equal(sends().length, 0);
+      assert.equal(await evaluate("window.omagmaDemo.error"), null, "negative control stopped the whole browser instead of exposing the mailbox failure");
+      assert.deepEqual(transportErrors, []); assert.deepEqual(unexpectedDestinations, []);
+      const witness = { synthetic: true, expectedFailure: "InvalidAddress", firstActorInboxEmpty: true, secondActorReadable: true, actualGoogleRequests: 0, syntheticSendRequests: 0,
+        screen: ada, requests: requests.map(({ url, method, accountIndex }) => ({ url, method, accountIndex })),
+        wasmSha256: createHash("sha256").update(await readFile(join(site, "omagma.wasm"))).digest("hex") };
+      await screenshot("incoming-addresses-negative.png");
+      await writeFile(join(work, "incoming-addresses-negative.json"), JSON.stringify(witness, null, 2) + "\n", { mode: 0o600 });
+      console.log(JSON.stringify({ expectedFailure: witness.expectedFailure, firstActorInboxEmpty: true, secondActorReadable: true, actualGoogleRequests: 0 }));
+    } else {
+      assert(ada.includes(incomingSubject(0)) && ada.includes(incomingBody(0).split("\n")[0]), "first actor refresh rejected its received 65-byte From address");
+      assertCachedAddresses(await cacheRows());
+      for (let index = 0; index < incomingAddressFields.length; index++) {
+        await selectCase(index);
+        const before = requests.length;
+        const opened = await act(() => key("Enter", "Enter")); await settled();
+        assert(opened.includes(incomingBody(index).split("\n")[0]), `${incomingAddressFields[index]}: reader failed to render the received address/body`);
+        assert(!/InvalidAddress/.test(opened), "reader applied outgoing validation to an incoming header");
+        assert.equal(await evaluate("window.omagmaDemo.error"), null);
+        assert(requests.slice(before).every(request => request.accountIndex === 0), "explicit incoming body read crossed account ownership");
+      }
+      const saved = assertCachedAddresses(await cacheRows());
+      assert(saved.snapshot.messages.filter(message => /^ada-message-[0-4]$/.test(message.id)).every(message => message.bodyCached), "incoming-header bodies did not enter the actor cache");
+      checks.listReadAndCachePreserve65LocalAnd254Total = true;
+      await screenshot("incoming-addresses-reader.png");
+      // Accepted incoming data remains unsuitable for an outgoing destination.
+      for (const [keyName, index] of [["r", 3], ["R", 1], ["R", 2]]) {
+        await selectCase(index);
+        const before = sends().length;
+        const refused = await act(() => text(keyName)); await settled();
+        assert.match(refused, /InvalidAddress|invalid.*address|invalid.*recipient/i, "reply validation silently accepted the overlong outgoing local part");
+        assert(!/\bSubject: Re:/.test(refused), "invalid outgoing reply created a composer");
+        assert.equal(sends().length, before);
+        assert.equal((await session()).sendPhase, null);
+        assert.equal(await evaluate("window.omagmaDemo.error"), null);
+      }
+      checks.outgoingReplyAndReplyAllRemainStrict = true;
+      await disconnect();
+      const reloadBefore = requests.length, marker = events.length;
+      await call("Page.reload", { ignoreCache: true });
+      await until(async () => events.slice(marker).some(event => event.method === "Page.loadEventFired"), "incoming cache reload did not complete");
+      await until(async () => evaluate("window.omagmaDemo?.ready===true"), "incoming cache reload did not restore the sample inbox");
+      assert.equal(requests.length, reloadBefore, "reload connected Google automatically");
+      assert(!(await screen()).includes(incomingSubject(0)), "unverified incoming cache rendered before Connect");
+      holdNextProfile = true;
+      const restoreBefore = requests.length;
+      await importBundle(bundles.both);
+      await until(async () => heldProfiles.length === 1, "incoming cache restore skipped profile verification");
+      assert(!(await screen()).includes(incomingSubject(0)), "incoming cache rendered while profile verification was held");
+      heldProfiles[0].release(); await connected(2);
+      const restored = requests.slice(restoreBefore);
+      assert(restored.filter(request => new URL(request.url).pathname.endsWith("/profile")).length === 2, "cache restore did not verify both exact actors");
+      assert(!restored.some(request => new URL(request.url).pathname.endsWith("/messages") || new URL(request.url).pathname.includes("/threads/") || new URL(request.url).searchParams.get("format") === "full"), "valid incoming cache restoration refreshed or downloaded cached mail");
+      for (const index of [0, 1, 2, 3, 4]) {
+        const cached = await selectCase(index);
+        assert(cached.includes(incomingBody(index).split("\n")[0]), "verified incoming cache lost a retained reader body");
+        const other = await local(() => text("2"), "switch to short-address actor");
+        assert(other.includes("Hello Bea,") && !other.includes(incomingBody(index).split("\n")[0]), "account switch leaked incoming mail into the other actor");
+      }
+      assertCachedAddresses(await cacheRows());
+      checks.reloadVerificationAndLocalActorIsolation = true;
+      const persistence = await evaluate("(async()=>({localStorage:{...localStorage},sessionStorage:{...sessionStorage},databases:await indexedDB.databases(),cookies:document.cookie,caches:await caches.keys()}))()");
+      assert.deepEqual(persistence.localStorage, {}); assert.deepEqual(persistence.sessionStorage, {}); assertCacheDatabases(persistence.databases);
+      assert.deepEqual(persistence.caches, []); assert.equal(persistence.cookies, "");
+      const diagnostic = JSON.stringify(persistence) + JSON.stringify(await cacheRows()) + JSON.stringify(events.filter(event => event.method === "Runtime.consoleAPICalled" || event.method === "Runtime.exceptionThrown"));
+      for (const secret of syntheticSecrets) assert(!diagnostic.includes(secret), "incoming-address test persisted or logged credentials");
+      assert.equal(sends().length, 0); assert(maximumActiveRequests <= 1);
+      assert.deepEqual(transportErrors, []); assert.deepEqual(unexpectedDestinations, []);
+      await screenshot("incoming-addresses-restored.png");
+      await disconnect();
+      const report = { synthetic: true, actualGoogleRequests: 0, browser: version.product, requestCount: requests.length, syntheticSendRequests: sends().length, maximumActiveRequests,
+        incomingAddressLengths: longIncomingAddresses.map(address => ({ local: address.split("@")[0].length, total: address.length })), localSelections, checks,
+        wasmSha256: createHash("sha256").update(await readFile(join(site, "omagma.wasm"))).digest("hex") };
+      await writeFile(join(work, "incoming-addresses-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+      console.log(JSON.stringify(report));
+    }
   } else if (args.get("--account-switch-only") === "true") {
     const checks = {};
     const localSelections = [];
