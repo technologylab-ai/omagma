@@ -1,11 +1,14 @@
 # Omagma features
 
 Choose the interface that fits your work: a compact read-only bar, an
-experimental terminal client, or an experimental agent CLI. All three keep
-configured accounts separate and open Gmail in each account's Chrome profile.
+experimental terminal client, an experimental agent CLI, or the optional
+browser WebAssembly build. All keep configured accounts separate; native
+interfaces open Gmail in each account's configured Chrome profile.
 
 The bar runs on Linux Omarchy. The TUI and CLI run natively on Linux and macOS;
 [Homebrew is preferred on Mac](MACOS.md).
+The browser experiment is available through an opt-in source build; it is not
+included in ordinary native builds.
 
 This catalogue describes Omagma's current features. Detailed controls and
 examples live in the linked guides.
@@ -17,6 +20,7 @@ examples live in the linked guides.
 | [Omarchy bar](UI.md) | Glance at recent Inbox mail and unread counts, then open Gmail | One `gmail.readonly` permission |
 | [TUI](TERMINAL.md) | Read full mail, work with drafts, reply/send and manage mailbox/contact data | Read-only to browse; a separate terminal grant for writes/contacts |
 | [Agent CLI](AGENT-CLI.md) | The shared mail operations as structured commands and responses | The same account-specific terminal permissions as the TUI |
+| [Browser WebAssembly](../web-demo/README.md) | Run the shared TUI in a browser, read mail and compose/reply/forward | Existing terminal grants through the local server or a private connection file; granted capabilities still apply |
 
 If the bar is all you need, install it and authorize only the read-only scope.
 It needs neither People API nor the second terminal Google OAuth registration. The dated
@@ -116,7 +120,75 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 
 [CLI contract and examples](AGENT-CLI.md) · [CLI/TUI coverage differences](AGENT-CLI.md#cli-and-tui-coverage)
 
+### Experimental browser WebAssembly client
+
+- The same TUI workflow controller, renderer and shared mail rules, with
+  browser adapters for terminal input, networking, cache and session drafts.
+- A self-contained `omagma server` command serves the embedded page, prints
+  its private loopback URL and tries the next port when the requested port is
+  occupied. Connect uses existing configured terminal accounts without an
+  export file. A private one-file credential export also supports static hosting.
+- Reading, chronological threads, contacts and recipient completion, local
+  cache search and explicit Gmail search. Cached account switching makes no
+  Google requests; explicit refresh and missing-body reads fetch as needed.
+  Restoring saved mail requires fresh account verification.
+- A prominent request-status strip above the terminal explains pending work
+  and when input is paused. Unicode text and terminal borders share the TUI's
+  width policy.
+- Plain/Markdown composition, Reply, Reply all and Forward with the shared
+  review and cancellable send countdown. HTML sources offer Keep formatting
+  with embedded resources; Text quote and exact original `.eml` forwarding
+  remain available. Source files are retained within the browser's quotas.
+- Session drafts can be resumed during the same connection. Mail and contacts
+  have bounded browser persistence; credentials and drafts remain in tab memory.
+  Reload or disconnect loses session drafts. Uncertain sends are protected
+  against automatic retry, including after reload.
+- Up to three accounts, 30 visible rows and 300 cached mail records per account;
+  mail snapshots have a 3 MiB individual / 8 MiB aggregate limit. Inline draft
+  file/resource data is limited to 2 MiB and must also fit the encoded request
+  and send limits. Oversized sources offer explicit omission or refusal.
+
+Browser mailbox changes (archive, labels, star/unread, Trash), contact editing,
+RSVP, adding local files, URL opening, clipboard integration, external editing,
+sender-alias selection and durable draft recovery/background queues are not
+implemented. Native features below retain their native platform scope.
+
+[Build and connect](../web-demo/README.md) · [Browser workflows and limits](../web-demo/LIVE-MAIL.md)
+· [Shared architecture](BROWSER-ARCHITECTURE.md)
+
 ## Smaller features that improve daily use
+
+### Mail compatibility and partial results
+
+- Shared UTF-8 byte allowances across decoding, drafts, cache and rendering:
+  1 KiB display names and received addresses, 512-byte outgoing addresses and
+  filenames, and 16 KiB subjects with reply/forward prefix room. External
+  address local-part spelling is preserved. Portable SMTP length concerns
+  appear in send review instead of emptying a received mailbox.
+- Windows-1251 and ISO-8859-2 join the supported text encodings. A readable
+  multipart alternative can survive an unsupported sibling.
+- Message-local decoding or size failures retain identifiable warning rows
+  and readable neighboring mail. Authentication, cancellation, identity
+  mismatches and application-pool exhaustion still fail the operation.
+- `status:partial` finds retained warnings and incomplete mail locally.
+  Bodies omitted under an aggregate budget can be opened individually with
+  Enter. Replies and text/formatted forwards refuse an unavailable body
+  explicitly; snippets never substitute for a complete quote.
+- Linear header unfolding avoids repeated growing copies. Application-owned
+  native and WASM memory comes from startup reservations and reusable bounded
+  workspaces; browser/OS allocations are outside that guarantee. Reservation
+  sizes are separate from the dated resident-memory measurements.
+
+The larger allowances remain limits. Outgoing mail still has at most 32
+recipients and bounded bodies and combined headers. Full IDNA/Unicode
+normalization, Unicode case-folded search, universal charset support,
+automatic multi-author replies and reference-chain compaction are not
+implemented. An exhausted subject-prefix/reference allowance refuses the
+operation explicitly. A malformed or oversized contact can still refuse a
+People response page; mail-row isolation does not yet cover contacts.
+
+[Mail bounds and recovery](TERMINAL.md#bounds-and-recovery)
+· [Shared budgets and platform boundaries](BROWSER-ARCHITECTURE.md#bounds-and-verification)
 
 ### Reading and navigation
 

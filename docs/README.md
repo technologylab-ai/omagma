@@ -28,6 +28,7 @@ smaller reading, composition, organization and agent workflow details.
 | [Bar dropdown](UI.md) | Account switching, mail links and refresh status |
 | [Terminal mail](TERMINAL.md) | Reading, search, compose/reply, contacts, attachments, labels and keyboard/mouse controls |
 | [Agent CLI](AGENT-CLI.md) | Structured commands, account selection, cache/server search, drafts, receipts and CLI/TUI coverage |
+| [Browser WebAssembly](../web-demo/README.md) | Optional source build, local server, existing-account connection and supported browser workflows |
 | [Updates](UPDATES.md) | Daily release notices, dismissal and installation-specific Omarchy/Homebrew/manual upgrade guidance |
 | [Bar background refresh](BACKGROUND-REFRESH.md) | Configure periodic checking while the dropdown is closed |
 | [Terminal background cache](TERMINAL-BACKGROUND.md) | Optional five-minute cache fetching while the TUI is closed |
@@ -57,6 +58,7 @@ installation and account onboarding.
 | [Terminal implementation](TERMINAL-IMPLEMENTATION.md) | Module ownership and terminal runtime architecture |
 | [Terminal provider](TERMINAL-PROVIDER-DESIGN.md) | Gmail/People operations and capability/credential design |
 | [Terminal UI](TERMINAL-UI-DESIGN.md) | Rendering, input, composition and lifecycle design |
+| [Browser architecture](BROWSER-ARCHITECTURE.md) | Shared TUI controller, platform/provider adapters, fixed budgets and browser capability boundaries |
 | [Bar verification](VERIFICATION.md) / [terminal verification](TERMINAL-VERIFICATION.md) | Developer correctness and resource checks |
 | [Release maintenance](RELEASING.md) | Version-driven Linux/macOS bundles and publication |
 | [Zig wiki follow-up](ZIG017-WIKI-FOLLOWUP.md) | Curator notes distinguishing compiler findings from application bugs |

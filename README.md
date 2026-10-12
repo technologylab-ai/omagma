@@ -98,7 +98,10 @@ WebAssembly. `omagma server` serves its embedded page, prints a private local
 URL and chooses the next free port when needed. Connect uses existing configured
 accounts; a private one-file credential export also supports static hosting.
 The browser supports reading, contacts, completion, cached search and reviewed
-compose/reply/text-forward workflows. [Build and try the browser](web-demo/README.md)
+plain/Markdown composition, reply/reply-all and forwarding, including retained
+original HTML/resources and exact `.eml` forwarding within its quotas. Drafts
+last for the current connection; mailbox/contact changes and local-file adding
+remain unavailable. [Build and try the browser](web-demo/README.md)
 · [Supported workflows and limits](web-demo/LIVE-MAIL.md)
 · [Shared controller and platform adapters](docs/BROWSER-ARCHITECTURE.md).
 Ordinary native builds keep their existing dependency selection.
