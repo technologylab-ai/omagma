@@ -3,7 +3,7 @@ import {resolve,join} from 'node:path';
 import {parseArgs} from 'node:util';
 import {browser,reservation,root} from './cdp.mjs';
 const {values:o}=parseArgs({options:{stills:{type:'string'},out:{type:'string'},scale:{type:'string',default:'1'},workers:{type:'string',default:'3'},step:{type:'string',default:'1'},from:{type:'string'},to:{type:'string'},film:{type:'string',default:'film.html'},timeline:{type:'string',default:'timeline.json'},manifest:{type:'string',default:'assets-manifest.json'}}});
-if(!['film.html','film-recut.html'].includes(o.film)||!['timeline.json','recut-timeline.json'].includes(o.timeline)||!['assets-manifest.json','recut-assets-manifest.json'].includes(o.manifest))throw Error('unknown owned film source');
+if(!['film.html','film-recut.html','film-story.html'].includes(o.film)||!['timeline.json','recut-timeline.json','story-timeline.json'].includes(o.timeline)||!['assets-manifest.json','recut-assets-manifest.json','story-assets-manifest.json'].includes(o.manifest))throw Error('unknown owned film source');
 await reservation();
 const plan=JSON.parse(readFileSync(join(root,'video/short028',o.timeline),'utf8'));
 const out=resolve(o.out||join(root,'video/cache/short028/frames'));

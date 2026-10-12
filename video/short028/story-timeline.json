@@ -1,0 +1,816 @@
+{
+  "schema": "omagma.video.timeline.v1",
+  "revision": "short028-story",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "chapters": [
+    {
+      "number": 1,
+      "title": "macOS setup: two options"
+    },
+    {
+      "number": 2,
+      "title": "Progressive CLI discovery for agents"
+    },
+    {
+      "number": 3,
+      "title": "Copy text from emails"
+    },
+    {
+      "number": 4,
+      "title": "Open emails in your editor"
+    },
+    {
+      "number": 5,
+      "title": "Skip the 10-second send delay"
+    },
+    {
+      "number": 6,
+      "title": "One more thing\u2026"
+    }
+  ],
+  "parts": [
+    {
+      "id": "intro",
+      "name": "intro",
+      "frameIn": 0,
+      "frameOut": 75,
+      "chapter": 0,
+      "asset": "reader.context",
+      "headline": null,
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "intro",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "editorialText": "What\u2019s new in v0.2.8"
+    },
+    {
+      "id": "mac-setup",
+      "name": "mac-setup",
+      "frameIn": 75,
+      "frameOut": 210,
+      "chapter": 1,
+      "asset": null,
+      "headline": "macOS setup: two options",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "mac-choices",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      }
+    },
+    {
+      "id": "cli-discover",
+      "name": "cli-discover",
+      "frameIn": 210,
+      "frameOut": 294,
+      "chapter": 2,
+      "asset": "cli.overview_story",
+      "headline": "Progressive CLI discovery for agents",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      }
+    },
+    {
+      "id": "cli-narrow",
+      "name": "cli-narrow",
+      "frameIn": 294,
+      "frameOut": 360,
+      "chapter": 2,
+      "asset": "cli.mail_story",
+      "headline": "Discover only the commands you need",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      }
+    },
+    {
+      "id": "cli-json",
+      "name": "cli-json",
+      "frameIn": 360,
+      "frameOut": 420,
+      "chapter": 2,
+      "asset": "cli.json_recut",
+      "headline": "Get examples as JSON, too",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      }
+    },
+    {
+      "id": "copy-select",
+      "name": "copy-select",
+      "frameIn": 420,
+      "frameOut": 585,
+      "chapter": 3,
+      "asset": "reader.move",
+      "headline": "Copy text from emails",
+      "subtitle": "With the keyboard or mouse.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.8
+      },
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "reader.move"
+        },
+        {
+          "offset": 1,
+          "asset": "reader.at_paragraph"
+        },
+        {
+          "offset": 1.7,
+          "asset": "reader.marked"
+        },
+        {
+          "offset": 2.1,
+          "asset": "reader.excerpt"
+        }
+      ]
+    },
+    {
+      "id": "copy-done",
+      "name": "copy-done",
+      "frameIn": 585,
+      "frameOut": 645,
+      "chapter": 3,
+      "asset": "reader.copied",
+      "headline": "Copy text from emails",
+      "subtitle": "Ready to paste into your agent chat.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "focus",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0
+      }
+    },
+    {
+      "id": "editor-open",
+      "name": "editor-open",
+      "frameIn": 645,
+      "frameOut": 708,
+      "chapter": 4,
+      "asset": "editor.view",
+      "headline": "Open emails in your editor",
+      "subtitle": "e \u2192 $EDITOR",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "body",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      }
+    },
+    {
+      "id": "editor-use",
+      "name": "editor-use",
+      "frameIn": 708,
+      "frameOut": 795,
+      "chapter": 4,
+      "asset": "editor.paragraph",
+      "headline": "Open emails in your editor",
+      "subtitle": "Search, select and copy with your familiar tools.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "body",
+        "to": "body",
+        "moveFrom": 0,
+        "moveUntil": 0
+      }
+    },
+    {
+      "id": "send-review",
+      "name": "send-review",
+      "frameIn": 795,
+      "frameOut": 840,
+      "chapter": 5,
+      "asset": "send.review",
+      "headline": "Skip the 10-second send delay",
+      "subtitle": "Review the message first.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "focus",
+        "moveFrom": 0,
+        "moveUntil": 0.5
+      }
+    },
+    {
+      "id": "send-ticking",
+      "name": "send-ticking",
+      "frameIn": 840,
+      "frameOut": 906,
+      "chapter": 5,
+      "asset": "send.timer10_story",
+      "headline": "Skip the 10-second send delay",
+      "subtitle": "The countdown is still running.",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "frame": [
+        545,
+        490,
+        830,
+        180
+      ],
+      "backgroundAsset": "send.countdown",
+      "backgroundCamera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "backgroundDim": 0.18,
+      "backgroundSequence": [
+        {
+          "offset": 0,
+          "asset": "send.countdown"
+        },
+        {
+          "offset": 1,
+          "asset": "send.countdown_nine"
+        },
+        {
+          "offset": 2,
+          "asset": "send.countdown_eight"
+        }
+      ],
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "send.timer10_story"
+        },
+        {
+          "offset": 1,
+          "asset": "send.timer9_story"
+        },
+        {
+          "offset": 2,
+          "asset": "send.timer8_story"
+        }
+      ]
+    },
+    {
+      "id": "send-now",
+      "name": "send-now",
+      "frameIn": 906,
+      "frameOut": 990,
+      "chapter": 5,
+      "asset": "send.button_recut",
+      "headline": "Skip the countdown. Send now.",
+      "subtitle": "Ctrl+S",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "frame": [
+        485,
+        450,
+        950,
+        180
+      ],
+      "backgroundAsset": "send.now_focus",
+      "backgroundCamera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "backgroundDim": 0.2
+    },
+    {
+      "id": "send-done",
+      "name": "send-done",
+      "frameIn": 990,
+      "frameOut": 1050,
+      "chapter": 5,
+      "asset": "send.complete_story",
+      "headline": "Sent.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "frame": [
+        545,
+        490,
+        830,
+        180
+      ],
+      "backgroundAsset": "send.receipt",
+      "backgroundCamera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "backgroundDim": 0.18
+    },
+    {
+      "id": "browser-surprise",
+      "name": "browser-surprise",
+      "frameIn": 1050,
+      "frameOut": 1245,
+      "chapter": 6,
+      "asset": null,
+      "headline": "And one more thing\u2026",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "headlineLarge": true,
+      "centerHeadline": true,
+      "browser": false,
+      "headlineReveal": [
+        {
+          "offset": 0,
+          "text": "And one more thing\u2026"
+        },
+        {
+          "offset": 1.1,
+          "text": "Omagma comes full circle."
+        },
+        {
+          "offset": 2.3,
+          "text": "Thanks to Zig + WebAssembly\u2026"
+        },
+        {
+          "offset": 3.5,
+          "text": "It even runs in the browser."
+        },
+        {
+          "offset": 4.9,
+          "text": "A tech demo. Not for everyday use."
+        }
+      ]
+    },
+    {
+      "id": "browser-launch",
+      "name": "browser-launch",
+      "frameIn": 1245,
+      "frameOut": 1320,
+      "chapter": 6,
+      "asset": "server.launch",
+      "headline": "Start it with omagma server",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true,
+      "sequence": [
+        {
+          "offset": 0.0,
+          "asset": "server.launch.typed0"
+        },
+        {
+          "offset": 0.06,
+          "asset": "server.launch.typed1"
+        },
+        {
+          "offset": 0.12,
+          "asset": "server.launch.typed2"
+        },
+        {
+          "offset": 0.18,
+          "asset": "server.launch.typed3"
+        },
+        {
+          "offset": 0.24,
+          "asset": "server.launch.typed4"
+        },
+        {
+          "offset": 0.3,
+          "asset": "server.launch.typed5"
+        },
+        {
+          "offset": 0.36,
+          "asset": "server.launch.typed6"
+        },
+        {
+          "offset": 0.42,
+          "asset": "server.launch.typed7"
+        },
+        {
+          "offset": 0.48,
+          "asset": "server.launch.typed8"
+        },
+        {
+          "offset": 0.54,
+          "asset": "server.launch.typed9"
+        },
+        {
+          "offset": 0.6,
+          "asset": "server.launch.typed10"
+        },
+        {
+          "offset": 0.66,
+          "asset": "server.launch.typed11"
+        },
+        {
+          "offset": 0.72,
+          "asset": "server.launch.typed12"
+        },
+        {
+          "offset": 0.78,
+          "asset": "server.launch.typed13"
+        },
+        {
+          "offset": 0.84,
+          "asset": "server.launch"
+        }
+      ]
+    },
+    {
+      "id": "browser-connect-button",
+      "name": "browser-connect-button",
+      "frameIn": 1320,
+      "frameOut": 1386,
+      "chapter": 6,
+      "asset": "browser.server-connect-button",
+      "headline": "Connect Gmail \u2014 this works, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": "connect",
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true,
+      "highlightPadding": [
+        8,
+        4
+      ]
+    },
+    {
+      "id": "browser-connect-load",
+      "name": "browser-connect-load",
+      "frameIn": 1386,
+      "frameOut": 1446,
+      "chapter": 6,
+      "asset": "browser.server-connect-loading",
+      "headline": "Connecting your accounts\u2026",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-connected",
+      "name": "browser-connected",
+      "frameIn": 1446,
+      "frameOut": 1536,
+      "chapter": 6,
+      "asset": "browser.server-connected-three",
+      "headline": "Gmail connected. In the browser.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-read",
+      "name": "browser-read",
+      "frameIn": 1536,
+      "frameOut": 1650,
+      "chapter": 6,
+      "asset": "browser.reader",
+      "headline": "Reading mail works, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-compose",
+      "name": "browser-compose",
+      "frameIn": 1650,
+      "frameOut": 1725,
+      "chapter": 6,
+      "asset": "browser.composer-empty",
+      "headline": "Writing mail works, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-type",
+      "name": "browser-type",
+      "frameIn": 1725,
+      "frameOut": 1770,
+      "chapter": 6,
+      "asset": "browser.composer-empty",
+      "headline": "Writing mail works, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true,
+      "sequence": [
+        {
+          "offset": 0.0,
+          "asset": "browser.composer-empty"
+        },
+        {
+          "offset": 0.059483,
+          "asset": "browser.typing-0017"
+        },
+        {
+          "offset": 0.137385,
+          "asset": "browser.typing-0018"
+        },
+        {
+          "offset": 0.215268,
+          "asset": "browser.typing-0019"
+        },
+        {
+          "offset": 0.293171,
+          "asset": "browser.typing-0020"
+        },
+        {
+          "offset": 0.371053,
+          "asset": "browser.typing-0021"
+        },
+        {
+          "offset": 0.448956,
+          "asset": "browser.typing-0022"
+        },
+        {
+          "offset": 0.526839,
+          "asset": "browser.typing-0023"
+        },
+        {
+          "offset": 0.604741,
+          "asset": "browser.typing-0024"
+        },
+        {
+          "offset": 0.682644,
+          "asset": "browser.typing-0025"
+        },
+        {
+          "offset": 0.760527,
+          "asset": "browser.typing-0026"
+        },
+        {
+          "offset": 0.838429,
+          "asset": "browser.typing-0027"
+        },
+        {
+          "offset": 0.916312,
+          "asset": "browser.typing-0028"
+        },
+        {
+          "offset": 0.994215,
+          "asset": "browser.typing-0029"
+        },
+        {
+          "offset": 1.072097,
+          "asset": "browser.typing-0030"
+        },
+        {
+          "offset": 1.15,
+          "asset": "browser.typing-0031"
+        }
+      ]
+    },
+    {
+      "id": "browser-preview",
+      "name": "browser-preview",
+      "frameIn": 1770,
+      "frameOut": 1860,
+      "chapter": 6,
+      "asset": "browser.draft",
+      "headline": "And the preview works, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-saved",
+      "name": "browser-saved",
+      "frameIn": 1860,
+      "frameOut": 1950,
+      "chapter": 6,
+      "asset": "browser.autosaved",
+      "headline": "Your draft saves itself, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-recovery",
+      "name": "browser-recovery",
+      "frameIn": 1950,
+      "frameOut": 2070,
+      "chapter": 6,
+      "asset": "browser.reloaded",
+      "headline": "Your draft survives a reload, too.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "browser-memory",
+      "name": "browser-memory",
+      "frameIn": 2070,
+      "frameOut": 2205,
+      "chapter": 6,
+      "asset": "browser.reloaded",
+      "headline": "3 accounts. About 125 MB.",
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": null,
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "browser": true
+    },
+    {
+      "id": "recap",
+      "name": "recap",
+      "frameIn": 2205,
+      "frameOut": 2370,
+      "chapter": 0,
+      "asset": null,
+      "headline": null,
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "recap",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "editorialTitle": "The little things, done better.",
+      "editorialRows": [
+        "Readable names and international text",
+        "A bad contact no longer breaks the list",
+        "Ctrl+Space works in classic terminals",
+        "Review label changes. Undo when needed."
+      ]
+    },
+    {
+      "id": "outro",
+      "name": "outro",
+      "frameIn": 2370,
+      "frameOut": 2527,
+      "chapter": 0,
+      "asset": null,
+      "headline": null,
+      "subtitle": "",
+      "transition": 0.3,
+      "editorial": "outro",
+      "focus": null,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0.6
+      },
+      "editorialTitle": "Omagma v0.2.8",
+      "editorialText": "Linux \u00b7 macOS \u00b7 TUI + agent CLI"
+    }
+  ]
+}

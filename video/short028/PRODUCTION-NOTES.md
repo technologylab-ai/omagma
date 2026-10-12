@@ -4,7 +4,7 @@ The picture is based on source `226365a295d2fcf2fc21fa0a559f62cc74faa9fb`. Genui
 
 The exact approved v0.2.7 flow soundtrack is reused: 2,527 frames at 30 fps, 84.23333333333333 seconds. Its encoded audio packets remain unchanged. No new music splice, speed, pitch, volume or fade is authorized by this edit. The last website frame remains through the natural ending.
 
-Native Mac/agent support, offline CLI help, received-mail selection, private editor snapshots and Send now lead the story. The browser appears only in the final product chapter and is labelled an experimental showcase that is not intended for everyday use.
+Native Mac/agent support, offline CLI help, received-mail selection, private editor snapshots and Send now lead the story. The browser appears only in the final chapter and is presented as a tech demo that is not intended for everyday use.
 
 Mac setup cards are editorial explanations of documented choices, not screenshots of an application wizard. Agent-enabled setup uses private owner-only, unencrypted token files. It still needs the host's file and network permissions.
 
@@ -32,10 +32,20 @@ Normal-speed encoded playback passed with 2,526 observed decoded-frame callbacks
 
 The source-generation requests were interrupted without completed results. The feasible local film source adapts the established pipeline; actual Opus visual review is a separate read-only pass over that source and genuine rendered stills. It must not be described as Opus-generated full source or as a normal-speed movie/music review.
 
-## Completed visual review
+## Earlier completed visual review
 
 The focused Opus pass approved the enlarged, genuine selected paragraph and identified two concrete problems: the Send now outline encroached on its header, and the translucent browser observation panel covered table/result/footer text. The compositor now supports independent per-phase highlight padding, and the observation panel is moved wholly into empty left-compose space with a solid warm background. Its nearby attribution states that the author observed different sessions/workloads rather than a controlled benchmark.
 
 The broad pass also identified source-level transition risks: repeated highlight fade-ins, abruptly removed editorial cards, the initially invisible title and the outgoing final picture. These are source findings rather than claims of normal-speed viewing. First-pass whole-pane highlight and reader crop criticism must be distinguished from the tighter, larger updated imagery that the focused pass reviewed. Final picture/audio review remains the production pipeline's responsibility.
 
 The source-level corrections are implemented: the title is present on frame zero; Mac cards/dimming ease in over 0.5 seconds; editorial overlays fade out over their last 0.3 seconds; browser observation timing is explicitly delayed until after the recovered draft can be read; and the outgoing final picture fades rather than disappearing abruptly. Nonessential whole-pane annotation outlines are removed in the timeline, leaving only independent paragraph/button targets. The clock and approved audio packets are unchanged.
+
+## Story revision — 2026-10-13
+
+`film-story.html` and `story-timeline.json` supersede the recut with explicit feature headlines, 4.5-second macOS choices and a visible Linux note, spaced/abridged actual CLI output, and a readable 10 → 9 → 8 countdown over 2.2 seconds before Send now. The success crop contains only the actual “Send complete” text. Five large centered surprise lines introduce Zig/WebAssembly and explicitly say “A tech demo. Not for everyday use.” The persistent label remains through the native launch and browser footage. The memory headline is simply “3 accounts. About 125 MB”; earlier visible attribution/benchmark qualifiers are removed at the user's direction.
+
+The terminal launch is a 0.84-second editorial replay of the actual native `omagma server` command and sanitized stdout. The fresh Connect Gmail take uses that native server and real browser toolbar, with synthetic Google responses intercepted before any production request. All three synthetic profiles are verified; disposable credentials, profile, private output and owned processes are removed. Later actual browser interaction captures are reused with the retained tabs/address bar; note typing is remapped to 1.15 seconds. Separate capture takes can have different loopback ports.
+
+An actual Claude Opus 5.5 review with requested xhigh effort completed over the current source/plan, five full-resolution stills and three sheets representing 21 stills. Its verdict was conditional: the Connect outline crossed the label, and one pre-fix launch still did not show the persistent badge. Root moved the outline down approximately nine output pixels, added clearance, and verified both corrected full-resolution shots. Only the affected 75 frames, including the outgoing transition, were replaced before re-encoding. No further model round was needed. A prior turn-limit failure and unavailable resume are preserved separately from the successful explicit-filename repair; they are not approvals. Canonical model initialization and model usage both identify `claude-opus-5-5`. This was a still/source review, with no movie or listening claim.
+
+Root checked 338 consecutive decoded frames around every phase handoff, then the final encoded Connect outline, launch label and outgoing transition. Full encoded playback at normal speed is checked separately; exact approved audio packets/timestamps and the 2,527-frame clock remain unchanged. Earlier delivered movies and source evidence are preserved. This work edits the video only; application publication remains held.
