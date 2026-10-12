@@ -644,7 +644,7 @@ test "mailbox compatibility: UTF8 locals quoted locals and U-label domains retai
         try parse(address, &parsed);
         try std.testing.expectEqualStrings(address, parsed.items[0].address.slice());
     }
-    for ([_][]const u8{ "user@a..invalid", "user@-bad.invalid", "a..b@example.invalid", "name\xc2\x85@example.invalid", "a@example.invalid\nBcc:x@example.invalid" }) |address| try std.invaliding.expectError(error.InvalidAddress, validateIncomingAddress(address));
+    for ([_][]const u8{ "user@a..invalid", "user@-bad.invalid", "a..b@example.invalid", "name\xc2\x85@example.invalid", "a@example.invalid\nBcc:x@example.invalid" }) |address| try std.testing.expectError(error.InvalidAddress, validateIncomingAddress(address));
 }
 
 test "mailbox compatibility: external locals stay case sensitive while quoted forms and domains compare equally" {
