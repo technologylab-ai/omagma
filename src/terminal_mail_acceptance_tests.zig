@@ -61,6 +61,28 @@ const Peer = struct {
 fn readProvider(a: std.mem.Allocator, account: []const u8, peer: *Peer) !t.Message {
     return j.decode(t.Message, a, try gmail.dispatchAuthorized(std.testing.io, a, account, &.{"mail-read"}, peer.transport(), "mail.read", try j.value(a, .{ .messageId = "same-message" })));
 }
+fn refusedWithHealthyNeighbor(a: std.mem.Allocator, wire: j.Value, code: []const u8) !t.Message {
+    var healthy = try std.json.parseFromSliceLeaky(j.Value, a, other_delivered, .{});
+    try healthy.object.put(a, "id", .{ .string = "healthy-message" });
+    try healthy.object.put(a, "threadId", .{ .string = "healthy-thread" });
+    var peer: Peer = .{ .steps = &.{
+        .{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, wire, .{}) },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/healthy-message?format=full", .response = try std.json.Stringify.valueAlloc(a, healthy, .{}) },
+    } };
+    const refused = try readProvider(a, "personal@example.com", &peer);
+    try std.testing.expectEqualStrings("same-message", refused.id);
+    try std.testing.expectEqualStrings("same-thread", refused.threadId);
+    try std.testing.expectEqualStrings(code, refused.bodyCacheError);
+    try std.testing.expectEqualStrings(code, refused.decodeWarning);
+    try std.testing.expect(refused.metadataPartial);
+    try std.testing.expectEqualStrings("", refused.bodyText);
+    const next = try gmail.readAuthorizedMessage(a, "personal@example.com", &.{"mail-read"}, peer.transport(), "healthy-message");
+    try std.testing.expectEqualStrings("healthy-message", next.id);
+    try std.testing.expectEqualStrings("Other account only.\n", next.bodyText);
+    try std.testing.expectEqualStrings("", next.bodyCacheError);
+    try peer.complete(0);
+    return refused;
+}
 fn expectDelivered(message: t.Message) !void {
     try std.testing.expectEqualStrings("same-message", message.id);
     try std.testing.expectEqualStrings("same-thread", message.threadId);
@@ -384,9 +406,10 @@ test "mail acceptance: broken display encodings retain readable mail and a healt
     const a = arena.allocator();
     var wire = try std.json.parseFromSliceLeaky(j.Value, a, delivered, .{});
     try wire.object.getPtr("payload").?.object.getPtr("headers").?.array.items[2].object.put(a, "value", .{ .string = "Subject\r\nBcc: injected@example.test" });
-    var peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, wire, .{}) }} };
-    try std.testing.expectError(error.InvalidHeaders, readProvider(a, "personal@example.com", &peer));
-    try peer.complete(0);
+    const refused = try refusedWithHealthyNeighbor(a, wire, "InvalidHeaders");
+    try std.testing.expectEqualStrings("", refused.from.address);
+    try std.testing.expectEqual(@as(usize, 0), refused.to.len + refused.cc.len + refused.replyTo.len);
+    try std.testing.expect(std.mem.indexOfAny(u8, refused.subject, "\r\n") == null);
 }
 
 fn sessionCommand(a: std.mem.Allocator, session: *core.Session, request: anytype) !j.Value {
@@ -526,9 +549,9 @@ test "mail acceptance: ordinary reply ignores unselected incoming SMTP limits wh
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     var wire = try std.json.parseFromSliceLeaky(j.Value, a, other_delivered, .{});
     try wire.object.getPtr("payload").?.object.getPtr("headers").?.array.append(try std.json.parseFromSliceLeaky(j.Value, a, "{\"name\":\"Message-ID\",\"value\":\"<recipient-selection@example.test>\"}", .{}));
-    // Incoming RFC address syntax permits this local part. SMTP does not; it
-    // should matter only if an action selects it as an outgoing recipient.
-    const long_local: [65]u8 = @splat('a');
+    // Received addresses have a wider bounded allowance than outgoing ones;
+    // that limit matters only when an action selects this recipient.
+    const long_local: [513]u8 = @splat('a');
     try wire.object.getPtr("payload").?.object.getPtr("headers").?.array.items[1].object.put(a, "value", .{ .string = try std.fmt.allocPrint(a, "Unselected original recipient <{s}@example.test>, personal@example.com", .{&long_local}) });
     const source = try j.value(a, .{ .account = "personal@example.com", .messages = [_]j.Value{wire} });
     try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
@@ -639,9 +662,8 @@ test "mail acceptance: unused identities on ordinary large files retain reading 
         try leaf.object.getPtr("body").?.object.put(a, "size", .{ .integer = 30 * 1024 * 1024 });
         try leaf.object.getPtr("body").?.object.put(a, "data", .{ .string = "eA" });
         try leaf.object.getPtr("headers").?.array.items[0].object.put(a, "value", .{ .string = "inline; filename=report.pptx" });
-        var inline_peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, wire, .{}) }} };
-        try std.testing.expectError(error.BodyTooLarge, readProvider(a, account, &inline_peer));
-        try inline_peer.complete(0);
+        const inline_refusal = try refusedWithHealthyNeighbor(a, wire, "BodyTooLarge");
+        try std.testing.expectEqualStrings("Large ordinary file", inline_refusal.subject);
         const stats = try sessionCommand(a, session, .{ .cmd = "cache.stats", .account = account });
         try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", -1));
     }
@@ -789,7 +811,6 @@ test "mail acceptance: external inline photos leave mail readable and refuse ove
     const body = loaded.object.getPtr("payload").?.object.getPtr("parts").?.array.items[2].object.getPtr("body").?;
     _ = body.object.orderedRemove("attachmentId");
     try body.object.put(a, "data", .{ .string = "AA" });
-    var peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = try std.json.Stringify.valueAlloc(a, loaded, .{}) }} };
-    try std.testing.expectError(error.BodyTooLarge, readProvider(a, "personal@example.com", &peer));
-    try peer.complete(0);
+    const refused = try refusedWithHealthyNeighbor(a, loaded, "BodyTooLarge");
+    try std.testing.expectEqualStrings("Inline photo and document", refused.subject);
 }

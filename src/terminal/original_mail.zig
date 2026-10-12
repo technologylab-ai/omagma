@@ -4,6 +4,7 @@
 //! encoding declarations are inspected. Every output allocation is caller-owned.
 const std = @import("std");
 const t = @import("types.zig");
+const mail_limits = @import("mail_limits.zig");
 
 pub const Note = struct { html: []const u8, plain: []const u8, logoOffset: usize };
 pub const Prepared = struct { html: []const u8, plain: []const u8, logoOffset: usize, resources: []const t.Attachment };
@@ -149,18 +150,18 @@ fn summaryText(value: []const u8, limit: usize) !void {
     for (value) |c| if ((c < 32 and c != '\t') or c == 127) return error.InvalidOriginalHtml;
 }
 fn mailbox(value: t.Address) !void {
-    try summaryText(value.address, 254);
-    try summaryText(value.name, 256);
+    try summaryText(value.address, mail_limits.incoming_address_bytes);
+    try summaryText(value.name, mail_limits.display_name_bytes);
 }
 fn inspect(original: t.Original) !Envelope {
     if (original.version != 1) return error.OriginalHtmlUnavailable;
     try bodyText(original.bodyText);
     try bodyText(original.bodyHtml);
     try summaryText(original.sourceMessageId, 1024);
-    try summaryText(original.subject, 4096);
+    try summaryText(original.subject, mail_limits.subject_bytes);
     try summaryText(original.date, 1024);
     try mailbox(original.from);
-    if (original.to.len + original.cc.len > 2 * t.Limits.recipients) return error.InvalidOriginalHtml;
+    if (original.to.len > mail_limits.incoming_recipients or original.cc.len > mail_limits.incoming_recipients) return error.InvalidOriginalHtml;
     for (original.to) |address| try mailbox(address);
     for (original.cc) |address| try mailbox(address);
     const envelope = try scan(original.bodyHtml);
@@ -929,6 +930,28 @@ fn fixtureOriginal(html: []const u8) t.Original {
 const fixture_note = "<div>New note<img src=\"cid:omagma-logo@omagma.invalid\"></div>";
 fn fixtureNote() Note {
     return .{ .html = fixture_note, .plain = "New note", .logoOffset = std.mem.indexOf(u8, fixture_note, logo_content_id).? };
+}
+
+test "mail metadata: original snapshots preserve received participant and display limits" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const participants = try a.alloc(t.Address, mail_limits.incoming_recipients + 1);
+    for (participants, 0..) |*address, index| address.* = .{ .address = try std.fmt.allocPrint(a, "member{d}@example.test", .{index}) };
+    const name: [mail_limits.display_name_bytes]u8 = @splat('n');
+    const subject: [mail_limits.subject_bytes]u8 = @splat('s');
+    var original = fixtureOriginal("<p>Preserved source</p>");
+    original.from.name = &name;
+    original.subject = &subject;
+    original.to = participants[0..mail_limits.incoming_recipients];
+    original.cc = participants[0..65];
+    try validate(original);
+    const rendered = try prepare(a, fixtureNote(), original);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.plain, "member1023@example.test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.plain, &subject) != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.html, &name) != null);
+    original.to = participants;
+    try std.testing.expectError(error.InvalidOriginalHtml, validate(original));
 }
 
 test "original mail: resource plan separates unloaded file metadata from bounded preserved resources" {

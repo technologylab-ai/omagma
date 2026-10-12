@@ -11,6 +11,8 @@ pub const Message = struct {
     message_id: b.Text(l.message_id) = .{},
     received_at: i64 = 0,
     unread: bool = false,
+    warning_code: b.Text(64) = .{},
+    partial: bool = false,
 };
 pub const Snapshot = struct {
     messages: [l.max_rows]Message = @splat(.{}),
@@ -81,7 +83,9 @@ pub fn writeSnapshot(w: *std.Io.Writer, a: *const Account, event: bool) !void {
         try b.jsonString(w, m.subject.slice());
         try w.writeAll(",\"snippet\":");
         try b.jsonString(w, m.snippet.slice());
-        try w.print(",\"receivedAt\":{d},\"unread\":{s}}}", .{ m.received_at, if (m.unread) "true" else "false" });
+        try w.print(",\"receivedAt\":{d},\"unread\":{s},\"partial\":{s},\"warningCode\":", .{ m.received_at, if (m.unread) "true" else "false", if (m.partial) "true" else "false" });
+        try b.jsonString(w, m.warning_code.slice());
+        try w.writeByte('}');
     }
     try w.writeAll("]}");
 }

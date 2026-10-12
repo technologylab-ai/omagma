@@ -2,6 +2,7 @@
 //! mutation happens while collecting the bounded candidates.
 const std = @import("std");
 const recipients = @import("recipients.zig");
+const policy = @import("mail_limits.zig");
 const Value = std.json.Value;
 pub const max_matches = 8;
 pub const Candidate = struct { address: []const u8, name: []const u8 };
@@ -56,7 +57,7 @@ fn text(value: Value) []const u8 {
     return if (value == .string) value.string else "";
 }
 fn safeName(raw: []const u8) []const u8 {
-    if (raw.len > 256) return "";
+    if (raw.len > policy.display_name_bytes) return "";
     recipients.validateHeader(raw) catch return "";
     return raw;
 }
@@ -67,7 +68,7 @@ fn includes(raw: []const u8, query: []const u8) bool {
 }
 pub fn collect(contacts: []const Value, raw: []const u8, cursor: usize) Matches {
     var out: Matches = .{ .range = token(raw, cursor) };
-    if (out.range.query.len == 0 or out.range.query.len > 254) return out;
+    if (out.range.query.len == 0 or out.range.query.len > policy.outgoing_address_bytes) return out;
     for (contacts) |contact| {
         const name = safeName(text(field(contact, "name")));
         const emails = field(contact, "emails");
@@ -75,9 +76,9 @@ pub fn collect(contacts: []const Value, raw: []const u8, cursor: usize) Matches 
         for (emails.array.items) |mailbox| {
             const address = text(field(mailbox, "address"));
             recipients.validateAddress(address) catch continue;
-            if ((!includes(address, out.range.query) and !includes(name, out.range.query)) or std.ascii.eqlIgnoreCase(address, out.range.query)) continue;
+            if ((!includes(address, out.range.query) and !includes(name, out.range.query)) or recipients.sameAddress(address, out.range.query)) continue;
             var duplicate = false;
-            for (out.slice()) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous.address, address);
+            for (out.slice()) |previous| duplicate = duplicate or recipients.sameAddress(previous.address, address);
             if (duplicate) continue;
             out.values[out.len] = .{ .address = address, .name = name };
             out.len += 1;
@@ -88,7 +89,7 @@ pub fn collect(contacts: []const Value, raw: []const u8, cursor: usize) Matches 
 }
 pub fn collectKnown(known: []const Value, contacts: []const Value, self_address: []const u8, raw: []const u8, cursor: usize) Matches {
     var out: Matches = .{ .range = token(raw, cursor) };
-    if (out.range.query.len == 0 or out.range.query.len > 254) return out;
+    if (out.range.query.len == 0 or out.range.query.len > policy.outgoing_address_bytes) return out;
     // The cached projection is already ranked by recent interaction. Saved
     // contacts remain a compatibility fallback while that projection loads.
     for ([_]u8{ 3, 2, 1 }) |wanted_quality| {
@@ -96,9 +97,9 @@ pub fn collectKnown(known: []const Value, contacts: []const Value, self_address:
             const address = text(field(value, "address"));
             const name = safeName(text(field(value, "name")));
             recipients.validateAddress(address) catch continue;
-            if (std.ascii.eqlIgnoreCase(address, self_address) or std.ascii.eqlIgnoreCase(address, out.range.query) or matchQuality(name, address, out.range.query) != wanted_quality) continue;
+            if (recipients.sameGmailIdentity(address, self_address) or recipients.sameAddress(address, out.range.query) or matchQuality(name, address, out.range.query) != wanted_quality) continue;
             var duplicate = false;
-            for (out.slice()) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous.address, address);
+            for (out.slice()) |previous| duplicate = duplicate or recipients.sameAddress(previous.address, address);
             if (duplicate) continue;
             out.values[out.len] = .{ .address = address, .name = name };
             out.len += 1;
@@ -106,9 +107,9 @@ pub fn collectKnown(known: []const Value, contacts: []const Value, self_address:
         }
         const saved = collect(contacts, raw, cursor);
         for (saved.slice()) |candidate| {
-            if (std.ascii.eqlIgnoreCase(candidate.address, self_address) or matchQuality(candidate.name, candidate.address, out.range.query) != wanted_quality) continue;
+            if (recipients.sameGmailIdentity(candidate.address, self_address) or matchQuality(candidate.name, candidate.address, out.range.query) != wanted_quality) continue;
             var duplicate = false;
-            for (out.slice()) |previous| duplicate = duplicate or std.ascii.eqlIgnoreCase(previous.address, candidate.address);
+            for (out.slice()) |previous| duplicate = duplicate or recipients.sameAddress(previous.address, candidate.address);
             if (duplicate) continue;
             out.values[out.len] = candidate;
             out.len += 1;

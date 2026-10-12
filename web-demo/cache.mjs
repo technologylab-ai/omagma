@@ -10,7 +10,7 @@ const BAD_HEADER = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u
 
 export class BrowserCacheError extends Error {
   constructor(code) {
-    super({ invalid: 'The browser cache snapshot is invalid.', limit: 'The browser cache size limit was reached.', verified: 'Verify this account before loading or saving its cache.', unavailable: 'Browser cache storage is unavailable.' }[code]);
+    super({ invalid: 'The browser cache snapshot is invalid.', limit: 'The browser cache size limit was reached.', verified: 'Verify this account before loading or saving its cache.', unavailable: 'Browser cache storage is unavailable.', policy: 'The browser mail policy is unavailable or invalid.' }[code]);
     this.name = 'BrowserCacheError';
     this.code = code;
   }
@@ -59,47 +59,62 @@ export function cacheKey(binding) {
   return [account, clientId, grantId];
 }
 
-function address(value, contact = false) {
+// The application passes this only from its same-origin compiled WASM module.
+// It never comes from an uploaded connection, message or persisted snapshot.
+const POLICY_FIELDS = ['displayNameBytes', 'incomingAddressBytes', 'outgoingAddressBytes', 'subjectTextBytes', 'subjectPrefixBytes', 'subjectBytes', 'snippetBytes', 'filenameBytes', 'headerValueBytes', 'headersBytes', 'headerCount', 'referenceCount', 'referencesBytes', 'messageIdBytes', 'incomingRecipients'];
+export function validateMailPolicy(value) {
+  try {
+    record(value, POLICY_FIELDS);
+    for (const field of POLICY_FIELDS) if (!Number.isSafeInteger(value[field]) || value[field] <= 0) throw new Error();
+    if (value.subjectTextBytes + value.subjectPrefixBytes !== value.subjectBytes || value.outgoingAddressBytes > value.incomingAddressBytes || value.headerValueBytes > value.headersBytes || value.referencesBytes > value.headerValueBytes) throw new Error();
+    return Object.freeze(Object.fromEntries(POLICY_FIELDS.map(field => [field, value[field]])));
+  } catch { throw new BrowserCacheError('policy'); }
+}
+
+function address(value, policy, contact = false) {
   record(value, ['address', 'name']);
-  const address = text(value.address, 254);
+  const address = text(value.address, contact ? policy.outgoingAddressBytes : policy.incomingAddressBytes);
   if (address && !address.includes('@')) invalid();
-  if (contact && (!address || !/^[\x20-\x7e]+$/.test(address))) invalid();
-  return { address, name: text(value.name ?? '', 4096) };
+  if (contact && !address) invalid();
+  return { address, name: text(value.name ?? '', policy.displayNameBytes) };
 }
-function attachment(value) {
+function attachment(value, policy) {
   record(value, ['id', 'filename', 'mimeType', 'size', 'contentId', 'disposition', 'contentLocation']);
-  const filename = text(value.filename, 4096);
+  const filename = text(value.filename, policy.filenameBytes);
   if (filename.includes('/') || filename.includes('\\') || /^[a-z]:/i.test(filename) || filename === '.' || filename === '..') invalid();
-  return { id: text(value.id, 4096), filename, mimeType: text(value.mimeType ?? 'application/octet-stream', 256), size: integer(value.size, 50 * 1024 * 1024), contentId: value.contentId === null || value.contentId === undefined ? null : text(value.contentId, 1024), disposition: value.disposition === null || value.disposition === undefined ? null : text(value.disposition, 32), contentLocation: value.contentLocation === null || value.contentLocation === undefined ? null : text(value.contentLocation, 4096) };
+  return { id: text(value.id, 4096), filename, mimeType: text(value.mimeType ?? 'application/octet-stream', policy.headerValueBytes), size: integer(value.size, 50 * 1024 * 1024), contentId: value.contentId === null || value.contentId === undefined ? null : text(value.contentId, policy.headerValueBytes), disposition: value.disposition === null || value.disposition === undefined ? null : text(value.disposition, policy.headerValueBytes), contentLocation: value.contentLocation === null || value.contentLocation === undefined ? null : text(value.contentLocation, policy.headerValueBytes) };
 }
-function message(value) {
-  record(value, ['id', 'threadId', 'from', 'replyTo', 'to', 'cc', 'subject', 'snippet', 'bodyText', 'bodyHtml', 'bodyHtmlAmbiguous', 'bodySource', 'messageId', 'references', 'inReplyTo', 'labels', 'receivedAt', 'sentDate', 'unread', 'bodyCached', 'bodyCacheError', 'attachments']);
+function message(value, policy) {
+  record(value, ['id', 'threadId', 'from', 'replyTo', 'to', 'cc', 'subject', 'snippet', 'bodyText', 'bodyHtml', 'bodyHtmlAmbiguous', 'bodySource', 'messageId', 'references', 'inReplyTo', 'labels', 'receivedAt', 'sentDate', 'unread', 'bodyCached', 'bodyCacheError', 'decodeWarning', 'metadataPartial', 'labelsVerified', 'attachments']);
   const bodySource = value.bodySource ?? 'unknown';
   if (!['unknown', 'plain', 'html'].includes(bodySource)) invalid();
   return {
     id: id(value.id), threadId: value.threadId === '' ? '' : id(value.threadId),
-    from: address(value.from ?? { address: '', name: '' }),
-    replyTo: list(value.replyTo ?? [], 1024, entry => address(entry)),
-    to: list(value.to ?? [], 1024, entry => address(entry)), cc: list(value.cc ?? [], 1024, entry => address(entry)),
-    subject: text(value.subject ?? '', 16 * 1024), snippet: text(value.snippet ?? '', 16 * 1024),
+    from: address(value.from ?? { address: '', name: '' }, policy),
+    replyTo: list(value.replyTo ?? [], policy.incomingRecipients, entry => address(entry, policy)),
+    to: list(value.to ?? [], policy.incomingRecipients, entry => address(entry, policy)), cc: list(value.cc ?? [], policy.incomingRecipients, entry => address(entry, policy)),
+    subject: text(value.subject ?? '', policy.subjectBytes), snippet: text(value.snippet ?? '', policy.snippetBytes),
     bodyText: text(value.bodyText ?? '', 2 * 1024 * 1024, true),
     // Preserve formatting/control characters in passive HTML source. This is
     // never DOM HTML: only the bounded Zig semantic reader may interpret and
     // sanitize it after the verified native restore.
     bodyHtml: value.bodyHtml === null || value.bodyHtml === undefined ? null : literalText(value.bodyHtml, 2 * 1024 * 1024),
     bodyHtmlAmbiguous: boolean(value.bodyHtmlAmbiguous ?? false), bodySource,
-    messageId: text(value.messageId ?? '', 4096), references: text(value.references ?? '', 64 * 1024), inReplyTo: text(value.inReplyTo ?? '', 4096),
+    // Received protocol fields keep their literal identity, including CFWS
+    // tabs and passive Unicode. The shared reply encoder validates reuse.
+    messageId: literalText(value.messageId ?? '', policy.headerValueBytes), references: literalText(value.references ?? '', policy.referencesBytes), inReplyTo: literalText(value.inReplyTo ?? '', policy.headerValueBytes),
     labels: list(value.labels ?? [], 128, label => id(label, 256)), receivedAt: integer(value.receivedAt ?? 0, 253402300800000, true),
-    sentDate: value.sentDate === null || value.sentDate === undefined ? null : text(value.sentDate, 512),
+    sentDate: value.sentDate === null || value.sentDate === undefined ? null : literalText(value.sentDate, policy.headerValueBytes),
     unread: boolean(value.unread ?? false), bodyCached: boolean(value.bodyCached ?? false), bodyCacheError: text(value.bodyCacheError ?? '', 512),
-    attachments: list(value.attachments ?? [], CACHE_LIMITS.attachments, attachment),
+    decodeWarning: text(value.decodeWarning ?? '', 512), metadataPartial: boolean(value.metadataPartial ?? false), labelsVerified: boolean(value.labelsVerified ?? true),
+    attachments: list(value.attachments ?? [], CACHE_LIMITS.attachments, entry => attachment(entry, policy)),
   };
 }
-function contact(value) {
+function contact(value, policy) {
   record(value, ['resourceName', 'etag', 'name', 'emails']);
   const resourceName = text(value.resourceName, 256);
   if (!/^people\/[A-Za-z0-9._-]+$/.test(resourceName)) invalid();
-  return { resourceName, etag: text(value.etag ?? '', 4096), name: text(value.name ?? '', 4096), emails: list(value.emails ?? [], 1024, entry => address(entry, true)) };
+  return { resourceName, etag: text(value.etag ?? '', 4096), name: text(value.name ?? '', policy.displayNameBytes), emails: list(value.emails ?? [], policy.incomingRecipients, entry => address(entry, policy, true)) };
 }
 
 function parseSnapshot(value) {
@@ -124,49 +139,53 @@ function encodedSize(snapshot) {
   return size;
 }
 
-export function validateCacheSnapshot(binding, raw) {
+export function validateCacheSnapshot(binding, raw, { mailPolicy } = {}) {
+  const policy = validateMailPolicy(mailPolicy);
   const key = cacheKey(binding);
-  const value = record(parseSnapshot(raw), ['version', 'account', 'clientId', 'grantId', 'updatedAt', 'messages', 'contacts', 'contactsLoaded']);
+  const value = record(parseSnapshot(raw), ['version', 'decoderRevision', 'account', 'clientId', 'grantId', 'updatedAt', 'messages', 'contacts', 'contactsLoaded']);
   if (value.version !== 1 || value.account !== key[0] || value.clientId !== key[1] || value.grantId !== key[2]) invalid();
-  const messages = list(value.messages, CACHE_LIMITS.messages, message);
+  const messages = list(value.messages, CACHE_LIMITS.messages, entry => message(entry, policy));
   if (new Set(messages.map(entry => entry.id)).size !== messages.length) invalid();
-  const contacts = list(value.contacts, CACHE_LIMITS.contacts, contact);
+  const contacts = list(value.contacts, CACHE_LIMITS.contacts, entry => contact(entry, policy));
   if (new Set(contacts.map(entry => entry.resourceName)).size !== contacts.length) invalid();
   const contactsLoaded = boolean(value.contactsLoaded);
   if (!contactsLoaded && contacts.length) invalid();
-  const snapshot = { version: 1, account: key[0], clientId: key[1], grantId: key[2], updatedAt: integer(value.updatedAt, 253402300800000), messages, contacts, contactsLoaded };
+  const decoderRevision = integer(value.decoderRevision === undefined ? 0 : value.decoderRevision, 0xffffffff);
+  const snapshot = { version: 1, decoderRevision, account: key[0], clientId: key[1], grantId: key[2], updatedAt: integer(value.updatedAt, 253402300800000), messages, contacts, contactsLoaded };
   encodedSize(snapshot);
   return snapshot;
 }
 
-export function scopeCacheSnapshot(binding, raw, { contactsGranted = false } = {}) {
-  const snapshot = validateCacheSnapshot(binding, raw);
+export function scopeCacheSnapshot(binding, raw, { contactsGranted = false, mailPolicy } = {}) {
+  const snapshot = validateCacheSnapshot(binding, raw, { mailPolicy });
   if (contactsGranted !== true) { snapshot.contacts = []; snapshot.contactsLoaded = false; }
   return snapshot;
 }
 
 function sameKey(left, right) { return Array.isArray(left) && left.length === 3 && left.every((value, index) => value === right[index]); }
-function validatedRecord(row) {
+function validatedRecord(row, mailPolicy) {
   record(row, ['key', 'snapshot', 'byteLength', 'savedAt']);
   if (!Array.isArray(row.key) || row.key.length !== 3) invalid();
   const binding = { account: row.key[0], clientId: row.key[1], grantId: row.key[2] };
-  const snapshot = validateCacheSnapshot(binding, row.snapshot);
+  const snapshot = validateCacheSnapshot(binding, row.snapshot, { mailPolicy });
+  // New defaulted metadata fields may expand a legacy snapshot. Verify the
+  // stored receipt against its actual bytes, then account for normalized size.
+  if (encodedSize(row.snapshot) !== row.byteLength) invalid();
   const byteLength = encodedSize(snapshot);
-  if (byteLength !== row.byteLength) invalid();
   return { key: cacheKey(binding), snapshot, byteLength, savedAt: integer(row.savedAt, 253402300800000) };
 }
 
 // Pure transaction plan used by IndexedDB writes and quota/replace regression
 // tests. An actor gets one current row; saving never appends mail history.
-export function planCacheWrite(rows, binding, raw, savedAt = Date.now()) {
+export function planCacheWrite(rows, binding, raw, savedAt = Date.now(), { mailPolicy } = {}) {
   if (!Array.isArray(rows) || rows.length > 4) invalid();
-  const snapshot = validateCacheSnapshot(binding, raw);
+  const snapshot = validateCacheSnapshot(binding, raw, { mailPolicy });
   const next = { key: cacheKey(binding), snapshot, byteLength: encodedSize(snapshot), savedAt: integer(savedAt, 253402300800000) };
   const remove = [];
   const retained = [];
   for (const row of rows) {
     let previous;
-    try { previous = validatedRecord(row); } catch { if (row?.key !== undefined) remove.push(row.key); continue; }
+    try { previous = validatedRecord(row, mailPolicy); } catch { if (row?.key !== undefined) remove.push(row.key); continue; }
     if (!sameKey(previous.key, next.key)) retained.push(previous);
   }
   retained.sort((left, right) => left.savedAt - right.savedAt);
@@ -179,7 +198,8 @@ export function planCacheWrite(rows, binding, raw, savedAt = Date.now()) {
   return { record: next, remove, rows: [...retained, next], bytes };
 }
 
-export function createBrowserCache({ indexedDB = globalThis.indexedDB, databaseName = DATABASE } = {}) {
+export function createBrowserCache({ indexedDB = globalThis.indexedDB, databaseName = DATABASE, mailPolicy } = {}) {
+  let configuredPolicy = mailPolicy === undefined ? null : validateMailPolicy(mailPolicy);
   let opening = null;
   let connection = null;
   let generation = 0;
@@ -225,6 +245,7 @@ export function createBrowserCache({ indexedDB = globalThis.indexedDB, databaseN
     });
   }
   async function read(binding, options) {
+    const policy = validateMailPolicy(configuredPolicy);
     const key = cacheKey(binding);
     return transaction('readwrite', (store, finish, fail) => {
       const request = store.get(key);
@@ -232,13 +253,14 @@ export function createBrowserCache({ indexedDB = globalThis.indexedDB, databaseN
       request.onsuccess = () => {
         if (request.result === undefined) { finish(null); return; }
         let row;
-        try { row = validatedRecord(request.result); if (!sameKey(row.key, key)) invalid(); }
+        try { row = validatedRecord(request.result, policy); if (!sameKey(row.key, key)) invalid(); }
         catch { store.delete(key); finish(null); return; }
-        finish(scopeCacheSnapshot(binding, row.snapshot, options));
+        finish(scopeCacheSnapshot(binding, row.snapshot, { ...options, mailPolicy: policy }));
       };
     });
   }
   return Object.freeze({
+    configure(policy) { configuredPolicy = validateMailPolicy(policy); },
     // PRE-verification staging only. The caller must send these untrusted
     // bytes solely to native pending-cache input; no DOM, diagnostic or UI use
     // is permitted until Gmail PROFILE and the exact native actor binding pass.
@@ -249,7 +271,8 @@ export function createBrowserCache({ indexedDB = globalThis.indexedDB, databaseN
     },
     async save(binding, snapshot, options = {}) {
       if (options.verified !== true) throw new BrowserCacheError('verified');
-      const validated = validateCacheSnapshot(binding, snapshot);
+      const policy = validateMailPolicy(configuredPolicy);
+      const validated = validateCacheSnapshot(binding, snapshot, { mailPolicy: policy });
       return transaction('readwrite', (store, finish, fail) => {
         // Count-limited retrieval bounds corrupted/old database contents too.
         const request = store.getAll(undefined, 4);
@@ -258,7 +281,7 @@ export function createBrowserCache({ indexedDB = globalThis.indexedDB, databaseN
           try {
             const rows = request.result;
             const oversized = rows.length > CACHE_LIMITS.accounts;
-            const plan = planCacheWrite(oversized ? [] : rows, binding, validated);
+            const plan = planCacheWrite(oversized ? [] : rows, binding, validated, Date.now(), { mailPolicy: policy });
             if (oversized) store.clear();
             else for (const key of plan.remove) store.delete(key);
             store.put(plan.record);

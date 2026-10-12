@@ -1,4 +1,4 @@
-const requiredFunctions = ['init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width'];
+const requiredFunctions = ['init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width', 'policy_ptr', 'policy_len'];
 const MAX_INPUT_EVENT = 64 * 1024;
 const MAX_OUTPUT_FRAME = 2 * 1024 * 1024;
 
@@ -179,6 +179,12 @@ export class BrowserWasmBridge {
     }
     try { await this.invoke('connect', bytes.length); }
     finally { this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection').fill(0); bytes.fill(0); cacheBytes?.fill(0); }
+  }
+
+  readMailPolicy() {
+    const bytes = this.view(this.exports.policy_ptr(), this.exports.policy_len(), 4096, 'mail policy');
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    catch (cause) { throw new Error('The WebAssembly mail policy is invalid.', { cause }); }
   }
 
   cacheSnapshot(index) {

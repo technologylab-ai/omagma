@@ -14,6 +14,8 @@ const conversation_draft = @import("conversation_draft.zig");
 const conversation_source = @import("conversation_source.zig");
 const draft_codec = @import("draft_codec.zig");
 const draft_summary = @import("draft_summary.zig");
+const gmail_decode = @import("gmail_decode.zig");
+const mail_limits = @import("mail_limits.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
 const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
@@ -373,7 +375,11 @@ pub const Session = struct {
             const input = j.get(req, "draft") orelse return error.MissingField;
             const fields = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.MissingField);
             if (fields.len != 5) return error.InvalidRecovery;
-            for (fields, 0..) |field, i| if (field.len > (if (i == 4) t.Limits.body_bytes else @as(usize, 16 * 1024)) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
+            for (fields, 0..) |field, i| if (field.len > (switch (i) {
+                4 => t.Limits.body_bytes,
+                3 => mail_limits.subject_bytes,
+                else => mail_limits.header_value_bytes,
+            }) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
             var clean = try j.copyObject(a, input);
             _ = clean.object.swapRemove("to");
             _ = clean.object.swapRemove("cc");
@@ -414,6 +420,7 @@ pub const Session = struct {
             // Legacy immutable caches predate CID metadata. A formatted draft
             // always captures the provider's current FULL source read-only.
             const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
+            try conversation_draft.requireBody(message);
             const original: ?t.Original = if (preserve) try s.captureOriginal(a, &store, req, message) else null;
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
             const d = try conversation_draft.reply(a, message, .{ .account = address, .aliases = aliases, .all = try j.boolean(req, "all", false), .format = format, .original = original });
@@ -431,6 +438,7 @@ pub const Session = struct {
             const preserve = try j.boolean(req, "preserveFormatting", false);
             if (omit and preserve) return error.InvalidForwardOptions;
             const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
+            try conversation_draft.requireBody(message);
             var source: ConversationAttachments = .{ .session = s, .store = &store, .request = req };
             const draft = try conversation_source.forward(a, message, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit }, source.adapter());
             return j.value(a, try store.putDraft(draft, null));
@@ -474,25 +482,37 @@ pub const Session = struct {
             for (store.state.outbox) |entry| if (std.mem.eql(u8, entry.threadId, thread)) {
                 thread_total += 1;
             };
+            if (thread_total > 100) return error.ThreadTooLarge;
+            var remaining: usize = t.Limits.thread_bytes;
+            var partial = false;
             if (thread_total != 0) s.reportProgress(.bodies, 0, thread_total);
             for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "threadId"), thread)) {
-                var m = try s.normalize(a, source, v);
+                var scope = std.heap.ArenaAllocator.init(s.allocator);
+                defer scope.deinit();
+                var m = try s.normalize(scope.allocator(), source, v);
                 if (store.find(m.id)) |existing| {
-                    m.labels = existing.message.labels;
-                    m.unread = existing.message.unread;
+                    copyMembership(&m, existing.message);
                 }
-                try store.put(m, true);
-                try messages.append(a, m);
+                const retained = try gmail_decode.retainThreadMessage(m, a, &remaining);
+                partial = partial or retained.metadataPartial or retained.decodeWarning.len != 0;
+                try store.put(retained, true);
+                try messages.append(a, retained);
                 s.reportProgress(.bodies, messages.items.len, thread_total);
             };
             for (store.state.outbox) |entry| if (std.mem.eql(u8, entry.threadId, thread)) {
-                if (try store.readOutbox(entry.id)) |sent| try messages.append(a, sent);
+                var scope = std.heap.ArenaAllocator.init(s.allocator);
+                defer scope.deinit();
+                if (try store.readOutboxWithAllocator(scope.allocator(), entry.id)) |sent| {
+                    const retained = try gmail_decode.retainThreadMessage(sent, a, &remaining);
+                    partial = partial or retained.metadataPartial or retained.decodeWarning.len != 0;
+                    try messages.append(a, retained);
+                }
                 s.reportProgress(.bodies, messages.items.len, thread_total);
             };
             if (messages.items.len == 0) return error.MessageNotFound;
             std.mem.sort(t.Message, messages.items, {}, olderFirst);
             try store.save();
-            return j.value(a, .{ .messages = messages.items });
+            return j.value(a, .{ .messages = messages.items, .partial = partial });
         }
         if (std.mem.eql(u8, cmd, "mail.attachment")) {
             return j.value(a, try s.fetchKnownAttachment(a, &store, req, null));
@@ -833,7 +853,7 @@ pub const Session = struct {
             for (store.state.identities) |*identity| {
                 try recipients.validateAddress(identity.address);
                 try recipients.validateHeader(identity.name);
-                if (identity.name.len > 256 or identity.signature.len > 8192) return error.IdentityTooLarge;
+                if (identity.name.len > @import("mail_limits.zig").display_name_bytes or identity.signature.len > 8192) return error.IdentityTooLarge;
                 identity.signature = try @import("mime.zig").sanitizeText(identity.signature, a);
                 if (std.ascii.eqlIgnoreCase(identity.address, primary.address)) {
                     if (primary.name.len != 0) identity.name = primary.name;
@@ -937,7 +957,7 @@ pub const Session = struct {
     }
     fn cacheStats(s: *Session, a: std.mem.Allocator, store: *storage.Store) !Value {
         const meter = if (s.meter) |m| m.snapshot() else null;
-        return j.value(a, .{ .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try storage.refreshActive(s.io, s.cache_root, store.state.account, s.options), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
+        return j.value(a, .{ .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .allocatorReservationBytes = if (meter) |m| m.allocatorReservationBytes else null, .backingRejectedAllocations = if (meter) |m| m.backingRejectedAllocations else null, .lastRejectedAllocationBytes = if (meter) |m| m.lastRejectedAllocationBytes else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try storage.refreshActive(s.io, s.cache_root, store.state.account, s.options), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
     }
     fn cachedDispatch(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
         const cmd = j.text(req, "cmd");
@@ -988,25 +1008,27 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "mail.read")) {
             const id = try j.required(req, "messageId");
-            var message = (try store.read(id)) orelse if (s.options.fixtures) (try store.readOutbox(id)) orelse return error.CacheMiss else return error.CacheMiss;
+            var message = (try store.read(id)) orelse store.refusedMessage(id) orelse if (s.options.fixtures) (try store.readOutbox(id)) orelse return error.CacheMiss else return error.CacheMiss;
             if (store.find(id)) |entry| {
-                message.labels = entry.message.labels;
-                message.unread = entry.message.unread;
+                copyMembership(&message, entry.message);
             }
-            message.bodyCached = true;
+            message.bodyCached = message.bodyCacheError.len == 0;
             return j.value(a, message);
         }
         if (std.mem.eql(u8, cmd, "mail.thread")) {
             const thread = try j.required(req, "threadId");
             var messages: std.ArrayList(t.Message) = .empty;
+            var remaining: usize = t.Limits.thread_bytes;
             for (store.state.entries) |entry| if (std.mem.eql(u8, entry.message.threadId, thread)) {
-                if (try store.read(entry.message.id)) |cached| {
+                if (messages.items.len == 100) return error.ThreadTooLarge;
+                var scope = std.heap.ArenaAllocator.init(s.allocator);
+                defer scope.deinit();
+                if ((try store.readWithAllocator(scope.allocator(), entry.message.id)) orelse store.refusedMessage(entry.message.id)) |cached| {
                     var message = cached;
-                    message.labels = entry.message.labels;
-                    message.unread = entry.message.unread;
-                    message.bodyCached = true;
-                    try messages.append(a, message);
-                }
+                    copyMembership(&message, entry.message);
+                    message.bodyCached = message.bodyCacheError.len == 0;
+                    try messages.append(a, try gmail_decode.retainThreadMessage(message, a, &remaining));
+                } else try messages.append(a, try gmail_decode.unavailablePlaceholder(entry.message, a, "BodyNotCached"));
             };
             if (messages.items.len == 0) return error.CacheMiss;
             std.sort.heap(t.Message, messages.items, {}, olderFirst);
@@ -1137,7 +1159,15 @@ pub const Session = struct {
                 for (view.?.ids) |id| member = member or std.mem.eql(u8, id, entry.message.id);
                 if (!member) continue;
             }
-            if (label_id.len > 0 and !hasLabel(entry.message, label_id)) continue;
+            if (label_id.len > 0 and !hasLabel(entry.message, label_id)) {
+                // The authoritative scoped list may certify membership when a
+                // single metadata response could not verify labelIds.
+                var listed = false;
+                if (!entry.message.labelsVerified) if (view) |scoped| {
+                    for (scoped.ids) |id| listed = listed or std.mem.eql(u8, id, entry.message.id);
+                };
+                if (!listed) continue;
+            }
             if (label_id.len == 0 and query.len == 0 and (hasLabel(entry.message, "TRASH") or hasLabel(entry.message, "SPAM"))) continue;
             var message = entry.message;
             message.bodyCached = entry.bytes != 0;
@@ -1174,7 +1204,7 @@ pub const Session = struct {
         source: Value,
         metadata_requests: usize = 0,
         fn transport(self: *FixtureRemote) @import("gmail.zig").Transport {
-            return .{ .context = self, .requestFn = request };
+            return .{ .context = self, .requestFn = request, .temporary_allocator = self.session.allocator };
         }
         fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?Value) !Value {
             _ = body;
@@ -1470,6 +1500,7 @@ pub const Session = struct {
             break :live_transport live.transport();
         };
         transport.progress_sink = s.progress_sink;
+        transport.temporary_allocator = s.allocator;
         defer if (!s.options.fixtures) live.close();
         const plan_value = try @import("gmail.zig").dispatchAuthorized(s.io, a, address, &.{"mail-read"}, transport, "mail.refresh", request);
         const plan = try j.decode(@import("gmail.zig").RefreshPlan, a, plan_value);
@@ -1501,7 +1532,13 @@ pub const Session = struct {
                 try commit.invalidate(id);
             }
             for (plan.messages) |message| try commit.put(message, false);
-            for (plan.labels) |update| commit.applyLabels(update.id, update.labels);
+            for (plan.labels) |update| {
+                if (update.verified) commit.applyLabels(update.id, update.labels) else if (commit.find(update.id)) |entry| {
+                    entry.message.labelsVerified = false;
+                    entry.message.metadataPartial = true;
+                    entry.message.decodeWarning = update.warning;
+                }
+            }
             if (plan.messages.len != 0 or plan.labels.len != 0 or plan.deleted.len != 0) for (commit.state.views) |*view| {
                 view.stale = true;
             };
@@ -1509,6 +1546,9 @@ pub const Session = struct {
                 var messages: std.ArrayList(t.Message) = .empty;
                 for (plan.viewIds) |id| if (commit.find(id)) |entry| try messages.append(ca, entry.message);
                 try commit.recordView(j.text(req, "query"), j.text(req, "label"), plan.labelId, messages.items, plan.nextCursor, false);
+                if (plan.partial) if (commit.findView(&key)) |view| {
+                    view.incomplete = true;
+                };
                 for (plan.viewIds) |id| if (commit.find(id) == null) {
                     if (commit.findView(&key)) |view| view.incomplete = true;
                 };
@@ -1614,7 +1654,7 @@ pub const Session = struct {
             expected = commit.state.generation;
             commit.release();
             body_completed += 1;
-            if (body_result) |message| s.reportRow(.{ .kind = .body, .message = message }) else s.reportRow(.{ .kind = .body, .failed = true, .message = .{ .id = id, .threadId = "" } });
+            if (body_result) |message| s.reportRow(.{ .kind = .body, .failed = message.bodyCacheError.len != 0, .message = message }) else s.reportRow(.{ .kind = .body, .failed = true, .message = .{ .id = id, .threadId = "" } });
             s.reportProgress(.bodies, body_completed, body_total);
             if (s.options.fixtures) try s.fixtureProgressGate(ma, fixture_remote.source, .bodies, body_completed);
         }
@@ -1646,10 +1686,7 @@ pub const Session = struct {
     }
 
     fn messageRefusal(err: anyerror) bool {
-        return switch (err) {
-            error.BodyTooLarge, error.DecodedMessageTooLarge, error.MessageTooLarge, error.ResponseTooLarge, error.UnsupportedCharset, error.TooManyMimeParts, error.MimeTooDeep, error.BodySizeMismatch, error.AmbiguousCalendarPart, error.AmbiguousHeader, error.AmbiguousSender, error.AttachmentsTooLarge, error.CapacityExceeded, error.ExternalBodyRequired, error.FilenameTooLarge, error.HeaderInjection, error.HeaderTooLarge, error.HeadersTooLarge, error.IncompleteMultipart, error.InvalidAttachmentFilename, error.InvalidAttachmentId, error.InvalidBase64, error.InvalidBody, error.InvalidCharsetData, error.InvalidDate, error.InvalidEncodedWord, error.InvalidHeaders, error.InvalidLabels, error.InvalidMessageId, error.InvalidMimeBoundary, error.InvalidMimeType, error.InvalidQuotedPrintable, error.InvalidUtf8, error.MissingHeaderBoundary, error.MissingMimeBoundary, error.MissingMimeType, error.ReferencesTooLarge, error.TooManyAttachments, error.TooManyHeaders, error.TooManyReferences, error.UnsupportedTransferEncoding, error.InvalidAddress, error.InvalidRecipients, error.RecipientHeaderTooLarge, error.RecipientTooLarge, error.TooManyIncomingRecipients, error.MalformedMessage => true,
-            else => false,
-        };
+        return @import("gmail_decode.zig").messageRefusal(err);
     }
     fn scenario(s: *Session, name: []const u8) bool {
         return std.mem.eql(u8, s.options.fixture_scenario, name);
@@ -1669,7 +1706,7 @@ pub const Session = struct {
         } else if (!std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
     }
     fn remote(s: *Session, a: std.mem.Allocator, address: []const u8, cmd: []const u8, req: Value) !Value {
-        return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeProgress, .{ s.io, a, &s.config, address, cmd, req, s.progress_sink });
+        return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeProgressWithAllocator, .{ s.io, a, s.allocator, &s.config, address, cmd, req, s.progress_sink });
     }
     fn fixture(s: *Session, a: std.mem.Allocator, address: []const u8) !Value {
         if (!s.options.fixtures) return error.LiveProviderNotReady;
@@ -1972,11 +2009,10 @@ pub const Session = struct {
             if (try store.readOutbox(id)) |sent| return sent;
             if (store.state.fixtureProvider.len != 0) _ = try s.fixtureProviderSource(a, store);
         }
-        if (if (allow_cached) try store.read(id) else null) |cached| {
+        if (if (allow_cached) (try store.read(id)) orelse store.refusedMessage(id) else null) |cached| {
             var m = cached;
             if (store.find(id)) |entry| {
-                m.labels = entry.message.labels;
-                m.unread = entry.message.unread;
+                copyMembership(&m, entry.message);
             }
             if (s.options.fixtures) try store.applyFixtureRecord(&m);
             return m;
@@ -1991,8 +2027,7 @@ pub const Session = struct {
             if (store.state.generation == expected) try store.put(m, true) else {
                 _ = try store.putBody(m);
                 if (store.find(m.id)) |entry| {
-                    m.labels = entry.message.labels;
-                    m.unread = entry.message.unread;
+                    copyMembership(&m, entry.message);
                 }
             }
             try store.save();
@@ -2004,8 +2039,7 @@ pub const Session = struct {
             try s.fixtureProgressGate(a, source, .bodies, 0);
             var m = try s.normalize(a, source, v);
             if (store.find(id)) |existing| {
-                m.labels = existing.message.labels;
-                m.unread = existing.message.unread;
+                copyMembership(&m, existing.message);
             }
             store.state.fixtureCalls += 1;
             if (!allow_cached) _ = try store.upgradeInvitation(m);
@@ -2057,8 +2091,7 @@ pub const Session = struct {
         for (try array(source, "messages")) |v| {
             var m = try s.normalize(a, source, v);
             if (store.find(m.id)) |e| {
-                m.labels = e.message.labels;
-                m.unread = e.message.unread;
+                copyMembership(&m, e.message);
             }
             try candidates.append(a, m);
         }
@@ -2434,6 +2467,15 @@ fn requestBodyFormat(value: Value) !t.BodyFormat {
 pub fn validateDraft(draft: t.Draft, send: bool) !void {
     return draft_codec.validateDraft(draft, send);
 }
+fn copyMembership(message: *t.Message, metadata: t.Message) void {
+    message.labels = metadata.labels;
+    message.unread = metadata.unread;
+    message.labelsVerified = metadata.labelsVerified;
+    if (!metadata.labelsVerified) {
+        message.metadataPartial = true;
+        if (message.decodeWarning.len == 0) message.decodeWarning = metadata.decodeWarning;
+    }
+}
 fn hasLabel(m: t.Message, label: []const u8) bool {
     for (m.labels) |l| if (std.mem.eql(u8, l, label)) return true;
     return false;
@@ -2643,7 +2685,7 @@ test "cache search has K account query mode cursors and metadata-only predicates
     try std.testing.expect(!cacheMatches(store.state.entries[0].message, "-in:inbox -in:trash"));
 }
 test "message refusal classification keeps integrity bounds and excludes systemic failures" {
-    for ([_]anyerror{ error.BodySizeMismatch, error.TooManyHeaders, error.InvalidEncodedWord, error.MalformedMessage, error.BodyTooLarge }) |err| try std.testing.expect(Session.messageRefusal(err));
+    for ([_]anyerror{ error.BodySizeMismatch, error.TooManyHeaders, error.InvalidEncodedWord, error.MalformedMessage, error.BodyTooLarge, error.CalendarTooLarge, error.JsonTooManyTokens, error.JsonTooDeep }) |err| try std.testing.expect(Session.messageRefusal(err));
     for ([_]anyerror{ error.OutOfMemory, error.Canceled, error.Timeout, error.InvalidGrant, error.PermissionDenied, error.TokenRefreshFailed, error.RateLimited, error.CacheBusy, error.CacheIdentityMismatch }) |err| try std.testing.expect(!Session.messageRefusal(err));
 }
 

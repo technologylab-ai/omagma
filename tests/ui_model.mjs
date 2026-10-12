@@ -35,6 +35,35 @@ assert.equal(Model.initialAccount(init, ADDRESSES[2]), ADDRESSES[2]);
 assert.equal(Model.initialAccount(init, "removed@example.com"), ADDRESSES[0]);
 assert.equal(Model.handshakeAccounts([]), null);
 assert.equal(init[0].messages[0].subject, "<img src=x onerror=alert(1)>");
+assert.equal(init[0].messages[0].partial, false);
+assert.equal(init[0].messages[0].warningCode, "");
+assert.equal(Model.messageWarning(init[0].messages[0]), "");
+assert.equal(Model.messageWarning(null), "");
+const partialRow = { ...init[0].messages[0], partial: true, warningCode: "MessageBudgetExceeded" };
+const partialAccount = Model.normalizeSnapshot(snapshot(ADDRESSES[0], 2, { messages: [partialRow] }));
+assert.equal(partialAccount.messages[0].partial, true);
+assert.equal(partialAccount.messages[0].warningCode, "MessageBudgetExceeded");
+assert.equal(Model.messageWarning(partialAccount.messages[0]),
+  "Some message details are unavailable · MessageBudgetExceeded");
+assert.equal(Model.effectiveState(partialAccount, 100000), "current");
+assert.equal(Model.hasAccountWarning(partialAccount, 100000), false);
+assert.equal(Model.stateLabel(partialAccount, 100000), "Current");
+assert.equal(Model.messageWarning({ partial: false, warningCode: "Header2" }),
+  "Some message details are unavailable · Header2");
+for (const warningCode of [null, 7, "", "Bad\nCode", "Bad\n", "Bad\r", "<b>Bad</b>", "Bad_Code", "é", "x".repeat(65)]) {
+  const normalized = Model.normalizeSnapshot(snapshot(ADDRESSES[0], 2, {
+    messages: [{ ...partialRow, warningCode }]
+  }));
+  assert.equal(normalized.messages[0].warningCode, "");
+  assert.equal(Model.messageWarning(normalized.messages[0]), "Some message details are unavailable");
+  assert.equal(Model.messageWarning({ partial: false, warningCode }), "");
+  assert.equal(Model.hasAccountWarning(normalized, 100000), false);
+}
+const longestWarning = "A0".repeat(32);
+assert.equal(Model.normalizeSnapshot(snapshot(ADDRESSES[0], 2, {
+  messages: [{ ...partialRow, warningCode: longestWarning }]
+})).messages[0].warningCode, longestWarning);
+assert.equal(Model.messageWarning({ partial: "true", warningCode: "" }), "");
 assert.equal(Model.selectedAccount(init, ADDRESSES[1]).messages[0].sender, ADDRESSES[1]);
 assert.equal(Model.replaceSnapshot(init, snapshot(ADDRESSES[0], 0)), init);
 assert.equal(Model.replaceSnapshot(init, snapshot(ADDRESSES[0], 1)), init);

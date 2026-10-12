@@ -9,9 +9,12 @@ const codec = @import("terminal/draft_codec.zig");
 const draft_summary = @import("terminal/draft_summary.zig");
 const conversation = @import("terminal/conversation_draft.zig");
 const conversation_source = @import("terminal/conversation_source.zig");
+const gmail_decode = @import("terminal/gmail_decode.zig");
 const bounded = @import("bounded.zig");
 const Allocator = std.mem.Allocator;
 const Value = j.Value;
+pub const heap_bytes: usize = 64 * 1024 * 1024;
+pub const linear_memory_bytes: usize = 96 * 1024 * 1024;
 const draft_limit = 8;
 const draft_bytes_limit = 8 * 1024 * 1024;
 const demo_accounts = [_][]const u8{ "alex@example.test", "studio@example.test", "team@example.test" };
@@ -137,6 +140,7 @@ pub const Provider = struct {
         defer scratch.deinit();
         // Profile validation happens before any uploaded snapshot is consumed.
         var session = try live.connect(scratch.allocator(), bytes);
+        session.temporary_allocator = self.allocator;
         for (self.live_sessions[0..self.live_count]) |previous| if (std.ascii.eqlIgnoreCase(previous.account, session.account)) return error.DuplicateAccount;
         const a = self.arena.allocator();
         session.account = try a.dupe(u8, session.account);
@@ -277,7 +281,7 @@ pub const Provider = struct {
             self.views[index] = @splat(.{});
             return j.value(a, .{ .cleared = true, .draftsPreserved = true, .operationsPreserved = true });
         }
-        if (std.mem.eql(u8, cmd, "cache.stats")) return j.value(a, .{ .metadataEntries = self.cache.retained(index).len, .metadataLimit = @as(usize, 300), .diskBytes = @as(usize, 0), .diskLimitBytes = cache_module.total_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .lastSyncAt = self.cache.updatedAt(index), .generation = self.cache.revision(index), .refreshInProgress = false });
+        if (std.mem.eql(u8, cmd, "cache.stats")) return j.value(a, .{ .metadataEntries = self.cache.retained(index).len, .metadataLimit = @as(usize, 300), .diskBytes = @as(usize, 0), .diskLimitBytes = cache_module.total_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = heap_bytes, .terminalHeapLimitBytes = heap_bytes, .browserLinearMemoryBytes = linear_memory_bytes, .mailScratch = @import("mail_scratch.zig").snapshot(), .lastSyncAt = self.cache.updatedAt(index), .generation = self.cache.revision(index), .refreshInProgress = false });
         if (std.mem.eql(u8, cmd, "mail.recipients")) {
             var known = @import("terminal/recipient_cache.zig").Builder.init(a, self.address(index));
             defer known.deinit();
@@ -291,8 +295,16 @@ pub const Provider = struct {
             const result = try self.live_sessions[index].list(a, j.text(request, "label"), j.text(request, "query"));
             const messages = j.get(result, "messages") orelse return error.InvalidProviderResponse;
             if (messages != .array or messages.array.items.len > 30) return error.InvalidPage;
-            try self.cache.replaceView(index, messages.array.items, std.Io.Timestamp.now(live.io, .real).toMilliseconds(), j.text(request, "label"), j.text(request, "query").len == 0 and j.text(result, "nextCursor").len == 0);
-            try self.recordView(index, request, messages.array.items, j.text(result, "nextCursor").len == 0);
+            var complete = j.text(result, "nextCursor").len == 0 and !try j.boolean(result, "partial", false);
+            for (messages.array.items) |message| complete = complete and !try j.boolean(message, "metadataPartial", false) and try j.boolean(message, "labelsVerified", true);
+            self.cache.replaceView(index, messages.array.items, std.Io.Timestamp.now(live.io, .real).toMilliseconds(), j.text(request, "label"), j.text(request, "query").len == 0 and complete) catch |err| {
+                if (err != error.BrowserCacheQuotaExceeded) return err;
+                for (messages.array.items) |*message| message.* = try cacheQuotaWarning(a, message.*);
+                // The caller can display this response even though the atomic
+                // cache operation kept the previous snapshot and timestamp.
+                return j.value(a, .{ .messages = messages.array.items, .cached = false, .partial = true, .cacheWriteFailed = true, .decodeWarning = "BrowserCacheQuotaExceeded", .cacheReady = self.cache.valid(index), .lastSyncAt = self.cache.updatedAt(index), .refreshCompleted = true, .refreshInProgress = false });
+            };
+            try self.recordView(index, request, messages.array.items, complete);
             // A bounded head is honest about its scope; it never invents a cursor.
             if (std.mem.eql(u8, cmd, "mail.refresh")) return j.value(a, .{ .cacheReady = true, .lastSyncAt = self.cache.updatedAt(index), .refreshCompleted = true, .refreshInProgress = false });
             return j.value(a, .{ .messages = messages.array.items, .cached = false, .partial = true, .cacheReady = true, .lastSyncAt = self.cache.updatedAt(index) });
@@ -304,17 +316,69 @@ pub const Provider = struct {
                 const session = &self.live_sessions[index];
                 const result = try @import("terminal/gmail.zig").dispatchAuthorized(live.io, a, session.account, session.capabilities(), session.transport(), cmd, request);
                 const messages = j.get(result, "messages") orelse return error.InvalidProviderResponse;
-                if (messages != .array or messages.array.items.len > 30) return error.ThreadTooLarge;
-                for (messages.array.items) |message| try self.cache.saveRead(index, try j.decode(t.Message, a, message));
+                if (messages != .array or messages.array.items.len > 100) return error.ThreadTooLarge;
+                std.mem.sort(Value, messages.array.items, {}, struct {
+                    fn less(_: void, left: Value, right: Value) bool {
+                        const l = j.integer(left, "receivedAt", 0) catch 0;
+                        const r = j.integer(right, "receivedAt", 0) catch 0;
+                        return l < r or (l == r and std.mem.lessThan(u8, j.text(left, "id"), j.text(right, "id")));
+                    }
+                }.less);
+                const selected = messages.array.items[messages.array.items.len -| 30..];
+                const omitted = messages.array.items.len - selected.len;
+                var cache_partial = false;
+                for (selected) |*value| {
+                    const decoded = try j.decode(t.Message, a, value.*);
+                    const admitted = try self.cacheRead(index, decoded);
+                    if (!std.mem.eql(u8, admitted.decodeWarning, decoded.decodeWarning) or admitted.metadataPartial != decoded.metadataPartial or admitted.bodyCached != decoded.bodyCached) {
+                        // Annotate only the small map. Re-encoding the complete
+                        // body here would duplicate an already bounded result.
+                        var annotated = try j.copyObject(a, value.*);
+                        try annotated.object.put(a, "decodeWarning", .{ .string = admitted.decodeWarning });
+                        try annotated.object.put(a, "metadataPartial", .{ .bool = admitted.metadataPartial });
+                        try annotated.object.put(a, "bodyCached", .{ .bool = admitted.bodyCached });
+                        value.* = annotated;
+                        cache_partial = true;
+                    }
+                }
+                if (cache_partial or omitted > 0) {
+                    var annotated = try j.copyObject(a, result);
+                    try annotated.object.put(a, "partial", .{ .bool = true });
+                    if (omitted > 0) {
+                        var window: Value = .{ .array = .init(a) };
+                        try window.array.appendSlice(selected);
+                        try annotated.object.put(a, "messages", window);
+                        try annotated.object.put(a, "omittedMessages", .{ .integer = (try j.integer(result, "omittedMessages", 0)) + @as(i64, @intCast(omitted)) });
+                    }
+                    return annotated;
+                }
                 return result;
             }
-            var messages: std.ArrayList(t.Message) = .empty;
-            for (self.cache.retained(index)) |message| if (message.bodyCached and std.mem.eql(u8, message.threadId, thread_id)) {
-                if (messages.items.len == 30) return error.ThreadTooLarge;
-                try messages.append(a, message);
+            var newest: [30]t.Message = undefined;
+            var count: usize = 0;
+            var total: usize = 0;
+            for (self.cache.retained(index)) |message| if (std.mem.eql(u8, message.threadId, thread_id)) {
+                total += 1;
+                if (count < newest.len) {
+                    newest[count] = message;
+                    count += 1;
+                } else {
+                    var oldest: usize = 0;
+                    for (newest[1..], 1..) |candidate, row| if (olderMessage({}, candidate, newest[oldest])) {
+                        oldest = row;
+                    };
+                    if (olderMessage({}, newest[oldest], message)) newest[oldest] = message;
+                }
             };
-            if (messages.items.len == 0) return error.CacheMiss;
-            return j.value(a, .{ .messages = messages.items, .cached = true, .partial = true });
+            if (count == 0) return error.CacheMiss;
+            std.mem.sort(t.Message, newest[0..count], {}, olderMessage);
+            var remaining: usize = t.Limits.thread_bytes;
+            const messages = try a.alloc(t.Message, count);
+            for (newest[0..count], messages) |message, *out| {
+                const candidate = if (message.bodyCached or message.bodyCacheError.len > 0) message else try gmail_decode.unavailablePlaceholder(message, a, "BodyNotCached");
+                out.* = try gmail_decode.retainThreadMessage(candidate, a, &remaining);
+            }
+            return j.value(a, .{ .messages = messages, .cached = true, .partial = true, .omittedMessages = total - count });
         }
         if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search")) {
             if (!self.canContacts(index)) return error.PermissionDenied;
@@ -473,7 +537,7 @@ pub const Provider = struct {
         // A server search may use Gmail-only operators. Its optional local
         // preview cannot reject the provider search as invalid cache syntax.
         if (std.mem.eql(u8, j.text(request, "cmd"), "mail.list")) @import("terminal/cache_query.zig").validate(j.text(request, "query")) catch return error.CacheMiss;
-        const values = if (std.mem.eql(u8, j.text(request, "cmd"), "mail.list")) try self.viewList(a, index, request) orelse try self.cache.listAll(index, a, j.text(request, "label"), j.text(request, "query")) else try self.cache.listAll(index, a, j.text(request, "label"), j.text(request, "query"));
+        const values = try self.viewList(a, index, request);
         var start: usize = 0;
         var end: usize = @min(values.len, 30);
         const before = j.text(request, "beforeMessageId");
@@ -505,7 +569,9 @@ pub const Provider = struct {
             if (start > values.len) return error.InvalidCursor;
             end = @min(values.len, start + 30);
         }
-        return j.value(a, .{ .messages = values[start..end], .cached = true, .partial = true, .cacheReady = true, .lastSyncAt = self.cache.updatedAt(index), .hasMoreCachedBefore = start > 0, .hasMoreCachedAfter = end < values.len, .cursor = try self.cacheCursor(a, index, request, start), .previousCursor = if (start > 0) try self.cacheCursor(a, index, request, start -| 30) else "", .nextCursor = if (end < values.len) try self.cacheCursor(a, index, request, end) else "", .viewIncomplete = false, .searchMode = "cache", .searchScope = "retained subset" });
+        var incomplete = self.viewIncomplete(index, request);
+        for (values) |message| incomplete = incomplete or try j.boolean(message, "metadataPartial", false) or !try j.boolean(message, "labelsVerified", true);
+        return j.value(a, .{ .messages = values[start..end], .cached = true, .partial = true, .cacheReady = true, .lastSyncAt = self.cache.updatedAt(index), .hasMoreCachedBefore = start > 0, .hasMoreCachedAfter = end < values.len, .cursor = try self.cacheCursor(a, index, request, start), .previousCursor = if (start > 0) try self.cacheCursor(a, index, request, start -| 30) else "", .nextCursor = if (end < values.len) try self.cacheCursor(a, index, request, end) else "", .viewIncomplete = incomplete, .searchMode = "cache", .searchScope = "retained subset" });
     }
     fn cacheCursor(self: *Provider, a: Allocator, index: usize, request: Value, offset: usize) ![]const u8 {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -530,28 +596,76 @@ pub const Provider = struct {
         const slot = self.view_next[index];
         self.views[index][slot] = replacement;
         self.view_next[index] = (slot + 1) % self.views[index].len;
-        // Only the latest current result for an exact view remains authoritative.
-        for (&self.views[index], 0..) |*view, row| if (row != slot and view.valid and std.mem.eql(u8, view.label.slice(), replacement.label.slice()) and std.mem.eql(u8, view.query.slice(), replacement.query.slice())) {
-            view.valid = false;
+        // A partial refresh proves no removals. Older matching IDs remain
+        // certified scoped members, but their former exact view is no longer
+        // authoritative. A complete unfiltered folder supersedes all its views.
+        for (&self.views[index], 0..) |*view, row| if (row != slot and view.valid and std.mem.eql(u8, view.label.slice(), replacement.label.slice())) {
+            if (replacement.complete and replacement.query.len == 0) {
+                view.valid = false;
+            } else if (std.mem.eql(u8, view.query.slice(), replacement.query.slice())) {
+                if (replacement.complete) view.valid = false else view.complete = false;
+            }
         };
     }
-    fn viewList(self: *Provider, a: Allocator, index: usize, request: Value) !?[]const Value {
-        for (self.views[index]) |view| if (view.valid and view.complete and std.mem.eql(u8, view.label.slice(), j.text(request, "label")) and std.mem.eql(u8, view.query.slice(), j.text(request, "query"))) {
+    fn viewList(self: *Provider, a: Allocator, index: usize, request: Value) ![]const Value {
+        for (&self.views[index]) |*view| if (view.valid and view.complete and std.mem.eql(u8, view.label.slice(), j.text(request, "label")) and std.mem.eql(u8, view.query.slice(), j.text(request, "query"))) {
             var values: std.ArrayList(Value) = .empty;
             for (view.ids[0..view.count]) |id| for (self.cache.retained(index)) |message| if (std.mem.eql(u8, message.id, id.slice())) {
                 try values.append(a, try j.value(a, message));
                 break;
             };
-            return try values.toOwnedSlice(a);
+            if (values.items.len == view.count) return try values.toOwnedSlice(a);
+            // Eviction makes the former exact result incomplete. Fall back to
+            // the retained subset, including its certified unknown-label IDs.
+            view.complete = false;
+            break;
         };
-        return null;
+        // A partial list certifies its returned IDs without proving that any
+        // older neighbor left the folder. Merge unknown-label IDs into the
+        // retained subset, and apply this request's local query afterwards.
+        var scoped_ids: [8 * 30][]const u8 = undefined;
+        var count: usize = 0;
+        for (&self.views[index]) |*view| if (view.valid and std.mem.eql(u8, view.label.slice(), j.text(request, "label"))) {
+            for (view.ids[0..view.count]) |*id| {
+                scoped_ids[count] = id.slice();
+                count += 1;
+            }
+        };
+        return self.cache.listAllScoped(index, a, j.text(request, "label"), j.text(request, "query"), scoped_ids[0..count]);
+    }
+    fn viewIncomplete(self: *const Provider, index: usize, request: Value) bool {
+        for (self.views[index]) |view| if (view.valid and !view.complete and std.mem.eql(u8, view.label.slice(), j.text(request, "label")) and (view.query.len == 0 or std.mem.eql(u8, view.query.slice(), j.text(request, "query")))) return true;
+        return false;
+    }
+    fn cacheRead(self: *Provider, index: usize, message: t.Message) !t.Message {
+        self.cache.saveRead(index, message) catch |err| {
+            // Serialization expansion or the retained snapshot quota can deny
+            // persistence of a valid body. The atomic cache write preserved its
+            // previous entry; the caller still owns the actual decoded body.
+            if (err != error.BrowserCacheQuotaExceeded) return err;
+            var readable = message;
+            readable.bodyCached = false;
+            readable.metadataPartial = true;
+            if (readable.decodeWarning.len == 0) readable.decodeWarning = "BrowserCacheQuotaExceeded";
+            return readable;
+        };
+        return message;
+    }
+    fn cacheQuotaWarning(a: Allocator, value: Value) !Value {
+        var annotated = try j.copyObject(a, value);
+        if (j.text(value, "decodeWarning").len == 0) try annotated.object.put(a, "decodeWarning", .{ .string = "BrowserCacheQuotaExceeded" });
+        try annotated.object.put(a, "metadataPartial", .{ .bool = true });
+        try annotated.object.put(a, "bodyCached", .{ .bool = false });
+        return annotated;
+    }
+    fn olderMessage(_: void, left: t.Message, right: t.Message) bool {
+        return left.receivedAt < right.receivedAt or (left.receivedAt == right.receivedAt and std.mem.lessThan(u8, left.id, right.id));
     }
     fn read(self: *Provider, a: Allocator, index: usize, id: []const u8, cached: bool) !t.Message {
         if (try self.cache.read(index, id)) |message| return message;
         if (cached or self.live_count == 0) return error.CacheMiss;
         const message = try self.live_sessions[index].read(a, id);
-        try self.cache.saveRead(index, message);
-        return message;
+        return self.cacheRead(index, message);
     }
     fn draftSlot(self: *Provider, a: Allocator, index: usize, id: []const u8) !*DraftSlot {
         _ = a;

@@ -1,12 +1,13 @@
 const std = @import("std");
 const b = @import("../bounded.zig");
+const policy = @import("mail_limits.zig");
 
 pub const max_recipients = 32;
-pub const max_incoming_recipients = 1024;
+pub const max_incoming_recipients = policy.incoming_recipients;
 /// Inbound names are decoded by MIME after mailbox grammar is parsed. Slices
 /// are caller-owned heap storage; incoming lists never enlarge outgoing stacks.
 pub const IncomingMailbox = struct { address: []const u8, name: []const u8 };
-pub const Mailbox = struct { address: b.Text(254) = .{}, name: b.Text(256) = .{} };
+pub const Mailbox = struct { address: b.Text(policy.outgoing_address_bytes) = .{}, name: b.Text(policy.display_name_bytes) = .{} };
 pub const List = struct {
     items: [max_recipients]Mailbox = @splat(.{}),
     count: u8 = 0,
@@ -14,7 +15,7 @@ pub const List = struct {
         return self.items[0..self.count];
     }
     pub fn contains(self: *const List, address: []const u8) bool {
-        for (self.slice()) |*item| if (std.ascii.eqlIgnoreCase(item.address.slice(), address)) return true;
+        for (self.slice()) |*item| if (sameAddress(item.address.slice(), address)) return true;
         return false;
     }
     pub fn append(self: *List, item: Mailbox) !void {
@@ -51,7 +52,7 @@ pub fn formatIncomingDisplay(allocator: std.mem.Allocator, address: []const u8, 
 
 fn formatDisplayName(allocator: std.mem.Allocator, address: []const u8, name: []const u8) ![]u8 {
     try validateHeader(name);
-    if (name.len > 256) return error.RecipientTooLarge;
+    if (name.len > policy.display_name_bytes) return error.RecipientTooLarge;
     if (std.mem.trim(u8, name, " ").len == 0) return allocator.dupe(u8, address);
     var quoted = name[0] == ' ' or name[name.len - 1] == ' ';
     var extra: usize = 0;
@@ -71,26 +72,24 @@ fn formatDisplayName(allocator: std.mem.Allocator, address: []const u8, name: []
     return result;
 }
 
-/// ASCII addr-spec, including quoted local parts and address literals. SMTPUTF8
-/// mailboxes are rejected explicitly; UTF-8 display names are supported.
+/// Gmail's MIME transport accepts UTF-8 mailboxes. This is bounded syntactic
+/// validation, not DNS/IDNA registration validation or a delivery guarantee.
 pub fn validateAddress(address: []const u8) !void {
     return validateAddressSyntax(address, false);
 }
-/// A received header is not an outgoing SMTP envelope. Preserve the address
-/// grammar and total bound without imposing SMTP's 64-byte local-part limit.
+/// Received headers have a separate, larger storage allowance.
 pub fn validateIncomingAddress(address: []const u8) !void {
     return validateAddressSyntax(address, true);
 }
-/// RFC 5322 address headers do not impose SMTP's 64-octet local-part limit.
-/// Retain the 254-byte address bound and all syntax/injection checks. Only an
-/// explicit conversion to an outgoing Mailbox applies the SMTP local limit.
 fn validateAddressSyntax(address: []const u8, incoming: bool) !void {
-    if (address.len == 0 or address.len > 254) return error.InvalidAddress;
+    if (address.len == 0 or address.len > (if (incoming) policy.incoming_address_bytes else policy.outgoing_address_bytes) or !std.unicode.utf8ValidateSlice(address)) return error.InvalidAddress;
+    var codepoints = std.unicode.Utf8View.initUnchecked(address).iterator();
+    while (codepoints.nextCodepoint()) |cp| if (cp < 32 or (cp >= 127 and cp <= 159)) return error.InvalidAddress;
     var quote = false;
     var escape = false;
     var at: ?usize = null;
     for (address, 0..) |c, i| {
-        if (c < 32 or c >= 127) return error.InvalidAddress;
+        if (c < 32 or c == 127) return error.InvalidAddress;
         if (escape) {
             escape = false;
             continue;
@@ -108,7 +107,7 @@ fn validateAddressSyntax(address: []const u8, incoming: bool) !void {
     const split = at orelse return error.InvalidAddress;
     const local = address[0..split];
     const domain = address[split + 1 ..];
-    if (local.len == 0 or (!incoming and local.len > 64) or domain.len == 0) return error.InvalidAddress;
+    if (local.len == 0 or domain.len == 0) return error.InvalidAddress;
     if (local[0] == '"') {
         if (local.len < 2 or local[local.len - 1] != '"') return error.InvalidAddress;
         var escaped = false;
@@ -128,7 +127,7 @@ fn validateAddressSyntax(address: []const u8, incoming: bool) !void {
                 if (dot) return error.InvalidAddress;
                 dot = true;
             } else {
-                if (!std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "!#$%&'*+-/=?^_`{|}~", c) == null) return error.InvalidAddress;
+                if (c < 128 and !std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "!#$%&'*+-/=?^_`{|}~", c) == null) return error.InvalidAddress;
                 dot = false;
             }
         }
@@ -139,10 +138,76 @@ fn validateAddressSyntax(address: []const u8, incoming: bool) !void {
     } else {
         var labels = std.mem.splitScalar(u8, domain, '.');
         while (labels.next()) |label| {
-            if (label.len == 0 or label.len > 63 or !std.ascii.isAlphanumeric(label[0]) or !std.ascii.isAlphanumeric(label[label.len - 1])) return error.InvalidAddress;
-            for (label) |c| if (!std.ascii.isAlphanumeric(c) and c != '-') return error.InvalidAddress;
+            if (label.len == 0 or label[0] == '-' or label[label.len - 1] == '-') return error.InvalidAddress;
+            var ascii = true;
+            for (label) |c| {
+                ascii = ascii and c < 128;
+                if (c < 128 and !std.ascii.isAlphanumeric(c) and c != '-') return error.InvalidAddress;
+            }
+            // A Unicode U-label's UTF-8 byte length is not its DNS A-label
+            // length. Gmail owns IDNA processing on this transport.
+            if (ascii and label.len > 63) return error.InvalidAddress;
         }
     }
+}
+
+/// External local parts are exact. Domains are ASCII-case insensitive;
+/// Unicode-domain NFC/IDNA equivalence is deliberately not guessed here.
+pub fn sameAddress(left: []const u8, right: []const u8) bool {
+    const l = std.mem.lastIndexOfScalar(u8, left, '@') orelse return std.mem.eql(u8, left, right);
+    const r = std.mem.lastIndexOfScalar(u8, right, '@') orelse return false;
+    return equalLocal(left[0..l], right[0..r], false) and std.ascii.eqlIgnoreCase(left[l + 1 ..], right[r + 1 ..]);
+}
+
+const LocalBytes = struct {
+    bytes: []const u8,
+    index: usize = 0,
+    quoted: bool,
+    fn init(local: []const u8) LocalBytes {
+        const quoted = local.len >= 2 and local[0] == '"' and local[local.len - 1] == '"';
+        return .{ .bytes = if (quoted) local[1 .. local.len - 1] else local, .quoted = quoted };
+    }
+    fn next(self: *LocalBytes) ?u8 {
+        if (self.index == self.bytes.len) return null;
+        if (self.quoted and self.bytes[self.index] == '\\' and self.index + 1 < self.bytes.len) self.index += 1;
+        const byte = self.bytes[self.index];
+        self.index += 1;
+        return byte;
+    }
+};
+fn equalLocal(left: []const u8, right: []const u8, gmail_identity: bool) bool {
+    var l = LocalBytes.init(left);
+    var r = LocalBytes.init(right);
+    while (l.next()) |byte| {
+        const other = r.next() orelse return false;
+        if (gmail_identity) {
+            if (std.ascii.toLower(byte) != std.ascii.toLower(other)) return false;
+        } else if (byte != other) return false;
+    }
+    return r.next() == null;
+}
+
+pub fn comparisonKey(output: []u8, address: []const u8) ![]const u8 {
+    if (address.len > output.len) return error.RecipientTooLarge;
+    const split = std.mem.lastIndexOfScalar(u8, address, '@') orelse return error.InvalidAddress;
+    var local = LocalBytes.init(address[0..split]);
+    var count: usize = 0;
+    while (local.next()) |byte| {
+        output[count] = byte;
+        count += 1;
+    }
+    output[count] = '@';
+    count += 1;
+    const domain = address[split + 1 ..];
+    _ = std.ascii.lowerString(output[count .. count + domain.len], domain);
+    return output[0 .. count + domain.len];
+}
+
+/// Portable SMTP thresholds are warnings for Gmail submission, not a rule for
+/// refusing received mail or a promise about downstream delivery.
+pub fn exceedsPortableTransport(address: []const u8) bool {
+    const split = std.mem.lastIndexOfScalar(u8, address, '@') orelse return false;
+    return split > 64 or address.len > 254;
 }
 
 /// Parses commas outside quoted phrases, comments, angle brackets and groups.
@@ -193,7 +258,7 @@ pub fn parseIncoming(raw: []const u8, allocator: std.mem.Allocator) ![]IncomingM
 fn scan(raw: []const u8, out: anytype) !void {
     if (!std.unicode.utf8ValidateSlice(raw)) return error.InvalidUtf8;
     for (raw) |c| if ((c < 32 and c != '\t') or c == 127) return error.HeaderInjection;
-    if (raw.len > 16 * 1024) return error.RecipientHeaderTooLarge;
+    if (raw.len > policy.header_value_bytes) return error.RecipientHeaderTooLarge;
     var quote = false;
     var escape = false;
     var comment: usize = 0;
@@ -266,7 +331,7 @@ fn scan(raw: []const u8, out: anytype) !void {
 }
 
 fn mailbox(raw: []const u8) !Mailbox {
-    var clean: [2048]u8 = undefined;
+    var clean: [2 * policy.display_name_bytes + policy.outgoing_address_bytes + 32]u8 = undefined;
     var used: usize = 0;
     var depth: usize = 0;
     var quote = false;
@@ -313,7 +378,7 @@ fn mailbox(raw: []const u8) !Mailbox {
         try out.address.set(address);
         const name = std.mem.trim(u8, token[0..left], " ");
         if (name.len > 1 and name[0] == '"' and name[name.len - 1] == '"') {
-            var decoded: [256]u8 = undefined;
+            var decoded: [policy.display_name_bytes]u8 = undefined;
             var n: usize = 0;
             var pos: usize = 1;
             while (pos < name.len - 1) : (pos += 1) {
@@ -327,7 +392,7 @@ fn mailbox(raw: []const u8) !Mailbox {
             }
             try out.name.set(decoded[0..n]);
         } else {
-            if (name.len > 256) return error.RecipientTooLarge;
+            if (name.len > policy.display_name_bytes) return error.RecipientTooLarge;
             try out.name.set(name);
         }
     } else {
@@ -426,9 +491,16 @@ fn unquotedAngle(token: []const u8) ?usize {
 }
 
 fn isSelf(address: []const u8, account: []const u8, aliases: []const []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(address, account)) return true;
-    for (aliases) |alias| if (std.ascii.eqlIgnoreCase(address, alias)) return true;
+    if (sameGmailIdentity(address, account)) return true;
+    for (aliases) |alias| if (sameGmailIdentity(address, alias)) return true;
     return false;
+}
+/// Verified Gmail identity matching is provider-specific; external recipient
+/// deduplication must use sameAddress and preserve local-part case.
+pub fn sameGmailIdentity(left: []const u8, right: []const u8) bool {
+    const l = std.mem.lastIndexOfScalar(u8, left, '@') orelse return false;
+    const r = std.mem.lastIndexOfScalar(u8, right, '@') orelse return false;
+    return equalLocal(left[0..l], right[0..r], true) and std.ascii.eqlIgnoreCase(left[l + 1 ..], right[r + 1 ..]);
 }
 
 fn addExternal(out: *List, source: *const List, account: []const u8, aliases: []const []const u8, other: ?*const List) !void {
@@ -540,13 +612,15 @@ test "legal incoming tabs group continuation and quoted angle names preserve mai
     try std.testing.expectEqualStrings("c@[IPv6:2001:db8::1]", list.items[2].address.slice());
 }
 
-test "incoming local parts preserve header syntax while outgoing SMTP limits remain literal" {
+test "mailbox compatibility: long local parts are bounded Gmail attempts with portable warnings" {
     const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.test";
     const boundary = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.test";
     try std.testing.expectEqual(@as(usize, 65), std.mem.indexOfScalar(u8, long, '@').?);
     try std.testing.expectEqual(@as(usize, 64), std.mem.indexOfScalar(u8, boundary, '@').?);
     try validateAddress(boundary);
-    try std.testing.expectError(error.InvalidAddress, validateAddress(long));
+    try validateAddress(long);
+    try std.testing.expect(!exceedsPortableTransport(boundary));
+    try std.testing.expect(exceedsPortableTransport(long));
     try validateIncomingAddress(long);
     try std.testing.expectError(error.InvalidAddress, validateIncomingAddress("a..b@example.test"));
     try std.testing.expectError(error.InvalidAddress, validateIncomingAddress("peer@example.test\r\nBcc: hidden@example.test"));
@@ -555,10 +629,35 @@ test "incoming local parts preserve header syntax while outgoing SMTP limits rem
     try std.testing.expectEqual(@as(usize, 1), incoming.len);
     try std.testing.expectEqualStrings(long, incoming[0].address);
     var outgoing: List = .{};
-    try std.testing.expectError(error.InvalidAddress, parse(long, &outgoing));
+    try parse(long, &outgoing);
     var reply_out: Envelope = .{};
-    try std.testing.expectError(error.InvalidAddress, replyIncoming(std.testing.allocator, "self@example.test", &.{}, "sender@example.test", long, "", "", false, &reply_out));
-    try std.testing.expectEqual(@as(u8, 0), reply_out.to.count);
+    try replyIncoming(std.testing.allocator, "self@example.test", &.{}, "sender@example.test", long, "", "", false, &reply_out);
+    try std.testing.expectEqual(@as(u8, 1), reply_out.to.count);
+    try std.testing.expectEqualStrings(long, reply_out.to.items[0].address.slice());
+}
+
+test "mailbox compatibility: UTF8 locals quoted locals and U-label domains retain exact spelling" {
+    for ([_][]const u8{ "josé@example.test", "用户@例子.测试", "\"名字 space\"@пример.рф", "rene+codex@example.test" }) |address| {
+        try validateIncomingAddress(address);
+        try validateAddress(address);
+        var parsed: List = .{};
+        try parse(address, &parsed);
+        try std.testing.expectEqualStrings(address, parsed.items[0].address.slice());
+    }
+    for ([_][]const u8{ "user@a..test", "user@-bad.test", "a..b@example.test", "name\xc2\x85@example.test", "a@example.test\nBcc:x@example.test" }) |address| try std.testing.expectError(error.InvalidAddress, validateIncomingAddress(address));
+}
+
+test "mailbox compatibility: external locals stay case sensitive while quoted forms and domains compare equally" {
+    try std.testing.expect(!sameAddress("Smith@example.test", "smith@example.test"));
+    try std.testing.expect(sameAddress("Smith@EXAMPLE.test", "\"Smith\"@example.TEST"));
+    try std.testing.expect(!sameAddress("name+tag@example.test", "name@example.test"));
+    var list: List = .{};
+    try parse("Smith@example.test, smith@example.test, \"Smith\"@EXAMPLE.test", &list);
+    try std.testing.expectEqual(@as(u8, 2), list.count);
+    var left: [512]u8 = undefined;
+    var right: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(try comparisonKey(&left, "\"Smith\"@EXAMPLE.test"), try comparisonKey(&right, "Smith@example.test"));
+    try std.testing.expect(sameGmailIdentity("SELF@EXAMPLE.test", "self@example.test"));
 }
 
 test "incoming 33 participants allow ordinary reply and refuse truncated reply-all" {
@@ -588,7 +687,9 @@ test "incoming 33 participants allow ordinary reply and refuse truncated reply-a
     try std.testing.expectEqual(@as(u8, 0), envelope_out.cc.count);
     try replyIncoming(std.testing.allocator, "self@example.test", &.{"alias@example.test"}, "sender@example.test", "replies@example.test", "SELF@example.test, alias@example.test, teammate@example.test, replies@example.test, teammate@example.test", "colleague@example.test, TEAMMATE@example.test", true, &envelope_out);
     try std.testing.expectEqualStrings("replies@example.test", envelope_out.to.items[0].address.slice());
-    try std.testing.expectEqual(@as(u8, 2), envelope_out.cc.count);
+    // External local parts remain case-sensitive; only verified self aliases
+    // use Gmail's identity comparison.
+    try std.testing.expectEqual(@as(u8, 3), envelope_out.cc.count);
     try std.testing.expectEqual(@as(u8, 0), envelope_out.bcc.count);
 }
 

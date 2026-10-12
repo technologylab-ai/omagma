@@ -323,9 +323,12 @@ const specs = [_]Spec{
     \\Usage: omagma budget
     \\No command-specific options or account setup are needed.
     \\Returns JSON: reservationBytes, assignedBytes, unassignedBytes, httpBytes,
-    \\daemonBytes, gmailBytes, oauthBytes and platformBytes.
-    \\The fixed application reservation is 16 MiB. These are compiled storage
-    \\allocations, not measured process RSS/PSS, total terminal heap or cache size.
+    \\daemonBytes, gmailBytes, oauthBytes, platformBytes and fixedMemory.
+    \\The backend reservation is 16 MiB. fixedMemory reports the separately
+    \\reserved reusable application/IO pools, startup storage, worker stacks,
+    \\allocator high-water marks and allocation refusals. The sealed native
+    \\runtime has no upstream allocator. Reservations are not measured RSS/PSS;
+    \\physical pages become resident as the reserved bytes are touched.
     \\No mail/config/credential reads or network requests occur.
     \\
     \\Example:

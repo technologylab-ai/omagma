@@ -11,10 +11,12 @@ const mime = @import("mime.zig");
 const recipients = @import("recipients.zig");
 const invitation = @import("invitation.zig");
 const label_collection = @import("labels.zig");
+const decode = @import("gmail_decode.zig");
 
 test {
     _ = @import("gmail_label_regression_test.zig");
     _ = @import("gmail_body_regression_test.zig");
+    _ = @import("gmail_isolation_regression_test.zig");
 }
 
 /// Tests inject this transport and fictional identity/capabilities. Production
@@ -22,6 +24,11 @@ test {
 pub const Transport = struct {
     context: *anyopaque,
     requestFn: *const fn (*anyopaque, std.mem.Allocator, std.http.Method, []const u8, ?j.Value) anyerror!j.Value,
+    /// Reusable fixed heap, rather than the caller's retained request arena.
+    /// Per-fetch arenas are destroyed after verified results are copied out.
+    temporary_allocator: ?std.mem.Allocator = null,
+    /// Trusted host read window; native retains up to100, browser up to30.
+    thread_limit: usize = 100,
     /// Hosts that suspend during an HTTP request can use a pre-encoded body.
     /// Its allocation and size checks finish before recording send uncertainty.
     preparedRequestFn: ?*const fn (*anyopaque, std.mem.Allocator, std.http.Method, []const u8, []const u8) anyerror!j.Value = null,
@@ -36,6 +43,19 @@ pub const Transport = struct {
         if (self.progress_sink) |sink| sink.row(update);
     }
 };
+/// Invalid dates remain message-local refusals, but cannot claim a recent
+/// position when choosing a bounded conversation window.
+fn threadReceivedAt(entry: j.Value) ?i64 {
+    const raw = j.get(entry, "internalDate") orelse return null;
+    const value = b.integer(raw) catch return null;
+    return if (value >= 0 and value <= mime.max_received_at_ms) value else null;
+}
+fn newestThreadEntry(_: void, left: j.Value, right: j.Value) bool {
+    const left_date = threadReceivedAt(left) orelse 0;
+    const right_date = threadReceivedAt(right) orelse 0;
+    return left_date > right_date or (left_date == right_date and std.mem.lessThan(u8, j.text(right, "id"), j.text(left, "id")));
+}
+
 const Network = struct {
     client: *http.Client,
     access: []const u8,
@@ -210,10 +230,14 @@ pub fn execute(io: std.Io, a: std.mem.Allocator, config: *const Config, account:
     return executeProgress(io, a, config, account, cmd, request, null);
 }
 pub fn executeProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) !j.Value {
+    return executeProgressWithAllocator(io, a, a, config, account, cmd, request, progress_sink);
+}
+pub fn executeProgressWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) !j.Value {
     var session: NetworkSession = undefined;
     try session.init(io, a, config, account, cmd, request);
     defer session.close();
     var transport = session.transport();
+    transport.temporary_allocator = temporary_allocator;
     transport.progress_sink = progress_sink;
     return try dispatchAuthorized(io, a, account, session.capabilities, transport, cmd, request);
 }
@@ -508,16 +532,27 @@ fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, pa
     for (try array(payload, "parts")) |part| try externalBodies(a, transport, id, part, map, depth + 1, budget);
 }
 fn read(a: std.mem.Allocator, transport: Transport, id: []const u8) !types.Message {
-    const value = try transport.request(a, .GET, try messageUrl(a, id, "?format=full"), null);
+    var scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+    defer scope.deinit();
+    const temporary = scope.allocator();
+    const value = transport.request(temporary, .GET, try messageUrl(temporary, id, "?format=full"), null) catch |err| {
+        if (!decode.messageRefusal(err)) return err;
+        var message = try fetchMetadata(a, transport, id, null);
+        message.decodeWarning = @errorName(err);
+        message.metadataPartial = true;
+        message.bodyCacheError = @errorName(err);
+        return message;
+    };
     if (!std.mem.eql(u8, j.text(value, "id"), id)) return error.MessageIdentityMismatch;
+    return readValue(a, temporary, transport, value);
+}
+fn readValue(a: std.mem.Allocator, temporary: std.mem.Allocator, transport: Transport, value: j.Value) !types.Message {
     var map: std.json.ObjectMap = .empty;
     var budget: ExternalBodiesBudget = .{};
-    try externalBodies(a, transport, id, j.get(value, "payload") orelse return error.InvalidProviderResponse, &map, 0, &budget);
-    return @import("gmail_decode.zig").normalize(value, a, .{ .object = map }) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        error.MissingField, error.InvalidEncoding, error.UnsupportedEncoding, error.InvalidIdentifier => return error.MalformedMessage,
-        else => return err,
+    externalBodies(temporary, transport, j.text(value, "id"), j.get(value, "payload") orelse .null, &map, 0, &budget) catch |err| {
+        return decode.refused(value, a, if (err == error.InvalidProviderResponse) error.MalformedMessage else err, true);
     };
+    return decode.normalize(value, a, .{ .object = map });
 }
 /// Internal typed read for bounded cache prefetch. Authorization and provider
 /// identity checks match dispatchAuthorized, while large body strings avoid a
@@ -545,7 +580,7 @@ fn identities(a: std.mem.Allocator, transport: Transport) ![]const @import("stor
         try recipients.validateAddress(address);
         const name = j.text(entry, "displayName");
         const signature = j.text(entry, "signature");
-        if (name.len > 256 or signature.len > 8192) return error.IdentityTooLarge;
+        if (name.len > @import("mail_limits.zig").display_name_bytes or signature.len > 8192) return error.IdentityTooLarge;
         if (std.mem.eql(u8, j.text(entry, "verificationStatus"), "accepted") or try j.boolean(entry, "isPrimary", false)) try out.append(a, .{ .address = address, .name = try mime.sanitizeText(name, a), .signature = try mime.htmlToText(signature, a), .isDefault = try j.boolean(entry, "isDefault", false) });
     }
     return try out.toOwnedSlice(a);
@@ -788,6 +823,7 @@ pub const RefreshPlan = struct {
     /// Only authoritatively projected IDs may survive a missing/expired history
     /// checkpoint. Requested query membership is separate from account retention.
     retentionIds: []const []const u8 = &.{},
+    partial: bool = false,
     pub fn inboxArrivals(self: RefreshPlan) usize {
         if (self.resync) return 0;
         var count: usize = 0;
@@ -795,14 +831,14 @@ pub const RefreshPlan = struct {
             if (containsId(self.added[0..index], id) or containsId(self.deleted, id)) continue;
             for (self.messages) |message| {
                 if (!std.mem.eql(u8, id, message.id)) continue;
-                if (containsId(message.labels, "INBOX") and !containsId(message.labels, "SENT")) count += 1;
+                if (message.labelsVerified and containsId(message.labels, "INBOX") and !containsId(message.labels, "SENT")) count += 1;
                 break;
             }
         }
         return count;
     }
 };
-pub const LabelUpdate = struct { id: []const u8, labels: []const []const u8 };
+pub const LabelUpdate = struct { id: []const u8, labels: []const []const u8 = &.{}, verified: bool = true, warning: []const u8 = "" };
 fn historyId(value: []const u8) !void {
     if (value.len == 0 or value.len > 32) return error.InvalidHistoryId;
     for (value) |c| if (!std.ascii.isDigit(c)) return error.InvalidHistoryId;
@@ -811,10 +847,22 @@ fn containsId(list: []const []const u8, id: []const u8) bool {
     for (list) |candidate| if (std.mem.eql(u8, candidate, id)) return true;
     return false;
 }
-fn fetchMetadata(a: std.mem.Allocator, transport: Transport, id: []const u8) !types.Message {
-    const got = try transport.request(a, .GET, try messageUrl(a, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null);
+fn fetchMetadata(a: std.mem.Allocator, transport: Transport, id: []const u8, remaining: ?*usize) !types.Message {
+    var scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+    defer scope.deinit();
+    const temporary = scope.allocator();
+    const got = transport.request(temporary, .GET, try messageUrl(temporary, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null) catch |err| {
+        if (!decode.messageRefusal(err)) return err;
+        // A token/size bound on one response must not pin the account history.
+        // This small identity-only retry certifies the placeholder's IDs.
+        _ = scope.reset(.retain_capacity);
+        const minimal = try transport.request(temporary, .GET, try messageUrl(temporary, id, "?format=minimal&fields=id,threadId"), null);
+        if (!std.mem.eql(u8, j.text(minimal, "id"), id)) return error.MessageIdentityMismatch;
+        if (remaining) |budget| return decode.retainMetadataMessage(try decode.refused(minimal, temporary, err, false), a, budget);
+        return decode.refused(minimal, a, err, false);
+    };
     if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
-    return @import("gmail_decode.zig").normalize(got, a, null);
+    return if (remaining) |budget| decode.normalizeMetadataBudgeted(got, a, budget) else decode.normalizeMetadata(got, a);
 }
 fn messageIds(a: std.mem.Allocator, messages: []const types.Message) ![]const []const u8 {
     const ids = try a.alloc([]const u8, messages.len);
@@ -822,6 +870,9 @@ fn messageIds(a: std.mem.Allocator, messages: []const types.Message) ![]const []
     return ids;
 }
 fn fetchView(a: std.mem.Allocator, transport: Transport, request: j.Value) !j.Value {
+    var scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+    defer scope.deinit();
+    const temporary = scope.allocator();
     const limit = try j.integer(request, "limit", 32);
     if (limit < 1 or limit > 100) return error.InvalidPageLimit;
     const query = j.text(request, "query");
@@ -832,7 +883,7 @@ fn fetchView(a: std.mem.Allocator, transport: Transport, request: j.Value) !j.Va
     var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults={d}&includeSpamTrash={s}&fields=messages(id),nextPageToken", .{ limit, if (include) @as([]const u8, "true") else "false" });
     if (query.len > 0) url = try std.fmt.allocPrint(a, "{s}&q={s}", .{ url, try escaped(a, query) });
     if (label.len > 0) url = try std.fmt.allocPrint(a, "{s}&labelIds={s}", .{ url, try escaped(a, label) });
-    const result = try transport.request(a, .GET, url, null);
+    const result = try transport.request(temporary, .GET, url, null);
     const entries = try array(result, "messages");
     if (entries.len > limit) return error.InvalidPage;
     const ids = try a.alloc([]const u8, entries.len);
@@ -855,6 +906,8 @@ fn bootstrap(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities
     try global_req.object.put(a, "includeSpamTrash", .{ .bool = true });
     const global = try dispatchAuthorized(io, a, account, capabilities, transport, "mail.list", global_req);
     const recent = try j.decode([]const types.Message, a, j.get(global, "messages") orelse return error.InvalidProviderResponse);
+    var remaining: usize = types.Limits.metadata_batch_bytes;
+    for (recent) |message| remaining -|= decode.serializedBytes(message);
     var messages: std.ArrayList(types.Message) = .empty;
     try messages.appendSlice(a, recent);
     var view_ids = try messageIds(a, recent);
@@ -877,13 +930,20 @@ fn bootstrap(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities
             if (!projected and !containsId(extra.items, id) and recent.len + extra.items.len < 100) try extra.append(a, id);
         }
         if (extra.items.len != 0) transport.progress(.metadata, recent.len, recent.len + extra.items.len);
-        for (extra.items) |id| {
+        for (extra.items, 0..) |id, index| {
             try io.checkCancel();
-            try messages.append(a, try fetchMetadata(a, transport, id));
-            transport.progress(.metadata, messages.items.len, recent.len + extra.items.len);
+            const message = fetchMetadata(a, transport, id, &remaining) catch |err| {
+                if (err != error.MessageNotFound) return err;
+                transport.progress(.metadata, recent.len + index + 1, recent.len + extra.items.len);
+                continue;
+            };
+            try messages.append(a, message);
+            transport.progress(.metadata, recent.len + index + 1, recent.len + extra.items.len);
         }
     }
-    return j.value(a, RefreshPlan{ .historyId = checkpoint, .messages = messages.items, .resync = resync, .nextCursor = next, .labelId = label_id, .metadataGets = messages.items.len, .listCalls = list_calls, .viewFetched = true, .viewIds = view_ids, .retentionIds = try messageIds(a, messages.items) });
+    var partial = try j.boolean(global, "partial", false);
+    for (messages.items) |message| partial = partial or message.metadataPartial;
+    return j.value(a, RefreshPlan{ .historyId = checkpoint, .messages = messages.items, .resync = resync, .nextCursor = next, .labelId = label_id, .metadataGets = messages.items.len, .listCalls = list_calls, .viewFetched = true, .viewIds = view_ids, .retentionIds = try messageIds(a, messages.items), .partial = partial });
 }
 
 fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, request: j.Value) !j.Value {
@@ -904,11 +964,13 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
         pages += 1;
         var url = try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId={s}&maxResults=100&fields=history(id,messagesAdded(message(id)),messagesDeleted(message(id)),labelsAdded(message(id)),labelsRemoved(message(id))),nextPageToken,historyId", .{start});
         if (cursor.len > 0) url = try std.fmt.allocPrint(a, "{s}&pageToken={s}", .{ url, try escaped(a, cursor) });
-        const page = transport.request(a, .GET, url, null) catch |err| {
+        var page_scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+        defer page_scope.deinit();
+        const page = transport.request(page_scope.allocator(), .GET, url, null) catch |err| {
             if (err == error.MessageNotFound) return bootstrap(io, a, account, capabilities, transport, request, true);
             return err;
         };
-        checkpoint = try j.required(page, "historyId");
+        checkpoint = try a.dupe(u8, try j.required(page, "historyId"));
         try historyId(checkpoint);
         for (try array(page, "history")) |record| {
             for ([_][]const u8{ "messagesAdded", "messagesDeleted", "labelsAdded", "labelsRemoved" }) |kind| for (try array(record, kind)) |event| {
@@ -917,20 +979,21 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
                 const id = try j.required(j.get(event, "message") orelse return error.InvalidProviderResponse, "id");
                 try b.identifier(id);
                 if (std.mem.eql(u8, kind, "messagesDeleted")) {
-                    if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                    if (!containsId(deleted.items, id)) try deleted.append(a, try a.dupe(u8, id));
                 } else {
-                    if (!containsId(changed.items, id)) try changed.append(a, id);
-                    if (std.mem.eql(u8, kind, "messagesAdded") and !containsId(added.items, id)) try added.append(a, id);
+                    if (!containsId(changed.items, id)) try changed.append(a, try a.dupe(u8, id));
+                    if (std.mem.eql(u8, kind, "messagesAdded") and !containsId(added.items, id)) try added.append(a, try a.dupe(u8, id));
                 }
             };
         }
-        cursor = j.text(page, "nextPageToken");
+        cursor = try a.dupe(u8, j.text(page, "nextPageToken"));
         if (cursor.len > 4096) return error.InvalidCursor;
         if (cursor.len == 0) break;
     }
     if (changed.items.len > 100) return bootstrap(io, a, account, capabilities, transport, request, true);
     var messages: std.ArrayList(types.Message) = .empty;
     var labels: std.ArrayList(LabelUpdate) = .empty;
+    var remaining: usize = types.Limits.metadata_batch_bytes;
     var total: usize = 0;
     for (changed.items) |id| if (!containsId(deleted.items, id)) {
         total += 1;
@@ -941,9 +1004,18 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
         if (containsId(deleted.items, id)) continue;
         try io.checkCancel();
         if (containsId(known, id) and !containsId(added.items, id)) {
-            const minimal = transport.request(a, .GET, try messageUrl(a, id, "?format=minimal&fields=id,labelIds"), null) catch |err| {
+            var scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+            defer scope.deinit();
+            const temporary = scope.allocator();
+            const minimal = transport.request(temporary, .GET, try messageUrl(temporary, id, "?format=minimal&fields=id,labelIds"), null) catch |err| {
                 if (err == error.MessageNotFound) {
                     if (!containsId(deleted.items, id)) try deleted.append(a, id);
+                    completed += 1;
+                    transport.progress(.metadata, completed, total);
+                    continue;
+                }
+                if (decode.messageRefusal(err)) {
+                    try labels.append(a, .{ .id = id, .verified = false, .warning = @errorName(err) });
                     completed += 1;
                     transport.progress(.metadata, completed, total);
                     continue;
@@ -951,15 +1023,16 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
                 return err;
             };
             if (!std.mem.eql(u8, j.text(minimal, "id"), id)) return error.MessageIdentityMismatch;
-            const label_ids = if (j.get(minimal, "labelIds")) |value| try j.decode([]const []const u8, a, value) else &.{};
-            if (label_ids.len > 64) return error.InvalidLabels;
-            for (label_ids) |label| {
-                try recipients.validateHeader(label);
-                if (label.len > 256) return error.InvalidLabels;
-            }
+            const label_ids = decode.verifiedLabels(minimal, a) catch |err| {
+                if (!decode.messageRefusal(err)) return err;
+                try labels.append(a, .{ .id = id, .verified = false, .warning = @errorName(err) });
+                completed += 1;
+                transport.progress(.metadata, completed, total);
+                continue;
+            };
             try labels.append(a, .{ .id = id, .labels = label_ids });
         } else {
-            const got = fetchMetadata(a, transport, id) catch |err| {
+            const got = fetchMetadata(a, transport, id, &remaining) catch |err| {
                 if (err == error.MessageNotFound) {
                     if (!containsId(deleted.items, id)) try deleted.append(a, id);
                     completed += 1;
@@ -974,6 +1047,8 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
         transport.progress(.metadata, completed, total);
     }
     var plan: RefreshPlan = .{ .historyId = checkpoint, .messages = messages.items, .labels = labels.items, .deleted = deleted.items, .added = added.items, .metadataGets = messages.items.len, .historyPages = pages };
+    for (messages.items) |message| plan.partial = plan.partial or message.metadataPartial;
+    for (labels.items) |update| plan.partial = plan.partial or !update.verified;
     if (try j.boolean(request, "forceView", false) or (events != 0 and j.text(request, "query").len != 0)) {
         const view = try fetchView(a, transport, request);
         plan.viewIds = try j.decode([]const []const u8, a, j.get(view, "ids") orelse return error.InvalidProviderResponse);
@@ -991,7 +1066,15 @@ fn refreshPlan(io: std.Io, a: std.mem.Allocator, account: []const u8, capabiliti
         const expanded_total = completed + extra.items.len;
         for (extra.items) |id| {
             try io.checkCancel();
-            try messages.append(a, try fetchMetadata(a, transport, id));
+            const message = fetchMetadata(a, transport, id, &remaining) catch |err| {
+                if (err != error.MessageNotFound) return err;
+                plan.partial = true;
+                completed += 1;
+                transport.progress(.metadata, completed, expanded_total);
+                continue;
+            };
+            try messages.append(a, message);
+            plan.partial = plan.partial or message.metadataPartial;
             plan.metadataGets += 1;
             completed += 1;
             transport.progress(.metadata, completed, expanded_total);
@@ -1018,21 +1101,31 @@ pub fn listAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, cap
         const value = if (std.mem.eql(u8, key, "label")) label else j.text(request, key);
         if (value.len != 0) url = try std.fmt.allocPrint(a, "{s}&{s}={s}", .{ url, parameter, try escaped(a, value) });
     }
-    const listed = try transport.request(a, .GET, url, null);
+    var listing_scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+    defer listing_scope.deinit();
+    const listed = try transport.request(listing_scope.allocator(), .GET, url, null);
     const entries = try array(listed, "messages");
     if (entries.len > limit) return error.InvalidPage;
-    const messages = try a.alloc(types.Message, entries.len);
+    var messages: std.ArrayList(types.Message) = .empty;
+    var partial = false;
+    var remaining: usize = types.Limits.metadata_batch_bytes;
     transport.progress(.metadata, 0, entries.len);
-    for (entries, messages, 0..) |entry, *dest, index| {
+    for (entries, 0..) |entry, index| {
         try io.checkCancel();
         const id = try j.required(entry, "id");
-        const got = try transport.request(a, .GET, try messageUrl(a, id, "?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To&fields=id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers)"), null);
-        if (!std.mem.eql(u8, j.text(got, "id"), id)) return error.MessageIdentityMismatch;
-        dest.* = try @import("gmail_decode.zig").normalize(got, a, null);
-        transport.row(.{ .kind = .page, .index = index, .total = entries.len, .message = dest.* });
+        for (entries[0..index]) |previous| if (std.mem.eql(u8, j.text(previous, "id"), id)) return error.DuplicateMessage;
+        const message = fetchMetadata(a, transport, id, &remaining) catch |err| {
+            if (err != error.MessageNotFound) return err;
+            partial = true;
+            transport.progress(.metadata, index + 1, entries.len);
+            continue;
+        };
+        partial = partial or message.metadataPartial;
+        try messages.append(a, message);
+        transport.row(.{ .kind = .page, .index = messages.items.len - 1, .total = entries.len, .message = message });
         transport.progress(.metadata, index + 1, entries.len);
     }
-    return j.value(a, .{ .messages = messages, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null), .labelId = label });
+    return j.value(a, .{ .messages = messages.items, .nextCursor = if (j.get(listed, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null), .labelId = label, .partial = partial });
 }
 
 /// The browser adapter uses the same validation, MIME encoder, threading and
@@ -1192,26 +1285,70 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     if (std.mem.eql(u8, cmd, "mail.thread")) {
         const id = try j.required(request, "threadId");
         try b.identifier(id);
-        const value = try transport.request(a, .GET, try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/threads/{s}?format=full", .{id}), null);
+        var thread_scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+        defer thread_scope.deinit();
+        const thread_allocator = thread_scope.allocator();
+        var full = true;
+        const value = transport.request(thread_allocator, .GET, try std.fmt.allocPrint(thread_allocator, "https://gmail.googleapis.com/gmail/v1/users/me/threads/{s}?format=full", .{id}), null) catch |err| blk: {
+            if (!decode.messageRefusal(err)) return err;
+            // A large/unsupported member may exceed the aggregate thread JSON
+            // bound before it can be decoded. Enumerate only its bounded IDs,
+            // then isolate full reads at the ordinary per-message boundary.
+            full = false;
+            _ = thread_scope.reset(.retain_capacity);
+            break :blk try transport.request(thread_allocator, .GET, try std.fmt.allocPrint(thread_allocator, "https://gmail.googleapis.com/gmail/v1/users/me/threads/{s}?format=metadata&fields=id,messages(id,threadId,internalDate)", .{id}), null);
+        };
+        if (j.get(value, "id") != null and !std.mem.eql(u8, j.text(value, "id"), id)) return error.MessageIdentityMismatch;
         const entries = try array(value, "messages");
         if (entries.len > 100) return error.ThreadTooLarge;
-        const messages = try a.alloc(types.Message, entries.len);
-        transport.progress(.bodies, 0, entries.len);
-        for (entries, messages, 0..) |entry, *dest, index| {
-            try io.checkCancel();
+        const limit = @min(@max(transport.thread_limit, 1), 100);
+        var partial = entries.len > limit;
+        // Validate all identities before windowing: an omitted row must not
+        // hide an account/thread mismatch or duplicate provider identity.
+        var candidates: [100]j.Value = undefined;
+        for (entries, 0..) |entry, index| {
             if (!std.mem.eql(u8, j.text(entry, "threadId"), id)) return error.MessageIdentityMismatch;
-            var map: std.json.ObjectMap = .empty;
-            var budget: ExternalBodiesBudget = .{};
-            try externalBodies(a, transport, j.text(entry, "id"), j.get(entry, "payload") orelse return error.InvalidProviderResponse, &map, 0, &budget);
-            dest.* = try @import("gmail_decode.zig").normalize(entry, a, .{ .object = map });
-            transport.progress(.bodies, index + 1, entries.len);
+            const message_id = j.required(entry, "id") catch return error.MessageIdentityMismatch;
+            b.identifier(message_id) catch return error.MessageIdentityMismatch;
+            for (entries[0..index]) |previous| if (std.mem.eql(u8, j.text(previous, "id"), message_id)) return error.DuplicateMessage;
+            if (threadReceivedAt(entry) == null) partial = true;
+            candidates[index] = entry;
         }
-        std.sort.heap(types.Message, messages, {}, struct {
+        std.sort.heap(j.Value, candidates[0..entries.len], {}, newestThreadEntry);
+        const selected = candidates[0..@min(entries.len, limit)];
+        var messages: std.ArrayList(types.Message) = .empty;
+        var remaining: usize = types.Limits.thread_bytes;
+        transport.progress(.bodies, 0, selected.len);
+        for (selected, 0..) |entry, index| {
+            try io.checkCancel();
+            const message_id = j.text(entry, "id");
+            var message_scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
+            defer message_scope.deinit();
+            const temporary = message_scope.allocator();
+            const message = if (full) try readValue(temporary, temporary, transport, entry) else read(temporary, transport, message_id) catch |err| {
+                if (err != error.MessageNotFound) return err;
+                partial = true;
+                transport.progress(.bodies, index + 1, selected.len);
+                continue;
+            };
+            if (!std.mem.eql(u8, message.threadId, id)) return error.MessageIdentityMismatch;
+            partial = partial or message.metadataPartial or message.decodeWarning.len != 0;
+            const size = decode.serializedBytes(message);
+            if (size <= remaining) {
+                remaining -= size;
+                try messages.append(a, try decode.copyMessage(message, a));
+            } else {
+                partial = true;
+                try messages.append(a, try decode.threadPlaceholder(message, a));
+            }
+            transport.progress(.bodies, index + 1, selected.len);
+        }
+        std.sort.heap(types.Message, messages.items, {}, struct {
             fn lessThan(_: void, left: types.Message, right: types.Message) bool {
                 return left.receivedAt < right.receivedAt or (left.receivedAt == right.receivedAt and std.mem.lessThan(u8, left.id, right.id));
             }
         }.lessThan);
-        return j.value(a, .{ .messages = messages });
+        return j.value(a, .{ .messages = messages.items, .partial = partial, .omittedMessages = entries.len - messages.items.len });
     }
     if (std.mem.eql(u8, cmd, "mail.attachment")) {
         const id = try j.required(request, "messageId");
@@ -1648,7 +1785,9 @@ test "invitation Gmail: named external Teams calendars fetch through read-only t
         try std.testing.expectEqualStrings("teams-external@example.test", invite.uid.slice());
         try std.testing.expectEqualStrings("self@example.test", invite.attendee.slice());
         oracle.declared = 131073;
-        try std.testing.expectError(error.CalendarTooLarge, readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, transport, "meeting-fixture"));
+        const refused = try readAuthorizedMessage(a, "self@example.test", &.{"mail-read"}, transport, "meeting-fixture");
+        try std.testing.expectEqualStrings("CalendarTooLarge", refused.bodyCacheError);
+        try std.testing.expect(refused.metadataPartial);
         try std.testing.expectEqual(@as(usize, 2), oracle.message_calls);
         try std.testing.expectEqual(@as(usize, 1), oracle.attachment_calls);
     }

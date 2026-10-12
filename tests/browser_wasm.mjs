@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mailPolicyFixture } from "../web-demo/mail-policy.fixture.mjs";
 
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -232,6 +233,8 @@ try {
     const {exports:e}=await WebAssembly.instantiate(module,{env:{
       http_request(){hostHttpCalls++;return 1},now_ms(){return Date.now()}
     }});
+    const policy=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(new Uint8Array(e.memory.buffer,e.policy_ptr(),e.policy_len())));
+    const policyBytes=e.policy_len();
     const init=e.init(100,30);
     const cap=e.input_capacity();
     const before=e.output_len();
@@ -239,13 +242,19 @@ try {
     const unchanged=before===e.output_len();
     const outOfRange=e.input(0xffffffff);
     const memory=e.memory.buffer.byteLength;
-    return {imports,hostHttpCalls,init,inputCapacity:cap,tooLarge,outOfRange,unchanged,memory,
+    let memoryGrowthRejected=false;
+    try {e.memory.grow(1)} catch {memoryGrowthRejected=true;}
+    return {imports,hostHttpCalls,policy,policyBytes,memoryGrowthRejected,init,inputCapacity:cap,tooLarge,outOfRange,unchanged,memory,
       outputBytes:e.output_len(),outputPointer:e.output_ptr(),inputPointer:e.input_ptr()};
   })()`);
   assert.deepEqual(abi.imports.map(({module,name,kind})=>({module,name,kind})).sort((a,b)=>a.name.localeCompare(b.name)), [
     {module:"env",name:"http_request",kind:"function"},{module:"env",name:"now_ms",kind:"function"},
   ], "WASM imports services outside its explicit HTTP and clock host adapters");
+  assert.deepEqual(abi.policy, mailPolicyFixture, "compiled mail policy drifted from independently specified compatibility boundaries");
+  assert(abi.policyBytes > 0 && abi.policyBytes <= 4096, "compiled mail policy export is not bounded");
   assert.equal(abi.hostHttpCalls, 0, "standalone fictional demo called the HTTP adapter");
+  assert.equal(abi.memory, 96 * 1024 * 1024, "WASM did not reserve its declared fixed96 MiB memory");
+  assert(abi.memoryGrowthRejected, "WASM accepted growth beyond its declared fixed reservation");
   assert.equal(abi.init, 0, "standalone browser module did not initialize");
   assert(abi.inputCapacity > 0 && abi.inputCapacity <= 65536, "WASM input buffer is not bounded");
   assert.notEqual(abi.tooLarge, 0, "WASM accepted input exceeding its exported capacity");

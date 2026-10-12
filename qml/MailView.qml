@@ -29,6 +29,7 @@ FocusScope {
   property string selectedMessageId: ""
   readonly property var account: service.currentAccount
   readonly property var selectedMessage: account.messages.find(row => row.id === selectedMessageId) || null
+  readonly property string selectedMessageWarning: Model.messageWarning(selectedMessage)
   // Sized from the longest bold address so account identity is never elided.
   readonly property int sidebarWidth: Math.max(px(180), Math.ceil(addressMetrics.advanceWidth) + px(16))
   signal closeRequested()
@@ -437,7 +438,7 @@ FocusScope {
       Rectangle {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
-        Layout.preferredHeight: root.px(80)
+        Layout.preferredHeight: root.px(root.selectedMessageWarning ? 100 : 80)
         visible: root.selectedMessage !== null
         color: "#1c2633"
         radius: 5
@@ -473,6 +474,17 @@ FocusScope {
               enabled: root.selectedMessage !== null && !root.service.fixtures
               onClicked: root.service.openMessage(root.selectedMessage.id)
             }
+          }
+          Text {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: root.selectedMessageWarning !== ""
+            text: root.selectedMessageWarning
+            textFormat: Text.PlainText
+            color: root.warning
+            font.family: root.fontFamily
+            font.pixelSize: root.captionFontSize
+            elide: Text.ElideRight
           }
           Text {
             Layout.fillWidth: true

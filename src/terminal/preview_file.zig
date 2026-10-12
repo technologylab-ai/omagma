@@ -6,6 +6,7 @@ const std = @import("std");
 const t = @import("types.zig");
 const markdown_mail = @import("markdown_mail.zig");
 const logo = @import("markdown_logo.zig");
+const policy = @import("mail_limits.zig");
 
 pub const filename = "preview.html";
 pub const max_file_bytes: usize = 16 * 1024 * 1024;
@@ -87,7 +88,7 @@ pub fn writePreview(io: std.Io, allocator: std.mem.Allocator, account_store_dir:
     const source = prepared.html orelse prepared.plain;
     if (source.len > t.Limits.body_bytes or !std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidPreviewBody;
     if (prepared.resources.len > 64 or draft.to.len + draft.cc.len + draft.bcc.len > t.Limits.recipients) return error.PreviewTooLarge;
-    if (draft.subject.len > 4096) return error.InvalidPreviewHeading;
+    if (draft.subject.len > policy.subject_bytes) return error.InvalidPreviewHeading;
     var atomic = try account_store_dir.createFileAtomic(io, filename, .{ .permissions = .fromMode(0o600), .replace = true });
     defer atomic.deinit(io);
     var buffer: [8192]u8 = undefined;
@@ -107,7 +108,7 @@ pub fn writePreview(io: std.Io, allocator: std.mem.Allocator, account_store_dir:
 
 fn addresses(out: *Out, values: []const t.Address) !void {
     for (values, 0..) |address, index| {
-        if (address.address.len > 320 or address.name.len > 256) return error.InvalidPreviewHeading;
+        if (address.address.len > policy.outgoing_address_bytes or address.name.len > policy.display_name_bytes) return error.InvalidPreviewHeading;
         if (index != 0) try out.raw(", ");
         if (address.name.len > 0) {
             try out.escaped(address.name);
@@ -119,6 +120,7 @@ fn addresses(out: *Out, values: []const t.Address) !void {
 }
 
 pub fn render(writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft) !void {
+    if (draft.subject.len > policy.subject_bytes) return error.InvalidPreviewHeading;
     var out: Out = .{ .writer = writer };
     const context = try Context.init(prepared);
     try out.raw("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"");
@@ -547,6 +549,21 @@ test "preview file: raster signatures and CID decoding prevent mislabeled SVG da
     const image = imageFor("c\\69 d:picture&#64;example.test", null, &context);
     try std.testing.expect(image != null);
     try std.testing.expect(imageFor("CID:picture%40example.test", null, &context) != null);
+}
+
+test "mail metadata: preview retains full subject and long Unicode names" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    var subject_bytes: [16383]u8 = undefined;
+    for (0..5461) |index| @memcpy(subject_bytes[index * 3 ..][0..3], "界");
+    const subject = &subject_bytes;
+    var name_bytes: [1023]u8 = undefined;
+    for (0..341) |index| @memcpy(name_bytes[index * 3 ..][0..3], "界");
+    const name = &name_bytes;
+    try render(&writer.writer, .{ .plain = "Note" }, .{ .subject = subject, .to = &.{.{ .address = "用户@例子.test", .name = name }} });
+    const output = writer.written();
+    try std.testing.expect(std.mem.indexOf(u8, output, subject) != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, name) != null);
 }
 
 test "preview file: symlink targets are refused and output overflow keeps the old preview" {

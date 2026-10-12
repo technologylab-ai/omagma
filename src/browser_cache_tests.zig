@@ -2,6 +2,8 @@ const std = @import("std");
 const cache = @import("browser_cache.zig");
 const types = @import("terminal/types.zig");
 const j = @import("terminal/json.zig");
+const policy = @import("terminal/mail_limits.zig");
+const decoder_policy = @import("terminal/decoder_policy.zig");
 
 const actor: cache.Binding = .{
     .account = "ada@example.test",
@@ -57,7 +59,7 @@ fn repeatedRows(a: std.mem.Allocator, count: usize, contacts: bool) ![]const u8 
     return std.mem.concat(a, u8, &.{ "[", try std.mem.join(a, ",", rows), "]" });
 }
 
-test "browser cache: received long local parts survive list full read and snapshot without granting send permission" {
+test "browser cache: long local parts survive reads snapshots and contact storage with portability warnings" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -93,10 +95,11 @@ test "browser cache: received long local parts survive list full read and snapsh
     try std.testing.expectEqualStrings(received, read.to[0].address);
     try std.testing.expectEqualStrings(received, read.cc[0].address);
     try std.testing.expectEqualStrings(received, read.replyTo[0].address);
-    try std.testing.expectError(error.InvalidAddress, @import("terminal/recipients.zig").validateAddress(read.replyTo[0].address));
-    // Contacts retain their existing sending-address admission policy.
+    try @import("terminal/recipients.zig").validateAddress(read.replyTo[0].address);
+    try std.testing.expect(@import("terminal/recipients.zig").exceedsPortableTransport(read.replyTo[0].address));
+    // Contacts use the bounded outgoing syntax policy too.
     const contact = try j.value(a, types.Contact{ .resourceName = "people/long-contact", .emails = &peers });
-    try std.testing.expectError(error.InvalidAddress, restored.replaceContacts(0, &.{contact}));
+    try restored.replaceContacts(0, &.{contact});
     try std.testing.expectEqualStrings(received, (try restored.read(0, message.id)).?.from.address);
 }
 
@@ -109,11 +112,11 @@ test "browser cache: incoming syntax and total bounds still reject unsafe addres
     try store.bind(0, actor);
     try store.restore(0, fixture, true);
     const before = try snapshot(a, &store, 0);
-    const oversized_local: [242]u8 = @splat('a');
+    const oversized_local: [policy.incoming_address_bytes]u8 = @splat('a');
     const too_long = try std.mem.concat(a, u8, &.{ &oversized_local, "@example.test" });
     for ([_][]const u8{ "a..b@example.test", "peer@example.test\r\nBcc: hidden@example.test", too_long }) |invalid| {
         const bad: types.Message = .{ .id = "invalid-address-mail", .threadId = "invalid-address-thread", .from = .{ .address = invalid } };
-        try std.testing.expectError(if (invalid.len > 254) error.InvalidBrowserCache else error.InvalidAddress, store.saveRead(0, bad));
+        try std.testing.expectError(if (invalid.len > policy.incoming_address_bytes) error.InvalidBrowserCache else error.InvalidAddress, store.saveRead(0, bad));
         try std.testing.expectEqualStrings(before, try snapshot(a, &store, 0));
     }
 }
@@ -672,4 +675,293 @@ test "browser cache: allocation failures in restore and replacements leave prior
         }
         try std.testing.expect(reached_success);
     }
+}
+
+fn utf8Bytes(a: std.mem.Allocator, bytes: usize) ![]u8 {
+    const result = try a.alloc(u8, bytes);
+    var offset: usize = 0;
+    while (offset + 2 <= bytes) : (offset += 2) @memcpy(result[offset..][0..2], "é");
+    if (offset < bytes) result[offset] = 'x';
+    return result;
+}
+
+test "browser cache: normalized metadata uses shared UTF8 byte caps and preserves prefixed subjects" {
+    try std.testing.expectEqual(@as(usize, 985), policy.manifest.messageIdBytes);
+    try std.testing.expectEqual(@as(usize, 16384), policy.manifest.snippetBytes);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    const incoming = try a.alloc(u8, policy.incoming_address_bytes);
+    @memset(incoming, 'a');
+    @memcpy(incoming[incoming.len - "@example.test".len ..], "@example.test");
+    const name = try utf8Bytes(a, policy.display_name_bytes);
+    const peers = try a.alloc(types.Address, policy.incoming_recipients);
+    for (peers) |*peer| peer.* = .{ .address = "用户@例子.测试", .name = "Résumé" };
+    const source: types.Message = .{
+        .id = "policy-boundary",
+        .threadId = "thread-policy",
+        .from = .{ .address = incoming, .name = name },
+        .to = peers,
+        .subject = try utf8Bytes(a, policy.subject_bytes),
+        .snippet = try utf8Bytes(a, policy.snippet_bytes),
+        .references = try utf8Bytes(a, policy.references_bytes),
+        .messageId = try utf8Bytes(a, policy.header_value_bytes),
+        .inReplyTo = try utf8Bytes(a, policy.header_value_bytes),
+        .sentDate = try utf8Bytes(a, policy.header_value_bytes),
+        .bodyText = "The body remains available.",
+        .attachments = &.{.{ .id = "unicode", .filename = try utf8Bytes(a, policy.filename_bytes) }},
+    };
+    try store.saveRead(0, source);
+    const bytes = try snapshot(a, &store, 0);
+    var restored = cache.Store.init(std.testing.allocator);
+    defer restored.deinit();
+    try restored.bind(0, actor);
+    try restored.restore(0, bytes, false);
+    const read = (try restored.read(0, source.id)).?;
+    try std.testing.expectEqualStrings(source.from.name, read.from.name);
+    try std.testing.expectEqualStrings(incoming, read.from.address);
+    try std.testing.expectEqualStrings(source.subject, read.subject);
+    try std.testing.expectEqual(peers.len, read.to.len);
+    try std.testing.expectEqualStrings(source.attachments[0].filename, read.attachments[0].filename);
+    const revision = restored.revision(0);
+    var too_large = source;
+    too_large.from.name = try utf8Bytes(a, policy.display_name_bytes + 2);
+    try std.testing.expectError(error.InvalidBrowserCache, restored.saveRead(0, too_large));
+    too_large = source;
+    too_large.subject = try utf8Bytes(a, policy.subject_bytes + 2);
+    try std.testing.expectError(error.InvalidBrowserCache, restored.saveRead(0, too_large));
+    too_large = source;
+    too_large.snippet = try utf8Bytes(a, policy.snippet_bytes + 2);
+    try std.testing.expectError(error.InvalidBrowserCache, restored.saveRead(0, too_large));
+    too_large = source;
+    too_large.attachments = &.{.{ .id = "unicode", .filename = try utf8Bytes(a, policy.filename_bytes + 2) }};
+    try std.testing.expectError(error.InvalidBrowserCache, restored.saveRead(0, too_large));
+    try std.testing.expectEqual(revision, restored.revision(0));
+    try std.testing.expectEqualStrings(bytes, try snapshot(a, &restored, 0));
+}
+
+test "browser cache: partial metadata preserves known membership and warning state through refresh and restore" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.restore(0, fixture, false);
+    const refused: types.Message = .{
+        .id = "mail-inbox",
+        .threadId = "thread-inbox",
+        .from = .{ .address = "", .name = "Unparsed sender" },
+        .decodeWarning = "HeaderTooLarge",
+        .metadataPartial = true,
+        .labelsVerified = false,
+        .bodyCacheError = "HeaderTooLarge",
+    };
+    try store.replaceView(0, &.{try j.value(a, refused)}, 50, "INBOX", true);
+    try expectIds(try store.list(0, a, "INBOX", ""), &.{ "mail-inbox", "mail-metadata" });
+    const retained = (try store.read(0, "mail-inbox")).?;
+    try std.testing.expectEqual(@as(i64, 6000), retained.receivedAt);
+    try std.testing.expect(!retained.labelsVerified and retained.metadataPartial and retained.unread);
+    try std.testing.expectEqualStrings("HeaderTooLarge", retained.decodeWarning);
+    try std.testing.expectEqualStrings("", retained.from.address);
+    const bytes = try snapshot(a, &store, 0);
+    var restored = cache.Store.init(std.testing.allocator);
+    defer restored.deinit();
+    try restored.bind(0, actor);
+    try restored.restore(0, bytes, false);
+    const read = (try restored.read(0, "mail-inbox")).?;
+    try std.testing.expectEqualStrings("HeaderTooLarge", read.decodeWarning);
+    try std.testing.expect(read.metadataPartial and !read.labelsVerified);
+    try expectIds(try restored.list(0, a, "INBOX", ""), &.{ "mail-inbox", "mail-metadata" });
+    // An empty label projection cannot turn an unknown row into Archive.
+    try restored.saveRead(0, .{ .id = "unknown-folder", .threadId = "unknown-thread", .metadataPartial = true, .labelsVerified = false, .decodeWarning = "InvalidLabels" });
+    try expectIds(try restored.list(0, a, "ARCHIVE", ""), &.{"mail-archive"});
+    try restored.saveRead(0, refused);
+    const reread = (try restored.read(0, "mail-inbox")).?;
+    try std.testing.expectEqualStrings("HeaderTooLarge", reread.bodyCacheError);
+    try std.testing.expect(!reread.bodyCached);
+    try std.testing.expectEqual(@as(i64, 6000), reread.receivedAt);
+    try std.testing.expect(reread.unread and !reread.labelsVerified);
+}
+
+test "browser cache: aggregate thread omissions cannot replace full bodies or final refusals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.saveRead(0, .{ .id = "full", .threadId = "thread", .from = .{ .address = "peer@example.test" }, .bodyText = "A retained full body", .labels = &.{"INBOX"} });
+    try store.saveRead(0, .{ .id = "final", .threadId = "thread", .decodeWarning = "UnsupportedCharset", .metadataPartial = true, .bodyCacheError = "UnsupportedCharset", .labels = &.{"INBOX"} });
+    for ([_][]const u8{ "BodyNotCached", "ThreadBodyBudgetExceeded" }) |code| {
+        const before = try snapshot(a, &store, 0);
+        const revision = store.revision(0);
+        for ([_][]const u8{ "full", "final" }) |id| {
+            try store.saveRead(0, .{ .id = id, .threadId = "thread", .bodyCacheError = code, .decodeWarning = code, .metadataPartial = true, .labelsVerified = false });
+        }
+        try std.testing.expectEqual(revision, store.revision(0));
+        try std.testing.expectEqualStrings(before, try snapshot(a, &store, 0));
+        try store.saveRead(0, .{ .id = code, .threadId = "thread", .bodyCacheError = code, .decodeWarning = code, .metadataPartial = true, .labelsVerified = false });
+        try std.testing.expect(try store.read(0, code) == null);
+        // Snapshot reload must keep aggregate omissions individually retryable.
+        var reopened = cache.Store.init(std.testing.allocator);
+        defer reopened.deinit();
+        try reopened.bind(0, actor);
+        try reopened.restore(0, try snapshot(a, &store, 0), false);
+        try std.testing.expect(try reopened.read(0, code) == null);
+        try std.testing.expectEqualStrings("A retained full body", (try reopened.read(0, "full")).?.bodyText);
+        try std.testing.expectEqualStrings("UnsupportedCharset", (try reopened.read(0, "final")).?.bodyCacheError);
+    }
+}
+
+test "browser cache: metadata refresh retains a final refusal but a fresh full read can replace it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.saveRead(0, .{ .id = "refused", .threadId = "thread", .subject = "Before", .decodeWarning = "UnsupportedCharset", .metadataPartial = true, .bodyCacheError = "UnsupportedCharset", .labels = &.{"INBOX"} });
+    const refreshed: types.Message = .{ .id = "refused", .threadId = "thread", .subject = "Fresh metadata", .labels = &.{ "INBOX", "UNREAD" }, .unread = true };
+    try store.replaceView(0, &.{try j.value(a, refreshed)}, 2, "INBOX", true);
+    const refusal = (try store.read(0, "refused")).?;
+    try std.testing.expectEqualStrings("Fresh metadata", refusal.subject);
+    try std.testing.expectEqualStrings("UnsupportedCharset", refusal.bodyCacheError);
+    try std.testing.expectEqualStrings("UnsupportedCharset", refusal.decodeWarning);
+    try std.testing.expect(refusal.metadataPartial and !refusal.bodyCached and refusal.unread);
+    try expectIds(try store.list(0, a, "INBOX", "status:partial"), &.{"refused"});
+    try store.saveRead(0, .{ .id = "refused", .threadId = "thread", .bodyText = "A later supported body", .labels = &.{"INBOX"} });
+    const full = (try store.read(0, "refused")).?;
+    try std.testing.expectEqualStrings("A later supported body", full.bodyText);
+    try std.testing.expect(full.bodyCached and !full.metadataPartial and full.bodyCacheError.len == 0);
+}
+
+test "browser cache: metadata allowance preserves full envelopes and final refusals until a complete refresh" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    try store.saveRead(0, .{ .id = "retained", .threadId = "thread", .from = .{ .address = "peer@example.test", .name = "Complete sender" }, .to = &.{.{ .address = "other@example.test" }}, .subject = "Complete subject", .bodyText = "Complete retained body", .labels = &.{"INBOX"}, .receivedAt = 3000 });
+    try store.saveRead(0, .{ .id = "final", .threadId = "thread", .subject = "Final refusal subject", .decodeWarning = "UnsupportedCharset", .metadataPartial = true, .bodyCacheError = "UnsupportedCharset", .labels = &.{"INBOX"}, .receivedAt = 1000 });
+    const omitted = [_]j.Value{
+        try j.value(a, types.Message{ .id = "retained", .threadId = "thread", .subject = "Short fallback", .decodeWarning = "MetadataBudgetExceeded", .metadataPartial = true, .labelsVerified = false }),
+        try j.value(a, types.Message{ .id = "final", .threadId = "thread", .decodeWarning = "MetadataBudgetExceeded", .metadataPartial = true, .labelsVerified = false }),
+        try j.value(a, types.Message{ .id = "new", .threadId = "new-thread", .decodeWarning = "MetadataBudgetExceeded", .metadataPartial = true, .labelsVerified = false, .receivedAt = 500 }),
+    };
+    try store.replaceView(0, &omitted, 50, "INBOX", true);
+    const retained = (try store.read(0, "retained")).?;
+    try std.testing.expectEqualStrings("Complete sender", retained.from.name);
+    try std.testing.expectEqualStrings("other@example.test", retained.to[0].address);
+    try std.testing.expectEqualStrings("Complete subject", retained.subject);
+    try std.testing.expectEqualStrings("Complete retained body", retained.bodyText);
+    try std.testing.expectEqualStrings("MetadataBudgetExceeded", retained.decodeWarning);
+    try std.testing.expect(retained.metadataPartial and !retained.labelsVerified);
+    try std.testing.expectEqualStrings("UnsupportedCharset", (try store.read(0, "final")).?.bodyCacheError);
+    try std.testing.expectEqualStrings("UnsupportedCharset", (try store.read(0, "final")).?.decodeWarning);
+    try std.testing.expect(try store.read(0, "new") == null);
+    try expectIds(try store.listAllScoped(0, a, "INBOX", "status:partial", &.{"new"}), &.{ "retained", "final", "new" });
+
+    // Persisting the warning must neither turn the omitted body into a hit nor
+    // prevent a later complete projection from replacing temporary metadata.
+    var reopened = cache.Store.init(std.testing.allocator);
+    defer reopened.deinit();
+    try reopened.bind(0, actor);
+    try reopened.restore(0, try snapshot(a, &store, 0), false);
+    try std.testing.expect(try reopened.read(0, "new") == null);
+    const fresh = [_]j.Value{
+        try j.value(a, types.Message{ .id = "retained", .threadId = "thread", .from = .{ .address = "fresh@example.test" }, .subject = "Fresh complete metadata", .labels = &.{"INBOX"}, .receivedAt = 3000 }),
+        try j.value(a, types.Message{ .id = "new", .threadId = "new-thread", .from = .{ .address = "new@example.test" }, .subject = "New complete metadata", .labels = &.{"INBOX"} }),
+    };
+    try reopened.replaceView(0, &fresh, 60, "INBOX", false);
+    const updated = (try reopened.read(0, "retained")).?;
+    try std.testing.expectEqualStrings("fresh@example.test", updated.from.address);
+    try std.testing.expectEqualStrings("Fresh complete metadata", updated.subject);
+    try std.testing.expectEqualStrings("Complete retained body", updated.bodyText);
+    try std.testing.expect(updated.decodeWarning.len == 0 and !updated.metadataPartial and updated.labelsVerified);
+    try std.testing.expect(try reopened.read(0, "new") == null);
+    try expectIds(try reopened.list(0, a, "INBOX", "status:partial"), &.{"final"});
+}
+
+test "browser cache: decoder upgrade retries only eligible older refusals and preserves display and membership" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(@as(u32, 4), decoder_policy.decoder_revision);
+    const refused_rows =
+        \\[{"id":"charset","threadId":"thread","from":{"address":"peer@example.test","name":"Retained sender"},"subject":"Retained subject","snippet":"Retained preview","labels":["INBOX","UNREAD"],"unread":true,"receivedAt":3000,"bodyCached":true,"bodyCacheError":"UnsupportedCharset","decodeWarning":"UnsupportedCharset","metadataPartial":true},
+        \\{"id":"auth","threadId":"auth-thread","bodyCacheError":"NotConnected"},
+        \\{"id":"unknown","threadId":"unknown-thread","bodyCacheError":"UnknownFutureRefusal"},
+        \\{"id":"unfixed","threadId":"unfixed-thread","bodyCacheError":"InvalidBase64"},
+        \\{"id":"quota","threadId":"quota-thread","bodyCacheError":"DiskQuotaExceeded"}]
+    ;
+    const legacy = try document(a, refused_rows, "[]", false);
+    for ([_]?u32{ null, 3, 4, 5 }) |recorded| {
+        var raw = try parse(a, legacy);
+        if (recorded) |revision| try raw.object.put(a, "decoderRevision", .{ .integer = revision });
+        var store = cache.Store.init(std.testing.allocator);
+        defer store.deinit();
+        try store.bind(0, actor);
+        try store.restore(0, try std.json.Stringify.valueAlloc(a, raw, .{}), false);
+        const retry = recorded == null or recorded.? < decoder_policy.decoder_revision;
+        if (retry) {
+            try std.testing.expect(try store.read(0, "charset") == null);
+            const row = store.retained(0)[0];
+            try std.testing.expect(row.bodyCacheError.len == 0 and !row.bodyCached);
+            try std.testing.expectEqualStrings("Retained sender", row.from.name);
+            try std.testing.expectEqualStrings("Retained subject", row.subject);
+            try std.testing.expectEqualStrings("Retained preview", row.snippet);
+            try std.testing.expect(row.unread and row.labelsVerified);
+            try expectIds(try store.list(0, a, "INBOX", "status:partial"), &.{"charset"});
+        } else try std.testing.expectEqualStrings("UnsupportedCharset", (try store.read(0, "charset")).?.bodyCacheError);
+        try std.testing.expectEqualStrings("NotConnected", (try store.read(0, "auth")).?.bodyCacheError);
+        try std.testing.expectEqualStrings("UnknownFutureRefusal", (try store.read(0, "unknown")).?.bodyCacheError);
+        try std.testing.expectEqualStrings("DiskQuotaExceeded", (try store.read(0, "quota")).?.bodyCacheError);
+        if (recorded != null) try std.testing.expectEqualStrings("InvalidBase64", (try store.read(0, "unfixed")).?.bodyCacheError);
+        const persisted = try snapshot(a, &store, 0);
+        try std.testing.expectEqual(@as(i64, @max(recorded orelse 0, decoder_policy.decoder_revision)), try j.integer(try parse(a, persisted), "decoderRevision", 0));
+        try store.restore(0, persisted, false);
+        if (retry) try std.testing.expect(try store.read(0, "charset") == null) else try std.testing.expectEqualStrings("UnsupportedCharset", (try store.read(0, "charset")).?.bodyCacheError);
+    }
+}
+
+test "browser cache: legacy successful reads canonicalize display fields while retaining bodies and raw headers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = cache.Store.init(std.testing.allocator);
+    defer store.deinit();
+    try store.bind(0, actor);
+    const rows =
+        \\[{"id":"warm","threadId":"warm-thread","from":{"address":"Peer@Example.test","name":"Decoded\tname"},"to":[{"address":"to@example.test","name":"To\nname"}],"cc":[{"address":"cc@example.test","name":"Cc\tname"}],"replyTo":[{"address":"reply@example.test","name":"Reply\u202ename"}],"subject":"Warm\ncache","bodyText":"Original\n\tbody","bodyHtml":"<p>Original\n\tbody</p>","bodyCached":true,"messageId":"\t<Raw@Example.test>","references":"\t<Parent@Example.test> (\u200f)","inReplyTo":"\t<Parent@Example.test>","sentDate":"Mon,\t12 Oct 2026 10:00:00 +0200","labels":["INBOX"],"attachments":[{"id":"part","filename":"legacy\nreport.pdf","mimeType":"application/pdf","size":12,"contentId":"raw\tcontent-id"}]}]
+    ;
+    try store.restore(0, try document(a, rows, "[]", false), false);
+    const warm = (try store.read(0, "warm")).?;
+    try std.testing.expectEqualStrings("Peer@Example.test", warm.from.address);
+    try std.testing.expectEqualStrings("Decoded name", warm.from.name);
+    try std.testing.expectEqualStrings("To name", warm.to[0].name);
+    try std.testing.expectEqualStrings("Cc name", warm.cc[0].name);
+    try std.testing.expectEqualStrings("Replyname", warm.replyTo[0].name);
+    try std.testing.expectEqualStrings("Warm cache", warm.subject);
+    try std.testing.expectEqualStrings("legacy report.pdf", warm.attachments[0].filename);
+    try std.testing.expectEqualStrings("raw\tcontent-id", warm.attachments[0].contentId.?);
+    try std.testing.expectEqualStrings("Original\n\tbody", warm.bodyText);
+    try std.testing.expectEqualStrings("<p>Original\n\tbody</p>", warm.bodyHtml.?);
+    try std.testing.expectEqualStrings("\t<Raw@Example.test>", warm.messageId);
+    try std.testing.expectEqualStrings("\t<Parent@Example.test> (\u{200f})", warm.references);
+    try std.testing.expectEqualStrings("\t<Parent@Example.test>", warm.inReplyTo);
+    try std.testing.expectEqualStrings("Mon,\t12 Oct 2026 10:00:00 +0200", warm.sentDate.?);
+    try std.testing.expect(warm.bodyCached and warm.bodyCacheError.len == 0 and warm.decodeWarning.len == 0);
+    const exported = try snapshot(a, &store, 0);
+    try store.restore(0, exported, false);
+    try std.testing.expectEqualStrings(exported, try snapshot(a, &store, 0));
+    try store.saveRead(0, .{ .id = "copy", .threadId = "copy-thread", .subject = "Saved\nsubject", .from = .{ .address = "peer@example.test", .name = "Saved\tname" }, .bodyText = "Copied\n\tbody" });
+    const copied = (try store.read(0, "copy")).?;
+    try std.testing.expectEqualStrings("Saved subject", copied.subject);
+    try std.testing.expectEqualStrings("Saved name", copied.from.name);
+    try std.testing.expectEqualStrings("Copied\n\tbody", copied.bodyText);
 }

@@ -91,11 +91,61 @@ under an aggregate 8 MiB draft quota, and 64 send records. Persisted mail has a
 verification and exact account/client/grant binding. Cache contains no tokens,
 drafts, native handles or provider metadata. Browser date filters use UTC.
 
-The browser uses a 48 MiB coalescing heap within a fixed 64 MiB WASM memory,
-which also contains static buffers, tables and stack. Temporary download and
-validation arenas release their buffers before draft serialization. This
-platform allocator reuses freed blocks across sizes; native allocation is
-unchanged. Allocator correctness runs with the ordinary native Debug checks.
+The browser uses a 64 MiB coalescing heap and a separate 16 MiB message-decoding
+workspace within a fixed 96 MiB WASM memory. Static buffers, tables and the
+2 MiB stack occupy the remainder. WASM memory cannot grow. Temporary response
+and validation arenas reuse these reservations and release their buffers before
+retaining normalized results or serializing drafts. Browser JavaScript, DOM,
+IndexedDB and browser networking have their own host-managed allocations.
+
+Native entrypoints also reserve their application and IO pools at startup;
+both front ends use the same message-decoding workspace and metadata policy.
+WASM exports that policy so JavaScript cache admission uses the compiled
+limits. Subjects allow 16 KiB plus reply/forward prefixes, display names 1 KiB,
+received addresses 1 KiB, submitted addresses 512 bytes, filenames 512 bytes,
+and aggregate headers 128 KiB. Sizes count UTF-8 bytes. Outgoing envelopes still
+allow at most 32 recipients. Portable SMTP address lengths produce a review
+warning rather than rejecting received mail or bounded Gmail submission.
+
+Message-local failures retain identifiable warning rows and readable neighbors.
+Unsupported text alternatives can retain a supported sibling; an unavailable
+body stays an explicit placeholder. Metadata batches and conversation results
+each retain up to 4 MiB of full message DTOs, with bounded placeholders for remaining members; an omitted
+body can be read individually. Cache admission failure does not hide a decoded
+body. `status:partial` searches warnings locally. Unknown labels do not authorize
+membership reconciliation. Authentication, cancellation, identity mismatches
+and exhaustion of the retained application pool remain operation failures.
+
+The browser displays the newest 30 members from the shared provider's bounded
+100-member thread enumeration and reports omitted members. It chooses that
+window before individual body fetches. Both adapters spend the full-body budget
+on newest members first, then return chronological results. Cached metadata-only
+members stay visible; focus their card and press Enter to read the body. Replies
+and text/formatted forwards refuse unavailable bodies rather than using compact
+metadata or silently empty quotes. Original `.eml` forwarding remains a separate
+opaque-byte path with a 2 MiB original limit.
+
+Decoder revisions accompany saved snapshots. A known refusal fixed by a newer
+decoder becomes eligible for one later read without fetching during restore;
+current refusals stay final. Legacy display headers normalize locally without
+changing addresses, threading headers, body bytes or native cached files.
+
+These allowances do not provide full IDNA normalization, every historical
+charset, automatic selection among multiple From authors, or unbounded bodies,
+conversations and reference chains. Browser contact editing, general filesystem
+workflows and durable browser drafts retain the existing platform restrictions.
+Archive/label/contact writes, RSVP, URL opening, clipboard integration, external
+editors and disk draft recovery remain native platform capabilities. Browser
+dates use UTC. Scoped view IDs live in the tab's bounded ledger; after reload,
+rows with unverified labels can be found through All Mail and `status:partial`.
+
+The new allowances are still quotas: 256 threading references cannot accept a
+257th parent reference, and a subject already filling prefix headroom can refuse
+an additional prefix. There is no reference-chain compaction, full Unicode
+normalization/case-folded search, universal charset support, or acceptance of
+arbitrarily large filename/participant/body combinations. A malformed or
+oversized contact remains subject to strict People normalization; mail-row
+isolation does not change contact-write validation.
 
 The shared Gmail preparation phase renders and freezes the exact MIME and host
 JSON payload before an uncertain send is recorded. Local preparation failures

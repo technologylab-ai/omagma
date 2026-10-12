@@ -1,5 +1,6 @@
 const std = @import("std");
 test {
+    std.testing.refAllDecls(@import("mail_scratch_compatibility_tests.zig"));
     std.testing.refAllDecls(@import("terminal/recipients.zig"));
     std.testing.refAllDecls(@import("terminal/mime.zig"));
     std.testing.refAllDecls(@import("terminal/html_document.zig"));

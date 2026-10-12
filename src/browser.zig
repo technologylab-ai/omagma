@@ -9,7 +9,11 @@ fn trap(_: []const u8, _: ?usize) noreturn {
 pub const std_options: std.Options = .{ .log_level = .err, .logFn = quietLog };
 fn quietLog(comptime _: std.log.Level, comptime _: @TypeOf(.enum_literal), comptime _: []const u8, _: anytype) void {}
 const BrowserHeap = @import("browser_heap.zig").Heap;
-var heap_buffer: [48 * 1024 * 1024]u8 align(16) = undefined;
+const policy_json = blk: {
+    @setEvalBranchQuota(100_000);
+    break :blk std.fmt.comptimePrint("{f}", .{std.json.fmt(@import("terminal/mail_limits.zig").manifest, .{})});
+};
+var heap_buffer: [@import("browser_provider.zig").heap_bytes]u8 align(16) = undefined;
 var heap: BrowserHeap = undefined;
 var heap_initialized = false;
 var demo: tui.BrowserSession = undefined;
@@ -29,6 +33,15 @@ var decoder: @import("terminal/input.zig").Decoder = .{};
 // before init and while another operation is suspended; it touches no session.
 export fn codepoint_width(codepoint: u32) u32 {
     return tui.browserCodepointWidth(codepoint);
+}
+
+// Static trusted configuration; no upload, provider response or credential
+// controls cache admission policy. Reading it needs no session allocation.
+export fn policy_ptr() usize {
+    return @intFromPtr(policy_json);
+}
+export fn policy_len() usize {
+    return policy_json.len;
 }
 
 export fn init(cols: u32, rows: u32) u32 {

@@ -43,11 +43,12 @@ pub const Session = struct {
     grant_id: []const u8,
     can_send: bool,
     can_contacts: bool = false,
+    temporary_allocator: ?std.mem.Allocator = null,
     pub fn capabilities(self: *const Session) []const []const u8 {
         return if (self.can_send) &.{ "mail-read", "mail-send" } else &.{"mail-read"};
     }
     pub fn transport(self: *Session) gmail.Transport {
-        return .{ .context = self, .requestFn = request, .preparedRequestFn = requestPrepared };
+        return .{ .context = self, .requestFn = request, .preparedRequestFn = requestPrepared, .temporary_allocator = self.temporary_allocator, .thread_limit = 30 };
     }
     fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         const encoded = if (body) |value| try std.json.Stringify.valueAlloc(a, value, .{}) else "";

@@ -410,29 +410,32 @@ def incoming_reply_to_local65(client):
         thread = client.request("mail.thread", account, threadId=full["threadId"])["messages"]
         received = next(m for m in thread if m["id"] == full["id"])
         require(addresses(received["replyTo"]) == case["expectedAddresses"], "thread reading weakened delivered Reply-To identity")
-        before = client.request("draft.list", account)
         for all_recipients in (False, True):
-            rejected = client.request("mail.reply", account, messageId=full["id"], all=all_recipients, ok=False)
-            require(rejected["code"] == "InvalidAddress", "reading a long Reply-To granted permission to send to it")
-        require(client.request("draft.list", account) == before, "invalid outgoing Reply-To created an orphan draft")
+            reply = client.request("mail.reply", account, messageId=full["id"], all=all_recipients)
+            require(addresses(reply["to"]) == case["expectedAddresses"], "long Reply-To was shortened or replaced during reply preparation")
         require(cache_limits(client, account)["fixtureSends"] == 0, "long Reply-To inspection submitted mail")
-    client.evidence = {"incomingReplyToLocalBytes": 65, "outgoingReplyRefused": True, "accountsChecked": 3}
+    client.evidence = {"incomingReplyToLocalBytes": 65, "replyPreparationPreservesAddress": True, "accountsChecked": 3}
 
 
 def outgoing_address_limits_unchanged(client):
     recipients32 = [f"boundary-{i:02}@example.org" for i in range(32)]
     local64 = "a" * 64 + "@example.org"
     local65 = "b" * 65 + "@example.org"
+    address512 = "c" * 500 + "@example.org"
+    address513 = "d" * 501 + "@example.org"
     for account in ACCOUNTS:
         boundary = client.request("draft.create", account, draft={"to": recipients32, "subject": "Fictional32-recipient boundary", "bodyText": "Synthetic draft only."})
         require(addresses(boundary["to"]) == recipients32, "valid32-recipient outgoing boundary was changed")
         address_boundary = client.request("draft.create", account, draft={"to": [local64], "subject": "Fictional64-byte local boundary", "bodyText": "Synthetic draft only."})
         require(addresses(address_boundary["to"]) == [local64], "valid64-byte local-part outgoing boundary was changed")
+        for accepted in (local65, address512, "用户@例子.test"):
+            prepared = client.request("draft.create", account, draft={"to": [accepted], "subject": "Fictional extended address", "bodyText": "Synthetic draft only."})
+            require(addresses(prepared["to"]) == [accepted], "bounded outgoing UTF-8 address was shortened or rejected")
         drafts = client.request("draft.list", account)
         operations = client.request("operation.list", account)
         calls = cache_limits(client, account)["fixtureCalls"]
         for suffix, to, code in [("many", recipients32 + ["boundary-33@example.org"], "TooManyRecipients"),
-                                  ("long", [local65], "InvalidAddress")]:
+                                  ("long", [address513], "InvalidAddress")]:
             draft = {"to": to, "subject": "Fictional invalid outgoing boundary", "bodyText": "Never dispatch."}
             rejected = client.request("draft.create", account, draft=draft, ok=False)
             require(rejected["code"] == code, "incoming compatibility loosened outgoing draft limits")
@@ -442,7 +445,7 @@ def outgoing_address_limits_unchanged(client):
         require(client.request("operation.list", account) == operations, "rejected outgoing boundary created a submission journal")
         metrics = cache_limits(client, account)
         require(metrics["fixtureCalls"] == calls and metrics["fixtureSends"] == 0, "invalid outgoing boundary reached the provider")
-    client.evidence = {"outgoingRecipientLimit": 32, "outgoingLocalPartLimit": 64,
+    client.evidence = {"outgoingRecipientLimit": 32, "outgoingAddressBytes": 512,
                        "invalidBoundaryHasNoProviderOrJournalSideEffect": True, "accountsChecked": 3}
 
 
@@ -485,18 +488,18 @@ def incoming_header_count_and_budget(client):
             require(len(bad["payload"]["headers"]) == vector["totalHeaders"], "header rejection fixture count wrong")
             aggregate = sum(len(h["name"].encode()) + len(h["value"].encode()) for h in bad["payload"]["headers"])
             require(all(len(h["value"].encode()) <= 8192 for h in bad["payload"]["headers"]), "rejection used single-field overflow")
-            require((aggregate > 32768) == (vector["expectedError"] == "HeadersTooLarge"), "header count/byte vectors overlap")
+            require((aggregate > spec["aggregateHeaderByteLimit"]) == (vector["expectedError"] == "HeadersTooLarge"), "header count/byte vectors overlap")
             source["messages"].append(bad)
             (root / "accounts" / f"{account.split('@')[0]}.json").write_text(json.dumps(source, ensure_ascii=False))
-            error = client.request("mail.read", account, messageId=vector["id"], ok=False)
-            require(error["code"] == vector["expectedError"], "incoming header bound did not reject explicitly")
+            refusal = client.request("mail.read", account, messageId=vector["id"])
+            require(refusal["id"] == vector["id"] and refusal["bodyCacheError"] == vector["expectedError"], "incoming header bound lost the identifiable refusal")
             good = client.request("mail.read", account, messageId=spec["validMessageId"], cacheOnly=True)
             require(account in good["bodyText"], "header refusal damaged valid cached account mail")
             path, before = cached_digests[account]
             require(hashlib.sha256(path.read_bytes()).hexdigest() == before, "header refusal rewrote valid body")
             require(cache_limits(client, account)["fixtureSends"] == 0, "incoming header tests submitted mail")
     client.evidence = {"incomingHeadersReadAndSearched": 96, "incomingHeaderCountLimit": 256,
-                       "rejectedHeaderCount": 257, "aggregateByteLimit": 32768,
+                       "rejectedHeaderCount": 257, "aggregateByteLimit": spec["aggregateHeaderByteLimit"],
                        "independentCountAndByteRejections": True, "validBodyDigestsPreserved": True, "accountsChecked": 3}
 
 
@@ -612,8 +615,10 @@ def gmail_inline_underdeclared_text(client):
             source.setdefault("externalBodies", {})[external_id] = {"size": len(data), "data": encoded}
         source["messages"].append(bad)
         (root / "accounts/personal.json").write_text(json.dumps(source, ensure_ascii=False))
-        error = client.request("mail.read", account, messageId=bad["id"], ok=False)
-        require(error["code"] == vector["expectedError"], "inline compatibility weakened a strict MIME size/cap refusal")
+        refused = client.request("mail.read", account, messageId=bad["id"])
+        require(refused["id"] == bad["id"] and refused["bodyCacheError"] == vector["expectedError"]
+                and refused["metadataPartial"] and not refused["bodyText"],
+                "inline compatibility omitted its identifiable MIME size/cap refusal")
         source["messages"].pop()
     client.restart()
     for account in ACCOUNTS:
@@ -683,11 +688,14 @@ def mime_refusal_preserves_valid_cache(client):
     errors = {"declaredBodyOver2MiB": "BodyTooLarge", "sizeMismatch": "BodySizeMismatch",
               "unsupportedCharset": "UnsupportedCharset", "depth33": "MimeTooDeep", "parts513": "TooManyMimeParts"}
     for name, payload in json.loads((FIXTURES / "mime-limits.json").read_text())["cases"].items():
+        target["id"] = "refused-" + name
         target["payload"] = {**payload, "headers": headers + payload["headers"]}
         (root / "accounts/personal.json").write_text(json.dumps(source))
         client.restart()
-        rejected = client.request("mail.read", messageId=target["id"], ok=False)
-        require(rejected["code"] == errors[name], f"malformed MIME {name} omitted its bounded refusal")
+        rejected = client.request("mail.read", messageId=target["id"])
+        require(rejected["bodyCacheError"] == errors[name] and rejected["metadataPartial"],
+                f"malformed MIME {name} omitted its bounded refusal")
+        require(not rejected["bodyText"], "refused MIME invented body content")
         require(client.request("mail.read", messageId=cached["id"]) == cached,
                 "malformed MIME corrupted another cached message")
 

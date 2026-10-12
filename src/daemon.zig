@@ -376,12 +376,16 @@ pub fn run(io: std.Io, config: *Config, options: Options) !void {
     try nonblocking(0);
     try nonblocking(1);
     worker = .{ .io = io, .config = config, .options = options, .event_fd = fd };
-    const thread = try std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, Worker.run, .{&worker});
+    // The native runtime prestarts the complete I/O pool before sealing. This
+    // long-lived worker must reuse that pool rather than acquire another stack.
+    var worker_future = try io.concurrent(Worker.run, .{&worker});
     defer {
         worker.stop.store(true, .release);
         worker.cancel_event.set(io);
         worker.start_event.set(io);
-        thread.join();
+        // Wake either idle wait and cancel any active refresh before joining.
+        // The future is joined before event_fd and the caller's config expire.
+        worker_future.await(io);
     }
     state = .{ .io = io, .config = config, .options = options, .selected = config.initial() };
     var eof = false;

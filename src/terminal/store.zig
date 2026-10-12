@@ -2,6 +2,9 @@ const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
 const draft_summary = @import("draft_summary.zig");
+const mail_limits = @import("mail_limits.zig");
+pub const index_read_bytes = 16 * 1024 * 1024;
+pub const index_write_bytes = 8 * 1024 * 1024;
 pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "", bodyError: []const u8 = "" };
 const attachmentMetadata = draft_summary.attachmentMetadata;
 // Address count alone allows tens of KiB per broad inbound header. Bound the
@@ -138,7 +141,7 @@ pub fn cacheStamp(io: std.Io, root: []const u8, account: []const u8, options: t.
     defer dir.close(io);
     const stat = dir.statFile(io, "index.json", .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) return null else return err;
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
-    if (stat.size >= 16 * 1024 * 1024) return error.CacheLimitExceeded;
+    if (stat.size >= index_read_bytes) return error.CacheLimitExceeded;
     return .{ .inode = @intCast(stat.inode), .size = stat.size, .mtime_ns = stat.mtime.toNanoseconds() };
 }
 
@@ -163,40 +166,9 @@ pub const QueuedSend = struct {
     dueAtMs: i64,
     errorCode: []const u8 = "",
 };
-/// Body refusal codes that a newer incoming-mail decoder may now accept. A
-/// cache recorded by an older decoder clears matching refusals once on a
-/// writable open, so those bodies are fetched again instead of remaining
-/// unavailable. Other refusals stay final. Append a revision; never reuse one.
-const decoder_retries = [_]struct { revision: u32, code: []const u8 }{
-    // Gmail declares base64 UTF-8 inline text with its stripped byte order mark.
-    .{ .revision = 1, .code = "BodySizeMismatch" },
-    // ISO-8859-15 text.
-    .{ .revision = 2, .code = "UnsupportedCharset" },
-    // Conflicting calendar parts no longer refuse the message.
-    .{ .revision = 2, .code = "AmbiguousCalendarPart" },
-    // Malformed encoded words in Subject, display names and filenames display
-    // as literal text.
-    .{ .revision = 2, .code = "InvalidEncodedWord" },
-    .{ .revision = 2, .code = "InvalidBase64" },
-    .{ .revision = 2, .code = "InvalidQuotedPrintable" },
-    .{ .revision = 2, .code = "InvalidCharsetData" },
-    .{ .revision = 2, .code = "InvalidUtf8" },
-    // Received attachments are bounded at 50 MiB instead of 25 MiB.
-    .{ .revision = 2, .code = "BodyTooLarge" },
-    // Large external images and other unloaded binary parts, including inline
-    // ones referenced by Content-ID, stay descriptors instead of refusing.
-    .{ .revision = 3, .code = "BodyTooLarge" },
-};
-pub const decoder_revision: u32 = decoder_retries[decoder_retries.len - 1].revision;
-
-fn retriedByNewerDecoder(code: []const u8, recorded: u32) bool {
-    if (code.len == 0 or std.mem.eql(u8, code, "DiskQuotaExceeded")) return false;
-    // Indexes from before revisions were recorded hold refusals from unknown
-    // older decoders, some since fixed. Retry each of them once.
-    if (recorded == 0) return true;
-    for (decoder_retries) |retry| if (retry.revision > recorded and std.mem.eql(u8, retry.code, code)) return true;
-    return false;
-}
+/// Shared native/browser decoder revision and retry eligibility.
+pub const decoder_revision = @import("decoder_policy.zig").decoder_revision;
+const retriedByNewerDecoder = @import("decoder_policy.zig").retriedByNewerDecoder;
 
 pub const State = struct {
     schema: u8 = 1,
@@ -229,6 +201,7 @@ pub const State = struct {
     /// schema-1 indexes; see `decoder_revision`.
     decoderRevision: u32 = 0,
     quotaFloor: ?QuotaFloor = null,
+    indexQuotaFloor: ?QuotaFloor = null,
     quotaDiskLimit: usize = 0,
     metadataPolicy: usize = 0,
     diskPolicy: usize = 0,
@@ -268,7 +241,7 @@ pub const Store = struct {
         }
         if (!readonly) try cleanupScratch(dir, io, a);
         var state: State = .{ .account = account };
-        const raw = readPrivate(dir, io, a, "index.json", 16 * 1024 * 1024) catch |err| if (err == error.FileNotFound) null else return err;
+        const raw = readPrivate(dir, io, a, "index.json", index_read_bytes) catch |err| if (err == error.FileNotFound) null else return err;
         if (raw) |bytes| {
             // readPrivate owns this immutable buffer in the same caller arena
             // as State. Borrow unescaped strings instead of copying each field
@@ -285,7 +258,7 @@ pub const Store = struct {
                 if (operation.kind.len > 64 or operation.labelId.len > 256) return error.CacheLimitExceeded;
                 if (operation.label) |label| if (label.id.len > 256 or label.name.len > 512 or label.type.len > 16) return error.CacheLimitExceeded;
             }
-            for (state.identities) |identity| if (identity.address.len > 320 or identity.name.len > 256 or identity.signature.len > 8192) return error.CacheLimitExceeded;
+            for (state.identities) |identity| if (identity.address.len > mail_limits.outgoing_address_bytes or identity.name.len > mail_limits.display_name_bytes or identity.signature.len > 8192) return error.CacheLimitExceeded;
             for (state.undo) |receipt| {
                 if (receipt.token.len > 256 or receipt.items.len > 100) return error.CacheLimitExceeded;
                 for (receipt.items) |item| {
@@ -307,6 +280,7 @@ pub const Store = struct {
         var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = resolved, .entriesStorage = state.entries };
         if (state.views.len > 16 or state.historyId.len > 32) return error.CacheLimitExceeded;
         for (state.views) |view| if (view.ids.len > t.Limits.metadata_hard or view.query.len > 4096 or view.label.len > 256 or view.remoteCursor.len > 4096) return error.CacheLimitExceeded;
+        for (state.entries) |entry| if (entry.bodyError.len > 64 or entry.message.bodyCacheError.len > 64 or entry.message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         if (!options.fixtures and (state.fixtureProvider.len != 0 or state.fixtureLabelsReady or state.fixtureDeletedLabels.len != 0)) return error.CacheIdentityMismatch;
         for (state.fixtureProvider) |record| try validateFixtureRecord(record);
         // Persisted indexes already have this order. Keep the legacy fallback
@@ -386,8 +360,51 @@ pub const Store = struct {
         try parent.sync(s.io);
     }
     pub fn save(s: *Store) !void {
+        // Count without allocating another index-sized copy. Wide legal
+        // subjects reduce retained mail count, never their original contents.
+        var estimated = @import("gmail_decode.zig").serializedBytes(s.state);
+        var evicted = false;
+        if (estimated >= index_write_bytes) {
+            // Protected drafts, receipts and settings cannot be evicted. Prove
+            // that removing all mail could fit before deleting any body file.
+            var protected = s.state;
+            protected.entries = &.{};
+            // Retain every view ID in this conservative preflight. Some may
+            // name mail outside the retained index and survive all evictions.
+            // Include the largest possible new floor before testing the final
+            // protected state; no side effect depends on a size estimate.
+            var floor_bytes = @import("gmail_decode.zig").serializedBytes(protected.indexQuotaFloor);
+            for (s.state.entries) |entry| {
+                const floor: QuotaFloor = .{ .receivedAt = entry.message.receivedAt, .id = entry.message.id };
+                const bytes = @import("gmail_decode.zig").serializedBytes(floor);
+                if (bytes > floor_bytes) {
+                    floor_bytes = bytes;
+                    protected.indexQuotaFloor = floor;
+                }
+            }
+            protected.generation +|= 1;
+            if (@import("gmail_decode.zig").serializedBytes(protected) >= index_write_bytes) return error.CacheLimitExceeded;
+        }
+        while (estimated >= index_write_bytes) {
+            if (s.state.entries.len == 0) return error.CacheLimitExceeded;
+            if (!evicted) {
+                s.state.generation +|= 1;
+                estimated = @import("gmail_decode.zig").serializedBytes(s.state);
+                evicted = true;
+            }
+            const last = s.state.entries.len - 1;
+            const removed = @import("gmail_decode.zig").serializedBytes(s.state.entries[last]);
+            const floor_before = @import("gmail_decode.zig").serializedBytes(s.state.indexQuotaFloor);
+            const tail = s.state.entries[last].message;
+            if (s.state.indexQuotaFloor == null or newestFirst({}, .{ .message = tail }, .{ .message = .{ .id = s.state.indexQuotaFloor.?.id, .threadId = "", .receivedAt = s.state.indexQuotaFloor.?.receivedAt } })) s.state.indexQuotaFloor = .{ .receivedAt = tail.receivedAt, .id = tail.id };
+            try s.evict(last);
+            // Removing view IDs and an array comma only makes this conservative.
+            estimated -|= removed;
+            estimated +|= @import("gmail_decode.zig").serializedBytes(s.state.indexQuotaFloor) -| floor_before;
+            if (estimated < index_write_bytes) estimated = @import("gmail_decode.zig").serializedBytes(s.state);
+        }
         var raw = try std.json.Stringify.valueAlloc(s.allocator, s.state, .{});
-        if (raw.len >= 16 * 1024 * 1024) return error.CacheLimitExceeded;
+        if (raw.len >= index_write_bytes) return error.CacheLimitExceeded;
         const count = s.state.entries.len;
         try s.makeRoom(raw.len, "index.json");
         // Only eviction changes this snapshot during makeRoom. Avoid retaining
@@ -463,8 +480,25 @@ pub const Store = struct {
         for (s.state.entries, 0..) |entry, i| if (std.mem.eql(u8, entry.message.id, id)) return s.evict(i);
     }
     pub fn put(s: *Store, message: t.Message, full: bool) !void {
+        if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         if (message.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
+        // A conversation-wide response quota says nothing about previously
+        // verified metadata. Preserve its full subject/envelope and any body.
+        if (std.mem.eql(u8, message.bodyCacheError, "ThreadBodyBudgetExceeded") and s.find(message.id) != null) return;
+        if (std.mem.eql(u8, message.decodeWarning, "MetadataBudgetExceeded")) if (s.find(message.id)) |entry| {
+            // Preserve the complete immutable envelope while retaining any
+            // independently verified current folder and unread membership.
+            entry.message.decodeWarning = "MetadataBudgetExceeded";
+            entry.message.metadataPartial = true;
+            entry.message.labelsVerified = message.labelsVerified;
+            if (message.labelsVerified) {
+                entry.message.labels = message.labels;
+                entry.message.unread = message.unread;
+            }
+            return;
+        };
         var metadata = message;
+        if (std.mem.eql(u8, metadata.bodyCacheError, "ThreadBodyBudgetExceeded")) metadata.bodyCacheError = "";
         metadata.bodyText = "";
         metadata.bodyHtml = null;
         metadata.bodySource = .unknown;
@@ -481,6 +515,13 @@ pub const Store = struct {
         var existing: ?usize = null;
         for (s.state.entries, 0..) |entry, i| if (std.mem.eql(u8, entry.message.id, message.id)) {
             existing = i;
+            // A failed projection provides no evidence of folder removal.
+            // Retain prior membership/order and mark it explicitly unverified.
+            if (!metadata.labelsVerified) {
+                metadata.labels = entry.message.labels;
+                metadata.unread = entry.message.unread;
+            }
+            if (metadata.metadataPartial and metadata.receivedAt == 0) metadata.receivedAt = entry.message.receivedAt;
             // Gmail's metadata projection omits MIME parts. A label/header
             // refresh must retain the descriptors from the immutable body.
             if (!full and metadata.attachments.len == 0) metadata.attachments = entry.message.attachments;
@@ -488,6 +529,7 @@ pub const Store = struct {
         };
         if (existing == null) {
             if (s.state.quotaFloor) |floor| if (!newestFirst({}, .{ .message = metadata }, .{ .message = .{ .id = floor.id, .threadId = "", .receivedAt = floor.receivedAt } })) return;
+            if (s.state.indexQuotaFloor) |floor| if (!newestFirst({}, .{ .message = metadata }, .{ .message = .{ .id = floor.id, .threadId = "", .receivedAt = floor.receivedAt } })) return;
             if (s.state.entries.len == s.options.metadata_limit) {
                 const tail = s.state.entries[s.state.entries.len - 1];
                 if (!newestFirst({}, .{ .message = metadata }, tail)) return;
@@ -522,14 +564,29 @@ pub const Store = struct {
                 s.state.entries[position] = entry;
             }
         }
+        if (message.bodyCacheError.len != 0 and !std.mem.eql(u8, message.bodyCacheError, "ThreadBodyBudgetExceeded")) {
+            if (s.find(message.id)) |entry| if (entry.bytes == 0) {
+                entry.bodyError = message.bodyCacheError;
+            };
+        }
         if (full) _ = try s.putBody(message);
     }
     /// Attach immutable bytes only to retained metadata. Never resurrect an ID,
     /// update ordering/labels, or rewrite an already valid cached body.
     pub fn putBody(s: *Store, message: t.Message) !bool {
+        if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         var e = s.find(message.id) orelse return false;
         if (message.bodyText.len > t.Limits.body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.body_bytes)) return error.BodyTooLarge;
+        // Conversation aggregate quotas never make an individual body a final
+        // refusal. An ordinary read/prefetch may still fetch it independently.
+        if (std.mem.eql(u8, message.bodyCacheError, "ThreadBodyBudgetExceeded")) return false;
         if (e.bytes != 0) if (try s.read(message.id)) |_| return false;
+        if (message.bodyCacheError.len != 0) {
+            e.bodyError = message.bodyCacheError;
+            e.message.decodeWarning = message.decodeWarning;
+            e.message.metadataPartial = true;
+            return false;
+        }
         e.bytes = 0;
         e.bodyHash = "";
         const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
@@ -549,6 +606,18 @@ pub const Store = struct {
         const digest = hash(raw);
         e.bodyHash = try s.allocator.dupe(u8, &digest);
         return true;
+    }
+    /// Final per-message refusals remain readable as explicit placeholders;
+    /// callers must not refetch them on every selection or cached thread read.
+    pub fn refusedMessage(s: *Store, id: []const u8) ?t.Message {
+        const entry = s.find(id) orelse return null;
+        if (entry.bodyError.len == 0 or std.mem.eql(u8, entry.bodyError, "DiskQuotaExceeded")) return null;
+        var message = entry.message;
+        message.bodyCached = false;
+        message.bodyCacheError = entry.bodyError;
+        if (message.decodeWarning.len == 0) message.decodeWarning = entry.bodyError;
+        message.metadataPartial = true;
+        return message;
     }
     pub fn bodyAvailable(s: *Store, id: []const u8) !bool {
         const entry = s.find(id) orelse return false;
@@ -599,7 +668,7 @@ pub const Store = struct {
             e.bodyHash = "";
             return null;
         }
-        return record.message;
+        return try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
     }
     pub fn putOutbox(s: *Store, message: t.Message) !void {
         if (s.state.outbox.len == 128) return error.OutboxLimitExceeded;
@@ -622,11 +691,14 @@ pub const Store = struct {
         try s.save();
     }
     pub fn readOutbox(s: *Store, id: []const u8) !?t.Message {
+        return s.readOutboxWithAllocator(s.allocator, id);
+    }
+    pub fn readOutboxWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
         for (s.state.outbox) |m| if (std.mem.eql(u8, m.id, id)) {
-            const raw = try readPrivate(s.dir, s.io, s.allocator, try s.fileName("outbox", id), 4 * t.Limits.body_bytes);
-            const record = try std.json.parseFromSliceLeaky(BodyRecord, s.allocator, raw, .{ .allocate = .alloc_always });
+            const raw = try readPrivate(s.dir, s.io, allocator, try std.fmt.allocPrint(allocator, "outbox-{s}.json", .{hash(id)}), 4 * t.Limits.body_bytes);
+            const record = try std.json.parseFromSliceLeaky(BodyRecord, allocator, raw, .{ .allocate = .alloc_if_needed });
             if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
-            var result = record.message;
+            var result = try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
             result.labels = m.labels;
             result.unread = m.unread;
             return result;
@@ -727,6 +799,7 @@ pub const Store = struct {
         s.state.generation += 1;
         s.state.historyId = "";
         s.state.quotaFloor = null;
+        s.state.indexQuotaFloor = null;
         s.state.quotaDiskLimit = 0;
         s.state.lastSyncAt = 0;
         s.state.views = &.{};
@@ -753,6 +826,7 @@ pub const Store = struct {
         if (append) try ids.appendSlice(s.allocator, view.?.ids);
         var incomplete = if (append) view.?.incomplete else false;
         for (messages) |message| {
+            incomplete = incomplete or message.metadataPartial;
             if (s.find(message.id) == null) {
                 incomplete = true;
                 continue;
@@ -810,6 +884,7 @@ pub const Store = struct {
     pub fn applyLabels(s: *Store, id: []const u8, labels: []const []const u8) void {
         const entry = s.find(id) orelse return;
         entry.message.labels = labels;
+        entry.message.labelsVerified = true;
         entry.message.unread = false;
         for (labels) |label| if (std.mem.eql(u8, label, "UNREAD")) {
             entry.message.unread = true;
@@ -967,6 +1042,80 @@ test "mail count eviction removes received-time tail including body and ignores 
     try std.testing.expectEqualStrings("Newest body", (try lowered.read("newest")).?.bodyText);
 }
 
+test "message isolation: index byte budget evicts whole oldest mail and preserves wide subjects drafts and receipts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/wide-index", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true, .metadata_limit = 1000 });
+    defer store.close();
+    const draft = try store.putDraft(.{ .subject = "Protected draft", .bodyText = "Retain draft bytes" }, null);
+    var receipt = [_]Operation{.{ .id = "receipt", .hash = "stable", .outcome = "applied" }};
+    store.state.operations = &receipt;
+    const subject = try a.alloc(u8, mail_limits.subject_bytes);
+    @memset(subject, 's');
+    for (0..600) |i| try store.put(.{ .id = try std.fmt.allocPrint(a, "wide-{d:0>3}", .{i}), .threadId = "wide-thread", .receivedAt = @intCast(i), .subject = subject }, false);
+    try std.testing.expect(@import("gmail_decode.zig").serializedBytes(store.state) > index_write_bytes);
+    try store.save();
+    try std.testing.expect(store.state.entries.len < 600 and store.state.entries.len != 0);
+    try std.testing.expect(store.find("wide-000") == null);
+    try std.testing.expectEqualStrings(subject, store.find("wide-599").?.message.subject);
+    try std.testing.expect((try store.dir.statFile(std.testing.io, "index.json", .{})).size < index_write_bytes);
+    const retained = store.state.entries.len;
+    try std.testing.expect(store.state.indexQuotaFloor != null);
+    const floor = store.state.indexQuotaFloor.?;
+    try store.put(.{ .id = "wide-000", .threadId = "wide-thread", .receivedAt = 0, .subject = subject, .bodyText = "Do not refetch an evicted old body" }, true);
+    try std.testing.expect(store.find("wide-000") == null);
+    try std.testing.expect(!try store.bodyAvailable("wide-000"));
+    try std.testing.expectEqual(retained, store.state.entries.len);
+    try store.save();
+    store.close();
+    var cached = try Store.openCached(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer cached.close();
+    try std.testing.expectEqual(retained, cached.state.entries.len);
+    try std.testing.expectEqualStrings(subject, cached.find("wide-599").?.message.subject);
+    try std.testing.expectEqualStrings("Retain draft bytes", (try cached.draft(draft.id)).bodyText);
+    try std.testing.expectEqualStrings("receipt", cached.state.operations[0].id);
+    try std.testing.expectEqual(floor.receivedAt, cached.state.indexQuotaFloor.?.receivedAt);
+    try std.testing.expectEqualStrings(floor.id, cached.state.indexQuotaFloor.?.id);
+    cached.close();
+    var writable = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer writable.close();
+    try writable.clearMail();
+    try std.testing.expect(writable.state.indexQuotaFloor == null);
+    try std.testing.expectEqualStrings("Retain draft bytes", (try writable.draft(draft.id)).bodyText);
+}
+
+test "message isolation: oversized protected index does not delete cached bodies or drafts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/protected-index", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    try store.put(.{ .id = "retained", .threadId = "thread", .subject = "Retain complete mail", .bodyText = "Body still available" }, true);
+    const draft = try store.putDraft(.{ .subject = "Protected draft", .bodyText = "Retain draft bytes" }, null);
+    try store.save();
+    const previous_index = try readPrivate(store.dir, std.testing.io, a, "index.json", index_read_bytes);
+    const calendar = try a.alloc(u8, 128 * 1024);
+    @memset(calendar, 'x');
+    var receipts: [64]Operation = undefined;
+    for (&receipts, 0..) |*receipt, i| receipt.* = .{ .id = try std.fmt.allocPrint(a, "protected-{d}", .{i}), .hash = "stable", .outcome = "applied", .icalendar = calendar };
+    store.state.operations = &receipts;
+    try std.testing.expectError(error.CacheLimitExceeded, store.save());
+    try std.testing.expectEqual(@as(usize, 1), store.state.entries.len);
+    try std.testing.expect(store.state.indexQuotaFloor == null);
+    try std.testing.expect(try store.bodyAvailable("retained"));
+    try std.testing.expectEqualStrings("Body still available", (try store.read("retained")).?.bodyText);
+    try std.testing.expectEqualStrings("Retain draft bytes", (try store.draft(draft.id)).bodyText);
+    try std.testing.expectEqual(@as(usize, 64), store.state.operations.len);
+    try std.testing.expectEqualStrings(previous_index, try readPrivate(store.dir, std.testing.io, a, "index.json", index_read_bytes));
+}
+
 test "refresh lease is exclusive across handles and does not lock cached reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1102,6 +1251,53 @@ test "refresh lease kernel ownership releases after a reaped child exits" {
     recovered.release();
 }
 
+test "mail display cache: native warm reads normalize legacy names without rewriting immutable bodies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/legacy-display", .{tmp.sub_path});
+    var participants: [40]t.Address = undefined;
+    for (&participants, 0..) |*address, i| address.* = .{ .address = try std.fmt.allocPrint(a, "Recipient-{d}@example.test", .{i}), .name = "Legacy\tRecipient\n" };
+    const legacy: t.Message = .{ .id = "legacy", .threadId = "thread", .from = .{ .address = "Sender@EXAMPLE.TEST", .name = "Old\tSender\n" }, .to = &participants, .cc = &.{.{ .address = "Cc@example.test", .name = "Copied\tPerson" }}, .replyTo = &.{.{ .address = "Reply@example.test", .name = "Actual\nReply" }}, .subject = "Legacy\nSubject", .bodyText = "Full immutable body\nwith\ttabs.", .references = "<root@example.test>\t<opaque\u{202e}@example.test>", .messageId = "<source@example.test>", .sentDate = "Tue,\t13 Oct 2026 09:00:00 +0000", .attachments = &.{.{ .id = "file", .filename = "Legacy\nfile.txt" }} };
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    try store.put(legacy, true);
+    try store.save();
+    const saved_hash = store.find(legacy.id).?.bodyHash;
+    const generation = store.state.generation;
+    const filename = try store.fileName("mail", legacy.id);
+    const original_file = try readPrivate(store.dir, std.testing.io, a, filename, 4 * t.Limits.body_bytes);
+    store.close();
+    var cached = try Store.openCached(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer cached.close();
+    for (0..2) |_| {
+        const message = (try cached.read(legacy.id)).?;
+        try std.testing.expectEqualStrings("Old Sender ", message.from.name);
+        try std.testing.expectEqualStrings("Legacy Subject", message.subject);
+        try std.testing.expectEqualStrings("Actual Reply", message.replyTo[0].name);
+        try std.testing.expectEqualStrings("Legacy file.txt", message.attachments[0].filename);
+        try std.testing.expectEqual(@as(usize, 40), message.to.len);
+        for (message.to, legacy.to) |actual, expected| {
+            try std.testing.expectEqualStrings("Legacy Recipient ", actual.name);
+            try std.testing.expectEqualStrings(expected.address, actual.address);
+            _ = try @import("recipients.zig").formatIncomingDisplay(a, actual.address, actual.name);
+        }
+        try std.testing.expectEqualStrings(legacy.from.address, message.from.address);
+        try std.testing.expectEqualStrings(legacy.replyTo[0].address, message.replyTo[0].address);
+        try std.testing.expectEqualStrings(legacy.references, message.references);
+        try std.testing.expectEqualStrings(legacy.sentDate.?, message.sentDate.?);
+        try std.testing.expectEqualStrings(legacy.bodyText, message.bodyText);
+        const quoted = try @import("conversation_draft.zig").quote(a, message.bodyText);
+        try std.testing.expectEqualStrings("\n\n> Full immutable body\n> with\ttabs.\n", quoted);
+    }
+    try std.testing.expectEqualStrings(saved_hash, cached.find(legacy.id).?.bodyHash);
+    try std.testing.expectEqualStrings("", cached.find(legacy.id).?.bodyError);
+    try std.testing.expectEqual(generation, cached.state.generation);
+    try std.testing.expectEqualStrings(original_file, try readPrivate(cached.dir, std.testing.io, a, filename, 4 * t.Limits.body_bytes));
+}
+
 test "body repair preserves valid immutable bytes and rejects wrong-account data" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1138,6 +1334,80 @@ test "body repair preserves valid immutable bytes and rejects wrong-account data
     try std.testing.expectError(error.CacheIdentityMismatch, store.read("m"));
     try std.testing.expect(!try store.putBody(.{ .id = "absent", .threadId = "t", .bodyText = "Never insert" }));
     try std.testing.expect(store.find("absent") == null);
+}
+
+test "message isolation: unknown metadata preserves labels and a final body refusal survives reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/message-isolation", .{tmp.sub_path});
+    {
+        var store = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+        defer store.close();
+        try store.put(.{ .id = "odd", .threadId = "thread", .labels = &.{ "INBOX", "UNREAD" }, .unread = true, .receivedAt = 20 }, false);
+        const partial: t.Message = .{ .id = "odd", .threadId = "thread", .labelsVerified = false, .metadataPartial = true, .decodeWarning = "JsonTooManyTokens", .bodyCacheError = "JsonTooManyTokens" };
+        try store.put(partial, true);
+        const entry = store.find("odd").?;
+        try std.testing.expectEqual(@as(usize, 2), entry.message.labels.len);
+        try std.testing.expectEqualStrings("INBOX", entry.message.labels[0]);
+        try std.testing.expect(entry.message.unread and !entry.message.labelsVerified);
+        try std.testing.expectEqual(@as(i64, 20), entry.message.receivedAt);
+        try std.testing.expectEqual(@as(usize, 0), entry.bytes);
+        try std.testing.expectEqualStrings("JsonTooManyTokens", entry.bodyError);
+        try store.save();
+    }
+    var reopened = try Store.open(std.testing.io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer reopened.close();
+    const message = reopened.refusedMessage("odd").?;
+    try std.testing.expectEqualStrings("JsonTooManyTokens", message.bodyCacheError);
+    try std.testing.expect(message.metadataPartial and !message.labelsVerified);
+    try std.testing.expect((try reopened.read("odd")) == null);
+}
+
+test "message isolation: transient thread placeholders preserve verified metadata and allow individual bodies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/thread-placeholder", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    const subject = try a.alloc(u8, 4000);
+    @memset(subject, 's');
+    const original: t.Message = .{ .id = "existing", .threadId = "thread", .from = .{ .address = "sender@example.test" }, .subject = subject, .bodyText = "Retained body", .labels = &.{"INBOX"} };
+    try store.put(original, true);
+    const placeholder = try @import("gmail_decode.zig").threadPlaceholder(original, a);
+    try store.put(placeholder, true);
+    try std.testing.expectEqualStrings(subject, store.find(original.id).?.message.subject);
+    try std.testing.expectEqualStrings(original.from.address, store.find(original.id).?.message.from.address);
+    try std.testing.expectEqualStrings("", store.find(original.id).?.message.decodeWarning);
+    try std.testing.expectEqualStrings("Retained body", (try store.read(original.id)).?.bodyText);
+    var metadata_placeholder = placeholder;
+    metadata_placeholder.bodyCacheError = "";
+    metadata_placeholder.decodeWarning = "MetadataBudgetExceeded";
+    try store.put(metadata_placeholder, false);
+    try std.testing.expectEqualStrings(subject, store.find(original.id).?.message.subject);
+    try std.testing.expectEqualStrings(original.from.address, store.find(original.id).?.message.from.address);
+    try std.testing.expect(store.find(original.id).?.message.labelsVerified);
+    metadata_placeholder.labelsVerified = false;
+    metadata_placeholder.labels = &.{};
+    try store.put(metadata_placeholder, false);
+    try std.testing.expect(!store.find(original.id).?.message.labelsVerified);
+    try std.testing.expectEqualStrings("INBOX", store.find(original.id).?.message.labels[0]);
+    try std.testing.expect(store.refusedMessage(original.id) == null);
+    try std.testing.expectEqualStrings("Retained body", (try store.read(original.id)).?.bodyText);
+    var new_placeholder = placeholder;
+    new_placeholder.id = "new";
+    try store.put(new_placeholder, true);
+    try std.testing.expect(store.find("new") != null);
+    try std.testing.expect(store.refusedMessage("new") == null);
+    var independent = original;
+    independent.id = "new";
+    try std.testing.expect(try store.putBody(independent));
+    try std.testing.expectEqualStrings("Retained body", (try store.read("new")).?.bodyText);
 }
 
 test "label collection: deletion preserves immutable bodies drafts outbox and independent labels" {
@@ -1406,10 +1676,16 @@ test "older decoder refusals are retried once on writable opens and current refu
     try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", decoder_revision));
     // A cache migrated by an earlier revision retries only refusals that a
     // later revision accepts, once.
-    try std.testing.expectEqual(@as(u32, 3), decoder_revision);
-    for ([_][]const u8{ "UnsupportedCharset", "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable" }) |code| {
+    try std.testing.expectEqual(@as(u32, 4), decoder_revision);
+    for ([_][]const u8{ "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable" }) |code| {
         try std.testing.expect(retriedByNewerDecoder(code, 1));
         try std.testing.expect(!retriedByNewerDecoder(code, 2));
+    }
+    // Charset support changed again in revision four; envelope/header bounds
+    // also get one new attempt, while current decoder refusals remain final.
+    for ([_][]const u8{ "UnsupportedCharset", "AmbiguousSender", "InvalidAddress", "HeaderTooLarge", "ReferencesTooLarge" }) |code| {
+        try std.testing.expect(retriedByNewerDecoder(code, 3));
+        try std.testing.expect(!retriedByNewerDecoder(code, decoder_revision));
     }
     try std.testing.expect(retriedByNewerDecoder("BodyTooLarge", 1));
     try std.testing.expect(retriedByNewerDecoder("BodyTooLarge", 2));

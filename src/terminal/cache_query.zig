@@ -40,7 +40,7 @@ fn addressMatches(addresses: []const t.Address, term: []const u8) bool {
     for (addresses) |address| if (find(address.address, term) != null or find(address.name, term) != null) return true;
     return false;
 }
-const Operator = enum { any, from, to, cc, subject, body, label, is, has, in, filename, after, before, on };
+const Operator = enum { any, from, to, cc, subject, body, label, is, has, in, filename, after, before, on, status };
 const Term = struct { operator: Operator, value: []const u8, negative: bool, day: i64 = 0 };
 pub const Plan = struct {
     terms: [32]Term = undefined,
@@ -60,6 +60,7 @@ pub const Plan = struct {
                 .label => has(message, term.value),
                 .is => if (std.ascii.eqlIgnoreCase(term.value, "unread")) message.unread else if (std.ascii.eqlIgnoreCase(term.value, "read")) !message.unread else has(message, term.value),
                 .has => message.attachments.len != 0,
+                .status => message.metadataPartial or message.decodeWarning.len != 0 or message.bodyCacheError.len != 0 or !message.labelsVerified,
                 .in => if (std.ascii.eqlIgnoreCase(term.value, "anywhere")) true else if (std.ascii.eqlIgnoreCase(term.value, "all")) !has(message, "TRASH") and !has(message, "SPAM") else if (std.ascii.eqlIgnoreCase(term.value, "archive")) !has(message, "INBOX") and !has(message, "TRASH") and !has(message, "SPAM") else has(message, if (std.ascii.eqlIgnoreCase(term.value, "drafts")) "DRAFT" else term.value),
                 .filename => found: {
                     for (message.attachments) |attachment| if (find(attachment.filename, term.value) != null) break :found true;
@@ -116,6 +117,7 @@ pub fn compile(query: []const u8) !Plan {
                 if (!allowed) return error.InvalidQueryValue;
             },
             .has => if (!std.ascii.eqlIgnoreCase(term.value, "attachment")) return error.InvalidQueryValue,
+            .status => if (!std.ascii.eqlIgnoreCase(term.value, "partial")) return error.InvalidQueryValue,
             .after, .before, .on => {
                 term.day = timezone.dateDay(term.value) catch return error.InvalidQueryDate;
                 result.needs_timezone = true;
@@ -142,9 +144,9 @@ pub fn validate(query: []const u8) !void {
 }
 pub fn diagnostic(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnknownQueryOperator => "Unknown cache operator; use from, to, cc, subject, body, label, is, in, has, filename, after, before or on",
+        error.UnknownQueryOperator => "Unknown cache operator; use from, to, cc, subject, body, label, is, in, has, filename, after, before, on or status",
         error.InvalidQueryDate => "Use a valid date: YYYY-MM-DD or YYYY/MM/DD (local calendar date)",
-        error.InvalidQueryValue => "Cache query needs a value; is accepts read, unread, starred or important; has accepts attachment",
+        error.InvalidQueryValue => "Cache query needs a value; is accepts read, unread, starred or important; has accepts attachment; status accepts partial",
         error.TimezoneUnavailable, error.TimezoneRangeUnavailable => "Local timezone unavailable for this date query",
         else => "Invalid cache query; use at most 32 terms and close quoted phrases",
     };
@@ -194,4 +196,20 @@ test "cache predicates: filename dates local midnight and diagnostics use metada
     try std.testing.expectError(error.TimezoneUnavailable, matchesWithZone(message, "on:2026-06-08", &.{ .unavailable = true }));
     try validate("\"https://example.test\"");
     try std.testing.expect(!needsBody("filename:pdf after:2026-01-01"));
+}
+
+test "message isolation: partial cache query finds warnings without fetching bodies" {
+    const plan = try compile("status:partial");
+    try std.testing.expect(!plan.needs_body);
+    try std.testing.expect(!try plan.matches(.{ .id = "good", .threadId = "t" }, &.{}));
+    for ([_]t.Message{
+        .{ .id = "metadata", .threadId = "t", .metadataPartial = true },
+        .{ .id = "warning", .threadId = "t", .decodeWarning = "UnsupportedCharset" },
+        .{ .id = "body", .threadId = "t", .bodyCacheError = "BodyTooLarge" },
+        .{ .id = "labels", .threadId = "t", .labelsVerified = false },
+    }) |message| {
+        try std.testing.expect(try plan.matches(message, &.{}));
+        try std.testing.expect(!matches(message, "-status:partial"));
+    }
+    try std.testing.expectError(error.InvalidQueryValue, compile("status:madeup"));
 }

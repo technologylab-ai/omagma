@@ -1,12 +1,15 @@
 const std = @import("std");
-/// All terminal allocations share one accounting ceiling; runtime stacks are
-/// measured separately. Accounting is protected for the single UI worker.
+/// Accounting and synchronization around one allocator. Native production
+/// backing storage is a fixed, reusable reservation with no upstream heap.
 pub const CappedAllocator = struct {
     backing: std.mem.Allocator,
     limit: usize,
+    reservation_bytes: usize = 0,
     used: usize = 0,
     peak: usize = 0,
     rejected: usize = 0,
+    backing_rejected: usize = 0,
+    last_rejected_bytes: usize = 0,
     mutex: std.atomic.Mutex = .unlocked,
     pub fn allocator(self: *CappedAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -14,10 +17,11 @@ pub const CappedAllocator = struct {
     fn lock(s: *CappedAllocator) void {
         while (!s.mutex.tryLock()) std.atomic.spinLoopHint();
     }
-    pub fn snapshot(s: *CappedAllocator) struct { allocatorUsedBytes: usize, allocatorPeakBytes: usize, rejectedAllocations: usize, allocatorLimitBytes: usize } {
+    pub const Snapshot = struct { allocatorUsedBytes: usize, allocatorPeakBytes: usize, rejectedAllocations: usize, allocatorLimitBytes: usize, allocatorReservationBytes: usize, backingRejectedAllocations: usize, lastRejectedAllocationBytes: usize };
+    pub fn snapshot(s: *CappedAllocator) Snapshot {
         s.lock();
         defer s.mutex.unlock();
-        return .{ .allocatorUsedBytes = s.used, .allocatorPeakBytes = s.peak, .rejectedAllocations = s.rejected, .allocatorLimitBytes = s.limit };
+        return .{ .allocatorUsedBytes = s.used, .allocatorPeakBytes = s.peak, .rejectedAllocations = s.rejected, .allocatorLimitBytes = s.limit, .allocatorReservationBytes = s.reservation_bytes, .backingRejectedAllocations = s.backing_rejected, .lastRejectedAllocationBytes = s.last_rejected_bytes };
     }
     fn alloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const s: *CappedAllocator = @ptrCast(@alignCast(ctx));
@@ -25,9 +29,15 @@ pub const CappedAllocator = struct {
         defer s.mutex.unlock();
         if (n > s.limit - s.used) {
             s.rejected += 1;
+            s.last_rejected_bytes = n;
             return null;
         }
-        const p = s.backing.rawAlloc(n, alignment, ra) orelse return null;
+        const p = s.backing.rawAlloc(n, alignment, ra) orelse {
+            s.rejected += 1;
+            s.backing_rejected += 1;
+            s.last_rejected_bytes = n;
+            return null;
+        };
         s.used += n;
         s.peak = @max(s.peak, s.used);
         return p;
@@ -38,6 +48,7 @@ pub const CappedAllocator = struct {
         defer s.mutex.unlock();
         if (n > m.len and n - m.len > s.limit - s.used) {
             s.rejected += 1;
+            s.last_rejected_bytes = n;
             return false;
         }
         if (!s.backing.rawResize(m, alignment, n, ra)) return false;
@@ -51,6 +62,7 @@ pub const CappedAllocator = struct {
         defer s.mutex.unlock();
         if (n > m.len and n - m.len > s.limit - s.used) {
             s.rejected += 1;
+            s.last_rejected_bytes = n;
             return null;
         }
         const p = s.backing.rawRemap(m, alignment, n, ra) orelse return null;

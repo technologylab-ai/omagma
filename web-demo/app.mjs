@@ -345,6 +345,7 @@ async function start(nextMode = 'demo') {
         frameCount++;
       });
     }, hasJSPI ? fn => WebAssembly.promising(fn) : null);
+    browserCache.configure(bridge.readMailPolicy());
     wasmCols = terminal.cols; wasmRows = terminal.rows;
     await runJob(current => current.init(wasmCols, wasmRows));
     await displayed;

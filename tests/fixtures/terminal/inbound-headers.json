@@ -4,10 +4,10 @@
   "validMessageId": "shared-msg-095",
   "validHeaderCount": 96,
   "incomingHeaderCountLimit": 256,
-  "aggregateHeaderByteLimit": 32768,
+  "aggregateHeaderByteLimit": 131072,
   "vectors": [
     {"id": "header-count-overflow", "totalHeaders": 257, "extraValueBytes": 24, "expectedError": "TooManyHeaders"},
-    {"id": "header-byte-overflow", "totalHeaders": 96, "extraValueBytes": 512, "expectedError": "HeadersTooLarge"}
+    {"id": "header-byte-overflow", "totalHeaders": 96, "extraValueBytes": 2048, "expectedError": "HeadersTooLarge"}
   ],
-  "expected": "read and search delivered96-header mail; reject257headers and aggregate32KiB overflow without damaging valid cached mail or crossing accounts"
+  "expected": "read and search delivered96-header mail; preserve identifiable warning placeholders beyond257headers or128KiB without damaging valid cached mail or crossing accounts"
 }

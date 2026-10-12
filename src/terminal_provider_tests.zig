@@ -86,7 +86,7 @@ test "send wires explicit thread headers UTF8 body and Bcc recipient" {
     try std.testing.expect(std.mem.indexOf(u8, fake.send_raw, "From: <self@example.test>\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, fake.send_raw, "Bcc: <hidden@example.test>\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, fake.send_raw, "In-Reply-To: <source@example.test>\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fake.send_raw, "References:\r\n <root@example.test>\r\n <source@example.test>\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fake.send_raw, "References: <root@example.test>\r\n <source@example.test>\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, fake.send_raw, "SGVsbG8g8J+Miw0K\r\n") != null);
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
 }

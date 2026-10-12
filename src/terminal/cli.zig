@@ -11,8 +11,8 @@ const HtmlMetrics = struct {
     htmlFallbacks: u64,
 };
 
-pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.process.Args.Iterator) !void {
-    var cap: CappedAllocator = .{ .backing = init.gpa, .limit = t.Limits.runtime_bytes };
+pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []const u8, args: *std.process.Args.Iterator) !void {
+    const cap = init.meter;
     const a = cap.allocator();
     var setup = std.heap.ArenaAllocator.init(a);
     defer setup.deinit();
@@ -234,9 +234,9 @@ pub fn run(init: std.process.Init, io: std.Io, mode: []const u8, args: *std.proc
     }
     var session = try core.Session.init(io, a, init.environ_map, options);
     defer session.deinit();
-    session.meter = &cap;
+    session.meter = cap;
     var html_metrics: ?HtmlMetrics = null;
-    defer if (metrics_file) |path| writeMetrics(io, path, &cap, html_metrics) catch {};
+    defer if (metrics_file) |path| writeMetrics(io, path, cap, init.memory, html_metrics) catch {};
     if (interactive) {
         if (@import("build_options").tui) {
             const stats = try @import("tui.zig").run(io, a, session.client(), options, init.environ_map);
@@ -351,8 +351,8 @@ fn valueOption(arg: []const u8) bool {
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }
-fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator, html_metrics: ?HtmlMetrics) !void {
-    var buffer: [1024]u8 = undefined;
+fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator, memory: *@import("../fixed_runtime.zig").Runtime, html_metrics: ?HtmlMetrics) !void {
+    var buffer: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const snapshot = cap.snapshot();
     try std.json.Stringify.value(.{
@@ -361,6 +361,7 @@ fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator, html_metric
         .rejectedAllocations = snapshot.rejectedAllocations,
         .allocatorLimitBytes = snapshot.allocatorLimitBytes,
         .html = html_metrics,
+        .fixedMemory = memory.snapshot(),
     }, .{ .emit_null_optional_fields = false }, &writer);
     var af = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .permissions = .fromMode(0o600), .replace = true });
     defer af.deinit(io);

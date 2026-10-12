@@ -139,8 +139,8 @@ pub fn migrate(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: 
     try atomic.replace(io);
     return .{ .credentialStore = @tagName(target.kind), .credentialDirectory = target.directory, .copiedCredentials = copied, .sourceCopiesRetained = true, .restartRequired = true };
 }
-pub fn run(init: std.process.Init, io: std.Io, args: *std.process.Args.Iterator) !void {
-    var arena = std.heap.ArenaAllocator.init(init.gpa);
+pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, args: *std.process.Args.Iterator) !void {
+    var arena = std.heap.ArenaAllocator.init(init.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const verb = args.next() orelse "status";

@@ -32,6 +32,7 @@ const mime = @import("mime.zig");
 const markdown_mail = @import("markdown_mail.zig");
 const original_mail = @import("original_mail.zig");
 const recipients = @import("recipients.zig");
+const mail_limits = @import("mail_limits.zig");
 const completion = @import("completion.zig");
 const path_completion = @import("path_completion.zig");
 const file_dialog = @import("file_dialog.zig");
@@ -110,6 +111,24 @@ fn messageHasLabel(message: Value, identifier: []const u8) bool {
 fn messageUnread(message: Value) bool {
     return truth(get(message, "unread")) or messageHasLabel(message, "UNREAD");
 }
+fn composeFieldLimit(index: usize) usize {
+    return if (index == 4) types.Limits.body_bytes else if (index == 3) mail_limits.subject_bytes else mail_limits.header_value_bytes;
+}
+fn draftExceedsPortableTransport(draft: types.Draft) bool {
+    if (draft.from) |from| if (recipients.exceedsPortableTransport(from.address)) return true;
+    for ([_][]const types.Address{ draft.to, draft.cc, draft.bcc }) |list| for (list) |address| if (recipients.exceedsPortableTransport(address.address)) return true;
+    return false;
+}
+fn metadataWarning(message: Value) ?[]const u8 {
+    const code = text(get(message, "decodeWarning"));
+    if (validDiagnosticCode(code)) return code;
+    if (truth(get(message, "metadataPartial")) or get(message, "labelsVerified") == .bool and !truth(get(message, "labelsVerified"))) return "PartialMetadata";
+    return null;
+}
+fn decodeWarningLabel(code: []const u8) []const u8 {
+    const label = humanError(code);
+    return if (same(label, "Operation failed")) "Some mail content or metadata could not be decoded" else label;
+}
 fn fileDialogHeight(entries: usize, available: u16) u16 {
     // @min can infer a narrow backing integer. Widen its result before the
     // addition; casting the completed sum cannot prevent that overflow.
@@ -140,12 +159,24 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "CacheBoundaryGone", .label = "This cached boundary is no longer available" },
         .{ .code = "CacheMiss", .label = "This body is not cached yet" },
         .{ .code = "BodySizeMismatch", .label = "Mail body is incomplete" },
+        .{ .code = "BodyNotCached", .label = "Body is not cached · Enter downloads this message" },
+        .{ .code = "MessageBodyUnavailable", .label = "Body unavailable · open in Gmail or forward the original .eml" },
+        .{ .code = "CalendarTooLarge", .label = "Calendar part exceeds the supported size" },
+        .{ .code = "JsonTooDeep", .label = "Mail structure exceeds the supported depth" },
+        .{ .code = "JsonTooManyTokens", .label = "Mail structure exceeds the supported complexity" },
         .{ .code = "BodyTooLarge", .label = "Mail body exceeds the supported size" },
         .{ .code = "MessageTooLarge", .label = "Mail exceeds the supported size" },
         .{ .code = "ResponseTooLarge", .label = "Mail exceeds the supported size" },
         .{ .code = "TooManyHeaders", .label = "Mail headers exceed the supported limit" },
         .{ .code = "HeadersTooLarge", .label = "Mail headers exceed the supported limit" },
         .{ .code = "UnsupportedCharset", .label = "Unsupported mail character encoding" },
+        .{ .code = "MessageBudgetExceeded", .label = "This message exceeds the decoding workspace" },
+        .{ .code = "MetadataBudgetExceeded", .label = "Metadata batch budget reached · open this message separately" },
+        .{ .code = "BrowserCacheQuotaExceeded", .label = "Message is readable now · exceeds browser cache space" },
+        .{ .code = "SnippetTooLarge", .label = "Preview shortened · full message remains available" },
+        .{ .code = "ThreadBodyBudgetExceeded", .label = "Conversation body budget reached · Enter reads this message" },
+        .{ .code = "PartialMetadata", .label = "Some mail metadata is unavailable" },
+        .{ .code = "UnsafeReplyMetadata", .label = "Reply addresses unavailable · open in Gmail to reply" },
         .{ .code = "NotInvitation", .label = "No calendar request found · o opens this mail in Gmail" },
         .{ .code = "NotInvitationRequest", .label = "This calendar item is not a meeting request" },
         .{ .code = "NotAnAttendee", .label = "This account is not an invited attendee" },
@@ -221,6 +252,7 @@ fn refreshIsCurrent(result: Value, requested_at: i64) bool {
 fn bodyRefusal(message: Value) ?[]const u8 {
     const code = text(get(message, "bodyCacheError"));
     if (code.len == 0) return null;
+    for ([_][]const u8{ "MessageBudgetExceeded", "ThreadBodyBudgetExceeded", "BodyNotCached", "CalendarTooLarge", "JsonTooDeep", "JsonTooManyTokens" }) |known| if (same(code, known)) return known;
     // Codes originate from the backend's named refusals. Only fixed labels
     // enter this UI path; a corrupt cache cannot inject provider text here.
     const known = [_][]const u8{
@@ -244,6 +276,15 @@ fn displayMailboxes(allocator: Allocator, value: Value, comptime format: anytype
         try out.appendSlice(allocator, display);
     }
     return out.toOwnedSlice(allocator);
+}
+fn displayIncomingMailbox(allocator: Allocator, address: []const u8, name: []const u8) ![]u8 {
+    return recipients.formatIncomingDisplay(allocator, address, name) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        recipients.validateIncomingAddress(address) catch return allocator.dupe(u8, "(invalid received address)");
+        // Display-only fallback for corrupt/older cached names. Recipient
+        // derivation and every outgoing mailbox still use strict validation.
+        return recipients.formatIncomingDisplay(allocator, address, "");
+    };
 }
 
 fn readerEnd(lines: usize, height: usize) usize {
@@ -307,6 +348,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "?", .action = "Open or close this help" },
     .{ .section = "SEARCH & READING" },
     .{ .keys = "/", .action = "Search retained mail in the local cache" },
+    .{ .keys = "status:partial in Cache search", .action = "Find warnings and partial metadata; use All Mail" },
     .{ .keys = "\\", .action = "Search Gmail on the server" },
     .{ .keys = "q after a search", .action = "Clear the search and return to the mailbox" },
     .{ .keys = "J / K in the reader", .action = "Next or previous mail" },
@@ -877,6 +919,8 @@ const App = struct {
     reader_account: Field = .{},
     reader_message: Field = .{},
     reader_partial: bool = false,
+    reader_cached_view: bool = false,
+    reader_omitted_messages: usize = 0,
     reader_is_thread: bool = false,
     reader_cards: [types.Limits.page]bool = @splat(true),
     reader_card_rows: [types.Limits.page]usize = @splat(0),
@@ -1004,6 +1048,7 @@ const App = struct {
     completion_open: bool = false,
     completion_dismissed: bool = false,
     review_ready: bool = false,
+    compose_portable_warning: bool = false,
     pending_contact_address: Field = .{},
     pending_contact_account: Field = .{},
     pending_contact_generation: u64 = 0,
@@ -3778,6 +3823,8 @@ const App = struct {
         self.reader_lines = 0;
         self.reader_height = 0;
         self.reader_partial = false;
+        self.reader_cached_view = false;
+        self.reader_omitted_messages = 0;
         self.reader_is_thread = false;
         self.body_cache_miss = false;
         self.reader_cache_busy = false;
@@ -4096,7 +4143,9 @@ const App = struct {
         self.markup = markup;
         self.reader_cards = cards;
         self.reader_card = focused;
-        self.reader_partial = full_thread and cached_view and truth(get(result, "partial"));
+        self.reader_partial = full_thread and truth(get(result, "partial"));
+        self.reader_cached_view = cached_view;
+        self.reader_omitted_messages = if (full_thread) @intCast(@min(@max(integer(get(result, "omittedMessages")), 0), types.Limits.metadata_hard)) else 0;
         self.reader_is_thread = full_thread;
         self.body_cache_miss = false;
         self.reader_cache_busy = false;
@@ -4648,8 +4697,12 @@ const App = struct {
                         // page/query response or use its now-stale cursor.
                         try self.cursor.set(self.allocator, "");
                         self.clearHistory();
-                        _ = self.loadCachedList(self.messageId()) catch |err| if (err == error.CacheBusy) false else return err;
-                        self.pending_remote_list = self.cache_view_missing;
+                        if (truth(get(value_in, "cacheWriteFailed"))) {
+                            _ = try self.applyUncachedRefresh(response, self.job.generation);
+                        } else {
+                            _ = self.loadCachedList(self.messageId()) catch |err| if (err == error.CacheBusy) false else return err;
+                            self.pending_remote_list = self.cache_view_missing;
+                        }
                     }
                 }
             }
@@ -4789,6 +4842,15 @@ const App = struct {
             const full_thread = self.pending_cached_thread;
             try self.preview(full_thread);
         }
+    }
+    fn applyUncachedRefresh(self: *App, response: []const u8, generation: u64) !bool {
+        if (generation != self.generation) return false;
+        try self.replaceList(.list, response);
+        self.cache_view_missing = false;
+        self.pending_remote_list = false;
+        self.pending_cached_list = false;
+        self.sayFailure("Mail readable · browser cache unchanged", "BrowserCacheQuotaExceeded");
+        return true;
     }
     fn dispatchPending(self: *App) !void {
         if (self.compose_choice) return;
@@ -6088,7 +6150,7 @@ const App = struct {
         const suffix_length = field.value().len - matches.range.end;
         const updated = try completion.replaceCandidate(self.allocator, field.value(), matches.range, matches.values[index]);
         defer self.allocator.free(updated);
-        if (updated.len > 16 * 1024) return error.InputTooLarge;
+        if (updated.len > mail_limits.header_value_bytes) return error.InputTooLarge;
         try field.history.record(self.allocator, field.value(), field.cursor);
         try field.assign(self.allocator, updated);
         field.cursor = updated.len - suffix_length;
@@ -6252,6 +6314,7 @@ const App = struct {
             }
             return err;
         };
+        self.compose_portable_warning = draftExceedsPortableTransport(draft);
     }
     fn saveDraft(self: *App, kind: JobKind) !void {
         if (kind == .save_browser and !self.capabilities.open_urls) return error.LinksUnavailable;
@@ -7316,12 +7379,23 @@ const App = struct {
             } else if (self.userLabelIndex(self.navigation - self.accounts.len - folders.len - 2)) |index| {
                 try self.chooseCustomLabel(index);
             }
+        } else if (self.focus == .reader and self.reader_card < self.thread.len and self.retryableReaderBody()) {
+            const id = text(get(self.thread[self.reader_card], "id"));
+            if (id.len == 0) return error.MessageRequired;
+            self.preemptReadOnly();
+            try self.start(.read, .{ .account = self.account(), .cmd = "mail.read", .messageId = id });
         } else if (self.drafts_list) {
             if (self.messageId().len > 0) try self.start(.draft_read, .{ .account = self.account(), .cmd = "draft.read", .draftId = self.messageId() });
         } else {
             self.focus = .reader;
             try self.preview(true);
         }
+    }
+    fn retryableReaderBody(self: *const App) bool {
+        if (self.reader_card >= self.thread.len) return false;
+        const message = self.thread[self.reader_card];
+        const code = text(get(message, "bodyCacheError"));
+        return same(code, "BodyNotCached") or same(code, "ThreadBodyBudgetExceeded");
     }
     fn activateContact(self: *App) !void {
         if (self.contacts_selected >= self.contacts.len or self.contacts_state == .denied) return;
@@ -7365,15 +7439,15 @@ const App = struct {
             const range = completion.token(target.value(), target.cursor);
             const updated = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ target.value()[0..range.start], display, target.value()[range.end..] });
             defer self.allocator.free(updated);
-            if (updated.len > 16 * 1024) return error.InputTooLarge;
+            if (updated.len > mail_limits.header_value_bytes) return error.InputTooLarge;
             const suffix = target.value().len - range.end;
             try target.history.record(self.allocator, target.value(), target.cursor);
             try target.assign(self.allocator, updated);
             target.cursor = updated.len - suffix;
         } else {
             target.cursor = target.value().len;
-            if (target.value().len > 0) try target.insert(self.allocator, ", ", 16 * 1024);
-            try target.insert(self.allocator, display, 16 * 1024);
+            if (target.value().len > 0) try target.insert(self.allocator, ", ", mail_limits.header_value_bytes);
+            try target.insert(self.allocator, display, mail_limits.header_value_bytes);
         }
         self.picker_replace_token = false;
         try self.composerChanged();
@@ -7882,7 +7956,7 @@ const App = struct {
             } else {
                 const field = &self.compose.fields[self.compose.selected];
                 const before_len = field.value().len;
-                try field.handleKey(self.allocator, key, self.compose.selected == 4, if (self.compose.selected == 4) types.Limits.body_bytes else 16 * 1024);
+                try field.handleKey(self.allocator, key, self.compose.selected == 4, composeFieldLimit(self.compose.selected));
                 if (field.value().len != before_len) try self.composerChanged();
             }
         } else if (key.matches('i', .{}) or key.matches(Key.enter, .{})) self.compose.insert_mode = true else if (key.matches('e', .{})) try self.runEditor() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.compose.selected = (self.compose.selected + 1) % 5 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.compose.selected = (self.compose.selected + 4) % 5 else if (key.matches('a', .{})) {
@@ -8085,7 +8159,7 @@ const App = struct {
             };
             if (field) |input_field| {
                 const multiline = self.mode == .compose and self.compose.selected == 4;
-                const limit: usize = if (multiline) types.Limits.body_bytes else if (self.mode == .help) 256 else 16 * 1024;
+                const limit: usize = if (self.mode == .compose) composeFieldLimit(self.compose.selected) else if (self.mode == .contact_edit) (if (self.contact_field == 0) mail_limits.display_name_bytes else mail_limits.header_value_bytes) else if (self.mode == .help) 256 else 16 * 1024;
                 const before_len = input_field.value().len;
                 try self.pasteInto(input_field, key, multiline, limit);
                 if (self.mode == .compose and input_field.value().len != before_len) try self.composerChanged();
@@ -8145,7 +8219,7 @@ const App = struct {
             if (self.job.future != null and !readOnlyJob(self.job.kind)) return;
             if (tabDirection(key)) |backwards| {
                 self.contact_field = (self.contact_field + if (backwards) @as(usize, 3) else 1) % 4;
-            } else if (key.matches('s', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.contact_field == 2)) try self.saveContact() else if (key.matches(Key.enter, .{}) and self.contact_field == 3) self.mode = backMode(.contact_edit, self.previous_mode, self.picker) else if (self.contact_field < 2) try (if (self.contact_field == 0) &self.contact_name else &self.contact_email).handleKey(self.allocator, key, false, 4096);
+            } else if (key.matches('s', .{ .ctrl = true }) or (key.matches(Key.enter, .{}) and self.contact_field == 2)) try self.saveContact() else if (key.matches(Key.enter, .{}) and self.contact_field == 3) self.mode = backMode(.contact_edit, self.previous_mode, self.picker) else if (self.contact_field < 2) try (if (self.contact_field == 0) &self.contact_name else &self.contact_email).handleKey(self.allocator, key, false, if (self.contact_field == 0) mail_limits.display_name_bytes else mail_limits.header_value_bytes);
             return;
         }
         if (self.mode == .attachment and key.matches(Key.tab, .{})) return self.completePath(&self.input, false);
@@ -8536,10 +8610,14 @@ const App = struct {
             break;
         };
         if (waiting) excerpt = try std.fmt.allocPrint(self.frame.allocator(), "Body pending {s}", .{loading.frame(self.loading_frame)});
+        const warning = metadataWarning(value_in) orelse bodyRefusal(value_in);
+        if (!waiting) if (warning) |code| {
+            excerpt = try std.fmt.allocPrint(self.frame.allocator(), "Warning · {s}", .{decodeWarningLabel(code)});
+        };
         if (printed.col +| 3 < sender_line.width) {
             const decoded = (try mail_display.decodePreview(self.frame.allocator(), excerpt)) orelse excerpt;
             const snippet = try self.fitLine(win, decoded, sender_line.width - printed.col - 3);
-            _ = sender_line.child(.{ .x_off = printed.col }).printSegment(.{ .text = try std.fmt.allocPrint(self.frame.allocator(), " — {s}", .{snippet}), .style = self.listStyle(if (waiting) .fetching else .muted, selected) }, .{ .wrap = .none });
+            _ = sender_line.child(.{ .x_off = printed.col }).printSegment(.{ .text = try std.fmt.allocPrint(self.frame.allocator(), " — {s}", .{snippet}), .style = self.listStyle(if (waiting) .fetching else if (warning != null) .warning else .muted, selected) }, .{ .wrap = .none });
         }
     }
     fn drawIncomingWindow(self: *App, win: vaxis.Window) !bool {
@@ -8924,8 +9002,8 @@ const App = struct {
     fn readerSnapshot(self: *App) ![]const u8 {
         const message = try self.readerCopyTarget();
         const from = get(message, "from");
-        const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), recipients.formatIncomingDisplay);
-        const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), recipients.formatIncomingDisplay);
+        const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), displayIncomingMailbox);
+        const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), displayIncomingMailbox);
         const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
         const body = text(get(message, "bodyText"));
         if (body.len > types.Limits.body_bytes) return error.BodyTooLarge;
@@ -9398,7 +9476,10 @@ const App = struct {
         const summary_rows: u16 = if (browsing and self.thread.len > 1 and outer.height >= 6) 1 else 0;
         if (toolbar_rows > 0) try self.line(outer, 0, try self.fitLine(outer, if (!self.capabilities.open_urls) "l Focus reader · r Reply · f Forward" else "l Focus reader · o Gmail · L Links · B Files", outer.width), .accent);
         const partial_rows: u16 = if (self.reader_partial and outer.height >= 14) 1 else 0;
-        if (partial_rows > 0) try self.line(outer, toolbar_rows + summary_rows, "Cached thread · partial", .muted);
+        if (partial_rows > 0) {
+            const notice = if (self.reader_omitted_messages > 0) try std.fmt.allocPrint(self.frame.allocator(), "Thread · partial · {d} earlier messages omitted", .{self.reader_omitted_messages}) else if (self.reader_cached_view) "Cached thread · partial" else "Thread · partial";
+            try self.line(outer, toolbar_rows + summary_rows, notice, .warning);
+        }
         const invitation_index = self.readerInvitationIndex();
         const header_rows = toolbar_rows + summary_rows + partial_rows;
         const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows -| find_rows -| copy_rows });
@@ -9618,9 +9699,10 @@ const App = struct {
             const from = get(message, "from");
             if (self.thread.len > 1) {
                 const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
-                const heading = try std.fmt.allocPrint(self.frame.allocator(), "{s} {d}/{d} {s}{s} · {s}", .{ if (self.reader_cards[message_index]) "▾" else "▸", message_index + 1, self.thread.len, if (truth(get(message, "unread"))) "● " else "", if (text(get(from, "name")).len > 0) text(get(from, "name")) else text(get(from, "address")), if (stamp.len >= 16) stamp[5..16] else stamp });
+                const partial = metadataWarning(message) != null or bodyRefusal(message) != null;
+                const heading = try std.fmt.allocPrint(self.frame.allocator(), "{s} {d}/{d} {s}{s}{s} · {s}", .{ if (self.reader_cards[message_index]) "▾" else "▸", message_index + 1, self.thread.len, if (partial) @as([]const u8, "Warning · ") else "", if (truth(get(message, "unread"))) "● " else "", if (text(get(from, "name")).len > 0) text(get(from, "name")) else text(get(from, "address")), if (stamp.len >= 16) stamp[5..16] else stamp });
                 const block_start = row;
-                row = try self.flowTone(win, try self.fitLine(win, heading, win.width), self.reader_scroll, row, if (message_index == self.reader_card) .accent else .sender);
+                row = try self.flowTone(win, try self.fitLine(win, heading, win.width), self.reader_scroll, row, if (partial) .warning else if (message_index == self.reader_card) .accent else .sender);
                 self.readerMouseRows(win, block_start, row - block_start, .reader_thread, message_index);
                 if (!self.reader_cards[message_index]) {
                     if (invitation_index == message_index) {
@@ -9635,8 +9717,8 @@ const App = struct {
                 }
             }
             const compact = natural_height <= 12 or win.width < 60;
-            const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), recipients.formatIncomingDisplay);
-            const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), recipients.formatIncomingDisplay);
+            const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), displayIncomingMailbox);
+            const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), displayIncomingMailbox);
             const subject = text(get(message, "subject"));
             const shown_subject = if (subject.len == 0) "(no subject)" else subject;
             row = try self.flowTone(win, if (compact) try self.fitLine(win, shown_subject, win.width) else shown_subject, self.reader_scroll, row, .subject);
@@ -9658,6 +9740,10 @@ const App = struct {
             row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
             const labels = try self.readerLabels(message);
             if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
+            if (metadataWarning(message) orelse bodyRefusal(message)) |code| {
+                const notice = try std.fmt.allocPrint(self.frame.allocator(), "Warning · {s} ({s})", .{ decodeWarningLabel(code), code });
+                row = try self.flowTone(win, notice, self.reader_scroll, row, .warning);
+            }
             if (invitation_index == message_index) {
                 const rows = readerInvitationRows(layout_win);
                 if (rows > 0) {
@@ -9796,6 +9882,7 @@ const App = struct {
             const content = inner.child(.{ .height = inner.height -| 2 });
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
             var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            if (self.compose_portable_warning) rows = try self.flowTone(content, "Address exceeds portable SMTP limits · Gmail may reject delivery.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.omitted_attachments > 0) rows = try self.flowTone(content, "Text-only forward: original attachments are omitted.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.attachments.len == 0 and composer_hints.attachmentIntent(self.compose.fields[4].value())) {
                 rows = try self.flowTone(content, if (!self.capabilities.attachments) "⚠ Your note mentions an attachment; no files are attached.\nAttachments are unavailable here. Back lets you revise the note.\n\n" else if (!self.capabilities.files) "⚠ Your note mentions an attachment; no files are attached.\nBack lets you revise the note.\n\n" else "⚠ Your note mentions an attachment; no files are attached.\nBack returns to the draft so you can add them.\n\n", self.compose_preview_scroll, rows, .warning);
@@ -11796,6 +11883,66 @@ test "compact reader envelope preserves recipients without doubled blank segment
     defer arena.deinit();
     const injected = try std.json.parseFromSliceLeaky(Value, arena.allocator(), "{\"bodyCacheError\":\"provider private text \\u001b]52\"}", .{});
     try std.testing.expectEqualStrings("BodyUnavailable", bodyRefusal(injected).?);
+}
+
+test "mailbox compatibility: compose review warns without refusing portable overflow" {
+    var address: [78]u8 = @splat('a');
+    @memcpy(address[65..], "@example.test");
+    try recipients.validateAddress(&address);
+    try std.testing.expect(draftExceedsPortableTransport(.{ .to = &.{.{ .address = &address }} }));
+    try std.testing.expect(!draftExceedsPortableTransport(.{ .to = &.{.{ .address = "rene+codex@example.test" }} }));
+    try std.testing.expectEqual(mail_limits.subject_bytes, composeFieldLimit(3));
+    try std.testing.expectEqual(mail_limits.header_value_bytes, composeFieldLimit(0));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const warning = try std.json.parseFromSliceLeaky(Value, arena.allocator(), "{\"decodeWarning\":\"UnsupportedCharset\",\"metadataPartial\":false}", .{});
+    try std.testing.expectEqualStrings("UnsupportedCharset", metadataWarning(warning).?);
+    const partial = try std.json.parseFromSliceLeaky(Value, arena.allocator(), "{\"metadataPartial\":true}", .{});
+    try std.testing.expectEqualStrings("PartialMetadata", metadataWarning(partial).?);
+    const injection = try std.json.parseFromSliceLeaky(Value, arena.allocator(), "{\"decodeWarning\":\"unsafe\\nprivate text\"}", .{});
+    try std.testing.expect(metadataWarning(injection) == null);
+}
+
+test "message isolation: uncached refresh shows current neighbors without replaying the network" {
+    var client: CacheTestClient = .{ .behavior = .miss };
+    var app = client.app(std.testing.allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    const response = "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"current\",\"subject\":\"Readable current mail\",\"decodeWarning\":\"BrowserCacheQuotaExceeded\",\"metadataPartial\":true},{\"id\":\"neighbor\"}],\"cached\":false,\"partial\":true,\"cacheWriteFailed\":true,\"cacheReady\":false}}";
+    app.pending_remote_list = true;
+    app.pending_cached_list = true;
+    try std.testing.expect(try app.applyUncachedRefresh(response, app.generation));
+    try std.testing.expectEqual(@as(usize, 2), app.messages.len);
+    try std.testing.expectEqualStrings("current", app.messageId());
+    try std.testing.expect(!app.pending_remote_list and !app.pending_cached_list and !app.cache_view_missing);
+    try std.testing.expect(!app.list_cached);
+    try std.testing.expect(!try app.applyUncachedRefresh("invalid stale response", app.generation + 1));
+    try std.testing.expectEqualStrings("current", app.messageId());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    try std.testing.expectEqual(@as(usize, 0), client.local_calls);
+}
+
+test "message isolation: reader card body retry distinguishes temporary omissions and permanent refusals" {
+    var client: CacheTestClient = .{};
+    var app = client.app(std.testing.allocator);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"}]", .{}));
+    try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"missing\",\"bodyCacheError\":\"BodyNotCached\"},{\"id\":\"budget\",\"bodyCacheError\":\"ThreadBodyBudgetExceeded\"},{\"id\":\"refused\",\"bodyCacheError\":\"UnsupportedCharset\"}],\"partial\":true}}", false);
+    app.reader_card = 0;
+    try std.testing.expect(app.retryableReaderBody());
+    app.reader_card = 1;
+    try std.testing.expect(app.retryableReaderBody());
+    app.reader_card = 2;
+    try std.testing.expect(!app.retryableReaderBody());
+    try std.testing.expect(app.reader_partial);
+}
+
+test "mail display cache: corrupt display names do not terminate the reader or weaken outgoing checks" {
+    const a = std.testing.allocator;
+    const shown = try displayIncomingMailbox(a, "peer@example.test", "Old\tName");
+    defer a.free(shown);
+    try std.testing.expectEqualStrings("peer@example.test", shown);
+    try std.testing.expectError(error.HeaderInjection, recipients.formatDisplay(a, "peer@example.test", "Old\tName"));
 }
 
 test "persisted selected body refusal remains local and does not mark mailbox offline" {
@@ -14238,7 +14385,7 @@ test "local UI: unread stars and bulk marks stay independent on focused narrow m
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
-test "local UI: received long local parts render and copy while compose recipients stay strict" {
+test "local UI: received long local parts render copy and compose without shortening" {
     const a = std.testing.allocator;
     var client: CacheTestClient = .{};
     var app = client.app(a);
@@ -14276,8 +14423,13 @@ test "local UI: received long local parts render and copy while compose recipien
     try std.testing.expect(std.mem.indexOf(u8, copied, expected_to ++ "\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, copied, expected_cc ++ "\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, copied, message.bodyText));
-    try std.testing.expectError(error.InvalidAddress, Compose.mailboxes(a, get(app.thread[0], "to")));
-    try std.testing.expectError(error.InvalidAddress, Compose.mailboxes(a, get(app.thread[0], "cc")));
+    const compose_to = try Compose.mailboxes(a, get(app.thread[0], "to"));
+    defer a.free(compose_to);
+    const compose_cc = try Compose.mailboxes(a, get(app.thread[0], "cc"));
+    defer a.free(compose_cc);
+    try std.testing.expectEqualStrings(expected_to[4..], compose_to);
+    try std.testing.expectEqualStrings(long_cc, compose_cc);
+    try std.testing.expect(draftExceedsPortableTransport(.{ .to = message.to, .cc = message.cc }));
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 

@@ -23,7 +23,7 @@ const Context = struct {
     }
 };
 
-pub fn run(init: std.process.Init, io: std.Io, args: *std.process.Args.Iterator, assets: []const server.Asset) !void {
+pub fn run(init: @import("fixed_runtime.zig").Context, io: std.Io, args: *std.process.Args.Iterator, assets: []const server.Asset) !void {
     var port: u16 = 8766;
     var config: ?[]const u8 = null;
     var grants: ?[]const u8 = null;

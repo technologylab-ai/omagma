@@ -79,7 +79,8 @@ def allocator_receipt(path):
     require(stat.S_IMODE(path.stat().st_mode) == 0o600, "allocator receipt is not private")
     value = json.loads(path.read_text())
     allocation_fields = {"allocatorUsedBytes", "allocatorPeakBytes", "rejectedAllocations", "allocatorLimitBytes"}
-    require(set(value) in (allocation_fields, allocation_fields | {"html"}),
+    require(set(value) in (allocation_fields, allocation_fields | {"html"},
+                           allocation_fields | {"fixedMemory"}, allocation_fields | {"html", "fixedMemory"}),
             "allocator receipt includes unexpected or missing fields")
     require(all(type(value[key]) is int and value[key] >= 0 for key in allocation_fields), "invalid allocator receipt")
     if "html" in value:
@@ -89,6 +90,23 @@ def allocator_receipt(path):
                 "HTML receipt contains invalid counters")
     require(value["allocatorUsedBytes"] <= value["allocatorPeakBytes"] <= value["allocatorLimitBytes"] == LIMIT,
             "terminal heap allocations exceeded64MiB")
+    if "fixedMemory" in value:
+        fixed = value["fixedMemory"]
+        require(fixed["phase"] == "sealed" and fixed["upstreamAllocatorPresent"] is False,
+                "application allocator is not sealed over fixed storage")
+        require(fixed["workerThreads"] == 16 and fixed["workerStackBytes"] == 1024**2,
+                "prestarted IO worker reservation changed")
+        require(fixed["application"]["allocatorReservationBytes"] == 72 * 1024**2,
+                "application physical pool differs from72MiB")
+        require(fixed["io"]["allocatorReservationBytes"] == 4 * 1024**2,
+                "IO physical pool differs from4MiB")
+        require(fixed["startupUsedBytes"] <= fixed["startupReservationBytes"] == 2 * 1024**2,
+                "startup environment exceeded its fixed pool")
+        scratch = fixed["mailScratch"]
+        require(scratch["reservationBytes"] == 16 * 1024**2 and scratch["peakBytes"] <= scratch["reservationBytes"],
+                "message decode exceeded its separate workspace")
+        require(scratch["usedBytes"] == 0 and scratch["active"] is False,
+                "completed workload retained a message scratch lease")
     return value
 
 
@@ -234,6 +252,8 @@ def measure_workload(args, report, directory):
         finally:
             terminal.close()
     report["allocator"] = allocator_receipt(metrics)
+    if "fixedMemory" in report["allocator"]:
+        report["allocationAccounting"] = "Startup fixed pools: application72MiB with64MiB payload cap, decoder16MiB, IO4MiB, environment2MiB, backend16MiB, plus16 prestarted workers requesting1MiB stacks each. RSS/PSS measure resident whole-process memory, not reserved capacity."
     summarize(report, rows, baseline, sampler)
 
 

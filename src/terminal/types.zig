@@ -3,6 +3,10 @@ pub const Limits = struct {
     pub const runtime_bytes: usize = 64 * 1024 * 1024;
     pub const request_bytes: usize = 3 * 1024 * 1024;
     pub const body_bytes: usize = 2 * 1024 * 1024;
+    /// Serialized full DTOs retained by one conversation response. Additional
+    /// member IDs remain visible as small explicit metadata placeholders.
+    pub const thread_bytes: usize = 4 * 1024 * 1024;
+    pub const metadata_batch_bytes: usize = 4 * 1024 * 1024;
     pub const attachments: usize = 16;
     pub const related_resources: usize = 32;
     /// Informational source files excluded from a text-only forward.
@@ -131,6 +135,12 @@ pub const Message = struct {
     unread: bool = false,
     bodyCached: bool = false,
     bodyCacheError: []const u8 = "",
+    /// A bounded decoder error code accompanies safe partial projections.
+    /// Display-only envelope fallbacks never populate reply destinations.
+    decodeWarning: []const u8 = "",
+    metadataPartial: bool = false,
+    /// False means absent/invalid labels must not replace prior membership.
+    labelsVerified: bool = true,
     attachments: []const Attachment = &.{},
     invitation: ?[]const u8 = null,
     /// Independent wire oracle for synthetic fixture sends only. Production

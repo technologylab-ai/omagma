@@ -3,6 +3,7 @@
 const std = @import("std");
 const t = @import("types.zig");
 const recipients = @import("recipients.zig");
+const policy = @import("mail_limits.zig");
 pub const max_candidates = 1024;
 // At capacity, saved contacts may occupy a quarter of the projection. This
 // keeps ordinary recent correspondents useful even with a large address book.
@@ -26,12 +27,11 @@ pub const Builder = struct {
     }
     fn add(self: *Builder, address: t.Address, recent: i64, saved: bool) !void {
         recipients.validateAddress(address.address) catch return;
-        if (std.ascii.eqlIgnoreCase(address.address, self.self_address)) return;
-        for (self.self_aliases) |alias| if (std.ascii.eqlIgnoreCase(address.address, alias)) return;
-        var normalized: [254]u8 = undefined;
-        if (address.address.len > normalized.len) return;
-        const key = std.ascii.lowerString(normalized[0..address.address.len], address.address);
-        const name = if (address.name.len <= 256) name: {
+        if (recipients.sameGmailIdentity(address.address, self.self_address)) return;
+        for (self.self_aliases) |alias| if (recipients.sameGmailIdentity(address.address, alias)) return;
+        var normalized: [policy.outgoing_address_bytes]u8 = undefined;
+        const key = try recipients.comparisonKey(&normalized, address.address);
+        const name = if (address.name.len <= policy.display_name_bytes) name: {
             recipients.validateHeader(address.name) catch break :name "";
             break :name address.name;
         } else "";
@@ -52,8 +52,8 @@ pub const Builder = struct {
         errdefer self.allocator.free(retained_key);
         try self.indexes.put(retained_key, if (full) 0 else self.known.items.len);
         if (full) {
-            var previous_key: [254]u8 = undefined;
-            const removed = self.indexes.fetchRemove(std.ascii.lowerString(previous_key[0..self.known.items[0].value.address.len], self.known.items[0].value.address)).?;
+            var previous_key: [policy.outgoing_address_bytes]u8 = undefined;
+            const removed = self.indexes.fetchRemove(try recipients.comparisonKey(&previous_key, self.known.items[0].value.address)).?;
             self.allocator.free(removed.key);
             if (self.known.items[0].saved) self.saved_count -= 1;
             self.known.items[0] = candidate;
@@ -73,10 +73,10 @@ pub const Builder = struct {
     }
     fn swap(self: *Builder, left: usize, right: usize) void {
         std.mem.swap(Known, &self.known.items[left], &self.known.items[right]);
-        var key: [254]u8 = undefined;
+        var key: [policy.outgoing_address_bytes]u8 = undefined;
         for ([_]usize{ left, right }) |index| {
             const address = self.known.items[index].value.address;
-            self.indexes.getPtr(std.ascii.lowerString(key[0..address.len], address)).?.* = index;
+            self.indexes.getPtr(recipients.comparisonKey(&key, address) catch unreachable).?.* = index;
         }
     }
     fn siftUp(self: *Builder, initial: usize) void {
@@ -125,7 +125,7 @@ test "recipient cache: unsaved From To Cc correspondents are recent deduplicated
     var builder = Builder.init(std.testing.allocator, "self@example.test");
     defer builder.deinit();
     try builder.mail(.{ .id = "old", .threadId = "old", .from = .{ .address = "caroline@example.test", .name = "Caroline Composer" }, .to = &.{.{ .address = "self@example.test" }}, .receivedAt = 10 });
-    try builder.mail(.{ .id = "sent", .threadId = "sent", .from = .{ .address = "self@example.test" }, .to = &.{.{ .address = "new@example.test", .name = "New Correspondent" }}, .cc = &.{.{ .address = "CAROLINE@example.test" }}, .receivedAt = 30 });
+    try builder.mail(.{ .id = "sent", .threadId = "sent", .from = .{ .address = "SELF@example.test" }, .to = &.{.{ .address = "new@example.test", .name = "New Correspondent" }}, .cc = &.{.{ .address = "caroline@EXAMPLE.test" }}, .receivedAt = 30 });
     try builder.contact(.{ .name = "Caroline Saved", .emails = &.{.{ .address = "caroline@example.test" }} });
     const values = try builder.result();
     defer std.testing.allocator.free(values);
@@ -167,4 +167,22 @@ test "recipient cache: newest capped correspondents survive outbox order and sav
     }
     try std.testing.expectEqual(@as(usize, 256), saved);
     try std.testing.expectEqual(@as(?usize, 257), oldest_peer);
+}
+
+test "mailbox compatibility: suggestions preserve external case and Unicode names" {
+    var builder = Builder.init(std.testing.allocator, "self@example.test");
+    defer builder.deinit();
+    var name_bytes: [600]u8 = undefined;
+    for (0..200) |index| @memcpy(name_bytes[index * 3 ..][0..3], "界");
+    const long = &name_bytes;
+    try builder.mail(.{ .id = "m", .threadId = "t", .from = .{ .address = "Smith@example.test", .name = long }, .to = &.{ .{ .address = "smith@example.test" }, .{ .address = "\"Smith\"@EXAMPLE.test" }, .{ .address = "SELF@example.test" } } });
+    const values = try builder.result();
+    defer std.testing.allocator.free(values);
+    try std.testing.expectEqual(@as(usize, 2), values.len);
+    var found_long_name = false;
+    for (values) |value| if (std.mem.eql(u8, value.address, "Smith@example.test")) {
+        try std.testing.expectEqualStrings(long, value.name);
+        found_long_name = true;
+    };
+    try std.testing.expect(found_long_name);
 }

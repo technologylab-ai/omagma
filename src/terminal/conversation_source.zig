@@ -21,6 +21,7 @@ pub const Attachments = struct {
 };
 
 pub fn captureOriginal(a: std.mem.Allocator, message: t.Message, source: Attachments) !t.Original {
+    try conversation.requireBody(message);
     const html = message.bodyHtml orelse return error.OriginalHtmlUnavailable;
     if (html.len == 0) return error.OriginalHtmlUnavailable;
     if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
@@ -53,6 +54,7 @@ pub const ForwardOptions = struct {
 };
 
 pub fn forward(a: std.mem.Allocator, message: t.Message, options: ForwardOptions, source: Attachments) !t.Draft {
+    try conversation.requireBody(message);
     const preserve = options.preserve_formatting;
     if (options.omit_attachments) {
         if (preserve) return error.InvalidForwardOptions;
@@ -225,4 +227,40 @@ test "conversation source: prefixed raw subject and file outlive raw fetch stora
     try std.testing.expectEqualStrings("Fwd: Exact source", draft.subject);
     try std.testing.expectEqualSlices(u8, expected, try @import("mime.zig").decodeBase64Url(draft.attachments[0].data, a));
     try codec.validateDraft(draft, false);
+}
+
+test "message isolation: body refusals stop source capture and all forward modes before hydration" {
+    const Source = struct {
+        calls: usize = 0,
+        fn fetch(context: *anyopaque, _: std.mem.Allocator, _: t.Message, _: t.Attachment) !t.Attachment {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return error.UnexpectedFetch;
+        }
+    };
+    var source: Source = .{};
+    var storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const a = fixed.allocator();
+    const message: t.Message = .{ .id = "refused", .threadId = "thread", .from = .{ .address = "sender@example.test" }, .bodyHtml = "<p><img src=\"cid:image\"></p>", .bodyCacheError = "BodyTooLarge", .attachments = &.{.{ .id = "image", .filename = "image.png", .mimeType = "image/png", .size = 8, .contentId = "image" }} };
+    const adapter: Attachments = .{ .context = &source, .fetchFn = Source.fetch };
+    try std.testing.expectError(error.MessageBodyUnavailable, captureOriginal(a, message, adapter));
+    for ([_]bool{ false, true }) |preserve| for ([_]bool{ false, true }) |omit| {
+        try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{ .preserve_formatting = preserve, .omit_attachments = omit }, adapter));
+    };
+    try std.testing.expectEqual(@as(usize, 0), source.calls);
+}
+
+test "message isolation: raw forwarding preserves unsupported charset bytes and enforces its own size bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "From: sender@example.test\r\nSubject: Opaque original\r\nContent-Type: text/plain; charset=Shift_JIS\r\n\r\n\x82\xa0\x82\xa2\r\n";
+    const draft = try forwardRaw(a, raw, .plain);
+    try std.testing.expectEqual(@as(usize, 1), draft.attachments.len);
+    try std.testing.expectEqualStrings("original.eml", draft.attachments[0].filename);
+    try std.testing.expectEqualSlices(u8, raw, try @import("mime.zig").decodeBase64Url(draft.attachments[0].data, a));
+    const oversized = try a.alloc(u8, t.Limits.body_bytes + 1);
+    @memset(oversized, 'x');
+    try std.testing.expectError(error.BodyTooLarge, forwardRaw(a, oversized, .plain));
 }

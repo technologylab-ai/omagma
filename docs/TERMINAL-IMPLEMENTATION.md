@@ -41,9 +41,40 @@ account-scoped files. Defaults are the newest 2,000 metadata entries and 256 MiB
 account, with hard limits of 10,000 and 1 GiB. One response page contains at most
 100 messages; the TUI replaces 32-row windows. Missing recent bodies are prefetched
 with a default head of 32, configurable from 0 to 64, within those same quotas.
-An individual decoded body is at most 2 MiB. Terminal heap allocations have a
-64 MiB limit, alongside the existing 16 MiB fixed backend reservation. Std and
-terminal runtime overhead are separate.
+An individual decoded body is at most 2 MiB. Application allocations reuse a
+startup-reserved 72 MiB coalescing pool with a 64 MiB payload ceiling. Separate
+fixed reservations provide 16 MiB for one message's decoding workspace, 4 MiB
+for IO, 2 MiB for startup/environment data, and the existing 16 MiB backend
+storage. Sixteen IO workers and their requested 1 MiB stacks start before the
+runtime seals, including the daemon worker. There is no application allocator
+fallback after sealing. Arenas subdivide and return this reserved storage.
+External libc/pthread, Keychain and subprocess internals remain outside this
+application-owned guarantee. Reservations describe capacity, not resident RSS
+or PSS; demand faults can make reserved pages resident later.
+
+The shared metadata policy permits 16 KiB subjects plus 16 bytes of prefix
+headroom, 1 KiB display names and received addresses, 512-byte outgoing
+addresses and filenames, and 128 KiB of aggregate headers. All counts are UTF-8
+bytes. Preview snippets are bounded separately at 16 KiB; clipping them leaves
+the full body available and reports a warning. Outgoing envelopes remain
+limited to 32 recipients. Extended addresses produce a portable-SMTP warning
+in send review; Gmail and downstream delivery may still reject them. Encoded
+aggregate header limits are checked before a spool/provider receives any bytes;
+combining every individual maximum can still exceed those aggregate limits.
+
+Raw folded headers unfold in one pass into one bounded allocation. Each
+provider response has a temporary scope; only owned normalized DTOs survive
+it. Metadata batches admit at most 4 MiB of complete DTOs plus bounded identity
+placeholders; an exceptional row can be read separately. A per-message decoding
+refusal preserves identifiable warnings and good
+neighbors without advancing an unverified identity or replacing unknown label
+membership. Supported multipart alternatives survive an unsupported sibling
+charset. Windows-1251 and ISO-8859-2 join the existing charset set. Thread DTOs
+have a 4 MiB aggregate body allowance plus bounded identity placeholders;
+individual reads remain available. Index saves target less than 8 MiB by
+evicting whole oldest mail entries while retaining complete metadata in kept
+rows; the 16 MiB legacy index read bound remains. Drafts and receipts are never
+discarded to meet that target. `status:partial` finds warning rows locally.
 
 Cached lists and bodies remain usable during the one owned network worker's
 refresh. Account/request-scoped progress reports actual metadata/body batches;

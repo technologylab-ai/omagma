@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { boundedSize, BrowserWasmBridge, terminalUnicode, alignTerminalRows } from './bridge.mjs';
+import { mailPolicyFixture } from './mail-policy.fixture.mjs';
 
 function fixture(capacity = 3) {
   const memory = new WebAssembly.Memory({ initial: 1 });
+  const policyBytes = new TextEncoder().encode(JSON.stringify(mailPolicyFixture));
+  new Uint8Array(memory.buffer, 1024, policyBytes.length).set(policyBytes);
   const inputs = [];
   const calls = [];
   const exports = {
@@ -16,6 +19,8 @@ function fixture(capacity = 3) {
     output_ptr: () => 128,
     output_len: () => 0,
     codepoint_width: () => 1,
+    policy_ptr: () => 1024,
+    policy_len: () => policyBytes.length,
   };
   return { exports, memory, inputs, calls };
 }
@@ -132,4 +137,30 @@ test('WASM traps become a readable error with the stopped operation', async () =
   instance.exports.input = () => { throw new WebAssembly.RuntimeError('unreachable'); };
   const bridge = new BrowserWasmBridge(instance, () => {});
   await assert.rejects(() => bridge.input(Uint8Array.of(1)), /stopped while running input\(\): unreachable/);
+});
+
+
+test('mail policy is read from the static WASM export without initialization or memory mutation', () => {
+  const instance = fixture();
+  const bridge = new BrowserWasmBridge(instance, () => assert.fail('policy read emitted a terminal frame'));
+  const before = new Uint8Array(instance.memory.buffer).slice();
+  assert.deepEqual(bridge.readMailPolicy(), mailPolicyFixture);
+  assert.deepEqual(instance.calls, []);
+  assert.deepEqual(new Uint8Array(instance.memory.buffer), before);
+  const result = bridge.readMailPolicy(); result.displayNameBytes = 1;
+  assert.equal(bridge.readMailPolicy().displayNameBytes, mailPolicyFixture.displayNameBytes);
+});
+
+test('missing invalid or oversized mail policy exports stop at the host boundary', () => {
+  for (const name of ['policy_ptr', 'policy_len']) {
+    const instance = fixture(); delete instance.exports[name];
+    assert.throws(() => new BrowserWasmBridge(instance, () => {}), new RegExp(`missing ${name}`));
+  }
+  for (const [ptr, len] of [[-1, 1], [65535, 2], [1024, 4097]]) {
+    const instance = fixture(); instance.exports.policy_ptr = () => ptr; instance.exports.policy_len = () => len;
+    assert.throws(() => new BrowserWasmBridge(instance, () => {}).readMailPolicy(), /invalid mail policy buffer/);
+  }
+  const instance = fixture(); instance.exports.policy_len = () => 1;
+  new Uint8Array(instance.memory.buffer, 1024, 1)[0] = 0xff;
+  assert.throws(() => new BrowserWasmBridge(instance, () => {}).readMailPolicy(), /mail policy is invalid/);
 });

@@ -5,12 +5,18 @@ const Config = @import("config.zig").Config;
 const daemon = @import("daemon.zig");
 const oauth = @import("oauth.zig");
 const http = @import("http_client.zig");
+const memory = @import("fixed_runtime.zig");
+pub const debug = memory.debug;
+var runtime_storage: memory.Storage(memory.application_reservation) = undefined;
 // The upstream parser's Debug paste log contains input text. Never log private
 // compose/paste content or interleave library diagnostics with terminal paint.
 pub const std_options: std.Options = .{ .log_scope_levels = &.{ .{ .scope = .vaxis, .level = .err }, .{ .scope = .vaxis_parser, .level = .err } } };
 pub const panic = std.debug.FullPanic(struct {
     fn call(message: []const u8, address: ?usize) noreturn {
         if (@import("build_options").tui) @import("terminal/tui.zig").recover();
+        // Keep one symbolizable code address without opening debug mappings
+        // or acquiring a panic-time heap. Mail/config values never enter it.
+        if (address) |origin| std.debug.print("panic origin: 0x{x}\n", .{origin});
         std.debug.defaultPanic(message, address);
     }
 }.call);
@@ -25,12 +31,12 @@ comptime {
     if (assigned_bytes > l.app_reservation) @compileError("Application reservation exceeds16MiB");
 }
 var unassigned_reserve: [l.app_reservation - assigned_bytes]u8 = undefined;
-pub fn main(init: std.process.Init) void {
+pub fn main(init: std.process.Init.Minimal) void {
     app(init) catch |err| {
         std.debug.print("omagma: {s}\n", .{@errorName(err)});
         if (usageError(err)) {
             std.debug.print("Try omagma --help for available commands and options.\n", .{});
-            contextHelpHint(init.minimal.args);
+            contextHelpHint(init.args);
         }
         std.process.exit(1);
     };
@@ -127,12 +133,13 @@ fn standaloneHelpRequested(mode: []const u8, args: *std.process.Args.Iterator) ?
     }
     return null;
 }
-fn app(init: std.process.Init) !void {
+fn app(minimal: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
-    // Runtime bookkeeping is outside the application slab but its worker count
-    // and virtual stack reservations are explicit rather than unlimited.
-    var runtime = std.Io.Threaded.init(init.gpa, .{ .stack_size = 1024 * 1024, .concurrent_limit = .limited(16), .async_limit = .limited(16), .environ = init.minimal.environ });
+    var runtime: memory.Runtime = .{};
+    try runtime.init(minimal, runtime_storage.buffers(), memory.application_limit);
     defer runtime.deinit();
+    try runtime.seal();
+    const init = runtime.context();
     const io = runtime.io();
     @memset(&unassigned_reserve, 0);
     std.mem.doNotOptimizeAway(&unassigned_reserve);
@@ -207,9 +214,20 @@ fn app(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, mode, "budget")) {
-        var buffer: [1024]u8 = undefined;
+        var buffer: [4096]u8 = undefined;
         var writer = std.Io.File.stdout().writer(io, &buffer);
-        try writer.interface.print("{{\"reservationBytes\":{d},\"assignedBytes\":{d},\"unassignedBytes\":{d},\"httpBytes\":{d},\"daemonBytes\":{d},\"gmailBytes\":{d},\"oauthBytes\":{d},\"platformBytes\":{d}}}\n", .{ l.app_reservation, assigned_bytes, unassigned_reserve.len, http.reservation_bytes, daemon.reservation_bytes, @import("providers/gmail.zig").reservation_bytes, oauth.reservation_bytes, @import("platform.zig").reservation_bytes });
+        try std.json.Stringify.value(.{
+            .reservationBytes = l.app_reservation,
+            .assignedBytes = assigned_bytes,
+            .unassignedBytes = unassigned_reserve.len,
+            .httpBytes = http.reservation_bytes,
+            .daemonBytes = daemon.reservation_bytes,
+            .gmailBytes = @import("providers/gmail.zig").reservation_bytes,
+            .oauthBytes = oauth.reservation_bytes,
+            .platformBytes = @import("platform.zig").reservation_bytes,
+            .fixedMemory = runtime.snapshot(),
+        }, .{}, &writer.interface);
+        try writer.interface.writeByte('\n');
         try writer.interface.flush();
         return;
     }
@@ -219,7 +237,7 @@ fn app(init: std.process.Init) !void {
         const method = std.meta.stringToEnum(std.http.Method, args.next() orelse return error.InvalidProbeMethod) orelse return error.InvalidProbeMethod;
         const url = args.next() orelse return error.UrlRequired;
         if (args.next() != null) return error.Args;
-        var arena = std.heap.ArenaAllocator.init(init.gpa);
+        var arena = std.heap.ArenaAllocator.init(init.allocator);
         defer arena.deinit();
         const value = try @import("terminal/gmail.zig").probeLabelHttp(io, arena.allocator(), method, url);
         var buffer: [4096]u8 = undefined;
@@ -245,10 +263,10 @@ fn app(init: std.process.Init) !void {
         const oversized_terminal = std.mem.eql(u8, mode, "probe-terminal-http-oversize");
         const terminal_probe = oversized_terminal or std.mem.eql(u8, mode, "probe-terminal-http");
         const url = if (!std.mem.eql(u8, mode, "probe-https")) args.next() orelse return error.UrlRequired else "https://gmail.googleapis.com/gmail/v1/users/me/profile";
-        const terminal_output: []u8 = if (terminal_probe) try init.gpa.alloc(u8, 3 * l.MiB) else &.{};
-        defer if (terminal_probe) init.gpa.free(terminal_output);
-        const terminal_body: []u8 = if (terminal_probe) try init.gpa.alloc(u8, if (oversized_terminal) 3 * l.MiB + 1 else 131072) else &.{};
-        defer if (terminal_probe) init.gpa.free(terminal_body);
+        const terminal_output: []u8 = if (terminal_probe) try init.allocator.alloc(u8, 3 * l.MiB) else &.{};
+        defer if (terminal_probe) init.allocator.free(terminal_output);
+        const terminal_body: []u8 = if (terminal_probe) try init.allocator.alloc(u8, if (oversized_terminal) 3 * l.MiB + 1 else 131072) else &.{};
+        defer if (terminal_probe) init.allocator.free(terminal_body);
         if (oversized_terminal) @memset(terminal_body, 'x');
         if (terminal_probe and !oversized_terminal) _ = try http.terminalProbeBody(terminal_body);
         var client = try http.Client.init(io);
@@ -329,6 +347,8 @@ fn app(init: std.process.Init) !void {
     } else return error.UnknownMode;
 }
 test {
+    std.testing.refAllDecls(@import("fixed_runtime_tests.zig"));
+    std.testing.refAllDecls(@import("fixed_heap.zig"));
     std.testing.refAllDecls(@import("daemon.zig"));
     std.testing.refAllDecls(@import("terminal/layout.zig"));
     std.testing.refAllDecls(@import("terminal/theme.zig"));

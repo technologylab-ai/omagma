@@ -517,7 +517,7 @@ try {
   async function sampleMemory(stage) {
     if (!originalsFixtureEnabled || linearMemorySamples.length >= 128) return;
     const bytes = await evaluate("window.__omagmaTestWasmMemory?.buffer.byteLength ?? 0");
-    assert(Number.isInteger(bytes) && bytes >= 0 && bytes <= 64 * 1024 * 1024, "WASM linear memory exceeded its unchanged 64 MiB maximum");
+    assert(Number.isInteger(bytes) && bytes >= 0 && bytes <= 96 * 1024 * 1024, "WASM linear memory exceeded its fixed 96 MiB maximum");
     linearMemorySamples.push({ stage, bytes, requestCount: requests.length });
   }
   const screen = () => evaluate("window.omagmaDemo.screenText()");
@@ -1029,18 +1029,25 @@ try {
       assert(saved.snapshot.messages.filter(message => /^ada-message-[0-4]$/.test(message.id)).every(message => message.bodyCached), "incoming-header bodies did not enter the actor cache");
       checks.listReadAndCachePreserve65LocalAnd254Total = true;
       await screenshot("incoming-addresses-reader.png");
-      // Accepted incoming data remains unsuitable for an outgoing destination.
+      // Syntactically valid received addresses within the outgoing budget
+      // remain eligible for Gmail submission, with an explicit portability
+      // warning at review. This regression never confirms or submits a send.
       for (const [keyName, index] of [["r", 3], ["R", 1], ["R", 2]]) {
         await selectCase(index);
         const before = sends().length;
-        const refused = await act(() => text(keyName)); await settled();
-        assert.match(refused, /InvalidAddress|invalid.*address|invalid.*recipient/i, "reply validation silently accepted the overlong outgoing local part");
-        assert(!/\bSubject: Re:/.test(refused), "invalid outgoing reply created a composer");
+        let composed = await act(() => text(keyName)); await settled();
+        if (composed.includes("Text quote")) composed = await act(() => text("t"));
+        assert(/Compose/.test(composed) && /Subject: Re:/.test(composed), "portable received address did not create a reply composer");
+        const reviewed = await act(() => key("s", "KeyS", 2)); await settled();
+        assert(reviewed.includes("Review send"), "portable received address did not reach explicit review");
+        assert.match(reviewed, /portable\s+SMTP\s+limits/i, "long outgoing address lost its portability warning");
         assert.equal(sends().length, before);
         assert.equal((await session()).sendPhase, null);
         assert.equal(await evaluate("window.omagmaDemo.error"), null);
+        await act(() => key("Escape", "Escape"));
+        await act(() => text("q"));
       }
-      checks.outgoingReplyAndReplyAllRemainStrict = true;
+      checks.outgoingReplyAndReplyAllWarnBeforeSubmission = true;
       await disconnect();
       const reloadBefore = requests.length, marker = events.length;
       await call("Page.reload", { ignoreCache: true });
@@ -1281,10 +1288,13 @@ try {
       assert(line, `original composer ${label} is not visible`);
       return line.slice(line.indexOf(label + ":") + label.length + 1).split(/[│┃]/)[0].replaceAll("▏", "").trim();
     };
-    const addressesIn = value => [...(value || "").matchAll(/[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9.-]+/g)].map(match => match[0].toLowerCase());
+    const addressesIn = value => [...(value || "").matchAll(/[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9.-]+/g)].map(match => {
+      const at = match[0].lastIndexOf('@');
+      return match[0].slice(0, at) + match[0].slice(at).toLowerCase();
+    });
     const expectRecipients = (mail, all) => {
       assert.deepEqual(addressesIn(mail.headers.to), [originalRecipients.reply], "reply did not honor Reply-To");
-      assert.deepEqual(addressesIn(mail.headers.cc), all ? [originalRecipients.toPeer, originalRecipients.ccPeer] : [], "reply-all did not exclude self and deduplicate original To/Cc");
+      assert.deepEqual(addressesIn(mail.headers.cc), all ? [originalRecipients.toPeer, originalRecipients.reply.split('@')[0].toUpperCase() + '@example.test', originalRecipients.toPeer.split('@')[0].toUpperCase() + '@example.test', originalRecipients.ccPeer] : [], "reply-all did not exclude verified self or preserve case-distinct external local parts");
       assert.equal(mail.headers.bcc, undefined, "conversation reply invented Bcc");
       assert.equal(mail.headers["in-reply-to"], "<ada-original-source@example.test>");
       assert.equal(mail.headers.references, "<prior-original-thread@example.test> <ada-original-source@example.test>");

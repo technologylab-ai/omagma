@@ -4,13 +4,14 @@ const recipients = @import("recipients.zig");
 const types = @import("types.zig");
 const markdown_logo = @import("markdown_logo.zig");
 const byte_stream = @import("../byte_stream.zig");
+const mail_limits = @import("mail_limits.zig");
 pub const Source = byte_stream.Source;
 
 pub const max_raw_bytes = types.Limits.request_bytes;
 pub const max_body_bytes = types.Limits.body_bytes;
 const utf8_bom = "\xef\xbb\xbf";
-pub const max_headers_bytes = 32 * 1024;
-pub const max_headers = 256;
+pub const max_headers_bytes = mail_limits.headers_bytes;
+pub const max_headers = mail_limits.header_count;
 pub const max_parts = 128;
 pub const max_depth = 16;
 pub const max_attachments = types.Limits.attachments + types.Limits.related_resources + 1;
@@ -37,6 +38,9 @@ pub const ParsedMessage = struct {
     body_html: []const u8 = "",
     html_documents: usize = 0,
     body_source: types.BodySource = .unknown,
+    /// A supported alternative remains readable when another text encoding
+    /// is unavailable. Envelope and attachment data remain independently valid.
+    decode_warning: []const u8 = "",
     calendar: ?[]const u8 = null,
     /// Valid calendar parts disagree. No invitation is offered, but the body
     /// and every attachment remain readable.
@@ -51,7 +55,7 @@ pub fn parse(raw: []const u8, allocator: std.mem.Allocator) !ParsedMessage {
     const entity = try splitEntity(raw, allocator);
     var result = try envelope(entity.headers, allocator);
     var context: Context = .{ .allocator = allocator };
-    try context.rawPart(entity, 0);
+    try context.rawPart(entity, 0, false);
     try context.finish(&result);
     return result;
 }
@@ -66,7 +70,7 @@ fn parseGmailExternal(message: std.json.Value, allocator: std.mem.Allocator, ext
     const headers = try gmailHeaders(payload, allocator);
     var result = try envelope(headers, allocator);
     var context: Context = .{ .allocator = allocator, .external_bodies = external_bodies };
-    try context.gmailPart(payload, 0);
+    try context.gmailPart(payload, 0, false);
     try context.finish(&result);
     return result;
 }
@@ -107,6 +111,10 @@ pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, exter
             .contentLocation = if (item.content_location.len == 0) null else item.content_location,
         };
     }
+    const raw_snippet = if (b.optional(value, "snippet")) |v| try b.string(v) else "";
+    var clipped_snippet: b.Text(mail_limits.snippet_bytes) = .{};
+    const snippet_clipped = raw_snippet.len > mail_limits.snippet_bytes;
+    if (snippet_clipped) clipped_snippet.display(raw_snippet);
     return .{
         .id = try allocator.dupe(u8, id),
         .threadId = try allocator.dupe(u8, thread),
@@ -115,11 +123,13 @@ pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, exter
         .to = try dtoAddresses(parsed.to, allocator),
         .cc = try dtoAddresses(parsed.cc, allocator),
         .subject = parsed.subject,
-        .snippet = try sanitizeText(if (b.optional(value, "snippet")) |v| try b.string(v) else "", allocator),
+        .snippet = try sanitizeText(if (snippet_clipped) clipped_snippet.slice() else raw_snippet, allocator),
         .bodyText = parsed.body_text,
         .bodyHtml = if (parsed.body_html.len == 0) null else parsed.body_html,
         .bodyHtmlAmbiguous = parsed.html_documents > 1,
         .bodySource = parsed.body_source,
+        .decodeWarning = if (parsed.decode_warning.len != 0) parsed.decode_warning else if (snippet_clipped) "SnippetTooLarge" else "",
+        .metadataPartial = snippet_clipped,
         .messageId = parsed.message_id,
         .references = parsed.references,
         .inReplyTo = parsed.in_reply_to,
@@ -137,7 +147,7 @@ fn safeFilename(filename: []const u8, allocator: std.mem.Allocator) ![]const u8 
         offset = i + 1;
     };
     const base = std.mem.trim(u8, filename[offset..], " .\t\r\n");
-    if (base.len > 512) return error.FilenameTooLarge;
+    if (base.len > mail_limits.filename_bytes) return error.FilenameTooLarge;
     return try sanitizeText(if (base.len == 0) "attachment" else base, allocator);
 }
 fn dtoAddresses(source: []const recipients.IncomingMailbox, allocator: std.mem.Allocator) ![]const types.Address {
@@ -153,29 +163,45 @@ fn splitEntity(raw: []const u8, allocator: std.mem.Allocator) !Entity {
     const split = if (crlf) |p| if (lf) |q| @min(p, q) else p else lf orelse return error.MissingHeaderBoundary;
     const separator: usize = if (crlf != null and split == crlf.?) 4 else 2;
     if (split > max_headers_bytes) return error.HeadersTooLarge;
-    var list: std.ArrayList(Header) = .empty;
+    // Unfold each physical line exactly once into one bounded allocation.
+    // Repeated concatenation retained every prefix in caller-owned arenas.
+    const bytes = try allocator.alloc(u8, split);
+    var used: usize = 0;
+    var headers: [max_headers]Header = undefined;
+    var count: usize = 0;
     var lines = std.mem.splitScalar(u8, raw[0..split], '\n');
     while (lines.next()) |physical| {
         const line = std.mem.trimEnd(u8, physical, "\r");
         if (line.len == 0 or std.mem.indexOfScalar(u8, line, '\r') != null) return error.InvalidHeaders;
         if (line[0] == ' ' or line[0] == '\t') {
-            if (list.items.len == 0) return error.InvalidHeaders;
-            const previous = &list.items[list.items.len - 1];
+            if (count == 0) return error.InvalidHeaders;
+            const previous = &headers[count - 1];
             const continuation = std.mem.trim(u8, line, " \t");
-            if (previous.value.len + continuation.len + 1 > 8192) return error.HeaderTooLarge;
-            previous.value = try std.fmt.allocPrint(allocator, "{s} {s}", .{ previous.value, continuation });
+            if (previous.value.len + continuation.len + 1 > mail_limits.header_value_bytes) return error.HeaderTooLarge;
+            for (continuation) |c| if ((c < 32 and c != '\t') or c == 127) return error.InvalidHeaders;
+            bytes[used] = ' ';
+            @memcpy(bytes[used + 1 ..][0..continuation.len], continuation);
+            used += 1 + continuation.len;
+            previous.value = bytes[used - previous.value.len - continuation.len - 1 .. used];
             continue;
         }
-        if (list.items.len == max_headers) return error.TooManyHeaders;
+        if (count == max_headers) return error.TooManyHeaders;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeaders;
         if (colon == 0) return error.InvalidHeaders;
         for (line[0..colon]) |c| if (c < 33 or c > 126 or c == ':') return error.InvalidHeaders;
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (value.len > 8192) return error.HeaderTooLarge;
+        if (value.len > mail_limits.header_value_bytes) return error.HeaderTooLarge;
         for (value) |c| if ((c < 32 and c != '\t') or c == 127) return error.InvalidHeaders;
-        try list.append(allocator, .{ .name = try allocator.dupe(u8, line[0..colon]), .value = try allocator.dupe(u8, value) });
+        const name_start = used;
+        @memcpy(bytes[used..][0..colon], line[0..colon]);
+        used += colon;
+        const value_start = used;
+        @memcpy(bytes[used..][0..value.len], value);
+        used += value.len;
+        headers[count] = .{ .name = bytes[name_start..value_start], .value = bytes[value_start..used] };
+        count += 1;
     }
-    return .{ .headers = try list.toOwnedSlice(allocator), .body = raw[split + separator ..] };
+    return .{ .headers = try allocator.dupe(Header, headers[0..count]), .body = raw[split + separator ..] };
 }
 
 pub const OriginalSource = struct { subject: []const u8, attachment: types.Attachment };
@@ -187,7 +213,7 @@ pub fn originalSource(a: std.mem.Allocator, raw: []const u8) !OriginalSource {
     if ((try header(entity.headers, "Subject")).len == 0 and (try header(entity.headers, "From")).len == 0 and (try header(entity.headers, "Date")).len == 0) return error.InvalidHeaders;
     // The reader, replies and this forward share one bounded display fallback.
     const decoded = try displayHeader(try header(entity.headers, "Subject"), a);
-    const subject = if (decoded.len == 0 or decoded.len > 4000) "Original message" else decoded;
+    const subject = if (decoded.len == 0) "Original message" else decoded;
     var ascii = true;
     for (raw) |c| ascii = ascii and c < 128;
     const headers_utf8 = std.unicode.utf8ValidateSlice(raw[0 .. raw.len - entity.body.len]);
@@ -220,10 +246,13 @@ fn gmailHeaders(payload: std.json.Value, allocator: std.mem.Allocator) ![]const 
     for (field.array.items, out) |entry, *dest| {
         const name = try b.string(try b.field(entry, "name"));
         const value = try b.string(try b.field(entry, "value"));
-        bytes += name.len + value.len;
-        if (bytes > max_headers_bytes or name.len == 0 or value.len > 8192) return error.HeadersTooLarge;
+        bytes = std.math.add(usize, bytes, name.len) catch return error.HeadersTooLarge;
+        bytes = std.math.add(usize, bytes, value.len) catch return error.HeadersTooLarge;
+        if (bytes > max_headers_bytes or name.len == 0) return error.HeadersTooLarge;
         for (name) |c| if (c < 33 or c > 126 or c == ':') return error.InvalidHeaders;
-        dest.* = .{ .name = try allocator.dupe(u8, name), .value = try unfoldHeader(value, allocator) };
+        const unfolded = try unfoldHeader(value, allocator);
+        if (unfolded.len > mail_limits.header_value_bytes) return error.HeadersTooLarge;
+        dest.* = .{ .name = try allocator.dupe(u8, name), .value = unfolded };
     }
     return out;
 }
@@ -266,7 +295,7 @@ fn addressList(raw: []const u8, allocator: std.mem.Allocator) ![]const recipient
     for (list) |*mailbox| {
         const decoded = try displayHeader(mailbox.name, allocator);
         errdefer allocator.free(decoded);
-        if (decoded.len > 256) return error.CapacityExceeded;
+        if (decoded.len > mail_limits.display_name_bytes) return error.CapacityExceeded;
         allocator.free(mailbox.name);
         mailbox.name = decoded;
     }
@@ -377,6 +406,8 @@ const Context = struct {
     plain: std.ArrayList(u8) = .empty,
     html: std.ArrayList(u8) = .empty,
     html_documents: usize = 0,
+    supported_text_parts: usize = 0,
+    unsupported_text_parts: usize = 0,
     calendar: ?[]const u8 = null,
     calendar_ambiguous: bool = false,
     attachments: std.ArrayList(Attachment) = .empty,
@@ -390,7 +421,7 @@ const Context = struct {
         if (size > max_body_bytes or size > max_raw_bytes - self.decoded) return error.DecodedMessageTooLarge;
         self.decoded += size;
     }
-    fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8) !void {
+    fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8, charset_alternative: bool) !void {
         const attached = try isAttached(headers, filename);
         const decoded_filename = try displayHeader(filename, self.allocator);
         const calendar_type = std.ascii.eqlIgnoreCase(mime_type, "text/calendar");
@@ -421,20 +452,31 @@ const Context = struct {
         }
         if (attached) return;
         if (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) {
-            const text = try convertCharset(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator);
+            const text = convertCharset(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator) catch |err| {
+                // Only a text decoding refusal is recoverable here. Parsing,
+                // transfer validation, attachment handling, quotas and OOM
+                // keep their ordinary errors and never erase accepted parts.
+                if (!charset_alternative or err != error.UnsupportedCharset) return err;
+                self.unsupported_text_parts += 1;
+                return;
+            };
             const target = if (std.ascii.eqlIgnoreCase(mime_type, "text/plain")) &self.plain else &self.html;
             if (std.ascii.eqlIgnoreCase(mime_type, "text/html")) self.html_documents += 1;
             if (text.len + @intFromBool(target.items.len != 0) > max_body_bytes - target.items.len) return error.BodyTooLarge;
             if (target.items.len != 0) try target.append(self.allocator, '\n');
             try target.appendSlice(self.allocator, text);
+            if (text.len != 0) self.supported_text_parts += 1;
         }
     }
-    fn rawPart(self: *Context, entity: Entity, depth: usize) anyerror!void {
+    fn rawPart(self: *Context, entity: Entity, depth: usize, charset_alternative: bool) anyerror!void {
         try self.enter(depth);
         const content_type = try header(entity.headers, "Content-Type");
         const mime_type = std.mem.trim(u8, content_type[0 .. std.mem.indexOfScalar(u8, content_type, ';') orelse content_type.len], " \t");
         if (mime_type.len > 0) try validateMimeType(mime_type);
         if (std.ascii.startsWithIgnoreCase(mime_type, "multipart/")) {
+            const alternative = std.ascii.eqlIgnoreCase(mime_type, "multipart/alternative");
+            const supported_before = self.supported_text_parts;
+            const unsupported_before = self.unsupported_text_parts;
             const boundary = parameter(content_type, "boundary") orelse return error.MissingMimeBoundary;
             if (boundary.len == 0 or boundary.len > 200) return error.InvalidMimeBoundary;
             var marker: [204]u8 = undefined;
@@ -454,7 +496,7 @@ const Context = struct {
                             // original message and must survive byte-for-byte.
                             const end_at = if (offset >= begin + 2 and std.mem.eql(u8, entity.body[offset - 2 .. offset], "\r\n")) offset - 2 else if (offset > begin and entity.body[offset - 1] == '\n') offset - 1 else offset;
                             const part = entity.body[begin..end_at];
-                            try self.rawPart(try splitEntity(part, self.allocator), depth + 1);
+                            try self.rawPart(try splitEntity(part, self.allocator), depth + 1, charset_alternative or alternative);
                         }
                         if (suffix.len != 0) {
                             closed = true;
@@ -466,24 +508,29 @@ const Context = struct {
                 offset = if (end < entity.body.len) end + 1 else end;
             }
             if (!closed or start == null) return error.IncompleteMultipart;
+            if (alternative and !charset_alternative and self.unsupported_text_parts > unsupported_before and self.supported_text_parts == supported_before) return error.UnsupportedCharset;
             return;
         }
         const decoded = try decodeTransfer(entity.body, try header(entity.headers, "Content-Transfer-Encoding"), self.allocator);
         try self.accountBytes(decoded.len);
         const filename = (try filenameParameter(try header(entity.headers, "Content-Disposition"), "filename", self.allocator)) orelse (try filenameParameter(content_type, "name", self.allocator)) orelse "";
-        try self.add(entity.headers, if (mime_type.len == 0) "text/plain" else mime_type, filename, decoded);
+        try self.add(entity.headers, if (mime_type.len == 0) "text/plain" else mime_type, filename, decoded, charset_alternative);
     }
-    fn gmailPart(self: *Context, part: std.json.Value, depth: usize) anyerror!void {
+    fn gmailPart(self: *Context, part: std.json.Value, depth: usize, charset_alternative: bool) anyerror!void {
         try self.enter(depth);
         const mime_type = if (b.optional(part, "mimeType")) |value| try b.string(value) else if (b.optional(part, "body") == null and b.optional(part, "parts") == null) return else return error.MissingMimeType;
         try validateMimeType(mime_type);
         const headers = try gmailHeaders(part, self.allocator);
+        const alternative = std.ascii.eqlIgnoreCase(mime_type, "multipart/alternative");
+        const supported_before = self.supported_text_parts;
+        const unsupported_before = self.unsupported_text_parts;
         var child_count: usize = 0;
         if (b.optional(part, "parts")) |children| {
             if (children != .array or children.array.items.len > max_parts) return error.TooManyMimeParts;
             child_count = children.array.items.len;
-            for (children.array.items) |child| try self.gmailPart(child, depth + 1);
+            for (children.array.items) |child| try self.gmailPart(child, depth + 1, charset_alternative or alternative);
         }
+        if (alternative and !charset_alternative and self.unsupported_text_parts > unsupported_before and self.supported_text_parts == supported_before) return error.UnsupportedCharset;
         const body = b.optional(part, "body") orelse return;
         const declared = if (b.optional(body, "size")) |v| try b.integer(v) else 0;
         if (declared < 0 or declared > types.Limits.incoming_attachment_bytes) return error.BodyTooLarge;
@@ -549,13 +596,14 @@ const Context = struct {
         }
         try self.accountBytes(decoded.len);
         const old_count = self.attachments.items.len;
-        try self.add(headers, mime_type, filename, decoded);
+        try self.add(headers, mime_type, filename, decoded, charset_alternative);
         if (self.attachments.items.len > old_count) self.attachments.items[old_count].id = try self.allocator.dupe(u8, external_id orelse part_id);
     }
     fn finish(self: *Context, result: *ParsedMessage) !void {
         result.body_html = try self.html.toOwnedSlice(self.allocator);
         result.html_documents = self.html_documents;
         result.body_source = if (self.plain.items.len > 0) .plain else if (result.body_html.len > 0) .html else .unknown;
+        result.decode_warning = if (self.unsupported_text_parts > 0) "UnsupportedCharset" else "";
         // htmlToText already returns owned sanitized text. A second sanitize
         // retained another full body in arena callers without changing bytes.
         result.body_text = if (self.plain.items.len > 0)
@@ -689,6 +737,45 @@ pub fn decodeTransfer(data: []const u8, encoding: []const u8, allocator: std.mem
     return try allocator.dupe(u8, data);
 }
 
+// Static mappings generated from Python standard-library Unicode codecs.
+// Only the 128 non-ASCII bytes need entries; 0x110000 marks undefined bytes.
+const windows1251 = [128]u21{
+    0x0402,   0x0403, 0x201a, 0x0453, 0x201e, 0x2026, 0x2020, 0x2021,
+    0x20ac,   0x2030, 0x0409, 0x2039, 0x040a, 0x040c, 0x040b, 0x040f,
+    0x0452,   0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+    0x110000, 0x2122, 0x0459, 0x203a, 0x045a, 0x045c, 0x045b, 0x045f,
+    0x00a0,   0x040e, 0x045e, 0x0408, 0x00a4, 0x0490, 0x00a6, 0x00a7,
+    0x0401,   0x00a9, 0x0404, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x0407,
+    0x00b0,   0x00b1, 0x0406, 0x0456, 0x0491, 0x00b5, 0x00b6, 0x00b7,
+    0x0451,   0x2116, 0x0454, 0x00bb, 0x0458, 0x0405, 0x0455, 0x0457,
+    0x0410,   0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
+    0x0418,   0x0419, 0x041a, 0x041b, 0x041c, 0x041d, 0x041e, 0x041f,
+    0x0420,   0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427,
+    0x0428,   0x0429, 0x042a, 0x042b, 0x042c, 0x042d, 0x042e, 0x042f,
+    0x0430,   0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
+    0x0438,   0x0439, 0x043a, 0x043b, 0x043c, 0x043d, 0x043e, 0x043f,
+    0x0440,   0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+    0x0448,   0x0449, 0x044a, 0x044b, 0x044c, 0x044d, 0x044e, 0x044f,
+};
+const iso8859_2 = [128]u21{
+    0x0080, 0x0081, 0x0082, 0x0083, 0x0084, 0x0085, 0x0086, 0x0087,
+    0x0088, 0x0089, 0x008a, 0x008b, 0x008c, 0x008d, 0x008e, 0x008f,
+    0x0090, 0x0091, 0x0092, 0x0093, 0x0094, 0x0095, 0x0096, 0x0097,
+    0x0098, 0x0099, 0x009a, 0x009b, 0x009c, 0x009d, 0x009e, 0x009f,
+    0x00a0, 0x0104, 0x02d8, 0x0141, 0x00a4, 0x013d, 0x015a, 0x00a7,
+    0x00a8, 0x0160, 0x015e, 0x0164, 0x0179, 0x00ad, 0x017d, 0x017b,
+    0x00b0, 0x0105, 0x02db, 0x0142, 0x00b4, 0x013e, 0x015b, 0x02c7,
+    0x00b8, 0x0161, 0x015f, 0x0165, 0x017a, 0x02dd, 0x017e, 0x017c,
+    0x0154, 0x00c1, 0x00c2, 0x0102, 0x00c4, 0x0139, 0x0106, 0x00c7,
+    0x010c, 0x00c9, 0x0118, 0x00cb, 0x011a, 0x00cd, 0x00ce, 0x010e,
+    0x0110, 0x0143, 0x0147, 0x00d3, 0x00d4, 0x0150, 0x00d6, 0x00d7,
+    0x0158, 0x016e, 0x00da, 0x0170, 0x00dc, 0x00dd, 0x0162, 0x00df,
+    0x0155, 0x00e1, 0x00e2, 0x0103, 0x00e4, 0x013a, 0x0107, 0x00e7,
+    0x010d, 0x00e9, 0x0119, 0x00eb, 0x011b, 0x00ed, 0x00ee, 0x010f,
+    0x0111, 0x0144, 0x0148, 0x00f3, 0x00f4, 0x0151, 0x00f6, 0x00f7,
+    0x0159, 0x016f, 0x00fa, 0x0171, 0x00fc, 0x00fd, 0x0163, 0x02d9,
+};
+
 pub fn convertCharset(data: []const u8, charset: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     if (data.len > max_body_bytes) return error.BodyTooLarge;
     if (std.ascii.eqlIgnoreCase(charset, "utf-8") or charset.len == 0) {
@@ -703,11 +790,13 @@ pub fn convertCharset(data: []const u8, charset: []const u8, allocator: std.mem.
     const windows = std.ascii.eqlIgnoreCase(charset, "windows-1252") or std.ascii.eqlIgnoreCase(charset, "cp1252");
     // ISO-8859-15 is Latin-1 with eight replacements, including the euro sign.
     const latin9 = std.ascii.eqlIgnoreCase(charset, "iso-8859-15") or std.ascii.eqlIgnoreCase(charset, "latin9");
-    if (!latin and !windows and !latin9) return error.UnsupportedCharset;
+    const cyrillic = std.ascii.eqlIgnoreCase(charset, "windows-1251") or std.ascii.eqlIgnoreCase(charset, "cp1251");
+    const latin2 = std.ascii.eqlIgnoreCase(charset, "iso-8859-2") or std.ascii.eqlIgnoreCase(charset, "latin2");
+    if (!latin and !windows and !latin9 and !cyrillic and !latin2) return error.UnsupportedCharset;
     const table = [_]u21{ 0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178 };
     var output: std.ArrayList(u8) = .empty;
     for (data) |c| {
-        const cp: u21 = if (windows and c >= 128 and c < 160) table[c - 128] else if (latin9) switch (c) {
+        const cp: u21 = if (cyrillic and c >= 128) windows1251[c - 128] else if (latin2 and c >= 128) iso8859_2[c - 128] else if (windows and c >= 128 and c < 160) table[c - 128] else if (latin9) switch (c) {
             0xa4 => 0x20ac,
             0xa6 => 0x160,
             0xa8 => 0x161,
@@ -718,6 +807,9 @@ pub fn convertCharset(data: []const u8, charset: []const u8, allocator: std.mem.
             0xbe => 0x178,
             else => c,
         } else c;
+        // Windows-1251 leaves byte 0x98 undefined. Header display retains its
+        // literal fallback; a declared body with that byte stays a refusal.
+        if (cp == 0x110000) return error.InvalidCharsetData;
         var encoded: [4]u8 = undefined;
         const count = try std.unicode.utf8Encode(cp, &encoded);
         if (count > max_body_bytes - output.items.len) return error.BodyTooLarge;
@@ -727,7 +819,7 @@ pub fn convertCharset(data: []const u8, charset: []const u8, allocator: std.mem.
 }
 
 pub fn decodeHeader(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    if (input.len > 8192) return error.HeaderTooLarge;
+    if (input.len > mail_limits.header_value_bytes) return error.HeaderTooLarge;
     var output: std.ArrayList(u8) = .empty;
     var pos: usize = 0;
     while (pos < input.len) {
@@ -756,9 +848,9 @@ pub fn decodeHeader(input: []const u8, allocator: std.mem.Allocator) ![]const u8
             try output.append(allocator, input[pos]);
             pos += 1;
         }
-        if (output.items.len > 8192) return error.HeaderTooLarge;
+        if (output.items.len > mail_limits.subject_bytes) return error.HeaderTooLarge;
     }
-    return try sanitizeText(output.items, allocator);
+    return try sanitizeHeaderText(output.items, allocator);
 }
 
 /// Display text for incoming Subject, display names and attachment filenames.
@@ -781,14 +873,23 @@ pub fn displayHeader(input: []const u8, allocator: std.mem.Allocator) ![]const u
                     try literal.appendSlice(allocator, "\u{FFFD}");
                     pos += 1;
                 }
-                if (literal.items.len > 8192) return error.HeaderTooLarge;
+                if (literal.items.len > mail_limits.subject_bytes) return error.HeaderTooLarge;
             }
-            return try sanitizeText(literal.items, allocator);
+            return try sanitizeHeaderText(literal.items, allocator);
         },
         else => return err,
     };
 }
 
+/// Display headers are one line. Body whitespace remains meaningful; raw
+/// protocol identifiers are preserved separately and validated before sending.
+pub fn sanitizeHeaderText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    const output = try sanitizeText(input, allocator);
+    for (@constCast(output)) |*byte| if (byte.* == '\n' or byte.* == '\t') {
+        byte.* = ' ';
+    };
+    return output;
+}
 pub fn sanitizeText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
     if (input.len > max_body_bytes) return error.BodyTooLarge;
@@ -930,22 +1031,23 @@ pub fn htmlToText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
 
 pub const ReplyHeaders = struct { in_reply_to: []const u8, references: []const u8 };
 pub fn validMessageId(id: []const u8) bool {
-    if (id.len < 5 or id.len > 512 or id[0] != '<' or id[id.len - 1] != '>') return false;
+    if (id.len < 5 or id.len > mail_limits.message_id_bytes or id[0] != '<' or id[id.len - 1] != '>') return false;
+    if (!std.unicode.utf8ValidateSlice(id)) return false;
     var at = false;
     for (id[1 .. id.len - 1]) |c| {
-        if (c <= 32 or c >= 127 or c == '<' or c == '>') return false;
+        if (c <= 32 or c == 127 or c == '<' or c == '>') return false;
         if (c == '@') at = true;
     }
     return at;
 }
-fn validateReferences(refs: []const u8) !void {
-    if (refs.len > 8192) return error.ReferencesTooLarge;
+pub fn validateReferences(refs: []const u8) !void {
+    if (refs.len > mail_limits.references_bytes) return error.ReferencesTooLarge;
     var words = std.mem.tokenizeAny(u8, refs, " \t");
     var count: usize = 0;
     while (words.next()) |id| {
         if (!validMessageId(id)) return error.InvalidMessageId;
         count += 1;
-        if (count > 32) return error.TooManyReferences;
+        if (count > mail_limits.reference_count) return error.TooManyReferences;
     }
 }
 pub fn threading(message_id: []const u8, references: []const u8, in_reply_to: []const u8, allocator: std.mem.Allocator) !ReplyHeaders {
@@ -977,12 +1079,12 @@ pub const Compose = struct {
     related: []const Attachment = &.{},
 };
 
-fn encodedWords(writer: *std.Io.Writer, value: []const u8) !void {
+fn encodedWords(writer: *std.Io.Writer, value: []const u8, force: bool) !void {
     try recipients.validateHeader(value);
-    if (value.len > 8192) return error.HeaderTooLarge;
+    if (value.len > mail_limits.subject_bytes) return error.HeaderTooLarge;
     var ascii = true;
     for (value) |c| ascii = ascii and c < 128;
-    if (ascii and value.len <= 900) {
+    if (!force and ascii and value.len <= 900) {
         try writer.writeAll(value);
         return;
     }
@@ -1005,8 +1107,12 @@ fn writeMailbox(writer: *std.Io.Writer, mailbox: *const recipients.Mailbox) !voi
     const name = mailbox.name.slice();
     if (name.len > 0) {
         var ascii = true;
-        for (name) |c| ascii = ascii and c < 128;
-        if (ascii) {
+        var quoted_bytes: usize = name.len + 2;
+        for (name) |c| {
+            ascii = ascii and c < 128;
+            if (c == '"' or c == '\\') quoted_bytes += 1;
+        }
+        if (ascii and quoted_bytes + mailbox.address.len + 3 <= 900) {
             try writer.writeByte('"');
             for (name) |c| {
                 if (c == '"' or c == '\\') try writer.writeByte('\\');
@@ -1014,7 +1120,7 @@ fn writeMailbox(writer: *std.Io.Writer, mailbox: *const recipients.Mailbox) !voi
             }
             try writer.writeAll("\" ");
         } else {
-            try encodedWords(writer, name);
+            try encodedWords(writer, name, true);
             try writer.writeByte(' ');
         }
     }
@@ -1033,7 +1139,12 @@ fn writeReferences(writer: *std.Io.Writer, refs: []const u8) !void {
     if (refs.len == 0) return;
     try writer.writeAll("References:");
     var words = std.mem.tokenizeAny(u8, refs, " \t");
-    while (words.next()) |id| try writer.print("\r\n {s}", .{id});
+    var first = true;
+    while (words.next()) |id| {
+        try writer.writeAll(if (first) " " else "\r\n ");
+        try writer.writeAll(id);
+        first = false;
+    }
     try writer.writeAll("\r\n");
 }
 fn emitBase64Line(writer: *std.Io.Writer, bytes: []const u8) !void {
@@ -1076,7 +1187,7 @@ fn textPart(writer: *std.Io.Writer, mime_type: []const u8, body: []const u8) !vo
 }
 pub fn validateAttachment(filename: []const u8, mime_type: []const u8) !void {
     try recipients.validateHeader(filename);
-    if (filename.len == 0 or filename.len > 512 or std.mem.eql(u8, filename, ".") or std.mem.eql(u8, filename, "..") or std.mem.indexOfAny(u8, filename, "/\\") != null) return error.InvalidAttachmentFilename;
+    if (filename.len == 0 or filename.len > mail_limits.filename_bytes or std.mem.eql(u8, filename, ".") or std.mem.eql(u8, filename, "..") or std.mem.indexOfAny(u8, filename, "/\\") != null) return error.InvalidAttachmentFilename;
     try validateMimeType(mime_type);
 }
 pub fn validateMimeType(mime_type: []const u8) !void {
@@ -1267,6 +1378,47 @@ pub fn encodeTo(compose: Compose, writer: *std.Io.Writer) !void {
         return err;
     };
 }
+/// Validate combined encoded allowances before any bytes reach a spool or
+/// provider. Individually bounded recipients can still exceed one header.
+fn validateGeneratedHeaders(raw: []const u8) !void {
+    if (raw.len < 4 or !std.mem.endsWith(u8, raw, "\r\n\r\n")) return error.InvalidHeaders;
+    if (raw.len - 4 > max_headers_bytes) return error.HeadersTooLarge;
+    var values: usize = 0;
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, raw[0 .. raw.len - 4], "\r\n");
+    while (lines.next()) |line| {
+        if (line.len == 0 or line.len > 998) return error.HeaderTooLarge;
+        if (line[0] == ' ' or line[0] == '\t') {
+            if (count == 0) return error.InvalidHeaders;
+            values += std.mem.trim(u8, line, " \t").len + 1;
+        } else {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeaders;
+            count += 1;
+            if (count > max_headers) return error.TooManyHeaders;
+            values = std.mem.trim(u8, line[colon + 1 ..], " \t").len;
+        }
+        if (values > mail_limits.header_value_bytes) return error.HeaderTooLarge;
+    }
+}
+fn writeGeneratedHeaders(compose: Compose, writer: *std.Io.Writer, boundary: []const u8, eight_bit: bool) !void {
+    try writer.writeAll("From: ");
+    try writeMailbox(writer, &compose.from);
+    try writer.writeAll("\r\n");
+    try writeAddressHeader(writer, "To", &compose.envelope.to);
+    try writeAddressHeader(writer, "Cc", &compose.envelope.cc);
+    try writeAddressHeader(writer, "Bcc", &compose.envelope.bcc);
+    try writer.writeAll("Subject: ");
+    try encodedWords(writer, compose.subject, false);
+    try writer.print("\r\nDate: {s}\r\nMessage-ID: {s}\r\nMIME-Version: 1.0\r\n", .{ compose.date, compose.message_id });
+    if (compose.in_reply_to.len > 0) try writer.print("In-Reply-To: {s}\r\n", .{compose.in_reply_to});
+    try writeReferences(writer, compose.references);
+    if (compose.html != null or compose.calendar != null or compose.attachments.len > 0) {
+        const mixed = compose.calendar != null or compose.attachments.len > 0;
+        try writer.print("Content-Type: multipart/{s}; boundary=\"{s}\"\r\n", .{ if (mixed) @as([]const u8, "mixed") else "alternative", boundary });
+        if (eight_bit) try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n");
+    } else try writer.writeAll("Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n");
+    try writer.writeAll("\r\n");
+}
 fn encodeInto(compose: Compose, writer: *std.Io.Writer, attachment_limit: usize) !void {
     try recipients.validateEnvelope(compose.envelope);
     try recipients.validateAddress(compose.from.address.slice());
@@ -1309,22 +1461,14 @@ fn encodeInto(compose: Compose, writer: *std.Io.Writer, attachment_limit: usize)
         eight_bit = eight_bit or attachment.source != null;
         for (attachment.data) |c| eight_bit = eight_bit or c >= 128;
     };
-    try writer.writeAll("From: ");
-    try writeMailbox(writer, &compose.from);
-    try writer.writeAll("\r\n");
-    try writeAddressHeader(writer, "To", &compose.envelope.to);
-    try writeAddressHeader(writer, "Cc", &compose.envelope.cc);
-    try writeAddressHeader(writer, "Bcc", &compose.envelope.bcc);
-    try writer.writeAll("Subject: ");
-    try encodedWords(writer, compose.subject);
-    try writer.print("\r\nDate: {s}\r\nMessage-ID: {s}\r\nMIME-Version: 1.0\r\n", .{ compose.date, compose.message_id });
-    if (compose.in_reply_to.len > 0) try writer.print("In-Reply-To: {s}\r\n", .{compose.in_reply_to});
-    try writeReferences(writer, compose.references);
+    var header_buffer: [max_headers_bytes + 4]u8 = undefined;
+    var headers: std.Io.Writer = .fixed(&header_buffer);
+    writeGeneratedHeaders(compose, &headers, boundary, eight_bit) catch |err| return if (err == error.WriteFailed) error.HeadersTooLarge else err;
+    try validateGeneratedHeaders(headers.buffered());
+    try writer.writeAll(headers.buffered());
     if (compose.html != null or compose.calendar != null or compose.attachments.len > 0) {
         const mixed = compose.calendar != null or compose.attachments.len > 0;
-        try writer.print("Content-Type: multipart/{s}; boundary=\"{s}\"\r\n", .{ if (mixed) @as([]const u8, "mixed") else "alternative", boundary });
-        if (eight_bit) try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n");
-        try writer.print("\r\n--{s}\r\n", .{boundary});
+        try writer.print("--{s}\r\n", .{boundary});
         if (compose.html != null and mixed) {
             try writer.writeAll("Content-Type: multipart/alternative; boundary=\"omagma-v1-alt\"\r\n\r\n--omagma-v1-alt\r\n");
             try textPart(writer, "text/plain", compose.body);
@@ -1344,7 +1488,7 @@ fn encodeInto(compose: Compose, writer: *std.Io.Writer, attachment_limit: usize)
             try attachmentPart(writer, attachment, false, boundary);
         }
         try writer.print("--{s}--\r\n", .{boundary});
-    } else try textPart(writer, "text/plain", compose.body);
+    } else try emitText(writer, compose.body);
 }
 
 test "original mail: exact message attachment and collision-safe outer MIME delimiter" {
@@ -1618,7 +1762,7 @@ test "ISO-8859-15 text converts its euro and other replaced code points" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("5 € ŠšŽžŒœŸ äöü ß", try convertCharset("5 \xa4 \xa6\xa8\xb4\xb8\xbc\xbd\xbe \xe4\xf6\xfc \xdf", "ISO-8859-15", a));
     try std.testing.expectEqualStrings("5 ¤ ¦¨´¸¼½¾", try convertCharset("5 \xa4 \xa6\xa8\xb4\xb8\xbc\xbd\xbe", "iso-8859-1", a));
-    try std.testing.expectError(error.UnsupportedCharset, convertCharset("x", "iso-8859-2", a));
+    try std.testing.expectError(error.UnsupportedCharset, convertCharset("x", "shift_jis", a));
     // An HTML-only Latin-9 message keeps its body and its named attachment.
     const message = try parseGmail(try GmailSizeOracle.json(a, "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"headers\":[],\"parts\":[" ++
         "{\"mimeType\":\"text/html\",\"headers\":[{\"name\":\"Content-Type\",\"value\":\"text/html; charset=\\\"iso-8859-15\\\"\"},{\"name\":\"Content-Transfer-Encoding\",\"value\":\"8bit\"}],\"body\":{\"size\":10,\"data\":\"PHA-NSCkPC9wPg\"}}," ++
@@ -1731,8 +1875,8 @@ test "encoded address name overflow is explicit and does not truncate via bar di
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const latin: [129]u8 = @splat(0xe9);
-    var encoded: [172]u8 = undefined;
+    const latin: [mail_limits.display_name_bytes / 2 + 1]u8 = @splat(0xe9);
+    var encoded: [std.base64.standard.Encoder.calcSize(latin.len)]u8 = undefined;
     const word = std.base64.standard.Encoder.encode(&encoded, &latin);
     const raw = try std.fmt.allocPrint(a, "From: =?ISO-8859-1?B?{s}?= <sender@example.test>\r\nTo: self@example.test\r\nContent-Type: text/plain\r\n\r\nBody", .{word});
     try std.testing.expectError(error.CapacityExceeded, parse(raw, a));
@@ -1781,7 +1925,7 @@ test "malformed encoded words fall back to literal display text and keep address
     try std.testing.expectEqualStrings("=?UTF-8?B?/w?= x", try displayHeader("=?UTF-8?B?/w?= x", a));
     try std.testing.expectEqualStrings("a\u{FFFD}b", try displayHeader("a\xffb", a));
     try std.testing.expectEqualStrings("Grüße", try displayHeader("=?UTF-8?Q?Gr=C3=BC=C3=9Fe?=", a));
-    var oversized: [8202]u8 = @splat('x');
+    var oversized: [mail_limits.subject_bytes + 1]u8 = @splat('x');
     oversized[0] = '=';
     oversized[1] = '?';
     try std.testing.expectError(error.HeaderTooLarge, displayHeader(&oversized, a));
@@ -1803,20 +1947,20 @@ test "malformed encoded words fall back to literal display text and keep address
     if (invalid) |_| return error.TestExpectedError else |err| try std.testing.expect(err != error.InvalidEncodedWord and err != error.InvalidBase64);
 }
 
-test "decoded incoming display names accept literal 256 bytes and reject 257" {
+test "mail metadata: decoded incoming names retain 1024 bytes and reject 1025" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const word = "=?UTF-8?Q?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?=";
     var name: std.ArrayList(u8) = .empty;
-    for (0..8) |i| {
+    for (0..mail_limits.display_name_bytes / 32) |i| {
         if (i != 0) try name.append(a, ' ');
         try name.appendSlice(a, word);
     }
     const raw = try std.fmt.allocPrint(a, "From: {s} <sender@example.test>\r\n\r\nBody", .{name.items});
     const accepted = try parse(raw, a);
-    try std.testing.expectEqual(@as(usize, 256), accepted.from[0].name.len);
-    const expected: [256]u8 = @splat('A');
+    try std.testing.expectEqual(mail_limits.display_name_bytes, accepted.from[0].name.len);
+    const expected: [mail_limits.display_name_bytes]u8 = @splat('A');
     try std.testing.expectEqualStrings(&expected, accepted.from[0].name);
     try name.appendSlice(a, " =?UTF-8?Q?A?=");
     const refused = try std.fmt.allocPrint(a, "From: {s} <sender@example.test>\r\n\r\nBody", .{name.items});
@@ -1847,7 +1991,7 @@ test "incoming raw and Gmail headers accept routing-rich mail within fixed budge
     const payload = try std.json.parseFromSliceLeaky(std.json.Value, a, encoded, .{ .allocate = .alloc_always });
     try std.testing.expectError(error.TooManyHeaders, gmailHeaders(payload, a));
 
-    const long = try a.alloc(u8, 8192);
+    const long = try a.alloc(u8, max_headers_bytes / 4);
     @memset(long, 'x');
     const large = try std.json.Stringify.valueAlloc(a, .{ .headers = [_]Header{
         .{ .name = "X-Route-A", .value = long },
@@ -1857,6 +2001,184 @@ test "incoming raw and Gmail headers accept routing-rich mail within fixed budge
     } }, .{});
     const oversized = try std.json.parseFromSliceLeaky(std.json.Value, a, large, .{ .allocate = .alloc_always });
     try std.testing.expectError(error.HeadersTooLarge, gmailHeaders(oversized, a));
+}
+
+test "mail metadata: heavily folded old-valid subject unfolds in linear fixed storage" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var raw: std.ArrayList(u8) = .empty;
+    try raw.appendSlice(a, "Subject: a");
+    for (0..4095) |_| try raw.appendSlice(a, "\r\n a");
+    try raw.appendSlice(a, "\r\n\r\nBody");
+    const storage = try a.alloc(u8, raw.items.len + @sizeOf(Header) + @alignOf(Header));
+    var fixed: std.heap.FixedBufferAllocator = .init(storage);
+    const entity = try splitEntity(raw.items, fixed.allocator());
+    const subject = try header(entity.headers, "Subject");
+    try std.testing.expectEqual(@as(usize, 8191), subject.len);
+    for (subject, 0..) |byte, index| try std.testing.expectEqual(if (index % 2 == 0) @as(u8, 'a') else ' ', byte);
+    try std.testing.expectEqualStrings("Body", entity.body);
+    try std.testing.expect(fixed.end_index <= raw.items.len + @sizeOf(Header) + @alignOf(Header));
+
+    // The whole legacy-valid message also fits a fixed job arena; before the
+    // one-pass change its successive unfolding copies retained over 18 MiB.
+    fixed = .init(try a.alloc(u8, 128 * 1024));
+    const parsed = try parse(raw.items, fixed.allocator());
+    try std.testing.expectEqualStrings(subject, parsed.subject);
+    try std.testing.expectEqualStrings("Body", parsed.body_text);
+    try std.testing.expectError(error.InvalidHeaders, splitEntity("Subject: safe\r\n bad\x01continuation\r\n\r\nBody", a));
+}
+
+test "mail metadata: oversized cosmetic snippet keeps the full body and explicit warning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const snippet = try a.alloc(u8, mail_limits.snippet_bytes + 1024);
+    @memset(snippet, 's');
+    const raw = try std.json.Stringify.valueAlloc(a, .{
+        .id = "snippet-message",
+        .threadId = "snippet-thread",
+        .internalDate = "42",
+        .labelIds = [_][]const u8{"INBOX"},
+        .snippet = snippet,
+        .payload = .{ .mimeType = "text/plain", .headers = .{ .{ .name = "From", .value = "sender@example.test" }, .{ .name = "Subject", .value = "Full readable message" } }, .body = .{ .size = @as(usize, 4), .data = "Qm9keQ" } },
+    }, .{});
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{});
+    const message = try normalizeGmail(value, a, null);
+    try std.testing.expectEqualStrings("Body", message.bodyText);
+    try std.testing.expectEqualStrings("sender@example.test", message.from.address);
+    try std.testing.expectEqualStrings("SnippetTooLarge", message.decodeWarning);
+    try std.testing.expect(message.metadataPartial and message.labelsVerified);
+    try std.testing.expectEqual(mail_limits.snippet_bytes, message.snippet.len);
+}
+
+test "mail metadata: combined encoded recipient quota refuses before emitting and smaller lists round trip" {
+    var envelope_out: recipients.Envelope = .{};
+    const digits = "0123456789abcdefghijklmnopqrstuv";
+    for (0..32) |index| {
+        var item: recipients.Mailbox = .{};
+        var address: [512]u8 = @splat('a');
+        address[1] = digits[index];
+        @memcpy(address[500..], "@example.org");
+        try item.address.set(&address);
+        const name: [mail_limits.display_name_bytes]u8 = @splat('N');
+        try item.name.set(&name);
+        try envelope_out.to.append(item);
+    }
+    var from: recipients.Mailbox = .{};
+    try from.address.set("self@example.test");
+    const composed: Compose = .{ .from = from, .envelope = &envelope_out, .subject = "Combined quota", .body = "Body", .message_id = "<combined@example.test>", .date = "Mon, 12 Oct 2026 12:00:00 +0000" };
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try std.testing.expectError(error.HeaderTooLarge, encodeTo(composed, &writer.writer));
+    try std.testing.expectEqual(@as(usize, 0), writer.written().len);
+    envelope_out.to.count = 16;
+    try encodeTo(composed, &writer.writer);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try parse(writer.written(), arena.allocator());
+    try std.testing.expectEqual(@as(usize, 16), parsed.to.len);
+    try std.testing.expectEqualStrings(envelope_out.to.items[15].address.slice(), parsed.to[15].address);
+    try std.testing.expectEqualStrings(envelope_out.to.items[15].name.slice(), parsed.to[15].name);
+}
+
+test "mail metadata: display header whitespace cannot poison cache or outgoing reply subject" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const decoded = try decodeHeader("=?UTF-8?Q?line=0Awith=09tabs?=", a);
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings("line with tabs", decoded);
+    try recipients.validateHeader(decoded);
+    const body = try sanitizeText("Body\nwith\ttabs", a);
+    defer a.free(body);
+    try std.testing.expectEqualStrings("Body\nwith\ttabs", body);
+}
+
+test "mail metadata: long subject names and filename round-trip as folded MIME" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const subject = try a.alloc(u8, mail_limits.subject_bytes);
+    for (subject, 0..) |*byte, index| byte.* = if (index % 2 == 0) 0xc3 else 0xa9;
+    const display_name: [mail_limits.display_name_bytes]u8 = @splat('"');
+    const filename = try a.alloc(u8, mail_limits.filename_bytes);
+    for (filename, 0..) |*byte, index| byte.* = if (index % 2 == 0) 0xc3 else 0xa4;
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("sender@example.test");
+    try sender.name.set(&display_name);
+    var targets: recipients.Envelope = .{};
+    try recipients.parse("recipient@example.test", &targets.to);
+    const attachment: Attachment = .{ .filename = filename, .mime_type = "text/plain", .data = "file" };
+    const output = try a.alloc(u8, 128 * 1024);
+    const raw = try encode(.{ .from = sender, .envelope = &targets, .subject = subject, .body = "Body", .message_id = "<metadata@example.test>", .date = "Mon, 12 Oct 2026 12:00:00 +0000", .attachments = &.{attachment} }, output);
+    var lines = std.mem.splitSequence(u8, raw, "\r\n");
+    while (lines.next()) |line| try std.testing.expect(line.len <= 998);
+    var fixed: std.heap.FixedBufferAllocator = .init(try a.alloc(u8, 512 * 1024));
+    const parsed = try parse(raw, fixed.allocator());
+    try std.testing.expectEqualStrings(subject, parsed.subject);
+    try std.testing.expectEqualStrings(&display_name, parsed.from[0].name);
+    try std.testing.expectEqualStrings(filename, parsed.attachments[0].filename);
+    try std.testing.expectEqualStrings("file", parsed.attachments[0].data);
+    try std.testing.expectEqualStrings("Body", parsed.body_text);
+    const source = try originalSource(a, raw);
+    try std.testing.expectEqualStrings(subject, source.subject);
+    const oversized = try a.alloc(u8, mail_limits.subject_bytes + 1);
+    @memset(oversized, 's');
+    try std.testing.expectError(error.HeaderTooLarge, displayHeader(oversized, a));
+    try std.testing.expectError(error.HeaderTooLarge, encode(.{ .from = sender, .envelope = &targets, .subject = oversized, .body = "Body", .message_id = "<metadata@example.test>", .date = "Mon, 12 Oct 2026 12:00:00 +0000" }, output));
+}
+
+test "mail metadata: reference count reserves the appended parent explicitly" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var refs: std.ArrayList(u8) = .empty;
+    for (0..mail_limits.reference_count - 1) |index| {
+        if (index != 0) try refs.append(a, ' ');
+        try refs.appendSlice(a, try std.fmt.allocPrint(a, "<m{d}@example.test>", .{index}));
+    }
+    const reply = try threading("<parent@example.test>", refs.items, "", a);
+    try std.testing.expect(std.mem.endsWith(u8, reply.references, " <parent@example.test>"));
+    var words = std.mem.tokenizeScalar(u8, reply.references, ' ');
+    var count: usize = 0;
+    while (words.next() != null) count += 1;
+    try std.testing.expectEqual(mail_limits.reference_count, count);
+    try std.testing.expectEqualStrings("<parent@example.test>", reply.in_reply_to);
+    try std.testing.expectError(error.TooManyReferences, threading("<next@example.test>", reply.references, "", a));
+    // Failure never edits, truncates or selects a subset of the saved chain.
+    try std.testing.expect(std.mem.startsWith(u8, reply.references, refs.items));
+}
+
+test "mail metadata: exact reference byte limit survives raw and Gmail folding" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const refs = try a.alloc(u8, mail_limits.references_bytes);
+    var refs_writer: std.Io.Writer = .fixed(refs);
+    var id: [512]u8 = @splat('a');
+    id[0] = '<';
+    for (0..128) |index| {
+        if (index != 0) try refs_writer.writeByte(' ');
+        const length: usize = if (index == 0) 512 else 511;
+        id[length - 3] = '@';
+        id[length - 2] = 'b';
+        id[length - 1] = '>';
+        try refs_writer.writeAll(id[0..length]);
+    }
+    try std.testing.expectEqual(refs.len, refs_writer.end);
+    try validateReferences(refs);
+    const storage = try a.alloc(u8, max_headers_bytes);
+    var writer: std.Io.Writer = .fixed(storage);
+    try writeReferences(&writer, refs);
+    const field_end = writer.end - 2;
+    try writer.writeAll("\r\nBody");
+    const parsed = try splitEntity(writer.buffered(), a);
+    try std.testing.expectEqualStrings(refs, try header(parsed.headers, "References"));
+    const encoded = try std.json.Stringify.valueAlloc(a, .{ .headers = [_]Header{.{ .name = "References", .value = storage["References:".len..field_end] }} }, .{});
+    const payload = try GmailSizeOracle.json(a, encoded);
+    try std.testing.expectEqualStrings(refs, try header(try gmailHeaders(payload, a), "References"));
+    try std.testing.expectError(error.ReferencesTooLarge, threading("<next@example.test>", refs, "", a));
 }
 
 const GmailSizeOracle = struct {
@@ -2163,6 +2485,141 @@ test "MIME charset: numeric German and Windows punctuation bytes obey explicit d
     try std.testing.expectEqualStrings("Benötigen für", declared.body_text);
     try std.testing.expectEqualStrings("utf-8", parameter("text/calendar; charset = \"utf-8\"; method = \"REQUEST\"", "charset").?);
     try std.testing.expectEqualStrings("REQUEST", parameter("text/calendar; charset = \"utf-8\"; method = \"REQUEST\"", "method").?);
+}
+
+test "MIME charset: Windows-1251 and ISO-8859-2 match independent full-byte oracles" {
+    var storage: [16 * 1024]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&storage);
+    var bytes: [256]u8 = undefined;
+    // Digests were computed independently with Python's standard-library
+    // strict decoders, covering all defined source bytes in numeric order.
+    const cases = .{
+        .{ "windows-1251", "caa388a459f126d69a1ced5e5005f5537409183fc0ce52f8a1c104b7585644f8" },
+        .{ "iso-8859-2", "a5871b0f978b840b9fad23483563caf9edf42c1828bff529f7594779ebaf5210" },
+    };
+    inline for (cases, 0..) |case, index| {
+        fixed.reset();
+        var count: usize = 0;
+        for (0..256) |value| {
+            if (index == 0 and value == 0x98) continue;
+            bytes[count] = @intCast(value);
+            count += 1;
+        }
+        const decoded = try convertCharset(bytes[0..count], case[0], fixed.allocator());
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(decoded, &digest, .{});
+        try std.testing.expectEqualStrings(case[1], &std.fmt.bytesToHex(digest, .lower));
+    }
+    fixed.reset();
+    const a = fixed.allocator();
+    try std.testing.expectEqualStrings("Привет, мир!", try convertCharset("\xcf\xf0\xe8\xe2\xe5\xf2, \xec\xe8\xf0!", "CP1251", a));
+    try std.testing.expectEqualStrings("Zażółć gęślą jaźń", try convertCharset("Za\xbf\xf3\xb3\xe6 g\xea\xb6l\xb1 ja\xbc\xf1", "latin2", a));
+    try std.testing.expectError(error.InvalidCharsetData, convertCharset("\x98", "windows-1251", a));
+    try std.testing.expectEqualStrings("Привет", try displayHeader("=?windows-1251?Q?=CF=F0=E8=E2=E5=F2?=", a));
+    const parsed = try parse("Subject: =?iso-8859-2?Q?Za=BF=F3=B3=E6?=\r\nContent-Type: text/plain; charset=iso-8859-2\r\n\r\nZa\xbf\xf3\xb3\xe6 g\xea\xb6l\xb1 ja\xbc\xf1", a);
+    try std.testing.expectEqualStrings("Zażółć", parsed.subject);
+    try std.testing.expectEqualStrings("Zażółć gęślą jaźń", parsed.body_text);
+}
+
+test "MIME charset: supported alternative survives unknown encoding with attachments intact" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "From: sender@example.test\r\nContent-Type: multipart/mixed; boundary=outer\r\n\r\n" ++
+        "--outer\r\nContent-Type: multipart/alternative; boundary=alt\r\n\r\n" ++
+        "--alt\r\nContent-Type: multipart/related; boundary=rel\r\n\r\n" ++
+        "--rel\r\nContent-Type: text/html; charset=x-fixture-unsupported\r\n\r\nOpaque\r\n" ++
+        "--rel\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=logo.png\r\nContent-Transfer-Encoding: base64\r\n\r\nAQID\r\n--rel--\r\n" ++
+        "--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nReadable\r\n--alt--\r\n" ++
+        "--outer\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=report.pdf\r\n\r\npdf\r\n--outer--\r\n";
+    var fixed: std.heap.FixedBufferAllocator = .init(try a.alloc(u8, 64 * 1024));
+    const parsed = try parse(raw, fixed.allocator());
+    try std.testing.expectEqualStrings("Readable", parsed.body_text);
+    try std.testing.expectEqualStrings("UnsupportedCharset", parsed.decode_warning);
+    try std.testing.expectEqualStrings("sender@example.test", parsed.from[0].address);
+    try std.testing.expectEqual(@as(usize, 2), parsed.attachments.len);
+    try std.testing.expectEqualStrings("logo.png", parsed.attachments[0].filename);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, parsed.attachments[0].data);
+    try std.testing.expectEqualStrings("report.pdf", parsed.attachments[1].filename);
+    try std.testing.expectEqualStrings("pdf", parsed.attachments[1].data);
+
+    const input = try GmailSizeOracle.json(a,
+        \\{"id":"alternative-source","threadId":"alternative-thread","internalDate":"42","labelIds":["INBOX"],"payload":{"mimeType":"multipart/mixed","headers":[{"name":"From","value":"sender@example.test"}],"parts":[{"mimeType":"multipart/alternative","parts":[{"mimeType":"multipart/related","parts":[{"mimeType":"text/html","headers":[{"name":"Content-Type","value":"text/html; charset=x-fixture-unsupported"}],"body":{"size":3,"data":"YWJj"}},{"mimeType":"image/png","filename":"logo.png","body":{"size":3,"data":"AQID"}}]},{"mimeType":"text/plain","body":{"size":3,"data":"YWJj"}}]},{"mimeType":"application/pdf","filename":"report.pdf","body":{"size":3,"data":"cGRm"}}]}}
+    );
+    for (0..2) |_| {
+        fixed.reset();
+        const normalized = try normalizeGmail(input, fixed.allocator(), null);
+        try std.testing.expectEqualStrings("abc", normalized.bodyText);
+        try std.testing.expectEqualStrings("UnsupportedCharset", normalized.decodeWarning);
+        try std.testing.expect(!normalized.metadataPartial);
+        try std.testing.expect(normalized.labelsVerified);
+        try std.testing.expectEqualStrings("sender@example.test", normalized.from.address);
+        try std.testing.expectEqual(@as(usize, 2), normalized.attachments.len);
+        try std.testing.expectEqualStrings("logo.png", normalized.attachments[0].filename);
+        try std.testing.expectEqualStrings("AQID", normalized.attachments[0].data);
+        try std.testing.expectEqualStrings("report.pdf", normalized.attachments[1].filename);
+        const children = input.object.get("payload").?.object.get("parts").?.array.items[0].object.get("parts").?.array.items;
+        std.mem.swap(std.json.Value, &children[0], &children[1]);
+    }
+}
+
+test "MIME charset: alternative fallback never masks all-unsupported bodies other refusals or OOM" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = "Content-Type: multipart/alternative; boundary=alt\r\n\r\n";
+    const unsupported = "--alt\r\nContent-Type: text/html; charset=x-fixture-unsupported\r\n\r\nOpaque\r\n";
+    try std.testing.expectError(error.UnsupportedCharset, parse(prefix ++ unsupported ++ "--alt--\r\n", a));
+    try std.testing.expectError(error.UnsupportedCharset, parse("Content-Type: multipart/mixed; boundary=alt\r\n\r\n" ++ unsupported ++ "--alt\r\nContent-Type: text/plain\r\n\r\nReadable\r\n--alt--\r\n", a));
+    try std.testing.expectError(error.InvalidBase64, parse(prefix ++ "--alt\r\nContent-Type: text/plain\r\n\r\nReadable\r\n--alt\r\nContent-Type: text/html; charset=x-fixture-unsupported\r\nContent-Transfer-Encoding: base64\r\n\r\n%%%\r\n--alt--\r\n", a));
+    try std.testing.expectError(error.InvalidUtf8, parse(prefix ++ "--alt\r\nContent-Type: text/plain\r\n\r\nReadable\r\n--alt\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\xff\r\n--alt--\r\n", a));
+    // Exercise the exact text conversion catch with an allocator that refuses
+    // every allocation, rather than failing during unrelated envelope setup.
+    var zero: [0]u8 = .{};
+    var fixed: std.heap.FixedBufferAllocator = .init(&zero);
+    var context: Context = .{ .allocator = fixed.allocator() };
+    try std.testing.expectError(error.OutOfMemory, context.add(&.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }}, "text/plain", "", "Readable", true));
+}
+
+test "mail metadata: UTF-8 Message-ID and 985-byte reply parent fit physical wire lines" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const id = try a.alloc(u8, mail_limits.message_id_bytes);
+    @memset(id, 'a');
+    id[0] = '<';
+    @memcpy(id[1..5], "éä");
+    id[id.len - 3] = '@';
+    id[id.len - 2] = 'b';
+    id[id.len - 1] = '>';
+    try std.testing.expect(validMessageId(id));
+    try std.testing.expect(validMessageId("<消息@例子.test>"));
+    try std.testing.expect(!validMessageId("<bad\xff@example.test>"));
+    try std.testing.expect(!validMessageId("<bad\r\nInjected: x@example.test>"));
+    const oversized = try a.alloc(u8, mail_limits.message_id_bytes + 1);
+    @memcpy(oversized[0..id.len], id);
+    oversized[id.len - 1] = 'a';
+    oversized[id.len] = '>';
+    try std.testing.expect(!validMessageId(oversized));
+    const reply = try threading(id, "<前@例子.test>", "", a);
+    try std.testing.expectEqualStrings(id, reply.in_reply_to);
+    try std.testing.expect(std.mem.endsWith(u8, reply.references, id));
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("sender@example.test");
+    var targets: recipients.Envelope = .{};
+    try recipients.parse("recipient@example.test", &targets.to);
+    const raw = try encode(.{ .from = sender, .envelope = &targets, .subject = "Literal identity", .body = "Body", .message_id = id, .date = "Mon, 12 Oct 2026 12:00:00 +0000", .in_reply_to = reply.in_reply_to, .references = reply.references }, try a.alloc(u8, 8 * 1024));
+    var lines = std.mem.splitSequence(u8, raw, "\r\n");
+    var exact_boundary = false;
+    while (lines.next()) |line| {
+        try std.testing.expect(line.len <= 998);
+        if (std.mem.startsWith(u8, line, "In-Reply-To:")) exact_boundary = line.len == 998;
+    }
+    try std.testing.expect(exact_boundary);
+    const parsed = try parse(raw, a);
+    try std.testing.expectEqualStrings(id, parsed.message_id);
+    try std.testing.expectEqualStrings(id, parsed.in_reply_to);
+    try std.testing.expectEqualStrings(reply.references, parsed.references);
 }
 
 test "body provenance preserves plain preference and the legacy HTML text fallback" {

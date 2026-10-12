@@ -400,6 +400,49 @@ def background_shutdown(binary, config):
         return {"shutdownSeconds": round(time.monotonic() - started, 4), "exitCode": daemon.process.returncode}
 
 
+def fixed_worker_pool(binary, config):
+    budget = subprocess.run([str(binary), "budget"], check=True, capture_output=True,
+                            text=True, timeout=5)
+    fixed = json.loads(budget.stdout)["fixedMemory"]
+    require(fixed["phase"] == "sealed" and not fixed["upstreamAllocatorPresent"],
+            "native runtime did not report sealed fixed memory")
+    expected_threads = fixed["workerThreads"] + 1  # The prestarted pool and main.
+    with Daemon(binary, config, ["--fixture-delay-ms", "250"]) as daemon:
+        hello = daemon.hello()
+        account = next(item["account"] for item in hello["accounts"] if item["enabled"])
+        task_directory = Path(f"/proc/{daemon.process.pid}/task")
+        initial_tasks = {entry.name for entry in task_directory.iterdir()}
+        require(len(initial_tasks) == expected_threads,
+                "daemon acquired a thread outside the prestarted I/O pool")
+
+        def same_pool(stage):
+            require({entry.name for entry in task_directory.iterdir()} == initial_tasks,
+                    f"daemon replaced or acquired a thread during {stage}")
+
+        check_reply(daemon.request("visibility", open=True, account=account))
+        daemon.until(lambda: daemon.request("status")["metrics"]["activeJobs"] == 1)
+        same_pool("active refresh")
+        check_reply(daemon.request("visibility", open=False, account=account))
+        daemon.settle()
+        same_pool("cancellation and idle")
+
+        check_reply(daemon.request("visibility", open=True, account=account))
+        daemon.current(account)
+        daemon.settle()
+        same_pool("successful refresh and reuse")
+
+        check_reply(daemon.request("refresh", account=account))
+        daemon.until(lambda: daemon.request("status")["metrics"]["activeJobs"] == 1)
+        same_pool("refresh before owner exit")
+        started = time.monotonic()
+        daemon.process.stdin.close()
+        daemon.process.wait(timeout=2)
+        require(daemon.process.returncode == 0, "fixed-pool worker failed during owner shutdown")
+        return {"prestartedWorkers": fixed["workerThreads"], "processThreads": expected_threads,
+                "threadIdentitiesUnchanged": True,
+                "shutdownSeconds": round(time.monotonic() - started, 4), "exitCode": daemon.process.returncode}
+
+
 def empty_and_failure(binary, config):
     with Daemon(binary, config, ["--fixture-empty-account", REQUIRED[0], "--fixture-fail-account", REQUIRED[1]]) as daemon:
         daemon.hello()
@@ -580,6 +623,7 @@ def stdout_backpressure(binary, config):
 CASES = {"account_isolation": account_isolation, "overlap_and_close": overlap_and_close,
          "cancel_before_first_fetch": cancel_before_first_fetch,
          "background_refresh": background_refresh, "background_shutdown": background_shutdown,
+         "fixed_worker_pool": fixed_worker_pool,
          "empty_and_failure": empty_and_failure, "frame_recovery": frame_recovery,
          "failed_refresh_preserves": failed_refresh_preserves,
          "restart": restart, "configuration_and_missing_profile": configuration_and_missing_profile,

@@ -28,7 +28,7 @@ pub fn Text(comptime capacity: usize) type {
                     pos += 1;
                     continue;
                 };
-                if (cp < 32 or (cp >= 127 and cp <= 159) or (cp >= 0x202a and cp <= 0x202e) or (cp >= 0x2066 and cp <= 0x2069)) {
+                if (cp < 32 or (cp >= 127 and cp <= 159) or cp == 0x061c or cp == 0x200e or cp == 0x200f or (cp >= 0x202a and cp <= 0x202e) or (cp >= 0x2066 and cp <= 0x2069)) {
                     if (self.len < capacity and self.len > 0 and self.bytes[self.len - 1] != ' ') {
                         self.bytes[self.len] = ' ';
                         self.len += 1;

@@ -5,6 +5,9 @@ const types = @import("terminal/types.zig");
 const j = @import("terminal/json.zig");
 const recipients = @import("terminal/recipients.zig");
 const query = @import("terminal/cache_query.zig");
+const policy = @import("terminal/mail_limits.zig");
+const decoder_policy = @import("terminal/decoder_policy.zig");
+const display_fields = @import("terminal/mail_display_fields.zig");
 pub const snapshot_limit = 3 * 1024 * 1024;
 pub const total_limit = 8 * 1024 * 1024;
 pub const Binding = struct { account: []const u8, clientId: []const u8, grantId: []const u8 };
@@ -31,10 +34,13 @@ const Message = struct {
     unread: bool = false,
     bodyCached: bool = false,
     bodyCacheError: []const u8 = "",
+    decodeWarning: []const u8 = "",
+    metadataPartial: bool = false,
+    labelsVerified: bool = true,
     attachments: []const Attachment = &.{},
 };
 const Contact = struct { resourceName: []const u8 = "", etag: []const u8 = "", name: []const u8 = "", emails: []const types.Address = &.{} };
-const Document = struct { version: u8, account: []const u8, clientId: []const u8, grantId: []const u8, updatedAt: i64, messages: []Message, contacts: []Contact, contactsLoaded: bool };
+const Document = struct { version: u8, decoderRevision: u32 = 0, account: []const u8, clientId: []const u8, grantId: []const u8, updatedAt: i64, messages: []Message, contacts: []Contact, contactsLoaded: bool };
 const Entry = struct {
     arena: std.heap.ArenaAllocator,
     messages: []types.Message = &.{},
@@ -44,19 +50,20 @@ const Entry = struct {
     loaded: bool = false,
     bytes: usize = 0,
     revision: u32 = 0,
+    decoder_revision: u32 = decoder_policy.decoder_revision,
 };
 fn bounded(value: []const u8, limit: usize) !void {
     if (value.len > limit or !std.unicode.utf8ValidateSlice(value)) return error.InvalidBrowserCache;
 }
 fn address(value: types.Address, incoming: bool) !void {
-    try bounded(value.name, 4096);
-    try bounded(value.address, 254);
+    try bounded(value.name, policy.display_name_bytes);
+    try bounded(value.address, if (incoming) policy.incoming_address_bytes else policy.outgoing_address_bytes);
     if (value.address.len > 0) {
         if (incoming) try recipients.validateIncomingAddress(value.address) else try recipients.validateAddress(value.address);
     }
 }
 fn addresses(values: []const types.Address, incoming: bool) !void {
-    if (values.len > 1024) return error.InvalidBrowserCache;
+    if (values.len > policy.incoming_recipients) return error.InvalidBrowserCache;
     for (values) |value| try address(value, incoming);
 }
 fn validateMessage(value: types.Message) !void {
@@ -69,22 +76,24 @@ fn validateMessage(value: types.Message) !void {
     try addresses(value.to, true);
     try addresses(value.cc, true);
     try addresses(value.replyTo, true);
-    try bounded(value.subject, 16 * 1024);
-    try bounded(value.snippet, 16 * 1024);
+    try bounded(value.subject, policy.subject_bytes);
+    try bounded(value.snippet, policy.snippet_bytes);
     try bounded(value.bodyText, 2 * 1024 * 1024);
     if (value.bodyHtml) |html| try bounded(html, 2 * 1024 * 1024);
-    try bounded(value.messageId, 4096);
-    try bounded(value.references, 64 * 1024);
-    try bounded(value.inReplyTo, 4096);
+    try bounded(value.messageId, policy.header_value_bytes);
+    try bounded(value.references, policy.references_bytes);
+    try bounded(value.inReplyTo, policy.header_value_bytes);
     try bounded(value.bodyCacheError, 512);
+    try bounded(value.decodeWarning, 512);
+    if (value.sentDate) |date| try bounded(date, policy.header_value_bytes);
     for (value.labels) |label| try bounded(label, 256);
     for (value.attachments) |file| {
         try bounded(file.id, 4096);
-        try bounded(file.filename, 4096);
-        try bounded(file.mimeType, 256);
-        if (file.contentId) |id| try bounded(id, 1024);
-        if (file.disposition) |kind| try bounded(kind, 32);
-        if (file.contentLocation) |location| try bounded(location, 4096);
+        try bounded(file.filename, policy.filename_bytes);
+        try bounded(file.mimeType, policy.header_value_bytes);
+        if (file.contentId) |id| try bounded(id, policy.header_value_bytes);
+        if (file.disposition) |kind| try bounded(kind, policy.header_value_bytes);
+        if (file.contentLocation) |location| try bounded(location, policy.header_value_bytes);
     }
 }
 fn copyAddress(a: std.mem.Allocator, value: types.Address) !types.Address {
@@ -98,7 +107,7 @@ fn copyAddresses(a: std.mem.Allocator, values: []const types.Address) ![]types.A
 fn copyMessage(a: std.mem.Allocator, value: types.Message) !types.Message {
     try validateMessage(value);
     var result = value;
-    inline for (.{ "id", "threadId", "subject", "snippet", "bodyText", "messageId", "references", "inReplyTo", "bodyCacheError" }) |field| @field(result, field) = try a.dupe(u8, @field(value, field));
+    inline for (.{ "id", "threadId", "subject", "snippet", "bodyText", "messageId", "references", "inReplyTo", "bodyCacheError", "decodeWarning" }) |field| @field(result, field) = try a.dupe(u8, @field(value, field));
     result.bodyHtml = if (value.bodyHtml) |html| try a.dupe(u8, html) else null;
     result.sentDate = if (value.sentDate) |date| try a.dupe(u8, date) else null;
     result.from = try copyAddress(a, value.from);
@@ -113,12 +122,12 @@ fn copyMessage(a: std.mem.Allocator, value: types.Message) !types.Message {
     result.attachments = files;
     result.fixtureRaw = null;
     result.invitation = null;
-    return result;
+    return display_fields.canonicalizeMessageDisplay(a, result);
 }
 fn copyContact(a: std.mem.Allocator, value: types.Contact) !types.Contact {
     try bounded(value.resourceName, 256);
     try bounded(value.etag, 4096);
-    try bounded(value.name, 4096);
+    try bounded(value.name, policy.display_name_bytes);
     try addresses(value.emails, false);
     return .{ .resourceName = try a.dupe(u8, value.resourceName), .etag = try a.dupe(u8, value.etag), .name = try a.dupe(u8, value.name), .emails = try copyAddresses(a, value.emails) };
 }
@@ -185,7 +194,7 @@ pub const Store = struct {
     }
     fn copyEntry(self: *Store, index: usize) !Entry {
         if (index >= 3 or self.bindings[index] == null) return error.InvalidBrowserCache;
-        var next: Entry = .{ .arena = .init(self.allocator), .updated_at = self.entries[index].updated_at, .loaded = true, .contacts_loaded = self.entries[index].contacts_loaded };
+        var next: Entry = .{ .arena = .init(self.allocator), .updated_at = self.entries[index].updated_at, .loaded = true, .contacts_loaded = self.entries[index].contacts_loaded, .decoder_revision = self.entries[index].decoder_revision };
         errdefer next.arena.deinit();
         const a = next.arena.allocator();
         next.messages = try a.alloc(types.Message, self.entries[index].messages.len);
@@ -200,11 +209,11 @@ pub const Store = struct {
         for (entry.messages, messages) |m, *dest| {
             const files = try a.alloc(Attachment, m.attachments.len);
             for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition, .contentLocation = file.contentLocation };
-            dest.* = .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .attachments = files };
+            dest.* = .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .decodeWarning = m.decodeWarning, .metadataPartial = m.metadataPartial, .labelsVerified = m.labelsVerified, .attachments = files };
         }
         const contact_values = try a.alloc(Contact, entry.contacts.len);
         for (entry.contacts, contact_values) |c, *dest| dest.* = .{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails };
-        return .{ .version = 1, .account = binding.account, .clientId = binding.clientId, .grantId = binding.grantId, .updatedAt = entry.updated_at, .messages = messages, .contacts = contact_values, .contactsLoaded = entry.contacts_loaded };
+        return .{ .version = 1, .decoderRevision = entry.decoder_revision, .account = binding.account, .clientId = binding.clientId, .grantId = binding.grantId, .updatedAt = entry.updated_at, .messages = messages, .contacts = contact_values, .contactsLoaded = entry.contacts_loaded };
     }
     fn commit(self: *Store, index: usize, next: *Entry, protected_id: []const u8) !void {
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
@@ -273,15 +282,48 @@ pub const Store = struct {
         errdefer next.arena.deinit();
         const a = next.arena.allocator();
         const incoming = try a.alloc(types.Message, values.len);
+        var verified_complete = complete;
         for (values, incoming, 0..) |value, *dest, row| {
             var parsed = try std.json.parseFromValueLeaky(types.Message, a, value, .{ .ignore_unknown_fields = true });
             for (incoming[0..row]) |old| if (std.mem.eql(u8, old.id, parsed.id)) return error.InvalidBrowserCache;
-            for (self.entries[index].messages) |old| if (old.bodyCached and std.mem.eql(u8, old.id, parsed.id) and std.mem.eql(u8, old.threadId, parsed.threadId)) {
+            verified_complete = verified_complete and !parsed.metadataPartial and parsed.labelsVerified;
+            for (self.entries[index].messages) |old| if (std.mem.eql(u8, old.id, parsed.id)) {
+                // This list-wide allowance omitted a decoded projection. It
+                // says nothing new about a retained envelope or body.
+                if (metadataOmitted(parsed) and std.mem.eql(u8, old.threadId, parsed.threadId)) {
+                    const labels = parsed.labels;
+                    const unread = parsed.unread;
+                    const labels_verified = parsed.labelsVerified;
+                    parsed = old;
+                    parsed.metadataPartial = true;
+                    parsed.labelsVerified = labels_verified;
+                    if (labels_verified) {
+                        parsed.labels = labels;
+                        parsed.unread = unread;
+                    }
+                    if (!finalBodyRefusal(old.bodyCacheError)) parsed.decodeWarning = "MetadataBudgetExceeded";
+                    break;
+                }
+                // A failed projection cannot prove that labels or ordering
+                // changed. Keep prior membership marked as unverified.
+                if (!parsed.labelsVerified) {
+                    parsed.labels = old.labels;
+                    parsed.unread = old.unread;
+                }
+                if (parsed.metadataPartial and parsed.receivedAt == 0) parsed.receivedAt = old.receivedAt;
+                if ((!old.bodyCached and !finalBodyRefusal(old.bodyCacheError)) or !std.mem.eql(u8, old.threadId, parsed.threadId)) break;
                 parsed.bodyText = old.bodyText;
                 parsed.bodyHtml = old.bodyHtml;
                 parsed.bodySource = old.bodySource;
                 parsed.bodyHtmlAmbiguous = old.bodyHtmlAmbiguous;
-                parsed.bodyCached = true;
+                parsed.bodyCached = old.bodyCached;
+                parsed.bodyCacheError = old.bodyCacheError;
+                // A complete later metadata response clears the list-wide
+                // allowance warning, while final body refusals stay visible.
+                if (!metadataOmitted(old)) {
+                    if (parsed.decodeWarning.len == 0) parsed.decodeWarning = old.decodeWarning;
+                    parsed.metadataPartial = parsed.metadataPartial or old.metadataPartial;
+                }
                 parsed.attachments = old.attachments;
                 parsed.messageId = old.messageId;
                 parsed.references = old.references;
@@ -301,7 +343,7 @@ pub const Store = struct {
             };
             if (!found and count < messages.len) {
                 var retained_message = old;
-                if (complete and label.len > 0) {
+                if (verified_complete and label.len > 0) {
                     var labels: std.ArrayList([]const u8) = .empty;
                     for (old.labels) |previous| if (!std.mem.eql(u8, previous, label)) try labels.append(a, previous);
                     retained_message.labels = labels.items;
@@ -316,17 +358,45 @@ pub const Store = struct {
         try self.commit(index, &next, "");
     }
     pub fn saveRead(self: *Store, index: usize, message: types.Message) !void {
+        if (index >= 3 or self.bindings[index] == null) return error.InvalidBrowserCache;
+        try validateMessage(message);
+        // A thread allowance describes this aggregate response, not the
+        // individual message. It cannot replace a body or final decode result,
+        // or reduce richer retained metadata to the small thread placeholder.
+        if (transientBodyError(message.bodyCacheError)) {
+            for (self.entries[index].messages) |old| if (std.mem.eql(u8, old.id, message.id)) {
+                if (!message.labelsVerified or !std.mem.eql(u8, old.threadId, message.threadId)) return;
+                var next = try self.copyEntry(index);
+                errdefer next.arena.deinit();
+                for (next.messages) |*stored| if (std.mem.eql(u8, stored.id, message.id)) {
+                    const labels = try next.arena.allocator().alloc([]const u8, message.labels.len);
+                    for (message.labels, labels) |label, *out| out.* = try next.arena.allocator().dupe(u8, label);
+                    stored.labels = labels;
+                    stored.labelsVerified = true;
+                    stored.unread = message.unread;
+                    break;
+                };
+                try self.commit(index, &next, message.id);
+                return;
+            };
+        }
         var next = try self.copyEntry(index);
         errdefer next.arena.deinit();
         for (next.messages) |*stored| if (std.mem.eql(u8, stored.id, message.id)) {
-            stored.* = try copyMessage(next.arena.allocator(), message);
-            stored.bodyCached = true;
+            var refreshed = message;
+            if (!refreshed.labelsVerified) {
+                refreshed.labels = stored.labels;
+                refreshed.unread = stored.unread;
+            }
+            if (refreshed.metadataPartial and refreshed.receivedAt == 0) refreshed.receivedAt = stored.receivedAt;
+            stored.* = try copyMessage(next.arena.allocator(), refreshed);
+            stored.bodyCached = message.bodyCacheError.len == 0;
             try self.commit(index, &next, message.id);
             return;
         };
         const messages = try next.arena.allocator().alloc(types.Message, @min(@as(usize, 300), next.messages.len + 1));
         messages[0] = try copyMessage(next.arena.allocator(), message);
-        messages[0].bodyCached = true;
+        messages[0].bodyCached = message.bodyCacheError.len == 0;
         @memcpy(messages[1..], next.messages[0 .. messages.len - 1]);
         next.messages = messages;
         try self.commit(index, &next, message.id);
@@ -355,7 +425,7 @@ pub const Store = struct {
     }
     pub fn read(self: *const Store, index: usize, id: []const u8) !?types.Message {
         if (index >= 3) return error.InvalidBrowserCache;
-        for (self.entries[index].messages) |m| if (m.bodyCached and std.mem.eql(u8, m.id, id)) return m;
+        for (self.entries[index].messages) |m| if (!transientBodyError(m.bodyCacheError) and (m.bodyCached or finalBodyRefusal(m.bodyCacheError)) and std.mem.eql(u8, m.id, id)) return m;
         return null;
     }
     pub fn contacts(self: *const Store, index: usize, a: std.mem.Allocator) ![]const j.Value {
@@ -369,15 +439,29 @@ pub const Store = struct {
         return values[0..@min(values.len, 30)];
     }
     pub fn listAll(self: *const Store, index: usize, a: std.mem.Allocator, label: []const u8, needle: []const u8) ![]const j.Value {
+        return self.listAllScoped(index, a, label, needle, &.{});
+    }
+    /// IDs returned by a scoped provider list certify only that view's
+    /// membership. They do not make a failed per-message label set complete.
+    pub fn listAllScoped(self: *const Store, index: usize, a: std.mem.Allocator, label: []const u8, needle: []const u8, scoped_ids: []const []const u8) ![]const j.Value {
         if (index >= 3) return error.InvalidBrowserCache;
         try query.validate(needle);
         var matches: std.ArrayList(types.Message) = .empty;
         for (self.entries[index].messages) |m| {
-            if (std.mem.eql(u8, label, "ARCHIVE")) {
-                if (hasLabel(m, "INBOX") or hasLabel(m, "SENT") or hasLabel(m, "TRASH") or hasLabel(m, "SPAM")) continue;
-            } else if (std.mem.eql(u8, label, "UNREAD")) {
-                if (!m.unread) continue;
-            } else if (label.len > 0 and !hasLabel(m, label)) continue;
+            const matches_label = if (std.mem.eql(u8, label, "ARCHIVE"))
+                m.labelsVerified and !hasLabel(m, "INBOX") and !hasLabel(m, "SENT") and !hasLabel(m, "TRASH") and !hasLabel(m, "SPAM")
+            else if (std.mem.eql(u8, label, "UNREAD"))
+                m.unread
+            else
+                label.len == 0 or hasLabel(m, label);
+            var scoped = false;
+            if (!m.labelsVerified) for (scoped_ids) |id| {
+                if (std.mem.eql(u8, id, m.id)) {
+                    scoped = true;
+                    break;
+                }
+            };
+            if (!matches_label and !scoped) continue;
             if (needle.len > 0 and !query.matches(m, needle)) continue;
             try matches.append(a, m);
         }
@@ -413,7 +497,13 @@ pub const Store = struct {
             for (doc.messages[0..row]) |old| if (std.mem.eql(u8, old.id, m.id)) return error.InvalidBrowserCache;
             const files = try a.alloc(types.Attachment, m.attachments.len);
             for (m.attachments, files) |file, *target| target.* = .{ .id = file.id, .filename = file.filename, .mimeType = file.mimeType, .size = file.size, .contentId = file.contentId, .disposition = file.disposition, .contentLocation = file.contentLocation };
-            dest.* = try copyMessage(a, .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .attachments = files });
+            dest.* = try copyMessage(a, .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .decodeWarning = m.decodeWarning, .metadataPartial = m.metadataPartial, .labelsVerified = m.labelsVerified, .attachments = files });
+            // Restore only changes retry eligibility; it never fetches mail.
+            // Keep the prior display and membership until a successful read.
+            if (doc.decoderRevision < decoder_policy.decoder_revision and decoder_policy.knownDecoderRefusal(dest.bodyCacheError) and decoder_policy.retriedByNewerDecoder(dest.bodyCacheError, doc.decoderRevision)) {
+                dest.bodyCacheError = "";
+                dest.bodyCached = false;
+            }
         }
         if (can_contacts and doc.contactsLoaded) {
             next.contacts = try a.alloc(types.Contact, doc.contacts.len);
@@ -421,10 +511,22 @@ pub const Store = struct {
             next.contacts_loaded = true;
         }
         next.updated_at = doc.updatedAt;
+        // An older application must not downgrade a newer snapshot's receipt.
+        next.decoder_revision = @max(doc.decoderRevision, decoder_policy.decoder_revision);
         try self.commit(index, &next, "");
     }
 };
 fn hasLabel(message: types.Message, label: []const u8) bool {
     for (message.labels) |value| if (std.mem.eql(u8, value, label)) return true;
     return false;
+}
+
+pub fn transientBodyError(code: []const u8) bool {
+    return std.mem.eql(u8, code, "BodyNotCached") or std.mem.eql(u8, code, "ThreadBodyBudgetExceeded");
+}
+fn finalBodyRefusal(code: []const u8) bool {
+    return code.len > 0 and !transientBodyError(code);
+}
+fn metadataOmitted(message: types.Message) bool {
+    return message.bodyCacheError.len == 0 and std.mem.eql(u8, message.decodeWarning, "MetadataBudgetExceeded");
 }

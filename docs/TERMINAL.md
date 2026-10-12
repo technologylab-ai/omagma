@@ -119,7 +119,7 @@ Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted line
 
 ## Search
 
-`/` searches this account's retained metadata and downloaded plaintext without fetching missing bodies. It supports quoted phrases, AND terms, negative terms, and `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `filename:`, `is:unread|read|starred|important` and `has:attachment` predicates. `after:` (inclusive), `before:` (exclusive) and `on:` compare local calendar dates written as `YYYY-MM-DD` or `YYYY/MM/DD`; `newer:`/`older:` are absolute-date aliases. Unsupported named operators and invalid values produce a diagnostic. Use Gmail search for its full query language.
+`/` searches this account's retained metadata and downloaded plaintext without fetching missing bodies. It supports quoted phrases, AND terms, negative terms, and `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `filename:`, `is:unread|read|starred|important`, `has:attachment` and `status:partial` predicates. `status:partial` finds decode warnings, unavailable bodies and incomplete metadata; use All Mail or the retained-cache view to include rows whose labels could not be verified. `after:` (inclusive), `before:` (exclusive) and `on:` compare local calendar dates written as `YYYY-MM-DD` or `YYYY/MM/DD`; `newer:`/`older:` are absolute-date aliases. Unsupported named operators and invalid values produce a diagnostic. Use Gmail search for its full query language.
 
 `\` explicitly searches Gmail using Google's query syntax. That can reach mail outside the cache and may take network time. `q` leaves search results and restores the original mailbox, selected message and reader position where still cached.
 

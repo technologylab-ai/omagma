@@ -15,7 +15,7 @@ const wasm = options.has('--wasm') ? resolve(process.cwd(), options.get('--wasm'
 const module = await WebAssembly.compile(await readFile(wasm));
 for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms'].includes(entry.name) || entry.kind !== 'function') throw new Error('The browser module imports an unsupported host capability.');
 const exports = new Set(WebAssembly.Module.exports(module).map(({ name }) => name));
-for (const name of ['memory', 'init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width']) {
+for (const name of ['memory', 'init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width', 'policy_ptr', 'policy_len']) {
   if (!exports.has(name)) throw new Error(`Missing browser WASM export: ${name}`);
 }
 const out = options.has('--out-dir') ? resolve(process.cwd(), options.get('--out-dir')) : resolve(here, 'dist');

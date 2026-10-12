@@ -3,6 +3,7 @@ const t = @import("types.zig");
 const j = @import("json.zig");
 const recipients = @import("recipients.zig");
 const bounded = @import("../bounded.zig");
+const policy = @import("mail_limits.zig");
 
 fn array(value: j.Value, key: []const u8) ![]j.Value {
     const entries = j.get(value, key) orelse return &.{};
@@ -11,11 +12,12 @@ fn array(value: j.Value, key: []const u8) ![]j.Value {
 }
 pub fn validate(value: t.Contact) !void {
     try recipients.validateHeader(value.name);
-    if (value.name.len > 256 or value.emails.len == 0 or value.emails.len > 32) return error.InvalidContact;
+    if (value.name.len > policy.display_name_bytes or value.emails.len == 0 or value.emails.len > 32) return error.InvalidContact;
     for (value.emails, 0..) |email, index| {
         try recipients.validateAddress(email.address);
         try recipients.validateHeader(email.name);
-        for (value.emails[0..index]) |previous| if (std.ascii.eqlIgnoreCase(email.address, previous.address)) return error.DuplicateAddress;
+        if (email.name.len > policy.display_name_bytes) return error.InvalidContact;
+        for (value.emails[0..index]) |previous| if (recipients.sameAddress(email.address, previous.address)) return error.DuplicateAddress;
     }
 }
 pub fn normalize(a: std.mem.Allocator, value: j.Value) !t.Contact {
@@ -43,11 +45,11 @@ pub fn normalize(a: std.mem.Allocator, value: j.Value) !t.Contact {
             break;
         };
     }
-    if (name.len > 512 or etag.len > 4096) return error.ContactTooLarge;
+    if (name.len > policy.display_name_bytes or etag.len > 4096) return error.ContactTooLarge;
     var provider = j.object(a);
     for ([_][]const u8{ "names", "emailAddresses", "metadata" }) |key| if (j.get(value, key)) |field| try provider.object.put(a, key, field);
     if ((try std.json.Stringify.valueAlloc(a, provider, .{})).len > 64 * 1024) return error.ContactTooLarge;
-    return .{ .resourceName = resource_name, .etag = etag, .name = try @import("mime.zig").sanitizeText(name, a), .emails = emails, .provider = provider };
+    return .{ .resourceName = resource_name, .etag = etag, .name = try @import("mime.zig").sanitizeHeaderText(name, a), .emails = emails, .provider = provider };
 }
 pub fn mergeInput(a: std.mem.Allocator, value: j.Value, current: ?t.Contact) !t.Contact {
     var result = try j.decode(t.Contact, a, value);
@@ -61,7 +63,7 @@ pub fn mergeInput(a: std.mem.Allocator, value: j.Value, current: ?t.Contact) !t.
 }
 pub fn emailsEqual(left: []const t.Address, right: []const t.Address) bool {
     if (left.len != right.len) return false;
-    for (left, right) |l, r| if (!std.mem.eql(u8, l.address, r.address)) return false;
+    for (left, right) |l, r| if (!recipients.sameAddress(l.address, r.address)) return false;
     return true;
 }
 pub fn providerBody(a: std.mem.Allocator, value: t.Contact, current: ?t.Contact) !j.Value {
@@ -74,7 +76,7 @@ pub fn providerBody(a: std.mem.Allocator, value: t.Contact, current: ?t.Contact)
     const old_emails = try array(previous, "emailAddresses");
     for (value.emails) |email| {
         var preserved: ?j.Value = null;
-        for (old_emails) |old| if (std.ascii.eqlIgnoreCase(email.address, j.text(old, "value"))) {
+        for (old_emails) |old| if (recipients.sameAddress(email.address, j.text(old, "value"))) {
             preserved = old;
             break;
         };
@@ -108,4 +110,21 @@ test "contacts: changing one address preserves other addresses and People metada
     const after_emails = try array(address_body, "emailAddresses");
     try std.testing.expect(try j.boolean(j.get(after_emails[0], "metadata").?, "primary", false));
     try std.testing.expectEqualStrings("new@example.test", j.text(after_emails[1], "value"));
+}
+
+test "mailbox compatibility: contacts allow Unicode names and preserve distinct local parts" {
+    var name_bytes: [1023]u8 = undefined;
+    for (0..341) |index| @memcpy(name_bytes[index * 3 ..][0..3], "界");
+    const long = &name_bytes;
+    try validate(.{ .name = long, .emails = &.{ .{ .address = "Smith@例子.test" }, .{ .address = "smith@例子.test" }, .{ .address = "用户@例子.test" } } });
+    try std.testing.expectError(error.DuplicateAddress, validate(.{ .emails = &.{ .{ .address = "Smith@example.test" }, .{ .address = "\"Smith\"@EXAMPLE.test" } } }));
+    const too_long = try std.mem.concat(std.testing.allocator, u8, &.{ long, "界" });
+    defer std.testing.allocator.free(too_long);
+    try std.testing.expectError(error.InvalidContact, validate(.{ .name = too_long, .emails = &.{.{ .address = "peer@example.test" }} }));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const normalized = try normalize(a, try j.value(a, .{ .resourceName = "people/unicode", .names = .{.{ .displayName = long }}, .emailAddresses = .{.{ .value = "用户@例子.test" }} }));
+    try std.testing.expectEqualStrings(long, normalized.name);
+    try std.testing.expectEqualStrings("用户@例子.test", normalized.emails[0].address);
 }

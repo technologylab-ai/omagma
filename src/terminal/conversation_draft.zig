@@ -5,6 +5,7 @@ const t = @import("types.zig");
 const recipients = @import("recipients.zig");
 const mime = @import("mime.zig");
 const markdown = @import("markdown_mail.zig");
+const mail_limits = @import("mail_limits.zig");
 
 pub const ReplyOptions = struct {
     account: []const u8,
@@ -22,6 +23,9 @@ pub const ForwardOptions = struct {
     body_text: ?[]const u8 = null,
     omitted_attachments: usize = 0,
 };
+pub fn requireBody(message: t.Message) !void {
+    if (message.bodyCacheError.len != 0) return error.MessageBodyUnavailable;
+}
 pub fn listAddresses(a: std.mem.Allocator, list: *const recipients.List) ![]const t.Address {
     const result = try a.alloc(t.Address, list.count);
     for (list.slice(), result) |*source, *dest| dest.* = .{ .address = try a.dupe(u8, source.address.slice()), .name = try a.dupe(u8, source.name.slice()) };
@@ -54,13 +58,16 @@ pub fn quote(a: std.mem.Allocator, body: []const u8) ![]const u8 {
     return bytes.items;
 }
 pub fn reply(a: std.mem.Allocator, message: t.Message, options: ReplyOptions) !t.Draft {
+    try requireBody(message);
+    // A display-only fallback never supplies an implicit outgoing recipient.
+    if (message.decodeWarning.len > 0 and message.from.address.len == 0) return error.UnsafeReplyMetadata;
     const threading = try mime.threading(message.messageId, message.references, message.inReplyTo, a);
     var envelope: recipients.Envelope = .{};
     try recipients.replyIncoming(a, options.account, options.aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), options.all, &envelope);
     return .{
         .to = try listAddresses(a, &envelope.to),
         .cc = try listAddresses(a, &envelope.cc),
-        .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Re:")) message.subject else try std.fmt.allocPrint(a, "Re: {s}", .{message.subject}),
+        .subject = try prefixedSubject(a, message.subject, "Re:"),
         .bodyText = if (options.original != null) "" else try quote(a, if (options.format == .markdown) try markdown.escapeSource(a, message.bodyText) else message.bodyText),
         .bodyFormat = options.format,
         .threadId = message.threadId,
@@ -70,8 +77,9 @@ pub fn reply(a: std.mem.Allocator, message: t.Message, options: ReplyOptions) !t
     };
 }
 pub fn forward(a: std.mem.Allocator, message: t.Message, options: ForwardOptions) !t.Draft {
+    try requireBody(message);
     var draft: t.Draft = .{
-        .subject = if (std.ascii.startsWithIgnoreCase(message.subject, "Fwd:")) message.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{message.subject}),
+        .subject = try prefixedSubject(a, message.subject, "Fwd:"),
         .bodyFormat = options.format,
         .attachments = options.attachments,
         .original = options.original,
@@ -83,6 +91,12 @@ pub fn forward(a: std.mem.Allocator, message: t.Message, options: ForwardOptions
     }
     // A forward deliberately has no original recipients or reply threading.
     return draft;
+}
+fn prefixedSubject(a: std.mem.Allocator, subject: []const u8, prefix: []const u8) ![]const u8 {
+    if (subject.len > mail_limits.subject_bytes) return error.HeaderTooLarge;
+    if (std.ascii.startsWithIgnoreCase(subject, prefix)) return subject;
+    if (prefix.len + 1 > mail_limits.subject_bytes - subject.len) return error.HeaderTooLarge;
+    return std.fmt.allocPrint(a, "{s} {s}", .{ prefix, subject });
 }
 fn appendSpan(a: std.mem.Allocator, out: *std.ArrayList(u8), span: @import("html_document.zig").Span) !void {
     try out.appendSlice(a, span.text);
@@ -151,4 +165,46 @@ test "conversation draft: forward preserves semantic links and omission warning 
     try std.testing.expectEqualStrings("", draft.threadId);
     try std.testing.expectEqualStrings("", draft.inReplyTo);
     try std.testing.expectEqualStrings("", draft.references);
+}
+
+test "mail metadata: reply and forward retain full subjects with prefix headroom" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const subject: [mail_limits.subject_text_bytes]u8 = @splat('s');
+    const message: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "sender@example.test" }, .to = &.{.{ .address = "self@example.test" }}, .subject = &subject, .bodyText = "Body", .messageId = "<source@example.test>" };
+    const reply_draft = try reply(a, message, .{ .account = "self@example.test" });
+    try std.testing.expectEqualStrings(&subject, reply_draft.subject["Re: ".len..]);
+    try @import("draft_codec.zig").validateDraft(reply_draft, true);
+    const forward_draft = try forward(a, message, .{});
+    try std.testing.expectEqualStrings(&subject, forward_draft.subject["Fwd: ".len..]);
+    try @import("draft_codec.zig").validateDraft(forward_draft, false);
+    const limit: [mail_limits.subject_bytes]u8 = @splat('s');
+    try std.testing.expectError(error.HeaderTooLarge, prefixedSubject(a, &limit, "Re:"));
+}
+
+test "conversation draft: display-only metadata never supplies reply destinations" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const message: t.Message = .{ .id = "source", .threadId = "thread", .from = .{ .address = "", .name = "Display-only sender" }, .replyTo = &.{.{ .address = "untrusted@example.test" }}, .subject = "Readable source", .bodyText = "Body", .messageId = "<source@example.test>", .decodeWarning = "InvalidRecipients" };
+    try std.testing.expectError(error.UnsafeReplyMetadata, reply(arena.allocator(), message, .{ .account = "self@example.test" }));
+    const draft = try forward(arena.allocator(), message, .{});
+    try std.testing.expectEqual(@as(usize, 0), draft.to.len);
+    try std.testing.expectEqual(@as(usize, 0), draft.cc.len);
+    try std.testing.expectEqual(@as(usize, 0), draft.bcc.len);
+    try std.testing.expect(std.mem.indexOf(u8, draft.bodyText, "Body") != null);
+}
+
+test "message isolation: body refusals block reply all and forwards before destination derivation" {
+    var storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const a = fixed.allocator();
+    const message: t.Message = .{ .id = "refused", .threadId = "thread", .from = .{ .address = "sender@example.test" }, .replyTo = &.{.{ .address = "actual-reply@example.test" }}, .to = &.{.{ .address = "self@example.test" }}, .cc = &.{.{ .address = "peer@example.test" }}, .subject = "Unavailable source", .bodyCacheError = "UnsupportedCharset", .decodeWarning = "UnsupportedCharset" };
+    for ([_]bool{ false, true }) |all| {
+        try std.testing.expectError(error.MessageBodyUnavailable, reply(a, message, .{ .account = "self@example.test", .all = all }));
+        try std.testing.expectError(error.MessageBodyUnavailable, reply(a, message, .{ .account = "self@example.test", .all = all, .original = .{ .sourceMessageId = message.id, .bodyHtml = "<p>Stale source</p>" } }));
+    }
+    try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{}));
+    try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{ .body_text = "Stale source", .omitted_attachments = 3 }));
+    try std.testing.expectError(error.MessageBodyUnavailable, forward(a, message, .{ .original = .{ .sourceMessageId = message.id, .bodyHtml = "<p>Stale source</p>" } }));
 }

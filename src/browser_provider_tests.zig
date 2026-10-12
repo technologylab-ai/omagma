@@ -764,9 +764,10 @@ test "browser provider: formatted reply all uses fresh source verified aliases a
     const cc = j.get(draft, "cc").?.array.items;
     try equal(@as(usize, 1), to.len);
     try strings("reply@example.test", j.text(to[0], "address"));
-    try equal(@as(usize, 2), cc.len);
+    try equal(@as(usize, 3), cc.len);
     try strings("peer@example.test", j.text(cc[0], "address"));
-    try strings("copy@example.test", j.text(cc[1], "address"));
+    try strings("PEER@example.test", j.text(cc[1], "address"));
+    try strings("copy@example.test", j.text(cc[2], "address"));
     try strings("source-thread", j.text(draft, "threadId"));
     try strings("<source@example.test>", j.text(draft, "inReplyTo"));
     try strings("<earlier@example.test> <source@example.test>", j.text(draft, "references"));
@@ -796,7 +797,7 @@ test "browser provider: formatted reply all uses fresh source verified aliases a
         .{ .url = source_style_url, .session = 12, .body = style_response },
     });
     const other = try data(try invoke(&provider, a, .{ .cmd = "mail.reply", .account = "second@example.test", .messageId = "source", .preserveFormatting = true, .all = true }, false));
-    try equal(@as(usize, 4), j.get(other, "cc").?.array.items.len);
+    try equal(@as(usize, 6), j.get(other, "cc").?.array.items.len);
     try verifyHost();
 }
 
@@ -1253,5 +1254,414 @@ test "browser provider: unsuccessful quota admission preserves retired active an
     try equal(hashes[0], try storedDraftHash(&provider, 0, retired));
     try equal(hashes[3], try storedDraftHash(&provider, 1, unconsumed));
     try failure(try invoke(&provider, a, .{ .cmd = "draft.discard", .account = other, .draftId = unconsumed }, false), "UnknownOutcome");
+    try verifyHost();
+}
+
+test "browser provider: partial metadata cannot remove retained folder membership or hide warning rows" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    try provider.cache.restore(0, fixture_snapshot, false);
+    resetHost(&.{
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?", .prefix = true, .body = "{\"messages\":[{\"id\":\"warning-mail\"}]}" },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/warning-mail?", .prefix = true, .body = "{\"id\":\"warning-mail\",\"threadId\":\"warning-thread\",\"labelIds\":[\"INBOX\"],\"internalDate\":\"2000\",\"payload\":{\"mimeType\":\"text/plain\",\"headers\":[{\"name\":\"Subject\",\"value\":\"Warning remains visible\"},{\"name\":\"From\",\"value\":\"unsupported syntax\"}]}}" },
+    });
+    _ = try data(try invoke(&provider, a, .{ .cmd = "mail.refresh", .account = account, .label = "INBOX" }, false));
+    const cached = try data(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX" }, true));
+    const rows = j.get(cached, "messages").?.array.items;
+    try equal(@as(usize, 2), rows.len);
+    try expect(try j.boolean(cached, "viewIncomplete", false));
+    try strings("warning-mail", j.text(rows[0], "id"));
+    try strings("", j.text(j.get(rows[0], "from").?, "address"));
+    try expect(try j.boolean(rows[0], "metadataPartial", false));
+    try expect(j.text(rows[0], "decodeWarning").len != 0);
+    try strings("old-inbox", j.text(rows[1], "id"));
+    try strings("An independently authored cached body", j.text(try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "old-inbox" }, true)), "bodyText"));
+    try verifyHost();
+}
+
+test "browser provider: stats report the actual fixed heap separately from linear memory" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    resetHost(&.{});
+    const stats = try data(try invoke(&provider, a, .{ .cmd = "cache.stats", .account = account }, true));
+    try equal(@as(i64, 64 * 1024 * 1024), try j.integer(stats, "runtimeReservationBytes", 0));
+    try equal(@as(i64, 64 * 1024 * 1024), try j.integer(stats, "terminalHeapLimitBytes", 0));
+    try equal(@as(i64, 96 * 1024 * 1024), try j.integer(stats, "browserLinearMemoryBytes", 0));
+    const scratch = j.get(stats, "mailScratch").?;
+    try equal(@as(i64, 16 * 1024 * 1024), try j.integer(scratch, "reservationBytes", 0));
+    try equal(@as(i64, 0), try j.integer(scratch, "usedBytes", -1));
+    try expect(!try j.boolean(scratch, "active", true));
+    try equal(@as(i64, 8 * 1024 * 1024), try j.integer(stats, "diskLimitBytes", 0));
+    try verifyHost();
+}
+
+fn browserMailFixture(a: A, id: []const u8, thread: []const u8, body: []const u8) !Value {
+    return j.value(a, .{
+        .id = id,
+        .threadId = thread,
+        .labelIds = [_][]const u8{"INBOX"},
+        .internalDate = "2000",
+        .payload = .{ .mimeType = "text/plain", .headers = [_]struct { name: []const u8, value: []const u8 }{
+            .{ .name = "From", .value = "Peer <peer@example.test>" },
+            .{ .name = "To", .value = account },
+            .{ .name = "Subject", .value = "Independent browser body fixture" },
+        }, .body = .{ .size = body.len, .data = try base64(a, body) } },
+    });
+}
+fn escapedBrowserBody(a: A, bytes: usize) ![]u8 {
+    const body = try a.alloc(u8, bytes);
+    for (body, 0..) |*byte, index| byte.* = if (index % 2 == 0) '"' else '\\';
+    return body;
+}
+fn findBrowserMessage(values: []const Value, id: []const u8) !Value {
+    for (values) |value| if (std.mem.eql(u8, j.text(value, "id"), id)) return value;
+    return error.MissingFixtureMessage;
+}
+
+test "browser provider: aggregate thread omission remains eligible for a later individual live read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    const body = try escapedBrowserBody(a, 1_100_000);
+    var first = try browserMailFixture(a, "first", "aggregate", body);
+    try first.object.put(a, "internalDate", .{ .string = "1000" });
+    const second = try browserMailFixture(a, "second", "aggregate", body);
+    const thread = try std.json.Stringify.valueAlloc(a, .{ .id = "aggregate", .messages = [_]Value{ first, second } }, .{});
+    const standalone = try std.json.Stringify.valueAlloc(a, first, .{});
+    resetHost(&.{
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/threads/aggregate?format=full", .body = thread },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/first?format=full", .body = standalone },
+    });
+    const conversation = try messages(try invoke(&provider, a, .{ .cmd = "mail.thread", .account = account, .threadId = "aggregate" }, false));
+    try equal(@as(usize, 2), conversation.len);
+    try strings(body, j.text(try findBrowserMessage(conversation, "second"), "bodyText"));
+    try strings("ThreadBodyBudgetExceeded", j.text(try findBrowserMessage(conversation, "first"), "bodyCacheError"));
+    try expect(try provider.cache.read(0, "first") == null);
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "first" }, true), "CacheMiss");
+    const opened = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "first" }, false));
+    try strings(body, j.text(opened, "bodyText"));
+    try strings("", j.text(opened, "bodyCacheError"));
+    try strings(body, (try provider.cache.read(0, "first")).?.bodyText);
+    try verifyHost();
+}
+
+test "browser provider: standalone escaped body remains readable when its serialized snapshot exceeds quota" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    const body = try escapedBrowserBody(a, 1_600_000);
+    const response = try std.json.Stringify.valueAlloc(a, try browserMailFixture(a, "quota", "thread", body), .{});
+    const step: HttpStep = .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/quota?format=full", .body = response };
+    resetHost(&.{ step, step });
+    for (0..2) |_| {
+        const opened = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "quota" }, false));
+        try strings(body, j.text(opened, "bodyText"));
+        try strings("BrowserCacheQuotaExceeded", j.text(opened, "decodeWarning"));
+        try strings("", j.text(opened, "bodyCacheError"));
+        try expect(try j.boolean(opened, "metadataPartial", false));
+        try expect(!try j.boolean(opened, "bodyCached", true));
+        try expect(try provider.cache.read(0, "quota") == null);
+    }
+    try verifyHost();
+}
+
+test "browser provider: thread cache quota warning preserves actual bodies neighboring messages and prior full cache" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    try provider.cache.saveRead(0, .{ .id = "large", .threadId = "quota-thread", .bodyText = "Earlier full cached body", .labels = &.{"INBOX"} });
+    const body = try escapedBrowserBody(a, 1_600_000);
+    const large = try browserMailFixture(a, "large", "quota-thread", body);
+    const neighbor = try browserMailFixture(a, "neighbor", "quota-thread", "A healthy neighboring body");
+    const response = try std.json.Stringify.valueAlloc(a, .{ .id = "quota-thread", .messages = [_]Value{ large, neighbor } }, .{});
+    resetHost(&.{.{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/threads/quota-thread?format=full", .body = response }});
+    const result = try data(try invoke(&provider, a, .{ .cmd = "mail.thread", .account = account, .threadId = "quota-thread" }, false));
+    const returned = j.get(result, "messages").?.array.items;
+    try equal(@as(usize, 2), returned.len);
+    const readable = try findBrowserMessage(returned, "large");
+    try strings(body, j.text(readable, "bodyText"));
+    try strings("BrowserCacheQuotaExceeded", j.text(readable, "decodeWarning"));
+    try strings("", j.text(readable, "bodyCacheError"));
+    try expect(try j.boolean(result, "partial", false));
+    try strings("A healthy neighboring body", j.text(try findBrowserMessage(returned, "neighbor"), "bodyText"));
+    try strings("Earlier full cached body", (try provider.cache.read(0, "large")).?.bodyText);
+    try strings("A healthy neighboring body", (try provider.cache.read(0, "neighbor")).?.bodyText);
+    try verifyHost();
+}
+
+test "browser provider: cache admission does not hide allocator authentication or identity failures" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    const response = try std.json.Stringify.valueAlloc(a, try browserMailFixture(a, "requested", "thread", "Small readable body"), .{});
+    resetHost(&.{
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/requested?format=full", .status = 401 },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/other?format=full", .body = response },
+    });
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "requested" }, false), "NotConnected");
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "other" }, false), "MessageIdentityMismatch");
+    try verifyHost();
+    provider.cache.deinit();
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    provider.cache = cache.Store.init(failing.allocator());
+    try provider.cache.bind(0, .{ .account = account, .clientId = client_id, .grantId = "" });
+    failing.fail_index = failing.alloc_index;
+    resetHost(&.{.{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/requested?format=full", .body = response }});
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "requested" }, false), "OutOfMemory");
+    try expect(!provider.cache.valid(0));
+    try verifyHost();
+}
+
+test "browser provider: ID-only scoped rows survive account switches and partial queries without losing neighbors" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    try actor(&provider, 1, "second@example.test", false, false);
+    try provider.cache.restore(0, fixture_snapshot, false);
+    try provider.cache.saveRead(1, .{ .id = "other-actor", .threadId = "other-thread", .bodyText = "Second actor only", .labels = &.{"INBOX"} });
+    resetHost(&.{
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?", .prefix = true, .body = "{\"messages\":[{\"id\":\"id-only\"}]}" },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/id-only?format=metadata", .prefix = true, .result = 2 },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/id-only?format=minimal&fields=id,threadId", .body = "{\"id\":\"id-only\",\"threadId\":\"unknown-thread\"}" },
+    });
+    _ = try data(try invoke(&provider, a, .{ .cmd = "mail.refresh", .account = account, .label = "INBOX" }, false));
+    try equal(@as(usize, 1), (try messages(try invoke(&provider, a, .{ .cmd = "mail.list", .account = "second@example.test", .label = "INBOX" }, true))).len);
+    const restored = try data(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX" }, true));
+    const rows = j.get(restored, "messages").?.array.items;
+    try equal(@as(usize, 2), rows.len);
+    _ = try findBrowserMessage(rows, "old-inbox");
+    const unknown = try findBrowserMessage(rows, "id-only");
+    try expect(!try j.boolean(unknown, "labelsVerified", true));
+    try equal(@as(usize, 0), j.get(unknown, "labels").?.array.items.len);
+    try expect(try j.boolean(restored, "viewIncomplete", false));
+    for ([_][]const u8{ "mail.list", "mail.search" }) |cmd| {
+        const partial = try messages(try invoke(&provider, a, .{ .cmd = cmd, .account = account, .label = "INBOX", .query = "status:partial" }, true));
+        try equal(@as(usize, 1), partial.len);
+        try strings("id-only", j.text(partial[0], "id"));
+    }
+    try equal(@as(usize, 0), (try messages(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "SENT", .query = "status:partial" }, true))).len);
+    try equal(@as(usize, 0), (try messages(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX", .query = "label:SENT status:partial" }, true))).len);
+    try strings("An independently authored cached body", (try provider.cache.read(0, "old-inbox")).?.bodyText);
+    try verifyHost();
+    // A subsequent partial head proves no removals, including for unknown
+    // labels whose membership came solely from an earlier scoped list.
+    resetHost(&.{.{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?", .prefix = true, .body = "{\"messages\":[],\"nextPageToken\":\"more\"}" }});
+    _ = try data(try invoke(&provider, a, .{ .cmd = "mail.refresh", .account = account, .label = "INBOX" }, false));
+    const repeated = try messages(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX", .query = "status:partial" }, true));
+    try equal(@as(usize, 1), repeated.len);
+    try strings("id-only", j.text(repeated[0], "id"));
+    try verifyHost();
+    // Only a later complete provider view can certify that these IDs left.
+    resetHost(&.{.{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?", .prefix = true, .body = "{\"messages\":[]}" }});
+    _ = try data(try invoke(&provider, a, .{ .cmd = "mail.refresh", .account = account, .label = "INBOX" }, false));
+    const empty = try data(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX" }, true));
+    try equal(@as(usize, 0), j.get(empty, "messages").?.array.items.len);
+    try expect(!try j.boolean(empty, "viewIncomplete", true));
+    try equal(@as(usize, 0), (try messages(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX", .query = "status:partial" }, true))).len);
+    try verifyHost();
+}
+
+test "browser provider: decoder migration stays offline and a newly refused charset is fetched only once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    const old = snapshot_head ++ "\"decoderRevision\":3,\"messages\":[{\"id\":\"charset\",\"threadId\":\"thread\",\"subject\":\"Retained subject\",\"bodyCacheError\":\"UnsupportedCharset\",\"decodeWarning\":\"UnsupportedCharset\",\"metadataPartial\":true,\"labels\":[\"INBOX\"]}],\"contacts\":[],\"contactsLoaded\":false}";
+    var source = try browserMailFixture(a, "charset", "thread", "\x82\xa0");
+    const payload = source.object.getPtr("payload").?;
+    try payload.object.getPtr("headers").?.array.append(try j.value(a, .{ .name = "Content-Type", .value = "text/plain; charset=Shift_JIS" }));
+    const response = try std.json.Stringify.valueAlloc(a, source, .{});
+    resetHost(&.{.{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/charset?format=full", .body = response }});
+    try provider.cache.restore(0, old, false);
+    try equal(@as(usize, 0), host.requests);
+    try failure(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, true), "CacheMiss");
+    try equal(@as(usize, 0), host.requests);
+    const first = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, false));
+    try strings("UnsupportedCharset", j.text(first, "bodyCacheError"));
+    try equal(@as(usize, 1), host.requests);
+    const snapshot_buffer = try a.alloc(u8, cache.snapshot_limit);
+    const persisted = try a.dupe(u8, try provider.cache.snapshot(0, snapshot_buffer));
+    try equal(@as(i64, 4), try j.integer(try parse(a, persisted), "decoderRevision", 0));
+    try provider.cache.restore(0, persisted, false);
+    const second = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, false));
+    try strings("UnsupportedCharset", j.text(second, "bodyCacheError"));
+    try equal(@as(usize, 1), host.requests);
+    try verifyHost();
+}
+
+test "browser provider: cached thread includes metadata-only members in the newest thirty message window" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    var rows: [35]Value = undefined;
+    for (&rows, 0..) |*row, index| row.* = try j.value(a, .{ .id = try std.fmt.allocPrint(a, "member-{d}", .{index}), .threadId = "large-thread", .subject = "Retained member", .receivedAt = @as(i64, @intCast(index + 1)), .bodyText = if (index % 2 == 0) @as([]const u8, "") else "Retained full body", .bodyCached = index % 2 != 0, .labels = [_][]const u8{"INBOX"} });
+    const old = try std.mem.concat(a, u8, &.{ snapshot_head, "\"decoderRevision\":4,\"messages\":", try std.json.Stringify.valueAlloc(a, &rows, .{}), ",\"contacts\":[],\"contactsLoaded\":false}" });
+    try provider.cache.restore(0, old, false);
+    resetHost(&.{});
+    const result = try data(try invoke(&provider, a, .{ .cmd = "mail.thread", .account = account, .threadId = "large-thread" }, true));
+    const returned = j.get(result, "messages").?.array.items;
+    try equal(@as(usize, 30), returned.len);
+    try equal(@as(i64, 5), try j.integer(result, "omittedMessages", 0));
+    try expect(try j.boolean(result, "partial", false));
+    try strings("member-5", j.text(returned[0], "id"));
+    try strings("member-34", j.text(returned[29], "id"));
+    const missing = try findBrowserMessage(returned, "member-6");
+    try strings("BodyNotCached", j.text(missing, "bodyCacheError"));
+    try expect(try j.boolean(missing, "labelsVerified", false));
+    try strings("INBOX", j.get(missing, "labels").?.array.items[0].string);
+    try strings("Retained full body", j.text(try findBrowserMessage(returned, "member-7"), "bodyText"));
+    try expect(try provider.cache.read(0, "member-6") == null);
+    try verifyHost();
+}
+
+test "browser provider: live threads keep healthy newest thirty members and report older omissions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    var rows: [35]Value = undefined;
+    for (&rows, 0..) |*row, index| {
+        row.* = try browserMailFixture(a, try std.fmt.allocPrint(a, "member-{d}", .{index}), "large-thread", "Healthy live body");
+        try row.object.put(a, "internalDate", .{ .string = try std.fmt.allocPrint(a, "{d}", .{index + 1}) });
+    }
+    resetHost(&.{.{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/threads/large-thread?format=full", .body = try std.json.Stringify.valueAlloc(a, .{ .id = "large-thread", .messages = &rows }, .{}) }});
+    const result = try data(try invoke(&provider, a, .{ .cmd = "mail.thread", .account = account, .threadId = "large-thread" }, false));
+    const returned = j.get(result, "messages").?.array.items;
+    try equal(@as(usize, 30), returned.len);
+    try equal(@as(i64, 5), try j.integer(result, "omittedMessages", 0));
+    try expect(try j.boolean(result, "partial", false));
+    try strings("member-5", j.text(returned[0], "id"));
+    try strings("member-34", j.text(returned[29], "id"));
+    for (returned) |row| try strings("Healthy live body", j.text(row, "bodyText"));
+    try expect(try provider.cache.read(0, "member-0") == null);
+    try equal(@as(usize, 30), provider.cache.retained(0).len);
+    try verifyHost();
+}
+
+test "browser provider: eviction invalidates a complete cached view and returns the retained subset honestly" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    resetHost(&.{
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?", .prefix = true, .body = "{\"messages\":[{\"id\":\"original\"}]}" },
+        .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/original?format=metadata", .prefix = true, .body = try std.json.Stringify.valueAlloc(a, try browserMailFixture(a, "original", "original-thread", ""), .{}) },
+    });
+    _ = try data(try invoke(&provider, a, .{ .cmd = "mail.refresh", .account = account, .label = "INBOX" }, false));
+    for (0..10) |page| {
+        var rows: [30]Value = undefined;
+        for (&rows, 0..) |*row, offset| row.* = try j.value(a, t.Message{ .id = try std.fmt.allocPrint(a, "retained-{d}", .{page * 30 + offset}), .threadId = "retained-thread", .receivedAt = @intCast(page * 30 + offset + 1), .labels = &.{"INBOX"} });
+        try provider.cache.replaceList(0, &rows, 100);
+    }
+    try equal(@as(usize, 300), provider.cache.retained(0).len);
+    const result = try data(try invoke(&provider, a, .{ .cmd = "mail.list", .account = account, .label = "INBOX" }, true));
+    const returned = j.get(result, "messages").?.array.items;
+    try equal(@as(usize, 30), returned.len);
+    try expect(try j.boolean(result, "viewIncomplete", false));
+    try expect(try j.boolean(result, "hasMoreCachedAfter", false));
+    try strings("retained-299", j.text(returned[0], "id"));
+    try verifyHost();
+}
+
+test "browser provider: list snapshot quota preserves the current decoded view and previous committed cache" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    const mime_type = try a.alloc(u8, 64 * 1024);
+    @memset(mime_type, 'a');
+    @memcpy(mime_type[0..12], "application/");
+    const content_id = try a.alloc(u8, 1024);
+    @memset(content_id, 'i');
+    var files: [47]t.Attachment = undefined;
+    for (&files, 0..) |*file, index| file.* = .{ .id = try std.fmt.allocPrint(a, "part-{d}", .{index}), .filename = "retained.bin", .mimeType = mime_type, .contentId = content_id };
+    try provider.cache.saveRead(0, .{ .id = "quota-meta", .threadId = "quota-thread", .subject = "Before", .bodyText = "Prior body", .attachments = &files, .labels = &.{"INBOX"} });
+    const before = try snapshot(&provider, a, 0);
+    try expect(before.len > cache.snapshot_limit - 16 * 1024 and before.len <= cache.snapshot_limit);
+    const revision = provider.cache.revision(0);
+    const timestamp = provider.cache.updatedAt(0);
+    const subject = try a.alloc(u8, 16 * 1024);
+    @memset(subject, 's');
+    var large = try browserMailFixture(a, "quota-meta", "quota-thread", "");
+    try large.object.getPtr("payload").?.object.getPtr("headers").?.array.items[2].object.put(a, "value", .{ .string = subject });
+    const large_response = try std.json.Stringify.valueAlloc(a, large, .{});
+    const neighbor_response = try std.json.Stringify.valueAlloc(a, try browserMailFixture(a, "neighbor", "neighbor-thread", ""), .{});
+    const listing: HttpStep = .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?", .prefix = true, .body = "{\"messages\":[{\"id\":\"quota-meta\"},{\"id\":\"neighbor\"}]}" };
+    const large_step: HttpStep = .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/quota-meta?format=metadata", .prefix = true, .body = large_response };
+    const neighbor_step: HttpStep = .{ .url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/neighbor?format=metadata", .prefix = true, .body = neighbor_response };
+    resetHost(&.{ listing, large_step, neighbor_step, listing, large_step, neighbor_step });
+    for ([_][]const u8{ "mail.refresh", "mail.list" }) |cmd| {
+        const result = try data(try invoke(&provider, a, .{ .cmd = cmd, .account = account, .label = "INBOX" }, false));
+        try expect(try j.boolean(result, "cacheWriteFailed", false));
+        try expect(try j.boolean(result, "cacheReady", false));
+        try expect(try j.boolean(result, "refreshCompleted", false));
+        const returned = j.get(result, "messages").?.array.items;
+        try equal(@as(usize, 2), returned.len);
+        const current = try findBrowserMessage(returned, "quota-meta");
+        try strings(subject, j.text(current, "subject"));
+        try strings("BrowserCacheQuotaExceeded", j.text(current, "decodeWarning"));
+        _ = try findBrowserMessage(returned, "neighbor");
+        try equal(timestamp, try j.integer(result, "lastSyncAt", -1));
+        try equal(revision, provider.cache.revision(0));
+        try strings(before, try snapshot(&provider, a, 0));
+        try strings("Prior body", (try provider.cache.read(0, "quota-meta")).?.bodyText);
+    }
+    try verifyHost();
+}
+
+test "browser provider: warm legacy header display is corrected without refetching a successful body" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, false, false);
+    const old = snapshot_head ++ "\"messages\":[{\"id\":\"warm\",\"threadId\":\"thread\",\"from\":{\"address\":\"peer@example.test\",\"name\":\"Decoded\\tname\"},\"subject\":\"Warm\\nsubject\",\"bodyText\":\"Retained\\n\\tbody\",\"bodyCached\":true,\"labels\":[\"INBOX\"]}],\"contacts\":[],\"contactsLoaded\":false}";
+    resetHost(&.{});
+    try provider.cache.restore(0, old, false);
+    for ([_]bool{ true, false }) |cached| {
+        const opened = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "warm" }, cached));
+        try strings("Warm subject", j.text(opened, "subject"));
+        try strings("Decoded name", j.text(j.get(opened, "from").?, "name"));
+        try strings("Retained\n\tbody", j.text(opened, "bodyText"));
+        try expect(try j.boolean(opened, "bodyCached", false));
+        try strings("", j.text(opened, "bodyCacheError"));
+    }
+    try equal(@as(usize, 0), host.requests);
+    try equal(@as(usize, 0), host.posts);
     try verifyHost();
 }

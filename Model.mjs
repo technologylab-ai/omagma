@@ -70,6 +70,18 @@ export function canonicalAddress(value) {
   return at > 0 && at < value.length - 1 && value.indexOf("@", at + 1) < 0 ? value : null;
 }
 
+function safeWarningCode(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 64
+    && !/[^A-Za-z0-9]/.test(value) ? value : "";
+}
+
+export function messageWarning(row) {
+  if (!row) return "";
+  const code = safeWarningCode(row.warningCode);
+  if (row.partial !== true && !code) return "";
+  return "Some message details are unavailable" + (code ? " · " + code : "");
+}
+
 export function normalizeSnapshot(value) {
   if (!value || !canonicalAddress(value.account) || STATES.indexOf(value.state) < 0
       || !safeInteger(value.generation, Number.MAX_SAFE_INTEGER)
@@ -88,7 +100,8 @@ export function normalizeSnapshot(value) {
     ids.add(row.id);
     rows.push({ id: row.id, threadId: row.threadId, sender: displayText(row.sender, 512),
       subject: displayText(row.subject, 512), snippet: displayText(row.snippet, 1024),
-      receivedAt: row.receivedAt, unread: row.unread });
+      receivedAt: row.receivedAt, unread: row.unread,
+      partial: row.partial === true, warningCode: safeWarningCode(row.warningCode) });
   }
   return { account: value.account, enabled: value.enabled, required: value.required,
     generation: value.generation, state: value.state, checkedAt: value.checkedAt,

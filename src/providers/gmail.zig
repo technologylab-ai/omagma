@@ -7,6 +7,7 @@ const oauth = @import("../oauth.zig");
 const keyring = @import("../keyring.zig");
 const Config = @import("../config.zig").Config;
 const open = @import("../open_target.zig");
+const message_refusal = @import("../terminal/gmail_decode.zig").messageRefusal;
 var response_storage: [l.response]u8 = undefined;
 var json_storage: [l.json_workspace / 2]u8 align(16) = undefined;
 var refresh_secret: [l.secret]u8 = undefined;
@@ -61,38 +62,46 @@ pub fn refresh(io: std.Io, config: *const Config, account: *const model.Account,
     const listed = try session.get("https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=INBOX&maxResults=30&includeSpamTrash=false&fields=messages(id,threadId)", metrics);
     try status(listed.status);
     var ids: [l.max_rows]b.Text(l.max_id) = @splat(.{});
-    const count = try list(listed.body, &ids, &parse_alloc, metrics);
+    var threads: [l.max_rows]b.Text(l.max_id) = @splat(.{});
+    const count = try listIdentities(listed.body, &ids, &threads, &parse_alloc, metrics);
     snapshot.* = .{};
-    for (ids[0..count]) |*id| {
+    for (ids[0..count], threads[0..count]) |*id, *thread| {
         var url: [4096]u8 = undefined;
         var w = std.Io.Writer.fixed(&url);
         try w.writeAll("https://gmail.googleapis.com/gmail/v1/users/me/messages/");
         try open.encode(&w, id.slice());
         try w.writeAll("?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&fields=id,threadId,labelIds,internalDate,snippet,payload(headers)");
-        const got = try session.get(w.buffered(), metrics);
+        const got = session.get(w.buffered(), metrics) catch |err| {
+            if (!message_refusal(err)) return err;
+            try partialMessage(.null, id.slice(), thread.slice(), &snapshot.messages[snapshot.count], err);
+            snapshot.count += 1;
+            snapshot.partial = true;
+            continue;
+        };
         if (got.status == 404) {
             snapshot.partial = true;
             continue;
         }
         try status(got.status);
-        message(got.body, &snapshot.messages[snapshot.count], &parse_alloc, metrics) catch |err| {
-            if (err == error.MessageLeftInbox) {
-                snapshot.partial = true;
-                continue;
-            }
-            return err;
-        };
-        if (!std.mem.eql(u8, id.slice(), snapshot.messages[snapshot.count].id.slice())) return error.MessageIdentityMismatch;
+        if (!try messageTolerant(got.body, id.slice(), thread.slice(), &snapshot.messages[snapshot.count], &parse_alloc, metrics)) {
+            snapshot.partial = true;
+            continue;
+        }
+        snapshot.partial = snapshot.partial or snapshot.messages[snapshot.count].partial;
         snapshot.count += 1;
     }
     const unread: ?http.Response = session.get("https://gmail.googleapis.com/gmail/v1/users/me/labels/INBOX?fields=messagesUnread", metrics) catch |err| blk: {
-        if (err == error.Canceled or err == error.InvalidGrant or err == error.NotConnected or err == error.WrongAccount) return err;
+        if (err == error.OutOfMemory or err == error.Canceled or err == error.InvalidGrant or err == error.NotConnected or err == error.WrongAccount) return err;
         break :blk null;
     };
     // A count-only failure leaves the verified page usable with unknown count.
     if (unread) |count_response| {
         if (count_response.status == 401) return error.NotConnected;
-        if (count_response.status == 200) snapshot.unread = unreadCount(count_response.body, &parse_alloc, metrics) catch null else if (count_response.status == 429 or count_response.status >= 500) metrics.retry_after = @max(metrics.retry_after, 5);
+        if (count_response.status == 403) return error.AccessDenied;
+        if (count_response.status == 200) snapshot.unread = unreadCount(count_response.body, &parse_alloc, metrics) catch |err| blk: {
+            if (err == error.OutOfMemory or err == error.Canceled) return err;
+            break :blk null;
+        } else if (count_response.status == 429 or count_response.status >= 500) metrics.retry_after = @max(metrics.retry_after, 5);
     }
     snapshot.sort();
     snapshot.checked_at = std.Io.Timestamp.now(io, .real).toSeconds();
@@ -125,6 +134,9 @@ fn status(s: u16) !void {
     };
 }
 pub fn list(raw: []const u8, ids: *[l.max_rows]b.Text(l.max_id), allocator: *std.heap.FixedBufferAllocator, metrics: *Metrics) !usize {
+    return listIdentities(raw, ids, null, allocator, metrics);
+}
+fn listIdentities(raw: []const u8, ids: *[l.max_rows]b.Text(l.max_id), threads: ?*[l.max_rows]b.Text(l.max_id), allocator: *std.heap.FixedBufferAllocator, metrics: *Metrics) !usize {
     defer allocator.reset();
     const parsed = try parse(raw, allocator, metrics);
     defer parsed.deinit();
@@ -135,6 +147,11 @@ pub fn list(raw: []const u8, ids: *[l.max_rows]b.Text(l.max_id), allocator: *std
         const id = try b.string(try b.field(entry, "id"));
         try b.identifier(id);
         try ids[i].set(id);
+        if (threads) |out| {
+            const thread = try b.string(try b.field(entry, "threadId"));
+            try b.identifier(thread);
+            try out[i].set(thread);
+        }
         for (ids[0..i]) |*previous| if (std.mem.eql(u8, previous.slice(), id)) return error.DuplicateMessage;
     }
     return v.array.items.len;
@@ -145,6 +162,9 @@ pub fn message(raw: []const u8, out: *model.Message, allocator: *std.heap.FixedB
     defer parsed.deinit();
     metrics.json_peak = @max(metrics.json_peak, allocator.end_index);
     const root = parsed.value;
+    try messageValue(root, out);
+}
+fn messageValue(root: std.json.Value, out: *model.Message) !void {
     out.* = .{};
     const id = try b.string(try b.field(root, "id"));
     try b.identifier(id);
@@ -153,14 +173,15 @@ pub fn message(raw: []const u8, out: *model.Message, allocator: *std.heap.FixedB
     try b.identifier(thread);
     try out.thread_id.set(thread);
     out.received_at = try b.integer(try b.field(root, "internalDate"));
-    if (out.received_at < 0 or out.received_at > 9007199254740991) return error.InvalidDate;
+    if (out.received_at < 0 or out.received_at > @import("../terminal/mime.zig").max_received_at_ms) return error.InvalidDate;
     // Missing snippet means projection feasibility has not been satisfied; don't silently hide it.
     out.snippet.display(try b.string(try b.field(root, "snippet")));
     const labels = try b.field(root, "labelIds");
-    if (labels != .array) return error.InvalidJson;
+    if (labels != .array or labels.array.items.len > 64) return error.InvalidLabels;
     var inbox = false;
     for (labels.array.items) |label| {
         const s = try b.string(label);
+        if (s.len == 0 or s.len > 256) return error.InvalidLabels;
         if (std.mem.eql(u8, s, "UNREAD")) out.unread = true;
         if (std.mem.eql(u8, s, "INBOX")) inbox = true;
     }
@@ -177,6 +198,66 @@ pub fn message(raw: []const u8, out: *model.Message, allocator: *std.heap.FixedB
             }
         }
     }
+}
+
+fn partialMessage(root: std.json.Value, id: []const u8, thread: []const u8, out: *model.Message, err: anyerror) !void {
+    try b.identifier(id);
+    try b.identifier(thread);
+    out.* = .{};
+    try out.id.set(id);
+    try out.thread_id.set(thread);
+    out.partial = true;
+    try out.warning_code.set(@errorName(err));
+    out.subject.display("Message unavailable");
+    if (b.optional(root, "internalDate")) |field| {
+        const received = b.integer(field) catch -1;
+        if (received >= 0 and received <= @import("../terminal/mime.zig").max_received_at_ms) out.received_at = received;
+    }
+    if (b.optional(root, "snippet")) |field| if (field == .string) out.snippet.display(field.string);
+    if (b.optional(root, "labelIds")) |labels| if (labels == .array and labels.array.items.len <= 64) {
+        var unread = false;
+        var verified = true;
+        for (labels.array.items) |label| {
+            if (label != .string or label.string.len > 256) {
+                verified = false;
+                break;
+            }
+            unread = unread or std.mem.eql(u8, label.string, "UNREAD");
+        }
+        if (verified) out.unread = unread;
+    };
+    if (b.optional(b.optional(root, "payload") orelse .null, "headers")) |headers| if (headers == .array) {
+        for (headers.array.items[0..@min(headers.array.items.len, 64)]) |header| {
+            const name = b.string(b.optional(header, "name") orelse .null) catch continue;
+            const value = b.string(b.optional(header, "value") orelse .null) catch continue;
+            if (std.ascii.eqlIgnoreCase(name, "From") and out.sender.len == 0) b.header(l.sender, &out.sender, value[0..@min(value.len, 8192)]);
+            if (std.ascii.eqlIgnoreCase(name, "Subject")) b.header(l.subject, &out.subject, value[0..@min(value.len, 8192)]);
+        }
+    };
+}
+
+/// Isolate unsupported metadata while keeping the IDs independently verified
+/// by the bounded list response. An explicit mismatched response stays fatal.
+pub fn messageTolerant(raw: []const u8, id: []const u8, thread: []const u8, out: *model.Message, allocator: *std.heap.FixedBufferAllocator, metrics: *Metrics) !bool {
+    defer allocator.reset();
+    const parsed = parse(raw, allocator, metrics) catch |err| {
+        // This allocator is the reset-per-message fixed JSON workspace, not
+        // the application's retained heap or the HTTP transport allocator.
+        const local = if (err == error.OutOfMemory) error.MessageBudgetExceeded else err;
+        if (!message_refusal(local)) return local;
+        try partialMessage(.null, id, thread, out, local);
+        return true;
+    };
+    defer parsed.deinit();
+    const got_id = b.string(b.optional(parsed.value, "id") orelse .null) catch return error.MessageIdentityMismatch;
+    const got_thread = b.string(b.optional(parsed.value, "threadId") orelse .null) catch return error.MessageIdentityMismatch;
+    if (!std.mem.eql(u8, got_id, id) or !std.mem.eql(u8, got_thread, thread)) return error.MessageIdentityMismatch;
+    messageValue(parsed.value, out) catch |err| {
+        if (err == error.MessageLeftInbox) return false;
+        if (!message_refusal(err)) return err;
+        try partialMessage(parsed.value, id, thread, out, err);
+    };
+    return true;
 }
 const DemoRow = struct { sender: []const u8, subject: []const u8, snippet: []const u8 };
 // Read-only synthetic artwork/data lives in executable mappings; fixed
@@ -257,6 +338,65 @@ test "partial provider input and oversized identities never become valid snapsho
     try std.testing.expectError(error.MissingField, message("{\"id\":\"a\",\"threadId\":\"b\",\"internalDate\":\"1\",\"labelIds\":[\"INBOX\"]}", &m, &f, &metrics));
     var ids: [l.max_rows]b.Text(l.max_id) = @splat(.{});
     try std.testing.expectError(error.DuplicateMessage, list("{\"messages\":[{\"id\":\"a\"},{\"id\":\"a\"}]}", &ids, &f, &metrics));
+}
+
+test "bar message isolation keeps good partial good rows and rejects wrong identity" {
+    var scratch: [64 * 1024]u8 = undefined;
+    var allocator = std.heap.FixedBufferAllocator.init(&scratch);
+    var metrics: Metrics = .{};
+    var snapshot: model.Snapshot = .{};
+    const raws = [_][]const u8{
+        "{\"id\":\"good1\",\"threadId\":\"thread\",\"internalDate\":\"3\",\"labelIds\":[\"INBOX\"],\"snippet\":\"first\",\"payload\":{\"headers\":[]}}",
+        "{\"id\":\"odd\",\"threadId\":\"thread\",\"internalDate\":\"2\",\"labelIds\":7,\"snippet\":\"retained\",\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"Unusual message\"}]}}",
+        "{\"id\":\"good2\",\"threadId\":\"thread\",\"internalDate\":\"1\",\"labelIds\":[\"INBOX\"],\"snippet\":\"last\",\"payload\":{\"headers\":[]}}",
+    };
+    for (raws, [_][]const u8{ "good1", "odd", "good2" }) |raw, id| {
+        try std.testing.expect(try messageTolerant(raw, id, "thread", &snapshot.messages[snapshot.count], &allocator, &metrics));
+        snapshot.partial = snapshot.partial or snapshot.messages[snapshot.count].partial;
+        snapshot.count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), snapshot.count);
+    try std.testing.expect(snapshot.partial);
+    try std.testing.expectEqualStrings("InvalidLabels", snapshot.messages[1].warning_code.slice());
+    try std.testing.expectEqualStrings("Unusual message", snapshot.messages[1].subject.slice());
+    try std.testing.expectError(error.MessageIdentityMismatch, messageTolerant(raws[0], "odd", "thread", &snapshot.messages[0], &allocator, &metrics));
+    try std.testing.expect(try messageTolerant("{broken", "odd", "thread", &snapshot.messages[1], &allocator, &metrics));
+    try std.testing.expectEqualStrings("odd", snapshot.messages[1].id.slice());
+    try std.testing.expect(snapshot.messages[1].partial);
+    var tiny: [1]u8 = undefined;
+    var exhausted = std.heap.FixedBufferAllocator.init(&tiny);
+    try std.testing.expect(try messageTolerant(raws[0], "good1", "thread", &snapshot.messages[0], &exhausted, &metrics));
+    try std.testing.expectEqualStrings("good1", snapshot.messages[0].id.slice());
+    try std.testing.expectEqualStrings("MessageBudgetExceeded", snapshot.messages[0].warning_code.slice());
+    try std.testing.expect(snapshot.messages[0].partial);
+    try std.testing.expectEqual(@as(usize, 0), exhausted.end_index);
+    // Transport/global allocation errors still fail refresh before parsing.
+    try std.testing.expect(!message_refusal(error.OutOfMemory));
+    try std.testing.expect(try messageTolerant(raws[2], "good2", "thread", &snapshot.messages[2], &allocator, &metrics));
+    try std.testing.expect(!snapshot.messages[2].partial);
+}
+
+test "bar message isolation keeps invalid dates inside the shared reader and UI bound" {
+    var scratch: [64 * 1024]u8 = undefined;
+    var allocator = std.heap.FixedBufferAllocator.init(&scratch);
+    var metrics: Metrics = .{};
+    var snapshot: model.Snapshot = .{};
+    const raws = [_][]const u8{
+        "{\"id\":\"good1\",\"threadId\":\"thread\",\"internalDate\":\"253402300799999\",\"labelIds\":[\"INBOX\"],\"snippet\":\"boundary\",\"payload\":{\"headers\":[]}}",
+        "{\"id\":\"odd\",\"threadId\":\"thread\",\"internalDate\":\"8900000000000000\",\"labelIds\":[\"INBOX\"],\"snippet\":\"bad date\",\"payload\":{\"headers\":[]}}",
+        "{\"id\":\"good2\",\"threadId\":\"thread\",\"internalDate\":\"1\",\"labelIds\":[\"INBOX\"],\"snippet\":\"last\",\"payload\":{\"headers\":[]}}",
+    };
+    for (raws, [_][]const u8{ "good1", "odd", "good2" }) |raw, id| {
+        try std.testing.expect(try messageTolerant(raw, id, "thread", &snapshot.messages[snapshot.count], &allocator, &metrics));
+        snapshot.partial = snapshot.partial or snapshot.messages[snapshot.count].partial;
+        snapshot.count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), snapshot.count);
+    try std.testing.expect(snapshot.partial);
+    try std.testing.expectEqual(@import("../terminal/mime.zig").max_received_at_ms, snapshot.messages[0].received_at);
+    try std.testing.expectEqual(@as(i64, 0), snapshot.messages[1].received_at);
+    try std.testing.expectEqualStrings("InvalidDate", snapshot.messages[1].warning_code.slice());
+    try std.testing.expect(!snapshot.messages[2].partial);
 }
 
 pub const reservation_bytes = @sizeOf(@TypeOf(response_storage)) + @sizeOf(@TypeOf(json_storage)) + @sizeOf(@TypeOf(refresh_secret)) + @sizeOf(@TypeOf(access_secret)) + @sizeOf(oauth.DesktopClient) + 128;

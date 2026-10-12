@@ -4,6 +4,7 @@ const std = @import("std");
 const t = @import("types.zig");
 const j = @import("json.zig");
 const recipients = @import("recipients.zig");
+const mail_limits = @import("mail_limits.zig");
 const Value = std.json.Value;
 fn valueArray(value: Value) ![]Value {
     return if (value == .array) value.array.items else error.InvalidRequest;
@@ -29,7 +30,7 @@ pub fn decodeAddresses(a: std.mem.Allocator, v: Value) ![]const t.Address {
         const name = if (item == .string) "" else j.text(item, "name");
         try recipients.validateAddress(address);
         try recipients.validateHeader(name);
-        if (name.len > 256) return error.InvalidAddress;
+        if (name.len > mail_limits.display_name_bytes) return error.InvalidAddress;
         try list.append(a, .{ .address = try a.dupe(u8, address), .name = try a.dupe(u8, name) });
     }
     return list.items;
@@ -95,7 +96,7 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (d.from) |sender| {
         try recipients.validateAddress(sender.address);
         try recipients.validateHeader(sender.name);
-        if (sender.name.len > 256) return error.InvalidSender;
+        if (sender.name.len > mail_limits.display_name_bytes) return error.InvalidSender;
     }
     if (d.to.len + d.cc.len + d.bcc.len > t.Limits.recipients) return error.TooManyRecipients;
     if (send and d.to.len + d.cc.len + d.bcc.len == 0) return error.MissingRecipient;
@@ -107,7 +108,7 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     var attachment_bytes: usize = 0;
     var embedded_bytes: usize = 0;
     for ([_][]const t.Attachment{ d.attachments, related }) |list| for (list) |attachment| {
-        if (attachment.filename.len == 0 or attachment.filename.len > 256 or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
+        if (attachment.filename.len == 0 or attachment.filename.len > mail_limits.filename_bytes or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
         try recipients.validateHeader(attachment.filename);
         try recipients.validateHeader(attachment.mimeType);
         if (attachment.mimeType.len == 0 or attachment.mimeType.len > 128 or std.mem.indexOfScalar(u8, attachment.mimeType, '/') == null) return error.InvalidAttachment;
@@ -145,10 +146,11 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     try recipients.validateHeader(d.inReplyTo);
     try recipients.validateHeader(d.references);
     try recipients.validateHeader(d.threadId);
-    if (d.subject.len > 4096 or d.references.len > 8192) return error.HeaderTooLarge;
+    if (d.subject.len > mail_limits.subject_bytes or d.references.len > mail_limits.references_bytes) return error.HeaderTooLarge;
     for ([_][]const t.Address{ d.to, d.cc, d.bcc }) |list| for (list) |address| {
         try recipients.validateAddress(address.address);
         try recipients.validateHeader(address.name);
+        if (address.name.len > mail_limits.display_name_bytes) return error.InvalidAddress;
     };
 }
 
@@ -202,4 +204,44 @@ test "draft codec: temporary attachment validation releases bytes without borrow
     var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, decodeDraftWithScratch(a, failing.allocator(), input));
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "mail metadata: draft round-trip shares subject name and filename byte limits" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const subject: [mail_limits.subject_bytes]u8 = @splat('s');
+    const name: [mail_limits.display_name_bytes]u8 = @splat('n');
+    const filename: [mail_limits.filename_bytes]u8 = @splat('f');
+    const source: t.Draft = .{
+        .from = .{ .address = "sender@example.test", .name = &name },
+        .to = &.{.{ .address = "peer@example.test", .name = &name }},
+        .subject = &subject,
+        .bodyText = "Saved note",
+        .attachments = &.{.{ .id = "synthetic-file", .filename = &filename, .size = 1, .data = "YQ" }},
+    };
+    const decoded = try decodeDraft(a, try j.value(a, source));
+    try validateDraft(decoded, true);
+    try std.testing.expectEqualStrings(&subject, decoded.subject);
+    try std.testing.expectEqualStrings(&name, decoded.to[0].name);
+    try std.testing.expectEqualStrings(&filename, decoded.attachments[0].filename);
+
+    const long_subject: [mail_limits.subject_bytes + 1]u8 = @splat('s');
+    var invalid = decoded;
+    invalid.subject = &long_subject;
+    try std.testing.expectError(error.HeaderTooLarge, validateDraft(invalid, false));
+    const long_name: [mail_limits.display_name_bytes + 1]u8 = @splat('n');
+    invalid = decoded;
+    invalid.from = .{ .address = "sender@example.test", .name = &long_name };
+    try std.testing.expectError(error.InvalidSender, validateDraft(invalid, false));
+    invalid = decoded;
+    invalid.to = &.{.{ .address = "peer@example.test", .name = &long_name }};
+    try std.testing.expectError(error.InvalidAddress, validateDraft(invalid, false));
+    try std.testing.expectError(error.InvalidAddress, decodeAddresses(a, try j.value(a, invalid.to)));
+    const long_filename: [mail_limits.filename_bytes + 1]u8 = @splat('f');
+    var attachment = decoded.attachments[0];
+    attachment.filename = &long_filename;
+    invalid = decoded;
+    invalid.attachments = &.{attachment};
+    try std.testing.expectError(error.InvalidAttachment, validateDraft(invalid, false));
 }

@@ -2,7 +2,6 @@ const std = @import("std");
 const core = @import("core.zig");
 const t = @import("types.zig");
 const j = @import("json.zig");
-const CappedAllocator = @import("capped_allocator.zig").CappedAllocator;
 const Io = std.Io;
 
 var wake_fd: std.atomic.Value(i32) = .init(-1);
@@ -56,8 +55,8 @@ fn refresh(session: *core.Session, slot: usize, address: []const u8, settings: S
     return .{ .slot = slot, .outcome = if (j.boolean(data, "refreshInProgress", false) catch false) .in_progress else if (j.boolean(data, "coalesced", false) catch false) .fresh else .refreshed };
 }
 
-pub fn run(init: std.process.Init, io: Io, args: *std.process.Args.Iterator) !void {
-    var cap: CappedAllocator = .{ .backing = init.gpa, .limit = t.Limits.runtime_bytes };
+pub fn run(init: @import("../fixed_runtime.zig").Context, io: Io, args: *std.process.Args.Iterator) !void {
+    const cap = init.meter;
     const a = cap.allocator();
     var settings: Settings = .{};
     while (args.next()) |arg| {
@@ -96,7 +95,7 @@ pub fn run(init: std.process.Init, io: Io, args: *std.process.Args.Iterator) !vo
     if (settings.interval < 60 or settings.interval > 86400) return error.InvalidRefreshInterval;
     var session = try core.Session.init(io, a, init.environ_map, settings.options);
     defer session.deinit();
-    session.meter = &cap;
+    session.meter = cap;
     const wake = try @import("../signal_wake.zig").Wake.init(io);
     defer wake.close(io);
     const file = wake.read;
