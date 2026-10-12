@@ -5,8 +5,10 @@ const t = @import("terminal/types.zig");
 const j = @import("terminal/json.zig");
 const live = @import("browser_live.zig");
 const cache_module = @import("browser_cache.zig");
+const mail_actions_module = @import("browser_mail_actions.zig");
 const codec = @import("terminal/draft_codec.zig");
 const draft_summary = @import("terminal/draft_summary.zig");
+const draft_storage = @import("browser_drafts.zig");
 const conversation = @import("terminal/conversation_draft.zig");
 const conversation_source = @import("terminal/conversation_source.zig");
 const gmail_decode = @import("terminal/gmail_decode.zig");
@@ -15,8 +17,8 @@ const Allocator = std.mem.Allocator;
 const Value = j.Value;
 pub const heap_bytes: usize = 64 * 1024 * 1024;
 pub const linear_memory_bytes: usize = 96 * 1024 * 1024;
-const draft_limit = 8;
-const draft_bytes_limit = 8 * 1024 * 1024;
+const draft_limit = draft_storage.per_actor;
+const draft_bytes_limit = draft_storage.total_bytes;
 const demo_accounts = [_][]const u8{ "alex@example.test", "studio@example.test", "team@example.test" };
 const DraftSlot = struct { raw: ?[]const u8 = null, id: bounded.Text(128) = .{}, retired: bool = false };
 const View = struct {
@@ -32,21 +34,30 @@ const Operation = struct {
     id: bounded.Text(256) = .{},
     draft_id: bounded.Text(128) = .{},
     hash: [32]u8,
-    outcome: enum { unknown, applied, rejected } = .unknown,
+    outcome: draft_storage.Outcome = .unknown,
+    phase: draft_storage.Phase = .submitted,
     error_code: bounded.Text(64) = .{},
     acknowledged: bool = false,
     awaiting_receipt: bool = true,
+    // Only set by the transport's exact send boundary result. This in-memory
+    // proof keeps a refused POST editable if its receipt cannot be persisted.
+    proven_no_post: bool = false,
 };
+
+pub const UnknownTarget = struct { account_index: usize, draft_id: []const u8, operation_id: []const u8 };
 
 pub const Provider = struct {
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
     cache: cache_module.Store,
+    mail_actions: mail_actions_module.Store,
     live_count: usize = 0,
     live_sessions: [3]live.Session = undefined,
     fixtures_ready: bool = false,
     drafts: [3][draft_limit]DraftSlot = @splat(@splat(.{})),
     draft_bytes: usize = 0,
+    draft_store: ?draft_storage.Storage = null,
+    draft_revisions: [3]u32 = @splat(0),
     sequence: u64 = 0,
     operations: [64]Operation = undefined,
     operation_count: usize = 0,
@@ -58,9 +69,10 @@ pub const Provider = struct {
     verified_aliases: [3]?[]const []const u8 = @splat(null),
 
     pub fn init(a: Allocator) Provider {
-        return .{ .allocator = a, .arena = .init(a), .cache = cache_module.Store.init(a) };
+        return .{ .allocator = a, .arena = .init(a), .cache = cache_module.Store.init(a), .mail_actions = mail_actions_module.Store.init(a) };
     }
     pub fn deinit(self: *Provider) void {
+        self.mail_actions.deinit();
         for (&self.drafts) |*draft_slots| for (draft_slots) |slot| if (slot.raw) |raw| self.allocator.free(raw);
         self.cache.deinit();
         self.arena.deinit();
@@ -84,6 +96,9 @@ pub const Provider = struct {
     pub fn canSend(self: *const Provider, index: usize) bool {
         return index < self.live_count and self.live_sessions[index].can_send;
     }
+    pub fn canModify(self: *const Provider, index: usize) bool {
+        return index < self.live_count and self.live_sessions[index].can_modify;
+    }
     pub fn canContacts(self: *const Provider, index: usize) bool {
         return self.live_count == 0 or (index < self.live_count and self.live_sessions[index].can_contacts);
     }
@@ -93,14 +108,33 @@ pub const Provider = struct {
     pub fn sendStatus(self: *const Provider) u32 {
         return self.last_send_status;
     }
-    pub fn pendingUnknown(self: *const Provider) ?struct { account_index: usize, draft_id: []const u8 } {
+    pub fn pendingUnknown(self: *const Provider) ?UnknownTarget {
         var index = self.operation_count;
         while (index > 0) {
             index -= 1;
             const operation = &self.operations[index];
-            if (operation.outcome == .unknown and !operation.acknowledged) return .{ .account_index = operation.account_index, .draft_id = operation.draft_id.slice() };
+            if (operation.outcome == .unknown and !operation.acknowledged) return .{ .account_index = operation.account_index, .draft_id = operation.draft_id.slice(), .operation_id = operation.id.slice() };
         }
         return null;
+    }
+    pub fn pendingUnknownFor(self: *const Provider, account_index: usize, draft_id: ?[]const u8) ?UnknownTarget {
+        if (account_index >= self.live_count) return null;
+        var index = self.operation_count;
+        while (index > 0) {
+            index -= 1;
+            const operation = &self.operations[index];
+            if (operation.account_index != account_index or operation.outcome != .unknown or operation.acknowledged) continue;
+            if (draft_id) |id| if (!std.mem.eql(u8, id, operation.draft_id.slice())) continue;
+            return .{ .account_index = account_index, .draft_id = operation.draft_id.slice(), .operation_id = operation.id.slice() };
+        }
+        return null;
+    }
+    pub fn unknownCount(self: *const Provider) usize {
+        var count: usize = 0;
+        for (self.operations[0..self.operation_count]) |operation| if (operation.outcome == .unknown and !operation.acknowledged) {
+            count += 1;
+        };
+        return count;
     }
     pub fn cacheSnapshot(self: *Provider, index: usize, out: []u8) ![]u8 {
         if (index >= self.live_count) return error.InvalidBrowserCache;
@@ -124,6 +158,7 @@ pub const Provider = struct {
     pub fn acknowledgeUnknown(self: *Provider, index: usize, draft_id: []const u8) !void {
         if (index >= self.live_count or draft_id.len == 0) return error.DraftNotFound;
         var found = false;
+        const previous_operations = self.operations;
         for (self.operations[0..self.operation_count]) |*operation| {
             if (operation.account_index == index and std.mem.eql(u8, operation.draft_id.slice(), draft_id) and operation.outcome == .unknown) {
                 operation.acknowledged = true;
@@ -132,7 +167,11 @@ pub const Provider = struct {
             }
         }
         if (!found) return error.OperationNotFound;
-        self.last_send_status = 0;
+        self.persistDrafts(index) catch |err| {
+            self.operations = previous_operations;
+            return err;
+        };
+        self.last_send_status = if (self.pendingUnknown() != null) 2 else 0;
     }
     pub fn connect(self: *Provider, bytes: []const u8, pending_cache: []const u8) !usize {
         if (self.live_count == 3) return error.TooManyAccounts;
@@ -191,6 +230,11 @@ pub const Provider = struct {
                     if (operation.outcome == .applied) for (&self.drafts[operation.account_index]) |*slot| {
                         if (slot.raw != null and std.mem.eql(u8, slot.id.slice(), operation.draft_id.slice())) slot.retired = true;
                     };
+                    self.persistDrafts(operation.account_index) catch {
+                        // Google may already have applied the send. A failed
+                        // deletion/receipt commit keeps the recovery protected.
+                        self.markReceiptUnknown(record_index);
+                    };
                 }
                 return;
             }
@@ -204,7 +248,17 @@ pub const Provider = struct {
     }
     fn markReceiptUnknown(self: *Provider, index: usize) void {
         const operation = &self.operations[index];
+        if (operation.proven_no_post) {
+            operation.awaiting_receipt = false;
+            operation.outcome = .rejected;
+            self.last_send_status = 3;
+            // A stale tab can fail CAS here; preserve its editor and the newer
+            // disk row while retaining the proof that this POST never began.
+            self.persistDrafts(operation.account_index) catch {};
+            return;
+        }
         operation.outcome = .unknown;
+        operation.phase = .submitted;
         operation.acknowledged = false;
         operation.error_code.set("AcknowledgementUnavailable") catch {};
         self.last_send_status = 2;
@@ -212,6 +266,7 @@ pub const Provider = struct {
         for (&self.drafts[operation.account_index]) |*slot| if (slot.raw != null and std.mem.eql(u8, slot.id.slice(), operation.draft_id.slice())) {
             slot.retired = false;
         };
+        self.persistDrafts(operation.account_index) catch {};
     }
     fn execute(self: *Provider, out: Allocator, raw: []const u8, cached: bool) ![]const u8 {
         self.local_send_rejection = false;
@@ -258,7 +313,7 @@ pub const Provider = struct {
     }
     fn capabilities(self: *const Provider, index: usize) []const []const u8 {
         if (self.live_count == 0) return &.{ "mail-read", "contacts-read" };
-        return if (self.canSend(index)) (if (self.canContacts(index)) &.{ "mail-read", "mail-send", "contacts-read" } else &.{ "mail-read", "mail-send" }) else (if (self.canContacts(index)) &.{ "mail-read", "contacts-read" } else &.{"mail-read"});
+        return self.live_sessions[index].capabilities();
     }
     fn dispatch(self: *Provider, a: Allocator, request: Value, cached_call: bool) !Value {
         const cmd = try j.required(request, "cmd");
@@ -273,7 +328,52 @@ pub const Provider = struct {
         if (explicitly_cached and !@import("terminal/client_contract.zig").cachedCommand(cmd)) return error.CacheUnsupported;
         const cached = explicitly_cached or self.live_count == 0;
         if (std.mem.eql(u8, cmd, "accounts.identities")) return j.value(a, .{ .identities = [_]struct { address: []const u8, name: []const u8 = "", signature: []const u8 = "" }{.{ .address = self.address(index) }}, .cached = true });
-        if (std.mem.eql(u8, cmd, "labels.list")) return j.value(a, .{ .labels = [_]Value{}, .cached = true });
+        if (std.mem.eql(u8, cmd, "labels.list")) {
+            if (cached and self.live_count > 0 and !self.mail_actions.labelsReady(index)) return error.CacheMiss;
+            return self.mail_actions.listLabels(a, index, if (cached) null else &self.live_sessions[index]);
+        }
+        if (std.mem.eql(u8, cmd, "mail.triage-scope") or std.mem.eql(u8, cmd, "mail.labels")) {
+            if (cached) return error.CacheUnsupported;
+            return self.live_sessions[index].dispatch(a, cmd, request);
+        }
+        if (std.mem.eql(u8, cmd, "mail.label-state")) {
+            if (cached) return error.CacheUnsupported;
+            return self.mail_actions.labelState(a, index, &self.live_sessions[index], request);
+        }
+        if (std.mem.eql(u8, cmd, "operation.read")) return self.mail_actions.operationRead(a, index, try j.required(request, "operationId"));
+        if (std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.undo") or std.mem.eql(u8, cmd, "mail.archive") or std.mem.eql(u8, cmd, "mail.trash") or std.mem.eql(u8, cmd, "mail.restore") or std.mem.eql(u8, cmd, "mail.mark") or std.mem.eql(u8, cmd, "mail.modify-labels")) {
+            if (cached or !self.canModify(index)) return error.PermissionDenied;
+            const previous = self.mail_actions.epoch(index);
+            defer {
+                if (previous != self.mail_actions.epoch(index)) self.views[index] = @splat(.{});
+            }
+            if (std.mem.eql(u8, cmd, "mail.undo")) return self.mail_actions.undo(a, index, &self.live_sessions[index], &self.cache, request);
+            var batch = request;
+            if (!std.mem.eql(u8, cmd, "mail.batch")) {
+                batch = try j.copyObject(a, request);
+                try batch.object.put(a, "messageIds", try j.value(a, [_][]const u8{try j.required(request, "messageId")}));
+                try batch.object.put(a, "action", .{ .string = if (std.mem.eql(u8, cmd, "mail.modify-labels")) "mark" else cmd[5..] });
+            }
+            const batch_receipt = try self.mail_actions.batch(a, index, &self.live_sessions[index], &self.cache, batch);
+            if (std.mem.eql(u8, cmd, "mail.batch")) return batch_receipt;
+            const token = j.text(batch_receipt, "undoToken");
+            try self.mail_actions.singleResult(index, token);
+            return self.directMailResult(a, index, cmd, try j.required(request, "messageId")) catch {
+                // The direct native protocol returns a message (or exact
+                // memberships), not a batch envelope. Losing that projection
+                // after a write must never make the target replayable.
+                self.mail_actions.loseSingleResult(index, token);
+                return error.UnknownOutcome;
+            };
+        }
+        if (std.mem.eql(u8, cmd, "labels.create") or std.mem.eql(u8, cmd, "labels.rename") or std.mem.eql(u8, cmd, "labels.delete") or std.mem.eql(u8, cmd, "labels.color")) {
+            if (cached or !self.canModify(index)) return error.PermissionDenied;
+            const previous = self.mail_actions.epoch(index);
+            defer {
+                if (previous != self.mail_actions.epoch(index)) self.views[index] = @splat(.{});
+            }
+            return self.mail_actions.manageLabel(a, index, &self.live_sessions[index], &self.cache, request);
+        }
         if (std.mem.eql(u8, cmd, "cache.refresh-status")) return j.value(a, .{ .refreshInProgress = false });
         if (std.mem.eql(u8, cmd, "cache.activity")) return j.value(a, .{ .inboxArrivalCount = @as(usize, 0), .generation = self.cache.revision(index), .lastSyncAt = self.cache.updatedAt(index) });
         if (std.mem.eql(u8, cmd, "cache.clear")) {
@@ -393,13 +493,14 @@ pub const Provider = struct {
                     };
                     if (match) try matches.append(a, contact);
                 }
-                return j.value(a, .{ .contacts = matches.items, .cached = true, .cacheReady = self.cache.contactsLoaded(index) });
+                const warnings = self.cache.contactWarnings(index);
+                return j.value(a, .{ .contacts = matches.items, .cached = true, .cacheReady = self.cache.contactsLoaded(index), .partial = warnings.any(), .contactWarnings = warnings });
             }
             const result = try self.live_sessions[index].contacts(a, j.text(request, "query"));
             const contacts = j.get(result, "contacts") orelse return error.InvalidProviderResponse;
             if (contacts != .array) return error.InvalidProviderResponse;
             // Remote searches are temporary views; they cannot replace the full cached head.
-            if (j.text(request, "query").len == 0) try self.cache.replaceContacts(index, contacts.array.items);
+            if (j.text(request, "query").len == 0) try self.cache.replaceContactPage(index, contacts.array.items, if (j.get(result, "contactWarnings")) |warnings| try j.decode(t.ContactReadWarnings, a, warnings) else .{});
             return result;
         }
         if (std.mem.eql(u8, cmd, "draft.list")) {
@@ -421,10 +522,14 @@ pub const Provider = struct {
             const draft_id = try j.required(request, "draftId");
             try self.requireEditableDraft(index, draft_id);
             const slot = try self.draftSlot(a, index, draft_id);
-            const raw = slot.raw.?;
-            self.draft_bytes -= raw.len;
-            self.allocator.free(raw);
-            slot.raw = null;
+            const previous = slot.*;
+            slot.* = .{};
+            self.persistDrafts(index) catch |err| {
+                slot.* = previous;
+                return err;
+            };
+            self.draft_bytes -= previous.raw.?.len;
+            self.allocator.free(previous.raw.?);
             return j.value(a, .{ .discarded = true });
         }
         if (std.mem.eql(u8, cmd, "operation.list")) {
@@ -443,19 +548,10 @@ pub const Provider = struct {
             if (!self.canSend(index)) return error.PermissionDenied;
             const acknowledgement_only = try j.boolean(request, "acknowledgementOnly", false);
             const input = j.get(request, "draft") orelse return error.MissingField;
-            var clean = input;
-            var recovery: ?[]const []const u8 = null;
-            if (std.mem.eql(u8, cmd, "draft.recovery-save")) {
-                recovery = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.MissingField);
-                if (recovery.?.len != 5) return error.InvalidRecovery;
-                for (recovery.?, 0..) |field, i| if (field.len > (if (i == 4) t.Limits.body_bytes else @as(usize, 16 * 1024)) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
-                clean = try j.copyObject(a, input);
-                for ([_][]const u8{ "to", "cc", "bcc", "recoveryFields" }) |key| _ = clean.object.swapRemove(key);
-                try clean.object.put(a, "subject", .{ .string = recovery.?[3] });
-                try clean.object.put(a, "bodyText", .{ .string = "" });
-            }
-            var draft = try codec.decodeDraftWithScratch(a, self.allocator, clean);
-            draft.recoveryFields = recovery;
+            var draft = if (std.mem.eql(u8, cmd, "draft.recovery-save"))
+                try codec.decodeRecoveryDraftWithScratch(a, self.allocator, input)
+            else
+                try codec.decodeDraftWithScratch(a, self.allocator, input);
             const existing = j.text(request, "draftId");
             if (existing.len > 0) {
                 const previous = try codec.decodeDraftWithScratch(a, self.allocator, try self.draftValue(a, index, existing));
@@ -667,6 +763,145 @@ pub const Provider = struct {
         const message = try self.live_sessions[index].read(a, id);
         return self.cacheRead(index, message);
     }
+    fn directMailResult(self: *Provider, a: Allocator, index: usize, cmd: []const u8, id: []const u8) !Value {
+        if (std.mem.eql(u8, cmd, "mail.modify-labels")) {
+            for (self.cache.retained(index)) |message| if (std.mem.eql(u8, message.id, id) and message.labelsVerified) return j.value(a, .{ .messageId = id, .labels = message.labels });
+            return self.live_sessions[index].dispatch(a, "mail.labels", try j.value(a, .{ .messageId = id }));
+        }
+        if (try self.cache.read(index, id)) |message| if (!message.metadataPartial and message.labelsVerified) return j.value(a, message);
+        const message = try self.live_sessions[index].read(a, id);
+        return j.value(a, try self.cacheRead(index, message));
+    }
+    fn writeDraftSnapshot(self: *const Provider, index: usize, revision: u32, writer: *std.Io.Writer) !void {
+        if (index >= self.live_count) return error.UnknownAccount;
+        const session = &self.live_sessions[index];
+        try writer.writeAll("{\"version\":1,\"revision\":");
+        try std.json.Stringify.value(revision, .{}, writer);
+        try writer.writeAll(",\"account\":");
+        try std.json.Stringify.value(session.account, .{}, writer);
+        try writer.writeAll(",\"clientId\":");
+        try std.json.Stringify.value(session.client_id, .{}, writer);
+        try writer.writeAll(",\"grantId\":");
+        try std.json.Stringify.value(session.grant_id, .{}, writer);
+        try writer.writeAll(",\"drafts\":[");
+        var first = true;
+        for (self.drafts[index]) |slot| if (!slot.retired) {
+            if (slot.raw) |raw| {
+                if (!first) try writer.writeByte(',');
+                first = false;
+                try writer.writeAll(raw);
+            }
+        };
+        try writer.writeAll("],\"operations\":[");
+        first = true;
+        for (self.operations[0..self.operation_count]) |operation| if (operation.account_index == index) {
+            if (!first) try writer.writeByte(',');
+            first = false;
+            const hash = std.fmt.bytesToHex(operation.hash, .lower);
+            try std.json.Stringify.value(draft_storage.Receipt{
+                .id = operation.id.slice(),
+                .draftId = operation.draft_id.slice(),
+                .hash = &hash,
+                .phase = operation.phase,
+                .outcome = operation.outcome,
+                .errorCode = operation.error_code.slice(),
+                .acknowledged = operation.acknowledged,
+            }, .{}, writer);
+        };
+        try writer.writeAll("]}");
+    }
+    pub fn draftSnapshot(self: *const Provider, index: usize, out: []u8) ![]const u8 {
+        var writer: std.Io.Writer = .fixed(out);
+        try self.writeDraftSnapshot(index, self.draft_revisions[index], &writer);
+        return out[0..writer.end];
+    }
+    fn writeDraftChanges(self: *const Provider, index: usize, revision: u32, other: ?usize, writer: *std.Io.Writer) !void {
+        if (other) |actor_index| {
+            try writer.writeAll("{\"version\":1,\"updates\":[");
+            try self.writeDraftSnapshot(index, revision, writer);
+            try writer.writeByte(',');
+            try self.writeDraftSnapshot(actor_index, self.draft_revisions[actor_index] + 1, writer);
+            try writer.writeAll("]}");
+        } else try self.writeDraftSnapshot(index, revision, writer);
+    }
+    fn persistDrafts(self: *Provider, index: usize) !void {
+        try self.persistDraftChanges(index, null);
+    }
+    fn persistDraftChanges(self: *Provider, index: usize, other: ?usize) !void {
+        const storage = self.draft_store orelse return;
+        if (index >= self.live_count) return error.UnknownAccount;
+        const revision = std.math.add(u32, self.draft_revisions[index], 1) catch return error.BrowserDraftStorageConflict;
+        if (other) |actor_index| {
+            if (actor_index >= self.live_count or actor_index == index or self.draft_revisions[actor_index] == std.math.maxInt(u32)) return error.BrowserDraftStorageConflict;
+        }
+        var count_buffer: [256]u8 = undefined;
+        var counter: std.Io.Writer.Discarding = .init(&count_buffer);
+        try self.writeDraftChanges(index, revision, other, &counter.writer);
+        const size: usize = @intCast(counter.fullCount());
+        if (size > draft_storage.snapshot_bytes) return error.BrowserDraftQuota;
+        const buffer = try self.allocator.alloc(u8, size);
+        defer {
+            std.crypto.secureZero(u8, buffer);
+            self.allocator.free(buffer);
+        }
+        var writer: std.Io.Writer = .fixed(buffer);
+        try self.writeDraftChanges(index, revision, other, &writer);
+        try storage.saveFn(storage.context, self.live_sessions[index].id, buffer);
+        self.draft_revisions[index] = revision;
+        if (other) |actor_index| self.draft_revisions[actor_index] += 1;
+    }
+    pub fn restoreDrafts(self: *Provider, index: usize, raw: []const u8) !void {
+        if (raw.len == 0) return;
+        if (index >= self.live_count) return error.UnknownAccount;
+        const session = &self.live_sessions[index];
+        var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch.deinit();
+        const document = try draft_storage.decode(scratch.allocator(), self.allocator, .{ .account = session.account, .clientId = session.client_id, .grantId = session.grant_id }, raw);
+        var next: [draft_limit]DraftSlot = @splat(.{});
+        errdefer for (next) |slot| if (slot.raw) |bytes| self.allocator.free(bytes);
+        var next_bytes: usize = 0;
+        for (document.drafts, 0..) |draft, cursor| {
+            try next[cursor].id.set(draft.id);
+            next[cursor].raw = try std.json.Stringify.valueAlloc(self.allocator, draft, .{ .emit_null_optional_fields = false });
+            next_bytes += next[cursor].raw.?.len;
+        }
+        var previous_bytes: usize = 0;
+        for (self.drafts[index]) |slot| if (slot.raw) |bytes| {
+            previous_bytes += bytes.len;
+        };
+        if (self.draft_bytes - previous_bytes + next_bytes > draft_bytes_limit) return error.BrowserDraftQuota;
+        var operations: [64]Operation = undefined;
+        var operation_count: usize = 0;
+        for (self.operations[0..self.operation_count]) |operation| if (operation.account_index != index) {
+            operations[operation_count] = operation;
+            operation_count += 1;
+        };
+        if (document.operations.len > operations.len - operation_count) return error.OperationJournalFull;
+        for (document.operations) |receipt_value| {
+            var operation: Operation = .{ .account_index = index, .hash = undefined, .outcome = receipt_value.outcome, .phase = receipt_value.phase, .acknowledged = receipt_value.acknowledged, .awaiting_receipt = false };
+            try operation.id.set(receipt_value.id);
+            try operation.draft_id.set(receipt_value.draftId);
+            try operation.error_code.set(receipt_value.errorCode);
+            _ = try std.fmt.hexToBytes(&operation.hash, receipt_value.hash);
+            if (operation.phase == .paused and operation.outcome == .unknown and !operation.acknowledged) {
+                operation.outcome = .rejected;
+                try operation.error_code.set("SendPausedForReview");
+            }
+            if (operation.outcome == .applied) for (&next) |*slot| {
+                if (slot.raw != null and std.mem.eql(u8, slot.id.slice(), operation.draft_id.slice())) slot.retired = true;
+            };
+            operations[operation_count] = operation;
+            operation_count += 1;
+        }
+        // Admission is whole-snapshot and failure leaves existing work intact.
+        for (self.drafts[index]) |slot| if (slot.raw) |bytes| self.allocator.free(bytes);
+        self.drafts[index] = next;
+        self.draft_bytes = self.draft_bytes - previous_bytes + next_bytes;
+        self.operations = operations;
+        self.operation_count = operation_count;
+        self.draft_revisions[index] = document.revision;
+        if (self.pendingUnknown() != null) self.last_send_status = 2;
+    }
     fn draftSlot(self: *Provider, a: Allocator, index: usize, id: []const u8) !*DraftSlot {
         _ = a;
         for (&self.drafts[index]) |*slot| if (slot.raw != null and std.mem.eql(u8, slot.id.slice(), id)) return slot;
@@ -714,16 +949,20 @@ pub const Provider = struct {
             admitted_bytes -= candidate.raw.?.len;
         };
         if (admitted_bytes > draft_bytes_limit) return error.BrowserDraftQuota;
-        // All validation and allocation precedes this non-fallible commit.
+        // Await the atomic host transaction before releasing any prior bytes.
+        const previous_slot = slot.*;
+        slot.* = .{ .raw = raw, .id = identity };
+        self.persistDrafts(index) catch |err| {
+            slot.* = previous_slot;
+            return err;
+        };
+        // All validation, allocation and durable storage precede this commit.
         for (victims[0..victim_count]) |victim| {
             self.allocator.free(victim.raw.?);
             victim.* = .{};
         }
         self.draft_bytes = admitted_bytes;
-        if (slot.raw) |previous| self.allocator.free(previous);
-        slot.raw = raw;
-        slot.id = identity;
-        slot.retired = false;
+        if (previous_slot.raw) |previous| self.allocator.free(previous);
         return draft;
     }
     fn reclaimableDraft(self: *const Provider, index: usize, slot: *const DraftSlot) bool {
@@ -736,11 +975,43 @@ pub const Provider = struct {
         }
         return confirmed;
     }
+    fn reclaimOrphanedSentDrafts(self: *Provider) void {
+        for (&self.drafts, 0..) |*slots, actor_index| for (slots) |*slot| {
+            if (!slot.retired or slot.raw == null) continue;
+            var retained = false;
+            for (self.operations[0..self.operation_count]) |operation| {
+                if (operation.account_index == actor_index and std.mem.eql(u8, operation.draft_id.slice(), slot.id.slice())) retained = true;
+            }
+            if (!retained) {
+                self.draft_bytes -= slot.raw.?.len;
+                self.allocator.free(slot.raw.?);
+                slot.* = .{};
+            }
+        };
+    }
     fn requireEditableDraft(self: *const Provider, index: usize, draft_id: []const u8) !void {
         for (self.operations[0..self.operation_count]) |operation| if (operation.account_index == index and (operation.awaiting_receipt or (operation.outcome == .unknown and !operation.acknowledged)) and std.mem.eql(u8, operation.draft_id.slice(), draft_id)) return error.UnknownOutcome;
     }
     fn receipt(_: *Provider, a: Allocator, operation: Operation) !Value {
         return j.value(a, .{ .id = operation.id.slice(), .draftId = operation.draft_id.slice(), .outcome = if (operation.acknowledged) "acknowledged" else @tagName(operation.outcome), .errorCode = operation.error_code.slice(), .reconciled = operation.acknowledged });
+    }
+    fn settledOperation(self: *const Provider, account_index: usize, same_actor: bool) ?usize {
+        for (self.operations[0..self.operation_count], 0..) |candidate, cursor| {
+            if ((candidate.account_index == account_index) != same_actor or candidate.awaiting_receipt or (candidate.outcome == .unknown and !candidate.acknowledged)) continue;
+            return cursor;
+        }
+        return null;
+    }
+    fn removeOperation(self: *Provider, cursor: usize) void {
+        std.mem.copyForwards(Operation, self.operations[cursor .. self.operation_count - 1], self.operations[cursor + 1 .. self.operation_count]);
+        self.operation_count -= 1;
+    }
+    fn rejectedBeforeSend(self: *Provider, a: Allocator, operation_id: []const u8, draft_id: []const u8, err: anyerror) !Value {
+        self.last_send_status = 3;
+        self.local_send_rejection = true;
+        // Keep the concrete preflight/storage cause whenever a receipt can be
+        // encoded. SendNotStarted remains the allocation-failure fallback.
+        return j.value(a, .{ .id = operation_id, .draftId = draft_id, .outcome = "rejected", .errorCode = @errorName(err) });
     }
     fn send(self: *Provider, a: Allocator, index: usize, request: Value) !Value {
         if (!self.canSend(index)) return error.PermissionDenied;
@@ -769,30 +1040,84 @@ pub const Provider = struct {
                 return self.receipt(a, operation);
             }
         };
-        if (self.operation_count == self.operations.len) return error.OperationJournalFull;
-        var operation: Operation = .{ .account_index = index, .hash = digest };
+        // A retained successful receipt may be replayed above, but a new
+        // operation must never re-submit the bytes of an already-sent draft.
+        if ((try self.draftSlot(a, index, draft.id)).retired) return error.DraftAlreadySent;
+        const evict: ?usize = if (self.operation_count == self.operations.len)
+            self.settledOperation(index, true) orelse self.settledOperation(index, false) orelse return self.rejectedBeforeSend(a, operation_id, draft.id, error.OperationJournalFull)
+        else
+            null;
+        var operation: Operation = .{ .account_index = index, .hash = digest, .phase = if (self.draft_store != null) .paused else .submitted };
         try operation.id.set(operation_id);
         try operation.draft_id.set(draft.id);
         const prepared = self.live_sessions[index].prepareSend(a, draft, operation_id) catch |err| {
             // Preparation has not submitted a provider write. A recognized
             // rejected receipt keeps local MIME/size failures editable without
             // weakening the existing replay/conflict and unknown-outcome gates.
-            self.last_send_status = 3;
-            self.local_send_rejection = true;
-            return j.value(a, .{ .id = operation_id, .draftId = draft.id, .outcome = "rejected", .errorCode = @errorName(err) });
+            return self.rejectedBeforeSend(a, operation_id, draft.id, err);
         };
+        // Reclaim settled receipt history atomically with the new pending
+        // record. Unknown/unconsumed outcomes are never quota victims.
+        const previous_operations = self.operations;
+        const previous_count = self.operation_count;
+        var other_actor: ?usize = null;
+        var reclaimed = false;
+        if (evict) |cursor| {
+            const actor_index = self.operations[cursor].account_index;
+            if (actor_index != index) other_actor = actor_index;
+            self.removeOperation(cursor);
+            reclaimed = true;
+        }
         // Record uncertainty before crossing the provider boundary.
         self.operations[self.operation_count] = operation;
-        const record = &self.operations[self.operation_count];
         self.acknowledgement_operation = self.operation_count;
         self.operation_count += 1;
+        const persistence_error: ?anyerror = commit: {
+            self.persistDraftChanges(index, other_actor) catch |first_error| {
+                // The durable table also contains unconnected actors. Their
+                // receipts can fill its global quota while this in-memory
+                // journal is smaller. Retire one settled receipt, preferring
+                // this actor, and retry once. Another live actor joins the
+                // same transaction so both in-memory revisions stay current.
+                if (first_error == error.BrowserDraftOperationQuota) {
+                    const retire = self.settledOperation(index, true) orelse if (other_actor) |actor_index| self.settledOperation(actor_index, true) else self.settledOperation(index, false);
+                    if (retire) |cursor| {
+                        const actor_index = self.operations[cursor].account_index;
+                        if (actor_index != index) other_actor = actor_index;
+                        self.removeOperation(cursor);
+                        self.acknowledgement_operation = self.operation_count - 1;
+                        reclaimed = true;
+                        self.persistDraftChanges(index, other_actor) catch |retry_error| break :commit retry_error;
+                        break :commit null;
+                    }
+                }
+                break :commit first_error;
+            };
+            break :commit null;
+        };
+        if (persistence_error) |err| {
+            self.operation_count = previous_count;
+            self.operations = previous_operations;
+            self.acknowledgement_operation = null;
+            return self.rejectedBeforeSend(a, operation_id, draft.id, err);
+        }
+        if (reclaimed) self.reclaimOrphanedSentDrafts();
+        const record = &self.operations[self.operation_count - 1];
         self.last_send_status = 2;
         const result = self.live_sessions[index].submitPrepared(a, prepared) catch |err| {
-            record.outcome = if (@import("terminal/send_outcome.zig").rejected(err)) .rejected else .unknown;
+            // The host may have durably crossed the submission boundary even
+            // when its final preflight proves no POST started. Preserve that
+            // phase monotonically; the rejected outcome remains editable.
+            const session = &self.live_sessions[index];
+            record.phase = if (session.send_boundary == .none and self.draft_store != null) .paused else .submitted;
+            record.proven_no_post = !session.send_possible_submission;
+            record.outcome = if (record.proven_no_post or @import("terminal/send_outcome.zig").rejected(err)) .rejected else .unknown;
             record.error_code.set(@errorName(err)) catch {};
-            self.last_send_status = 2;
+            self.local_send_rejection = record.proven_no_post;
+            self.last_send_status = if (record.proven_no_post) 3 else 2;
             return self.receipt(a, record.*);
         };
+        record.phase = .submitted;
         record.outcome = if (std.mem.eql(u8, j.text(result, "outcome"), "applied")) .applied else .unknown;
         self.last_send_status = 2;
         return self.receipt(a, record.*);

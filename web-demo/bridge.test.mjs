@@ -41,6 +41,51 @@ test('terminal width provider uses the WASM policy and preserves combining cell 
   assert.deepEqual(called, [0x1fa84, 0x2063, 0x301, 0x301, 0x301, 0x301]);
 });
 
+test('unknown-send acknowledgement names and pins the exact actor and draft before consumption', async () => {
+  const instance = fixture();
+  const account = new TextEncoder().encode('bea@example.test');
+  const draft = new TextEncoder().encode('protected-bea-draft');
+  new Uint8Array(instance.memory.buffer, 256, account.length).set(account);
+  new Uint8Array(instance.memory.buffer, 512, draft.length).set(draft);
+  let current = 1;
+  Object.assign(instance.exports, {
+    unknown_account_ptr: () => 256,
+    unknown_account_len: () => account.length,
+    unknown_target_index: () => current,
+    unknown_draft_ptr: () => 512,
+    unknown_draft_len: () => draft.length,
+    acknowledge_unknown: (index, pointer, length) => {
+      instance.calls.push(['acknowledge_unknown', index, pointer, length]);
+      return index === current && pointer === 512 && length === draft.length ? 0 : 2;
+    },
+  });
+  const bridge = new BrowserWasmBridge(instance, () => {});
+  assert.equal(bridge.unknownAccount(), 'bea@example.test');
+  await bridge.acknowledgeUnknown();
+  assert.deepEqual(instance.calls.at(-1), ['acknowledge_unknown', 1, 512, draft.length]);
+  instance.exports.unknown_draft_len = () => { current = 0; return draft.length; };
+  await assert.rejects(() => bridge.acknowledgeUnknown(), /status 2/);
+  assert.equal(instance.calls.at(-1)[1], 1, 'target identity was silently changed before acknowledgement');
+});
+
+test('refused draft staging keeps verified mail connection available without claiming restored drafts', async () => {
+  const instance = fixture();
+  const staged = [];
+  Object.assign(instance.exports, {
+    connect_ptr: () => 256,
+    connect_capacity: () => 2048,
+    connect: length => { instance.calls.push(['connect', length]); return 0; },
+    drafts_stage: length => { staged.push(length); return length ? 1 : 0; },
+    drafts_input_ptr: () => 4096,
+  });
+  const bridge = new BrowserWasmBridge(instance, () => {});
+  const result = await bridge.connect({ session: 17 }, null, { version: 1, drafts: [] });
+  assert.equal(result.draftsStaged, false);
+  assert.equal(instance.calls.filter(call => call[0] === 'connect').length, 1);
+  assert(staged[0] > 0 && staged.slice(1).every(length => length === 0));
+  assert(new Uint8Array(instance.memory.buffer, 256, 2048).every(byte => byte === 0));
+});
+
 test('missing or invalid WASM width capability stops the host instead of selecting different Unicode tables', () => {
   assert.throws(() => terminalUnicode({}), /missing codepoint_width/);
   const instance = fixture();

@@ -12,8 +12,9 @@ session; static hosting instead uses an exported connection file.
 
 This is a browser adapter for a focused set of terminal workflows. Start with
 inbox reading, plain/Markdown composition, replies and forwarding, Google contacts
-and recipient completion. A bounded IndexedDB cache retains mail/contact
-snapshots separately from credentials. Live queries fetch up to 30 messages; refine Gmail search to reach older mail.
+and recipient completion, mailbox changes, and browser draft recovery. Bounded
+IndexedDB stores retain mail/contact snapshots and drafts separately from credentials.
+Live queries fetch up to 30 messages; refine Gmail search to reach older mail.
 Cache search pages through the retained 300-record inventory. The native disk cache,
 external editor, local filesystem dialogs and background send queue are not part
 of this browser mode. Forwarding retains bounded source files and embedded resources.
@@ -75,7 +76,8 @@ the Gmail account profile before exposing that account's messages.
 
 Existing grants are preserved. A read-only grant permits reading; a reply or
 new message requires an explicitly declared send capability and a token with
-the necessary Gmail scope. The browser does not upgrade permissions or start a
+the necessary Gmail scope. Mailbox changes require the declared `mail-modify`
+capability and verified `gmail.modify` scope. The browser does not upgrade permissions or start a
 new consent flow. The native Secret Service and Keychain cannot be read by a
 webpage; the local server or explicit native export supplies the selected credentials.
 
@@ -107,7 +109,7 @@ safe literal links. Forwards retain source files and leave reply/thread headers 
 The composer and send review show the outgoing files; `[x]` removes a file.
 
 Source files use bounded inline storage: 2 MiB decoded data per draft, a 3 MiB
-JSON envelope and an 8 MiB aggregate session draft quota. MIME/base64 overhead can
+JSON envelope and an 8 MiB aggregate browser draft quota. MIME/base64 overhead can
 lower the effective send limit. An oversized capture or send is refused without
 silently omitting files. For over-quota forward sources, **Text quote · omit files**
 explicitly creates a quote without files; the omission warning stays in send review.
@@ -119,6 +121,21 @@ the existing contacts capability and matching Google scope; the browser never
 upgrades a grant. `a` opens the bounded contacts page, `/` searches contacts,
 and Enter selects an address. Recipient completion works while typing;
 Ctrl+Space searches Google when local choices do not match.
+Malformed contacts do not abort the page: usable names/addresses and healthy
+neighbors remain, with visible omission counts. Incomplete contacts cannot be
+edited from a retained subset. Browser contact editing remains unavailable.
+
+Granted mailbox changes use the native shortcuts and action palette: `x`
+archives, `D` reviews Trash, `s` toggles star, `u` toggles unread and `m` stages
+labels. Space selects rows; Ctrl+Z undoes confirmed touched-label changes.
+`:spam`, `:unspam`, `:scope message|thread` and `:labels` use the shared workflows.
+Custom-label creation, rename, color and reviewed deletion are supported.
+Per-item failures and unknown undo outcomes require review; uncertain actions
+are not automatically replayed. Up to 64 mailbox receipts are retained in the
+tab, rotating settled history while protecting unknown outcomes.
+After a mailbox request is dispatched, the status strip waits for Google's
+confirmation. Ctrl+C does not abort that mutation or offer a misleading cancel
+action.
 
 `/` in the mailbox searches the local cache; `\` searches Gmail and Ctrl+R
 refreshes. The cache merges current records across folders and searches, with
@@ -129,15 +146,32 @@ the Gmail profile and exact account/client/grant; contact scope loss hides cache
 contacts. Disconnect keeps these snapshots; **Clear cache** removes them.
 Drafts, OAuth credentials and uncertain-send state are excluded from this cache.
 
-Drafts stay in the tab. A failed or uncertain submission is not retried
-automatically. A small generic operation receipt records that an actual send
-started, so reload cannot silently clear an unconfirmed outcome. The receipt
-contains no token or message body. Check Sent before explicitly clearing an
-uncertain-send notice.
+Drafts have their own private browser store: at most eight per verified actor,
+8 MiB combined draft data, and 64 recent send receipts. The same account,
+registration and grant must verify before saved drafts are exposed. Whole
+originals, files, format and unfinished recipient fields survive reload and
+disconnect. Ctrl+S still requires a complete reviewed envelope before sending.
+Storage errors keep the previous saved copy and current editor contents; the
+status strip explains the refusal. When storage cannot be loaded, mail browsing
+remains available but drafting/sending for that account is blocked until a
+successful reconnect. Other verified accounts can keep working.
+
+**Saved drafts…** reviews local record counts before clearing known saved
+drafts and settled history. Cancel is selected initially. Unconfirmed sends,
+unconsumed send receipts and unreadable records are preserved; cleanup makes
+no Google requests and disconnects the current session after committing. Mail
+cache is kept. Reconnect to continue with the remaining saved records.
+
+A reload during the countdown retains an editable draft and requires fresh
+review. Once submission may have started, its draft and receipt stay protected
+without automatic retry. The acknowledgement control names and pins the account
+being checked. A generic token-free marker also warns before connection; it
+contains no account or message body. Settled send history rotates within the
+limit; unconfirmed outcomes are never evicted to make room.
 
 ## HTTP boundary
 
-The WASM module imports only the explicit browser transport and clock adapters.
+The WASM module imports only explicit browser transport, clock and draft-storage adapters.
 The host permits fixed Google OAuth/Gmail HTTPS destinations, bounds request
 and decoded response bytes, rejects redirects and applies finite request/job
 deadlines. It serializes operations so suspended WASM calls cannot race over
@@ -168,13 +202,16 @@ restrictions, body decoding, reply MIME, explicit review/cancellation, exact
 send count and uncertain-result protection. Private screenshots and receipts
 belong under a scratch directory, outside the tracked source tree.
 
-Session drafts survive leaving the composer and switching accounts within the
-tab. Successful sends retire their drafts only after the shared controller
-consumes the receipt. Reload and Disconnect discard remaining drafts, with a
-warning when drafts exist. Pasted input is limited to 64 KiB per event; oversized
+Drafts autosave after a 1.5-second pause, or within ten seconds of continuous
+editing, and typing during automatic saves queues without loss. Successful sends
+retire their drafts only after the shared controller consumes the receipt.
+Explicit saves that open send review pause input; typing before the review is
+visible cannot become a confirmation.
+Reload and Disconnect retain saved drafts and warn about unsaved changes or
+pending work. Pasted input is limited to 64 KiB per event; oversized
 paste is skipped while keeping the session. Paste autosave happens after the
 complete paste. Ctrl+C cancels reads and the send countdown; it does not abort
-an already submitted send.
+an already submitted send or mailbox change.
 
 Switching connected accounts reads the local snapshot and cached reader only.
 It does not refresh OAuth, enumerate Gmail or fetch an uncached body. First

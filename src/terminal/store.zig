@@ -180,6 +180,7 @@ pub const State = struct {
     outbox: []t.Message = &.{},
     contacts: []t.Contact = &.{},
     contactsReady: bool = false,
+    contactWarnings: t.ContactReadWarnings = .{},
     labels: []Label = &.{},
     /// Fixtures own one persistent provider collection after their first write.
     /// Baseline source files must not resurrect renamed or deleted labels.

@@ -44,6 +44,33 @@ pub fn decodeDraft(a: std.mem.Allocator, v: Value) !t.Draft {
 pub fn decodeDraftWithScratch(a: std.mem.Allocator, backing: std.mem.Allocator, v: Value) !t.Draft {
     return decodeDraftAllocators(a, backing, v);
 }
+/// Autosave keeps raw editor fields separate from the validated send DTO.
+/// Incomplete recipient/header input is never interpreted as a send envelope.
+pub fn decodeRecoveryDraftWithScratch(a: std.mem.Allocator, backing: std.mem.Allocator, input: Value) !t.Draft {
+    const fields = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.InvalidRecovery);
+    try validateRecoveryFields(fields);
+    var clean = try j.copyObject(a, input);
+    for ([_][]const u8{ "to", "cc", "bcc", "recoveryFields" }) |key| _ = clean.object.swapRemove(key);
+    // Raw subject and body remain in recoveryFields, including unfinished
+    // syntax. Display/send DTO headers keep their independently valid shape.
+    const subject_valid = valid: {
+        if (fields[3].len > mail_limits.subject_bytes) break :valid false;
+        recipients.validateHeader(fields[3]) catch break :valid false;
+        break :valid true;
+    };
+    try clean.object.put(a, "subject", .{ .string = if (subject_valid) fields[3] else "" });
+    try clean.object.put(a, "bodyText", .{ .string = "" });
+    var draft = try decodeDraftWithScratch(a, backing, clean);
+    draft.recoveryFields = fields;
+    try validateDraft(draft, false);
+    return draft;
+}
+pub fn validateRecoveryFields(fields: []const []const u8) !void {
+    if (fields.len != 5) return error.InvalidRecovery;
+    for (fields, 0..) |field, index| {
+        if (field.len > (if (index == 4) t.Limits.body_bytes else if (index == 3) mail_limits.subject_bytes else @as(usize, 64 * 1024)) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
+    }
+}
 fn decodeDraftAllocators(a: std.mem.Allocator, backing: ?std.mem.Allocator, v: Value) !t.Draft {
     if (v != .object) return error.InvalidRequest;
     for ([_][]const u8{ "id", "subject", "bodyText", "threadId", "inReplyTo", "references" }) |key| if (j.get(v, key)) |field| {
@@ -91,6 +118,7 @@ pub fn requestBodyFormat(v: Value) !t.BodyFormat {
     return std.meta.stringToEnum(t.BodyFormat, text) orelse error.InvalidBodyFormat;
 }
 pub fn validateDraft(d: t.Draft, send: bool) !void {
+    if (d.recoveryFields) |fields| try validateRecoveryFields(fields);
     if (d.omittedAttachments > t.Limits.omitted_attachment_count) return error.TooManyAttachments;
     if (send and d.recoveryFields != null) return error.UnfinishedDraft;
     if (d.from) |sender| {

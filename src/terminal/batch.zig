@@ -4,6 +4,7 @@ const j = @import("json.zig");
 const storage = @import("store.zig");
 const triage = @import("triage.zig");
 const bounded = @import("../bounded.zig");
+const item_engine = @import("batch_item.zig");
 
 pub const Provider = struct {
     context: *anyopaque,
@@ -17,18 +18,7 @@ fn find(store: *storage.Store, token: []const u8) !*storage.Undo {
     for (store.state.undo) |*receipt| if (std.mem.eql(u8, receipt.token, token)) return receipt;
     return error.UndoNotFound;
 }
-fn cloneLabels(a: std.mem.Allocator, labels: []const []const u8) ![]const []const u8 {
-    if (labels.len > 64) return error.TooManyLabels;
-    const cloned_labels = try a.alloc([]const u8, labels.len);
-    for (labels, cloned_labels) |label, *copy| copy.* = try a.dupe(u8, label);
-    return cloned_labels;
-}
-fn knownRejection(err: anyerror) bool {
-    return switch (err) {
-        error.ProviderRejected, error.PermissionDenied, error.NotConnected, error.InvalidGrant, error.MessageNotFound, error.RateLimited, error.InvalidLabel, error.LabelNotFound, error.TooManyLabels, error.InvalidIdentifier, error.WrongAccount, error.GrantClientMismatch => true,
-        else => false,
-    };
-}
+const knownRejection = item_engine.knownRejection;
 fn commitResult(ctx: Context, token: []const u8, position: usize, undoing: bool, labels: ?[]const []const u8, err: ?anyerror, preflight: bool) !void {
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
@@ -58,43 +48,48 @@ fn commitResult(ctx: Context, token: []const u8, position: usize, undoing: bool,
     }
     try store.save();
 }
-fn modify(ctx: Context, token: []const u8, position: usize, id: []const u8, delta: triage.Delta, undoing: bool) !void {
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var before: []const []const u8 = undefined;
-    {
-        var read_arena = std.heap.ArenaAllocator.init(ctx.allocator);
-        defer read_arena.deinit();
-        var store = try storage.Store.open(ctx.io, read_arena.allocator(), ctx.root, ctx.account, ctx.options);
+const ItemAdapter = struct {
+    ctx: Context,
+    token: []const u8,
+    position: usize,
+    fn labelsFn(raw: *anyopaque, a: std.mem.Allocator, id: []const u8) ![]const []const u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        var arena = std.heap.ArenaAllocator.init(self.ctx.allocator);
+        defer arena.deinit();
+        var store = try storage.Store.open(self.ctx.io, arena.allocator(), self.ctx.root, self.ctx.account, self.ctx.options);
         defer store.close();
         store.release();
-        const actual = ctx.provider.labelsFn(ctx.provider.context, a, &store, id) catch |err| {
-            try commitResult(ctx, token, position, undoing, null, err, true);
-            return;
-        };
-        before = try cloneLabels(a, actual);
+        const actual = try self.ctx.provider.labelsFn(self.ctx.provider.context, a, &store, id);
+        if (actual.len > 64) return error.TooManyLabels;
+        const copied = try a.alloc([]const u8, actual.len);
+        for (actual, copied) |label, *copy| copy.* = try a.dupe(u8, label);
+        return copied;
     }
-    if (delta.add.len + delta.remove.len == 0) {
-        try commitResult(ctx, token, position, undoing, before, null, false);
-        return;
-    }
-    {
-        var journal_arena = std.heap.ArenaAllocator.init(ctx.allocator);
-        defer journal_arena.deinit();
-        var store = try storage.Store.open(ctx.io, journal_arena.allocator(), ctx.root, ctx.account, ctx.options);
+    fn prepareFn(raw: *anyopaque, id: []const u8, before: []const []const u8, delta: triage.Delta, undoing: bool) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        var arena = std.heap.ArenaAllocator.init(self.ctx.allocator);
+        defer arena.deinit();
+        var store = try storage.Store.open(self.ctx.io, arena.allocator(), self.ctx.root, self.ctx.account, self.ctx.options);
         defer store.close();
-        const item = &(try find(&store, token)).items[position];
-        if (!undoing) item.* = try triage.inverse(journal_arena.allocator(), id, before, delta);
-        // Durable pending/undo uncertainty is recorded before dispatch.
+        const item = &(try find(&store, self.token)).items[self.position];
+        if (!undoing) item.* = try triage.inverse(arena.allocator(), id, before, delta);
         if (undoing) item.errorCode = "UnknownOutcome";
         try store.save();
     }
-    const updated = ctx.provider.modifyFn(ctx.provider.context, a, id, before, delta) catch |err| {
-        try commitResult(ctx, token, position, undoing, null, err, false);
-        return;
-    };
-    commitResult(ctx, token, position, undoing, updated, null, false) catch return error.UnknownOutcome;
+    fn modifyFn(raw: *anyopaque, a: std.mem.Allocator, id: []const u8, before: []const []const u8, delta: triage.Delta) ![]const []const u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.ctx.provider.modifyFn(self.ctx.provider.context, a, id, before, delta);
+    }
+    fn commitFn(raw: *anyopaque, undoing: bool, labels: ?[]const []const u8, err: ?anyerror, preflight: bool) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return commitResult(self.ctx, self.token, self.position, undoing, labels, err, preflight);
+    }
+};
+fn modify(ctx: Context, token: []const u8, position: usize, id: []const u8, delta: triage.Delta, undoing: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    var adapter: ItemAdapter = .{ .ctx = ctx, .token = token, .position = position };
+    try item_engine.run(.{ .context = &adapter, .labelsFn = ItemAdapter.labelsFn, .prepareFn = ItemAdapter.prepareFn, .modifyFn = ItemAdapter.modifyFn, .commitFn = ItemAdapter.commitFn }, arena.allocator(), id, delta, undoing);
 }
 fn result(ctx: Context, a: std.mem.Allocator, token: []const u8) !j.Value {
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
@@ -102,13 +97,8 @@ fn result(ctx: Context, a: std.mem.Allocator, token: []const u8) !j.Value {
     var store = try storage.Store.openCached(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options);
     defer store.close();
     const receipt = try find(&store, token);
-    var applied: usize = 0;
-    var restored: usize = 0;
-    for (receipt.items) |item| {
-        if (std.mem.eql(u8, item.outcome, "applied")) applied += 1;
-        if (item.restored) restored += 1;
-    }
-    return j.value(a, .{ .undoToken = receipt.token, .outcomes = receipt.items, .appliedCount = applied, .restoredCount = restored, .partial = applied != receipt.items.len });
+    const summary = item_engine.summarize(receipt.items);
+    return j.value(a, .{ .undoToken = receipt.token, .outcomes = receipt.items, .appliedCount = summary.appliedCount, .restoredCount = summary.restoredCount, .partial = summary.partial });
 }
 pub fn run(ctx: Context, a: std.mem.Allocator, request: j.Value, delta: triage.Delta) !j.Value {
     const values = j.get(request, "messageIds") orelse return error.MissingField;
@@ -159,7 +149,7 @@ pub fn undo(ctx: Context, a: std.mem.Allocator, request: j.Value) !j.Value {
             for (ids) |id| selected_item = selected_item or std.mem.eql(u8, item.messageId, id);
             if (!selected_item) continue;
         }
-        if (!std.mem.eql(u8, item.outcome, "applied") or item.restored or std.mem.eql(u8, item.errorCode, "UnknownOutcome")) continue;
+        if (!item_engine.canUndo(item)) continue;
         try modify(ctx, token, index, item.messageId, .{ .add = item.addLabels, .remove = item.removeLabels }, true);
     }
     return result(ctx, a, token);

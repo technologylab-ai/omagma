@@ -5,6 +5,164 @@ const recipients = @import("recipients.zig");
 const bounded = @import("../bounded.zig");
 const policy = @import("mail_limits.zig");
 
+pub const ReadOptions = struct { search: bool = false, limit: usize = 100, retain_provider: bool = true };
+pub const ReadPage = struct {
+    contacts: []t.Contact,
+    nextCursor: ?[]const u8 = null,
+    partial: bool = false,
+    contactWarnings: t.ContactReadWarnings = .{},
+};
+
+fn count(value: usize) u32 {
+    return @intCast(@min(value, std.math.maxInt(u32)));
+}
+fn readArray(value: j.Value, key: []const u8, warnings: *t.ContactReadWarnings) []const j.Value {
+    const field = j.get(value, key) orelse return &.{};
+    if (field == .array) return field.array.items;
+    warnings.invalidFields +|= 1;
+    return &.{};
+}
+fn identity(value: j.Value) ?[]const u8 {
+    const resource_name = j.text(value, "resourceName");
+    if (!std.mem.startsWith(u8, resource_name, "people/")) return null;
+    bounded.identifier(resource_name[7..]) catch return null;
+    return resource_name;
+}
+fn readRecord(a: std.mem.Allocator, value: j.Value, resource_name: []const u8, retain_provider: bool) !?t.Contact {
+    var warnings: t.ContactReadWarnings = .{};
+    const raw_emails = readArray(value, "emailAddresses", &warnings);
+    // Inspect at most 32 source addresses, preserving the established contact
+    // bound even when a provider returns an unexpectedly large array.
+    const email_count = @min(raw_emails.len, 32);
+    warnings.omittedEmails = count(raw_emails.len - email_count);
+    var emails: std.ArrayList(t.Address) = .empty;
+    for (raw_emails[0..email_count]) |entry| {
+        const address = j.text(entry, "value");
+        recipients.validateAddress(address) catch {
+            warnings.omittedEmails +|= 1;
+            continue;
+        };
+        var duplicate = false;
+        for (emails.items) |previous| duplicate = duplicate or recipients.sameAddress(address, previous.address);
+        if (duplicate) {
+            warnings.omittedEmails +|= 1;
+            continue;
+        }
+        try emails.append(a, .{ .address = address });
+    }
+    const names = readArray(value, "names", &warnings);
+    const name_count = @min(names.len, 32);
+    warnings.omittedNames = count(names.len - name_count);
+    var name: []const u8 = "";
+    var primary = false;
+    for (names[0..name_count]) |entry| {
+        const candidate = j.get(entry, "displayName") orelse {
+            warnings.omittedNames +|= 1;
+            continue;
+        };
+        if (candidate != .string or !std.unicode.utf8ValidateSlice(candidate.string)) {
+            warnings.omittedNames +|= 1;
+            continue;
+        }
+        var len = @min(candidate.string.len, policy.display_name_bytes);
+        if (len < candidate.string.len) while (len > 0 and candidate.string[len] & 0xc0 == 0x80) : (len -= 1) {};
+        const cleaned = try @import("mime.zig").sanitizeHeaderText(candidate.string[0..len], a);
+        if (!std.mem.eql(u8, cleaned, candidate.string)) warnings.sanitizedNames +|= 1;
+        if (std.mem.trim(u8, cleaned, " ").len == 0) continue;
+        const preferred = if (j.get(entry, "metadata")) |metadata| j.boolean(metadata, "primary", false) catch false else false;
+        if (name.len == 0 or (preferred and !primary)) {
+            name = cleaned;
+            primary = preferred;
+        }
+    }
+    if (name.len == 0 and emails.items.len == 0) return null;
+    var etag: []const u8 = "";
+    if (j.get(value, "metadata")) |metadata| {
+        if (metadata != .object) warnings.omittedMetadata = 1 else {
+            const sources = readArray(metadata, "sources", &warnings);
+            if (sources.len > 32) warnings.omittedMetadata = 1;
+            for (sources[0..@min(sources.len, 32)]) |source| {
+                if (source != .object) {
+                    warnings.omittedMetadata = 1;
+                    continue;
+                }
+                if (!std.mem.eql(u8, j.text(source, "type"), "CONTACT")) continue;
+                const raw_etag = j.get(source, "etag") orelse continue;
+                if (raw_etag != .string or raw_etag.string.len > 4096) {
+                    warnings.omittedMetadata = 1;
+                    continue;
+                }
+                recipients.validateHeader(raw_etag.string) catch {
+                    warnings.omittedMetadata = 1;
+                    continue;
+                };
+                etag = raw_etag.string;
+            }
+        }
+    }
+    var provider: ?j.Value = null;
+    if (!warnings.any()) {
+        var fields = j.object(a);
+        for ([_][]const u8{ "names", "emailAddresses", "metadata" }) |key| if (j.get(value, key)) |field| try fields.object.put(a, key, field);
+        // Count without allocating the over-limit serialization. Only a bounded
+        // provider object can survive the temporary record/page arenas.
+        if (@import("gmail_decode.zig").serializedBytes(fields) > 64 * 1024) warnings.omittedMetadata = 1 else if (retain_provider) provider = fields;
+    }
+    if (warnings.any()) warnings.partialContacts = 1;
+    return .{ .resourceName = resource_name, .etag = etag, .name = name, .emails = emails.items, .provider = provider, .readWarnings = warnings };
+}
+fn copyRead(a: std.mem.Allocator, value: t.Contact) !t.Contact {
+    var result = value;
+    result.resourceName = try a.dupe(u8, value.resourceName);
+    result.etag = try a.dupe(u8, value.etag);
+    result.name = try a.dupe(u8, value.name);
+    const emails = try a.alloc(t.Address, value.emails.len);
+    for (value.emails, emails) |email, *dest| dest.* = .{ .address = try a.dupe(u8, email.address) };
+    result.emails = emails;
+    result.provider = if (value.provider) |provider| try j.value(a, provider) else null;
+    return result;
+}
+/// Strict page boundaries and bounded record-local loss are shared by every
+/// People read. Global allocator/provider failures are never swallowed here.
+pub fn readPage(a: std.mem.Allocator, scratch: std.mem.Allocator, value: j.Value, options: ReadOptions) !ReadPage {
+    if (value != .object or options.limit == 0 or options.limit > 100) return error.InvalidProviderResponse;
+    const field = j.get(value, if (options.search) "results" else "connections");
+    if (field != null and field.? != .array) return error.InvalidProviderResponse;
+    const entries: []const j.Value = if (field) |present| present.array.items else &.{};
+    if (entries.len > @min(options.limit, if (options.search) @as(usize, 30) else 100)) return error.InvalidPage;
+    const cursor = if (j.get(value, "nextPageToken")) |v| if (v == .string) v.string else return error.InvalidProviderResponse else "";
+    if (cursor.len > 4096) return error.InvalidProviderResponse;
+    recipients.validateHeader(cursor) catch return error.InvalidProviderResponse;
+    var result: ReadPage = .{ .contacts = try a.alloc(t.Contact, entries.len) };
+    var used: usize = 0;
+    for (entries) |entry| {
+        const person = if (options.search) j.get(entry, "person") orelse .null else entry;
+        const resource_name = identity(person) orelse {
+            result.contactWarnings.omittedContacts +|= 1;
+            continue;
+        };
+        var duplicate = false;
+        for (result.contacts[0..used]) |previous| duplicate = duplicate or std.mem.eql(u8, resource_name, previous.resourceName);
+        if (duplicate) {
+            result.contactWarnings.omittedContacts +|= 1;
+            continue;
+        }
+        var record_scope: std.heap.ArenaAllocator = .init(scratch);
+        defer record_scope.deinit();
+        const normalized = (try readRecord(record_scope.allocator(), person, resource_name, options.retain_provider)) orelse {
+            result.contactWarnings.omittedContacts +|= 1;
+            continue;
+        };
+        result.contacts[used] = try copyRead(a, normalized);
+        result.contactWarnings.add(normalized.readWarnings);
+        used += 1;
+    }
+    result.contacts = result.contacts[0..used];
+    result.nextCursor = if (cursor.len > 0) try a.dupe(u8, cursor) else null;
+    result.partial = result.contactWarnings.any();
+    return result;
+}
+
 fn array(value: j.Value, key: []const u8) ![]j.Value {
     const entries = j.get(value, key) orelse return &.{};
     if (entries != .array) return error.InvalidContact;
@@ -54,10 +212,14 @@ pub fn normalize(a: std.mem.Allocator, value: j.Value) !t.Contact {
 pub fn mergeInput(a: std.mem.Allocator, value: j.Value, current: ?t.Contact) !t.Contact {
     var result = try j.decode(t.Contact, a, value);
     if (current) |old| {
+        // Read isolation must never silently become a destructive write of the
+        // retained subset. Live updates first fetch a strictly decoded record.
+        if (old.readWarnings.any()) return error.IncompleteContact;
         if (j.get(value, "name") == null) result.name = old.name;
         if (j.get(value, "emails") == null) result.emails = old.emails;
         result.provider = old.provider;
     } else result.provider = null;
+    result.readWarnings = .{};
     try validate(result);
     return result;
 }

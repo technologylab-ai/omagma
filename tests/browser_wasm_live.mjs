@@ -18,6 +18,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
   args.set(process.argv[index], process.argv[index + 1]);
 }
 const originalsFixtureEnabled = args.get("--originals-only") === "true" || args.get("--originals-size-only") === "true" || args.get("--originals-medium-only") === "true";
+const nextWorkFixtureEnabled = args.get("--next-work-only") === "true";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const site = resolve(args.get("--site-dir") || join(root, "web-demo/dist"));
 const work = resolve(args.get("--work-dir") || "/tmp/omagma-wasm-browser-live");
@@ -44,7 +45,8 @@ await mkdir(work, { recursive: true, mode: 0o700 });
 const readScope = "https://www.googleapis.com/auth/gmail.readonly";
 const sendScope = "https://www.googleapis.com/auth/gmail.send";
 const contactsScope = "https://www.googleapis.com/auth/contacts.readonly";
-const capabilitiesFor = (scopes) => ["mail-read", ...(scopes.includes(sendScope) ? ["mail-send"] : []), ...(scopes.includes(contactsScope) ? ["contacts-read"] : [])];
+const modifyScope = "https://www.googleapis.com/auth/gmail.modify";
+const capabilitiesFor = (scopes) => ["mail-read", ...(scopes.includes(sendScope) || scopes.includes(modifyScope) ? ["mail-send"] : []), ...(scopes.includes(modifyScope) ? ["mail-modify"] : []), ...(scopes.includes(contactsScope) ? ["contacts-read"] : [])];
 const clientId = "synthetic-browser-test.apps.googleusercontent.com";
 const clientSecret = "synthetic-client-secret-never-valid";
 const accounts = ["ada.browser@example.test", "bea.browser@example.test"];
@@ -107,6 +109,8 @@ const bundles = {
   workflows: await connectionBundle("workflows", await Promise.all(accounts.map(address => bundleRecord(address, [readScope, sendScope, contactsScope])))),
   contactsReadonly: await connectionBundle("contacts-readonly", [await bundleRecord(accounts[0], [readScope, contactsScope])]),
   workflowAda: await connectionBundle("workflow-ada", [await bundleRecord(accounts[0], [readScope, sendScope, contactsScope])]),
+  nextWork: await connectionBundle("next-work", await Promise.all(accounts.map(address => bundleRecord(address, [modifyScope, contactsScope])))),
+  nextWorkAda: await connectionBundle("next-work-ada", [await bundleRecord(accounts[0], [modifyScope, contactsScope])]),
   invalid: [
     ["format", await connectionBundle("bad-format", [adaBundleRecord], { format: "unsupported-browser-format" })],
     ["version", await connectionBundle("bad-version", [adaBundleRecord], { version: 2 })],
@@ -318,12 +322,18 @@ try {
   let scopeMode = "send";
   let mailVariant = "";
   let sendMode = "success";
+  let mailboxMode = "success";
+  const mailboxLabels = new Map();
+  const customLabels = [{ id: "Label_fixture", name: "Fixture projects", type: "user", labelListVisibility: "labelShow", messageListVisibility: "show" }];
+  const actualLabels = (owner, index) => mailboxLabels.get(`${owner}-message-${index}`) ?? ["INBOX", "UNREAD"];
   let listFailure = null;
   let originalAttachmentFailure = null;
   let holdNextFullRead = false;
   let holdNextProfile = false;
   const heldProfiles = [];
   const heldReads = [];
+  const heldMailboxWrites = [];
+  let holdNextMailboxWrite = false;
   const canceledRequests = new Set();
   let expectedDialog = null;
   const handledDialogs = [];
@@ -351,7 +361,7 @@ try {
   async function handleOwnedDialog(params) {
     const intent = expectedDialog;
     expectedDialog = null;
-    if (!intent || params.type !== intent.type || (intent.type === "confirm" && !/disconnect.*discard.*drafts/i.test(params.message))) {
+    if (!intent || params.type !== intent.type || (intent.type === "confirm" && !/disconnect.*(unsaved|discard).*drafts/i.test(params.message))) {
       await call("Page.handleJavaScriptDialog", { accept: false });
       throw new Error(`Unexpected owned browser dialog: ${params.type}`);
     }
@@ -377,7 +387,7 @@ try {
     const headers = [
       { name: "Content-Type", value: "application/json" }, { name: "Access-Control-Allow-Origin", value: origin },
       { name: "Access-Control-Allow-Headers", value: "authorization,content-type" },
-      { name: "Access-Control-Allow-Methods", value: "GET,POST,OPTIONS" },
+      { name: "Access-Control-Allow-Methods", value: "GET,POST,PATCH,DELETE,OPTIONS" },
       { name: "Cache-Control", value: "no-store" },
     ];
     if (request.method === "OPTIONS") return call("Fetch.fulfillRequest", { requestId, responseCode: 204, responseHeaders: headers, body: "" });
@@ -402,7 +412,7 @@ try {
         assert.equal(form.get("grant_type"), "refresh_token");
         record.accountIndex = accountIndex;
         payload = { access_token: accessSecrets[accountIndex], token_type: "Bearer", expires_in: 3600,
-          ...(scopeMode === "omitted" ? {} : { scope: (scopeMode === "readonly" ? [readScope] : scopeMode === "workflows" ? [readScope, sendScope, contactsScope] : [readScope, sendScope]).join(" ") }) };
+          ...(scopeMode === "omitted" ? {} : { scope: (scopeMode === "readonly" ? [readScope] : scopeMode === "next-work" ? [modifyScope, contactsScope] : scopeMode === "workflows" ? [readScope, sendScope, contactsScope] : [readScope, sendScope]).join(" ") }) };
       } else if (url.origin === "https://people.googleapis.com") {
         assert(accountIndex >= 0, "People request used an unknown synthetic bearer");
         assert.equal(request.method, "GET", "browser attempted a People mutation");
@@ -413,6 +423,9 @@ try {
           assert(Number(url.searchParams.get("pageSize")) >= 1 && Number(url.searchParams.get("pageSize")) <= 100, "People list exceeds its bounded contact limit");
           assert(!url.searchParams.get("pageToken"), "browser followed unbounded People pagination");
           payload = { connections: providerContacts(accountIndex), nextPageToken: "must-not-be-followed", totalPeople: 5000, totalItems: 5000 };
+          if (nextWorkFixtureEnabled) payload.connections.push(
+            { resourceName: "invalid/person", names: [{ displayName: "Unusable identity" }], emailAddresses: [{ value: "unsafe@example.test" }] },
+            { resourceName: "people/partial-contact", names: [{ displayName: "Partial safe neighbor" }], emailAddresses: [{ value: "not an address" }, { value: "partial.safe@example.test" }] });
         } else if (url.pathname === "/v1/people:searchContacts") {
           assert.equal(url.searchParams.get("readMask"), expectedFields);
           assert(Number(url.searchParams.get("pageSize")) >= 1 && Number(url.searchParams.get("pageSize")) <= 30, "People search exceeds the bounded page limit");
@@ -451,6 +464,13 @@ try {
               if (query === "live mailbox") indices = [0];
               if (query === "category:updates") indices = [4];
             }
+            if (nextWorkFixtureEnabled) {
+              const labels = url.searchParams.getAll("labelIds");
+              const query = url.searchParams.get("q") || "";
+              indices = indices.filter(index => labels.every(label => actualLabels(owner, index).includes(label)));
+              if (query.includes("-in:inbox")) indices = indices.filter(index => !actualLabels(owner, index).includes("INBOX"));
+              if (query.includes("is:unread")) indices = indices.filter(index => actualLabels(owner, index).includes("UNREAD"));
+            }
             payload = { messages: indices.map(index => ({ id: `${owner}-message-${index}`, threadId: `${owner}-thread-${index}` })), nextPageToken: "must-not-be-followed", resultSizeEstimate: 5000 };
           }
         } else if (url.pathname === "/gmail/v1/users/me/settings/sendAs" && request.method === "GET") {
@@ -472,6 +492,7 @@ try {
             await new Promise((release) => heldReads.push({ requestId, networkId, url: request.url, release }));
           }
           payload = providerMessage(accountIndex, index, url.searchParams.get("format"));
+          if (nextWorkFixtureEnabled) payload.labelIds = actualLabels(accountIndex === 0 ? "ada" : "bea", index);
           if (mailVariant && accountIndex === 0 && index === 0) {
             payload.payload.headers.find(header => header.name === "Subject").value = `${mailVariant} Ada live mailbox`;
             if (url.searchParams.get("format") === "full") {
@@ -487,6 +508,38 @@ try {
             await new Promise(release => heldReads.push({ requestId, networkId, url: request.url, release }));
           }
           payload = { id: `${accountIndex === 0 ? "ada" : "bea"}-thread-${index}`, historyId: "1200", messages: [providerMessage(accountIndex, index, "full")] };
+          if (nextWorkFixtureEnabled) payload.messages[0].labelIds = actualLabels(accountIndex === 0 ? "ada" : "bea", index);
+        } else if (nextWorkFixtureEnabled && url.pathname === "/gmail/v1/users/me/labels" && request.method === "GET") {
+          payload = { labels: [
+            ...["INBOX", "UNREAD", "STARRED", "SENT", "TRASH", "SPAM", "IMPORTANT"].map(id => ({ id, name: id, type: "system" })), ...customLabels,
+          ] };
+        } else if (nextWorkFixtureEnabled && /^\/gmail\/v1\/users\/me\/messages\/(ada|bea)-message-\d+\/(modify|trash|untrash)$/.test(url.pathname) && request.method === "POST") {
+          const id = url.pathname.split("/").at(-2), owner = accountIndex === 0 ? "ada" : "bea", index = Number(id.match(/-(\d+)$/)[1]);
+          assert(id.startsWith(owner + "-"), "mailbox mutation crossed account identity");
+          const change = JSON.parse(request.postData || "{}");
+          const before = actualLabels(owner, index);
+          const action = url.pathname.split("/").at(-1);
+          const add = action === "trash" ? ["TRASH"] : change.addLabelIds || [];
+          const remove = action === "untrash" ? ["TRASH"] : change.removeLabelIds || [];
+          const after = [...new Set([...before.filter(label => !remove.includes(label)), ...add])];
+          mailboxLabels.set(id, after);
+          if (holdNextMailboxWrite) {
+            holdNextMailboxWrite = false;
+            await new Promise(release => heldMailboxWrites.push({ requestId, release }));
+          }
+          if (mailboxMode === "uncertain") return call("Fetch.failRequest", { requestId, errorReason: "ConnectionClosed" });
+          payload = { id, threadId: `${owner}-thread-${index}`, labelIds: after };
+        } else if (nextWorkFixtureEnabled && url.pathname === "/gmail/v1/users/me/labels" && request.method === "POST") {
+          const data = JSON.parse(request.postData);
+          payload = { ...data, id: "Label_created", type: "user" };
+          customLabels.push(payload);
+        } else if (nextWorkFixtureEnabled && /^\/gmail\/v1\/users\/me\/labels\/Label_[A-Za-z0-9_-]+$/.test(url.pathname)) {
+          const id = url.pathname.split("/").at(-1);
+          const position = customLabels.findIndex(label => label.id === id);
+          assert(position >= 0, "unknown custom label identity");
+          if (request.method === "DELETE") { customLabels.splice(position, 1); responseCode = 204; payload = {}; }
+          else if (request.method === "PATCH") { customLabels[position] = { ...customLabels[position], ...JSON.parse(request.postData) }; payload = customLabels[position]; }
+          else { assert.equal(request.method, "GET"); payload = customLabels[position]; }
         } else if (url.pathname === "/gmail/v1/users/me/messages/send" && request.method === "POST") {
           const sent = JSON.parse(request.postData);
           assert(typeof sent.raw === "string" && sent.raw.length > 0, "send request has no RFC5322 message");
@@ -586,7 +639,7 @@ try {
     })()`);
   }
   function assertCacheDatabases(databases) {
-    assert(databases.length <= 1 && databases.every(db => db.name === cacheDatabase && db.version === 1), "unexpected browser persistence database");
+    assert(databases.length <= 2 && databases.every(db => [cacheDatabase, "omagma-browser-drafts-v1"].includes(db.name) && db.version === 1), "unexpected browser persistence database");
   }
   async function settled(message = "browser job did not settle") {
     await until(async () => !(await session()).busy && await evaluate("document.querySelector('#terminal').getAttribute('aria-busy')==='false'"), message, 30000);
@@ -614,6 +667,21 @@ try {
     await act(() => text("k".repeat(32))); // Native restores navigation context; reach the first row explicitly.
     await act(() => text("j".repeat(count + folder)));
     nativeFolderGetsBeforeEnter = gmailGets().length;
+    return act(() => key("Enter", "Enter"));
+  }
+  async function openVisibleDraft(subject) {
+    const target = await evaluate(`(()=>{
+      const api=window.omagmaDemo,subject=${JSON.stringify(subject)},rect=document.querySelector('.xterm-screen').getBoundingClientRect();
+      for(let row=0;row<api.rows;row++){
+        let line='';for(let col=0;col<api.cols;col++)line+=api.cell(col,row).chars;
+        const col=line.indexOf(subject);if(col>=0)return {x:rect.left+(col+3.5)*rect.width/api.cols,y:rect.top+(row+0.5)*rect.height/api.rows};
+      }return null;
+    })()`);
+    assert(target, `saved draft ${subject} is not visible`);
+    await act(async () => {
+      await call("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 });
+      await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 });
+    });
     return act(() => key("Enter", "Enter"));
   }
   async function importFiles(paths) {
@@ -1637,7 +1705,7 @@ try {
     assert.deepEqual(transportErrors, [], "original fixture transport failed");
     assert.deepEqual(unexpectedDestinations, [], "original source requested an unapproved external resource");
     checks.sourceNeverExecutesOrLoadsRemoteResources = true;
-    checks.noCredentialsOrOriginalDraftPersistence = true;
+    checks.noCredentialsInMailCacheOrLogsAndDraftsUseSeparateStore = true;
     const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product, origin,
       fixedGoogleUrlsIntercepted: true, requestCount: requests.length, maximumActiveRequests, syntheticSendRequests: sends().length,
       attachmentRequests: gmailGets().filter(request => new URL(request.url).pathname.includes("/attachments/")).length,
@@ -1645,6 +1713,343 @@ try {
       wasmSha256: createHash("sha256").update(await readFile(join(site, "omagma.wasm"))).digest("hex") };
     await writeFile(join(work, args.get("--originals-size-only") === "true" ? "originals-size-acceptance.json" : args.get("--originals-medium-only") === "true" ? "originals-medium-acceptance.json" : "originals-acceptance.json"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
     console.log(JSON.stringify({ ...report, submitted: submitted.map(({ label, account, parts }) => ({ label, account, parts: parts.length })) }));
+  } else if (nextWorkFixtureEnabled) {
+    const checks = {};
+    const draftDatabase = "omagma-browser-drafts-v1";
+    const mailboxWrites = () => requests.filter(request => request.method !== "GET" && new URL(request.url).origin === "https://gmail.googleapis.com" && !new URL(request.url).pathname.endsWith("/send"));
+    const messageWrites = () => mailboxWrites().filter(request => new URL(request.url).pathname.includes("/messages/"));
+    async function draftRows() {
+      return evaluate(`(async()=>{
+        if(!(await indexedDB.databases()).some(db=>db.name===${JSON.stringify(draftDatabase)}))return [];
+        const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(draftDatabase)},1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+        try{return await new Promise((resolve,reject)=>{const tx=db.transaction('actors','readonly'),r=tx.objectStore('actors').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}finally{db.close()}
+      })()`);
+    }
+    const field = (label, value) => {
+      const line = value.split("\n").find(line => line.includes(label + ":"));
+      assert(line, `missing composer ${label}`);
+      return line.slice(line.indexOf(label + ":") + label.length + 1).split(/[│┃]/)[0].replaceAll("▏", "").trim();
+    };
+    async function reload() {
+      const before = requests.length;
+      const marker = events.length;
+      await call("Page.reload", { ignoreCache: true });
+      await until(async () => events.slice(marker).some(event => event.method === "Page.loadEventFired") && await evaluate("window.omagmaDemo?.ready === true"), "reload failed");
+      assert.equal(requests.length, before, "reload connected credentials or replayed provider requests");
+      assert(!(await screen()).includes("Durable unfinished draft"), "unverified draft exposed before Connect");
+      const connectStart = requests.length;
+      await importBundle(bundles.nextWork);
+      await connected(2);
+      assert(!requests.slice(connectStart).some(request => request.method === "GET" && (new URL(request.url).pathname.endsWith("/messages") || new URL(request.url).searchParams.get("format") === "metadata")), "verified cache restore refetched retained mailbox metadata");
+      await act(() => text("1"));
+    }
+    scopeMode = "next-work";
+    await importBundle(bundles.nextWork);
+    await connected(2);
+    await act(() => text("1"));
+    assert(await evaluate("document.querySelector('.brand-mark').tagName==='IMG' && document.querySelector('.brand-mark').naturalWidth===120"), "Omagma logo is missing or unloaded");
+    const contacts = await act(() => text("a"));
+    assert(contacts.includes(contactNames[0][0]) && contacts.includes("partial.safe@example.test"), "contact failure removed healthy neighbors");
+    assert.match(contacts, /Partial contacts.*1 omitted.*1 with warnings/, "contact omissions are not visibly reported");
+    await settled();
+    const contactSnapshot = (await cacheRows()).find(row => row.key[0] === accounts[0]);
+    assert.equal(contactSnapshot?.snapshot.contactWarnings.omittedContacts, 1, "contact omission count was not persisted");
+    assert.equal(contactSnapshot?.snapshot.contacts.find(contact => contact.resourceName === "people/partial-contact")?.readWarnings.omittedEmails, 1, "partial contact fields lost their persisted warning");
+    await screenshot("next-contact-isolation.png");
+    await act(() => text("q"));
+    const beforeSwitch = requests.length;
+    await act(() => text("2121"));
+    assert.equal(requests.length, beforeSwitch, "mailbox support regressed local account switching");
+    checks.contactsIsolationAndLocalSwitch = true;
+    const firstWrite = messageWrites().length;
+    holdNextMailboxWrite = true;
+    await text("s");
+    await until(async () => heldMailboxWrites.length === 1 && (await session()).mailboxWriting, "mailbox POST did not enter its submitted phase");
+    assert.match(await evaluate("document.querySelector('#runtime-status').textContent"), /confirm mailbox change/i, "mailbox submission has no visible confirmation status");
+    assert(!/Ctrl\+C cancels/.test(await evaluate("document.querySelector('#request-status-hint').textContent")), "submitted mailbox write misleadingly offers cancellation");
+    await key("c", "KeyC", 2);
+    await pause(100);
+    assert((await session()).mailboxWriting, "Ctrl+C aborted an already dispatched mailbox change");
+    heldMailboxWrites[0].release();
+    await settled();
+    assert.equal(messageWrites().length, firstWrite + 1, "star toggle did not submit exactly once");
+    assert(actualLabels("ada", 0).includes("STARRED"), "star toggle targeted another message");
+    await act(() => key("z", "KeyZ", 2));
+    await settled();
+    assert.equal(messageWrites().length, firstWrite + 2, "undo did not submit once");
+    assert(!actualLabels("ada", 0).includes("STARRED") && actualLabels("ada", 0).includes("UNREAD"), "undo changed unrelated membership");
+    await act(() => text("u"));
+    assert(!actualLabels("ada", 0).includes("UNREAD"), "unread toggle failed");
+    await act(() => text("u"));
+    assert(actualLabels("ada", 0).includes("UNREAD"), "read toggle failed");
+    await act(() => text("x"));
+    assert(!actualLabels("ada", 0).includes("INBOX"), "archive failed");
+    await act(() => key("z", "KeyZ", 2));
+    assert(actualLabels("ada", 0).includes("INBOX"), "archive undo did not restore Inbox");
+    await act(() => text("D"));
+    assert.match(await screen(), /Trash/, "Trash review did not open");
+    const trashBefore = messageWrites().length;
+    await act(() => key("Escape", "Escape"));
+    assert.equal(messageWrites().length, trashBefore, "canceling Trash still modified mail");
+    await act(() => text("D"));
+    await act(() => text("y"));
+    assert(actualLabels("ada", 0).includes("TRASH"), "confirmed Trash failed");
+    await act(() => key("z", "KeyZ", 2));
+    assert(!actualLabels("ada", 0).includes("TRASH"), "Trash undo failed");
+    await act(() => text("m"));
+    assert.match(await screen(), /Fixture projects/, "custom-label assignment did not load the shared chooser");
+    await act(() => text("+"));
+    await act(() => key("s", "KeyS", 2));
+    assert(actualLabels("ada", 0).includes("Label_fixture"), "staged label assignment failed");
+    await act(() => key("z", "KeyZ", 2));
+    assert(!actualLabels("ada", 0).includes("Label_fixture"), "label undo failed");
+    assert(messageWrites().every(request => request.accountIndex === 0), "mailbox actions crossed actor identity");
+    await screenshot("next-mailbox-actions.png");
+    checks.reviewedMailboxActionsAndUndo = true;
+    checks.submittedMailboxChangeWaitsForReceiptWithoutFalseCancellation = true;
+
+    // Preserve invalid in-progress recipient text without treating it as a
+    // valid sending envelope. Native shared recovery fields remain authoritative.
+    await act(() => text("c"));
+    await editComposer({ plain: true });
+    await act(() => text("unfinished recipient"));
+    await act(() => key("Tab", "Tab"));
+    await act(() => key("Tab", "Tab"));
+    await act(() => key("Tab", "Tab"));
+    await act(() => text("Durable unfinished draft"));
+    await act(() => key("Tab", "Tab"));
+    await act(() => paste("Exact durable café 日本語 note.\n"));
+    await act(() => key("Escape", "Escape"));
+    await pause(1800);
+    await settled();
+    const beforeReloadDrafts = await draftRows();
+    const stored = beforeReloadDrafts.find(row => row.key[0] === accounts[0]);
+    assert(stored?.snapshot.drafts.some(draft => draft.recoveryFields?.[0] === "unfinished recipient" && draft.recoveryFields?.[3] === "Durable unfinished draft" && draft.recoveryFields?.[4] === "Exact durable café 日本語 note.\n"), "autosave lost unfinished fields or exact UTF-8 body");
+    assert.equal(sends().length, 0, "autosave submitted mail");
+    await reload();
+    const drafts = await chooseNativeFolder(1, 2, 2);
+    assert(drafts.includes("Durable unfinished draft"), "verified reload lost the durable draft");
+    const reopened = await act(() => key("Enter", "Enter"));
+    assert.equal(field("To", reopened), "unfinished recipient", "recovery normalized away unfinished recipient text");
+    assert(reopened.includes("Exact durable café 日本語 note."), "recovery body changed");
+    await screenshot("next-durable-recovery.png");
+    checks.exactUnfinishedRecoveryAfterVerifiedReload = true;
+
+    // Hold an actual IndexedDB writer while automatic save suspends WASM.
+    // Real xterm input must enter the bounded host queue instead of disappearing.
+    await evaluate(`(async()=>{
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(draftDatabase)},1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+      const tx=db.transaction('actors','readwrite'),store=tx.objectStore('actors');window.__nextHoldDrafts=true;
+      function hold(){const r=store.getAll(undefined,3);r.onsuccess=()=>{if(window.__nextHoldDrafts)hold()}}
+      tx.oncomplete=()=>db.close();tx.onabort=()=>db.close();hold();return true;
+    })()`);
+    await editComposer({ body: true });
+    await act(() => text("Before blocked autosave. "));
+    await until(async () => evaluate("document.querySelector('#runtime-status').textContent.includes('Saving browser drafts')"), "held IndexedDB transaction did not suspend autosave");
+    await text("Typing during autosave survives.");
+    await evaluate("window.__nextHoldDrafts=false;true");
+    await until(async () => (await screen()).includes("Typing during autosave survives."), "automatic saving dropped queued keystrokes");
+    await pause(1800);
+    await settled();
+    const queuedSaved = await draftRows();
+    assert(queuedSaved.some(row => row.snapshot.drafts.some(draft => draft.recoveryFields?.[4]?.includes("Typing during autosave survives."))), "queued typing was displayed but not durably saved");
+    checks.typingDuringAutomaticStorageSuspensionSurvives = true;
+
+    for (let index = 0; index < 4; index++) await act(() => key("Tab", "Tab", 8));
+    await act(() => key("e", "KeyE", 2));
+    for (let index = 0; index < 24; index++) await act(() => key("Backspace", "Backspace"));
+    await act(() => text("recipient@example.test"));
+    await act(() => key("Escape", "Escape"));
+    await evaluate(`(async()=>{
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(draftDatabase)},1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+      const tx=db.transaction('actors','readwrite'),store=tx.objectStore('actors');window.__nextHoldDrafts=true;
+      function hold(){const r=store.getAll(undefined,3);r.onsuccess=()=>{if(window.__nextHoldDrafts)hold()}}
+      tx.oncomplete=()=>db.close();tx.onabort=()=>db.close();hold();return true;
+    })()`);
+    await key("s", "KeyS", 2);
+    await until(async () => evaluate("document.querySelector('#runtime-status').textContent.includes('Saving browser drafts')"), "explicit review save did not suspend at held storage");
+    assert.match(await evaluate("document.querySelector('#request-status-hint').textContent"), /input is paused/i, "explicit review save did not explain its input fence");
+    await text("y");
+    await evaluate("window.__nextHoldDrafts=false;true");
+    await until(async () => (await screen()).includes("Review send"), "explicit save did not reach review");
+    await settled();
+    assert.equal(sends().length, 0, "typing before review became a send confirmation");
+    assert.equal((await session()).sendPhase, null, "typing during explicit review save started a countdown");
+    await act(() => key("Escape", "Escape"));
+    const savedBeforeQuota = await draftRows();
+    checks.preReviewStorageCannotQueueAConfirmation = true;
+
+    // Refused storage preserves the previous committed snapshot and the editor.
+    await evaluate(`(()=>{const original=IDBObjectStore.prototype.put;window.__nextOriginalPut=original;IDBObjectStore.prototype.put=function(...args){if(this.transaction.db.name===${JSON.stringify(draftDatabase)})throw new DOMException('Synthetic draft quota','QuotaExceededError');return original.apply(this,args)};return true})()`);
+    await editComposer({ body: true });
+    await act(() => paste("Unsaved quota addition.\n"));
+    await pause(1800);
+    await settled();
+    assert((await screen()).includes("Unsaved quota addition."), "quota refusal discarded in-tab edits");
+    assert.match(await evaluate("document.querySelector('#runtime-status').textContent + ' ' + document.querySelector('#request-status-hint').textContent"), /draft.*(could not|full|unavailable|saved)/i, "draft persistence failure is not visible");
+    assert.deepEqual(await draftRows(), savedBeforeQuota, "failed write changed the previous disk snapshot");
+    await evaluate("IDBObjectStore.prototype.put=window.__nextOriginalPut;delete window.__nextOriginalPut;true");
+    await act(() => key("Escape", "Escape"));
+    await act(() => text("q"));
+    await settled();
+    assert((await draftRows()).some(row => row.snapshot.drafts.some(draft => (draft.recoveryFields?.[4] ?? draft.bodyText)?.includes("Unsaved quota addition."))), "explicit retry did not durably save retained edits");
+    checks.atomicQuotaRefusalAndExplicitRetry = true;
+    await disconnect();
+    scopeMode = "readonly";
+    await importBundle(bundles.readonly);
+    await connected(1);
+    const differentGrantDrafts = await chooseNativeFolder(1, 1, 2);
+    assert(!differentGrantDrafts.includes("Durable unfinished draft"), "another grant exposed private drafts");
+    const readonlyWrites = mailboxWrites().length;
+    await act(() => text("q"));
+    await act(() => text("s"));
+    assert.equal(mailboxWrites().length, readonlyWrites, "read-only grant performed a mailbox mutation");
+    checks.exactGrantIsolationAndReadOnlyGate = true;
+    await disconnect();
+    scopeMode = "next-work";
+    await importBundle(bundles.nextWork);
+    await connected(2);
+    await chooseNativeFolder(1, 2, 2);
+    await act(() => key("Enter", "Enter"));
+    await editComposer({ body: true });
+    for (let index = 0; index < 4; index++) await act(() => key("Tab", "Tab", 8));
+    await act(() => key("e", "KeyE", 2));
+    for (let index = 0; index < 24; index++) await act(() => key("Backspace", "Backspace"));
+    await act(() => text("recipient@example.test"));
+    await act(() => key("Escape", "Escape"));
+    await act(() => key("s", "KeyS", 2));
+    assert.match(await screen(), /Review send/, "recovered draft did not require fresh review");
+    await text("y");
+    await waitGrace();
+    expectedDialog = { purpose: "reload-during-paused-countdown", type: "beforeunload", accept: true };
+    await reload();
+    expectedDialog = null;
+    assert.equal(sends().length, 0, "reload replayed a countdown send");
+    await chooseNativeFolder(1, 2, 2);
+    const pausedDraft = await act(() => key("Enter", "Enter"));
+    assert(!/protected recovery|Outcome unknown/.test(pausedDraft), "never-submitted countdown draft became permanently protected");
+    await pause(1000);
+    assert.equal(sends().length, 0);
+    checks.countdownReloadPausedWithoutReplay = true;
+    await act(() => key("s", "KeyS", 2));
+    sendMode = "uncertain";
+    await explicitSend("durable unknown outcome");
+    await reload();
+    await chooseNativeFolder(1, 2, 2);
+    const unknown = await act(() => key("Enter", "Enter"));
+    assert.match(unknown, /protected recovery|Outcome unknown|unconfirmed/i, "unknown-send draft was not protected after reload");
+    const posts = sends().length;
+    await act(() => text("i"));
+    await act(() => key("s", "KeyS", 2));
+    assert.equal(sends().length, posts, "unknown recovered draft was resubmitted automatically");
+    assert(await evaluate("!document.querySelector('#send-uncertainty').hidden"), "recovered uncertainty lacks an acknowledgement control");
+    assert((await evaluate("document.querySelector('#send-acknowledge').textContent")).includes(accounts[0]), "unknown acknowledgement does not name the exact account");
+    await act(() => text("q"));
+    await act(() => text("2"));
+    await act(() => text("c"));
+    await editComposer({ body: true });
+    await act(() => text("Second actor protected fixture"));
+    await act(() => key("Escape", "Escape"));
+    await act(() => text("q"));
+    await settled();
+    await evaluate(`(async()=>{
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(draftDatabase)},1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+      try{await new Promise((resolve,reject)=>{
+        const tx=db.transaction('actors','readwrite'),store=tx.objectStore('actors'),r=store.getAll();
+        r.onsuccess=()=>{const row=r.result.find(value=>value.key[0]===${JSON.stringify(accounts[1])});if(!row?.snapshot.drafts.length){tx.abort();return}
+          row.snapshot.operations=[{id:'synthetic-restored-unknown-b',draftId:row.snapshot.drafts[0].id,hash:'b'.repeat(64),phase:'submitted',outcome:'unknown',errorCode:'NetworkFailure',acknowledged:false}];
+          row.snapshot.revision++;row.byteLength=new TextEncoder().encode(JSON.stringify(row.snapshot)).length;store.put(row)};
+        tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Missing second actor fixture'));
+      })}finally{db.close()}return true;
+    })()`);
+    await reload();
+    await chooseNativeFolder(1, 2, 2);
+    const selectedUnknownA = await act(() => key("Enter", "Enter"));
+    assert.match(selectedUnknownA, /protected recovery|Outcome unknown|unconfirmed/i, "first actor's protected draft disappeared");
+    assert((await evaluate("document.querySelector('#send-acknowledge').textContent")).includes(accounts[1]), "two-actor acknowledgement failed to name its actual target");
+    await call("Emulation.setDeviceMetricsOverride", { width: 360, height: 850, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    assert(await evaluate("(()=>{const p=document.querySelector('#send-uncertainty').getBoundingClientRect(),b=document.querySelector('#send-acknowledge').getBoundingClientRect();return b.left>=p.left&&b.right<=p.right&&document.documentElement.scrollWidth<=360})()"), "named acknowledgement overflows the narrow browser page");
+    assert(await evaluate("(()=>{const p=document.querySelector('.window-bar').getBoundingClientRect();return [...document.querySelectorAll('.window-actions button')].filter(button=>!button.hidden).every(button=>{const b=button.getBoundingClientRect();return b.left>=p.left&&b.right<=p.right})})()"), "browser page controls are clipped at a narrow width");
+    await screenshot("next-narrow-unknown.png");
+    await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+    await click("#send-acknowledge");
+    await settled();
+    const oneAcknowledged = await draftRows();
+    assert(oneAcknowledged.find(row => row.key[0] === accounts[1]).snapshot.operations[0].acknowledged, "named second actor was not acknowledged");
+    assert(oneAcknowledged.find(row => row.key[0] === accounts[0]).snapshot.operations.some(op => op.outcome === 'unknown' && !op.acknowledged), "acknowledging second actor unlocked first actor's draft");
+    assert(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')!==null"), "another actor's acknowledgement cleared the remaining global uncertainty");
+    assert((await evaluate("document.querySelector('#send-acknowledge').textContent")).includes(accounts[0]), "remaining unknown actor lost its named acknowledgement");
+    const unrelatedMarker = { id: 'browser-12345678-1234-4234-8234-123456789abc-999', startedAt: Date.now() };
+    await evaluate(`localStorage.setItem('omagma-browser-pending-send-v1',${JSON.stringify(JSON.stringify(unrelatedMarker))});true`);
+    await click("#send-acknowledge");
+    await settled();
+    assert.deepEqual(await evaluate("JSON.parse(localStorage.getItem('omagma-browser-pending-send-v1'))"), unrelatedMarker, "named acknowledgement cleared a different operation's marker");
+    assert.match(await evaluate("document.querySelector('#send-acknowledge').textContent"), /all accounts/i, "unattributed marker did not require the wider Sent check");
+    await click("#send-acknowledge");
+    await settled();
+    assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "reviewed generic notice could not acknowledge its pinned marker");
+    assert.equal(sends().length, posts, "acknowledgement resubmitted mail");
+    checks.unknownRecoveryProtectedAndAcknowledgedWithoutRetry = true;
+    checks.multipleUnknownActorsAcknowledgedOnlyByNamedPinnedTarget = true;
+    await screenshot("next-unknown-recovery.png");
+    // A damaged second account stays isolated while the first account's
+    // named, durable receipt remains inspectable and acknowledgeable.
+    await act(() => text("q"));
+    await evaluate(`(async()=>{
+      const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(${JSON.stringify(draftDatabase)},1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+      try{await new Promise((resolve,reject)=>{
+        const tx=db.transaction('actors','readwrite'),store=tx.objectStore('actors'),r=store.getAll();
+        r.onsuccess=()=>{for(const row of r.result){if(row.key[0]===${JSON.stringify(accounts[0])}){
+          const op=row.snapshot.operations.find(value=>value.phase==='submitted'&&value.outcome==='unknown');op.acknowledged=false;localStorage.setItem('omagma-browser-pending-send-v1',JSON.stringify({id:op.id,startedAt:Date.now()}));
+        }else{row.snapshot.version=2}row.byteLength=new TextEncoder().encode(JSON.stringify(row.snapshot)).length;store.put(row)}};
+        tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
+      })}finally{db.close()}return true;
+    })()`);
+    await reload();
+    assert((await evaluate("document.querySelector('#request-status-hint').textContent")).includes(accounts[1]), "unrestorable actor has no retained warning");
+    assert(!(await evaluate("document.querySelector('#send-acknowledge').disabled")), "one unrestorable actor disabled another actor's verified receipt acknowledgement");
+    await click("#send-acknowledge");
+    await settled();
+    assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "named first-actor acknowledgement did not clear its matching marker");
+    await chooseNativeFolder(1, 2, 2);
+    await act(() => key("Enter", "Enter"));
+    await editComposer({ body: true });
+    await act(() => text("Healthy account keeps the other warning. "));
+    await pause(1800); await settled();
+    assert((await evaluate("document.querySelector('#request-status-hint').textContent")).includes(accounts[1]), "successful healthy save erased another actor's restore warning");
+    const damagedRows = await draftRows();
+    assert.equal(damagedRows.find(row => row.key[0] === accounts[1]).snapshot.version, 2, "healthy save deleted or rewrote unrestorable actor data");
+    checks.failedActorStorageCannotPoisonHealthySavesOrNamedAcknowledgement = true;
+    await act(() => key("Escape", "Escape"));
+    await act(() => text("q")); await settled();
+    const beforeCleanupRows = await draftRows();
+    const clearBefore = requests.length;
+    await click("#draft-storage-open");
+    await until(async () => evaluate("document.querySelector('#draft-storage-dialog').open&&!document.querySelector('#draft-storage-clear').disabled"), "reviewed known-draft cleanup did not offer eligible records");
+    assert(await evaluate("document.activeElement===document.querySelector('#draft-storage-cancel')"), "draft cleanup did not default to Cancel");
+    await key("Enter", "Enter");
+    assert.deepEqual(await draftRows(), beforeCleanupRows, "default cleanup Cancel removed saved data");
+    await click("#draft-storage-open");
+    await until(async () => evaluate("!document.querySelector('#draft-storage-clear').disabled"), "cleanup review did not reload eligibility");
+    await click("#draft-storage-clear");
+    await until(async () => (await session()).mode === 'demo' && await evaluate("window.omagmaDemo.ready"), "committed cleanup did not retire the old session");
+    const cleanedRows = await draftRows();
+    assert.equal(cleanedRows.length, 1, "known cleanup retained eligible actors or erased protected/unreadable rows");
+    assert.equal(cleanedRows[0].snapshot.account, accounts[1]);
+    assert.equal(cleanedRows[0].snapshot.version, 2);
+    assert.equal(requests.length, clearBefore, "local draft cleanup called Google");
+    checks.reviewedLocalCleanupKeepsUnreadableRowsAndMakesNoGoogleRequests = true;
+    const rows = await draftRows();
+    for (const secret of syntheticSecrets) assert(!JSON.stringify(rows).includes(secret), "durable drafts leaked credentials");
+    assert(rows.length <= 3 && rows.reduce((sum, row) => sum + row.draftBytes, 0) <= 8 * 1024 * 1024, "durable draft store exceeded bounds");
+    assert.deepEqual(transportErrors, [], "next-work synthetic provider failed");
+    assert.deepEqual(unexpectedDestinations, [], "next-work attempted an external resource fetch");
+    assert.equal(maximumActiveRequests, 1, "browser ran parallel provider operations");
+    const report = { synthetic: true, actualGoogleRequests: 0, browser: version.product, checks, requestCount: requests.length, mailboxWrites: mailboxWrites().length, sendWrites: sends().length, maximumActiveRequests };
+    await writeFile(join(work, "next-work-acceptance.json"), JSON.stringify(report, null, 2), { mode: 0o600 });
+    console.log(JSON.stringify(report));
   } else if (args.get("--workflows-only") === "true") {
     const checks = {};
     const inputField = (label, terminalText) => {
@@ -1683,6 +2088,8 @@ try {
     assert(/Compose/.test(selectedContact) && inputField("To", selectedContact).includes(contactAddresses[0][1]), "selecting a contact did not create an addressed composer");
     assert.equal(sends().length, 0, "selecting a contact submitted a message");
     checks.peopleListSearchSelectionAndAccountIsolation = true;
+    await editComposer({ body: true });
+    await act(() => text("Unsaved disconnect prompt witness"));
     const cancelSession = await session();
     const cancelScreen = await screen();
     const cancelRequests = requests.length;
@@ -1755,13 +2162,13 @@ try {
     assert(adaDrafts.includes("Retained Ada draft") && !adaDrafts.includes("Retained Bea draft"), "native Drafts list leaked another actor's retained draft");
     assert.equal(gmailGets().length, nativeFolderGetsBeforeEnter, "session Drafts list unexpectedly fetched Gmail");
     assert(gmailGets().slice(beforeDrafts).every(request => request.accountIndex === 0), "native draft account switch refreshed another actor's mailbox");
-    const reopenedAda = await act(() => key("Enter", "Enter"));
+    const reopenedAda = await openVisibleDraft("Retained Ada draft");
     assert(inputField("To", reopenedAda).includes(contactAddresses[0][0]) && inputField("Cc", reopenedAda).includes("remote.ada@example.test"), "native Drafts did not restore the exact Ada recipient fields");
     assert.equal(inputField("Subject", reopenedAda), "Retained Ada draft");
     await act(() => text("q"));
     const beaDrafts = await chooseNativeFolder(2, 2, 2);
     assert(beaDrafts.includes("Retained Bea draft") && !beaDrafts.includes("Retained Ada draft"));
-    const reopenedBea = await act(() => key("Enter", "Enter"));
+    const reopenedBea = await openVisibleDraft("Retained Bea draft");
     assert(inputField("To", reopenedBea).includes("bea.own@example.test") && !inputField("To", reopenedBea).includes(contactAddresses[0][0]));
     const discard = await act(() => text("d"));
     assert(/Discard local draft/.test(discard) && discard.includes("Cancel"), "normal d did not open the shared discard review");
@@ -2048,7 +2455,7 @@ try {
     await act(() => text("q"));
     const recoveredUnknownDrafts = await chooseNativeFolder(1, 2, 2);
     assert(recoveredUnknownDrafts.includes("Workflow uncertain draft"), "acknowledgement discarded the receipt's native draft");
-    const recoveredUnknown = await act(() => key("Enter", "Enter"));
+    const recoveredUnknown = await openVisibleDraft("Workflow uncertain draft");
     assert.equal(inputField("Subject", recoveredUnknown), "Workflow uncertain draft");
     await act(() => text("y"));
     assert.equal((await session()).sendPhase, null, "acknowledgement reused the previous send review");
@@ -2084,9 +2491,9 @@ try {
     assertCacheDatabases(privacy.databases);
     assert.deepEqual(privacy.caches, []);
     assert.equal(privacy.cookies, "");
-    assert(!JSON.stringify(privacy.indexedDBRows).includes("Workflow protected draft body"), "browser snapshot persisted a session draft");
+    assert(!JSON.stringify(privacy.indexedDBRows).includes("Workflow protected draft body"), "mail cache persisted a draft");
     assert.deepEqual(privacy.localStorage, {}, "acknowledged workflow left unexpected localStorage data");
-    checks.noCredentialOrDraftPersistenceOrLogs = true;
+    checks.noCredentialsInMailCacheOrLogsAndDraftsUseSeparateStore = true;
     assert.deepEqual(transportErrors, [], "synthetic workflow transport failed");
     assert.deepEqual(unexpectedDestinations, [], "workflow attempted an unapproved external request");
     const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product, origin,
@@ -2388,7 +2795,7 @@ try {
       new Uint8Array(memory(),rp,bytes.length).set(bytes);const status=new DataView(memory(),meta,8);status.setUint32(0,200,true);status.setUint32(4,bytes.length,true);return 0;
     }
     const module=await WebAssembly.compile(await(await fetch('./omagma.wasm')).arrayBuffer());
-    instance=await WebAssembly.instantiate(module,{env:{http_request:new WebAssembly.Suspending(http),now_ms:()=>Date.now()}});
+    instance=await WebAssembly.instantiate(module,{env:{http_request:new WebAssembly.Suspending(http),drafts_store:()=>0,now_ms:()=>Date.now()}});
     const e=instance.exports;
     const invoke=name=>WebAssembly.promising(e[name]);
     if(await invoke('init')(140,35)!==0)throw new Error('Packet fixture initialization failed');
@@ -2635,8 +3042,12 @@ try {
   assert.equal(privacy.cookies, "");
   assert.deepEqual(Object.keys(privacy.localStorage), ["omagma-browser-pending-send-v1"]);
   assert(!JSON.stringify(receipt).includes("Protected uncertain body") && !JSON.stringify(receipt).includes(accounts[0]), "uncertain receipt retained mail content or account details");
+  assert(await evaluate("document.querySelector('#send-acknowledge').disabled"), "unverified reload allowed clearing a protected receipt");
+  await importBundle(bundles.both);
+  await connected(2);
   await click("#send-acknowledge");
-  assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "explicit acknowledgement did not clear the generic receipt");
+  await settled();
+  assert.equal(await evaluate("localStorage.getItem('omagma-browser-pending-send-v1')"), null, "explicit verified acknowledgement did not clear the generic receipt");
   assert.deepEqual(transportErrors, [], "synthetic transport handler failed");
   assert.deepEqual(unexpectedDestinations, [], "message content or host attempted an unapproved external destination");
   const report = { synthetic: true, desktopUsed: false, actualGoogleRequests: 0, browser: version.product,

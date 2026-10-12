@@ -183,13 +183,32 @@ pub const Draft = struct {
     omittedAttachments: usize = 0,
 };
 pub const LabelColor = struct { backgroundColor: []const u8, textColor: []const u8 };
+/// Bounded counts, never provider text. Kept with cached pages so an omitted
+/// record cannot turn into an apparently complete empty address book offline.
+pub const ContactReadWarnings = struct {
+    omittedContacts: u32 = 0,
+    partialContacts: u32 = 0,
+    omittedEmails: u32 = 0,
+    omittedNames: u32 = 0,
+    sanitizedNames: u32 = 0,
+    omittedMetadata: u32 = 0,
+    invalidFields: u32 = 0,
+    pub fn any(self: @This()) bool {
+        inline for (@typeInfo(@This()).@"struct".field_names) |name| if (@field(self, name) != 0) return true;
+        return false;
+    }
+    pub fn add(self: *@This(), other: @This()) void {
+        inline for (@typeInfo(@This()).@"struct".field_names) |name| @field(self, name) +|= @field(other, name);
+    }
+};
 pub const Contact = struct {
     resourceName: []const u8 = "",
     etag: []const u8 = "",
     name: []const u8 = "",
     emails: []const Address = &.{},
-    /// Bounded People names, emailAddresses and metadata. The provider merges
-    /// updates against its current version; this preserves descriptive fields
-    /// for offline inspection without trusting them as a write precondition.
+    readWarnings: ContactReadWarnings = .{},
+    /// Bounded People fields for complete native reads. Partial/browser reads
+    /// omit this object. Updates fetch a strictly decoded current provider
+    /// version; cached fields are never a write precondition.
     provider: ?std.json.Value = null,
 };

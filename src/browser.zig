@@ -2,6 +2,8 @@
 //! transport. OAuth tokens stay in the host, outside WASM and diagnostics.
 const std = @import("std");
 const tui = @import("terminal/tui.zig");
+const draft_storage = @import("browser_drafts.zig");
+extern "env" fn drafts_store(session: u32, pointer: usize, length: usize) u32;
 pub const panic = std.debug.FullPanic(trap);
 fn trap(_: []const u8, _: ?usize) noreturn {
     @trap();
@@ -19,11 +21,14 @@ var heap_initialized = false;
 var demo: tui.BrowserSession = undefined;
 var initialized = false;
 var busy = false;
+var edit_input_context = false;
 var input_buffer: [1024]u8 = undefined;
 var connect_buffer: [16 * 1024]u8 = undefined;
 var cache_buffer: [3 * 1024 * 1024]u8 = undefined;
 var cache_length: usize = 0;
 var staged_cache_length: usize = 0;
+// Transfer bytes share the fixed application heap, never enlarge linear memory.
+var staged_drafts: ?[]u8 = null;
 var output_buffer: [1024 * 1024]u8 = undefined;
 var output_length: usize = 0;
 var writer: std.Io.Writer = undefined;
@@ -53,8 +58,18 @@ export fn init(cols: u32, rows: u32) u32 {
     }
     writer = .fixed(&output_buffer);
     demo.init(heap.allocator(), &writer, dimension(cols, 240), dimension(rows, 80)) catch return 1;
+    demo.provider.draft_store = .{ .saveFn = persistDraftSnapshot };
     initialized = true;
     return redraw();
+}
+fn persistDraftSnapshot(_: ?*anyopaque, session: u32, bytes: []const u8) !void {
+    return switch (drafts_store(session, @intFromPtr(bytes.ptr), bytes.len)) {
+        0 => {},
+        2 => error.BrowserDraftQuota,
+        3 => error.BrowserDraftStorageConflict,
+        4 => error.BrowserDraftOperationQuota,
+        else => error.BrowserDraftStorageUnavailable,
+    };
 }
 fn dimension(value: u32, maximum: u16) u16 {
     return @intCast(@min(@max(value, 1), maximum));
@@ -83,6 +98,8 @@ export fn input(length: usize) u32 {
     if (!initialized or length > input_buffer.len) return 2;
     busy = true;
     defer busy = false;
+    edit_input_context = true;
+    defer edit_input_context = false;
     var offset: usize = 0;
     while (offset < length) {
         // A UTF-8 or ANSI prefix may remain from the preceding host chunk.
@@ -117,9 +134,15 @@ export fn connect(length: usize) u32 {
     busy = true;
     defer busy = false;
     demo.stageCache(cache_buffer[0..staged_cache_length]);
+    demo.stageDrafts(staged_drafts orelse "");
     defer {
         staged_cache_length = 0;
         std.crypto.secureZero(u8, &cache_buffer);
+        if (staged_drafts) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            heap.allocator().free(bytes);
+            staged_drafts = null;
+        }
     }
     demo.connect(connect_buffer[0..length]) catch |err| {
         demo.failure(err);
@@ -133,6 +156,46 @@ export fn live_accounts() u32 {
 }
 export fn draft_count() u32 {
     return if (initialized) @intCast(demo.draftCount()) else 0;
+}
+export fn draft_dirty() u32 {
+    return @intFromBool(initialized and demo.draftDirty());
+}
+export fn autosave_pending() u32 {
+    return @intFromBool(initialized and demo.autosavePending());
+}
+export fn autosave_accepts_input() u32 {
+    return @intFromBool(initialized and edit_input_context and demo.autosaveAcceptsInput());
+}
+export fn autosave_delay() u32 {
+    return if (initialized) demo.autosaveDelay() else 0;
+}
+export fn idle() u32 {
+    if (busy or !initialized) return 4;
+    busy = true;
+    defer busy = false;
+    edit_input_context = true;
+    defer edit_input_context = false;
+    demo.idle() catch |err| demo.failure(err);
+    return redraw();
+}
+export fn drafts_stage(length: usize) u32 {
+    if (busy or !initialized or length > draft_storage.snapshot_bytes) return 2;
+    if (staged_drafts) |bytes| {
+        std.crypto.secureZero(u8, bytes);
+        heap.allocator().free(bytes);
+        staged_drafts = null;
+    }
+    if (length > 0) staged_drafts = heap.allocator().alloc(u8, length) catch return 1;
+    return 0;
+}
+export fn drafts_restored(index: usize) u32 {
+    return @intFromBool(initialized and demo.draftsRestored(index));
+}
+export fn drafts_input_ptr() usize {
+    return if (staged_drafts) |bytes| @intFromPtr(bytes.ptr) else 0;
+}
+export fn drafts_input_capacity() usize {
+    return draft_storage.snapshot_bytes;
 }
 export fn can_send() u32 {
     return @intFromBool(initialized and demo.canSend());
@@ -182,9 +245,44 @@ export fn cache_clear(index: usize) u32 {
     };
     return redraw();
 }
-export fn acknowledge_unknown() u32 {
+export fn unknown_target_index() u32 {
+    if (!initialized) return 0xffffffff;
+    return if (demo.unknownTarget()) |target| @intCast(target.account_index) else 0xffffffff;
+}
+export fn unknown_account_ptr() usize {
+    return if (initialized) (if (demo.unknownTarget()) |target| @intFromPtr(target.account.ptr) else 0) else 0;
+}
+export fn unknown_account_len() usize {
+    return if (initialized) (if (demo.unknownTarget()) |target| target.account.len else 0) else 0;
+}
+export fn unknown_draft_ptr() usize {
+    return if (initialized) (if (demo.unknownTarget()) |target| @intFromPtr(target.draft_id.ptr) else 0) else 0;
+}
+export fn unknown_draft_len() usize {
+    return if (initialized) (if (demo.unknownTarget()) |target| target.draft_id.len else 0) else 0;
+}
+export fn unknown_operation_ptr() usize {
+    return if (initialized) (if (demo.unknownTarget()) |target| @intFromPtr(target.operation_id.ptr) else 0) else 0;
+}
+export fn unknown_operation_len() usize {
+    return if (initialized) (if (demo.unknownTarget()) |target| target.operation_id.len else 0) else 0;
+}
+export fn acknowledge_unknown(expected_index: u32, pointer: usize, length: usize) u32 {
     if (busy or !initialized) return 4;
-    demo.acknowledgeUnknown();
+    const expected_draft: []const u8 = if (demo.unknownTarget()) |target| blk: {
+        if (expected_index != target.account_index or pointer != @intFromPtr(target.draft_id.ptr) or length != target.draft_id.len) return 2;
+        break :blk target.draft_id;
+    } else blk: {
+        if (expected_index != 0xffffffff or pointer != 0 or length != 0) return 2;
+        break :blk "";
+    };
+    busy = true;
+    defer busy = false;
+    demo.acknowledgeUnknown(expected_index, expected_draft) catch |err| {
+        demo.failure(err);
+        _ = redraw();
+        return 1;
+    };
     return redraw();
 }
 export fn contacts_permission(index: usize, allowed: u32) u32 {

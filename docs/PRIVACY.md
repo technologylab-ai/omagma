@@ -55,6 +55,31 @@ The cache keeps the newest mail within message-count and byte quotas. Old-tail e
 
 The CLI returns requested mail and contacts to its caller. Treat its stdout, redirected files and agent logs as private. Local send and invitation receipts contain account/message identities and submission state; they are private too. An uncertain send is retained for review rather than automatically resubmitted.
 
+## Browser WebAssembly client
+
+The optional browser build keeps OAuth credentials in tab memory. Connect uses
+existing terminal grants through the guarded loopback server or a private
+connection file. Google requests go directly from the browser to Google;
+the page does not broaden the grant. Browser JavaScript can access credentials
+loaded into that page, so use the controlled local page or a trusted deployment.
+
+Mail/contacts and drafts/send receipts use separate bounded IndexedDB stores.
+**Saved browser mail and drafts are plaintext browser data, not encrypted at
+rest.** Browser same-origin storage controls apply; native owner-only file modes
+do not govern IndexedDB. Tokens are excluded from both stores. Saved drafts
+remain after reload/disconnect and require fresh account verification with the
+same registration/grant before Omagma displays them. Browser storage is local
+to the browser profile and page origin; another server port has separate storage.
+
+Clear cache removes mail/contact snapshots and preserves drafts/receipts.
+Reviewed draft discard removes that verified account's selected local draft.
+**Saved drafts…** offers reviewed cleanup of eligible saved rows and settled
+history; unconfirmed sends, unconsumed receipts and unreadable rows are kept.
+Unconfirmed sends protect their recovery draft without automatic replay; check
+the named account's Sent before acknowledging. Disconnect clears credentials
+from the page without revoking Google authorization or deleting saved drafts.
+See [browser workflows and limits](../web-demo/LIVE-MAIL.md).
+
 ## Message rendering and attachments
 
 Display text is sanitized to remove terminal controls and directional formatting. A supplied plain-text body takes precedence. HTML-only mail becomes bounded formatted text; scripts, stylesheets, remote images and other remote resources never run or load.

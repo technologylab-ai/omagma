@@ -43,10 +43,18 @@ test('reported narrower scopes disable send; omitted scopes preserve the origina
   const original = scopesFor(['mail-read', 'mail-send']);
   const base = { access_token: 'synthetic-access', expires_in: 3600, token_type: 'Bearer' };
   const narrowed = parseRefreshedToken({ ...base, scope: original[0] }, original);
-  assert.deepEqual(permissions(['mail-read', 'mail-send'], narrowed.actualScopes), { canRead: true, canSend: false });
+  assert.deepEqual(permissions(['mail-read', 'mail-send'], narrowed.actualScopes), { canRead: true, canSend: false, canModify: false });
   const unchanged = parseRefreshedToken(base, original);
-  assert.deepEqual(permissions(['mail-read', 'mail-send'], unchanged.actualScopes), { canRead: true, canSend: true });
-  assert.deepEqual(permissions(['mail-read'], unchanged.actualScopes), { canRead: true, canSend: false });
+  assert.deepEqual(permissions(['mail-read', 'mail-send'], unchanged.actualScopes), { canRead: true, canSend: true, canModify: false });
+  assert.deepEqual(permissions(['mail-read'], unchanged.actualScopes), { canRead: true, canSend: false, canModify: false });
+});
+
+test('mailbox modifications require both the declared capability and actual modify scope', () => {
+  const modify = 'https://www.googleapis.com/auth/gmail.modify';
+  const read = 'https://www.googleapis.com/auth/gmail.readonly';
+  assert.deepEqual(permissions(['mail-read', 'mail-send', 'mail-modify'], [modify]), { canRead: true, canSend: true, canModify: true });
+  assert.equal(permissions(['mail-read', 'mail-modify'], [read]).canModify, false);
+  assert.equal(permissions(['mail-read', 'mail-send'], [modify]).canModify, false);
 });
 
 async function connectionFixture() {

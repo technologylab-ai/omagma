@@ -31,7 +31,7 @@ Enter and Gmail search retain their network routes.
 
 `src/browser_provider.zig` implements the native `types.Client` JSON protocol.
 It owns verified browser sessions, current mail inventory, bounded folder/search
-views, read-only contacts, session drafts and send receipts. It never receives
+views, read-only contacts, browser drafts and send receipts. It never receives
 keyboard events. `src/browser_live.zig` supplies the bounded HTTPS transport to
 the ordinary Gmail/People decoders. Tokens remain in the JavaScript host.
 
@@ -57,9 +57,15 @@ boundary; expose capabilities and use the existing common help/action filtering
 when a platform cannot support an action yet.
 
 Native capability defaults preserve existing behavior. Browser capabilities
-support reading, cache search, contacts and completion, session drafts,
+support reading, cache search, contacts and completion, persistent browser drafts,
 plain/Markdown compose, text-quoted or formatted reply/reply-all/forward,
 original `.eml` forwarding, source attachment retention and reviewed sending.
+Mailbox changes use the shared triage rules and `batch_item.zig` transaction
+engine. Native and browser stores supply storage edges; reviewed targets,
+touched-label undo and preflight/unknown classification remain shared.
+Browser authority requires declared `mail-modify` and the actual Google scope.
+Confirmed label receipts update cached membership; unknown changes invalidate
+membership instead of guessing or replaying.
 Replies exclude the account's verified aliases. Source capture uses fresh FULL
 metadata, the shared original-resource plan and an injected attachment source;
 cached reader snapshots never stand in for a complete formatted source.
@@ -68,7 +74,7 @@ mutations, desktop preferences and background send queues remain unavailable.
 
 Browser source files use the existing portable inline tier: at most 2 MiB of
 decoded attachment data in a draft, a bounded 3 MiB JSON envelope, and the
-aggregate session draft quota. The exact MIME/base64 envelope can impose a
+aggregate browser draft quota. The exact MIME/base64 envelope can impose a
 smaller send limit. Oversized captures and sends fail explicitly without
 dropping files. For over-quota sources the shared chooser explicitly offers
 Text quote with omitted files, and the omission remains visible through review.
@@ -85,11 +91,46 @@ native feature development keeps its current build loop.
 ## Bounds and verification
 
 Browser storage keeps at most three verified actors, 300 current mail records
-per actor, 30 visible rows per page, 100 contacts, eight session drafts per actor
+per actor, 30 visible rows per page, 100 contacts, eight browser drafts per actor
 under an aggregate 8 MiB draft quota, and 64 send records. Persisted mail has a
 3 MiB snapshot and 8 MiB aggregate limit. Cache restores require a fresh profile
 verification and exact account/client/grant binding. Cache contains no tokens,
 drafts, native handles or provider metadata. Browser date filters use UTC.
+
+Drafts and send receipts use a separate bounded IndexedDB store. The portable
+`browser_drafts.zig` envelope validates whole drafts through the shared codec;
+`drafts_store` suspends WASM until an atomic transaction completes. Unfinished
+addresses remain bounded raw recovery fields, separate from the validated
+sending envelope. Save/discard acknowledges committed storage; quota failures
+retain the prior saved copy and current editor contents. Storage load failure
+permits mail browsing while drafting/sending for the affected actor remains
+blocked. Other verified actors keep working; their successful saves do not
+erase the affected actor's warning or stored data. Restore follows
+fresh profile and exact account/client/grant checks. Draft persistence, native
+send queues and saved workspace preferences have separate capabilities.
+
+The host autosave timer calls the shared App after 1.5 seconds without editing,
+or ten seconds of continued editing. One bounded input queue retains typing
+during automatic save writes. Draft snapshots borrow reusable heap storage without
+an additional large static transfer buffer or memory growth. Explicit review
+saves pause input so earlier keystrokes cannot confirm a later review. Send preparation
+records a paused intent before the countdown; the host pins its operation ID,
+draft/content identity and revision at actual submission. Another tab's changed
+record rejects submission before POST. Reloaded paused intents require fresh
+review; submitted unknowns remain protected. Atomic cross-account rotation keeps
+64 recent send receipts, protecting unacknowledged unknowns and unconsumed
+receipts. Mailbox receipts use a separate 64-record/2 MiB in-tab journal; unknown
+records and each actor's latest undo stay protected while settled history rotates.
+The transport distinguishes a proven pre-POST refusal from possible submission,
+even when saving its result fails. Submitted mailbox changes wait for the
+provider receipt; Ctrl+C cancels reads, never an already dispatched mutation.
+
+Reviewed saved-draft cleanup rechecks whole-row eligibility and the generic
+pending-send identity inside its transaction. Matching unconsumed receipts,
+unconfirmed recoveries and unreadable rows remain protected. Cleanup retires
+the current WASM session so it cannot resave a deleted revision. Inactive empty
+settled history can rotate under quota pressure; connected actor revisions
+remain intact.
 
 The browser uses a 64 MiB coalescing heap and a separate 16 MiB message-decoding
 workspace within a fixed 96 MiB WASM memory. Static buffers, tables and the
@@ -133,9 +174,8 @@ changing addresses, threading headers, body bytes or native cached files.
 These allowances do not provide full IDNA normalization, every historical
 charset, automatic selection among multiple From authors, or unbounded bodies,
 conversations and reference chains. Browser contact editing, general filesystem
-workflows and durable browser drafts retain the existing platform restrictions.
-Archive/label/contact writes, RSVP, URL opening, clipboard integration, external
-editors and disk draft recovery remain native platform capabilities. Browser
+workflows, RSVP, URL opening, clipboard integration, external editors,
+sender-alias selection and background send queues retain platform restrictions. Browser
 dates use UTC. Scoped view IDs live in the tab's bounded ledger; after reload,
 rows with unverified labels can be found through All Mail and `status:partial`.
 
@@ -143,9 +183,12 @@ The new allowances are still quotas: 256 threading references cannot accept a
 257th parent reference, and a subject already filling prefix headroom can refuse
 an additional prefix. There is no reference-chain compaction, full Unicode
 normalization/case-folded search, universal charset support, or acceptance of
-arbitrarily large filename/participant/body combinations. A malformed or
-oversized contact remains subject to strict People normalization; mail-row
-isolation does not change contact-write validation.
+arbitrarily large filename/participant/body combinations. Shared contact-page
+normalization retains safe names/addresses and healthy neighbors, with cached
+per-record and page warning counts. Unsafe identity rows are omitted; corrupt
+page envelopes and authentication/cancellation/network/global allocation errors
+remain fatal. Partial contacts cannot be edited from a retained subset; strict
+contact-write validation remains unchanged.
 
 The shared Gmail preparation phase renders and freezes the exact MIME and host
 JSON payload before an uncertain send is recorded. Local preparation failures
@@ -161,17 +204,19 @@ Native clients can omit this callback because their durable receipt log remains
 available for reconciliation. Editing, discarding or
 resubmitting its protected draft is refused until explicit acknowledgement;
 mail browsing and checking Sent remain available. The pending host marker
-survives reload, while session drafts do not. Acknowledgement retains the
-uncertain receipt and requires a fresh review before a new submission.
+and protected drafts survive reload. Acknowledgement names and pins the target
+account/draft, retains the uncertain receipt and requires a fresh review before a new submission.
 
 Run the appropriate native and browser checks under the cooperative host lock:
 
 ```sh
 zig build test -Doptimize=debug -Dtest-filter="local UI:"
 zig build test-browser-provider test-browser-cache -Doptimize=debug
+zig build test-contacts test-browser-mail-actions -Doptimize=debug
 npm test --prefix web-demo
 node tests/browser_wasm.mjs --site-dir /absolute/path/to/site
 node tests/browser_wasm_live.mjs --site-dir /absolute/path/to/site
+node tests/browser_wasm_live.mjs --site-dir /absolute/path/to/site --next-work-only true
 ```
 
 Provider tests use independent synthetic responses and allocator faults.

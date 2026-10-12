@@ -35,6 +35,26 @@ const vtable: std.Io.VTable = blk: {
 };
 pub const io: std.Io = .{ .userdata = null, .vtable = &vtable };
 
+/// Exact mailbox mutation endpoints. Sending and mailbox changes have separate
+/// authority and uncertainty handling; neither grants arbitrary Gmail writes.
+fn mailboxRequest(method: std.http.Method, url: []const u8) bool {
+    const root = "https://gmail.googleapis.com/gmail/v1/users/me/";
+    if (!std.mem.startsWith(u8, url, root)) return false;
+    const path = url[root.len..];
+    if (method == .POST and std.mem.eql(u8, path, "labels")) return true;
+    if ((method == .PATCH or method == .DELETE) and std.mem.startsWith(u8, path, "labels/")) {
+        @import("bounded.zig").identifier(path[7..]) catch return false;
+        return true;
+    }
+    if (method != .POST or !std.mem.startsWith(u8, path, "messages/")) return false;
+    const rest = path[9..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
+    @import("bounded.zig").identifier(rest[0..slash]) catch return false;
+    const action = rest[slash..];
+    return std.mem.eql(u8, action, "/modify?fields=id,labelIds") or std.mem.eql(u8, action, "/modify") or std.mem.eql(u8, action, "/trash") or std.mem.eql(u8, action, "/untrash");
+}
+
+pub const SendBoundary = enum { none, marked, submitted };
 pub const Session = struct {
     id: u32,
     nonce: []const u8,
@@ -42,10 +62,23 @@ pub const Session = struct {
     client_id: []const u8,
     grant_id: []const u8,
     can_send: bool,
+    can_modify: bool = false,
     can_contacts: bool = false,
+    mailbox_submitted: bool = false,
+    send_boundary: SendBoundary = .none,
+    send_possible_submission: bool = false,
     temporary_allocator: ?std.mem.Allocator = null,
     pub fn capabilities(self: *const Session) []const []const u8 {
-        return if (self.can_send) &.{ "mail-read", "mail-send" } else &.{"mail-read"};
+        return switch (@as(u3, @intFromBool(self.can_send)) | (@as(u3, @intFromBool(self.can_modify)) << 1) | (@as(u3, @intFromBool(self.can_contacts)) << 2)) {
+            0 => &.{"mail-read"},
+            1 => &.{ "mail-read", "mail-send" },
+            2 => &.{ "mail-read", "mail-modify" },
+            3 => &.{ "mail-read", "mail-send", "mail-modify" },
+            4 => &.{ "mail-read", "contacts-read" },
+            5 => &.{ "mail-read", "mail-send", "contacts-read" },
+            6 => &.{ "mail-read", "mail-modify", "contacts-read" },
+            7 => &.{ "mail-read", "mail-send", "mail-modify", "contacts-read" },
+        };
     }
     pub fn transport(self: *Session) gmail.Transport {
         return .{ .context = self, .requestFn = request, .preparedRequestFn = requestPrepared, .temporary_allocator = self.temporary_allocator, .thread_limit = 30 };
@@ -60,15 +93,26 @@ pub const Session = struct {
         if (people) {
             if (method != .GET or !self.can_contacts) return error.PermissionDenied;
         } else if (!std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/")) return error.InvalidHost;
-        if (method != .GET and !(method == .POST and self.can_send and std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"))) return error.PermissionDenied;
+        const sending = method == .POST and std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/send");
+        if (method != .GET and !(if (sending) self.can_send else self.can_modify and mailboxRequest(method, url))) return error.PermissionDenied;
         if (encoded.len > types.Limits.request_bytes) return error.RequestTooLarge;
         const method_name = @tagName(method);
         response_metadata = .{ 0, 0 };
         const result = http_request(self.id, @intFromPtr(method_name.ptr), method_name.len, @intFromPtr(url.ptr), url.len, @intFromPtr(encoded.ptr), encoded.len, @intFromPtr(&response_buffer), response_buffer.len, @intFromPtr(&response_metadata));
         const mutating = method != .GET;
+        if (sending) {
+            self.send_boundary = switch (result) {
+                3, 4 => .none,
+                5 => .marked,
+                else => .submitted,
+            };
+            self.send_possible_submission = self.send_boundary == .submitted;
+            if (result == 5) return error.SendCanceledBeforeSubmission;
+        }
         // The host reports these only before initiating a provider request.
-        if (result == 4) return if (mutating) error.SendCanceledBeforeSubmission else error.Canceled;
+        if (result == 4) return if (sending) error.SendCanceledBeforeSubmission else error.Canceled;
         if (result == 3) return error.NotConnected;
+        if (mutating and !sending) self.mailbox_submitted = true;
         if (result != 0) return if (mutating) error.UnknownOutcome else switch (result) {
             2 => error.ResponseTooLarge,
             3 => error.NotConnected,
@@ -76,6 +120,10 @@ pub const Session = struct {
         };
         if (response_metadata[0] > 599 or response_metadata[0] < 100 or response_metadata[1] > response_buffer.len) return if (mutating) error.UnknownOutcome else error.InvalidProviderResponse;
         return gmail.decodeResponse(a, method, url, @intCast(response_metadata[0]), response_buffer[0..response_metadata[1]]);
+    }
+    pub fn dispatch(self: *Session, a: std.mem.Allocator, cmd: []const u8, value: j.Value) !j.Value {
+        self.mailbox_submitted = false;
+        return gmail.dispatchAuthorized(io, a, self.account, self.capabilities(), self.transport(), cmd, value);
     }
     pub fn list(self: *Session, a: std.mem.Allocator, label: []const u8, query: []const u8) !j.Value {
         const request_value = try j.value(a, .{ .limit = @as(u32, 30), .label = label, .query = query });
@@ -106,24 +154,19 @@ pub const Session = struct {
         var url_buffer: [3 * 4096 + 256]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&url_buffer);
         const search = query.len > 0;
+        const temporary = self.temporary_allocator orelse a;
         if (search) {
-            _ = try request(self, a, .GET, people_search_prefix, null);
+            var warmup: std.heap.ArenaAllocator = .init(temporary);
+            defer warmup.deinit();
+            _ = try request(self, warmup.allocator(), .GET, people_search_prefix, null);
             try writer.writeAll(people_search_prefix);
             try @import("oauth.zig").percent(&writer, query);
         }
-        const value = try request(self, a, .GET, if (search) writer.buffered() else people_list_url, null);
-        const entries_value = j.get(value, if (search) "results" else "connections") orelse .null;
-        if (entries_value != .null and entries_value != .array) return error.InvalidProviderResponse;
-        const entries: []const j.Value = if (entries_value == .array) entries_value.array.items else &.{};
-        if (entries.len > (if (search) @as(usize, 30) else contacts_limit)) return error.InvalidPage;
-        var normalized: std.ArrayList(j.Value) = .empty;
-        for (entries) |entry| {
-            const person = if (search) j.get(entry, "person") orelse return error.InvalidProviderResponse else entry;
-            const contact = try @import("terminal/contact_record.zig").normalize(a, person);
-            // Do not retain raw People provider metadata in browser snapshots.
-            try normalized.append(a, try j.value(a, .{ .resourceName = contact.resourceName, .etag = contact.etag, .name = contact.name, .emails = contact.emails }));
-        }
-        return j.value(a, .{ .contacts = normalized.items, .hasMore = j.text(value, "nextPageToken").len > 0 });
+        var scope: std.heap.ArenaAllocator = .init(temporary);
+        defer scope.deinit();
+        const value = try request(self, scope.allocator(), .GET, if (search) writer.buffered() else people_list_url, null);
+        const page = try @import("terminal/contact_record.zig").readPage(scope.allocator(), temporary, value, .{ .search = search, .limit = contacts_limit, .retain_provider = false });
+        return j.value(a, .{ .contacts = page.contacts, .hasMore = page.nextCursor != null, .partial = page.partial, .contactWarnings = page.contactWarnings });
     }
     pub fn prepareSend(self: *Session, a: std.mem.Allocator, draft: types.Draft, operation_id: []const u8) !gmail.PreparedSend {
         const clock = now_ms();
@@ -131,6 +174,8 @@ pub const Session = struct {
         return gmail.prepareDraftAuthorized(io, a, self.account, self.capabilities(), self.transport(), draft, operation_id);
     }
     pub fn submitPrepared(self: *Session, a: std.mem.Allocator, prepared: gmail.PreparedSend) !j.Value {
+        self.send_boundary = .none;
+        self.send_possible_submission = false;
         return gmail.sendPrepared(a, self.transport(), prepared);
     }
 };
@@ -167,9 +212,10 @@ pub fn connect(a: std.mem.Allocator, bytes: []const u8) !Session {
     } else if (value.capabilities.len != 1 or !has(value.capabilities, "mail-read")) return error.PermissionDenied;
     const read_granted = has(value.actualScopes, readonly_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
     const send_granted = has(value.actualScopes, send_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
+    const modify_granted = has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
     const contacts_granted = has(value.actualScopes, contacts_read_scope) or has(value.actualScopes, contacts_write_scope);
     if (!read_granted) return error.PermissionDenied;
-    var session: Session = .{ .id = value.session, .nonce = value.nonce, .account = value.account, .client_id = value.clientId, .grant_id = value.grantId orelse "", .can_send = has(value.capabilities, "mail-send") and send_granted, .can_contacts = (has(value.capabilities, "contacts-read") or has(value.capabilities, "contacts-write")) and contacts_granted };
+    var session: Session = .{ .id = value.session, .nonce = value.nonce, .account = value.account, .client_id = value.clientId, .grant_id = value.grantId orelse "", .can_send = has(value.capabilities, "mail-send") and send_granted, .can_modify = has(value.capabilities, "mail-modify") and modify_granted, .can_contacts = (has(value.capabilities, "contacts-read") or has(value.capabilities, "contacts-write")) and contacts_granted };
     const profile = try session.transport().requestFn(&session, a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", null);
     if (!std.ascii.eqlIgnoreCase(j.text(profile, "emailAddress"), value.account)) return error.WrongAccount;
     return session;

@@ -1496,15 +1496,21 @@ fn contacts(a: std.mem.Allocator, transport: Transport, cmd: []const u8, request
     const query = j.text(request, "query");
     const limit = try j.integer(request, "limit", 100);
     if (limit < 1 or limit > 100) return error.InvalidPageLimit;
+    if (query.len > 4096) return error.InvalidQuery;
+    if (j.text(request, "cursor").len > 4096) return error.InvalidCursor;
     const search = std.mem.eql(u8, cmd, "contacts.search");
     const url = if (search) try std.fmt.allocPrint(a, "https://people.googleapis.com/v1/people:searchContacts?readMask=names,emailAddresses,metadata&pageSize=30&query={s}", .{try escaped(a, query)}) else try std.fmt.allocPrint(a, "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,metadata&sources=READ_SOURCE_TYPE_CONTACT&pageSize={d}&pageToken={s}", .{ limit, try escaped(a, j.text(request, "cursor")) });
-    if (search) _ = try transport.request(a, .GET, "https://people.googleapis.com/v1/people:searchContacts?readMask=names,emailAddresses,metadata&pageSize=30&query=", null);
-    const value = try transport.request(a, .GET, url, null);
-    const entries = try array(value, if (search) "results" else "connections");
-    if (entries.len > 100) return error.InvalidPage;
-    const results = try a.alloc(types.Contact, entries.len);
-    for (entries, results) |entry, *dest| dest.* = try contact(a, if (search) j.get(entry, "person") orelse return error.InvalidProviderResponse else entry);
-    return j.value(a, .{ .contacts = results, .nextCursor = if (j.get(value, "nextPageToken")) |v| try j.string(v) else @as(?[]const u8, null) });
+    const temporary = transport.temporary_allocator orelse a;
+    if (search) {
+        var warmup: std.heap.ArenaAllocator = .init(temporary);
+        defer warmup.deinit();
+        _ = try transport.request(warmup.allocator(), .GET, "https://people.googleapis.com/v1/people:searchContacts?readMask=names,emailAddresses,metadata&pageSize=30&query=", null);
+    }
+    var scope: std.heap.ArenaAllocator = .init(temporary);
+    defer scope.deinit();
+    const value = try transport.request(scope.allocator(), .GET, url, null);
+    const page = try @import("contact_record.zig").readPage(scope.allocator(), temporary, value, .{ .search = search, .limit = if (search) 30 else @intCast(limit) });
+    return j.value(a, page);
 }
 test "People stale-source response requires exact failedPrecondition reason" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

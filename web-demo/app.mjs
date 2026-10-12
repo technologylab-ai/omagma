@@ -2,8 +2,9 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { boundedSize, BrowserWasmBridge, terminalUnicode, alignTerminalRows } from './bridge.mjs';
 import { importCredentialFiles, importConnectionFile } from './credentials.mjs';
-import { SessionTransport, pendingSend, acknowledgePendingSend } from './transport.mjs';
+import { SessionTransport, pendingSend, acknowledgePendingSend, capturePendingSendAcknowledgement } from './transport.mjs';
 import { createBrowserCache } from './cache.mjs';
+import { createBrowserDrafts, DRAFT_LIMITS } from './drafts.mjs';
 
 const select = selector => document.querySelector(selector);
 const terminalElement = select('#terminal');
@@ -25,7 +26,10 @@ const credentialError = select('#credential-error');
 const credentialSubmit = select('#credential-connect');
 const fileConnectButton = select('#connect-file-open');
 const cacheClearButton = select('#cache-clear');
+const draftStorageButton = select('#draft-storage-open');
+const draftStorageDialog = select('#draft-storage-dialog');
 const browserCache = createBrowserCache();
+const browserDrafts = createBrowserDrafts();
 const sessionParameter = new URLSearchParams(location.hash.slice(1)).get('omagma-session');
 const serverSession = location.protocol === 'http:' && location.hostname === '127.0.0.1' && /^[a-f0-9]{64}$/.test(sessionParameter ?? '') ? sessionParameter : null;
 const encoder = new TextEncoder();
@@ -57,6 +61,13 @@ let credentialBusy = false;
 let credentialRequest = null;
 let cacheBusy = false;
 let cacheError = '';
+let draftError = '';
+let draftRestoreWarning = '';
+let draftBusy = false;
+let draftInputQueued = false;
+let draftCleanupBusy = false;
+let storageNotice = '';
+let autosaveTimer = null;
 let cacheRevisions = [];
 let deferredFit = false;
 let resizeCover = false;
@@ -67,7 +78,8 @@ let wasmRows = 0;
 const pendingInput = new Uint8Array(64 * 1024);
 let pendingLength = 0;
 let inputNotice = '';
-const sessionDraftCount = () => bridge?.exports.draft_count?.() ?? 0;
+const draftDirty = () => Boolean(bridge?.exports.draft_dirty?.());
+const unsavedDraftRisk = () => draftDirty() || (Boolean(draftError) && (bridge?.exports.draft_count?.() ?? 0) > 0);
 const terminalRows = terminalElement.querySelector('.xterm-rows');
 terminal.onRender(({ start, end }) => alignTerminalRows(terminalRows, terminal.cols, terminalWidths, start, end));
 // Selection, focus and link hover can replace DOM rows outside onRender.
@@ -113,7 +125,7 @@ Object.defineProperty(window, 'omagmaDemo', { value: Object.freeze({
 function updateControls() {
   const info = sessionInfo();
   const canConnect = hasJSPI && typeof bridge?.exports.connect === 'function';
-  terminal.options.disableStdin = !ready || lifecycleBusy || info.busy;
+  terminal.options.disableStdin = !ready || lifecycleBusy || info.busy || draftCleanupBusy || (draftBusy && !draftInputQueued);
   focusButton.disabled = !ready;
   resetButton.disabled = !ready || lifecycleBusy || mode !== 'demo';
   connectButton.hidden = mode !== 'demo';
@@ -122,20 +134,25 @@ function updateControls() {
   fileConnectButton.hidden = !serverSession || mode !== 'demo';
   fileConnectButton.disabled = connectButton.disabled;
   disconnectButton.hidden = mode === 'demo';
-  disconnectButton.disabled = mode === 'demo';
+  disconnectButton.disabled = mode === 'demo' || draftCleanupBusy;
   credentialSubmit.disabled = credentialBusy || lifecycleBusy;
   cacheClearButton.hidden = mode !== 'live';
   cacheClearButton.disabled = !ready || Boolean(activeJob) || info.busy || cacheBusy || lifecycleBusy || credentialBusy;
+  draftStorageButton.hidden = mode !== 'live';
+  draftStorageButton.disabled = !ready || Boolean(activeJob) || info.busy || cacheBusy || lifecycleBusy || credentialBusy || draftCleanupBusy;
   select('#send-grace').hidden = !info.sendPhase;
   select('#send-grace-text').textContent = info.sendPhase === 'grace' ? `Sending in ${info.sendRemaining}s · Esc / Ctrl+C cancels` : 'Submitting to Google…';
   select('#send-grace-cancel').disabled = info.sendPhase !== 'grace';
-  select('#send-uncertainty').hidden = !pendingSend() || info.sendPhase === 'sending';
-  select('#send-acknowledge').disabled = info.busy || Boolean(activeJob) || cacheBusy;
-  const active = !error && (info.busy || mode === 'connecting' || credentialBusy || cacheBusy || lifecycleBusy || !ready);
+  const unknownAccount = mode === 'live' ? bridge?.unknownAccount?.() || '' : '';
+  select('#send-uncertainty-text').textContent = unknownAccount ? `An unconfirmed send for ${unknownAccount} is protected. Check this account's Sent before acknowledging.` : 'A previous send has no confirmation. Check Sent in every account used here before clearing this notice.';
+  select('#send-acknowledge').textContent = unknownAccount ? `I checked ${unknownAccount}'s Sent` : 'I checked Sent for all accounts used here';
+  select('#send-uncertainty').hidden = !(pendingSend() || unknownAccount || (mode === 'live' && bridge?.exports.send_status?.() === 2)) || Boolean(info.sendPhase);
+  select('#send-acknowledge').disabled = info.busy || Boolean(activeJob) || cacheBusy || !(unknownAccount ? bridge?.draftActorReady?.(bridge.exports.unknown_target_index()) : mode === 'live' && bridge?.exports.live_accounts?.() > 0);
+  const active = !error && (info.busy || mode === 'connecting' || credentialBusy || cacheBusy || draftBusy || lifecycleBusy || !ready);
   requestStatus.classList.toggle('is-busy', active);
   requestStatus.classList.toggle('is-error', Boolean(error));
   requestSpinner.hidden = !active;
-  terminalElement.setAttribute('aria-busy', String(!error && (info.busy || lifecycleBusy || !ready)));
+  terminalElement.setAttribute('aria-busy', String(!error && (Boolean(activeJob) || info.busy || draftBusy || draftCleanupBusy || lifecycleBusy || !ready)));
   requestHint.textContent = '';
   if (!error) {
     if (info.sendPhase === 'grace') {
@@ -144,14 +161,24 @@ function updateControls() {
     } else if (info.sendPhase === 'sending') {
       runtimeStatus.textContent = 'Sending mail to Google…';
       requestHint.textContent = 'Waiting for Google to confirm the send.';
+    } else if (info.mailboxWriting) {
+      runtimeStatus.textContent = 'Waiting for Google to confirm mailbox change…';
+      requestHint.textContent = 'Keyboard input is paused. The change has been submitted; waiting for confirmation.';
     } else if (info.busy) {
       runtimeStatus.textContent = mode === 'connecting' ? 'Connecting to Gmail…' : 'Google request in progress…';
       requestHint.textContent = 'Keyboard input is paused. Ctrl+C cancels the request.';
-    } else if (cacheBusy) runtimeStatus.textContent = 'Updating browser cache…';
+    } else if (draftBusy) {
+      runtimeStatus.textContent = 'Saving browser drafts…';
+      requestHint.textContent = draftInputQueued ? 'Typing is queued while your draft saves.' : 'Keyboard input is paused until this change is saved.';
+    }
+    else if (cacheBusy) runtimeStatus.textContent = 'Updating browser cache…';
     else if (credentialBusy) runtimeStatus.textContent = 'Loading your Omagma connection…';
     else if (mode === 'connecting') runtimeStatus.textContent = 'Connecting to Gmail…';
     else if (!ready || lifecycleBusy) runtimeStatus.textContent = 'Loading WebAssembly…';
+    else if (draftError) { runtimeStatus.textContent = 'Browser drafts could not be saved'; requestHint.textContent = draftError; }
+    else if (draftRestoreWarning) { runtimeStatus.textContent = 'Some browser drafts could not be loaded'; requestHint.textContent = draftRestoreWarning; }
     else if (cacheError) { runtimeStatus.textContent = 'Browser cache could not be saved'; requestHint.textContent = cacheError; }
+    else if (storageNotice) { runtimeStatus.textContent = 'Saved browser drafts cleared'; requestHint.textContent = storageNotice; }
     else runtimeStatus.textContent = 'Running locally in WebAssembly';
   }
   if (!error && inputNotice && !active) {
@@ -214,6 +241,17 @@ async function persistCaches(current, currentTransport, epoch) {
   if (epoch === generation) { cacheBusy = false; if (attempted) cacheError = failed; updateControls(); }
 }
 
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer); autosaveTimer = null;
+  if (!ready || activeJob || lifecycleBusy || credentialBusy || !bridge?.exports.autosave_pending?.()) return;
+  const epoch = generation;
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    if (epoch !== generation || !ready || activeJob || lifecycleBusy || credentialBusy) return;
+    void runJob(current => current.idle()).catch(reason => { if (epoch === generation) fail(reason); });
+  }, Math.max(25, Math.min(1500, bridge.exports.autosave_delay?.() ?? 1500)));
+}
+
 function runJob(action) {
   if (activeJob) return Promise.reject(new Error('Another terminal operation is running.'));
   const currentBridge = bridge;
@@ -225,11 +263,13 @@ function runJob(action) {
     finally { currentTransport?.finishSend(currentBridge?.exports.send_status?.() ?? 0); }
   })();
   activeJob = job;
+  updateControls();
   void job.finally(() => {
     if (activeJob === job) activeJob = null;
     if (deferredFit && epoch === generation) fitTerminal();
     updateControls();
     drain();
+    scheduleAutosave();
   }).catch(() => {});
   return job;
 }
@@ -289,7 +329,7 @@ terminal.attachCustomKeyEventHandler(event => {
   }
   if (transport?.info().busy && event.ctrlKey && event.key.toLowerCase() === 'c') {
     event.preventDefault();
-    if (event.type === 'keydown' && transport.info().sendPhase !== 'sending') transport.abort();
+    if (event.type === 'keydown' && transport.info().sendPhase !== 'sending' && !transport.info().mailboxWriting) transport.abort();
     return false;
   }
   return true;
@@ -297,13 +337,14 @@ terminal.attachCustomKeyEventHandler(event => {
 
 async function start(nextMode = 'demo') {
   const thisGeneration = ++generation;
+  clearTimeout(autosaveTimer); autosaveTimer = null;
   const oldBridge = bridge;
   const oldTransport = transport;
   const oldJob = activeJob;
   oldTransport?.close();
   bridge = null; transport = null; ready = false; error = null;
   mode = nextMode; lifecycleBusy = true;
-  cacheRevisions = []; cacheBusy = false; cacheError = ''; deferredFit = false;
+  cacheRevisions = []; cacheBusy = false; cacheError = ''; draftBusy = false; draftInputQueued = false; draftError = ''; draftRestoreWarning = ''; storageNotice = ''; deferredFit = false;
   pendingInput.fill(0); pendingLength = 0;
   message.hidden = false; message.classList.remove('failed');
   messageText.textContent = 'Loading WebAssembly…';
@@ -324,12 +365,42 @@ async function start(nextMode = 'demo') {
       const response = await fetch(new URL('./omagma.wasm', import.meta.url));
       if (!response.ok) throw new Error(`Could not load omagma.wasm (HTTP ${response.status}). Build and package the browser experiment first.`);
       module = await WebAssembly.compile(await response.arrayBuffer());
-      for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms'].includes(entry.name) || entry.kind !== 'function') throw new Error('This browser module requests an unsupported host capability.');
+      for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms', 'drafts_store'].includes(entry.name) || entry.kind !== 'function') throw new Error('This browser module requests an unsupported host capability.');
     }
     let instance;
-    const currentTransport = new SessionTransport(() => instance?.exports.memory, () => { if (thisGeneration === generation) updateControls(); }, () => { if (thisGeneration === generation) updateControls(); });
+    const verifiedActors = new Map();
+    const pendingDraftSends = new Map();
+    const restoreProblems = new Map();
+    const currentTransport = new SessionTransport(() => instance?.exports.memory, () => { if (thisGeneration === generation) updateControls(); }, () => { if (thisGeneration === generation) updateControls(); }, async session => {
+      const actor = verifiedActors.get(session);
+      if (thisGeneration !== generation || !actor) throw new Error('Draft account verification expired.');
+      const expected = pendingDraftSends.get(session);
+      await browserDrafts.markSubmitting(actor, { verified: true, expected });
+      pendingDraftSends.delete(session);
+      return expected.id;
+    });
     const http = (...args) => currentTransport.wasmRequest(...args);
-    instance = await WebAssembly.instantiate(module, { env: { http_request: hasJSPI ? new WebAssembly.Suspending(http) : () => 3, now_ms: () => Date.now() } });
+    const saveDrafts = async (session, pointer, length) => {
+      const actor = verifiedActors.get(session >>> 0);
+      if (thisGeneration !== generation || !actor) return 1;
+      let bytes;
+      draftBusy = true;
+      draftInputQueued = Boolean(instance.exports.autosave_accepts_input?.());
+      updateControls();
+      try {
+        const memory = instance.exports.memory.buffer;
+        if (!Number.isInteger(pointer) || !Number.isInteger(length) || pointer < 0 || length < 0 || length > DRAFT_LIMITS.snapshotBytes || pointer > memory.byteLength - length) throw new Error();
+        bytes = new Uint8Array(memory, pointer, length).slice();
+        const expected = await browserDrafts.saveChanges(actor, bytes, { verified: true, bindings: Array.from(verifiedActors.values()) });
+        if (expected) pendingDraftSends.set(session >>> 0, expected); else pendingDraftSends.delete(session >>> 0);
+        if (thisGeneration === generation) draftError = '';
+        return 0;
+      } catch (reason) {
+        if (thisGeneration === generation) draftError = reason?.code === 'operations' ? 'Browser send history is full. Reconnect its accounts or review saved-draft cleanup before retrying.' : reason?.code === 'limit' ? 'Draft storage is full. Your current edits and the previous saved copy are kept.' : reason?.code === 'conflict' ? 'Another tab changed these drafts. Your current edits are kept; reconnect before saving.' : 'Local draft storage is unavailable. Your current edits and the previous saved copy are kept.';
+        return reason?.code === 'operations' ? 4 : reason?.code === 'limit' ? 2 : reason?.code === 'conflict' ? 3 : 1;
+      } finally { bytes?.fill(0); if (thisGeneration === generation) { draftBusy = false; draftInputQueued = false; updateControls(); } }
+    };
+    instance = await WebAssembly.instantiate(module, { env: { http_request: hasJSPI ? new WebAssembly.Suspending(http) : () => 3, drafts_store: hasJSPI ? new WebAssembly.Suspending(saveDrafts) : () => 1, now_ms: () => Date.now() } });
     if (thisGeneration !== generation) { currentTransport.close(); new Uint8Array(instance.exports.memory.buffer).fill(0); return; }
     transport = currentTransport;
     const unicode = terminalUnicode(instance.exports);
@@ -345,6 +416,19 @@ async function start(nextMode = 'demo') {
         frameCount++;
       });
     }, hasJSPI ? fn => WebAssembly.promising(fn) : null);
+    bridge.verifyDraftActor = (session, actor) => {
+      restoreProblems.delete(session >>> 0); draftRestoreWarning = Array.from(restoreProblems.values()).join(' · ');
+      return verifiedActors.set(session >>> 0, Object.freeze(bindingOf(actor)));
+    };
+    bridge.blockDraftActor = (session, actor) => {
+      restoreProblems.set(session >>> 0, `Saved drafts for ${actor.account} could not be loaded. Reading works; drafting and sending need a successful reconnect.`);
+      draftRestoreWarning = Array.from(restoreProblems.values()).join(' · ');
+    };
+    bridge.draftActorReady = index => {
+      const actor = currentTransport.cacheBindings()[index];
+      return Boolean(actor && Array.from(verifiedActors.values()).some(value => value.account === actor.account && value.clientId === actor.clientId && value.grantId === actor.grantId));
+    };
+    bridge.draftStorageReady = () => verifiedActors.size > 0 && verifiedActors.size === instance.exports.live_accounts();
     browserCache.configure(bridge.readMailPolicy());
     wasmCols = terminal.cols; wasmRows = terminal.rows;
     await runJob(current => current.init(wasmCols, wasmRows));
@@ -438,7 +522,14 @@ function beginConnection(local = false) {
           let cached = null;
           try { cached = await browserCache.stage(bindingOf(actor), { contactsGranted: actor.canContacts }); }
           catch { cacheError = 'A saved snapshot was refused. Gmail will load a fresh view.'; }
-          await current.connect(metadata, cached);
+          // Staging is private until connect's fresh PROFILE and exact native
+          // binding succeed. Refusal keeps disk records and stops restoration.
+          let drafts = null, draftStorageReady = false;
+          try { drafts = await browserDrafts.stage(bindingOf(actor)); draftStorageReady = true; }
+          catch { /* Its verified actor will receive a separate restore warning below. */ }
+          const restoration = await current.connect(metadata, cached, drafts);
+          if (draftStorageReady && restoration.draftsStaged && current.exports.drafts_restored?.(index)) current.verifyDraftActor(metadata.session, actor);
+          else current.blockDraftActor(metadata.session, actor);
         }
       });
       if (attempt !== connectAttempt || generation !== connectingGeneration) return;
@@ -473,26 +564,65 @@ for (const selector of ['#credential-clients', '#credential-grants', '#credentia
 select('#credential-cancel').addEventListener('click', stopConnection);
 dialog.addEventListener('cancel', event => { event.preventDefault(); stopConnection(); });
 disconnectButton.addEventListener('click', () => {
-  if (sessionDraftCount() && !window.confirm('Disconnect and discard the drafts saved in this tab?')) return;
+  if ((unsavedDraftRisk() || pendingLength || activeJob) && !window.confirm('Disconnect with unsaved changes? Previously saved drafts remain in this browser.')) return;
   void stopConnection();
 });
 focusButton.addEventListener('click', () => terminal.focus());
 resetButton.addEventListener('click', stopConnection);
 select('#send-grace-cancel').addEventListener('click', () => transport?.cancelSend());
 select('#send-acknowledge').addEventListener('click', () => {
-  if (activeJob || !bridge) return;
-  void runJob(async current => { await current.acknowledgeUnknown(); acknowledgePendingSend(); }).catch(fail);
+  const namedTarget = bridge?.unknownAccount?.();
+  if (activeJob || !bridge || (namedTarget ? !bridge.draftActorReady(bridge.exports.unknown_target_index()) : mode !== 'live')) return;
+  const marker = pendingSend();
+  const clearGenericNotice = namedTarget ? null : capturePendingSendAcknowledgement();
+  void runJob(async current => {
+    const acknowledged = await current.acknowledgeUnknown();
+    if (!current.unknownAccount()) {
+      if (acknowledged.operationId && marker?.id === acknowledged.operationId) acknowledgePendingSend(acknowledged.operationId);
+      else clearGenericNotice?.();
+    }
+  }).catch(() => { draftError = 'The acknowledgment could not be saved. The recovery draft remains protected.'; updateControls(); });
 });
 cacheClearButton.addEventListener('click', () => {
   if (activeJob || !bridge) return;
   void runJob(async current => { await current.clearCache(); await browserCache.clear(); cacheError = ''; }).catch(fail);
 });
+draftStorageButton.addEventListener('click', async () => {
+  if (mode !== 'live' || activeJob || draftCleanupBusy) return;
+  const epoch = generation;
+  select('#draft-storage-error').textContent = '';
+  select('#draft-storage-clear').disabled = true;
+  select('#draft-storage-summary').textContent = 'Loading saved draft counts…';
+  draftStorageDialog.showModal(); select('#draft-storage-cancel').focus();
+  try {
+    const counts = await browserDrafts.savedDraftsSummary();
+    if (epoch !== generation || !draftStorageDialog.open) return;
+    select('#draft-storage-summary').textContent = `${counts.clearableDrafts} saved drafts and confirmed history from ${counts.clearableActors} saved connections can be cleared. ${counts.protected} connections with unconfirmed sends and ${counts.unrestorable} unreadable connections will be kept.`;
+    select('#draft-storage-clear').disabled = counts.clearableActors === 0 || unsavedDraftRisk() || pendingLength > 0;
+    if (unsavedDraftRisk() || pendingLength) select('#draft-storage-error').textContent = 'Save or discard your current changes before clearing saved drafts.';
+  } catch { select('#draft-storage-error').textContent = 'Saved draft storage is unavailable. Existing data was kept.'; }
+});
+select('#draft-storage-cancel').addEventListener('click', () => { if (!draftCleanupBusy) { draftStorageDialog.close(); terminal.focus(); } });
+draftStorageDialog.addEventListener('cancel', event => { if (draftCleanupBusy) event.preventDefault(); });
+select('#draft-storage-clear').addEventListener('click', async () => {
+  if (mode !== 'live' || activeJob || draftCleanupBusy || unsavedDraftRisk() || pendingLength) return;
+  draftCleanupBusy = true; select('#draft-storage-clear').disabled = true; updateControls();
+  try {
+    const result = await browserDrafts.clearKnownSavedDrafts({ reviewed: true });
+    if (result.clearedActors > 0) {
+      draftStorageDialog.close(); await stopConnection();
+      storageNotice = result.remainingProtected || result.remainingUnreadable ? 'Unconfirmed sends and unreadable saved data were kept. Connect again to continue.' : 'Connect again to continue. Your mailbox and mail cache were kept.';
+    } else select('#draft-storage-error').textContent = 'No safe saved records could be cleared. Unconfirmed sends and unreadable data were kept.';
+  } catch { select('#draft-storage-error').textContent = 'Draft cleanup could not be committed. Existing data was kept.'; }
+  finally { draftCleanupBusy = false; updateControls(); }
+});
 window.addEventListener('pagehide', () => {
   connectAttempt++; generation++; ready = false;
+  clearTimeout(autosaveTimer); autosaveTimer = null;
   credentialRequest?.abort(); transport?.close(); pendingInput.fill(0); pendingLength = 0;
 });
 window.addEventListener('beforeunload', event => {
-  if (!sessionDraftCount()) return;
+  if (!unsavedDraftRisk() && !pendingLength && !activeJob && !draftCleanupBusy) return;
   event.preventDefault();
   event.returnValue = '';
 });

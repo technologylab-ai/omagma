@@ -1004,7 +1004,7 @@ pub const Session = struct {
                 for (contact.emails) |email| match = match or containsIgnoreCase(email.address, query);
                 if (match) try cached_contacts.append(a, contact);
             }
-            return j.value(a, .{ .contacts = cached_contacts.items, .cached = true, .cacheReady = store.state.contactsReady or store.state.contacts.len != 0 });
+            return j.value(a, .{ .contacts = cached_contacts.items, .cached = true, .cacheReady = store.state.contactsReady or store.state.contacts.len != 0, .partial = store.state.contactWarnings.any(), .contactWarnings = store.state.contactWarnings });
         }
         if (std.mem.eql(u8, cmd, "mail.read")) {
             const id = try j.required(req, "messageId");
@@ -2180,14 +2180,18 @@ pub const Session = struct {
             if (write) {
                 store.state.contacts = &.{};
                 store.state.contactsReady = false;
+                store.state.contactWarnings = .{};
                 try store.save();
             }
             const result = try s.remote(a, store.state.account, cmd, req);
             // Provider writes already validate the contact receipt. Return it
             // directly; refresh the invalidated cache on the next contacts read
             // rather than risking a cache failure after a successful create.
-            if (write) return result;
+            // A provider search is a temporary filtered view. It must not erase
+            // the cached head or its retained omission/warning receipt.
+            if (write or std.mem.eql(u8, cmd, "contacts.search")) return result;
             store.state.contacts = try j.decode([]t.Contact, a, j.get(result, "contacts") orelse return error.InvalidProviderResponse);
+            store.state.contactWarnings = if (j.get(result, "contactWarnings")) |warnings| try j.decode(t.ContactReadWarnings, a, warnings) else .{};
             store.state.contactsReady = true;
             try store.save();
             return result;
@@ -2195,11 +2199,14 @@ pub const Session = struct {
         if (store.state.contacts.len == 0 and !store.state.contactsReady) {
             if (s.options.fixture_root) |root| {
                 const key = if (std.mem.eql(u8, store.state.account, "personal@example.com")) "personal" else if (std.mem.eql(u8, store.state.account, "work@example.com")) "work" else "optional";
-                const raw = try std.Io.Dir.cwd().readFileAlloc(s.io, try std.fmt.allocPrint(a, "{s}/contacts/{s}.json", .{ root, key }), a, .limited(4 * 1024 * 1024));
-                const source = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
-                var list: std.ArrayList(t.Contact) = .empty;
-                for (try array(source, "connections")) |v| try list.append(a, try @import("contact_record.zig").normalize(a, v));
-                store.state.contacts = list.items;
+                var scope: std.heap.ArenaAllocator = .init(s.allocator);
+                defer scope.deinit();
+                const temporary = scope.allocator();
+                const raw = try std.Io.Dir.cwd().readFileAlloc(s.io, try std.fmt.allocPrint(temporary, "{s}/contacts/{s}.json", .{ root, key }), temporary, .limited(4 * 1024 * 1024));
+                const source = try std.json.parseFromSliceLeaky(Value, temporary, raw, .{});
+                const page = try @import("contact_record.zig").readPage(a, s.allocator, source, .{});
+                store.state.contacts = page.contacts;
+                store.state.contactWarnings = page.contactWarnings;
             } else store.state.contacts = try a.dupe(t.Contact, &.{.{ .resourceName = "people/demo-alex", .etag = "demo-1", .name = "Alex Fixture", .emails = &.{.{ .address = "alex@example.org" }} }});
             store.state.contactsReady = true;
             store.state.fixtureCalls += 1;
@@ -2213,7 +2220,7 @@ pub const Session = struct {
                 for (contact.emails) |email| match = match or containsIgnoreCase(email.address, query);
                 if (match) try contacts_list.append(a, contact);
             }
-            return j.value(a, .{ .contacts = contacts_list.items });
+            return j.value(a, .{ .contacts = contacts_list.items, .partial = store.state.contactWarnings.any(), .contactWarnings = store.state.contactWarnings });
         }
         if (s.scenario("rejected-mutation")) return error.ProviderRejected;
         const v = j.get(req, "contact") orelse return error.MissingField;
@@ -2719,6 +2726,42 @@ test "cached contacts distinguish absent empty and loaded data without granting 
     try std.testing.expectEqual(@as(usize, 1), (try array(try session.cachedDispatch(a, "fictional@example.test", search), "contacts")).len);
     session.options.fixture_scenario = "readonly";
     try std.testing.expectError(error.PermissionDenied, session.cachedDispatch(a, "fictional@example.test", req));
+}
+
+test "contact isolation: native fixture and cached search retain omissions without permitting subset writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture_root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const cache_root = try std.fmt.allocPrint(a, "{s}/cache", .{fixture_root});
+    try tmp.dir.createDir(std.testing.io, "contacts", .fromMode(0o700));
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "contacts/optional.json", .data =
+        \\{"connections":[{"resourceName":"people/complete","names":[{"displayName":"Alex Fixture"}],"emailAddresses":[{"value":"alex@example.test"}]},{"resourceName":"people/partial","names":[{"displayName":"Partial Peer"}],"emailAddresses":[{"value":"not an address"},{"value":"peer@example.test"}]},{"emailAddresses":[{"value":"missing-identity@example.test"}]}]}
+    });
+    var session: Session = .{ .io = std.testing.io, .allocator = std.testing.allocator, .options = .{ .fixtures = true, .fixture_root = fixture_root }, .config = undefined, .cache_root = cache_root, .env = undefined };
+    const req = try j.value(a, .{ .cmd = "contacts.list" });
+    {
+        var store = try storage.Store.open(std.testing.io, a, cache_root, "fictional@example.test", session.options);
+        defer store.close();
+        const live = try session.contacts(a, &store, req, "contacts.list");
+        try std.testing.expectEqual(@as(usize, 2), (try array(live, "contacts")).len);
+        try std.testing.expect(try j.boolean(live, "partial", false));
+        try std.testing.expectEqual(@as(i64, 1), try j.integer(j.get(live, "contactWarnings").?, "omittedContacts", 0));
+        try std.testing.expectEqual(@as(u32, 1), store.state.contacts[1].readWarnings.omittedEmails);
+        const edit = try j.value(a, .{ .cmd = "contacts.upsert", .contact = .{ .resourceName = "people/partial", .name = "Changed" } });
+        try std.testing.expectError(error.IncompleteContact, session.contacts(a, &store, edit, "contacts.upsert"));
+        try std.testing.expectEqualStrings("Partial Peer", store.state.contacts[1].name);
+        try std.testing.expectEqual(@as(u64, 1), store.state.fixtureCalls);
+    }
+    const cached = try session.cachedDispatch(a, "fictional@example.test", req);
+    try std.testing.expect(try j.boolean(cached, "partial", false));
+    try std.testing.expect(try j.boolean(cached, "cacheReady", false));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(j.get(cached, "contactWarnings").?, "omittedContacts", 0));
+    const search = try session.cachedDispatch(a, "fictional@example.test", try j.value(a, .{ .cmd = "contacts.search", .query = "no-match" }));
+    try std.testing.expectEqual(@as(usize, 0), (try array(search, "contacts")).len);
+    try std.testing.expect(try j.boolean(search, "partial", false));
 }
 
 test "recipient cache: actual cached client sees body-free Sent To Cc and fences grants and accounts" {

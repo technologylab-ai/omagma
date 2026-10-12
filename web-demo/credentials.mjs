@@ -115,7 +115,8 @@ export async function importCredentialFiles(clientFiles, grantFile, tokenFiles) 
 export function permissions(caps, actualScopes) {
   const readScope = actualScopes.includes(READ) || actualScopes.includes(MODIFY);
   const sendScope = actualScopes.includes(SEND) || actualScopes.includes(MODIFY);
-  return { canRead: caps.includes('mail-read') && readScope, canSend: caps.includes('mail-send') && sendScope };
+  return { canRead: caps.includes('mail-read') && readScope, canSend: caps.includes('mail-send') && sendScope,
+    canModify: caps.includes('mail-modify') && actualScopes.includes(MODIFY) };
 }
 
 export function parseRefreshedToken(data, originalScopes) {

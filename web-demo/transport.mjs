@@ -6,6 +6,8 @@ const PEOPLE_ORIGIN = 'https://people.googleapis.com';
 const RECEIPT_KEY = 'omagma-browser-pending-send-v1';
 const MAX_RESPONSE = 3 * 1024 * 1024;
 const MAX_REQUEST = 3 * 1024 * 1024;
+const BROWSER_OPERATION_ID = /^browser-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9]{1,20}$/i;
+const LEGACY_MARKER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 class LocalCanceled extends Error {}
@@ -16,21 +18,63 @@ export function pendingSend() {
     if (!text) return null;
     if (text.length > 512) return { uncertain: true };
     const receipt = JSON.parse(text);
-    return receipt && typeof receipt.id === 'string' && receipt.id.length <= 64 && Number.isFinite(receipt.startedAt) ? { uncertain: true } : { uncertain: true };
+    if (receipt && typeof receipt.id === 'string' && (BROWSER_OPERATION_ID.test(receipt.id) || LEGACY_MARKER_ID.test(receipt.id)) && Number.isFinite(receipt.startedAt) && receipt.startedAt >= 0) return { uncertain: true, id: receipt.id };
+    return { uncertain: true };
   } catch { return { uncertain: true }; }
 }
 
-export function acknowledgePendingSend() {
-  try { localStorage.removeItem(RECEIPT_KEY); return true; }
+export function acknowledgePendingSend(expectedId) {
+  try {
+    if (typeof expectedId !== 'string' || pendingSend()?.id !== expectedId) return false;
+    localStorage.removeItem(RECEIPT_KEY);
+    return true;
+  }
   catch { return false; }
+}
+
+// The generic notice can represent an old or malformed marker without a usable
+// operation id. Pin its exact value before awaiting the acknowledgement, so a
+// newly submitted operation from another tab is never cleared in its place.
+export function capturePendingSendAcknowledgement() {
+  let expected;
+  try { expected = localStorage.getItem(RECEIPT_KEY); }
+  catch { return () => false; }
+  return () => {
+    try {
+      if (expected === null || localStorage.getItem(RECEIPT_KEY) !== expected) return false;
+      localStorage.removeItem(RECEIPT_KEY);
+      return true;
+    } catch { return false; }
+  };
 }
 
 export function allowedGmailRequest(url, method) {
   let parsed;
   try { parsed = new URL(url); } catch { return false; }
-  if (!url.startsWith(GMAIL_ROOT) || parsed.origin !== 'https://gmail.googleapis.com' || !parsed.pathname.startsWith('/gmail/v1/users/me/') || parsed.username || parsed.password || parsed.hash) return false;
-  for (const name of parsed.searchParams.keys()) if (/^(access_token|refresh_token|client_secret|token)$/i.test(name)) return false;
-  return method === 'GET' || (method === 'POST' && parsed.pathname === '/gmail/v1/users/me/messages/send' && !parsed.search);
+  if (!url.startsWith(GMAIL_ROOT) || parsed.origin !== 'https://gmail.googleapis.com' || !parsed.pathname.startsWith('/gmail/v1/users/me/') || parsed.username || parsed.password || parsed.hash || url.length > 16384) return false;
+  const path = parsed.pathname.slice('/gmail/v1/users/me/'.length);
+  const query = parsed.searchParams;
+  const parameters = allowed => {
+    for (const name of query.keys()) if (!allowed.includes(name) || (name !== 'metadataHeaders' && query.getAll(name).length !== 1)) return false;
+    return true;
+  };
+  if (method === 'GET') {
+    if (path === 'profile' || path === 'labels' || path === 'settings/sendAs') return parameters(['fields']);
+    if (path === 'messages') return parameters(['maxResults', 'includeSpamTrash', 'fields', 'labelIds', 'q', 'pageToken']) && (!query.has('maxResults') || /^(?:[1-9]|[1-9][0-9]|100)$/.test(query.get('maxResults')));
+    if (/^messages\/[A-Za-z0-9_-]{1,128}$/.test(path) || /^threads\/[A-Za-z0-9_-]{1,128}$/.test(path)) return parameters(['format', 'fields', 'metadataHeaders']) && (!query.has('format') || ['minimal', 'metadata', 'full', 'raw'].includes(query.get('format')));
+    if (/^messages\/[A-Za-z0-9_-]{1,128}\/attachments\/[A-Za-z0-9_%.-]{1,12288}$/.test(path)) return parameters(['fields']);
+    return false;
+  }
+  if (method === 'POST' && path === 'messages/send') return !parsed.search;
+  if (method === 'POST' && /^messages\/[A-Za-z0-9_-]{1,128}\/modify$/.test(path)) return !parsed.search || parsed.search === '?fields=id,labelIds';
+  if (method === 'POST' && /^messages\/[A-Za-z0-9_-]{1,128}\/(trash|untrash)$/.test(path)) return !parsed.search;
+  if (method === 'POST' && path === 'labels') return !parsed.search;
+  return (method === 'PATCH' || method === 'DELETE') && /^labels\/[A-Za-z0-9_-]{1,128}$/.test(path) && !parsed.search;
+}
+
+function isSend(url, method) { return method === 'POST' && url === `${GMAIL_ROOT}messages/send`; }
+function permitsRequest(record, url, method) {
+  return method === 'GET' || (isSend(url, method) ? record.canSend : record.canModify);
 }
 
 export function allowedPeopleRequest(url, method) {
@@ -62,16 +106,19 @@ export class SessionTransport {
   #memory;
   #grace = null;
   #sendPhase = null;
+  #mailboxWriting = false;
   #remaining = 0;
+  #beforeSend;
 
-  constructor(getMemory, activity = () => {}, receiptChanged = () => {}) {
+  constructor(getMemory, activity = () => {}, receiptChanged = () => {}, beforeSend = async () => {}) {
     this.#memory = getMemory;
     this.#activity = activity;
     this.#receiptChanged = receiptChanged;
+    this.#beforeSend = beforeSend;
   }
 
   beginJob() { this.#deadline = Date.now() + 30000; this.#jobPendingId = null; }
-  info() { return { accountCount: this.#sessions.size, canSend: Array.from(this.#sessions.values(), record => record.canSend), busy: this.#active, sendPhase: this.#sendPhase, sendRemaining: this.#remaining }; }
+  info() { return { accountCount: this.#sessions.size, canSend: Array.from(this.#sessions.values(), record => record.canSend), canModify: Array.from(this.#sessions.values(), record => record.canModify), busy: this.#active, sendPhase: this.#sendPhase, sendRemaining: this.#remaining, mailboxWriting: this.#mailboxWriting }; }
   cacheBindings() { return Array.from(this.#sessions.values(), record => ({ account: record.account, clientId: record.clientId, grantId: record.grantId, canContacts: Boolean(contactsPermission(record)) })); }
 
   close() {
@@ -86,7 +133,13 @@ export class SessionTransport {
     this.#sessions.clear();
   }
 
-  abort() { this.#controller?.abort(); }
+  abort() {
+    // A submitted mutation has no cancellation guarantee. Keep its response
+    // alive; disconnect and the bounded request deadline still abort directly.
+    if (this.#mailboxWriting || this.#sendPhase === 'sending') return false;
+    this.#controller?.abort();
+    return true;
+  }
   cancelSend() { this.#grace?.cancel(); }
 
   async prepare(records) {
@@ -95,7 +148,7 @@ export class SessionTransport {
       if (this.#closed) throw new Error('Connection cancelled.');
       let session;
       do { session = crypto.getRandomValues(new Uint32Array(1))[0]; } while (session === 0 || this.#sessions.has(session));
-      const privateRecord = { ...record, accessToken: '', expiresAt: 0, canRead: false, canSend: false };
+      const privateRecord = { ...record, accessToken: '', expiresAt: 0, canRead: false, canSend: false, canModify: false };
       this.#sessions.set(session, privateRecord);
       this.beginJob();
       await this.#operation(() => this.#refresh(privateRecord));
@@ -112,10 +165,10 @@ export class SessionTransport {
     this.#active = true;
     this.#activity(true);
     try { return await action(); }
-    finally { this.#active = false; this.#sendPhase = null; this.#remaining = 0; this.#activity(false); }
+    finally { this.#active = false; this.#sendPhase = null; this.#remaining = 0; this.#mailboxWriting = false; this.#activity(false); }
   }
 
-  async #fetch(url, init, limit) {
+  async #fetch(url, init, limit, onDispatch = () => {}) {
     const remaining = this.#deadline - Date.now();
     if (this.#closed) throw new LocalCanceled('Connection cancelled before the request started.');
     if (remaining <= 0) throw new LocalCanceled('The operation timed out before the request started.');
@@ -124,6 +177,7 @@ export class SessionTransport {
     const timeout = setTimeout(() => controller.abort(), Math.min(10000, remaining));
     let reader;
     try {
+      onDispatch();
       const response = await fetch(url, { ...init, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' });
       if (this.#closed) throw new Error('Connection cancelled.');
       const length = response.headers.get('content-length');
@@ -182,9 +236,10 @@ export class SessionTransport {
     meta.setUint32(4, length, true);
   }
 
-  #startSend() {
+  #startSend(operationId) {
     if (pendingSend()) throw new LocalCanceled('Check Sent and acknowledge the previous send before submitting another message.');
-    const receipt = { id: crypto.randomUUID(), startedAt: Date.now() };
+    if (operationId !== undefined && (typeof operationId !== 'string' || !BROWSER_OPERATION_ID.test(operationId))) throw new LocalCanceled('The browser send identity is invalid.');
+    const receipt = { id: operationId ?? crypto.randomUUID(), startedAt: Date.now() };
     try { localStorage.setItem(RECEIPT_KEY, JSON.stringify(receipt)); }
     catch { throw new LocalCanceled('This browser cannot retain send confirmation state. Sending is disabled.'); }
     this.#jobPendingId = receipt.id;
@@ -231,6 +286,8 @@ export class SessionTransport {
   async wasmRequest(session, methodPtr, methodLength, urlPtr, urlLength, bodyPtr, bodyLength, responsePtr, responseCapacity, metaPtr) {
     let body;
     let method;
+    let sending = false;
+    let sendMarked = false;
     let submissionStarted = false;
     try {
       this.#meta(metaPtr, 0, 0);
@@ -239,18 +296,29 @@ export class SessionTransport {
       if (this.#closed || !record || !record.canRead) return 3;
       method = decoder.decode(this.#view(methodPtr, methodLength, 8));
       const url = decoder.decode(this.#view(urlPtr, urlLength, 16384));
+      sending = isSend(url, method);
       const people = allowedPeopleRequest(url, method);
-      if ((!allowedGmailRequest(url, method) && !people) || (people && !contactsPermission(record)) || (method === 'POST' && !record.canSend)) return 3;
+      if ((!allowedGmailRequest(url, method) && !people) || (people && !contactsPermission(record)) || !permitsRequest(record, url, method)) return 3;
       this.#view(responsePtr, responseCapacity, MAX_RESPONSE);
       body = this.#view(bodyPtr, bodyLength, MAX_REQUEST).slice();
-      if ((method === 'GET' && bodyLength !== 0) || (method === 'POST' && bodyLength === 0)) return 3;
+      if (((method === 'GET' || method === 'DELETE') && bodyLength !== 0) || ((method === 'POST' || method === 'PATCH') && bodyLength === 0 && !/\/(trash|untrash)$/.test(url))) return 3;
       return await this.#operation(async () => {
         if (record.expiresAt - Date.now() < 60000) await this.#refresh(record);
         if (people && !contactsPermission(record)) return 3;
-        if (method === 'POST' && !record.canSend) return 3;
-        if (method === 'POST') { await this.#sendGrace(); this.#startSend(); }
-        submissionStarted = method === 'POST';
-        const response = await this.#fetch(url, { method, headers: { Authorization: `Bearer ${record.accessToken}`, Accept: 'application/json', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' ? { body } : {}) }, responseCapacity);
+        if (!permitsRequest(record, url, method)) return 3;
+        if (sending) {
+          await this.#sendGrace();
+          const operationId = await this.#beforeSend(session >>> 0);
+          sendMarked = true;
+          this.#startSend(operationId);
+        }
+        const response = await this.#fetch(url, { method, headers: { Authorization: `Bearer ${record.accessToken}`, Accept: 'application/json', ...(body.length ? { 'Content-Type': 'application/json' } : {}) }, ...(body.length ? { body } : {}) }, responseCapacity, () => {
+          if (method !== 'GET' && !sending) {
+            this.#mailboxWriting = true;
+            this.#activity(true);
+          }
+          submissionStarted = method !== 'GET';
+        });
         try {
           if (this.#closed) return 1;
           this.#view(responsePtr, response.bytes.length, MAX_RESPONSE).set(response.bytes);
@@ -259,8 +327,11 @@ export class SessionTransport {
         } finally { response.bytes.fill(0); }
       });
     } catch (reason) {
+      // Status 5 proves the durable send mark succeeded but no POST began.
+      // Statuses 3/4 happen before that mark; neither can be an unknown send.
+      if (sending && sendMarked && !submissionStarted) return 5;
       if (reason instanceof LocalCanceled) return 4;
-      if (method === 'POST' && !submissionStarted) return 3;
+      if (method !== 'GET' && !submissionStarted) return 3;
       return reason instanceof RangeError ? 2 : 1;
     }
     finally { body?.fill(0); }

@@ -231,7 +231,7 @@ try {
     const imports=WebAssembly.Module.imports(module);
     let hostHttpCalls=0;
     const {exports:e}=await WebAssembly.instantiate(module,{env:{
-      http_request(){hostHttpCalls++;return 1},now_ms(){return Date.now()}
+      http_request(){hostHttpCalls++;return 1},drafts_store(){return 1},now_ms(){return Date.now()}
     }});
     const policy=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(new Uint8Array(e.memory.buffer,e.policy_ptr(),e.policy_len())));
     const policyBytes=e.policy_len();
@@ -248,8 +248,8 @@ try {
       outputBytes:e.output_len(),outputPointer:e.output_ptr(),inputPointer:e.input_ptr()};
   })()`);
   assert.deepEqual(abi.imports.map(({module,name,kind})=>({module,name,kind})).sort((a,b)=>a.name.localeCompare(b.name)), [
-    {module:"env",name:"http_request",kind:"function"},{module:"env",name:"now_ms",kind:"function"},
-  ], "WASM imports services outside its explicit HTTP and clock host adapters");
+    {module:"env",name:"drafts_store",kind:"function"},{module:"env",name:"http_request",kind:"function"},{module:"env",name:"now_ms",kind:"function"},
+  ], "WASM imports services outside its explicit HTTP, clock and draft-storage host adapters");
   assert.deepEqual(abi.policy, mailPolicyFixture, "compiled mail policy drifted from independently specified compatibility boundaries");
   assert(abi.policyBytes > 0 && abi.policyBytes <= 4096, "compiled mail policy export is not bounded");
   assert.equal(abi.hostHttpCalls, 0, "standalone fictional demo called the HTTP adapter");

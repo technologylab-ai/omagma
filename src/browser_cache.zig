@@ -39,13 +39,14 @@ const Message = struct {
     labelsVerified: bool = true,
     attachments: []const Attachment = &.{},
 };
-const Contact = struct { resourceName: []const u8 = "", etag: []const u8 = "", name: []const u8 = "", emails: []const types.Address = &.{} };
-const Document = struct { version: u8, decoderRevision: u32 = 0, account: []const u8, clientId: []const u8, grantId: []const u8, updatedAt: i64, messages: []Message, contacts: []Contact, contactsLoaded: bool };
+const Contact = struct { resourceName: []const u8 = "", etag: []const u8 = "", name: []const u8 = "", emails: []const types.Address = &.{}, readWarnings: types.ContactReadWarnings = .{} };
+const Document = struct { version: u8, decoderRevision: u32 = 0, account: []const u8, clientId: []const u8, grantId: []const u8, updatedAt: i64, messages: []Message, contacts: []Contact, contactsLoaded: bool, contactWarnings: types.ContactReadWarnings = .{} };
 const Entry = struct {
     arena: std.heap.ArenaAllocator,
     messages: []types.Message = &.{},
     contacts: []types.Contact = &.{},
     contacts_loaded: bool = false,
+    contact_warnings: types.ContactReadWarnings = .{},
     updated_at: i64 = 0,
     loaded: bool = false,
     bytes: usize = 0,
@@ -129,7 +130,7 @@ fn copyContact(a: std.mem.Allocator, value: types.Contact) !types.Contact {
     try bounded(value.etag, 4096);
     try bounded(value.name, policy.display_name_bytes);
     try addresses(value.emails, false);
-    return .{ .resourceName = try a.dupe(u8, value.resourceName), .etag = try a.dupe(u8, value.etag), .name = try a.dupe(u8, value.name), .emails = try copyAddresses(a, value.emails) };
+    return .{ .resourceName = try a.dupe(u8, value.resourceName), .etag = try a.dupe(u8, value.etag), .name = try a.dupe(u8, value.name), .emails = try copyAddresses(a, value.emails), .readWarnings = value.readWarnings };
 }
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -184,6 +185,9 @@ pub const Store = struct {
     pub fn contactsLoaded(self: *const Store, index: usize) bool {
         return index < 3 and self.entries[index].contacts_loaded;
     }
+    pub fn contactWarnings(self: *const Store, index: usize) types.ContactReadWarnings {
+        return if (index < 3) self.entries[index].contact_warnings else .{};
+    }
     pub fn updatedAt(self: *const Store, index: usize) i64 {
         return if (index < 3) self.entries[index].updated_at else 0;
     }
@@ -192,9 +196,53 @@ pub const Store = struct {
     pub fn retained(self: *const Store, index: usize) []const types.Message {
         return if (index < 3) self.entries[index].messages else &.{};
     }
+    /// Only a confirmed provider receipt may replace mailbox membership. Body
+    /// and envelope data remain attached to their existing message identity.
+    pub fn applyLabels(self: *Store, index: usize, id: []const u8, labels: []const []const u8) !void {
+        if (index >= 3 or labels.len > 64) return error.InvalidBrowserCache;
+        try @import("bounded.zig").identifier(id);
+        for (labels) |label| try bounded(label, 256);
+        var position: ?usize = null;
+        for (self.entries[index].messages, 0..) |message, row| if (std.mem.eql(u8, message.id, id)) {
+            position = row;
+            break;
+        };
+        const row = position orelse return;
+        var next = try self.copyEntry(index);
+        errdefer next.arena.deinit();
+        const a = next.arena.allocator();
+        const copied = try a.alloc([]const u8, labels.len);
+        var unread = false;
+        for (labels, copied) |label, *dest| {
+            dest.* = try a.dupe(u8, label);
+            unread = unread or std.mem.eql(u8, label, "UNREAD");
+        }
+        next.messages[row].labels = copied;
+        next.messages[row].unread = unread;
+        next.messages[row].labelsVerified = true;
+        try self.commit(index, &next, id);
+    }
+    /// Deleting a custom label keeps every message and its cached body.
+    pub fn dropLabel(self: *Store, index: usize, id: []const u8) !void {
+        if (index >= 3) return error.InvalidBrowserCache;
+        try @import("bounded.zig").identifier(id);
+        if (self.entries[index].messages.len == 0) return;
+        var next = try self.copyEntry(index);
+        errdefer next.arena.deinit();
+        for (next.messages) |*message| {
+            const labels = @constCast(message.labels);
+            var kept: usize = 0;
+            for (labels) |label| if (!std.mem.eql(u8, label, id)) {
+                labels[kept] = label;
+                kept += 1;
+            };
+            message.labels = labels[0..kept];
+        }
+        try self.commit(index, &next, "");
+    }
     fn copyEntry(self: *Store, index: usize) !Entry {
         if (index >= 3 or self.bindings[index] == null) return error.InvalidBrowserCache;
-        var next: Entry = .{ .arena = .init(self.allocator), .updated_at = self.entries[index].updated_at, .loaded = true, .contacts_loaded = self.entries[index].contacts_loaded, .decoder_revision = self.entries[index].decoder_revision };
+        var next: Entry = .{ .arena = .init(self.allocator), .updated_at = self.entries[index].updated_at, .loaded = true, .contacts_loaded = self.entries[index].contacts_loaded, .contact_warnings = self.entries[index].contact_warnings, .decoder_revision = self.entries[index].decoder_revision };
         errdefer next.arena.deinit();
         const a = next.arena.allocator();
         next.messages = try a.alloc(types.Message, self.entries[index].messages.len);
@@ -212,8 +260,8 @@ pub const Store = struct {
             dest.* = .{ .id = m.id, .threadId = m.threadId, .from = m.from, .replyTo = m.replyTo, .to = m.to, .cc = m.cc, .subject = m.subject, .snippet = m.snippet, .bodyText = m.bodyText, .bodyHtml = m.bodyHtml, .bodyHtmlAmbiguous = m.bodyHtmlAmbiguous, .bodySource = m.bodySource, .messageId = m.messageId, .references = m.references, .inReplyTo = m.inReplyTo, .labels = m.labels, .receivedAt = m.receivedAt, .sentDate = m.sentDate, .unread = m.unread, .bodyCached = m.bodyCached, .bodyCacheError = m.bodyCacheError, .decodeWarning = m.decodeWarning, .metadataPartial = m.metadataPartial, .labelsVerified = m.labelsVerified, .attachments = files };
         }
         const contact_values = try a.alloc(Contact, entry.contacts.len);
-        for (entry.contacts, contact_values) |c, *dest| dest.* = .{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails };
-        return .{ .version = 1, .decoderRevision = entry.decoder_revision, .account = binding.account, .clientId = binding.clientId, .grantId = binding.grantId, .updatedAt = entry.updated_at, .messages = messages, .contacts = contact_values, .contactsLoaded = entry.contacts_loaded };
+        for (entry.contacts, contact_values) |c, *dest| dest.* = .{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails, .readWarnings = c.readWarnings };
+        return .{ .version = 1, .decoderRevision = entry.decoder_revision, .account = binding.account, .clientId = binding.clientId, .grantId = binding.grantId, .updatedAt = entry.updated_at, .messages = messages, .contacts = contact_values, .contactsLoaded = entry.contacts_loaded, .contactWarnings = entry.contact_warnings };
     }
     fn commit(self: *Store, index: usize, next: *Entry, protected_id: []const u8) !void {
         var scratch: std.heap.ArenaAllocator = .init(self.allocator);
@@ -250,6 +298,7 @@ pub const Store = struct {
             if (!removed and next.contacts.len > 0) {
                 next.contacts = &.{};
                 next.contacts_loaded = false;
+                next.contact_warnings = .{};
                 removed = true;
             }
             if (!removed and next.messages.len > 1) {
@@ -402,6 +451,9 @@ pub const Store = struct {
         try self.commit(index, &next, message.id);
     }
     pub fn replaceContacts(self: *Store, index: usize, values: []const j.Value) !void {
+        return self.replaceContactPage(index, values, .{});
+    }
+    pub fn replaceContactPage(self: *Store, index: usize, values: []const j.Value, warnings: types.ContactReadWarnings) !void {
         if (values.len > 100) return error.InvalidBrowserCache;
         var next = try self.copyEntry(index);
         errdefer next.arena.deinit();
@@ -412,6 +464,7 @@ pub const Store = struct {
             for (next.contacts[0..row]) |old| if (std.mem.eql(u8, old.resourceName, dest.resourceName)) return error.InvalidBrowserCache;
         }
         next.contacts_loaded = true;
+        next.contact_warnings = warnings;
         try self.commit(index, &next, "");
     }
     pub fn dropContacts(self: *Store, index: usize) !void {
@@ -421,6 +474,7 @@ pub const Store = struct {
         errdefer next.arena.deinit();
         next.contacts = &.{};
         next.contacts_loaded = false;
+        next.contact_warnings = .{};
         try self.commit(index, &next, "");
     }
     pub fn read(self: *const Store, index: usize, id: []const u8) !?types.Message {
@@ -431,7 +485,7 @@ pub const Store = struct {
     pub fn contacts(self: *const Store, index: usize, a: std.mem.Allocator) ![]const j.Value {
         if (index >= 3) return error.InvalidBrowserCache;
         const result = try a.alloc(j.Value, self.entries[index].contacts.len);
-        for (self.entries[index].contacts, result) |c, *dest| dest.* = try j.value(a, Contact{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails });
+        for (self.entries[index].contacts, result) |c, *dest| dest.* = try j.value(a, Contact{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails, .readWarnings = c.readWarnings });
         return result;
     }
     pub fn list(self: *const Store, index: usize, a: std.mem.Allocator, label: []const u8, needle: []const u8) ![]const j.Value {
@@ -507,8 +561,9 @@ pub const Store = struct {
         }
         if (can_contacts and doc.contactsLoaded) {
             next.contacts = try a.alloc(types.Contact, doc.contacts.len);
-            for (doc.contacts, next.contacts) |c, *dest| dest.* = try copyContact(a, .{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails });
+            for (doc.contacts, next.contacts) |c, *dest| dest.* = try copyContact(a, .{ .resourceName = c.resourceName, .etag = c.etag, .name = c.name, .emails = c.emails, .readWarnings = c.readWarnings });
             next.contacts_loaded = true;
+            next.contact_warnings = doc.contactWarnings;
         }
         next.updated_at = doc.updatedAt;
         // An older application must not downgrade a newer snapshot's receipt.

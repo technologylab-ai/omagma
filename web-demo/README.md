@@ -5,7 +5,7 @@ owns the screen, layout and mail interaction; xterm.js supplies the browser's
 terminal display and input. It starts with fictional mail and can connect
 existing grants through the local server or an exported connection file for live
 Gmail reading, plain or Markdown composition, replies and forwarding, contacts and recipient
-completion, and a bounded browser mail cache. See [live mail](LIVE-MAIL.md) for
+completion, mailbox changes, durable drafts, and a bounded browser mail cache. See [live mail](LIVE-MAIL.md) for
 credential loading and scope.
 
 The prototype runs client-side with browser HTTP and credential adapters. The
@@ -66,10 +66,13 @@ Account switching displays cached mail without Google requests. Ctrl+R explicitl
 refreshes; Enter loads a missing body. First Connect initializes an uncached
 account once. The cache keeps up to 300 message records per account, shows
 30 matching rows, and enforces 3 MiB per snapshot / 8 MiB total. IndexedDB holds
-mail and contacts, while credentials and drafts stay in tab memory. Leaving a composer saves a session
-draft; open Drafts to resume it. Reload/disconnect discards session drafts. Disconnect
+mail and contacts. A separate store keeps verified browser drafts and send
+receipts; credentials stay in tab memory. Leaving a composer saves a draft;
+open Drafts to resume after reconnecting. Reload/disconnect retains saved drafts. Disconnect
 retains the cache; **Clear cache** removes it. Cached restores require a fresh
 account verification and the exact registration/grant. Date filters use UTC.
+**Saved drafts…** offers reviewed local cleanup and keeps protected send
+recoveries and unreadable data.
 
 Request activity appears in a prominent strip above the terminal, with a spinner
 and an explanation when keyboard input is paused. Ctrl+C cancels an active read;
@@ -105,10 +108,10 @@ interface in HTML.
 `src/browser.zig` exports the browser ABI. The thin `BrowserSession` in
 `src/terminal/tui.zig` supplies the terminal surface and delegates input, jobs
 and drawing to `App`. `src/browser_provider.zig` implements the existing
-`types.Client` command envelopes for browser transport, cache and session drafts.
+`types.Client` command envelopes for browser transport, cache and browser drafts.
 Native and browser providers share draft builders, validation, MIME and send
 outcome rules. [Architecture and extension guidance](../docs/BROWSER-ARCHITECTURE.md). The pinned libvaxis parser, screen, text layout and renderer run in
-WASM. The freestanding module imports only `env.http_request` and `env.now_ms`.
+WASM. The freestanding module imports only `env.http_request`, `env.now_ms` and `env.drafts_store`.
 The HTTP call is suspended while browser `fetch` runs, then returns status and
 bounded response bytes to the same Zig request/decoder code. OAuth credentials
 stay in the host transport, outside WASM and diagnostics. The build requires
@@ -173,10 +176,12 @@ delivery. Real verification occurs when the user loads their selected files.
 The browser adapter supplies token expiry handling and asynchronous HTTP
 completion through Promise Integration. One operation owns the request path;
 account views and drafts remain bounded in session memory. Mail/contact
-snapshots have bounded IndexedDB persistence, with no tokens or draft state. A generic pending
+snapshots have bounded IndexedDB persistence, with no tokens or draft state.
+Separate bounded draft storage keeps whole originals, unfinished fields and
+send receipts. A generic pending
 send receipt survives reload and carries no token or message body. Full draft
-recovery and queued-send persistence remain separate native/browser-storage
-work.
+recovery uses the browser storage adapter; native background send queues remain
+unavailable in the browser.
 
 Replies use the ordinary Gmail API. The existing MIME and reply/thread-header
 logic can be reused with explicit send authorization, send review and the

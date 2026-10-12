@@ -13,7 +13,7 @@ for (let index = 0; index < args.length; index += 2) {
 const wasm = options.has('--wasm') ? resolve(process.cwd(), options.get('--wasm')) : resolve(here, 'omagma.wasm');
 // Packaging only: the served application is a static page, JS, CSS and WASM.
 const module = await WebAssembly.compile(await readFile(wasm));
-for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms'].includes(entry.name) || entry.kind !== 'function') throw new Error('The browser module imports an unsupported host capability.');
+for (const entry of WebAssembly.Module.imports(module)) if (entry.module !== 'env' || !['http_request', 'now_ms', 'drafts_store'].includes(entry.name) || entry.kind !== 'function') throw new Error('The browser module imports an unsupported host capability.');
 const exports = new Set(WebAssembly.Module.exports(module).map(({ name }) => name));
 for (const name of ['memory', 'init', 'resize', 'input_ptr', 'input_capacity', 'input', 'output_ptr', 'output_len', 'codepoint_width', 'policy_ptr', 'policy_len']) {
   if (!exports.has(name)) throw new Error(`Missing browser WASM export: ${name}`);
@@ -33,6 +33,7 @@ await build({
 await Promise.all([
   cp(resolve(here, 'index.html'), resolve(out, 'index.html')),
   cp(resolve(here, 'style.css'), resolve(out, 'style.css')),
+  cp(resolve(here, '../assets/omagma-logo.png'), resolve(out, 'omagma-logo.png')),
   cp(resolve(here, 'node_modules/@xterm/xterm/css/xterm.css'), resolve(out, 'xterm.css')),
   cp(resolve(here, 'node_modules/@xterm/xterm/LICENSE'), resolve(out, 'LICENSE-xterm.txt')),
   cp(resolve(here, 'node_modules/@xterm/addon-fit/LICENSE'), resolve(out, 'LICENSE-xterm-addon-fit.txt')),

@@ -6,7 +6,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://oauth2.googleapis.com https://gmail.googleapis.com https://people.googleapis.com; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <meta name="description" content="An experimental Omagma terminal UI running as Zig WebAssembly, with fictional mail held in memory.">
     <title>Omagma · browser experiment</title>
-    <link rel="icon" href="data:,">
+    <link rel="icon" type="image/png" href="./omagma-logo.png">
     <link rel="stylesheet" href="./xterm.css">
     <link rel="stylesheet" href="./style.css">
     <script type="module" src="./app.mjs"></script>
@@ -15,7 +15,7 @@
     <main class="demo">
       <header class="masthead">
         <div class="identity">
-          <span class="brand-mark" aria-hidden="true">o/</span>
+          <img class="brand-mark" src="./omagma-logo.png" width="48" height="48" alt="">
           <div><h1>Omagma</h1><p>browser experiment</p></div>
         </div>
         <div class="runtime-badge"><span aria-hidden="true" class="runtime-dot"></span>Zig + WebAssembly</div>
@@ -30,6 +30,7 @@
             <button id="connect-file-open" type="button" hidden>Load file…</button>
             <button id="disconnect-session" type="button" hidden>Disconnect</button>
             <button id="cache-clear" type="button" hidden>Clear cache</button>
+            <button id="draft-storage-open" type="button" hidden>Saved drafts…</button>
             <button id="terminal-focus" type="button" title="F6 moves focus from the terminal to page controls" disabled>Focus terminal</button>
             <button id="demo-reset" type="button" disabled>Reset demo</button>
           </div>
@@ -40,7 +41,7 @@
         </div>
         <div id="sample-notice" class="sample-notice" role="status">Sample inbox · Connect to load your Gmail</div>
         <div id="send-grace" class="send-notice" role="status" hidden><span id="send-grace-text"></span><button id="send-grace-cancel" type="button">Cancel send</button></div>
-        <div id="send-uncertainty" class="send-notice" role="status" hidden><span>A previous send has no confirmation. Check Sent before sending again.</span><button id="send-acknowledge" type="button">I checked Sent</button></div>
+        <div id="send-uncertainty" class="send-notice" role="status" hidden><span id="send-uncertainty-text">A previous send has no confirmation. Check Sent before sending again.</span><button id="send-acknowledge" type="button">I checked Sent</button></div>
         <div class="terminal-stage">
           <div id="terminal" aria-label="Interactive Omagma terminal. Press j or k to navigate, Enter to read, question mark for help."></div>
           <div id="runtime-message" class="runtime-message" role="status"><span class="loading-dot" aria-hidden="true"></span><span id="runtime-message-text">Loading WebAssembly…</span></div>
@@ -61,6 +62,13 @@
         <div class="demo-status"><span id="session-status" role="status">Sample mode · no Gmail connection</span></div>
       </footer>
     </main>
+    <dialog id="draft-storage-dialog" aria-labelledby="draft-storage-title">
+      <h2 id="draft-storage-title">Saved browser drafts</h2>
+      <p id="draft-storage-summary" role="status">Loading saved draft counts…</p>
+      <p>Clear removes saved drafts and confirmed send history from this browser origin. Unconfirmed sends and unreadable data are kept. It does not change your mailbox.</p>
+      <p id="draft-storage-error" role="status"></p>
+      <div class="credential-actions"><button id="draft-storage-cancel" type="button" autofocus>Cancel</button><button id="draft-storage-clear" type="button" disabled>Clear saved drafts</button></div>
+    </dialog>
     <dialog id="credential-dialog" aria-labelledby="credential-title">
       <form id="credential-form">
         <h2 id="credential-title">Load an Omagma connection file</h2>

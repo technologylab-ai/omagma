@@ -19,6 +19,9 @@ pub const Capabilities = struct {
     original_attachment: bool = true,
     markdown: bool = true,
     durable_drafts: bool = true,
+    /// Draft persistence and native background queue services are independent.
+    send_queue: bool = true,
+    remote_recipients: bool = false,
     aliases: bool = true,
     background_recipients: bool = true,
     /// Native futures refresh while input remains available. An inline host
@@ -43,12 +46,14 @@ pub const browser_capabilities: Capabilities = .{
     .original_formatting = true,
     .original_attachment = true,
     .markdown = true,
-    .durable_drafts = false,
+    .durable_drafts = true,
+    .send_queue = false,
+    .remote_recipients = true,
     .aliases = false,
     .background_recipients = false,
     .refresh_on_account_switch = false,
     .quit = false,
-    .mail_changes = false,
+    .mail_changes = true,
     .open_urls = false,
     .invitations = false,
 };

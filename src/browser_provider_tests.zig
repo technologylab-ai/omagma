@@ -45,6 +45,7 @@ const Host = struct {
     fail_after_post: ?usize = null,
     capture_body: ?[]u8 = null,
     captured_bytes: usize = 0,
+    draft_receipt_failure: ?*?anyerror = null,
 };
 var host: Host = .{};
 
@@ -60,6 +61,7 @@ export fn http_request(session: u32, method_ptr: usize, method_len: usize, url_p
     const url = @as([*]const u8, @ptrFromInt(url_ptr))[0..url_len];
     const is_post = std.mem.eql(u8, method, "POST");
     if (is_post) {
+        if (host.draft_receipt_failure) |failure_ptr| failure_ptr.* = error.BrowserDraftStorageConflict;
         host.posts += 1;
         if (body_len == 0 or body_ptr == 0) host.violation = true;
         if (host.capture_body) |buffer| {
@@ -440,7 +442,7 @@ test "browser provider: cancellation proven before submission leaves the draft e
     host.provider = &provider;
     host.expected_draft = draft_id;
     try outcome(try send(&provider, a, draft_id, "canceled-before-submit"), "rejected");
-    try equal(@as(u32, 2), provider.sendStatus());
+    try equal(@as(u32, 3), provider.sendStatus());
     try acknowledgeReceipt(&provider, a, draft_id, "canceled-before-submit", true);
     try equal(@as(u32, 3), provider.sendStatus());
     try expect(provider.pendingUnknown() == null);
@@ -1664,4 +1666,313 @@ test "browser provider: warm legacy header display is corrected without refetchi
     try equal(@as(usize, 0), host.requests);
     try equal(@as(usize, 0), host.posts);
     try verifyHost();
+}
+
+test {
+    _ = @import("browser_drafts_tests.zig");
+}
+
+const DraftRotationHost = struct {
+    rows: [3]?[]u8 = @splat(null),
+    revisions: [3]u32 = @splat(0),
+    batch_commits: usize = 0,
+    fail: bool = false,
+    failure: ?anyerror = null,
+    attempts: usize = 0,
+    quota_failures: usize = 0,
+    fn deinit(self: *@This()) void {
+        for (self.rows) |row| if (row) |raw| std.testing.allocator.free(raw);
+    }
+    fn save(ctx: ?*anyopaque, _: u32, raw: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.attempts += 1;
+        var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer scratch.deinit();
+        const out = scratch.allocator();
+        const value = try parse(out, raw);
+        const batch = j.get(value, "updates");
+        const single = [_]Value{value};
+        const updates = if (batch) |items| items.array.items else &single;
+        var next: [3]?[]u8 = @splat(null);
+        defer for (next) |item| if (item) |bytes| std.testing.allocator.free(bytes);
+        var revision = self.revisions;
+        const actors = [_][]const u8{ account, "second@example.test", "third@example.test" };
+        for (updates) |doc| {
+            const index = find: {
+                for (actors, 0..) |address, cursor| if (std.mem.eql(u8, address, j.text(doc, "account"))) break :find cursor;
+                return error.UnknownAccount;
+            };
+            try equal(@as(i64, self.revisions[index]) + 1, try j.integer(doc, "revision", 0));
+            if (next[index] != null) return error.DuplicateAccount;
+            next[index] = try std.json.Stringify.valueAlloc(std.testing.allocator, doc, .{});
+            revision[index] += 1;
+        }
+        var records: usize = 0;
+        for (self.rows, 0..) |previous, index| {
+            if (next[index] orelse previous) |bytes| {
+                const doc = try parse(out, bytes);
+                records += j.get(doc, "operations").?.array.items.len;
+            }
+        }
+        if (records > 64) {
+            self.quota_failures += 1;
+            return error.BrowserDraftOperationQuota;
+        }
+        if (self.fail) return error.BrowserDraftStorageUnavailable;
+        if (self.failure) |err| return err;
+        for (&next, 0..) |*item, index| if (item.*) |bytes| {
+            if (self.rows[index]) |previous| std.testing.allocator.free(previous);
+            self.rows[index] = bytes;
+            item.* = null;
+        };
+        self.revisions = revision;
+        if (batch != null) self.batch_commits += 1;
+    }
+};
+
+test "browser durable drafts: settled receipts rotate after reload and across actors without evicting unknown sends" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var durable: DraftRotationHost = .{};
+    defer durable.deinit();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    for ([_][]const u8{ account, "second@example.test", "third@example.test" }, 0..) |address, index| try actor(&provider, index, address, true, false);
+    provider.draft_store = .{ .context = &durable, .saveFn = DraftRotationHost.save };
+    const replies: [70]HttpStep = @splat(.{ .method = "POST", .url = send_url, .body = "{\"id\":\"sent123\"}" });
+    resetHost(&replies);
+    host.provider = &provider;
+    for (0..70) |index| {
+        const draft_id = try create(&provider, a, try std.fmt.allocPrint(a, "Settled durable body {d}", .{index}));
+        const operation_id = try std.fmt.allocPrint(a, "durable-operation-{d}", .{index});
+        host.expected_draft = draft_id;
+        try outcome(try send(&provider, a, draft_id, operation_id), "applied");
+        try acknowledgeReceipt(&provider, a, draft_id, operation_id, true);
+        try equal(@as(usize, @min(64, index + 1)), provider.operation_count);
+    }
+    try verifyHost();
+    const unknown = j.text(try data(try invoke(&provider, a, .{ .cmd = "draft.create", .account = "second@example.test", .draft = .{ .to = "peer@example.test", .bodyText = "Independent protected recovery" } }, false)), "id");
+    resetHost(&.{.{ .method = "POST", .session = 12, .url = send_url, .result = 1 }});
+    host.provider = &provider;
+    host.expected_draft = unknown;
+    const unknown_request = .{ .cmd = "draft.send", .account = "second@example.test", .draftId = unknown, .operationId = "retained-unknown" };
+    try outcome(try invoke(&provider, a, unknown_request, false), "unknown");
+    provider.client().sendReceipt(try std.json.Stringify.valueAlloc(a, unknown_request, .{}), false);
+    try verifyHost();
+    try equal(@as(usize, 64), provider.operation_count);
+    var restored = Provider.init(std.testing.allocator);
+    defer restored.deinit();
+    for ([_][]const u8{ account, "second@example.test", "third@example.test" }, 0..) |address, index| {
+        try actor(&restored, index, address, true, false);
+        if (durable.rows[index]) |raw| try restored.restoreDrafts(index, raw);
+    }
+    restored.draft_store = .{ .context = &durable, .saveFn = DraftRotationHost.save };
+    try equal(@as(usize, 64), restored.operation_count);
+    try expect(restored.pendingUnknown() != null);
+    const third_draft = j.text(try data(try invoke(&restored, a, .{ .cmd = "draft.create", .account = "third@example.test", .draft = .{ .to = "peer@example.test", .bodyText = "New third actor" } }, false)), "id");
+    const third_request = .{ .cmd = "draft.send", .account = "third@example.test", .draftId = third_draft, .operationId = "third-actor-send" };
+    const previous_first = try a.dupe(u8, durable.rows[0].?);
+    const previous_third = try a.dupe(u8, durable.rows[2].?);
+    durable.fail = true;
+    resetHost(&.{});
+    const rejected_send = try invoke(&restored, a, third_request, false);
+    try outcome(rejected_send, "rejected");
+    try strings("BrowserDraftStorageUnavailable", j.text(try data(rejected_send), "errorCode"));
+    try equal(@as(usize, 64), restored.operation_count);
+    try strings(previous_first, durable.rows[0].?);
+    try strings(previous_third, durable.rows[2].?);
+    try verifyHost();
+    durable.fail = false;
+    resetHost(&.{.{ .method = "POST", .session = 13, .url = send_url, .body = "{\"id\":\"third123\"}" }});
+    host.provider = &restored;
+    host.expected_draft = third_draft;
+    try outcome(try invoke(&restored, a, third_request, false), "applied");
+    restored.client().sendReceipt(try std.json.Stringify.valueAlloc(a, third_request, .{}), true);
+    try verifyHost();
+    try expect(durable.batch_commits >= 2);
+    try equal(@as(usize, 64), restored.operation_count);
+    try strings(unknown, restored.pendingUnknown().?.draft_id);
+    try failure(try invoke(&restored, a, .{ .cmd = "draft.discard", .account = "second@example.test", .draftId = unknown }, false), "UnknownOutcome");
+    var records: usize = 0;
+    for (durable.rows) |row| if (row) |bytes| {
+        records += j.get(try parse(a, bytes), "operations").?.array.items.len;
+    };
+    try equal(@as(usize, 64), records);
+}
+
+fn seedDraftHistory(a: A, durable: *DraftRotationHost, index: usize, count: usize, uncertain: bool) !void {
+    const draft_storage = @import("browser_drafts.zig");
+    const actors = [_][]const u8{ account, "second@example.test", "third@example.test" };
+    const draft_id = try std.fmt.allocPrint(a, "protected-{d}", .{index});
+    const receipts = try a.alloc(draft_storage.Receipt, count);
+    for (receipts, 0..) |*receipt, cursor| receipt.* = .{
+        .id = try std.fmt.allocPrint(a, "old-{d}-{d}", .{ index, cursor }),
+        .draftId = if (uncertain and cursor == count - 1) draft_id else try std.fmt.allocPrint(a, "settled-draft-{d}", .{cursor}),
+        .hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .phase = .submitted,
+        .outcome = if (uncertain and cursor == count - 1) .unknown else .applied,
+    };
+    const drafts = [_]t.Draft{.{ .id = draft_id, .subject = "Protected older recovery", .bodyText = "Kept unchanged" }};
+    const document: draft_storage.Document = .{ .version = 1, .revision = 1, .account = actors[index], .clientId = client_id, .grantId = "", .drafts = if (uncertain) &drafts else &.{}, .operations = receipts };
+    durable.rows[index] = try std.json.Stringify.valueAlloc(std.testing.allocator, document, .{ .emit_null_optional_fields = false });
+    durable.revisions[index] = 1;
+}
+
+test "browser durable drafts: disconnected actor receipts trigger one bounded local retirement retry before POST" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var durable: DraftRotationHost = .{};
+    defer durable.deinit();
+    try seedDraftHistory(a, &durable, 0, 40, true);
+    try seedDraftHistory(a, &durable, 1, 24, true);
+    const disconnected = try a.dupe(u8, durable.rows[1].?);
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    try provider.restoreDrafts(0, durable.rows[0].?);
+    provider.draft_store = .{ .context = &durable, .saveFn = DraftRotationHost.save };
+    const draft_id = try create(&provider, a, "New send with one connected actor");
+    resetHost(&.{.{ .method = "POST", .url = send_url, .body = "{\"id\":\"accepted123\"}" }});
+    host.provider = &provider;
+    host.expected_draft = draft_id;
+    const attempts = durable.attempts;
+    try outcome(try send(&provider, a, draft_id, "only-connected-actor"), "applied");
+    try equal(attempts + 2, durable.attempts);
+    try equal(@as(usize, 1), durable.quota_failures);
+    try acknowledgeReceipt(&provider, a, draft_id, "only-connected-actor", true);
+    try verifyHost();
+    try equal(@as(usize, 40), provider.operation_count);
+    try strings("protected-0", provider.pendingUnknown().?.draft_id);
+    try strings(disconnected, durable.rows[1].?);
+    var count: usize = 0;
+    for (durable.rows) |row| if (row) |raw| {
+        count += j.get(try parse(a, raw), "operations").?.array.items.len;
+    };
+    try equal(@as(usize, 64), count);
+    // A failed second transaction restores the full local journal and both
+    // durable rows. Its error remains visible, with no provider request.
+    const retry_id = try create(&provider, a, "Refused storage retry");
+    const previous = try a.dupe(u8, durable.rows[0].?);
+    const old_revision = provider.draft_revisions[0];
+    durable.fail = true;
+    resetHost(&.{});
+    const rejected_send = try send(&provider, a, retry_id, "storage-retry-failed");
+    try outcome(rejected_send, "rejected");
+    try strings("BrowserDraftStorageUnavailable", j.text(try data(rejected_send), "errorCode"));
+    try equal(@as(usize, 2), durable.quota_failures);
+    try equal(@as(usize, 40), provider.operation_count);
+    try equal(old_revision, provider.draft_revisions[0]);
+    try strings(previous, durable.rows[0].?);
+    try strings(disconnected, durable.rows[1].?);
+    try strings("protected-0", provider.pendingUnknown().?.draft_id);
+    try equal(@as(usize, 0), host.posts);
+    try verifyHost();
+}
+
+test "browser durable drafts: transport no-POST proof survives stale receipt writes and consumer failure" {
+    for ([_]u32{ 3, 4, 5, 1 }) |transport_result| for ([_]bool{ true, false }) |accepted| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var durable: DraftRotationHost = .{};
+        defer durable.deinit();
+        var provider = Provider.init(std.testing.allocator);
+        defer provider.deinit();
+        try actor(&provider, 0, account, true, false);
+        provider.draft_store = .{ .context = &durable, .saveFn = DraftRotationHost.save };
+        const draft_id = try create(&provider, a, "Cancelled or unconfirmed exact send");
+        resetHost(&.{.{ .method = "POST", .url = send_url, .result = transport_result }});
+        host.provider = &provider;
+        host.expected_draft = draft_id;
+        host.draft_receipt_failure = &durable.failure;
+        const possibly_submitted = transport_result == 1;
+        try outcome(try send(&provider, a, draft_id, "transport-proof"), if (possibly_submitted) "unknown" else "rejected");
+        try equal(possibly_submitted, provider.live_sessions[0].send_possible_submission);
+        const boundary: live.SendBoundary = if (transport_result == 5) .marked else if (possibly_submitted) .submitted else .none;
+        const phase: @import("browser_drafts.zig").Phase = if (transport_result == 3 or transport_result == 4) .paused else .submitted;
+        try equal(boundary, provider.live_sessions[0].send_boundary);
+        try equal(phase, provider.operations[0].phase);
+        try acknowledgeReceipt(&provider, a, draft_id, "transport-proof", accepted);
+        try equal(possibly_submitted, provider.pendingUnknown() != null);
+        try equal(@as(u32, if (possibly_submitted) 2 else 3), provider.sendStatus());
+        try verifyHost();
+        // The failed receipt transaction leaves the durable pending copy;
+        // the live editor still distinguishes a proven refusal from a POST.
+        const persisted = try parse(a, durable.rows[0].?);
+        try strings("unknown", j.text(j.get(persisted, "operations").?.array.items[0], "outcome"));
+        durable.failure = null;
+        const edit = .{ .cmd = "draft.update", .account = account, .draftId = draft_id, .draft = .{ .subject = "Retained editable work" } };
+        if (possibly_submitted) try failure(try invoke(&provider, a, edit, false), "UnknownOutcome") else _ = try data(try invoke(&provider, a, edit, false));
+    };
+}
+
+test "browser durable drafts: pre-POST cause survives receipt encoding and allocation failure stays definitely rejected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var durable: DraftRotationHost = .{};
+    defer durable.deinit();
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    provider.draft_store = .{ .context = &durable, .saveFn = DraftRotationHost.save };
+    const draft_id = try create(&provider, a, "Typed storage rejection");
+    resetHost(&.{});
+    for ([_]anyerror{ error.BrowserDraftQuota, error.BrowserDraftStorageUnavailable, error.BrowserDraftStorageConflict, error.BrowserDraftOperationQuota }) |cause| {
+        durable.failure = cause;
+        const result = try send(&provider, a, draft_id, "preflight-storage-cause");
+        try outcome(result, "rejected");
+        try strings(@errorName(cause), j.text(try data(result), "errorCode"));
+        try equal(@as(usize, 0), provider.operation_count);
+        try expect(provider.pendingUnknown() == null);
+    }
+    try verifyHost();
+    durable.failure = null;
+    resetHost(&.{.{ .method = "POST", .url = send_url, .result = 3 }});
+    host.provider = &provider;
+    host.expected_draft = draft_id;
+    host.draft_receipt_failure = &durable.failure;
+    var failing_output: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    const request = try std.json.Stringify.valueAlloc(a, .{ .cmd = "draft.send", .account = account, .draftId = draft_id, .operationId = "failed-local-receipt-allocation" }, .{});
+    try std.testing.expectError(error.SendNotStarted, provider.client().call(failing_output.allocator(), request));
+    provider.client().sendReceipt(request, false);
+    try expect(provider.pendingUnknown() == null);
+    try equal(@as(u32, 3), provider.sendStatus());
+    try expect(!provider.operations[0].awaiting_receipt);
+    try verifyHost();
+}
+
+test "browser durable drafts: a quota retry can retire another connected actor atomically without revision drift" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var durable: DraftRotationHost = .{};
+    defer durable.deinit();
+    try seedDraftHistory(a, &durable, 1, 24, false);
+    try seedDraftHistory(a, &durable, 2, 40, true);
+    const unconnected = try a.dupe(u8, durable.rows[2].?);
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    try actor(&provider, 0, account, true, false);
+    try actor(&provider, 1, "second@example.test", true, false);
+    try provider.restoreDrafts(1, durable.rows[1].?);
+    provider.draft_store = .{ .context = &durable, .saveFn = DraftRotationHost.save };
+    const draft_id = try create(&provider, a, "First send by new actor");
+    resetHost(&.{.{ .method = "POST", .url = send_url, .body = "{\"id\":\"newactor123\"}" }});
+    host.provider = &provider;
+    host.expected_draft = draft_id;
+    try outcome(try send(&provider, a, draft_id, "new-actor-with-loaded-history"), "applied");
+    try acknowledgeReceipt(&provider, a, draft_id, "new-actor-with-loaded-history", true);
+    try verifyHost();
+    try equal(@as(usize, 1), durable.quota_failures);
+    try equal(@as(usize, 1), durable.batch_commits);
+    try equal(@as(usize, 24), provider.operation_count);
+    try equal(@as(u32, 2), provider.draft_revisions[1]);
+    try equal(provider.draft_revisions[1], durable.revisions[1]);
+    try strings(unconnected, durable.rows[2].?);
+    _ = try data(try invoke(&provider, a, .{ .cmd = "draft.create", .account = "second@example.test", .draft = .{ .subject = "Loaded actor stays writable" } }, false));
+    try equal(@as(u32, 3), provider.draft_revisions[1]);
+    try equal(provider.draft_revisions[1], durable.revisions[1]);
 }

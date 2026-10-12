@@ -18,6 +18,113 @@ function stored(actor, size = 0, savedAt = 1) {
 }
 function code(expected) { return error => error instanceof BrowserCacheError && error.code === expected; }
 
+// Literal transport DTO, kept independent of the JavaScript normalizer. WASM
+// emits every warning count even for a mail-only or complete contact snapshot.
+const wasmSnapshot = `{"version":1,"decoderRevision":4,"account":"ada@example.test","clientId":"synthetic.apps.googleusercontent.com","grantId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updatedAt":1791730000000,"messages":[{"id":"mail-1","threadId":"thread-1","from":{"address":"morgan@example.test","name":"Morgan"},"replyTo":[],"to":[],"cc":[],"subject":"Synthetic cached mail","snippet":"","bodyText":"A literal cached body.","bodyHtml":null,"bodyHtmlAmbiguous":false,"bodySource":"plain","messageId":"","references":"","inReplyTo":"","labels":["INBOX"],"receivedAt":0,"sentDate":null,"unread":false,"bodyCached":true,"bodyCacheError":"","decodeWarning":"","metadataPartial":false,"labelsVerified":true,"attachments":[]}],"contacts":[{"resourceName":"people/c1","etag":"synthetic-etag","name":"Morgan","emails":[{"address":"morgan@example.test","name":""}],"readWarnings":{"omittedContacts":0,"partialContacts":0,"omittedEmails":0,"omittedNames":0,"sanitizedNames":0,"omittedMetadata":0,"invalidFields":0}}],"contactsLoaded":true,"contactWarnings":{"omittedContacts":0,"partialContacts":0,"omittedEmails":0,"omittedNames":0,"sanitizedNames":0,"omittedMetadata":0,"invalidFields":0}}`;
+const zeroContactWarnings = { omittedContacts: 0, partialContacts: 0, omittedEmails: 0, omittedNames: 0, sanitizedNames: 0, omittedMetadata: 0, invalidFields: 0 };
+
+function memoryCacheDatabase() {
+  let rows = [];
+  const database = {
+    close() {},
+    transaction() {
+      let staged = structuredClone(rows), pending = 0, aborted = false, timer;
+      const tx = {};
+      const finish = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { if (!aborted && pending === 0) { rows = staged; tx.oncomplete?.(); } }, 0);
+      };
+      const request = action => {
+        pending++;
+        const result = {};
+        queueMicrotask(() => {
+          if (aborted) return;
+          try { result.result = action(); result.onsuccess?.(); }
+          catch { result.onerror?.(); }
+          finally { pending--; finish(); }
+        });
+        return result;
+      };
+      const key = value => JSON.stringify(value);
+      tx.abort = () => { aborted = true; clearTimeout(timer); queueMicrotask(() => tx.onabort?.()); };
+      tx.objectStore = () => ({
+        get: identity => request(() => structuredClone(staged.find(row => key(row.key) === key(identity)))),
+        getAll: (_query, limit) => request(() => structuredClone(staged.slice(0, limit))),
+        put: row => request(() => { staged = staged.filter(item => key(item.key) !== key(row.key)); staged.push(structuredClone(row)); }),
+        delete: identity => request(() => { staged = staged.filter(row => key(row.key) !== key(identity)); }),
+        clear: () => request(() => { staged = []; }),
+      });
+      finish();
+      return tx;
+    },
+  };
+  return { indexedDB: { open() { const request = {}; queueMicrotask(() => { request.result = database; request.onsuccess(); }); return request; } }, rows: () => structuredClone(rows) };
+}
+
+test('literal WASM cache snapshots retain zero contact warning objects including mail-only snapshots', () => {
+  const complete = validateCacheSnapshot(binding, new TextEncoder().encode(wasmSnapshot));
+  assert.deepEqual(complete, JSON.parse(wasmSnapshot));
+  const mailOnly = { ...JSON.parse(wasmSnapshot), contacts: [], contactsLoaded: false };
+  const planned = planCacheWrite([], binding, mailOnly, 1);
+  assert.deepEqual(planned.record.snapshot.contactWarnings, zeroContactWarnings);
+  assert.deepEqual(scopeCacheSnapshot(binding, JSON.stringify(planned.record.snapshot), { contactsGranted: true }), mailOnly);
+  const legacy = validateCacheSnapshot(binding, snapshot());
+  assert.deepEqual(legacy.contactWarnings, zeroContactWarnings);
+  assert.deepEqual(legacy.contacts[0].readWarnings, zeroContactWarnings);
+});
+
+test('contact warning pages survive IndexedDB save reopen and scoped restore without losing all-omitted warnings', async () => {
+  const memory = memoryCacheDatabase();
+  let cache = createBrowserCache(memory);
+  const partial = JSON.parse(wasmSnapshot);
+  partial.contacts[0].readWarnings = { omittedContacts: 0, partialContacts: 1, omittedEmails: 2, omittedNames: 1, sanitizedNames: 1, omittedMetadata: 1, invalidFields: 1 };
+  partial.contactWarnings = { ...partial.contacts[0].readWarnings, omittedContacts: 2 };
+  const empty = { ...JSON.parse(wasmSnapshot), contacts: [], contactWarnings: { ...zeroContactWarnings, omittedContacts: 100 } };
+  for (const value of [JSON.parse(wasmSnapshot), partial, empty]) {
+    await cache.save(binding, new TextEncoder().encode(JSON.stringify(value)), { verified: true });
+    assert.equal(memory.rows().length, 1);
+    assert.deepEqual(memory.rows()[0].snapshot, value);
+    cache.close();
+    cache = createBrowserCache(memory);
+    assert.deepEqual(await cache.stage(binding, { contactsGranted: true }), value);
+    assert.deepEqual(await cache.load(binding, { verified: true, contactsGranted: true }), value);
+    const narrowed = await cache.load(binding, { verified: true, contactsGranted: false });
+    assert.deepEqual(narrowed.contacts, []);
+    assert.equal(narrowed.contactsLoaded, false);
+    assert.deepEqual(narrowed.contactWarnings, zeroContactWarnings);
+    assert.deepEqual(narrowed.messages, value.messages);
+  }
+  const before = memory.rows();
+  await assert.rejects(() => cache.save(binding, { ...empty, contactWarnings: { omittedContacts: 101 } }, { verified: true }), code('invalid'));
+  assert.deepEqual(memory.rows(), before);
+  cache.close();
+});
+
+test('contact warning counters default only absent fields and reject malformed or unbounded counts', () => {
+  const pageLimits = { omittedContacts: 100, partialContacts: 100, omittedEmails: 1572864, omittedNames: 1572864, sanitizedNames: 3200, omittedMetadata: 100, invalidFields: 300 };
+  const rowLimits = { omittedContacts: 0, partialContacts: 1, omittedEmails: 1572864, omittedNames: 1572864, sanitizedNames: 32, omittedMetadata: 1, invalidFields: 3 };
+  for (const [field, limits] of [['contactWarnings', pageLimits], ['readWarnings', rowLimits]]) {
+    const value = JSON.parse(wasmSnapshot);
+    const target = field === 'contactWarnings' ? value : value.contacts[0];
+    target[field] = {};
+    const defaults = validateCacheSnapshot(binding, value);
+    assert.deepEqual(field === 'contactWarnings' ? defaults[field] : defaults.contacts[0][field], zeroContactWarnings);
+    for (const [count, max] of Object.entries(limits)) {
+      target[field] = { [count]: max };
+      const exact = validateCacheSnapshot(binding, value);
+      assert.equal(field === 'contactWarnings' ? exact[field][count] : exact.contacts[0][field][count], max);
+      for (const bad of [-1, max + 1, 0xffffffff, 1.5, Infinity, '1', null, true]) {
+        target[field] = { [count]: bad };
+        assert.throws(() => validateCacheSnapshot(binding, value), code('invalid'));
+      }
+    }
+    for (const malformed of [null, [], 'warning', 0, { provider: 'private data' }]) {
+      target[field] = malformed;
+      assert.throws(() => validateCacheSnapshot(binding, value), code('invalid'));
+    }
+  }
+});
+
 test('snapshot binding requires every exact actor and grant component', () => {
   assert.deepEqual(cacheKey(binding), [binding.account, binding.clientId, binding.grantId]);
   for (const changed of [{ account: 'bea@example.test' }, { clientId: 'other.apps.googleusercontent.com' }, { grantId: 'b'.repeat(64) }, { account: 'Ada@example.test' }]) assert.throws(() => validateCacheSnapshot({ ...binding, ...changed }, snapshot()), code('invalid'));
@@ -285,6 +392,8 @@ test('legacy persisted byte receipts survive newly defaulted warning fields and 
   const normalized = plan.rows[0];
   assert.equal(normalized.snapshot.decoderRevision, 0);
   assert.equal(normalized.snapshot.messages[0].labelsVerified, true);
+  assert.deepEqual(normalized.snapshot.contactWarnings, zeroContactWarnings);
+  assert.deepEqual(normalized.snapshot.contacts[0].readWarnings, zeroContactWarnings);
   assert.equal(normalized.byteLength, new TextEncoder().encode(JSON.stringify(normalized.snapshot)).length);
   assert(normalized.byteLength > row.byteLength);
 });

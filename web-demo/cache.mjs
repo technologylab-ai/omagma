@@ -110,11 +110,23 @@ function message(value, policy) {
     attachments: list(value.attachments ?? [], CACHE_LIMITS.attachments, entry => attachment(entry, policy)),
   };
 }
+const CONTACT_WARNING_FIELDS = ['omittedContacts', 'partialContacts', 'omittedEmails', 'omittedNames', 'sanitizedNames', 'omittedMetadata', 'invalidFields'];
+function contactWarnings(value, perContact = false) {
+  const warnings = record(value === undefined ? {} : value, CONTACT_WARNING_FIELDS);
+  const contacts = perContact ? 1 : CACHE_LIMITS.contacts;
+  // People responses fit the same 3 MiB transport bound as snapshots. Even
+  // minimum-sized JSON array entries consume two bytes, so counted omitted
+  // tails cannot reach this ceiling. Only 32 names and three array fields per
+  // contact are inspected; metadata omission is a per-contact flag.
+  const sourceItems = Math.floor(CACHE_LIMITS.snapshotBytes / 2);
+  const limits = { omittedContacts: perContact ? 0 : contacts, partialContacts: contacts, omittedEmails: sourceItems, omittedNames: sourceItems, sanitizedNames: contacts * 32, omittedMetadata: contacts, invalidFields: contacts * 3 };
+  return Object.fromEntries(CONTACT_WARNING_FIELDS.map(field => [field, integer(warnings[field] === undefined ? 0 : warnings[field], limits[field])]));
+}
 function contact(value, policy) {
-  record(value, ['resourceName', 'etag', 'name', 'emails']);
+  record(value, ['resourceName', 'etag', 'name', 'emails', 'readWarnings']);
   const resourceName = text(value.resourceName, 256);
   if (!/^people\/[A-Za-z0-9._-]+$/.test(resourceName)) invalid();
-  return { resourceName, etag: text(value.etag ?? '', 4096), name: text(value.name ?? '', policy.displayNameBytes), emails: list(value.emails ?? [], policy.incomingRecipients, entry => address(entry, policy, true)) };
+  return { resourceName, etag: text(value.etag ?? '', 4096), name: text(value.name ?? '', policy.displayNameBytes), emails: list(value.emails ?? [], policy.incomingRecipients, entry => address(entry, policy, true)), readWarnings: contactWarnings(value.readWarnings, true) };
 }
 
 function parseSnapshot(value) {
@@ -142,7 +154,7 @@ function encodedSize(snapshot) {
 export function validateCacheSnapshot(binding, raw, { mailPolicy } = {}) {
   const policy = validateMailPolicy(mailPolicy);
   const key = cacheKey(binding);
-  const value = record(parseSnapshot(raw), ['version', 'decoderRevision', 'account', 'clientId', 'grantId', 'updatedAt', 'messages', 'contacts', 'contactsLoaded']);
+  const value = record(parseSnapshot(raw), ['version', 'decoderRevision', 'account', 'clientId', 'grantId', 'updatedAt', 'messages', 'contacts', 'contactsLoaded', 'contactWarnings']);
   if (value.version !== 1 || value.account !== key[0] || value.clientId !== key[1] || value.grantId !== key[2]) invalid();
   const messages = list(value.messages, CACHE_LIMITS.messages, entry => message(entry, policy));
   if (new Set(messages.map(entry => entry.id)).size !== messages.length) invalid();
@@ -151,14 +163,14 @@ export function validateCacheSnapshot(binding, raw, { mailPolicy } = {}) {
   const contactsLoaded = boolean(value.contactsLoaded);
   if (!contactsLoaded && contacts.length) invalid();
   const decoderRevision = integer(value.decoderRevision === undefined ? 0 : value.decoderRevision, 0xffffffff);
-  const snapshot = { version: 1, decoderRevision, account: key[0], clientId: key[1], grantId: key[2], updatedAt: integer(value.updatedAt, 253402300800000), messages, contacts, contactsLoaded };
+  const snapshot = { version: 1, decoderRevision, account: key[0], clientId: key[1], grantId: key[2], updatedAt: integer(value.updatedAt, 253402300800000), messages, contacts, contactsLoaded, contactWarnings: contactWarnings(value.contactWarnings) };
   encodedSize(snapshot);
   return snapshot;
 }
 
 export function scopeCacheSnapshot(binding, raw, { contactsGranted = false, mailPolicy } = {}) {
   const snapshot = validateCacheSnapshot(binding, raw, { mailPolicy });
-  if (contactsGranted !== true) { snapshot.contacts = []; snapshot.contactsLoaded = false; }
+  if (contactsGranted !== true) { snapshot.contacts = []; snapshot.contactsLoaded = false; snapshot.contactWarnings = contactWarnings(); }
   return snapshot;
 }
 

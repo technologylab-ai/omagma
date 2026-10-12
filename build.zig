@@ -38,7 +38,8 @@ pub fn build(b: *std.Build) void {
         package.addArtifactArg(browser);
         package.addArg("--out-dir");
         browser_assets = package.addOutputDirectoryArg("site");
-        for ([_][]const u8{ "app.mjs", "credentials.mjs", "transport.mjs", "bridge.mjs", "cache.mjs", "index.html", "style.css", "package.json", "package-lock.json" }) |source| package.addFileInput(b.path(b.fmt("web-demo/{s}", .{source})));
+        for ([_][]const u8{ "app.mjs", "credentials.mjs", "transport.mjs", "bridge.mjs", "cache.mjs", "drafts.mjs", "index.html", "style.css", "package.json", "package-lock.json" }) |source| package.addFileInput(b.path(b.fmt("web-demo/{s}", .{source})));
+        package.addFileInput(b.path("assets/omagma-logo.png"));
     }
     const vaxis = if (tui_enabled) b.lazyDependency("vaxis", .{ .target = target, .optimize = optimize }) else null;
     const m = b.createModule(.{
@@ -72,6 +73,12 @@ pub fn build(b: *std.Build) void {
     const browser_provider_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_provider_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(browser_provider_tests.root_module, sdk);
     b.step("test-browser-provider", "Check browser Client isolation and uncertain-send contracts").dependOn(&b.addRunArtifact(browser_provider_tests).step);
+    const contact_isolation_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/contact_isolation_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
+    if (macos_sdk) |sdk| linkNativeKeychain(contact_isolation_tests.root_module, sdk);
+    b.step("test-contacts", "Check shared contact-page refusal isolation").dependOn(&b.addRunArtifact(contact_isolation_tests).step);
+    const mailbox_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_mail_actions_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
+    if (macos_sdk) |sdk| linkNativeKeychain(mailbox_tests.root_module, sdk);
+    b.step("test-browser-mail-actions", "Check shared browser mailbox mutations and per-item undo").dependOn(&b.addRunArtifact(mailbox_tests).step);
     if (vaxis) |v| m.addImport("vaxis", v.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "omagma", .root_module = m, .linkage = if (target.result.os.tag == .linux) .static else null, .use_llvm = if (vaxis != null) true else null });
     b.installArtifact(exe);
@@ -106,11 +113,12 @@ pub fn build(b: *std.Build) void {
 fn embeddedAssetSource(enabled: bool) []const u8 {
     if (!enabled) return "pub fn assets(comptime Asset: type) [0]Asset { return .{}; }\n";
     return
-    \\pub fn assets(comptime Asset: type) [8]Asset {
+    \\pub fn assets(comptime Asset: type) [9]Asset {
     \\    return .{
     \\        .{ .path = "/index.html", .mime = "text/html; charset=utf-8", .bytes = @embedFile("assets/index.html") },
     \\        .{ .path = "/app.mjs", .mime = "text/javascript; charset=utf-8", .bytes = @embedFile("assets/app.mjs") },
     \\        .{ .path = "/style.css", .mime = "text/css; charset=utf-8", .bytes = @embedFile("assets/style.css") },
+    \\        .{ .path = "/omagma-logo.png", .mime = "image/png", .bytes = @embedFile("assets/omagma-logo.png") },
     \\        .{ .path = "/xterm.css", .mime = "text/css; charset=utf-8", .bytes = @embedFile("assets/xterm.css") },
     \\        .{ .path = "/omagma.wasm", .mime = "application/wasm", .bytes = @embedFile("assets/omagma.wasm") },
     \\        .{ .path = "/app.mjs.LEGAL.txt", .mime = "text/plain; charset=utf-8", .bytes = @embedFile("assets/app.mjs.LEGAL.txt") },

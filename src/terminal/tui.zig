@@ -200,6 +200,12 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "MissingRecipient", .label = "Add a recipient in To, Cc or Bcc" },
         .{ .code = "MissingMessageId", .label = "Mail has no valid reply identifier" },
         .{ .code = "InvalidAddress", .label = "Enter a valid email address" },
+        .{ .code = "IncompleteContact", .label = "Contact is incomplete · check it in Google Contacts before editing" },
+        .{ .code = "BrowserDraftStorageUnavailable", .label = "Draft could not be saved · keep this tab open and retry" },
+        .{ .code = "BrowserDraftQuotaExceeded", .label = "Browser draft storage is full · draft changes remain in this tab" },
+        .{ .code = "BrowserDraftQuota", .label = "Browser draft storage is full · current edits and saved copies are kept" },
+        .{ .code = "BrowserDraftOperationQuota", .label = "Browser send history is full · reconnect its accounts or review saved-draft cleanup" },
+        .{ .code = "BrowserDraftStorageConflict", .label = "Drafts changed in another tab · reconnect · current edits are kept here" },
         .{ .code = "InvalidLabelName", .label = "Enter a valid custom label name" },
         .{ .code = "DuplicateLabelName", .label = "A label with this name already exists" },
         .{ .code = "LabelNotFound", .label = "Label no longer exists · Ctrl+R refreshes labels" },
@@ -310,7 +316,7 @@ fn setMouseReporting(vx: *vaxis.Vaxis, writer: *Io.Writer, enabled: bool) !void 
 }
 const folders = [_][]const u8{ "Inbox", "Sent", "Drafts", "Archive", "Trash", "Spam", "All Mail", "Unread" };
 const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH", "SPAM", "", "UNREAD" };
-const HelpFeature = enum { always, files, attachments, editor, clipboard, aliases, updates, durable_drafts, mail_changes, contacts_write, invitations, open_urls, session_drafts };
+const HelpFeature = enum { always, files, attachments, editor, clipboard, aliases, updates, durable_drafts, send_queue, preferences, mail_changes, contacts_write, invitations, open_urls, session_drafts };
 const HelpRow = struct { keys: []const u8 = "", action: []const u8 = "", section: []const u8 = "", requires: HelpFeature = .always };
 const help_rows = [_]HelpRow{
     .{ .keys = ":updates · Ctrl+P Updates", .action = "Check stable releases and see installation-specific upgrade instructions", .requires = .updates },
@@ -330,7 +336,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "Space in attachment file list", .action = "Select several files across folders before attaching once", .requires = .files },
     .{ .keys = ":save-all DIRECTORY", .action = "Save received attachments privately without overwriting existing files", .requires = .files },
     .{ .keys = ":add-contact / :discard-draft / :spam / :unspam", .action = "Complete contact, local draft and Spam workflows with explicit actions", .requires = .mail_changes },
-    .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", .action = "During the countdown, Undo keeps the draft; Send now skips this wait; Tab/Enter chooses", .requires = .durable_drafts },
+    .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", .action = "During the countdown, Undo keeps the draft; Send now skips this wait; Tab/Enter chooses", .requires = .send_queue },
     .{ .section = "NAVIGATION" },
     .{ .keys = "j / k · arrows", .action = "Move through the focused pane" },
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
@@ -450,7 +456,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":split right 60", .action = "Use 60% of horizontal space for the mail list" },
     .{ .keys = ":split below 40", .action = "Use 40% of vertical space for the mail list" },
     .{ .keys = ":bind n down", .action = "Remap n in mailbox mode; :unbind n restores it" },
-    .{ .action = "Account, mailbox, selected mail and reader scroll restore on startup.", .requires = .durable_drafts },
+    .{ .action = "Account, mailbox, selected mail and reader scroll restore on startup.", .requires = .preferences },
 };
 
 const TextPosition = text_layout.Position;
@@ -1041,6 +1047,7 @@ const App = struct {
     contacts_account: Field = .{},
     contacts_state: ContactsState = .loading,
     contacts_cache_ready: bool = false,
+    contacts_warnings: types.ContactReadWarnings = .{},
     recipient_arena: ?std.heap.ArenaAllocator = null,
     recipient_values: []const Value = &.{},
     recipient_account: Field = .{},
@@ -1218,6 +1225,7 @@ const App = struct {
     loading_frame: usize = 0,
     autosave_last_edit: std.atomic.Value(i64) = .init(0),
     autosave_started: i64 = 0,
+    browser_autosave_last_edit: i64 = 0,
     autosave_due: bool = false,
     autosave_revision: u64 = 0,
     contact_name: Field = .{},
@@ -1800,7 +1808,8 @@ const App = struct {
         defer arena.deinit();
         const labels_response = self.cached(arena.allocator(), .{ .cmd = "labels.list", .account = self.account(), .cacheOnly = true }) catch null;
         if (labels_response) |response| self.replaceLabels(response) catch {};
-        if (!same(self.labels_account.value(), self.account()) or self.labels.len == 0) self.pending_labels = true;
+        const missing = !same(self.labels_account.value(), self.account()) or self.labels.len == 0;
+        self.pending_labels = missing and (self.capabilities.refresh_on_account_switch or self.label_picker or self.mode == .label_manager);
     }
     fn openLabelPicker(self: *App) !void {
         if (!self.capabilities.mail_changes) return error.MailChangesUnavailable;
@@ -2936,7 +2945,7 @@ const App = struct {
                 .view_editor => self.capabilities.editor,
                 .copy_message, .select_text => self.capabilities.clipboard,
                 .manage_labels, .scope => self.capabilities.mail_changes,
-                .send_grace, .resume_send, .cancel_send => self.capabilities.durable_drafts,
+                .send_grace, .resume_send, .cancel_send => self.capabilities.send_queue,
                 else => true,
             };
             if (!supported) continue;
@@ -2975,14 +2984,14 @@ const App = struct {
             return true;
         }
         if (same(command, "resume-send")) {
-            if (!self.capabilities.durable_drafts) return error.SendQueueUnavailable;
+            if (!self.capabilities.send_queue) return error.SendQueueUnavailable;
             if (!self.pausedGraceForCompose()) return error.NoPendingSend;
             self.preemptReadOnly();
             try self.start(.grace_resume, .{ .cmd = "queue.resume", .account = self.grace_account.value(), .queueId = self.grace_queue.value(), .delaySeconds = self.ui_preferences.sendGraceSeconds });
             return true;
         }
         if (same(command, "cancel-send")) {
-            if (!self.capabilities.durable_drafts) return error.SendQueueUnavailable;
+            if (!self.capabilities.send_queue) return error.SendQueueUnavailable;
             if (self.grace_active) try self.cancelGrace(false) else {
                 if (!self.pausedGraceForCompose()) return error.NoPendingSend;
                 self.preemptReadOnly();
@@ -3026,7 +3035,7 @@ const App = struct {
             return true;
         }
         if (same(command, "send-grace") or std.mem.startsWith(u8, command, "send-grace ")) {
-            if (!self.capabilities.durable_drafts) return error.SendQueueUnavailable;
+            if (!self.capabilities.send_queue) return error.SendQueueUnavailable;
             if (command.len > 11) {
                 const seconds = try std.fmt.parseInt(u8, std.mem.trim(u8, command[11..], " "), 10);
                 if (seconds > 30) return error.InvalidSendGrace;
@@ -3699,7 +3708,7 @@ const App = struct {
                 .failed => "Contacts unavailable · cached entries retained",
                 .busy => "Contacts cache is busy",
             };
-            return std.fmt.allocPrint(self.frame.allocator(), " {s}{s}", .{ label, if (self.contacts.len > 0) try std.fmt.allocPrint(self.frame.allocator(), " · {d} available", .{self.contacts.len}) else "" });
+            return std.fmt.allocPrint(self.frame.allocator(), " {s}{s}{s}", .{ label, if (self.contacts.len > 0) try std.fmt.allocPrint(self.frame.allocator(), " · {d} available", .{self.contacts.len}) else "", if (self.contacts_warnings.any()) try std.fmt.allocPrint(self.frame.allocator(), " · Partial: {d} omitted, {d} with warnings", .{ self.contacts_warnings.omittedContacts, self.contacts_warnings.partialContacts }) else "" });
         }
         if (self.statusContext().mode == .compose or self.statusContext().mode == .review) {
             if (self.compose.unknown_outcome) return " Outcome unknown · recovery draft protected";
@@ -3730,7 +3739,7 @@ const App = struct {
     fn syncTone(self: *const App) Tone {
         if (self.contactsOpen()) return switch (self.contacts_state) {
             .loading => .fetching,
-            .current => .current,
+            .current => if (self.contacts_warnings.any()) .warning else .current,
             .denied, .failed => .warning,
             else => .muted,
         };
@@ -6074,6 +6083,9 @@ const App = struct {
     }
     fn armAutosave(self: *App) !void {
         if (browser_target) {
+            const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+            if (!self.autosave_due) self.autosave_started = now;
+            self.browser_autosave_last_edit = now;
             self.autosave_due = true;
             return;
         }
@@ -6086,7 +6098,10 @@ const App = struct {
         }
     }
     fn onComposeIdle(self: *App) !void {
-        if (browser_target) return self.autosaveDraft();
+        if (browser_target) {
+            if (self.browserAutosaveDelay() != 0) return;
+            return self.autosaveDraft();
+        }
         self.cancelAutosaveTimer();
         const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
         if (now - self.autosave_last_edit.load(.acquire) < 1500 and now - self.autosave_started < 10000) {
@@ -6102,6 +6117,16 @@ const App = struct {
         self.compose.completion_selected = 0;
         self.say(false, "Draft changed · autosave pending · no mail sent", .{});
         try self.armAutosave();
+    }
+    fn browserDraftDirty(self: *const App) bool {
+        return self.compose_active and !self.compose.unknown_outcome and
+            self.compose.revision != self.compose.saved_revision;
+    }
+    fn browserAutosaveDelay(self: *const App) u32 {
+        if (!self.browserDraftDirty() or !self.autosave_due) return 0;
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        const deadline = @min(self.browser_autosave_last_edit + 1500, self.autosave_started + 10000);
+        return @intCast(std.math.clamp(deadline - now, 0, 1500));
     }
     fn autosaveDraft(self: *App) !void {
         self.cancelAutosaveTimer();
@@ -6277,7 +6302,7 @@ const App = struct {
     }
     fn dispatchComposer(self: *App) !bool {
         if (self.job.future != null) return false;
-        if (self.autosave_due) {
+        if (self.autosave_due and (!browser_target or self.browserAutosaveDelay() == 0)) {
             try self.autosaveDraft();
             return self.job.future != null;
         }
@@ -6927,7 +6952,7 @@ const App = struct {
         defer self.allocator.free(id);
         try self.compose.operation_id.set(self.allocator, id);
         try self.compose.operation_error.set(self.allocator, "");
-        if (self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id }) else {
+        if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id }) else {
             self.cancelAutosaveTimer();
             self.autosave_due = false;
             try self.start(.grace_stage, .{ .account = self.account(), .cmd = "draft.queue", .draftId = self.compose.id.value(), .operationId = id, .delaySeconds = self.ui_preferences.sendGraceSeconds });
@@ -7107,10 +7132,13 @@ const App = struct {
         const result = try self.data(replacement.allocator(), response);
         const contacts = items(get(result, "contacts"));
         if (contacts.len > 1024) return error.ContactListTooLarge;
+        const warning_value = get(result, "contactWarnings");
+        const warnings: types.ContactReadWarnings = if (warning_value == .null) .{} else try @import("json.zig").decode(types.ContactReadWarnings, replacement.allocator(), warning_value);
         const previous = self.contact_arena;
         self.contact_arena = replacement;
         replacement = previous;
         self.contacts = contacts;
+        self.contacts_warnings = warnings;
         self.contacts_selected = @min(self.contacts_selected, contacts.len -| 1);
         self.contacts_cache_ready = !cached_view or truth(get(result, "cacheReady"));
         self.contacts_state = if (cached_view and self.contacts_cache_ready) .cached else if (cached_view) .loading else .current;
@@ -7150,6 +7178,7 @@ const App = struct {
         self.contacts_selected = 0;
         self.contacts = &.{};
         _ = self.contact_arena.reset(.retain_capacity);
+        self.contacts_warnings = .{};
         self.contacts_cache_ready = false;
         self.contacts_state = .loading;
         self.pending_contacts = false;
@@ -7170,6 +7199,7 @@ const App = struct {
         if (same(self.contacts_account.value(), address)) {
             self.contacts = &.{};
             _ = self.contact_arena.reset(.free_all);
+            self.contacts_warnings = .{};
             self.contacts_cache_ready = false;
             self.contacts_state = .denied;
             self.pending_contacts = false;
@@ -7269,6 +7299,12 @@ const App = struct {
     fn editContact(self: *App, contact: ?Value) !void {
         if (!self.capabilities.contacts_write) return error.ContactWritesUnavailable;
         const value_in: Value = contact orelse .null;
+        if (value_in != .null and get(value_in, "readWarnings") != .null) {
+            var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+            defer scratch.deinit();
+            const warnings = try @import("json.zig").decode(types.ContactReadWarnings, scratch.allocator(), get(value_in, "readWarnings"));
+            if (warnings.any()) return error.IncompleteContact;
+        }
         if (self.contact_snapshot) |*arena| arena.deinit();
         self.contact_snapshot = .init(self.allocator);
         const owned = self.contact_snapshot.?.allocator();
@@ -9926,7 +9962,7 @@ const App = struct {
         const alias_action = left.child(.{ .x_off = alias_x, .width = alias_width, .height = 1 });
         if (self.capabilities.aliases) try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
         if (self.capabilities.aliases and !self.compose.unknown_outcome) self.mouseArea(alias_action, .compose_from, 0);
-        if (self.compose.unknown_outcome) try self.line(left, 1, if (!self.capabilities.durable_drafts) "Send unconfirmed · draft protected in this session" else try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
+        if (self.compose.unknown_outcome) try self.line(left, 1, if (browser_target) "Send unconfirmed · recovery draft retained" else try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
         const original_note = self.compose.original != null or self.compose_source_mode == .attached or self.compose.omitted_attachments > 0;
         if (original_note and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.omitted_attachments > 0) "Text-only forward · original attachments are omitted" else if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", if (self.compose.omitted_attachments > 0) .warning else .muted);
         const header_row: usize = if (self.compose.unknown_outcome or original_note) 2 else 1;
@@ -9974,7 +10010,7 @@ const App = struct {
         if (split) {
             const right = self.panel(win, left_width, win.width - left_width, if (self.compose.unknown_outcome) " Submission receipt " else self.composePreviewTitle(), false);
             if (self.compose.unknown_outcome) {
-                const receipt = if (!self.capabilities.durable_drafts) @as([]const u8, "Send outcome is unconfirmed.\n\nCheck Sent in Gmail before any new send.\n\nDraft is protected in this tab; disconnect/reload discards it.") else try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown\nOperation: {s}\nReason: {s}\n\nThe original recovery draft is protected.\nNo edit or automatic resend.\n\n:receipt checks the journal.\nq keeps it and returns to mail.", .{ self.compose.operation_id.value(), self.compose.operation_error.value() });
+                const receipt = if (browser_target) @as([]const u8, "Send outcome is unconfirmed.\n\nCheck Sent in Gmail before any new send.\n\nRecovery draft is retained and protected; no automatic resend.") else try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown\nOperation: {s}\nReason: {s}\n\nThe original recovery draft is protected.\nNo edit or automatic resend.\n\n:receipt checks the journal.\nq keeps it and returns to mail.", .{ self.compose.operation_id.value(), self.compose.operation_error.value() });
                 _ = try self.flow(right, receipt, 0, 0);
             } else try self.composePreviewDraw(right);
         }
@@ -10009,8 +10045,12 @@ const App = struct {
             try self.line(inner, 4, "? Help · Esc / q Back · no consent starts here", .muted);
             return;
         }
-        if (self.contacts.len == 0 and self.contacts_cache_ready) try self.line(inner, 2, if (!self.capabilities.contacts_write) "No matching contacts · / Search · Ctrl+R Refresh" else "No contacts · n Create contact", .muted);
-        const first_row: usize = if (self.contacts_state == .current) 0 else 2;
+        if (self.contacts_warnings.any()) {
+            const warning_row: u16 = if (self.contacts_state == .current) 0 else 1;
+            try self.line(inner, warning_row, try self.fitLine(inner, try std.fmt.allocPrint(self.frame.allocator(), "Partial contacts · {d} omitted · {d} with warnings", .{ self.contacts_warnings.omittedContacts, self.contacts_warnings.partialContacts }), inner.width), .warning);
+        }
+        const first_row: usize = if (self.contacts_warnings.any()) (if (self.contacts_state == .current) 2 else 3) else if (self.contacts_state == .current) 0 else 2;
+        if (self.contacts.len == 0 and self.contacts_cache_ready) try self.line(inner, @intCast(first_row), if (self.contacts_warnings.any()) "No usable contacts in this page · / Search · Ctrl+R Refresh" else if (!self.capabilities.contacts_write) "No matching contacts · / Search · Ctrl+R Refresh" else "No contacts · n Create contact", .muted);
         const stride: usize = if (inner.height >= 16) 3 else 2;
         const visible = @max((inner.height -| first_row) / stride, 1);
         const top = self.contacts_selected -| @as(usize, visible - 1);
@@ -10022,23 +10062,29 @@ const App = struct {
             const item = inner.child(.{ .y_off = @intCast(row), .height = @min(@as(u16, 2), inner.height -| @as(u16, @intCast(row))) });
             const selected = index == self.contacts_selected;
             item.fill(.{ .style = self.style(if (selected) .selected else .text) });
-            _ = item.child(.{ .height = 1 }).printSegment(.{ .text = try self.fitLine(item, text(get(contact, "name")), item.width), .style = self.listStyle(.subject, selected) }, .{ .wrap = .none });
+            const warning_value = get(contact, "readWarnings");
+            const warning: types.ContactReadWarnings = if (warning_value == .null) .{} else try @import("json.zig").decode(types.ContactReadWarnings, self.frame.allocator(), warning_value);
+            const name = if (warning.any()) try std.fmt.allocPrint(self.frame.allocator(), "! {s}", .{text(get(contact, "name"))}) else text(get(contact, "name"));
+            _ = item.child(.{ .height = 1 }).printSegment(.{ .text = try self.fitLine(item, name, item.width), .style = self.listStyle(.subject, selected) }, .{ .wrap = .none });
             if (item.height > 1) _ = item.child(.{ .y_off = 1, .height = 1 }).printSegment(.{ .text = try self.fitLine(item, try Compose.mailboxes(self.frame.allocator(), get(contact, "emails")), item.width), .style = self.listStyle(.muted, selected) }, .{ .wrap = .none });
             self.mouseRows(inner, row, 2, .contact, index);
         }
     }
     fn contextHints(self: *const App) []const u8 {
-        if (!self.capabilities.durable_drafts) {
+        if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
+        if (self.mode == .label_manager) return if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text";
+        if (browser_target) {
             if (self.ux_overlay == .discard) return " Tab Controls · Enter Discard/Cancel · Esc Keep draft";
             if (self.ux_overlay == .contact_addresses) return " Type filter · Ctrl+N/P Choose · Tab Controls · Enter Use · Esc Back";
             return switch (self.mode) {
-                .compose => if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · disconnect discards draft" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · q is text" else " i Edit · a Contacts · d Discard · p Preview · Ctrl+T Format · Ctrl+S Review · q Save/back · ? Help",
+                .compose => if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · recovery draft retained" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · q is text" else " i Edit · a Contacts · d Discard · p Preview · Ctrl+T Format · Ctrl+S Review · q Save/back · ? Help",
                 .review => " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
                 .contacts => " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back",
                 .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Cached subset · Enter Search · Esc Back · q is text" else " Gmail search · Enter Search · Esc Back · q is text",
                 .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Return",
                 .theme => " j/k Choice · Tab Controls · Enter Activate · Esc/q Back",
-                .browse => if (self.focus == .navigation) " j/k Navigate · Enter Choose · 1–3 Accounts · a Contacts · l/Esc/q Mail · ? Help" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · c Compose · v Layout · z Expand · q List · ? Help" else if (self.query.value().len > 0) " j/k Mail · r Reply · f Forward · c Compose · / Cache · \\ Gmail · Ctrl+R Refresh · q Clear · ? Help" else " j/k Mail · Enter Read · c Compose · r/R Reply · f Forward · a Contacts · / Cache · \\ Gmail · Ctrl+R Refresh · ? Help",
+                .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
+                .browse => if (self.focus == .navigation) " j/k Navigate · Enter Choose · 1–3 Accounts · a Contacts · l/Esc/q Mail · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and self.focus == .list and !self.expanded) " j/k Mail · Space Select · m Labels · s Star · u Unread · x Archive · D Trash · Ctrl+Z Undo · ? Help" else if (self.capabilities.mail_changes and self.canManageLabels() and (self.focus == .reader or self.expanded)) " j/k Scroll · r/R Reply · f Forward · m Labels · s Star · u Unread · q List · ? Help" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · c Compose · v Layout · z Expand · q List · ? Help" else if (self.query.value().len > 0) " j/k Mail · r Reply · f Forward · c Compose · / Cache · \\ Gmail · Ctrl+R Refresh · q Clear · ? Help" else " j/k Mail · Enter Read · c Compose · r/R Reply · f Forward · a Contacts · / Cache · \\ Gmail · Ctrl+R Refresh · ? Help",
                 else => " Esc Back",
             };
         }
@@ -10058,7 +10104,7 @@ const App = struct {
             .contacts => if (!self.capabilities.contacts_write) " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back" else " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (!self.capabilities.durable_drafts) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
+            .compose => if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
@@ -10072,8 +10118,8 @@ const App = struct {
             if (!self.capabilities.original_formatting and !self.capabilities.original_attachment) return "Tab / Shift+Tab · Enter · t Text quote · Esc/q Back";
             return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         }
-        if (!self.capabilities.durable_drafts) {
-            if (width >= 100 or self.ux_overlay != .none) return self.contextHints();
+        if (browser_target) {
+            if (width >= 100 or self.ux_overlay != .none or self.label_picker or self.mode == .label_manager or self.mode == .trash_confirm) return self.contextHints();
             return switch (self.mode) {
                 .compose => if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
                 .review => " Tab · Enter Activate · y Send · Esc Back",
@@ -10180,6 +10226,8 @@ const App = struct {
             .aliases => self.capabilities.aliases,
             .updates => self.capabilities.updates,
             .durable_drafts => self.capabilities.durable_drafts,
+            .send_queue => self.capabilities.send_queue,
+            .preferences => self.capabilities.preferences,
             .session_drafts => !self.capabilities.durable_drafts,
             .mail_changes => self.capabilities.mail_changes,
             .contacts_write => self.capabilities.contacts_write,
@@ -15134,6 +15182,50 @@ test "local UI: narrowing contacts clears the owning account while another draft
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+test "local UI: partial contact pages remain usable and warn before editing incomplete records" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.mode = .contacts;
+    try app.replaceContacts(
+        \\{"ok":true,"data":{"contacts":[{"name":"Safe contact","emails":[{"address":"safe@example.test"}],"readWarnings":{"omittedEmails":1}},{"name":"Healthy neighbor","emails":[{"address":"neighbor@example.test"}]}],"contactWarnings":{"omittedContacts":2,"partialContacts":1,"omittedEmails":1},"partial":true}}
+    , false);
+    try std.testing.expectEqual(@as(usize, 2), app.contacts.len);
+    try std.testing.expectEqual(Tone.warning, app.syncTone());
+    const status = try app.syncLine();
+    try std.testing.expect(std.mem.indexOf(u8, status, "2 omitted, 1 with warnings") != null);
+    try std.testing.expectError(error.IncompleteContact, app.editContact(app.contacts[0]));
+    try app.replaceContacts("{\"ok\":true,\"data\":{\"contacts\":[],\"contactWarnings\":{\"omittedContacts\":3},\"partial\":true,\"cacheReady\":true}}", true);
+    try std.testing.expect(app.contacts_warnings.any() and app.contacts_cache_ready);
+    try std.testing.expect(std.mem.indexOf(u8, try app.syncLine(), "3 omitted") != null);
+}
+
+test "local UI: persistent browser drafts do not enable native queue or preference services" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.capabilities = platform.browser_capabilities;
+    try std.testing.expect(app.helpAvailable(.{ .requires = .durable_drafts }));
+    try std.testing.expect(!app.helpAvailable(.{ .requires = .send_queue }));
+    try std.testing.expect(!app.helpAvailable(.{ .requires = .preferences }));
+    try std.testing.expectError(error.SendQueueUnavailable, app.onUxCommand("send-grace 5"));
+    try std.testing.expectError(error.SendQueueUnavailable, app.onUxCommand("resume-send"));
+    app.compose_active = true;
+    app.compose.revision = 1;
+    app.autosave_due = true;
+    const now = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+    app.browser_autosave_last_edit = now;
+    app.autosave_started = now;
+    try std.testing.expect(app.browserDraftDirty());
+    try std.testing.expect(app.browserAutosaveDelay() > 1000);
+    app.autosave_started = now - 11000;
+    try std.testing.expectEqual(@as(u32, 0), app.browserAutosaveDelay());
+    app.compose.saved_revision = 1;
+    try std.testing.expect(!app.browserDraftDirty());
+}
+
 const browser_width_method: vaxis.gwidth.Method = .wcwidth;
 
 /// The browser terminal consumes the same scalar widths used to lay out and
@@ -15190,6 +15282,8 @@ pub const BrowserSession = struct {
     loop: Loop = .{},
     environ: std.process.Environ.Map = undefined,
     pending_cache: []const u8 = "",
+    pending_drafts: []const u8 = "",
+    draft_restore_blocked: [3]bool = @splat(false),
 
     pub fn init(self: *BrowserSession, allocator: Allocator, output: *Io.Writer, cols: u16, rows: u16) !void {
         if (!browser_target) @compileError("BrowserSession requires wasm32-freestanding");
@@ -15198,6 +15292,8 @@ pub const BrowserSession = struct {
         self.environ = std.process.Environ.Map.init(allocator);
         errdefer self.environ.deinit();
         self.pending_cache = "";
+        self.pending_drafts = "";
+        self.draft_restore_blocked = @splat(false);
         self.tty = .{ .output = output };
         self.vx = try vaxis.init(browser_live.io, allocator, &self.environ, .{});
         errdefer self.vx.deinit(allocator, output);
@@ -15259,6 +15355,22 @@ pub const BrowserSession = struct {
     pub fn draftCount(self: *const BrowserSession) usize {
         return self.provider.draftCount();
     }
+    pub fn draftDirty(self: *const BrowserSession) bool {
+        return self.app.browserDraftDirty();
+    }
+    pub fn autosavePending(self: *const BrowserSession) bool {
+        return self.app.autosave_due and self.app.browserDraftDirty();
+    }
+    pub fn autosaveAcceptsInput(self: *const BrowserSession) bool {
+        return self.app.job.kind == .autosave and self.app.compose_active;
+    }
+    pub fn autosaveDelay(self: *const BrowserSession) u32 {
+        return self.app.browserAutosaveDelay();
+    }
+    pub fn idle(self: *BrowserSession) !void {
+        try self.app.onComposeIdle();
+        try self.drain();
+    }
     pub fn canSend(self: *const BrowserSession) bool {
         return self.provider.canSend(self.app.account_index);
     }
@@ -15267,6 +15379,12 @@ pub const BrowserSession = struct {
     }
     pub fn sendStatus(self: *const BrowserSession) u32 {
         return self.provider.sendStatus();
+    }
+    pub fn draftsRestored(self: *const BrowserSession, index: usize) bool {
+        return index < self.provider.accountCount() and !self.draft_restore_blocked[index];
+    }
+    pub fn stageDrafts(self: *BrowserSession, bytes: []const u8) void {
+        self.pending_drafts = bytes;
     }
     pub fn stageCache(self: *BrowserSession, bytes: []const u8) void {
         self.pending_cache = bytes;
@@ -15283,6 +15401,7 @@ pub const BrowserSession = struct {
         self.app.clearReader();
         self.app.messages = &.{};
         self.app.contacts = &.{};
+        self.app.contacts_warnings = .{};
         self.app.recipient_values = &.{};
         self.app.recipient_ready = false;
         self.app.contacts_cache_ready = false;
@@ -15298,9 +15417,15 @@ pub const BrowserSession = struct {
         self.app.say(true, "Contacts permission narrowed · saved contacts removed", .{});
     }
     pub fn connect(self: *BrowserSession, bytes: []const u8) !void {
-        defer self.pending_cache = "";
+        defer {
+            self.pending_cache = "";
+            self.pending_drafts = "";
+        }
         if (self.app.compose_active) return error.DraftAccountMismatch;
         const index = try self.provider.connect(bytes, self.pending_cache);
+        self.provider.restoreDrafts(index, self.pending_drafts) catch {
+            self.draft_restore_blocked[index] = true;
+        };
         self.app.cancelJob();
         self.app.clearReader();
         self.app.messages = &.{};
@@ -15322,13 +15447,18 @@ pub const BrowserSession = struct {
         self.app.focus = .list;
         try self.drain();
     }
-    pub fn acknowledgeUnknown(self: *BrowserSession) void {
-        const target = self.provider.pendingUnknown() orelse return;
-        const current_draft = self.app.account_index == target.account_index and same(self.app.compose.id.value(), target.draft_id);
-        self.provider.acknowledgeUnknown(target.account_index, target.draft_id) catch |err| {
-            self.failure(err);
+    pub fn unknownTarget(self: *const BrowserSession) ?struct { account_index: usize, draft_id: []const u8, operation_id: []const u8, account: []const u8 } {
+        const target = self.provider.pendingUnknown() orelse return null;
+        return .{ .account_index = target.account_index, .draft_id = target.draft_id, .operation_id = target.operation_id, .account = self.provider.accountAddress(target.account_index) };
+    }
+    pub fn acknowledgeUnknown(self: *BrowserSession, expected_index: u32, expected_draft: []const u8) !void {
+        const target = self.provider.pendingUnknown() orelse {
+            if (expected_index != 0xffffffff or expected_draft.len != 0) return error.OperationConflict;
             return;
         };
+        if (expected_index != target.account_index or !same(expected_draft, target.draft_id)) return error.OperationConflict;
+        const current_draft = self.app.account_index == target.account_index and same(self.app.compose.id.value(), target.draft_id);
+        try self.provider.acknowledgeUnknown(target.account_index, target.draft_id);
         if (current_draft) {
             self.app.compose.unknown_outcome = false;
             self.app.receipt_unknown = false;

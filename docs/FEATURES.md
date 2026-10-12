@@ -123,7 +123,7 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 ### Experimental browser WebAssembly client
 
 - The same TUI workflow controller, renderer and shared mail rules, with
-  browser adapters for terminal input, networking, cache and session drafts.
+  browser adapters for terminal input, networking, cache and browser drafts.
 - A self-contained `omagma server` command serves the embedded page, prints
   its private loopback URL and tries the next port when the requested port is
   occupied. Connect uses existing configured terminal accounts without an
@@ -139,18 +139,27 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   review and cancellable send countdown. HTML sources offer Keep formatting
   with embedded resources; Text quote and exact original `.eml` forwarding
   remain available. Source files are retained within the browser's quotas.
-- Session drafts can be resumed during the same connection. Mail and contacts
-  have bounded browser persistence; credentials and drafts remain in tab memory.
-  Reload or disconnect loses session drafts. Uncertain sends are protected
-  against automatic retry, including after reload.
+- Archive, Trash/restore, Spam/Not spam, star/unread, staged labels and custom
+  label management use the shared account-scoped review, per-item results and
+  undo rules. Both the declared capability and actual Google scope must permit
+  changes; read-only accounts stay read-only.
+- Browser drafts autosave and survive reload/disconnect, including unfinished
+  addresses, original formatting and files. Restore requires fresh account
+  verification and the same registration/grant. An interrupted countdown needs
+  fresh review; unconfirmed sends stay protected until the named account's
+  Sent has been checked. Credentials remain in tab memory.
+- Storage failures retain the previous saved copy and current edits, with a
+  visible warning. If saved drafts cannot be loaded safely, reading remains
+  available while that account's drafting/sending waits for a successful
+  reconnect. **Saved drafts…** offers reviewed local cleanup, preserving
+  unconfirmed sends and unreadable records.
 - Up to three accounts, 30 visible rows and 300 cached mail records per account;
   mail snapshots have a 3 MiB individual / 8 MiB aggregate limit. Inline draft
   file/resource data is limited to 2 MiB and must also fit the encoded request
   and send limits. Oversized sources offer explicit omission or refusal.
 
-Browser mailbox changes (archive, labels, star/unread, Trash), contact editing,
-RSVP, adding local files, URL opening, clipboard integration, external editing,
-sender-alias selection and durable draft recovery/background queues are not
+Browser contact editing, RSVP, adding local files, URL opening, clipboard
+integration, external editing, sender-alias selection and background queues are not
 implemented. Native features below retain their native platform scope.
 
 [Build and connect](../web-demo/README.md) · [Browser workflows and limits](../web-demo/LIVE-MAIL.md)
@@ -170,6 +179,10 @@ implemented. Native features below retain their native platform scope.
 - Message-local decoding or size failures retain identifiable warning rows
   and readable neighboring mail. Authentication, cancellation, identity
   mismatches and application-pool exhaustion still fail the operation.
+- Contact list/search pages retain healthy neighbors and usable fields from
+  incomplete records. Skipped contacts and omitted fields have visible warning
+  counts that survive caching. Incomplete contacts cannot be edited from their
+  retained subset; outgoing contact validation stays strict.
 - `status:partial` finds retained warnings and incomplete mail locally.
   Bodies omitted under an aggregate budget can be opened individually with
   Enter. Replies and text/formatted forwards refuse an unavailable body
@@ -184,8 +197,8 @@ recipients and bounded bodies and combined headers. Full IDNA/Unicode
 normalization, Unicode case-folded search, universal charset support,
 automatic multi-author replies and reference-chain compaction are not
 implemented. An exhausted subject-prefix/reference allowance refuses the
-operation explicitly. A malformed or oversized contact can still refuse a
-People response page; mail-row isolation does not yet cover contacts.
+operation explicitly. Corrupt whole pages, permission failures and global
+allocation exhaustion remain failures; individual malformed contacts are isolated.
 
 [Mail bounds and recovery](TERMINAL.md#bounds-and-recovery)
 · [Shared budgets and platform boundaries](BROWSER-ARCHITECTURE.md#bounds-and-verification)

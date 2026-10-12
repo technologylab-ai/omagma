@@ -147,7 +147,7 @@ try {
   }
   const port = Number(new URL(origin).port);
   assert.equal(port, expectedPort, "native server did not select the next free port after occupied 8766/8767");
-  const assetTypes = { "index.html": "text/html", "app.mjs": "text/javascript", "style.css": "text/css", "xterm.css": "text/css", "omagma.wasm": "application/wasm" };
+  const assetTypes = { "index.html": "text/html", "app.mjs": "text/javascript", "style.css": "text/css", "omagma-logo.png": "image/png", "xterm.css": "text/css", "omagma.wasm": "application/wasm" };
   const assets = [];
   for (const [name, mime] of Object.entries(assetTypes)) {
     const expected = await readFile(join(site, name));

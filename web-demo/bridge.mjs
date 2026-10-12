@@ -100,7 +100,7 @@ export class BrowserWasmBridge {
       if (typeof this.exports[name] !== 'function') throw new Error(`The browser module is missing ${name}().`);
     }
     this.calls = {};
-    for (const name of ['init', 'resize', 'input', 'connect', 'cache_clear', 'acknowledge_unknown', 'contacts_permission']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
+    for (const name of ['init', 'resize', 'input', 'connect', 'idle', 'cache_clear', 'acknowledge_unknown', 'contacts_permission']) if (typeof this.exports[name] === 'function') this.calls[name] = promising ? promising(this.exports[name]) : this.exports[name];
   }
 
   async invoke(name, ...args) {
@@ -160,7 +160,7 @@ export class BrowserWasmBridge {
     }
   }
 
-  async connect(metadata, cached = null) {
+  async connect(metadata, cached = null, drafts = null) {
     if (typeof this.exports.connect_ptr !== 'function' || typeof this.exports.connect_capacity !== 'function' || !this.calls.connect) throw new Error('This browser build does not include live mail support.');
     const bytes = new TextEncoder().encode(JSON.stringify(metadata));
     const capacity = this.exports.connect_capacity();
@@ -169,7 +169,8 @@ export class BrowserWasmBridge {
     const buffer = this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection');
     buffer.fill(0);
     buffer.set(bytes);
-    let cacheBytes;
+    let cacheBytes, draftBytes;
+    let draftsStaged = true;
     if (typeof this.exports.cache_stage === 'function') {
       cacheBytes = new TextEncoder().encode(cached ? JSON.stringify(cached) : '');
       const cacheCapacity = this.exports.cache_input_capacity();
@@ -177,8 +178,19 @@ export class BrowserWasmBridge {
       this.view(this.exports.cache_input_ptr(), cacheCapacity, 3 * 1024 * 1024, 'cache').set(cacheBytes);
       if (this.exports.cache_stage(cacheBytes.length) !== 0) throw new Error('The saved cache cannot be staged while another operation is running.');
     }
-    try { await this.invoke('connect', bytes.length); }
-    finally { this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection').fill(0); bytes.fill(0); cacheBytes?.fill(0); }
+    try {
+      if (typeof this.exports.drafts_stage === 'function') {
+        draftBytes = new TextEncoder().encode(drafts ? JSON.stringify(drafts) : '');
+        const limit = 8 * 1024 * 1024 + 128 * 1024;
+        try {
+          if (draftBytes.length > limit || this.exports.drafts_stage(draftBytes.length) !== 0) throw new Error('The saved drafts exceed the bounded restore workspace.');
+          if (draftBytes.length) this.view(this.exports.drafts_input_ptr(), draftBytes.length, limit, 'drafts').set(draftBytes);
+        } catch { draftsStaged = false; this.exports.drafts_stage(0); }
+      } else if (drafts) draftsStaged = false;
+      await this.invoke('connect', bytes.length);
+      return { draftsStaged };
+    }
+    finally { this.view(ptr, capacity, MAX_INPUT_EVENT, 'connection').fill(0); bytes.fill(0); cacheBytes?.fill(0); draftBytes?.fill(0); this.exports.drafts_stage?.(0); }
   }
 
   readMailPolicy() {
@@ -193,8 +205,21 @@ export class BrowserWasmBridge {
     try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
     finally { bytes.fill(0); }
   }
+  idle() { return this.invoke('idle'); }
   clearCache(index = 0xffffffff) { return this.invoke('cache_clear', index); }
-  acknowledgeUnknown() { return this.invoke('acknowledge_unknown'); }
+  unknownAccount() {
+    if (!this.exports.unknown_account_len) return '';
+    return new TextDecoder('utf-8', { fatal: true }).decode(this.view(this.exports.unknown_account_ptr(), this.exports.unknown_account_len(), 1024, 'unknown-send account'));
+  }
+  async acknowledgeUnknown() {
+    const index = this.exports.unknown_target_index?.() ?? 0xffffffff;
+    const pointer = this.exports.unknown_draft_ptr?.() ?? 0;
+    const length = this.exports.unknown_draft_len?.() ?? 0;
+    this.view(pointer, length, 128, 'unknown-send draft identity');
+    const operationId = this.exports.unknown_operation_len ? new TextDecoder('utf-8', { fatal: true }).decode(this.view(this.exports.unknown_operation_ptr(), this.exports.unknown_operation_len(), 256, 'unknown-send operation')) : '';
+    await this.invoke('acknowledge_unknown', index, pointer, length);
+    return { operationId, index };
+  }
   restrictContacts(index, allowed) { return this.invoke('contacts_permission', index, Number(Boolean(allowed))); }
 
   wipe() { new Uint8Array(this.exports.memory.buffer).fill(0); }
