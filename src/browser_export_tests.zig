@@ -21,7 +21,11 @@ const Fixture = struct {
     fn init(a: std.mem.Allocator, token: bool) !Fixture {
         var random: [16]u8 = undefined;
         try io.randomSecure(&random);
-        const path = try std.fmt.allocPrint(a, "/tmp/omagma-browser-export-test-{s}", .{std.fmt.bytesToHex(random, .lower)});
+        // macOS exposes /tmp through a symlink. Give the strict credential
+        // and output directory walkers a physical fixture path.
+        const temp_root = try std.Io.Dir.cwd().realPathFileAlloc(io, "/tmp", a);
+        defer a.free(temp_root);
+        const path = try std.fmt.allocPrint(a, "{s}/omagma-browser-export-test-{s}", .{ temp_root, std.fmt.bytesToHex(random, .lower) });
         try std.Io.Dir.createDirAbsolute(io, path, .fromMode(0o700));
         var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
         errdefer dir.close(io);

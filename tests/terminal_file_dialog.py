@@ -237,7 +237,15 @@ def attach_case(binary, directory, key, captures):
     terminal = start_ready(binary, directory, source)
     try:
         terminal.send(key)
-        terminal.until(lambda: "Subject:" in terminal.text() and "Attachments" in terminal.text())
+        if key.lower() == b"f":
+            terminal.until(lambda: "Forward · original format" in terminal.text()
+                           and "[Text quote t]" in terminal.text()
+                           and "[Attach original .eml e]" in terminal.text()
+                           and "[Back Esc/q]" in terminal.text())
+            terminal.send(b"t")
+        terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text()
+                       and "Attachments" in terminal.text()
+                       and "Forward · original format" not in terminal.text())
         if key in (b"c", b"F"):
             terminal.send(b"irecipient@example.org\x1b")
             terminal.gap(.04)
