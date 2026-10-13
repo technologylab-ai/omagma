@@ -12,6 +12,7 @@ const draft_storage = @import("browser_drafts.zig");
 const conversation = @import("terminal/conversation_draft.zig");
 const conversation_source = @import("terminal/conversation_source.zig");
 const gmail_decode = @import("terminal/gmail_decode.zig");
+const mail_value = @import("terminal/mail_response_value.zig");
 const bounded = @import("bounded.zig");
 const Allocator = std.mem.Allocator;
 const Value = j.Value;
@@ -409,7 +410,7 @@ pub const Provider = struct {
             if (std.mem.eql(u8, cmd, "mail.refresh")) return j.value(a, .{ .cacheReady = true, .lastSyncAt = self.cache.updatedAt(index), .refreshCompleted = true, .refreshInProgress = false });
             return j.value(a, .{ .messages = messages.array.items, .cached = false, .partial = true, .cacheReady = true, .lastSyncAt = self.cache.updatedAt(index) });
         }
-        if (std.mem.eql(u8, cmd, "mail.read")) return j.value(a, try self.read(a, index, try j.required(request, "messageId"), cached));
+        if (std.mem.eql(u8, cmd, "mail.read")) return mail_value.borrowed(a, try self.read(a, index, try j.required(request, "messageId"), cached));
         if (std.mem.eql(u8, cmd, "mail.thread")) {
             const thread_id = try j.required(request, "threadId");
             if (!cached) {
@@ -478,7 +479,7 @@ pub const Provider = struct {
                 const candidate = if (message.bodyCached or message.bodyCacheError.len > 0) message else try gmail_decode.unavailablePlaceholder(message, a, "BodyNotCached");
                 out.* = try gmail_decode.retainThreadMessage(candidate, a, &remaining);
             }
-            return j.value(a, .{ .messages = messages, .cached = true, .partial = true, .omittedMessages = total - count });
+            return mail_value.borrowed(a, .{ .messages = messages, .cached = true, .partial = true, .omittedMessages = total - count });
         }
         if (std.mem.eql(u8, cmd, "contacts.list") or std.mem.eql(u8, cmd, "contacts.search")) {
             if (!self.canContacts(index)) return error.PermissionDenied;

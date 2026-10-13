@@ -16,6 +16,7 @@ const draft_codec = @import("draft_codec.zig");
 const draft_summary = @import("draft_summary.zig");
 const gmail_decode = @import("gmail_decode.zig");
 const mail_limits = @import("mail_limits.zig");
+const mail_value = @import("mail_response_value.zig");
 const Config = @import("../config.zig").Config;
 const Value = std.json.Value;
 const system_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS" };
@@ -444,7 +445,7 @@ pub const Session = struct {
             return j.value(a, try store.putDraft(draft, null));
         }
         if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) return s.listMail(a, &store, req);
-        if (std.mem.eql(u8, cmd, "mail.read")) return j.value(a, try s.read(a, &store, try j.required(req, "messageId"), req));
+        if (std.mem.eql(u8, cmd, "mail.read")) return mail_value.borrowed(a, try s.read(a, &store, try j.required(req, "messageId"), req));
         if (std.mem.eql(u8, cmd, "mail.open")) {
             const id = j.text(req, "messageId");
             var message: @import("../model.zig").Message = .{};
@@ -512,7 +513,7 @@ pub const Session = struct {
             if (messages.items.len == 0) return error.MessageNotFound;
             std.mem.sort(t.Message, messages.items, {}, olderFirst);
             try store.save();
-            return j.value(a, .{ .messages = messages.items, .partial = partial });
+            return mail_value.borrowed(a, .{ .messages = messages.items, .partial = partial });
         }
         if (std.mem.eql(u8, cmd, "mail.attachment")) {
             return j.value(a, try s.fetchKnownAttachment(a, &store, req, null));
@@ -1013,7 +1014,7 @@ pub const Session = struct {
                 copyMembership(&message, entry.message);
             }
             message.bodyCached = message.bodyCacheError.len == 0;
-            return j.value(a, message);
+            return mail_value.borrowed(a, message);
         }
         if (std.mem.eql(u8, cmd, "mail.thread")) {
             const thread = try j.required(req, "threadId");
@@ -1032,7 +1033,7 @@ pub const Session = struct {
             };
             if (messages.items.len == 0) return error.CacheMiss;
             std.sort.heap(t.Message, messages.items, {}, olderFirst);
-            return j.value(a, .{ .messages = messages.items, .cached = true, .partial = true });
+            return mail_value.borrowed(a, .{ .messages = messages.items, .cached = true, .partial = true });
         }
         return error.CacheUnsupported;
     }
@@ -2587,6 +2588,118 @@ fn utf8Prefix(bytes: []const u8, limit: usize) []const u8 {
     var n = @min(bytes.len, limit);
     while (n > 0 and !std.unicode.utf8ValidateSlice(bytes[0..n])) : (n -= 1) {}
     return bytes[0..n];
+}
+
+test "mail response memory: borrowed DTO values preserve the owning JSON wire shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var message: t.Message = .{
+        .id = "literal-message",
+        .threadId = "literal-thread",
+        .from = .{ .address = "Sender@EXAMPLE.test", .name = "Sender \"Café\"" },
+        .to = &.{.{ .address = "self@example.test", .name = "Self" }},
+        .cc = &.{.{ .address = "peer@example.test" }},
+        .replyTo = &.{.{ .address = "reply@example.test" }},
+        .subject = "Quoted \"subject\"",
+        .bodyText = "Literal text\n\twith café and \\slashes.",
+        .bodyHtml = "<p>Literal \"HTML\"</p>\n",
+        .bodySource = .html,
+        .messageId = "<literal@example.test>",
+        .references = "<earlier@example.test>",
+        .inReplyTo = "<earlier@example.test>",
+        .labels = &.{ "INBOX", "Custom label" },
+        .receivedAt = -1,
+        .sentDate = "Fri, 09 Oct 2026 12:00:00 +0000",
+        .unread = true,
+        .bodyCached = true,
+        .attachments = &.{.{ .id = "binary", .filename = "binary café.bin", .size = 4, .data = "AP-AfQ", .blobId = "owned-blob", .contentId = "<image@example.test>", .disposition = "inline", .contentLocation = "literal/image" }},
+        .invitation = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+        .fixtureRaw = "Literal synthetic raw\r\n",
+    };
+    for ([_]?[]const u8{ message.bodyHtml, "", null }) |html| {
+        message.bodyHtml = html;
+        const expected = try std.json.Stringify.valueAlloc(a, try j.value(a, message), .{});
+        const actual = try std.json.Stringify.valueAlloc(a, try mail_value.borrowed(a, message), .{});
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    const thread = .{ .messages = @as([]const t.Message, &.{message}), .cached = true, .partial = true };
+    try std.testing.expectEqualStrings(
+        try std.json.Stringify.valueAlloc(a, try j.value(a, thread), .{}),
+        try std.json.Stringify.valueAlloc(a, try mail_value.borrowed(a, thread), .{}),
+    );
+}
+
+test "mail response memory: native and cached reads preserve two MiB HTML within the fixed runtime cap" {
+    const testing_allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture_arena = std.heap.ArenaAllocator.init(testing_allocator);
+    defer fixture_arena.deinit();
+    const fa = fixture_arena.allocator();
+    const root = try std.fmt.allocPrint(fa, ".zig-cache/tmp/{s}/large-cached-html", .{tmp.sub_path});
+    const account = "personal@example.com";
+    const html = try fa.alloc(u8, t.Limits.body_bytes);
+    const prefix = "<html><body><h1>Fictional large HTML</h1><pre>Fictional personal@example.com: café 👋.\n";
+    const suffix = "\nFictional large tail marker.</pre></body></html>";
+    const line = "Fictional bounded navigation line.\n";
+    @memcpy(html[0..prefix.len], prefix);
+    const end = html.len - suffix.len;
+    var pos = prefix.len;
+    while (pos < end) {
+        const count = @min(line.len, end - pos);
+        @memcpy(html[pos..][0..count], line[0..count]);
+        pos += count;
+    }
+    @memcpy(html[end..], suffix);
+    const plain = try @import("mime.zig").htmlToText(html, fa);
+    {
+        var store = try storage.Store.open(std.testing.io, fa, root, account, .{ .fixtures = true, .metadata_limit = 40 });
+        defer store.close();
+        for (0..39) |index| try store.put(.{
+            .id = try std.fmt.allocPrint(fa, "neighbor-{d}", .{index}),
+            .threadId = "neighbor-thread",
+            .subject = "Retained fictional neighbor",
+            .receivedAt = @intCast(index),
+            .labels = &.{"INBOX"},
+        }, false);
+        try store.put(.{ .id = "large-html", .threadId = "html-thread", .from = .{ .address = "sender@example.test", .name = "Fictional Sender" }, .to = &.{.{ .address = account }}, .subject = "Fictional large HTML", .bodyText = plain, .bodyHtml = html, .bodySource = .html, .labels = &.{"INBOX"}, .receivedAt = 100 }, true);
+        try store.save();
+    }
+    // Match the production reusable backing heap and unchanged payload cap.
+    // Fixture construction and independent response assertions stay outside it.
+    const reservation = try testing_allocator.alloc(u8, @import("../fixed_runtime.zig").application_reservation);
+    defer testing_allocator.free(reservation);
+    var heap = @import("../fixed_heap.zig").Heap.init(reservation);
+    var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = t.Limits.runtime_bytes, .reservation_bytes = reservation.len };
+    const a = cap.allocator();
+    var env = std.process.Environ.Map.init(testing_allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try a.create(Session);
+    defer a.destroy(session);
+    session.* = try Session.init(std.testing.io, a, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    session.meter = &cap;
+    const baseline = cap.snapshot().allocatorUsedBytes;
+    for ([_]bool{ false, true, false }) |cached_only| {
+        {
+            var output = std.heap.ArenaAllocator.init(a);
+            defer output.deinit();
+            const response = try session.executeMode(output.allocator(), "{\"cmd\":\"mail.read\",\"account\":\"personal@example.com\",\"messageId\":\"large-html\"}", cached_only);
+            const parsed = try std.json.parseFromSlice(Value, testing_allocator, response, .{});
+            defer parsed.deinit();
+            try std.testing.expect(try j.boolean(parsed.value, "ok", false));
+            const message = j.get(parsed.value, "data") orelse return error.MissingReadResponse;
+            try std.testing.expectEqualStrings("large-html", j.text(message, "id"));
+            try std.testing.expectEqualStrings("html", j.text(message, "bodySource"));
+            try std.testing.expectEqualStrings(html, j.text(message, "bodyHtml"));
+            try std.testing.expectEqualStrings(plain, j.text(message, "bodyText"));
+            try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+        }
+        try std.testing.expectEqual(baseline, cap.snapshot().allocatorUsedBytes);
+    }
+    try std.testing.expect(cap.snapshot().allocatorPeakBytes <= t.Limits.runtime_bytes);
 }
 
 test "post-dispatch allocation failure preserves live mutation ambiguity" {

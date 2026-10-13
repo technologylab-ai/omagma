@@ -23,7 +23,7 @@
         "headers": [
           {"name": "From", "value": "Fictional Contract Desk <contracts@example.test>"},
           {"name": "To", "value": "Personal Fixture <personal@example.com>, Fictional Teammate <teammate@example.test>"},
-          {"name": "Cc", "value": "Fictional Reviewer <reviewer@example.test>, Duplicate Teammate <TEAMMATE@example.test>, Duplicate Personal <personal@example.com>"},
+          {"name": "Cc", "value": "Fictional Reviewer <reviewer@example.test>, Duplicate Teammate <teammate@EXAMPLE.test>, Duplicate Personal <personal@example.com>"},
           {"name": "Subject", "value": "Fictional contract acceptance"},
           {"name": "Message-ID", "value": "<provider-contract@example.test>"},
           {"name": "Date", "value": "Sat, 10 Oct 2026 12:00:00 +0000"},

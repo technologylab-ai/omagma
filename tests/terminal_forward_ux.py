@@ -38,6 +38,11 @@ def exercise(binary, directory):
         require("f Forward" in footer, "Forward shortcut missing from actual mailbox footer")
         terminal.forward_stage="unavailable-forward-diagnostic"
         terminal.send(b"f")
+        terminal.until(lambda: "Forward · original format" in terminal.text()
+                       and "[Text quote t]" in terminal.text()
+                       and "[Attach original .eml e]" in terminal.text()
+                       and "[Back Esc/q]" in terminal.text())
+        terminal.send(b"t")
         terminal.until(lambda: "AttachmentNotFound" in terminal.text()
                        and "An attachment could not be retrieved" in terminal.text())
         require("An attachment could not be retrieved" in terminal.text(), "forward error lacks readable explanation")

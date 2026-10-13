@@ -167,7 +167,9 @@ above the original HTML, retaining its tables, styling and embedded images.
 Forward also offers **Attach original (.eml)** (`e`), which attaches the
 complete original message and leaves the body ready for your note.
 Tab/Shift+Tab selects a choice, Enter or a click activates it, and Escape/`q`
-returns to reading. Mail without HTML keeps the direct text-quote workflow.
+returns to reading. Replies and reply-all to mail without HTML open directly
+with a text quote. Forwarding mail without HTML offers **Text quote** or
+**Attach original (.eml)**, with Text quote selected initially.
 
 In **Keep formatting**, only your note is editable. Its usual Markdown
 rendering and Omagma footer appear above a read-only original. Switching your

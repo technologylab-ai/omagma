@@ -1140,6 +1140,7 @@ const App = struct {
     synchronous_cache_search: bool = @import("builtin").is_test,
     pending_cached_read: bool = false,
     pending_cached_thread: bool = false,
+    pending_cached_reader_refresh: bool = false,
     pending_read: bool = false,
     pending_thread: bool = false,
     pending_page: bool = false,
@@ -1426,7 +1427,7 @@ const App = struct {
             if (previous == null or previous.?.generation != activity.generation or previous.?.lastSyncAt != activity.lastSyncAt) self.cache_reload[index] = true;
             // A body commit may not change generation. Retry an outstanding
             // local body read after that atomic replacement too.
-            if (index == self.account_index and (self.pending_cached_list or self.pending_cached_read)) self.cache_reload[index] = true;
+            if (index == self.account_index and (self.pending_cached_list or self.pending_cached_read or self.readerNeedsCacheRefresh())) self.cache_reload[index] = true;
             self.cache_activity[index] = activity;
             if (activity.lastSyncAt > self.sync[index].last_sync_at) {
                 self.sync[index].last_sync_at = activity.lastSyncAt;
@@ -3839,6 +3840,7 @@ const App = struct {
         self.reader_cache_busy = false;
         self.pending_cached_read = false;
         self.pending_cached_thread = false;
+        self.pending_cached_reader_refresh = false;
         self.reader_account.bytes.clearRetainingCapacity();
         self.reader_message.bytes.clearRetainingCapacity();
         self.reader_account.cursor = 0;
@@ -4108,10 +4110,14 @@ const App = struct {
         std.mem.swap(Field, &self.previous_cursor, &preceding);
         std.mem.swap(Field, &self.remote_cursor, &remote);
         if (!retain_reader) self.clearReader();
+        if (retain_reader and truth(get(result, "cached")) and self.readerNeedsCacheRefresh()) self.pending_cached_reader_refresh = true;
         if (kind != .drafts) self.syncMetadata(self.account_index, result);
         if (!self.compose_active and !self.background_merge) self.say(false, "{s}", .{if (messages.len == 0 and self.list_cached and self.list_partial) "No rows in cached subset · Ready" else if (messages.len == 0) "No messages match this mailbox" else "Ready"});
     }
     fn replaceReader(self: *App, full_thread: bool, response: []const u8, cached_view: bool) !void {
+        _ = try self.replaceReaderImpl(full_thread, response, cached_view, false);
+    }
+    fn replaceReaderImpl(self: *App, full_thread: bool, response: []const u8, cached_view: bool, retain_available: bool) !bool {
         var replacement: std.heap.ArenaAllocator = .init(self.allocator);
         defer replacement.deinit();
         const result = try self.data(replacement.allocator(), response);
@@ -4121,6 +4127,15 @@ const App = struct {
             break :blk one;
         };
         if (messages.len > types.Limits.page) return error.ThreadTooLarge;
+        if (retain_available) for (self.thread) |previous_message| {
+            // A provider thread can contain useful cards outside cache
+            // retention. A passive local refresh must not discard those cards
+            // or replace a readable body with an evicted/refused placeholder.
+            const next = for (messages) |message| {
+                if (same(text(get(message, "id")), text(get(previous_message, "id")))) break message;
+            } else return false;
+            if (bodyRefusal(previous_message) == null and (bodyRefusal(next) != null or (get(next, "bodyCached") == .bool and !truth(get(next, "bodyCached"))))) return false;
+        };
         const markup = try self.prepareMarkup(replacement.allocator(), messages);
         errdefer deinitMarkup(markup);
         const same_reader = same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId()) and self.reader_is_thread == full_thread;
@@ -4160,6 +4175,7 @@ const App = struct {
         self.reader_cache_busy = false;
         self.pending_cached_read = false;
         self.pending_cached_thread = false;
+        self.pending_cached_reader_refresh = false;
         if (!same_reader) {
             self.closeReaderOverlay();
             self.reader_scroll = 0;
@@ -4175,27 +4191,53 @@ const App = struct {
             self.search_restore_pending = false;
         }
         if (!self.compose_active) self.say(false, "Ready", .{});
+        return true;
+    }
+    fn readerNeedsCacheRefresh(self: *App) bool {
+        if (self.thread.len == 0 or self.drafts_list or !same(self.reader_account.value(), self.account()) or !same(self.reader_message.value(), self.messageId())) return false;
+        if (self.reader_partial) return true;
+        for (self.thread) |message| if (bodyRefusal(message) != null) return true;
+        return false;
+    }
+    fn refreshCachedReader(self: *App) !void {
+        if (!self.pending_cached_reader_refresh) return;
+        if (self.compose_active or self.mode != .browse or self.reader_overlay != .none) return;
+        self.pending_cached_reader_refresh = false;
+        if (!self.readerNeedsCacheRefresh()) return;
+        // One local attempt per merged cache snapshot. CacheBusy retains this
+        // distinct intent, never the explicit preview's provider fallback.
+        _ = self.cachedPreviewImpl(self.reader_is_thread, true) catch |err| {
+            if (err == error.CacheBusy) return;
+            return err;
+        };
     }
     fn cachedPreview(self: *App, full_thread: bool) !bool {
+        return self.cachedPreviewImpl(full_thread, false);
+    }
+    fn cachedPreviewImpl(self: *App, full_thread: bool, refresh_retained: bool) !bool {
         const selected_value = self.selectedMessage() orelse return false;
         if (self.drafts_list) return false;
         const same_target = self.thread.len > 0 and same(self.reader_account.value(), self.account()) and same(self.reader_message.value(), self.messageId());
-        if (same_target and (!full_thread or (self.reader_is_thread and !self.reader_partial))) return true;
+        if (!refresh_retained and same_target and (!full_thread or (self.reader_is_thread and !self.reader_partial))) return true;
+        if (refresh_retained) self.reader_cache_busy = false;
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const response = (if (full_thread) self.cached(arena.allocator(), .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(selected_value, "threadId")) }) else self.cached(arena.allocator(), .{ .account = self.account(), .cmd = "mail.read", .messageId = text(get(selected_value, "id")) })) catch |err| {
             if (err == error.CacheBusy) {
                 if (!same_target and !self.compose_active) self.clearReader();
                 self.reader_cache_busy = true;
-                self.pending_cached_read = true;
-                self.pending_cached_thread = full_thread;
+                if (refresh_retained) self.pending_cached_reader_refresh = true else {
+                    self.pending_cached_read = true;
+                    self.pending_cached_thread = full_thread;
+                }
             }
             return err;
         };
         if (response) |bytes| {
-            try self.replaceReader(full_thread, bytes, true);
+            _ = try self.replaceReaderImpl(full_thread, bytes, true, refresh_retained);
             return true;
         }
+        if (refresh_retained) return same_target;
         if (same_target) {
             // The full selected message remains useful even when a complete
             // thread is not cached or a short commit owns the store lock.
@@ -4251,6 +4293,7 @@ const App = struct {
             }
             self.pending_cached_list = false;
             try self.replaceList(.list, bytes);
+            try self.refreshCachedReader();
             if (!self.compose_active and self.thread.len == 0 and self.messages.len > 0) {
                 self.pending_read = false;
                 const restoring_thread = self.search_restore_pending and self.restore_reader_thread;
@@ -4529,6 +4572,7 @@ const App = struct {
         self.pending_cached_list = false;
         self.pending_cached_read = false;
         self.pending_cached_thread = false;
+        self.pending_cached_reader_refresh = false;
         self.pending_contacts = false;
         self.pending_cached_contacts = false;
         self.pending_recipient_cache = false;
@@ -4845,6 +4889,10 @@ const App = struct {
         }
         if (self.pending_cached_list) {
             _ = self.loadCachedList(self.messageId()) catch |err| if (err == error.CacheBusy) false else return err;
+            return;
+        }
+        if (self.pending_cached_reader_refresh) {
+            try self.refreshCachedReader();
             return;
         }
         if (self.pending_cached_read) {
@@ -9776,7 +9824,17 @@ const App = struct {
             row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
             const labels = try self.readerLabels(message);
             if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
-            if (metadataWarning(message) orelse bodyRefusal(message)) |code| {
+            if (bodyRefusal(message)) |code| {
+                const notice = try std.fmt.allocPrint(self.frame.allocator(), "Body unavailable · {s} ({s})", .{ decodeWarningLabel(code), code });
+                row = try self.flowTone(win, notice, self.reader_scroll, row, .warning);
+                // A refused DTO is metadata only, even if a malformed legacy
+                // record still carries text or HTML beside its diagnostic.
+                self.reader_body_bounds[message_index] = .{ .start = row, .end = row };
+                attachment_number += items(get(message, "attachments")).len;
+                row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
+                continue;
+            }
+            if (metadataWarning(message)) |code| {
                 const notice = try std.fmt.allocPrint(self.frame.allocator(), "Warning · {s} ({s})", .{ decodeWarningLabel(code), code });
                 row = try self.flowTone(win, notice, self.reader_scroll, row, .warning);
             }
@@ -11991,6 +12049,208 @@ test "mail display cache: corrupt display names do not terminate the reader or w
     defer a.free(shown);
     try std.testing.expectEqualStrings("peer@example.test", shown);
     try std.testing.expectError(error.HeaderInjection, recipients.formatDisplay(a, "peer@example.test", "Old\tName"));
+}
+
+const ReaderRefreshTestClient = struct {
+    const list = "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"threadId\":\"thread-a\",\"bodyCached\":true},{\"id\":\"b\",\"threadId\":\"thread-a\",\"bodyCached\":true}],\"cached\":true,\"cacheReady\":true}}";
+    const refused = "{\"ok\":true,\"data\":{\"id\":\"a\",\"threadId\":\"thread-a\",\"bodyCacheError\":\"BodySizeMismatch\",\"bodyCached\":false}}";
+    const incomplete = "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"bodyText\":\"Retained provider body\",\"bodyCached\":true},{\"id\":\"b\",\"bodyCacheError\":\"BodyNotCached\",\"bodyCached\":false}],\"partial\":true}}";
+    body: ?[]const u8 = "{\"ok\":true,\"data\":{\"id\":\"a\",\"bodyText\":\"Recovered full body\",\"bodyCached\":true}}",
+    thread: ?[]const u8 = "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"b\",\"bodyText\":\"Newly cached neighbor\",\"bodyCached\":true},{\"id\":\"a\",\"bodyText\":\"Retained provider body\",\"bodyCached\":true}],\"partial\":true}}",
+    busy: bool = false,
+    reads: usize = 0,
+    provider_calls: usize = 0,
+
+    fn provider(ctx: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.provider_calls += 1;
+        return error.ProviderMustNotRun;
+    }
+    fn local(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const request = try std.json.parseFromSlice(Value, a, raw, .{});
+        defer request.deinit();
+        const cmd = text(get(request.value, "cmd"));
+        if (same(cmd, "mail.list") or same(cmd, "mail.search")) return a.dupe(u8, list);
+        self.reads += 1;
+        if (self.busy) return error.CacheBusy;
+        const response = if (same(cmd, "mail.thread")) self.thread else if (same(cmd, "mail.read")) self.body else return error.UnexpectedCachedRequest;
+        return a.dupe(u8, response orelse "{\"ok\":false,\"error\":{\"code\":\"CacheMiss\"}}");
+    }
+    fn attach(self: *@This(), app: *App) void {
+        app.client = .{ .ctx = self, .callFn = provider, .cachedFn = local };
+    }
+};
+
+test "local UI: cached reader refresh replaces a recovered refusal without another activation" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: ReaderRefreshTestClient = .{};
+    client.attach(&app);
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, ReaderRefreshTestClient.list);
+    try app.replaceReader(false, ReaderRefreshTestClient.refused, true);
+    app.reader_scroll = 7;
+    app.sync[0].state = .current;
+    try std.testing.expect(try app.loadCachedList("a"));
+    try std.testing.expectEqualStrings("Recovered full body", text(get(app.thread[0], "bodyText")));
+    try std.testing.expect(bodyRefusal(app.thread[0]) == null);
+    try std.testing.expectEqual(@as(usize, 7), app.reader_scroll);
+    try std.testing.expectEqualStrings("a", app.reader_message.value());
+    try std.testing.expect(!app.pending_cached_reader_refresh and !app.pending_read and !app.pending_cached_read);
+    try std.testing.expectEqual(@as(usize, 1), client.reads);
+    try std.testing.expect(try app.loadCachedList("a"));
+    try app.retryLocalCache();
+    try std.testing.expectEqual(@as(usize, 1), client.reads);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    try std.testing.expect(app.job.future == null);
+}
+
+test "local UI: cached reader refresh retries a busy partial thread locally and preserves card context" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: ReaderRefreshTestClient = .{ .busy = true };
+    client.attach(&app);
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, ReaderRefreshTestClient.list);
+    try app.replaceReader(true, ReaderRefreshTestClient.incomplete, false);
+    app.reader_cards[0] = false;
+    app.reader_cards[1] = true;
+    app.reader_card = 1;
+    app.reader_scroll = 13;
+    app.reader_card_pinned = true;
+    try std.testing.expect(try app.loadCachedList("a"));
+    try std.testing.expect(app.pending_cached_reader_refresh and app.reader_cache_busy);
+    try std.testing.expect(!app.pending_cached_read and !app.pending_read);
+    try std.testing.expectEqualStrings("Retained provider body", text(get(app.thread[0], "bodyText")));
+    try std.testing.expectEqual(@as(usize, 1), app.reader_card);
+    client.busy = false;
+    try app.retryLocalCache();
+    try std.testing.expectEqualStrings("Newly cached neighbor", text(get(app.thread[0], "bodyText")));
+    try std.testing.expectEqualStrings("Retained provider body", text(get(app.thread[1], "bodyText")));
+    try std.testing.expectEqual(@as(usize, 0), app.reader_card);
+    try std.testing.expect(app.reader_cards[0] and !app.reader_cards[1]);
+    try std.testing.expectEqual(@as(usize, 13), app.reader_scroll);
+    try std.testing.expect(app.reader_card_pinned and app.reader_is_thread and app.reader_partial);
+    try std.testing.expect(!app.pending_cached_reader_refresh and !app.pending_cached_read and !app.reader_cache_busy);
+    const reads = client.reads;
+    try app.retryLocalCache();
+    try std.testing.expectEqual(reads, client.reads);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    try std.testing.expect(app.job.future == null);
+}
+
+test "local UI: cached reader refresh keeps useful provider cards when the cache is missing or narrower" {
+    const a = std.testing.allocator;
+    const responses = [_]?[]const u8{
+        null,
+        "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"b\",\"bodyText\":\"Newly cached neighbor\",\"bodyCached\":true}],\"partial\":true}}",
+        "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"bodyCacheError\":\"BodyNotCached\",\"bodyCached\":false},{\"id\":\"b\",\"bodyText\":\"Newly cached neighbor\",\"bodyCached\":true}],\"partial\":true}}",
+    };
+    for (responses) |response| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var client: ReaderRefreshTestClient = .{ .thread = response };
+        client.attach(&app);
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        try app.replaceList(.list, ReaderRefreshTestClient.list);
+        try app.replaceReader(true, ReaderRefreshTestClient.incomplete, false);
+        app.reader_scroll = 9;
+        app.reader_card = 1;
+        try std.testing.expect(try app.loadCachedList("a"));
+        try std.testing.expectEqual(@as(usize, 2), app.thread.len);
+        try std.testing.expectEqualStrings("Retained provider body", text(get(app.thread[0], "bodyText")));
+        try std.testing.expectEqualStrings("b", text(get(app.thread[app.reader_card], "id")));
+        try std.testing.expectEqual(@as(usize, 9), app.reader_scroll);
+        try std.testing.expect(!app.reader_cached_view and !app.pending_cached_reader_refresh);
+        try app.retryLocalCache();
+        try std.testing.expectEqual(@as(usize, 1), client.reads);
+        try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    }
+}
+
+test "local UI: cached reader refresh defers during composition and rejects a changed account or selection" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: ReaderRefreshTestClient = .{};
+    client.attach(&app);
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+    try app.replaceList(.list, ReaderRefreshTestClient.list);
+    try app.replaceReader(false, ReaderRefreshTestClient.refused, true);
+    app.compose_active = true;
+    try app.compose.fields[3].set(a, "Keep this unsaved subject");
+    try std.testing.expect(try app.loadCachedList("a"));
+    try app.retryLocalCache();
+    try std.testing.expectEqual(@as(usize, 0), client.reads);
+    try std.testing.expectEqualStrings("BodySizeMismatch", bodyRefusal(app.thread[0]).?);
+    try std.testing.expectEqualStrings("Keep this unsaved subject", app.compose.fields[3].value());
+    try std.testing.expect(app.pending_cached_reader_refresh);
+    app.compose_active = false;
+    try app.retryLocalCache();
+    try std.testing.expectEqualStrings("Recovered full body", text(get(app.thread[0], "bodyText")));
+    for ([_]bool{ false, true }) |change_account| {
+        try app.replaceReader(false, ReaderRefreshTestClient.refused, true);
+        try app.replaceList(.list, ReaderRefreshTestClient.list);
+        try std.testing.expect(app.pending_cached_reader_refresh);
+        const reads = client.reads;
+        if (change_account) app.account_index = 1 else app.selected = 1;
+        try app.retryLocalCache();
+        try std.testing.expectEqual(reads, client.reads);
+        try std.testing.expect(!app.pending_cached_reader_refresh);
+        try std.testing.expectEqualStrings("personal@example.test", app.reader_account.value());
+        try std.testing.expectEqualStrings("a", app.reader_message.value());
+        app.account_index = 0;
+        app.selected = 0;
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: cached reader refresh leaves an unchanged refusal local without an event retry loop" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var client: ReaderRefreshTestClient = .{ .body = ReaderRefreshTestClient.refused };
+    client.attach(&app);
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, ReaderRefreshTestClient.list);
+    try app.replaceReader(false, ReaderRefreshTestClient.refused, true);
+    for (1..3) |expected_reads| {
+        try std.testing.expect(try app.loadCachedList("a"));
+        try std.testing.expectEqualStrings("BodySizeMismatch", bodyRefusal(app.thread[0]).?);
+        for (0..3) |_| try app.retryLocalCache();
+        try std.testing.expectEqual(expected_reads, client.reads);
+        try std.testing.expect(!app.pending_cached_reader_refresh and !app.pending_cached_read and !app.pending_read);
+        try std.testing.expect(app.job.future == null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "local UI: populated refusal cards show body unavailable and never display rejected body bytes" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, ReaderRefreshTestClient.list);
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"a\",\"subject\":\"Refused fictional message\",\"bodyCacheError\":\"BodySizeMismatch\",\"decodeWarning\":\"PartialMetadata\",\"bodyText\":\"REJECTED-PLAIN-BYTES\",\"bodyHtml\":\"<p>REJECTED-HTML-BYTES</p>\",\"bodySource\":\"html\"}}", true);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 30, .screen = &screen };
+    try app.readerDraw(win);
+    const visible = try markdownTestScreenText(a, &screen);
+    defer a.free(visible);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "Body unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "BodySizeMismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "REJECTED-") == null);
+    try std.testing.expectEqual(@as(u64, 0), app.html_stats.htmlDocumentBuilds);
 }
 
 test "persisted selected body refusal remains local and does not mark mailbox offline" {

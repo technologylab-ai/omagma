@@ -72,7 +72,7 @@ def validate_fixture():
     envelope = {header["name"].lower(): header["value"] for header in mixed["headers"]}
     require("Fictional Teammate <teammate@example.test>" in envelope["to"]
             and "Fictional Reviewer <reviewer@example.test>" in envelope["cc"]
-            and "TEAMMATE@example.test" in envelope["cc"] and ACCOUNT in envelope["cc"],
+            and "teammate@EXAMPLE.test" in envelope["cc"] and ACCOUNT in envelope["cc"],
             "reply-all literal fixture lost named participants or duplicate/self addresses")
     alternative, document, image = mixed["parts"]
     require(alternative["mimeType"] == "multipart/alternative", "literal nested alternative changed")
@@ -550,8 +550,12 @@ def run_case(binary, directory, terminal_type=Terminal):
             retained = client.request("draft.read", draftId=draft["id"])
             require(all(retained[key] == value for key, value in draft.items()),
                     "decoder upgrade changed the unsent local draft")
-            require(client.request("mail.read", messageId=INVALID, cacheOnly=True, ok=False)["code"] == "CacheMiss",
-                    "refused body unexpectedly became readable from cache")
+            refused = client.request("mail.read", messageId=INVALID, cacheOnly=True)
+            require(refused["id"] == INVALID and refused["bodyCached"] is False
+                    and refused["bodyCacheError"] == "BodySizeMismatch"
+                    and refused["bodyText"] == "" and not refused.get("bodyHtml")
+                    and not refused["attachments"],
+                    "refused cache DTO lost its diagnostic or exposed rejected body bytes")
             for value in formatted:
                 require(client.request("draft.read", draftId=value["id"]) == value,
                         "saved formatted draft changed during later reader actions")

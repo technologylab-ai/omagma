@@ -12,6 +12,7 @@ const recipients = @import("recipients.zig");
 const invitation = @import("invitation.zig");
 const label_collection = @import("labels.zig");
 const decode = @import("gmail_decode.zig");
+const mail_value = @import("mail_response_value.zig");
 
 test {
     _ = @import("gmail_label_regression_test.zig");
@@ -1214,7 +1215,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
         const message = try read(a, transport, try j.required(request, "messageId"));
         transport.row(.{ .kind = .body, .message = message });
         transport.progress(.bodies, 1, 1);
-        return j.value(a, message);
+        return mail_value.borrowed(a, message);
     }
     if (std.mem.eql(u8, cmd, "accounts.aliases")) return j.value(a, .{ .aliases = try aliases(a, transport) });
     if (std.mem.eql(u8, cmd, "accounts.identities")) return j.value(a, .{ .identities = try identities(a, transport) });
@@ -1348,7 +1349,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
                 return left.receivedAt < right.receivedAt or (left.receivedAt == right.receivedAt and std.mem.lessThan(u8, left.id, right.id));
             }
         }.lessThan);
-        return j.value(a, .{ .messages = messages.items, .partial = partial, .omittedMessages = entries.len - messages.items.len });
+        return mail_value.borrowed(a, .{ .messages = messages.items, .partial = partial, .omittedMessages = entries.len - messages.items.len });
     }
     if (std.mem.eql(u8, cmd, "mail.attachment")) {
         const id = try j.required(request, "messageId");
@@ -1543,6 +1544,103 @@ test "user label names resolve exact provider IDs once and system IDs need no re
     try std.testing.expectEqualStrings("Label_42", try resolver.resolve("Label_42"));
     try std.testing.expectError(error.LabelNotFound, resolver.resolve("Unknown synthetic label"));
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
+test "mail response memory: live read and thread preserve two MiB HTML within the fixed runtime cap" {
+    const Oracle = struct {
+        message_wire: []const u8,
+        thread_wire: []const u8,
+        html: []const u8,
+        plain: []const u8,
+        calls: usize = 0,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(body == null);
+            self.calls += 1;
+            const wire = if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/large-html?format=full")) self.message_wire else if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/threads/large-thread?format=full")) self.thread_wire else return error.UnexpectedProviderRequest;
+            // Match Network.request: decoded strings belong to the supplied
+            // per-fetch allocator, with no mock stringify/parse roundtrip.
+            return decodeResponse(a, method, url, 200, wire);
+        }
+        fn verify(self: *@This(), allocator: std.mem.Allocator, command: []const u8) !void {
+            var request_arena = std.heap.ArenaAllocator.init(allocator);
+            defer request_arena.deinit();
+            const a = request_arena.allocator();
+            const request_value = try std.json.parseFromSliceLeaky(j.Value, a, "{\"messageId\":\"large-html\",\"threadId\":\"large-thread\"}", .{ .allocate = .alloc_always });
+            const before = self.calls;
+            const result = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, .{ .context = self, .requestFn = request, .temporary_allocator = allocator }, command, request_value);
+            try std.testing.expectEqual(before + 1, self.calls);
+            const message = if (std.mem.eql(u8, command, "mail.read")) result else blk: {
+                const messages = try array(result, "messages");
+                try std.testing.expectEqual(@as(usize, 1), messages.len);
+                try std.testing.expect(!try j.boolean(result, "partial", false));
+                try std.testing.expectEqual(@as(i64, 0), try j.integer(result, "omittedMessages", -1));
+                break :blk messages[0];
+            };
+            try std.testing.expectEqualStrings("large-html", j.text(message, "id"));
+            try std.testing.expectEqualStrings("large-thread", j.text(message, "threadId"));
+            try std.testing.expectEqualStrings("html", j.text(message, "bodySource"));
+            try std.testing.expectEqualStrings("", j.text(message, "bodyCacheError"));
+            try std.testing.expectEqualStrings("", j.text(message, "decodeWarning"));
+            try std.testing.expect(!try j.boolean(message, "metadataPartial", false));
+            try std.testing.expectEqualStrings(self.html, j.text(message, "bodyHtml"));
+            try std.testing.expectEqualStrings(self.plain, j.text(message, "bodyText"));
+            // Native core serializes this envelope while its request arena
+            // still owns the provider result; include that simultaneous use.
+            var output_arena = std.heap.ArenaAllocator.init(allocator);
+            defer output_arena.deinit();
+            const response = try std.json.Stringify.valueAlloc(output_arena.allocator(), .{ .version = @as(u8, 1), .id = @as(?u8, null), .ok = true, .account = "self@example.test", .data = result }, .{});
+            try std.testing.expect(response.len > self.html.len);
+        }
+    };
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const fa = fixture_arena.allocator();
+    const html = try fa.alloc(u8, types.Limits.body_bytes);
+    const prefix = "<html><body>\n<p>Fictional live header.</p>\n";
+    const line = "<p>Fictional bounded navigation line.</p>\n";
+    const suffix = "\n<p>Fictional live tail.</p></body></html>";
+    @memcpy(html[0..prefix.len], prefix);
+    const end = html.len - suffix.len;
+    var plain: std.ArrayList(u8) = .empty;
+    try plain.appendSlice(fa, "Fictional live header.\n");
+    var pos = prefix.len;
+    while (line.len <= end - pos) : (pos += line.len) {
+        @memcpy(html[pos..][0..line.len], line);
+        try plain.appendSlice(fa, "Fictional bounded navigation line.\n");
+    }
+    @memset(html[pos..end], ' ');
+    @memcpy(html[end..], suffix);
+    try plain.appendSlice(fa, "Fictional live tail.");
+    // Repeated markup keeps this exact two-MiB body plus its independently
+    // specified plaintext below the unchanged aggregate thread allowance.
+    try std.testing.expect(decode.serializedBytes(types.Message{ .id = "large-html", .threadId = "large-thread", .bodyText = plain.items, .bodyHtml = html }) < types.Limits.thread_bytes);
+    const encoded = try fa.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(html.len));
+    _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, html);
+    const message_wire = try std.fmt.allocPrint(fa, "{{\"id\":\"large-html\",\"threadId\":\"large-thread\",\"internalDate\":\"1791633600000\",\"labelIds\":[\"INBOX\"],\"payload\":{{\"mimeType\":\"text/html\",\"headers\":[{{\"name\":\"From\",\"value\":\"Fictional Sender <sender@example.test>\"}},{{\"name\":\"To\",\"value\":\"self@example.test\"}},{{\"name\":\"Subject\",\"value\":\"Fictional large HTML\"}},{{\"name\":\"Message-ID\",\"value\":\"<large-html@example.test>\"}}],\"body\":{{\"size\":{d},\"data\":\"{s}\"}}}}}}", .{ html.len, encoded });
+    var oracle: Oracle = .{ .message_wire = message_wire, .thread_wire = try std.fmt.allocPrint(fa, "{{\"id\":\"large-thread\",\"messages\":[{s}]}}", .{message_wire}), .html = html, .plain = plain.items };
+    // Wire construction is outside the measured heap. Its parsed response,
+    // normalized DTO, provider Value and final frame all use the native pool.
+    const reservation = try std.testing.allocator.alloc(u8, @import("../fixed_runtime.zig").application_reservation);
+    defer std.testing.allocator.free(reservation);
+    var failure: ?anyerror = null;
+    for ([_][]const u8{ "mail.read", "mail.thread" }) |command| {
+        var heap = @import("../fixed_heap.zig").Heap.init(reservation);
+        var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = types.Limits.runtime_bytes, .reservation_bytes = reservation.len };
+        var case_failed = false;
+        oracle.verify(cap.allocator(), command) catch |err| {
+            // Exercise both commands even if one fails, and retain the exact
+            // cap/backing distinction for a useful qualification diagnosis.
+            std.debug.print("\n{s}: {s}; allocation snapshot {any}\n", .{ command, @errorName(err), cap.snapshot() });
+            case_failed = true;
+            if (failure == null) failure = err;
+        };
+        try std.testing.expectEqual(@as(usize, 0), cap.snapshot().allocatorUsedBytes);
+        if (!case_failed) try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+        try std.testing.expect(cap.snapshot().allocatorPeakBytes <= types.Limits.runtime_bytes);
+    }
+    if (failure) |err| return err;
 }
 
 test "network session HTTP allocator borrows its caller-stable owner" {

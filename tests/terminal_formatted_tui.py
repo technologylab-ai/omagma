@@ -273,12 +273,11 @@ def modes(binary, directory):
         try:
             terminal.until(lambda: ("PLAIN LEGACY SOURCE" if choice == "plain" else "Original layout") in terminal.text())
             terminal.send(b"F")
-            if choice != "plain":
-                wait_chooser(terminal, True)
-                if via_mouse:
-                    click(terminal, *point(terminal, "[Attach original .eml e]" if choice == "attached" else "[Text quote t]"))
-                else:
-                    terminal.send(b"e" if choice == "attached" else b"t")
+            wait_chooser(terminal, True)
+            if via_mouse:
+                click(terminal, *point(terminal, "[Attach original .eml e]" if choice == "attached" else "[Text quote t]"))
+            else:
+                terminal.send(b"e" if choice == "attached" else b"t")
             terminal.until(lambda: "Compose" in terminal.text() and "Subject:" in terminal.text())
             value = single_draft(binary, current, fixture)
             require(value.get("original") is None, "explicit text/eml or plain source created formatted snapshot")
@@ -289,7 +288,7 @@ def modes(binary, directory):
                         ".eml choice lost original source bytes or title")
             else:
                 require("Forwarded message" in value["bodyText"], "text quote failed to retain editable original")
-                require("[Keep formatting k]" not in terminal.text(), "plain source unnecessarily opened chooser")
+                require("[Keep formatting k]" not in terminal.text(), "text quote selection did not dismiss chooser")
             results.append(terminal.finish())
         except Exception:
             diagnose(terminal, choice)

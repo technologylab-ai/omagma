@@ -1305,6 +1305,133 @@ test "browser provider: stats report the actual fixed heap separately from linea
     try verifyHost();
 }
 
+test "mail response memory: browser live and cached reads and threads preserve two MiB HTML in the fixed heap" {
+    const Meter = @import("terminal/capped_allocator.zig").CappedAllocator;
+    const Oracle = struct {
+        html: []const u8,
+        plain: []const u8,
+        message_wire: []const u8,
+        thread_wire: []const u8,
+        snapshot_buffer: []u8,
+        fn response(self: *const @This(), provider: *Provider, a: A, command: []const u8, cached: bool, body_cached: bool) !void {
+            var output: std.heap.ArenaAllocator = .init(a);
+            defer output.deinit();
+            const request = if (std.mem.eql(u8, command, "mail.read"))
+                "{\"id\":\"browser-large\",\"cmd\":\"mail.read\",\"account\":\"ada@example.test\",\"messageId\":\"large-html\"}"
+            else
+                "{\"id\":\"browser-large\",\"cmd\":\"mail.thread\",\"account\":\"ada@example.test\",\"threadId\":\"large-thread\"}";
+            const raw = if (cached) try provider.client().callCached(output.allocator(), request) else try provider.client().call(output.allocator(), request);
+            // The transport, response encoding and retained cache share the
+            // production heap. Independent assertion parsing stays outside it.
+            var assertions: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer assertions.deinit();
+            const envelope = try parse(assertions.allocator(), raw);
+            try strings("browser-large", j.text(envelope, "id"));
+            try strings(account, j.text(envelope, "account"));
+            const result = try data(envelope);
+            const message = if (std.mem.eql(u8, command, "mail.read")) result else blk: {
+                const rows = (j.get(result, "messages") orelse return error.MissingMessages).array.items;
+                try equal(@as(usize, 1), rows.len);
+                try equal(cached, try j.boolean(result, "partial", !cached));
+                try equal(@as(i64, 0), try j.integer(result, "omittedMessages", -1));
+                if (cached) try expect(try j.boolean(result, "cached", false));
+                break :blk rows[0];
+            };
+            try strings("large-html", j.text(message, "id"));
+            try strings("large-thread", j.text(message, "threadId"));
+            try strings("Fictional large HTML", j.text(message, "subject"));
+            try strings("sender@example.test", j.text(j.get(message, "from").?, "address"));
+            try strings("html", j.text(message, "bodySource"));
+            try strings(self.html, j.text(message, "bodyHtml"));
+            try strings(self.plain, j.text(message, "bodyText"));
+            try equal(body_cached, try j.boolean(message, "bodyCached", !body_cached));
+            try strings("", try j.string(j.get(message, "bodyCacheError").?));
+            try strings("", try j.string(j.get(message, "decodeWarning").?));
+            try expect(!try j.boolean(message, "metadataPartial", true));
+            try expect(!try j.boolean(message, "bodyHtmlAmbiguous", true));
+            try equal(@as(usize, 0), j.get(message, "attachments").?.array.items.len);
+            try expect(j.get(message, "invitation") == null);
+        }
+        fn run(self: *const @This(), cap: *Meter, command: []const u8) !void {
+            const a = cap.allocator();
+            var provider = Provider.init(a);
+            defer provider.deinit();
+            try actor(&provider, 0, account, false, false);
+            // actor() skips OAuth setup; match Provider.connect's allocator
+            // so completed provider fetch arenas release their heap storage.
+            provider.live_sessions[0].temporary_allocator = a;
+            resetHost(&.{.{
+                .url = if (std.mem.eql(u8, command, "mail.read")) "https://gmail.googleapis.com/gmail/v1/users/me/messages/large-html?format=full" else "https://gmail.googleapis.com/gmail/v1/users/me/threads/large-thread?format=full",
+                .body = if (std.mem.eql(u8, command, "mail.read")) self.message_wire else self.thread_wire,
+            }});
+            defer resetHost(&.{});
+            // Each case starts empty, so both live routes must cross the real
+            // browser_live ABI and decodeResponse before final JSON encoding.
+            try self.response(&provider, a, command, false, false);
+            const retained = cap.snapshot().allocatorUsedBytes;
+            const revision = provider.cacheRevision(0);
+            const stored = try provider.cacheSnapshot(0, self.snapshot_buffer);
+            try expect(stored.len > self.html.len and stored.len < cache.snapshot_limit);
+            try equal(retained, cap.snapshot().allocatorUsedBytes);
+            for ([_][]const u8{ "mail.read", "mail.thread", "mail.read", "mail.thread" }) |cached_command| {
+                try self.response(&provider, a, cached_command, true, true);
+                try equal(retained, cap.snapshot().allocatorUsedBytes);
+                try equal(revision, provider.cacheRevision(0));
+            }
+            // Ordinary read also borrows the retained entry once it is warm.
+            try self.response(&provider, a, "mail.read", false, true);
+            try equal(retained, cap.snapshot().allocatorUsedBytes);
+            try equal(revision, provider.cacheRevision(0));
+            try equal(@as(usize, 1), host.requests);
+            try equal(@as(usize, 0), host.posts);
+            try verifyHost();
+        }
+    };
+    var fixtures: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer fixtures.deinit();
+    const fa = fixtures.allocator();
+    const html = try fa.alloc(u8, t.Limits.body_bytes);
+    const prefix = "<html><body>\n<p>Fictional browser header.</p>\n";
+    const line = "<p><strong>Fictional line.</strong></p>\n";
+    const suffix = "\n<p>Fictional browser tail.</p></body></html>";
+    @memcpy(html[0..prefix.len], prefix);
+    const end = html.len - suffix.len;
+    var plain: std.ArrayList(u8) = .empty;
+    try plain.appendSlice(fa, "Fictional browser header.\n");
+    var pos = prefix.len;
+    while (line.len <= end - pos) : (pos += line.len) {
+        @memcpy(html[pos..][0..line.len], line);
+        try plain.appendSlice(fa, "Fictional line.\n");
+    }
+    @memset(html[pos..end], ' ');
+    @memcpy(html[end..], suffix);
+    try plain.appendSlice(fa, "Fictional browser tail.");
+    // Literal markup and a separately authored plaintext oracle keep the
+    // exact two-MiB HTML body within the existing three-MiB snapshot quota.
+    const encoded = try base64(fa, html);
+    const message_wire = try std.fmt.allocPrint(fa, "{{\"id\":\"large-html\",\"threadId\":\"large-thread\",\"internalDate\":\"1791633600000\",\"labelIds\":[\"INBOX\"],\"payload\":{{\"mimeType\":\"text/html\",\"headers\":[{{\"name\":\"From\",\"value\":\"Fictional Sender <sender@example.test>\"}},{{\"name\":\"To\",\"value\":\"ada@example.test\"}},{{\"name\":\"Subject\",\"value\":\"Fictional large HTML\"}},{{\"name\":\"Message-ID\",\"value\":\"<large-html@example.test>\"}}],\"body\":{{\"size\":{d},\"data\":\"{s}\"}}}}}}", .{ html.len, encoded });
+    const oracle: Oracle = .{ .html = html, .plain = plain.items, .message_wire = message_wire, .thread_wire = try std.fmt.allocPrint(fa, "{{\"id\":\"large-thread\",\"messages\":[{s}]}}", .{message_wire}), .snapshot_buffer = try fa.alloc(u8, cache.snapshot_limit) };
+    // Browser production uses this exact fixed reservation, without the
+    // native heap's additional allocator-overhead allowance.
+    const reservation = try std.testing.allocator.alloc(u8, @import("browser_provider.zig").heap_bytes);
+    defer std.testing.allocator.free(reservation);
+    var first_error: ?anyerror = null;
+    for ([_][]const u8{ "mail.read", "mail.thread" }) |command| {
+        var heap = @import("browser_heap.zig").Heap.init(reservation);
+        var cap: Meter = .{ .backing = heap.allocator(), .limit = reservation.len, .reservation_bytes = reservation.len };
+        var failed = false;
+        oracle.run(&cap, command) catch |err| {
+            std.debug.print("\nbrowser {s}: {s}; allocation snapshot {any}\n", .{ command, @errorName(err), cap.snapshot() });
+            failed = true;
+            if (first_error == null) first_error = err;
+        };
+        try equal(@as(usize, 0), cap.snapshot().allocatorUsedBytes);
+        if (!failed) try equal(@as(usize, 0), cap.snapshot().rejectedAllocations);
+        try expect(cap.snapshot().allocatorPeakBytes <= reservation.len);
+    }
+    if (first_error) |err| return err;
+}
+
 fn browserMailFixture(a: A, id: []const u8, thread: []const u8, body: []const u8) !Value {
     return j.value(a, .{
         .id = id,

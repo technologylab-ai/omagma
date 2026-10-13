@@ -217,6 +217,12 @@ def conversation_case(binary, directory, kind, capture_dir=None):
     try:
         terminal.until(lambda: "ORIGINAL-MARKDOWN-MARKER" in terminal.text())
         terminal.send(b"r" if kind == "reply" else b"f")
+        if kind == "forward":
+            terminal.until(lambda: "Forward · original format" in terminal.text()
+                           and "[Text quote t]" in terminal.text()
+                           and "[Attach original .eml e]" in terminal.text()
+                           and "[Back Esc/q]" in terminal.text())
+            terminal.send(b"t")
         wait_compose(terminal)
         with Client(binary, directory, extra=fixture.options()) as client:
             fresh = latest_draft(client)
