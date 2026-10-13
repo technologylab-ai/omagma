@@ -1475,10 +1475,16 @@ pub const Session = struct {
             try request.object.put(a, "knownIds", try j.value(a, known));
             try request.object.put(a, "forceView", .{ .bool = (j.text(req, "query").len != 0 or j.text(req, "label").len != 0) and (view == null or view.?.stale) });
         }
+        // Keep the complete fixture tree separate from the request's plan and
+        // result allocations. Its large arena must not determine their next
+        // growth size; borrowed provider values stay alive through all fetches.
+        var fixture_arena = std.heap.ArenaAllocator.init(s.allocator);
+        defer fixture_arena.deinit();
         var fixture_remote: FixtureRemote = undefined;
         var live: @import("gmail.zig").NetworkSession = undefined;
         var transport = if (s.options.fixtures) fixture_transport: {
-            const raw_source = try s.fixture(a, address);
+            const fixture_allocator = fixture_arena.allocator();
+            const raw_source = try s.fixture(fixture_allocator, address);
             try s.fixtureGate(a, raw_source, req);
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
@@ -1492,6 +1498,8 @@ pub const Session = struct {
                 try provider_store.save();
                 expected = provider_store.state.generation;
             }
+            // Overlay maps borrow the long-lived source tree; allocating them
+            // with the request avoids growing that tree's large arena again.
             const source = try overlayFixtureSource(a, &provider_store, raw_source);
             fixture_remote = .{ .session = s, .source = source };
             break :fixture_transport fixture_remote.transport();
@@ -1714,7 +1722,9 @@ pub const Session = struct {
             const key = if (std.mem.eql(u8, address, "personal@example.com")) "personal" else if (std.mem.eql(u8, address, "work@example.com")) "work" else if (std.mem.eql(u8, address, "optional@example.com")) "optional" else return error.FixtureAccountRequired;
             const path = try std.fmt.allocPrint(a, "{s}/accounts/{s}.json", .{ root, key });
             const raw = try std.Io.Dir.cwd().readFileAlloc(s.io, path, a, .limited(16 * 1024 * 1024));
-            const source = try std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_always, .max_value_len = t.Limits.request_bytes });
+            // The immutable input and parsed tree share this allocator's
+            // lifetime; only escaped strings need another owned allocation.
+            const source = try std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = t.Limits.request_bytes });
             if (!std.mem.eql(u8, j.text(source, "account"), address)) return error.FixtureIdentityMismatch;
             return source;
         }
@@ -2005,9 +2015,10 @@ pub const Session = struct {
     }
     fn readMessage(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value, allow_cached: bool) !t.Message {
         try s.capability(a, store.state.account, req, "mail-read");
+        var fixture_source: ?Value = null;
         if (s.options.fixtures) {
             if (try store.readOutbox(id)) |sent| return sent;
-            if (store.state.fixtureProvider.len != 0) _ = try s.fixtureProviderSource(a, store);
+            if (store.state.fixtureProvider.len != 0) fixture_source = try s.fixtureProviderSource(a, store);
         }
         if (if (allow_cached) (try store.read(id)) orelse store.refusedMessage(id) else null) |cached| {
             var m = cached;
@@ -2033,7 +2044,9 @@ pub const Session = struct {
             try store.save();
             return m;
         }
-        const source = try s.fixtureProviderSource(a, store);
+        // Reconciliation already loaded the complete source when provider
+        // overlays exist. Reuse it for an uncached body in this same request.
+        const source = fixture_source orelse try s.fixtureProviderSource(a, store);
         for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "id"), id)) {
             s.reportProgress(.bodies, 0, 1);
             try s.fixtureProgressGate(a, source, .bodies, 0);

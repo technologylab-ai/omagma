@@ -186,7 +186,20 @@ def run(binary, directory):
             if COUNT <= number < COUNT + NEW:
                 require(record["message"]["bodyText"] == f"Synthetic private-cache fixture body {number:04}.\nCafé 👋.\n",
                         "new stored body differs from its independent literal content")
+        # Reuse the complete provider after deletion overrides were persisted.
+        # A second refresh must neither parse it twice nor rewrite cached bodies.
+        before_repeat = metric(client)
+        body_digests = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in files.items()}
+        repeat_started = time.monotonic()
+        repeated = client.request("mail.refresh", limit=NEW, prefetchLimit=PREFETCH)
         final = metric(client)
+        repeat_seconds = round(time.monotonic() - repeat_started, 4)
+        require(final["metadataEntries"] == COUNT and final["historyId"] == "1001", "repeated refresh lost retained mail/checkpoint")
+        require(final["syncMetadataGets"] == before_repeat["syncMetadataGets"]
+                and final["syncBodyGets"] == before_repeat["syncBodyGets"], "repeated refresh refetched unchanged messages or bodies")
+        require([message["id"] for message in repeated["messages"]] == fixture["expectedIds"][:NEW], "repeated refresh changed the newest retained head")
+        require({name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in files.items()} == body_digests,
+                "repeated refresh changed immutable body bytes")
         status = (Path("/proc") / str(client.process.pid) / "status").read_text()
         os_peak = next(int(line.split()[1]) for line in status.splitlines() if line.startswith("VmHWM:"))
     require(client.process.returncode == 0 and not client.stderr, "stress child exit/stderr cleanup failed")
@@ -198,6 +211,7 @@ def run(binary, directory):
             "explicitNewBodyReadSeconds": manual_seconds, "totalNewFullBodies": NEW,
             "allocatorPeakBytes": final["allocatorPeakBytes"], "terminalHeapLimitBytes": HEAP_LIMIT,
             "rejectedAllocations": final["rejectedAllocations"], "fixedBackendReservationBytes": final["fixedBackendReservationBytes"],
+            "repeatedRefreshSeconds": repeat_seconds, "repeatedRefreshPreservedBodies": True,
             "diskBytes": final["diskBytes"], "diskLimitBytes": DISK_LIMIT, "osPeakRssKiB": os_peak,
             "wholeProcessRssIsSeparateFromHeap": True, "absoluteRssLimit": None, "childrenReaped": True}
 

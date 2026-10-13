@@ -273,11 +273,6 @@ pub const Store = struct {
         if (state.metadataPolicy != 0 and (state.metadataPolicy > t.Limits.metadata_hard or state.diskPolicy < 64 * 1024 or state.diskPolicy > t.Limits.disk_hard)) return error.CacheLimitExceeded;
         if (state.metadataPolicy != 0 and (readonly or options.use_persisted_policy or (!options.metadata_limit_set and options.metadata_limit == t.Limits.metadata))) resolved.metadata_limit = state.metadataPolicy;
         if (state.diskPolicy != 0 and (readonly or options.use_persisted_policy or (!options.disk_limit_set and options.disk_limit == t.Limits.disk_bytes))) resolved.disk_limit = state.diskPolicy;
-        const policy_changed = !readonly and (state.metadataPolicy != resolved.metadata_limit or state.diskPolicy != resolved.disk_limit);
-        if (!readonly) {
-            state.metadataPolicy = resolved.metadata_limit;
-            state.diskPolicy = resolved.disk_limit;
-        }
         var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = resolved, .entriesStorage = state.entries };
         if (state.views.len > 16 or state.historyId.len > 32) return error.CacheLimitExceeded;
         for (state.views) |view| if (view.ids.len > t.Limits.metadata_hard or view.query.len > 4096 or view.label.len > 256 or view.remoteCursor.len > 4096) return error.CacheLimitExceeded;
@@ -287,29 +282,17 @@ pub const Store = struct {
         // Persisted indexes already have this order. Keep the legacy fallback
         // without heap-sorting thousands of rows on every cached/body read.
         if (!entriesSorted(s.state.entries)) std.sort.heap(Entry, s.state.entries, {}, newestFirst);
-        if (!readonly) {
-            try s.enforceLimits();
-            if (policy_changed) {
-                s.state.generation += 1;
-                try s.save();
-            }
-        }
+        if (!readonly) try s.enforceLimits();
         return s;
     }
     pub fn enforceLimits(s: *Store) !void {
-        var changed = false;
-        while (s.state.entries.len > s.options.metadata_limit) {
-            try s.evict(s.state.entries.len - 1);
-            changed = true;
-        }
-        while (try s.diskBytes() > s.options.disk_limit) {
-            if (s.state.entries.len == 0) return error.DiskQuotaExceeded;
-            const tail = s.state.entries[s.state.entries.len - 1].message;
-            s.state.quotaFloor = .{ .receivedAt = tail.receivedAt, .id = tail.id };
-            s.state.quotaDiskLimit = s.options.disk_limit;
-            try s.evict(s.state.entries.len - 1);
-            changed = true;
-        }
+        // Plan all pruning in save before deleting any body. In particular, a
+        // lower policy must not destroy mail when the old/protected index
+        // cannot coexist with even the smallest atomic replacement.
+        var changed = s.state.metadataPolicy != s.options.metadata_limit or s.state.diskPolicy != s.options.disk_limit or
+            s.state.entries.len > s.options.metadata_limit or try s.diskBytes() > s.options.disk_limit;
+        s.state.metadataPolicy = s.options.metadata_limit;
+        s.state.diskPolicy = s.options.disk_limit;
         if (s.state.quotaDiskLimit != 0 and s.options.disk_limit > s.state.quotaDiskLimit) {
             s.state.quotaFloor = null;
             for (s.state.entries) |*entry| if (std.mem.eql(u8, entry.bodyError, "DiskQuotaExceeded")) {
@@ -361,60 +344,102 @@ pub const Store = struct {
         try parent.sync(s.io);
     }
     pub fn save(s: *Store) !void {
-        // Count without allocating another index-sized copy. Wide legal
-        // subjects reduce retained mail count, never their original contents.
-        var estimated = @import("gmail_decode.zig").serializedBytes(s.state);
-        var evicted = false;
-        if (estimated >= index_write_bytes) {
-            // Protected drafts, receipts and settings cannot be evicted. Prove
-            // that removing all mail could fit before deleting any body file.
-            var protected = s.state;
-            protected.entries = &.{};
-            // Retain every view ID in this conservative preflight. Some may
-            // name mail outside the retained index and survive all evictions.
-            // Include the largest possible new floor before testing the final
-            // protected state; no side effect depends on a size estimate.
-            var floor_bytes = @import("gmail_decode.zig").serializedBytes(protected.indexQuotaFloor);
-            for (s.state.entries) |entry| {
-                const floor: QuotaFloor = .{ .receivedAt = entry.message.receivedAt, .id = entry.message.id };
-                const bytes = @import("gmail_decode.zig").serializedBytes(floor);
-                if (bytes > floor_bytes) {
-                    floor_bytes = bytes;
-                    protected.indexQuotaFloor = floor;
+        try s.admitIndex();
+        // The admitted state stays fixed through serialization. A small file
+        // buffer avoids growing and retaining an index-sized arena allocation.
+        var af = try s.dir.createFileAtomic(s.io, "index.json", .{ .permissions = .fromMode(0o600), .replace = true });
+        defer af.deinit(s.io);
+        var buffer: [8192]u8 = undefined;
+        var writer = af.file.writer(s.io, &buffer);
+        std.json.Stringify.value(s.state, .{}, &writer.interface) catch |err| return writer.err orelse err;
+        try writer.flush();
+        try af.file.sync(s.io);
+        try af.replace(s.io);
+        const parent: std.Io.File = .{ .handle = s.dir.handle, .flags = .{ .nonblocking = false } };
+        try parent.sync(s.io);
+    }
+    fn indexFits(s: *const Store, state: State, bytes: usize, used: usize) bool {
+        return state.entries.len <= s.options.metadata_limit and bytes < index_write_bytes and
+            bytes <= s.options.disk_limit - @min(used, s.options.disk_limit);
+    }
+    fn admitIndex(s: *Store) !void {
+        const serializedBytes = @import("gmail_decode.zig").serializedBytes;
+        var bytes = serializedBytes(s.state);
+        var used = try s.diskBytes();
+        if (s.indexFits(s.state, bytes, used)) return;
+
+        // Borrow the retained entry prefix, but give the plan its own view-ID
+        // arrays. A quota refusal leaves all state and body files untouched.
+        // Non-mail files, including the old index and every protected draft,
+        // outbox and receipt, remain charged throughout the atomic write.
+        var planned = s.state;
+        planned.views = try s.allocator.dupe(View, s.state.views);
+        for (planned.views) |*view| view.ids = try s.allocator.dupe([]const u8, view.ids);
+        planned.generation +|= 1;
+        bytes = serializedBytes(planned);
+        while (true) {
+            if (s.indexFits(planned, bytes, used)) {
+                // Verify the final count before any irreversible file work.
+                bytes = serializedBytes(planned);
+                if (s.indexFits(planned, bytes, used)) break;
+            }
+            if (planned.entries.len == 0) return if (bytes >= index_write_bytes) error.CacheLimitExceeded else error.DiskQuotaExceeded;
+            const tail = planned.entries[planned.entries.len - 1].message;
+            var name_buffer: [74]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buffer, "mail-{s}.json", .{hash(tail.id)}) catch unreachable;
+            const removed_file_bytes = try s.size(name);
+            const fields_before = serializedBytes(planned.indexQuotaFloor) + serializedBytes(planned.quotaFloor) + serializedBytes(planned.quotaDiskLimit);
+            // A count-only trim does not establish a byte-quota floor.
+            if (planned.entries.len <= s.options.metadata_limit) {
+                if (bytes >= index_write_bytes) {
+                    if (planned.indexQuotaFloor == null or newestFirst({}, .{ .message = tail }, .{ .message = .{ .id = planned.indexQuotaFloor.?.id, .threadId = "", .receivedAt = planned.indexQuotaFloor.?.receivedAt } })) planned.indexQuotaFloor = .{ .receivedAt = tail.receivedAt, .id = tail.id };
+                } else {
+                    planned.quotaFloor = .{ .receivedAt = tail.receivedAt, .id = tail.id };
+                    planned.quotaDiskLimit = s.options.disk_limit;
                 }
             }
-            protected.generation +|= 1;
-            if (@import("gmail_decode.zig").serializedBytes(protected) >= index_write_bytes) return error.CacheLimitExceeded;
+            bytes = bytes - fields_before + serializedBytes(planned.indexQuotaFloor) + serializedBytes(planned.quotaFloor) + serializedBytes(planned.quotaDiskLimit);
+            bytes -= pruneIndexTail(&planned);
+            used -= @min(removed_file_bytes, used);
         }
-        while (estimated >= index_write_bytes) {
-            if (s.state.entries.len == 0) return error.CacheLimitExceeded;
-            if (!evicted) {
-                s.state.generation +|= 1;
-                estimated = @import("gmail_decode.zig").serializedBytes(s.state);
-                evicted = true;
+        // Only the proven tail is removed. Planning never touches another
+        // account, protected files or the original immutable entry contents.
+        for (s.state.entries[planned.entries.len..]) |entry| {
+            var name_buffer: [74]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buffer, "mail-{s}.json", .{hash(entry.message.id)}) catch unreachable;
+            s.dir.deleteFile(s.io, name) catch |err| if (err != error.FileNotFound) return err;
+        }
+        s.state = planned;
+    }
+    /// Exact JSON size removed by one tail entry and its view memberships.
+    /// Count deltas keep wide indexes linear in their metadata bytes instead
+    /// of serializing the entire shrinking index after every eviction.
+    fn pruneIndexTail(state: *State) usize {
+        const serializedBytes = @import("gmail_decode.zig").serializedBytes;
+        const last = state.entries.len - 1;
+        const entry = state.entries[last];
+        var removed = serializedBytes(entry) + @as(usize, @intFromBool(last != 0));
+        for (state.views) |*view| {
+            var kept: usize = 0;
+            var removed_ids: usize = 0;
+            for (view.ids) |id| {
+                if (std.mem.eql(u8, id, entry.message.id)) {
+                    removed += serializedBytes(id);
+                    removed_ids += 1;
+                } else {
+                    @constCast(view.ids)[kept] = id;
+                    kept += 1;
+                }
             }
-            const last = s.state.entries.len - 1;
-            const removed = @import("gmail_decode.zig").serializedBytes(s.state.entries[last]);
-            const floor_before = @import("gmail_decode.zig").serializedBytes(s.state.indexQuotaFloor);
-            const tail = s.state.entries[last].message;
-            if (s.state.indexQuotaFloor == null or newestFirst({}, .{ .message = tail }, .{ .message = .{ .id = s.state.indexQuotaFloor.?.id, .threadId = "", .receivedAt = s.state.indexQuotaFloor.?.receivedAt } })) s.state.indexQuotaFloor = .{ .receivedAt = tail.receivedAt, .id = tail.id };
-            try s.evict(last);
-            // Removing view IDs and an array comma only makes this conservative.
-            estimated -|= removed;
-            estimated +|= @import("gmail_decode.zig").serializedBytes(s.state.indexQuotaFloor) -| floor_before;
-            if (estimated < index_write_bytes) estimated = @import("gmail_decode.zig").serializedBytes(s.state);
+            if (removed_ids != 0) {
+                removed += removed_ids - @as(usize, @intFromBool(kept == 0));
+                if (!view.incomplete) removed += 1; // false -> true
+                view.incomplete = true;
+            }
+            view.ids = view.ids[0..kept];
         }
-        var raw = try std.json.Stringify.valueAlloc(s.allocator, s.state, .{});
-        if (raw.len >= index_write_bytes) return error.CacheLimitExceeded;
-        const count = s.state.entries.len;
-        try s.makeRoom(raw.len, "index.json");
-        // Only eviction changes this snapshot during makeRoom. Avoid retaining
-        // two serialized copies for the common unchanged/no-pressure commit.
-        if (s.state.entries.len != count) {
-            s.allocator.free(raw);
-            raw = try std.json.Stringify.valueAlloc(s.allocator, s.state, .{});
-        }
-        try s.write("index.json", raw);
+        state.entries = state.entries[0..last];
+        return removed;
     }
     pub fn diskBytes(s: *Store) !usize {
         var total: usize = 0;
@@ -1472,6 +1497,125 @@ test "quota refuses oversized writes and protected oldest replacement before des
     try std.testing.expectError(error.DiskQuotaExceeded, store.makeRoom(64 * 1024, try store.fileName("mail", "m0")));
     try std.testing.expectEqual(before, try store.diskBytes());
     try std.testing.expectEqual(@as(usize, 3), store.state.entries.len);
+}
+
+test "quota shrinking a metadata-only index retains the newest head and persists across reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/shrinking-index", .{tmp.sub_path});
+    const account = "fictional@example.test";
+    const quota = 131072;
+    var original = try Store.open(std.testing.io, a, root, account, .{ .fixtures = true });
+    defer original.close();
+    const subject = try a.alloc(u8, 1000);
+    @memset(subject, 's');
+    for (0..60) |i| try original.put(.{ .id = try std.fmt.allocPrint(a, "row-{d:0>2}", .{i}), .threadId = "thread", .receivedAt = @intCast(i), .subject = subject }, false);
+    var messages: [60]t.Message = undefined;
+    for (original.state.entries, &messages) |entry, *message| message.* = entry.message;
+    try original.recordView("subject:\"fictional\"", "", "", &messages, "", false);
+    try original.save();
+    const old_index_bytes = try original.size("index.json");
+    try std.testing.expect(old_index_bytes < quota);
+    var count_trimmed = original.state;
+    count_trimmed.entries = count_trimmed.entries[0..30];
+    // Even with every view ID removed, the initial replacement cannot fit
+    // alongside the old file. Further metadata-only eviction is necessary.
+    count_trimmed.views = &.{};
+    try std.testing.expect(old_index_bytes + @import("gmail_decode.zig").serializedBytes(count_trimmed) > quota);
+    original.close();
+
+    var lowered = try Store.open(std.testing.io, a, root, account, .{ .fixtures = true, .metadata_limit = 30, .disk_limit = quota, .metadata_limit_set = true, .disk_limit_set = true });
+    defer lowered.close();
+    const retained = lowered.state.entries.len;
+    try std.testing.expect(retained > 0 and retained < 30);
+    try std.testing.expectEqual(@as(usize, 30), lowered.state.metadataPolicy);
+    try std.testing.expectEqual(@as(usize, quota), lowered.state.diskPolicy);
+    try std.testing.expect(old_index_bytes + try lowered.size("index.json") <= quota);
+    try std.testing.expect(try lowered.diskBytes() <= quota);
+    try std.testing.expect(lowered.state.views[0].incomplete);
+    try std.testing.expectEqual(retained, lowered.state.views[0].ids.len);
+    for (lowered.state.entries, 0..) |entry, i| {
+        const expected = try std.fmt.allocPrint(a, "row-{d:0>2}", .{59 - i});
+        try std.testing.expectEqualStrings(expected, entry.message.id);
+        try std.testing.expectEqualStrings(expected, lowered.state.views[0].ids[i]);
+        try std.testing.expectEqualStrings(subject, entry.message.subject);
+    }
+    const saved = try readPrivate(lowered.dir, std.testing.io, a, "index.json", index_read_bytes);
+    lowered.close();
+    for (0..2) |_| {
+        var reopened = try Store.open(std.testing.io, a, root, account, .{ .fixtures = true });
+        defer reopened.close();
+        try std.testing.expectEqual(retained, reopened.state.entries.len);
+        try std.testing.expectEqual(@as(usize, 30), reopened.options.metadata_limit);
+        try std.testing.expectEqual(@as(usize, quota), reopened.options.disk_limit);
+        try std.testing.expectEqualStrings("row-59", reopened.state.entries[0].message.id);
+        try std.testing.expectEqualStrings(saved, try readPrivate(reopened.dir, std.testing.io, a, "index.json", index_read_bytes));
+    }
+}
+
+test "quota impossible protected index overlap preserves mail drafts outbox receipts and saved policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/protected-overlap", .{tmp.sub_path});
+    const account = "fictional@example.test";
+    const quota = 131072;
+    var original = try Store.open(std.testing.io, a, root, account, .{ .fixtures = true });
+    defer original.close();
+    const draft_body = try a.alloc(u8, 80 * 1024);
+    @memset(draft_body, 'd');
+    const draft = try original.putDraft(.{ .subject = "Protected draft", .bodyText = draft_body }, null);
+    const sent_body = try a.alloc(u8, 8 * 1024);
+    @memset(sent_body, 'o');
+    try original.putOutbox(.{ .id = "sent", .threadId = "sent-thread", .bodyText = sent_body });
+    const receipt = try a.alloc(u8, 20 * 1024);
+    @memset(receipt, 'r');
+    original.state.operations = try a.dupe(Operation, &.{.{ .id = "protected-operation", .hash = "stable", .outcome = "applied", .icalendar = receipt }});
+    try original.put(.{ .id = "older", .threadId = "thread", .receivedAt = 1, .bodyText = "Older immutable body" }, true);
+    try original.put(.{ .id = "newer", .threadId = "thread", .receivedAt = 2, .bodyText = "Newer immutable body" }, true);
+    try original.save();
+    const names = [_][]const u8{ "index.json", try original.fileName("mail", "older"), try original.fileName("mail", "newer"), try original.fileName("draft", draft.id), try original.fileName("outbox", "sent") };
+    var saved: [names.len][]const u8 = undefined;
+    for (names, &saved) |name, *raw| raw.* = try readPrivate(original.dir, std.testing.io, a, name, index_read_bytes);
+    const used = try original.diskBytes();
+    const without_mail = used - saved[1].len - saved[2].len;
+    var protected = original.state;
+    protected.entries = &.{};
+    const protected_index_bytes = @import("gmail_decode.zig").serializedBytes(protected);
+    // Final protected data would fit, but the old and new index must coexist.
+    try std.testing.expect(without_mail - saved[0].len + protected_index_bytes < quota);
+    try std.testing.expect(without_mail + protected_index_bytes > quota);
+    const saved_policy = original.state.diskPolicy;
+    const saved_metadata_policy = original.state.metadataPolicy;
+    original.close();
+
+    var other = try Store.open(std.testing.io, a, root, "other@example.test", .{ .fixtures = true });
+    defer other.close();
+    try other.put(.{ .id = "older", .threadId = "other-thread", .bodyText = "Other account body" }, true);
+    try other.save();
+    const other_index = try readPrivate(other.dir, std.testing.io, a, "index.json", index_read_bytes);
+    other.close();
+
+    try std.testing.expectError(error.DiskQuotaExceeded, Store.open(std.testing.io, a, root, account, .{ .fixtures = true, .metadata_limit = 1, .disk_limit = quota, .metadata_limit_set = true, .disk_limit_set = true }));
+    var preserved = try Store.openCached(std.testing.io, a, root, account, .{ .fixtures = true });
+    defer preserved.close();
+    try std.testing.expectEqual(saved_policy, preserved.options.disk_limit);
+    try std.testing.expectEqual(saved_metadata_policy, preserved.options.metadata_limit);
+    try std.testing.expectEqual(@as(usize, 2), preserved.state.entries.len);
+    try std.testing.expectEqual(used, try preserved.diskBytes());
+    for (names, saved) |name, raw| try std.testing.expectEqualStrings(raw, try readPrivate(preserved.dir, std.testing.io, a, name, index_read_bytes));
+    try std.testing.expectEqualStrings(draft_body, (try preserved.draft(draft.id)).bodyText);
+    try std.testing.expectEqualStrings(sent_body, (try preserved.readOutbox("sent")).?.bodyText);
+    try std.testing.expectEqualStrings(receipt, preserved.state.operations[0].icalendar);
+    var other_reopened = try Store.openCached(std.testing.io, a, root, "other@example.test", .{ .fixtures = true });
+    defer other_reopened.close();
+    try std.testing.expectEqualStrings(other_index, try readPrivate(other_reopened.dir, std.testing.io, a, "index.json", index_read_bytes));
+    try std.testing.expectEqualStrings("Other account body", (try other_reopened.read("older")).?.bodyText);
 }
 
 test "persisted cache policy is shared by default readers and automatic writers while explicit reset works" {
