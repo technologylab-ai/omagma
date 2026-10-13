@@ -4,18 +4,32 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import termios
 import tty
 
 BODY = "Reviewed fixture editor body.\nCafé and emoji 👋 remain intact.\n"
 
 
+def publish_receipt(log, receipt):
+    fd, name = tempfile.mkstemp(prefix=f".{log.name}.", suffix=".tmp", dir=log.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(receipt))
+        # Readers see either the complete entry receipt or the complete exit
+        # receipt, never an existing path during truncation or a partial write.
+        os.replace(temporary, log)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main():
     path = Path(sys.argv[-1])
     log = Path(os.environ["OMAGMA_EDITOR_TEST_LOG"])
-    log.write_text(json.dumps({"entered": True, "argv": sys.argv[1:-1], "fileExists": path.is_file(),
-                               "stdinIsTty": sys.stdin.isatty(), "stdoutIsTty": sys.stdout.isatty(),
-                               "pid": os.getpid(), "processGroup": os.getpgrp(), "sessionId": os.getsid(0)}))
+    publish_receipt(log, {"entered": True, "argv": sys.argv[1:-1], "fileExists": path.is_file(),
+                          "stdinIsTty": sys.stdin.isatty(), "stdoutIsTty": sys.stdout.isatty(),
+                          "pid": os.getpid(), "processGroup": os.getpgrp(), "sessionId": os.getsid(0)})
     settings = termios.tcgetattr(0)
     try:
         tty.setraw(0)
@@ -29,7 +43,7 @@ def main():
         result = 0 if action in {b"s", b"f"} else 1
         receipt = json.loads(log.read_text())
         receipt.update(action=action.decode("ascii", errors="replace"), exitCode=result)
-        log.write_text(json.dumps(receipt))
+        publish_receipt(log, receipt)
         return result
     finally:
         termios.tcsetattr(0, termios.TCSANOW, settings)

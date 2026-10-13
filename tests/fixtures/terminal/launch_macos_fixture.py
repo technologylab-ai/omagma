@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import tempfile
 import time
 
 receipt = Path(sys.argv[1])
@@ -14,13 +15,22 @@ try:
     inherited = True
 except OSError:
     inherited = False
-receipt.write_text(json.dumps({
+payload = json.dumps({
     "pid": os.getpid(), "session": os.getsid(0), "group": os.getpgrp(),
     "inheritedSentinel": inherited, "stdinEof": os.read(0, 1) == b"",
     "stdoutIsTty": os.isatty(1), "stderrIsTty": os.isatty(2),
     "ignoredJobControl": signal.getsignal(signal.SIGTTOU) == signal.SIG_IGN,
     "argv": sys.argv[3:], "blockedSignals": sorted(int(value) for value in signal.pthread_sigmask(signal.SIG_BLOCK, [])),
-}) + "\n")
+}) + "\n"
+fd, name = tempfile.mkstemp(prefix=f".{receipt.name}.", suffix=".tmp", dir=receipt.parent)
+temporary = Path(name)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(payload)
+    # Existence is the parent's readiness signal; publish only complete JSON.
+    os.replace(temporary, receipt)
+finally:
+    temporary.unlink(missing_ok=True)
 
 # Pin this exact owned PID until the parent acknowledges its receipt.
 deadline = time.monotonic() + 10
