@@ -97,6 +97,9 @@ def add_files(terminal, directory, existing=0):
 
 
 def open_retained(terminal, subject):
+    # Startup can expose the reader's first line before the same PTY frame
+    # reaches the sidebar row. Wait for the target we will actually click.
+    terminal.until(lambda: terminal.screen.locate("Drafts") is not None)
     click(terminal, *point(terminal, "Drafts"))
     terminal.until(lambda: subject in terminal.text())
     terminal.send(b"\r")
