@@ -1,0 +1,227 @@
+{
+  "threadId": "attachment-review-thread",
+  "messageIds": [
+    "attachment-received",
+    "attachment-sent",
+    "attachment-duplicates",
+    "attachment-formatted"
+  ],
+  "accounts": {
+    "personal@example.com": [
+      {
+        "messageId": "attachment-received",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "received-token-A/+%?",
+        "contentId": null,
+        "payload": "payloads/personal-received.bin",
+        "size": 49,
+        "sha256": "daa1f6ad3b4903ab5ecba68f3178a2f3db6d8bc7b0812e1a3578df6b91ed3533"
+      },
+      {
+        "messageId": "attachment-sent",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "sent-token-A/+%?",
+        "contentId": null,
+        "payload": "payloads/personal-sent.bin",
+        "size": 49,
+        "sha256": "9666519217e0da8025dc06e9031217a260b0a1b8d5e25811b1cbf829839acefa"
+      },
+      {
+        "messageId": "attachment-duplicates",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "duplicate-token-a",
+        "contentId": null,
+        "payload": "payloads/personal-duplicate-a.bin",
+        "size": 49,
+        "sha256": "0dcafe7413843089e431c8eb3aa88bc10f0d8aecb2ada0a763ff51215ef81991"
+      },
+      {
+        "messageId": "attachment-duplicates",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "duplicate-token-b",
+        "contentId": null,
+        "payload": "payloads/personal-duplicate-b.bin",
+        "size": 49,
+        "sha256": "b6e2be59b0ebe0a405ae793060a00465916c7087517ffda280f9ea1689f8d74f"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "café β notes.bin",
+        "mimeType": "application/octet-stream",
+        "providerId": null,
+        "contentId": null,
+        "payload": "payloads/personal-unicode.bin",
+        "size": 50,
+        "sha256": "a9a7f784611bb4fd82c049b3d2a347cb2889acfda3170d42a43ce107d4365fc3"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "empty.txt",
+        "mimeType": "text/plain",
+        "providerId": null,
+        "contentId": null,
+        "payload": "payloads/personal-empty.bin",
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "source-image.png",
+        "mimeType": "image/png",
+        "providerId": "image-token-A",
+        "contentId": "source-image@example.test",
+        "payload": "payloads/personal-image.bin",
+        "size": 91,
+        "sha256": "b3f7bfa5338c8d062f7ec1bb107642a0e5b68b918daecb6ba03a405e22fdaeed"
+      }
+    ],
+    "work@example.com": [
+      {
+        "messageId": "attachment-received",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "received-token-A/+%?",
+        "contentId": null,
+        "payload": "payloads/work-received.bin",
+        "size": 49,
+        "sha256": "7f2a516a88dc58fcfe0a8340193c63d80e79f4463dacf099e357f5631ea25704"
+      },
+      {
+        "messageId": "attachment-sent",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "sent-token-A/+%?",
+        "contentId": null,
+        "payload": "payloads/work-sent.bin",
+        "size": 49,
+        "sha256": "e194643e27cce1796c82875db81bec45773a43e831ceda8527e01b94b5e168a1"
+      },
+      {
+        "messageId": "attachment-duplicates",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "duplicate-token-a",
+        "contentId": null,
+        "payload": "payloads/work-duplicate-a.bin",
+        "size": 49,
+        "sha256": "18ac487dcefbd9a6f99e12e275f6b3ac789658182c6b23d49923cbaa66c01d87"
+      },
+      {
+        "messageId": "attachment-duplicates",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "duplicate-token-b",
+        "contentId": null,
+        "payload": "payloads/work-duplicate-b.bin",
+        "size": 49,
+        "sha256": "ca24bc1f37e2ff2c1a05a5bbc94e63b7c73675eaa118e594b48d298040a2962a"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "café β notes.bin",
+        "mimeType": "application/octet-stream",
+        "providerId": null,
+        "contentId": null,
+        "payload": "payloads/work-unicode.bin",
+        "size": 46,
+        "sha256": "6c14146f26d78a5bc63866dab7e38671b3ca5c99ac328d554f3e5b988bbb815f"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "empty.txt",
+        "mimeType": "text/plain",
+        "providerId": null,
+        "contentId": null,
+        "payload": "payloads/work-empty.bin",
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "source-image.png",
+        "mimeType": "image/png",
+        "providerId": "image-token-A",
+        "contentId": "source-image@example.test",
+        "payload": "payloads/work-image.bin",
+        "size": 87,
+        "sha256": "c86e859dba25464d6f1bf0cea3309706d174a69c382c4dffc76dc0b914ed0ddd"
+      }
+    ],
+    "optional@example.com": [
+      {
+        "messageId": "attachment-received",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "received-token-A/+%?",
+        "contentId": null,
+        "payload": "payloads/optional-received.bin",
+        "size": 49,
+        "sha256": "8562f0ce732ca881a79a9b8ac69951cb1f6774047ce5f0feb48eb0a9bc91c2ef"
+      },
+      {
+        "messageId": "attachment-sent",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "sent-token-A/+%?",
+        "contentId": null,
+        "payload": "payloads/optional-sent.bin",
+        "size": 49,
+        "sha256": "f810ae94083629c46aa5bbde673db1987d8e27d0cfd16de25f9daac53dcd9fe8"
+      },
+      {
+        "messageId": "attachment-duplicates",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "duplicate-token-a",
+        "contentId": null,
+        "payload": "payloads/optional-duplicate-a.bin",
+        "size": 49,
+        "sha256": "4ea6e72352bac24fd5bbfef3214d4f5c299c455fdebd91dad4f0002b640883c5"
+      },
+      {
+        "messageId": "attachment-duplicates",
+        "filename": "report.pdf",
+        "mimeType": "application/pdf",
+        "providerId": "duplicate-token-b",
+        "contentId": null,
+        "payload": "payloads/optional-duplicate-b.bin",
+        "size": 49,
+        "sha256": "c9be01c9b366a59522181e4365a268f04aa338c8f68ac5ecfb6243ee67f00f14"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "café β notes.bin",
+        "mimeType": "application/octet-stream",
+        "providerId": null,
+        "contentId": null,
+        "payload": "payloads/optional-unicode.bin",
+        "size": 50,
+        "sha256": "3a03ead4a19fa6f388e9d40b1e23891f15c1c65cdbfdbe18ec71f192a9365a85"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "empty.txt",
+        "mimeType": "text/plain",
+        "providerId": null,
+        "contentId": null,
+        "payload": "payloads/optional-empty.bin",
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "messageId": "attachment-formatted",
+        "filename": "source-image.png",
+        "mimeType": "image/png",
+        "providerId": "image-token-A",
+        "contentId": "source-image@example.test",
+        "payload": "payloads/optional-image.bin",
+        "size": 91,
+        "sha256": "e7ce168b7dddc9b8cc74c13e87d1f91dca2baee8c7cc4975a7a1ca2493f9b907"
+      }
+    ]
+  }
+}

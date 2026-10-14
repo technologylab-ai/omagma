@@ -30,6 +30,8 @@ pub const Options = struct {
     config_file: ?[]const u8 = null,
     grant_file: ?[]const u8 = null,
     ui_file: ?[]const u8 = null,
+    // With a daemon, private UI state belongs to its encrypted store as well.
+    remote_preferences: bool = false,
     account: ?[]const u8 = null,
     metadata_limit: usize = Limits.metadata,
     disk_limit: usize = Limits.disk_bytes,

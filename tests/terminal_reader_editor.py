@@ -32,10 +32,12 @@ MouseTerminal = OwnedMouseTerminal
 if sys.platform == "darwin":
     from terminal_macos import DarwinTerminal
 
-    class GuardianMouseTerminal(DarwinTerminal, OwnedMouseTerminal):
-        pass
+    # The shared workflow runner may already have installed the guardian.
+    if not issubclass(OwnedMouseTerminal, DarwinTerminal):
+        class GuardianMouseTerminal(DarwinTerminal, OwnedMouseTerminal):
+            pass
 
-    MouseTerminal = GuardianMouseTerminal
+        MouseTerminal = GuardianMouseTerminal
 
 
 ACCOUNT = "personal@example.com"

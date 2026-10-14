@@ -323,6 +323,9 @@ const Daemon = struct {
                 try w.writeByte(',');
                 try b.jsonString(&w, t.profile_arg.slice());
                 try w.writeByte(',');
+                var data_buffer: [4128]u8 = undefined;
+                try b.jsonString(&w, try open.userDataArgument(self.config, &data_buffer));
+                try w.writeByte(',');
                 try b.jsonString(&w, t.url.slice());
                 try w.writeByte(']');
             }

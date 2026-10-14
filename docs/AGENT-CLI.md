@@ -112,13 +112,16 @@ screen, and can request up to 100 messages per page rather than the TUI's
 
 The command table below is the backend contract. One-shot commands
 cover common operations; JSONL supplies arrays and structured fields for richer
-requests. Drafts are local in both interfaces. Neither currently offers
-permanent mail deletion, contact deletion or calendar views. Label support
+requests. Drafts are local in both interfaces, with optional explicit
+[Gmail draft handoff](TERMINAL.md#continue-a-draft-in-gmail).
+Both native interfaces support [Calendar reads and reviewed imports](CALENDAR-PERMISSIONS.md);
+the TUI also provides agenda, day and week views.
+Permanent mail deletion and contact deletion remain unavailable. Label support
 includes listing, assigning/removing existing labels and creating, renaming,
 coloring or deleting custom definitions. Shared target resolution and membership
 counts support reviewed conversation/bulk workflows. The CLI also exposes the
 durable local send queue; its delay is explicit rather than the TUI's default
-countdown. Calendar support means invitation details/replies by email.
+countdown.
 
 ## Software updates
 
@@ -193,7 +196,7 @@ Send lines such as:
 | attachment.import / discard | import takes path and optional mimeType, returning immutable account blobId metadata; discard takes blobId and refuses referenced content |
 | contacts.list / search | live list pages accept limit 1..100 and cursor; search accepts query (live up to 30); cacheOnly uses downloaded contacts; results include resourceName,etag,name,emails and live nextCursor |
 | contacts.upsert | contact; editing requires resourceName and expectedEtag or contact.etag; omitted emails on name-only updates preserve all supported addresses/provider metadata |
-| invitation.inspect | messageId; validated identities and calendar protocol, friendly startDisplay/endDisplay/durationDisplay, location, joinUrl, attendeeStatus and recurrenceDisplay |
+| invitation.inspect | messageId; optional cacheOnly or reconcile; identities, friendly time displays, joinUrl, attendeeStatus, confirmedResponse and responseOutcome |
 | invitation.reply | messageId,status accepted/tentative/declined,operationId |
 | operation.list / read | read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
@@ -489,7 +492,7 @@ their recovery draft and require receipt/provider inspection, not a new send.
 
 ## Side effects and uncertainty
 
-Every send/RSVP needs a stable operationId chosen by the caller. Omagma persists an unknown receipt before dispatch and derives a stable RFC Message-ID from account+operationId. Repeating the **same account, identity and semantic content** returns the recorded receipt without another provider call. A new identity for the same unresolved draft/content also returns the existing unknown receipt, preventing accidental duplicate submission through a reopened draft. Reusing it for different content gives OperationConflict. This is a local duplicate guard, not a server-side idempotency guarantee.
+Every send/RSVP needs a stable operationId chosen by the caller. Omagma persists an unknown receipt before dispatch and derives a stable RFC Message-ID from account+operationId. Repeating the **same account, identity and semantic content** returns the recorded receipt without another provider call. For ordinary mail sends, a new identity for the same unresolved draft/content also returns the existing unknown receipt, preventing accidental duplicate submission through a reopened draft. For an unresolved invitation RSVP, a new operationId instead returns `UnknownOutcome`; replay the original ID to read its existing receipt. Reusing it for different content gives OperationConflict. This is a local duplicate guard, not a server-side idempotency guarantee.
 
 Outcomes: applied=provider accepted, rejected=known failure, unknown=possibly applied. **Do not retry unknown with a new ID.** Inspect operation.read and the provider's Sent folder before asking the user how to proceed. Direct sends also preserve a local recovery draft before dispatch. `draft.discard` removes a local draft and its regenerable preview, but refuses protected pending/submitting/unknown sends. Cancel an unsent queued intent before discarding or editing its draft. Applied/rejected drafts may be explicitly discarded to free the 128-draft quota. Cache clear does not erase the journal. A full journal stops new sends; it never silently discards uncertain receipts. RSVP replay ignores its varying DTSTAMP but compares the semantic response.
 
@@ -504,9 +507,9 @@ Contact updates use CONTACT-source etags and reject conflicts. Supported edits p
 
 **Bulk and undo:** bulk actions preserve independent per-message outcomes and never submit sends. Up to 16 account-scoped undo receipts persist under the private cache quota. The receipt records actual pre-action membership only for touched labels. Undo therefore preserves unrelated labels changed later. Rejected, pending, unknown and already restored entries are skipped; an uncertain undo is not repeated automatically. Cache clear preserves these receipts. Apply bulk actions only to IDs explicitly selected for the intended account; a batch is a bounded sequence with partial outcomes, not a transaction.
 
-**Meeting invitations:** JSONL `invitation.inspect`/`invitation.reply` and one-shot `invitations inspect`/`invitations reply` share calendar recognition and receipts. Recognized MIME forms are `text/calendar`, `application/ics`, and `application/octet-stream` with a `.ics` filename, including named external Outlook/Teams attachments. Calendar data is limited to 128 KiB and must identify exactly one requested event or recurrence instance and an attendee belonging to the selected account or a verified send-as alias. Matching duplicate MIME representations are accepted; conflicting calendars are refused. Inspection requires `mail-read`; reply additionally requires `calendar-rsvp` and an operation ID. If an older cached message retained only a calendar attachment reference, explicit inspection or reply refreshes that one message and preserves unrelated cached bodies.
+**Meeting invitations:** JSONL `invitation.inspect`/`invitation.reply` and one-shot `invitations inspect`/`invitations reply` share calendar recognition and receipts. Recognized MIME forms are `text/calendar`, `application/ics`, and `application/octet-stream` with a `.ics` filename, including named external Outlook/Teams attachments. Calendar data is limited to 128 KiB. Inspection displays requests, responses, published events and cancellations; a multi-event or ambiguous-attendee notice remains read-only. Sending a response requires exactly one requested event or recurrence instance and an attendee belonging to the selected account or a verified send-as alias. Matching duplicate MIME representations are accepted; conflicting calendars are refused. Inspection requires `mail-read`; reply additionally requires `calendar-rsvp` and an operation ID. If an older cached message retained only a calendar attachment reference, explicit inspection or reply refreshes that one message and preserves unrelated cached bodies.
 
-Reply sends a standard iTIP email response to the calendar organizer, preserving UID, sequence and recurrence identity; email From/Reply-To do not choose the destination. The three states are `accepted`, `tentative` and `declined`, mapped to the corresponding attendee PARTSTAT. A copied Zoom/Teams join link alone is not a calendar request and cannot be given an invented RSVP. Calendar API access is unnecessary. Unknown submissions are not retried automatically. Inspection can fetch mail or verified identities; `--cached` is not an invitation command option.
+Reply sends a standard iTIP email response to the calendar organizer, preserving UID, sequence and recurrence identity; email From/Reply-To do not choose the destination. The three states are `accepted`, `tentative` and `declined`, mapped to the corresponding attendee PARTSTAT. A copied Zoom/Teams join link alone is not a calendar request and cannot be given an invented RSVP. Calendar API access is unnecessary. Unknown submissions are not retried automatically. Inspection can fetch mail or verified identities; `invitations inspect --cached` or JSONL `cacheOnly:true` instead uses only retained source and identities. After an uncertain RSVP, `invitations inspect --reconcile` or JSONL `reconcile:true` checks Sent for the recorded Message-ID and exact RSVP identity. Positive evidence confirms the local receipt; absence leaves it unknown and never resends. The TUI offers **C Check Sent** for this case. Cached inspection and reconciliation cannot be combined.
 
 Configurable body prefetch defaults to the smaller of the display page and 32. `prefetchLimit` or `--prefetch-bodies N` explicitly selects 0..64; 64 can fill a larger retained head while the display page stays 32. Zero disables automatic body filling. TUI startup and the background `cache-refresh` command share this policy, fixed message/disk quotas and old-tail eviction. Cached mail remains readable while refresh runs.
 

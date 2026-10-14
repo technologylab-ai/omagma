@@ -72,6 +72,12 @@ pub fn checkedExit(term: std.process.Child.Term) !void {
 var launch_strings: [32 * 1024]u8 = undefined;
 var launch_environment: [64 * 1024]u8 = undefined;
 var launch_active = std.atomic.Value(bool).init(false);
+var launch_environ: ?std.process.Environ = null;
+/// Startup-only: the OS environment block lives for the process lifetime.
+/// Hardened owners cannot reopen /proc/self/environ after PR_SET_DUMPABLE=0.
+pub fn configureLaunchEnvironment(environ: std.process.Environ) void {
+    launch_environ = environ;
+}
 // Exact Zig 0.17.0 includes the leading reserved bit in CLOSE_RANGE. Keep the
 // exec-status pipe open until exec while marking inherited descriptors CLOEXEC.
 const inherited_descriptor_flags: std.os.linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = true };
@@ -79,6 +85,11 @@ const inherited_descriptor_flags: std.os.linux.CLOSE_RANGE = .{ .UNSHARE = false
 /// Linux double fork. The short intermediary is reaped; its child reports exec
 /// failure on a CLOEXEC pipe. No allocation, locks or std.Io run after fork.
 pub fn launchDetached(io: std.Io, argv: []const []const u8) !void {
+    _ = try launchDetachedPid(io, argv);
+}
+
+/// The returned PID is for read-only startup liveness checks, never signaling.
+pub fn launchDetachedPid(io: std.Io, argv: []const []const u8) !i32 {
     if (@import("builtin").os.tag == .macos) return launchDarwin(io, argv);
     if (argv.len == 0 or argv.len > 16 or !std.mem.startsWith(u8, argv[0], "/")) return error.InvalidArgv;
     if (launch_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return error.LaunchBusy;
@@ -93,9 +104,19 @@ pub fn launchDetached(io: std.Io, argv: []const []const u8) !void {
         strings_used += arg.len + 1;
     }
     defer std.crypto.secureZero(u8, launch_strings[0..strings_used]);
-    const env = try std.Io.Dir.cwd().readFile(io, "/proc/self/environ", &launch_environment);
+    defer std.crypto.secureZero(u8, &launch_environment);
+    const env = if (launch_environ) |environment| blk: {
+        var used: usize = 0;
+        for (environment.block.slice) |entry| {
+            const bytes = std.mem.span(entry.?);
+            if (bytes.len + 1 > launch_environment.len - used) return error.EnvironmentTooLarge;
+            @memcpy(launch_environment[used..][0..bytes.len], bytes);
+            launch_environment[used + bytes.len] = 0;
+            used += bytes.len + 1;
+        }
+        break :blk launch_environment[0..used];
+    } else try std.Io.Dir.cwd().readFile(io, "/proc/self/environ", &launch_environment);
     if (env.len == launch_environment.len) return error.EnvironmentTooLarge;
-    defer std.crypto.secureZero(u8, launch_environment[0..env.len]);
     var env_z: [513:null]?[*:0]const u8 = @splat(null);
     var start: usize = 0;
     var entries: usize = 0;
@@ -144,11 +165,12 @@ pub fn launchDetached(io: std.Io, argv: []const []const u8) !void {
     };
     try deadline(io, seconds(3), launchHandshake, .{ io, pipe, &child, &launched_pid });
     success = true;
+    return launched_pid orelse error.ExecFailed;
 }
 
 /// A short exec-self owner performs native spawn, then exits so the actual
 /// desktop process is adopted by launchd. No application fork-child code runs.
-fn launchDarwin(io: std.Io, argv: []const []const u8) !void {
+fn launchDarwin(io: std.Io, argv: []const []const u8) !i32 {
     if (@import("builtin").os.tag != .macos) return error.UnsupportedPlatform;
     if (argv.len == 0 or argv.len > 16 or !std.fs.path.isAbsolute(argv[0])) return error.InvalidArgv;
     if (launch_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return error.LaunchBusy;
@@ -170,7 +192,9 @@ fn launchDarwin(io: std.Io, argv: []const []const u8) !void {
         closePipes(&child, io);
         if (child.id != null) killOwned(io, &child);
     }
-    try deadline(io, seconds(3), launchDarwinHandshake, .{ io, &child });
+    var pid: ?i32 = null;
+    try deadline(io, seconds(3), launchDarwinHandshake, .{ io, &child, &pid });
+    return pid orelse error.ExecFailed;
 }
 
 const Darwin = struct {
@@ -226,7 +250,7 @@ fn launchDarwinAck(io: std.Io) !void {
     };
     if (count != 1 or acknowledgement[0] != 1) return error.InvalidLaunchAcknowledgement;
 }
-fn launchDarwinHandshake(io: std.Io, child: *std.process.Child) !void {
+fn launchDarwinHandshake(io: std.Io, child: *std.process.Child, pid_out: *?i32) !void {
     var pid_bytes: [4]u8 = undefined;
     var used: usize = 0;
     while (used < pid_bytes.len) {
@@ -237,7 +261,7 @@ fn launchDarwinHandshake(io: std.Io, child: *std.process.Child) !void {
         if (count == 0) return error.ExecFailed;
         used += count;
     }
-    _ = try decodeLaunchPid(&pid_bytes);
+    const pid = try decodeLaunchPid(&pid_bytes);
     try child.stdin.?.writeStreamingAll(io, &.{1});
     child.stdin.?.close(io);
     child.stdin = null;
@@ -248,6 +272,7 @@ fn launchDarwinHandshake(io: std.Io, child: *std.process.Child) !void {
     };
     if (count != 0) return error.ExecFailed;
     try checkedExit(try waitOwned(io, child));
+    pid_out.* = pid;
 }
 fn launchFailure(fd: i32) noreturn {
     const byte: [1]u8 = .{1};
@@ -463,4 +488,26 @@ fn waitCancellationCase(io: std.Io, comptime preserving: bool) !void {
         const result = std.os.linux.wait4(pid, &wait_status, std.os.linux.W.NOHANG, null);
         try std.testing.expectEqual(std.os.linux.E.CHILD, std.os.linux.errno(result));
     }
+}
+
+/// A detached child may exit after successful exec but before binding a socket.
+/// A reused PID can only delay the bounded wait; this function sends no signal.
+pub fn detachedRunning(io: std.Io, pid: i32) !bool {
+    if (pid <= 0) return error.InvalidLaunchPid;
+    std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| switch (err) {
+        error.ProcessNotFound => return false,
+        else => return err,
+    };
+    if (@import("builtin").os.tag == .linux) {
+        var path: [64]u8 = undefined;
+        var bytes: [1024]u8 = undefined;
+        const stat = std.Io.Dir.cwd().readFile(io, try std.fmt.bufPrint(&path, "/proc/{d}/stat", .{pid}), &bytes) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        const end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return error.InvalidLaunchPid;
+        if (end + 2 >= stat.len) return error.InvalidLaunchPid;
+        if (stat[end + 2] == 'Z' or stat[end + 2] == 'X') return false;
+    }
+    return true;
 }

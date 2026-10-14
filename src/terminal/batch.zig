@@ -12,7 +12,7 @@ pub const Provider = struct {
     modifyFn: *const fn (*anyopaque, std.mem.Allocator, []const u8, []const []const u8, triage.Delta) anyerror![]const []const u8,
     fixtureCheckpoint: ?[]const u8 = null,
 };
-pub const Context = struct { io: std.Io, allocator: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options, provider: Provider };
+pub const Context = struct { io: std.Io, allocator: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options, provider: Provider, access: @import("store_access.zig").Access = .{} };
 
 fn find(store: *storage.Store, token: []const u8) !*storage.Undo {
     for (store.state.undo) |*receipt| if (std.mem.eql(u8, receipt.token, token)) return receipt;
@@ -22,7 +22,7 @@ const knownRejection = item_engine.knownRejection;
 fn commitResult(ctx: Context, token: []const u8, position: usize, undoing: bool, labels: ?[]const []const u8, err: ?anyerror, preflight: bool) !void {
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
-    var store = try storage.Store.open(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options);
+    var store = try ctx.access.open(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options, false);
     defer store.close();
     const item = &(try find(&store, token)).items[position];
     if (err) |failure| {
@@ -56,7 +56,7 @@ const ItemAdapter = struct {
         const self: *@This() = @ptrCast(@alignCast(raw));
         var arena = std.heap.ArenaAllocator.init(self.ctx.allocator);
         defer arena.deinit();
-        var store = try storage.Store.open(self.ctx.io, arena.allocator(), self.ctx.root, self.ctx.account, self.ctx.options);
+        var store = try self.ctx.access.open(self.ctx.io, arena.allocator(), self.ctx.root, self.ctx.account, self.ctx.options, false);
         defer store.close();
         store.release();
         const actual = try self.ctx.provider.labelsFn(self.ctx.provider.context, a, &store, id);
@@ -69,7 +69,7 @@ const ItemAdapter = struct {
         const self: *@This() = @ptrCast(@alignCast(raw));
         var arena = std.heap.ArenaAllocator.init(self.ctx.allocator);
         defer arena.deinit();
-        var store = try storage.Store.open(self.ctx.io, arena.allocator(), self.ctx.root, self.ctx.account, self.ctx.options);
+        var store = try self.ctx.access.open(self.ctx.io, arena.allocator(), self.ctx.root, self.ctx.account, self.ctx.options, false);
         defer store.close();
         const item = &(try find(&store, self.token)).items[self.position];
         if (!undoing) item.* = try triage.inverse(arena.allocator(), id, before, delta);
@@ -94,7 +94,7 @@ fn modify(ctx: Context, token: []const u8, position: usize, id: []const u8, delt
 fn result(ctx: Context, a: std.mem.Allocator, token: []const u8) !j.Value {
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
-    var store = try storage.Store.openCached(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options);
+    var store = try ctx.access.open(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options, true);
     defer store.close();
     const receipt = try find(&store, token);
     const summary = item_engine.summarize(receipt.items);
@@ -113,7 +113,7 @@ pub fn run(ctx: Context, a: std.mem.Allocator, request: j.Value, delta: triage.D
         var arena = std.heap.ArenaAllocator.init(ctx.allocator);
         defer arena.deinit();
         const sa = arena.allocator();
-        var store = try storage.Store.open(ctx.io, sa, ctx.root, ctx.account, ctx.options);
+        var store = try ctx.access.open(ctx.io, sa, ctx.root, ctx.account, ctx.options, false);
         defer store.close();
         const token = try store.nextId("undo");
         const items = try sa.alloc(storage.UndoItem, ids.len);
@@ -133,7 +133,7 @@ pub fn undo(ctx: Context, a: std.mem.Allocator, request: j.Value) !j.Value {
     const receipt = snapshot: {
         var arena = std.heap.ArenaAllocator.init(ctx.allocator);
         defer arena.deinit();
-        var store = try storage.Store.openCached(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options);
+        var store = try ctx.access.open(ctx.io, arena.allocator(), ctx.root, ctx.account, ctx.options, true);
         defer store.close();
         break :snapshot try j.decode(storage.Undo, a, try j.value(a, (try find(&store, token)).*));
     };

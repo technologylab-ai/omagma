@@ -21,11 +21,23 @@ pub fn integer(v: Value, key: []const u8, default: i64) !i64 {
     return if (get(v, key)) |x| if (x == .integer) x.integer else error.InvalidRequest else default;
 }
 pub fn value(a: std.mem.Allocator, v: anytype) !Value {
-    const raw = try std.json.Stringify.valueAlloc(a, v, .{ .emit_null_optional_fields = false });
+    const raw = try encodeAlloc(a, v, .{ .emit_null_optional_fields = false });
     // The serialized bytes already belong to this allocator and remain alive
     // with the returned value. Borrow unescaped strings from that owned copy
     // instead of duplicating every large attachment's base64 payload again.
     return std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed });
+}
+/// Exact allocation keeps serialized attachments from retaining every growth
+/// buffer in an operation arena. Values and wire bytes share that arena's life.
+pub fn encodeAlloc(a: std.mem.Allocator, v: anytype, options: std.json.Stringify.Options) ![]u8 {
+    var buffer: [4096]u8 = undefined;
+    var count = std.Io.Writer.Discarding.init(&buffer);
+    try std.json.Stringify.value(v, options, &count.writer);
+    const output = try a.alloc(u8, @intCast(count.fullCount()));
+    errdefer a.free(output);
+    var writer: std.Io.Writer = .fixed(output);
+    try std.json.Stringify.value(v, options, &writer);
+    return output;
 }
 pub fn decode(comptime T: type, a: std.mem.Allocator, v: Value) !T {
     return std.json.parseFromValueLeaky(T, a, v, .{ .ignore_unknown_fields = true });

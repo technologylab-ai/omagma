@@ -135,7 +135,7 @@ export class TermView {
   }
   paint(tape, frame) {
     const { cellW: cw, cellH: ch } = this
-    const parts = [], segments = new Map()
+    const parts = [], backgrounds = [], segments = new Map()
     const add = (color, d) => { if (!segments.has(color)) segments.set(color, []); segments.get(color).push(d) }
     frame.rows.forEach((runs, y) => {
       for (const [x, text, styleIndex, cells] of runs) {
@@ -152,7 +152,10 @@ export class TermView {
         // Blank cells still paint a background or an underline/strike decoration.
         if (!shown.trim() && !bg && !(flags & (UNDERLINE | STRIKE))) continue
         const style = [`left:${x * cw}px`, `top:${y * ch}px`, `width:${cells * cw}px`, `color:${fg}`]
-        if (bg) style.push(`background:${bg}`)
+        // A terminal paints the cell backgrounds before foreground glyphs.
+        // Nerd Font symbols may legitimately overhang into a neighboring blank
+        // cell; painting that blank later would chop the camera into a square.
+        if (bg) backgrounds.push(`<span class="run" style="left:${x * cw}px;top:${y * ch}px;width:${cells * cw}px;height:${ch}px;background:${bg}"></span>`)
         if (flags & BOLD) style.push('font-weight:700')
         if (flags & ITALIC) style.push('font-style:italic')
         const deco = [flags & UNDERLINE ? 'underline' : '', flags & STRIKE ? 'line-through' : ''].filter(Boolean).join(' ')
@@ -161,7 +164,7 @@ export class TermView {
         parts.push(`<span class="${cls}" style="${style.join(';')}">${escapeHtml(shown)}</span>`)
       }
     })
-    this.text.innerHTML = parts.join('')
+    this.text.innerHTML = backgrounds.join('') + parts.join('')
     const width = Math.max(1.3, ch * .055).toFixed(2)
     this.lines.setAttribute('viewBox', `0 0 ${this.width} ${this.height}`)
     this.lines.setAttribute('width', this.width); this.lines.setAttribute('height', this.height)

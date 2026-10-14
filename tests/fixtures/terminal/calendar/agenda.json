@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "id": "planninginstance_20261013T080000Z",
+      "iCalUID": "weekly-2026@example.test",
+      "etag": "\"version-4\"",
+      "status": "confirmed",
+      "summary": "Moved planning meeting",
+      "organizer": { "email": "host@example.test" },
+      "start": { "dateTime": "2026-10-13T11:00:00+02:00", "timeZone": "Europe/Vienna" },
+      "end": { "dateTime": "2026-10-13T12:00:00+02:00", "timeZone": "Europe/Vienna" },
+      "originalStartTime": { "dateTime": "2026-10-13T10:00:00+02:00", "timeZone": "Europe/Vienna" },
+      "recurringEventId": "planningmaster",
+      "sequence": 4,
+      "hangoutLink": "https://meet.example.test/planning",
+      "htmlLink": "https://calendar.google.com/calendar/event?eid=fictional",
+      "attendees": [{ "email": "self@example.test", "self": true, "responseStatus": "accepted" }],
+      "extendedProperties": { "private": { "omagmaOperation": "fixture-operation-1" } }
+    },
+    {
+      "id": "retreat",
+      "iCalUID": "retreat-2026@example.test",
+      "etag": "\"version-1\"",
+      "status": "confirmed",
+      "summary": "Fictional retreat",
+      "start": { "date": "2026-10-24" },
+      "end": { "date": "2026-10-27" },
+      "hangoutLink": "javascript:alert(1)"
+    },
+    { "id": "deleted-event", "status": "cancelled" }
+  ]
+}

@@ -4,16 +4,18 @@ const layout = @import("layout.zig");
 const theme = @import("theme.zig");
 const b = @import("../bounded.zig");
 
-pub const Action = enum { down, up, left, right, next_mail, previous_mail, compose, reply, reply_all, contacts, cache_search, server_search, layout, expand, help, thread_next, thread_previous, thread_fold, quote_fold, signature_fold, links, attachments };
+pub const Action = enum { down, up, left, right, next_mail, previous_mail, compose, reply, reply_all, contacts, calendar, follow_up, cache_search, server_search, layout, expand, help, thread_next, thread_previous, thread_fold, quote_fold, signature_fold, links, attachments };
 pub const Context = struct { account: b.Text(254) = .{}, folder: u8 = 0, label: b.Text(256) = .{}, message: b.Text(256) = .{}, selected: u32 = 0, readerScroll: u32 = 0 };
 pub const Binding = struct { key: b.Text(24) = .{}, action: Action };
 pub const SearchMode = enum { cache, server };
+pub const Density = enum { comfortable, compact };
 pub const Search = struct { account: b.Text(254) = .{}, name: b.Text(96) = .{}, query: b.Text(4096) = .{}, mode: SearchMode = .cache };
 pub const Preferences = struct {
     schema: u8 = 1,
     theme: theme.Mode = .follow_omarchy,
     sendGraceSeconds: u8 = 10,
     readerLayout: layout.ReaderLayout = .right,
+    density: Density = .comfortable,
     listWidthPercent: u8 = 55,
     listHeightPercent: u8 = 40,
     lastAccount: b.Text(254) = .{},
@@ -26,7 +28,7 @@ const max_bytes = 256 * 1024;
 const ContextWire = struct { account: []const u8, folder: u8 = 0, label: []const u8 = "", message: []const u8 = "", selected: u32 = 0, readerScroll: u32 = 0 };
 const BindingWire = struct { key: []const u8, action: Action };
 const SearchWire = struct { account: []const u8, name: []const u8 = "", query: []const u8, mode: SearchMode = .cache };
-const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, sendGraceSeconds: u8 = 10, readerLayout: layout.ReaderLayout = .right, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{}, searchHistory: []const SearchWire = &.{}, savedSearches: []const SearchWire = &.{} };
+const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, sendGraceSeconds: u8 = 10, readerLayout: layout.ReaderLayout = .right, density: Density = .comfortable, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{}, searchHistory: []const SearchWire = &.{}, savedSearches: []const SearchWire = &.{} };
 
 pub fn rememberSearch(value: *Preferences, account: []const u8, query: []const u8, mode: SearchMode, name: ?[]const u8) !void {
     try b.address(account);
@@ -84,6 +86,14 @@ pub fn validKey(key: []const u8) bool {
 }
 
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Preferences {
+    var result: Preferences = undefined;
+    try parseInto(&result, allocator, bytes);
+    return result;
+}
+
+/// The daemon validates preferences on a bounded worker stack. Initialize its
+/// heap-owned output directly instead of copying the large query arrays.
+pub fn parseInto(result: *Preferences, allocator: std.mem.Allocator, bytes: []const u8) !void {
     if (bytes.len > max_bytes) return error.UiPreferencesTooLarge;
     const parsed = try std.json.parseFromSlice(Wire, allocator, bytes, .{ .max_value_len = max_bytes });
     defer parsed.deinit();
@@ -92,7 +102,14 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Preferences {
     if (wire.listWidthPercent < 25 or wire.listWidthPercent > 75 or wire.listHeightPercent < 25 or wire.listHeightPercent > 75) return error.InvalidPaneRatio;
     if (wire.contexts.len > 3 or wire.bindings.len > 24) return error.UiPreferencesTooManyEntries;
     if (wire.sendGraceSeconds > 30) return error.InvalidSendGrace;
-    var result: Preferences = .{ .theme = wire.theme, .sendGraceSeconds = wire.sendGraceSeconds, .readerLayout = wire.readerLayout, .listWidthPercent = wire.listWidthPercent, .listHeightPercent = wire.listHeightPercent };
+    result.* = .{};
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(result));
+    result.theme = wire.theme;
+    result.sendGraceSeconds = wire.sendGraceSeconds;
+    result.readerLayout = wire.readerLayout;
+    result.density = wire.density;
+    result.listWidthPercent = wire.listWidthPercent;
+    result.listHeightPercent = wire.listHeightPercent;
     try parseSearches(wire.searchHistory, &result.searchHistory, false);
     try parseSearches(wire.savedSearches, &result.savedSearches, true);
     if (wire.lastAccount.len > 0) try b.address(wire.lastAccount);
@@ -114,7 +131,6 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Preferences {
         for (wire.bindings[0..index]) |prior| if (std.mem.eql(u8, prior.key, entry.key)) return error.DuplicateKeyBinding;
         result.bindings[index] = binding;
     }
-    return result;
 }
 
 pub fn encode(allocator: std.mem.Allocator, value: *const Preferences) ![]const u8 {
@@ -142,7 +158,7 @@ pub fn encode(allocator: std.mem.Allocator, value: *const Preferences) ![]const 
         saved[saved_count] = .{ .account = entry.account.slice(), .name = entry.name.slice(), .query = entry.query.slice(), .mode = entry.mode };
         saved_count += 1;
     };
-    return std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count] }, .{});
+    return std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count] }, .{});
 }
 
 pub fn path(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map, explicit: ?[]const u8) ![]const u8 {
@@ -217,6 +233,16 @@ test "local UI: theme choice survives private preference encoding and old settin
     try std.testing.expectEqual(theme.Mode.omagma, restored.theme);
     try std.testing.expectEqual(@as(u8, 60), restored.listWidthPercent);
     try std.testing.expectError(error.InvalidEnumTag, parse(allocator, "{\"theme\":\"not-a-theme\"}"));
+}
+
+test "local reader: compact density persists and legacy settings stay comfortable" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(Density.comfortable, (try parse(a, "{\"schema\":1}")).density);
+    const chosen = try parse(a, "{\"schema\":1,\"density\":\"compact\"}");
+    const encoded = try encode(a, &chosen);
+    defer a.free(encoded);
+    try std.testing.expectEqual(Density.compact, (try parse(a, encoded)).density);
+    try std.testing.expectError(error.InvalidEnumTag, parse(a, "{\"density\":\"unknown\"}"));
 }
 
 test "local reader: working contexts and keys own parsed strings and preserve bounded ratios" {

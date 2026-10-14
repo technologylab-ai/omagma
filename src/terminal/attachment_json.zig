@@ -7,11 +7,14 @@ pub const Decoder = struct {
     writer: std.Io.Writer,
     sink: *std.Io.Writer,
     expected: usize,
+    raw_message_id: ?[]const u8 = null,
+    id_offset: usize = 0,
+    seen_id: bool = false,
     failure: ?anyerror = null,
-    state: enum { start, key_start, key, colon, value, data, number, separator, done } = .start,
+    state: enum { start, key_start, key, colon, value, data, number, id, separator, done } = .start,
     key_bytes: [16]u8 = undefined,
     key_len: usize = 0,
-    field: enum { data, size } = .data,
+    field: enum { data, size, id } = .data,
     seen_data: bool = false,
     seen_size: bool = false,
     size: usize = 0,
@@ -25,6 +28,15 @@ pub const Decoder = struct {
     pub fn init(sink: *std.Io.Writer, expected: usize) !Decoder {
         if (expected > t.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
         return .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .sink = sink, .expected = expected };
+    }
+    /// RAW has an unknown decoded length, a strict outgoing-file bound, and
+    /// an independently verified message identity. Publication still waits
+    /// for finish(), including when Gmail places id after the large raw field.
+    pub fn initRaw(sink: *std.Io.Writer, message_id: []const u8) !Decoder {
+        try @import("../bounded.zig").identifier(message_id);
+        var result = try init(sink, t.Limits.attachment_bytes);
+        result.raw_message_id = message_id;
+        return result;
     }
     fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *Decoder = @alignCast(@fieldParentPtr("writer", writer));
@@ -65,12 +77,15 @@ pub const Decoder = struct {
             .key => {
                 if (c == '"') {
                     const key = self.key_bytes[0..self.key_len];
-                    if (std.mem.eql(u8, key, "data") and !self.seen_data) {
+                    if (std.mem.eql(u8, key, if (self.raw_message_id != null) "raw" else "data") and !self.seen_data) {
                         self.field = .data;
                         self.seen_data = true;
-                    } else if (std.mem.eql(u8, key, "size") and !self.seen_size) {
+                    } else if (self.raw_message_id == null and std.mem.eql(u8, key, "size") and !self.seen_size) {
                         self.field = .size;
                         self.seen_size = true;
+                    } else if (self.raw_message_id != null and std.mem.eql(u8, key, "id") and !self.seen_id) {
+                        self.field = .id;
+                        self.seen_id = true;
                     } else return error.InvalidProviderResponse;
                     self.state = .colon;
                 } else {
@@ -89,6 +104,9 @@ pub const Decoder = struct {
                 if (self.field == .data) {
                     if (c != '"') return error.InvalidProviderResponse;
                     self.state = .data;
+                } else if (self.field == .id) {
+                    if (c != '"') return error.InvalidProviderResponse;
+                    self.state = .id;
                 } else {
                     self.state = .number;
                     try self.byte(c);
@@ -121,7 +139,7 @@ pub const Decoder = struct {
                 self.bit_count += 6;
                 if (self.bit_count >= 8) {
                     self.bit_count -= 8;
-                    if (self.bytes == self.expected) return error.BodySizeMismatch;
+                    if (self.bytes == self.expected) return if (self.raw_message_id != null) error.AttachmentsTooLarge else error.BodySizeMismatch;
                     try self.sink.writeByte(@intCast(self.bits >> self.bit_count));
                     self.bytes += 1;
                     self.bits &= (@as(u32, 1) << self.bit_count) - 1;
@@ -141,6 +159,16 @@ pub const Decoder = struct {
                     try self.byte(c);
                 }
             },
+            .id => {
+                const id = self.raw_message_id.?;
+                if (c == '"') {
+                    if (self.id_offset != id.len) return error.MessageIdentityMismatch;
+                    self.state = .separator;
+                } else {
+                    if (self.id_offset == id.len or c != id[self.id_offset]) return error.MessageIdentityMismatch;
+                    self.id_offset += 1;
+                }
+            },
             .separator => {
                 if (std.ascii.isWhitespace(c)) return;
                 if (c == ',') self.state = .key_start else if (c == '}') self.state = .done else return error.InvalidProviderResponse;
@@ -150,7 +178,12 @@ pub const Decoder = struct {
     }
     pub fn finish(self: *Decoder) !void {
         if (self.failure) |err| return err;
-        if (self.state != .done or !self.seen_data or !self.seen_size) return error.InvalidProviderResponse;
+        if (self.state != .done or !self.seen_data) return error.InvalidProviderResponse;
+        if (self.raw_message_id != null) {
+            if (!self.seen_id) return error.MessageIdentityMismatch;
+            return;
+        }
+        if (!self.seen_size) return error.InvalidProviderResponse;
         if (self.bytes != self.expected or self.size != self.expected) return error.BodySizeMismatch;
     }
 };
@@ -197,4 +230,29 @@ test "attachment streaming: incoming size boundary is independent of outgoing fi
     try std.testing.expectError(error.AttachmentsTooLarge, Decoder.init(&sink, 50 * 1024 * 1024 + 1));
     try std.testing.expectError(error.AttachmentsTooLarge, Decoder.init(&sink, 51 * 1024 * 1024));
     try std.testing.expectEqual(@as(usize, 0), sink.buffered().len);
+}
+
+test "attachment streaming: raw originals exceed the embedded tier without allocating payloads" {
+    var buffer: [4096]u8 = undefined;
+    var sink: std.Io.Writer.Discarding = .init(&buffer);
+    var decoder = try Decoder.initRaw(&sink.writer, "raw-source");
+    try decoder.writer.writeAll("{\"raw\":\"");
+    var encoded: [4096]u8 = undefined;
+    for (0..encoded.len / 4) |index| @memcpy(encoded[index * 4 ..][0..4], "QUJD");
+    for (0..1025) |_| try decoder.writer.writeAll(&encoded);
+    try decoder.writer.writeAll("\",\"id\":\"raw-source\"}");
+    try decoder.finish();
+    try std.testing.expectEqual(@as(usize, 1025 * 3072), decoder.bytes);
+    try std.testing.expectEqual(@as(u64, decoder.bytes), sink.fullCount());
+    for ([_][]const u8{ "{\"id\":\"neighbor\",\"raw\":\"QUJD\"}", "{\"raw\":\"QUJD\"}", "{\"id\":\"raw-source\",\"raw\":\"QUJD\",\"raw\":\"QUJD\"}", "{\"id\":\"raw-source\",\"raw\":\"QUJ\"}" }) |wire| {
+        var invalid = try Decoder.initRaw(&sink.writer, "raw-source");
+        invalid.writer.writeAll(wire) catch {};
+        if (invalid.finish()) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    var limited = try Decoder.initRaw(&sink.writer, "raw-source");
+    // The same streaming boundary check with a small limit avoids a 25 MiB
+    // test payload while checking refusal before its first excess byte.
+    limited.expected = 2;
+    try std.testing.expectError(error.WriteFailed, limited.writer.writeAll("{\"id\":\"raw-source\",\"raw\":\"QUJD\"}"));
+    try std.testing.expectEqual(error.AttachmentsTooLarge, limited.failure.?);
 }

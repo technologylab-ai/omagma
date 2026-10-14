@@ -1,4 +1,8 @@
 const std = @import("std");
+const session_cache = @import("session_cache.zig");
+fn sessionNow(io: std.Io) i64 {
+    return @intCast(std.Io.Timestamp.now(io, .boot).toMilliseconds());
+}
 const b = @import("../bounded.zig");
 const http = @import("../http_client.zig");
 const oauth = @import("../oauth.zig");
@@ -66,6 +70,37 @@ const Network = struct {
     scopes: []const []const u8,
     refreshed_401: bool = false,
     response: []u8,
+    verified_account: []const u8 = "",
+    cache: ?*session_cache.Cache = null,
+    cache_binding: ?session_cache.Binding = null,
+    cache_lease: ?session_cache.Lease = null,
+    cache_index: usize = 0,
+    fn invalidate(self: *Network) void {
+        if (self.cache) |cache| if (self.cache_lease) |lease| cache.invalidate(lease);
+        self.cache_lease = null;
+    }
+    /// Every newly exchanged token must prove its Gmail account before use or
+    /// publication. A retry never extends the original job's HTTP deadline.
+    fn refreshVerified(self: *Network) !void {
+        self.invalidate();
+        const started = sessionNow(self.client.io);
+        if (self.cache) |cache| self.cache_lease = try cache.begin(self.cache_index, self.cache_binding.?, started);
+        errdefer self.invalidate();
+        const token = try oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes);
+        const profile = try self.client.requestTerminal("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, token.access_token, null, self.response);
+        try oauth.verifyProfile(profile.status, profile.body, self.verified_account);
+        if (self.cache) |cache| _ = try cache.publishVerified(self.cache_lease.?, self.verified_account, token.access_token, started, token.expires_in, sessionNow(self.client.io));
+        self.access = token.access_token;
+    }
+    /// Only read operations may retry once. A write response (including 401)
+    /// is returned to its durable operation owner without another dispatch.
+    fn refreshRead(self: *Network) !void {
+        self.refreshed_401 = true;
+        self.refreshVerified() catch |err| switch (err) {
+            error.InvalidGrant, error.OutOfMemory, error.Canceled, error.Timeout, error.WrongAccount => return err,
+            else => return error.TokenRefreshFailed,
+        };
+    }
     fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         const self: *Network = @ptrCast(@alignCast(ctx));
         const json_body = if (body) |v| try std.json.Stringify.valueAlloc(a, v, .{}) else null;
@@ -74,17 +109,13 @@ const Network = struct {
             if (mutating and !localRequestError(err)) return error.UnknownOutcome;
             return err;
         };
-        if (response.status == 401 and !self.refreshed_401) {
-            self.refreshed_401 = true;
-            const token = oauth.refreshScoped(self.client.io, self.client, self.desktop, self.refresh_token, self.access_storage, self.scopes) catch |err| switch (err) {
-                error.InvalidGrant, error.OutOfMemory, error.Canceled, error.Timeout => return err,
-                else => return error.TokenRefreshFailed,
-            };
-            self.access = token.access_token;
-            response = self.client.requestTerminal(url, method, self.access, json_body, self.response) catch |err| {
-                if (mutating and !localRequestError(err)) return error.UnknownOutcome;
-                return err;
-            };
+        if (response.status == 401) {
+            self.invalidate();
+            if (!mutating and !self.refreshed_401) {
+                try self.refreshRead();
+                response = try self.client.requestTerminal(url, method, self.access, json_body, self.response);
+                if (response.status == 401) self.invalidate();
+            }
         }
         return decodeResponse(a, method, url, response.status, response.body);
     }
@@ -151,6 +182,43 @@ fn contactPrecondition(a: std.mem.Allocator, bytes: []const u8) bool {
 /// One bounded refresh owns one credential/client lifetime. Callers may reset
 /// independent per-message arenas after committing each response; transport and
 /// token buffers remain owned here until close joins every outstanding request.
+const NetworkBuffers = struct {
+    refresh: []u8,
+    access: []u8,
+    response: []u8,
+
+    fn init(a: std.mem.Allocator) !NetworkBuffers {
+        const refresh = try a.alloc(u8, 4096);
+        errdefer {
+            std.crypto.secureZero(u8, refresh);
+            a.free(refresh);
+        }
+        const access = try a.alloc(u8, 4096);
+        errdefer {
+            std.crypto.secureZero(u8, access);
+            a.free(access);
+        }
+        return .{
+            .refresh = refresh,
+            .access = access,
+            .response = try a.alloc(u8, types.Limits.request_bytes),
+        };
+    }
+
+    fn wipe(self: NetworkBuffers) void {
+        std.crypto.secureZero(u8, self.refresh);
+        std.crypto.secureZero(u8, self.access);
+        std.crypto.secureZero(u8, self.response);
+    }
+
+    fn deinit(self: NetworkBuffers, a: std.mem.Allocator) void {
+        self.wipe();
+        a.free(self.response);
+        a.free(self.access);
+        a.free(self.refresh);
+    }
+};
+
 pub const NetworkSession = struct {
     io: std.Io,
     client: http.Client,
@@ -162,18 +230,42 @@ pub const NetworkSession = struct {
     refresh_token: []const u8,
     scopes: []const []const u8,
     capabilities: []const []const u8,
+    /// Set only after the credential's Gmail profile matches this account.
+    verified_account: []const u8 = "",
+    buffer_allocator: std.mem.Allocator,
     network: Network = undefined,
     initialized: bool = false,
     pub fn init(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !void {
-        const index = config.index(account) orelse return error.UnknownAccount;
+        return self.initWithAllocator(io, a, a, config, account, cmd, request);
+    }
+    pub fn initWithAllocator(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, buffer_allocator: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !void {
+        return self.initRequiringAnyCapabilityWithAllocator(io, a, buffer_allocator, config, account, cmd, request, &.{});
+    }
+    /// Additional host capability gate sharing the existing grant validation,
+    /// credential backend and verified-profile path. An empty set preserves the
+    /// ordinary mail initializer; a nonempty set requires a terminal grant.
+    pub fn initRequiringAnyCapabilityWithAllocator(self: *NetworkSession, io: std.Io, a: std.mem.Allocator, buffer_allocator: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, required_any: []const []const u8) !void {
+        const index = config.index(account) orelse {
+            if (config.runtime_access_cache) |cache| cache.clear();
+            return error.UnknownAccount;
+        };
+        errdefer if (config.runtime_access_cache) |cache| cache.invalidateAccount(index);
         if (!config.accounts[index].enabled) return error.AccountDisabled;
         try b.address(account);
         var registry: auth.Registry = .{};
         const bar_only = try j.boolean(request, "barGrantOnly", false) or try j.boolean(request, "auto", false);
-        if (!bar_only) if (j.get(request, "grantFile")) |path| {
-            registry = try auth.load(io, a, try j.string(path));
+        if (!bar_only and config.credential_store == .vault) {
+            registry = try auth.loadConfigured(io, a, config, "");
+        } else if (!bar_only) if (j.get(request, "grantFile")) |path| {
+            registry = try auth.loadConfigured(io, a, config, try j.string(path));
         };
         const grant = auth.find(&registry, account);
+        if (required_any.len != 0) {
+            const selected = grant orelse return error.PermissionDenied;
+            var permitted = false;
+            for (required_any) |capability_name| permitted = permitted or selected.permits(capability_name);
+            if (!permitted) return error.PermissionDenied;
+        }
         const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
         if (grant) |g| {
             if (!g.permits(capability)) return error.PermissionDenied;
@@ -182,12 +274,15 @@ pub const NetworkSession = struct {
         if (client_file.len == 0) return error.OAuthClientRequired;
         self.desktop = .{};
         errdefer self.desktop.wipe();
-        try oauth.loadDesktop(io, client_file, &self.desktop);
+        try oauth.loadDesktopWithSettings(io, client_file, &self.desktop, config.credentials());
         if (grant) |g| if (!std.mem.eql(u8, self.desktop.client_id.slice(), g.clientId)) return error.GrantClientMismatch;
-        const refresh = try a.alloc(u8, 4096);
-        errdefer std.crypto.secureZero(u8, refresh);
-        const access = try a.alloc(u8, 4096);
-        errdefer std.crypto.secureZero(u8, access);
+        // Fixed wire/token storage does not belong in the growing JSON arena:
+        // a 3 MiB response otherwise makes later small JSON growth request a
+        // multi-MiB arena node and fragments the native reusable fixed heap.
+        const buffers = try NetworkBuffers.init(buffer_allocator);
+        errdefer buffers.deinit(buffer_allocator);
+        const refresh = buffers.refresh;
+        const access = buffers.access;
         const refresh_token = if (grant) |g| (try keyring.lookupTerminal(io, config.credentials(), account, g.clientId, g.grantId, refresh)) orelse return error.NotConnected else (if (bar_only) try keyring.lookupAutomatic(io, config.credentials(), account, self.desktop.client_id.slice(), refresh) else try keyring.lookup(io, config.credentials(), account, self.desktop.client_id.slice(), refresh)) orelse return error.NotConnected;
         // One absolute attachment deadline covers token refresh, the profile
         // check, the streamed download and its single 401 retry. Every other
@@ -195,36 +290,97 @@ pub const NetworkSession = struct {
         self.client = if (std.mem.eql(u8, cmd, "mail.attachment")) try http.Client.initAttachmentDownload(io) else try http.Client.init(io);
         errdefer self.client.deinit();
         const scopes: []const []const u8 = if (grant) |g| g.scopes else &.{oauth.readonly_scope};
-        const tokens = try oauth.refreshScoped(io, &self.client, &self.desktop, refresh_token, access, scopes);
-        const response = try a.alloc(u8, types.Limits.request_bytes);
-        errdefer std.crypto.secureZero(u8, response);
-        const profile_response = try self.client.requestTerminal("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, tokens.access_token, null, response);
-        try oauth.verifyProfile(profile_response.status, profile_response.body, account);
+        const capabilities: []const []const u8 = if (grant) |g| g.capabilities else &.{"mail-read"};
+        self.verified_account = try a.dupe(u8, account);
         // The initialized HTTP client must never be copied: its inner allocator
         // borrows the workspace in this caller-stable storage.
         self.io = io;
         self.refresh = refresh;
         self.access = access;
-        self.response = response;
-        self.token = tokens.access_token;
+        self.response = buffers.response;
         self.refresh_token = refresh_token;
         self.scopes = scopes;
-        self.capabilities = if (grant) |g| g.capabilities else &.{"mail-read"};
-        self.initialized = false;
+        self.capabilities = capabilities;
+        self.buffer_allocator = buffer_allocator;
+        self.network = .{ .client = &self.client, .access = "", .access_storage = access, .desktop = &self.desktop, .refresh_token = refresh_token, .scopes = scopes, .response = buffers.response, .verified_account = self.verified_account, .cache = config.runtime_access_cache, .cache_index = index };
+        if (config.runtime_access_cache) |cache| {
+            var location_buffer: [32]u8 = undefined;
+            const location = if (config.credential_store == .vault) try std.fmt.bufPrint(&location_buffer, "vault:{x}", .{@intFromPtr((config.runtime_provider orelse return error.VaultLocked).context)}) else config.credential_directory.slice();
+            const grant_revision = if (grant) |g| session_cache.revision(try j.encodeAlloc(a, g.*, .{})) else session_cache.revision("omagma-bar-readonly-v1");
+            const binding = try session_cache.Binding.init(.{
+                .account = account,
+                .namespace = if (grant != null) .terminal else if (bar_only) .readonly_automatic else .readonly_interactive,
+                .client_id = self.desktop.client_id.slice(),
+                .client_revision = session_cache.revision(self.desktop.client_secret.slice()),
+                .grant_id = if (grant) |g| g.grantId else "",
+                .grant_revision = grant_revision,
+                .scopes = scopes,
+                .capabilities = capabilities,
+                .credential_backend = switch (config.credential_store) {
+                    .keyring => .keyring,
+                    .file => .file,
+                    .vault => .vault,
+                },
+                .credential_location = location,
+                .credential_revision = session_cache.revision(refresh_token),
+            });
+            self.network.cache_binding = binding;
+            const now = sessionNow(io);
+            self.network.cache_lease = try cache.begin(index, binding, now);
+            if (try cache.token(self.network.cache_lease.?, now)) |token| self.network.access = token;
+        }
+        if (self.network.access.len == 0) try self.network.refreshVerified();
+        self.token = self.network.access;
+        self.initialized = true;
     }
     pub fn transport(self: *NetworkSession) Transport {
         if (!self.initialized) {
-            self.network = .{ .client = &self.client, .access = self.token, .access_storage = self.access, .desktop = &self.desktop, .refresh_token = self.refresh_token, .scopes = self.scopes, .response = self.response };
+            self.network = .{ .client = &self.client, .access = self.token, .access_storage = self.access, .desktop = &self.desktop, .refresh_token = self.refresh_token, .scopes = self.scopes, .response = self.response, .verified_account = self.verified_account };
             self.initialized = true;
         }
         return .{ .context = &self.network, .requestFn = Network.request };
     }
+    /// A mutating upload never retries after 401. Invalidate its cached token
+    /// so a later explicit operation reacquires authorization normally.
+    /// Stream an exact message attachment through this already verified session.
+    /// The caller retains one HTTP client and the session's single read retry.
+    pub fn attachmentToWriter(self: *NetworkSession, a: std.mem.Allocator, message_id: []const u8, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+        try b.identifier(message_id);
+        try mime.validateAttachment(expected.filename, expected.mimeType);
+        if (expected.id.len == 0 or expected.id.len > 1024) return error.InvalidAttachmentId;
+        if (expected.size > types.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
+        return downloadToWriter(self, a, message_id, expected, writer);
+    }
+    pub fn invalidateAccess(self: *NetworkSession) void {
+        self.network.invalidate();
+    }
     pub fn close(self: *NetworkSession) void {
         self.client.deinit();
         self.desktop.wipe();
-        std.crypto.secureZero(u8, self.refresh);
-        std.crypto.secureZero(u8, self.access);
-        std.crypto.secureZero(u8, self.response);
+        const buffers: NetworkBuffers = .{ .refresh = self.refresh, .access = self.access, .response = self.response };
+        buffers.deinit(self.buffer_allocator);
+        self.verified_account = "";
+    }
+    /// Raw Calendar status/body for its own service classifier. Response bytes
+    /// borrow the reusable session buffer until the next network request.
+    /// Calendar writes never refresh/retry automatically, including a 401.
+    pub fn requestCalendarRaw(self: *NetworkSession, account: []const u8, url: []const u8, method: std.http.Method, json_body: ?[]const u8, if_match: ?[]const u8, retry_unauthorized: bool) !http.Response {
+        if (!std.ascii.eqlIgnoreCase(account, self.verified_account)) return error.CalendarAccountMismatch;
+        _ = self.transport();
+        const output = self.response[0..@min(self.response.len, http.calendar_response_bytes)];
+        var response = try self.client.requestCalendar(url, method, self.network.access, json_body, if_match, output);
+        if (response.status == 401) {
+            self.network.invalidate();
+            if (retry_unauthorized and calendarReadRetryAllowed(method, url) and !self.network.refreshed_401) {
+                try self.network.refreshRead();
+                response = try self.client.requestCalendar(url, method, self.network.access, json_body, if_match, output);
+                if (response.status == 401) self.network.invalidate();
+            }
+        }
+        return response;
+    }
+    pub fn calendarReadRetryAllowed(method: std.http.Method, url: []const u8) bool {
+        return method == .GET or (method == .POST and std.mem.eql(u8, url, "https://www.googleapis.com/calendar/v3/freeBusy"));
     }
 };
 pub fn execute(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value) !j.Value {
@@ -234,8 +390,10 @@ pub fn executeProgress(io: std.Io, a: std.mem.Allocator, config: *const Config, 
     return executeProgressWithAllocator(io, a, a, config, account, cmd, request, progress_sink);
 }
 pub fn executeProgressWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, cmd: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) !j.Value {
+    var phase = std.heap.ArenaAllocator.init(temporary_allocator);
+    defer phase.deinit();
     var session: NetworkSession = undefined;
-    try session.init(io, a, config, account, cmd, request);
+    try session.initWithAllocator(io, phase.allocator(), temporary_allocator, config, account, cmd, request);
     defer session.close();
     var transport = session.transport();
     transport.temporary_allocator = temporary_allocator;
@@ -246,24 +404,43 @@ pub fn executeProgressWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_
 /// The cached attachment is an authoritative positional argument from core's
 /// account-scoped message read, never a caller-supplied JSON request field.
 pub fn executeAttachment(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, attachment: types.Attachment, progress_sink: ?types.ProgressSink) !types.Attachment {
+    return executeAttachmentWithAllocator(io, a, a, config, account, request, attachment, progress_sink);
+}
+
+pub fn executeAttachmentWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, attachment: types.Attachment, progress_sink: ?types.ProgressSink) !types.Attachment {
+    var phase = std.heap.ArenaAllocator.init(temporary_allocator);
+    defer phase.deinit();
+    const scratch = phase.allocator();
     var session: NetworkSession = undefined;
-    try session.init(io, a, config, account, "mail.attachment", request);
+    try session.initWithAllocator(io, scratch, temporary_allocator, config, account, "mail.attachment", request);
     defer session.close();
     var transport = session.transport();
+    transport.temporary_allocator = temporary_allocator;
     transport.progress_sink = progress_sink;
-    return attachmentAuthorized(a, account, session.capabilities, transport, try j.required(request, "messageId"), attachment);
+    return retainAttachment(a, try attachmentAuthorized(scratch, account, session.capabilities, transport, try j.required(request, "messageId"), attachment));
 }
 
 pub fn executeAttachmentToWriter(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+    return executeAttachmentToWriterWithAllocator(io, a, a, config, account, request, expected, writer);
+}
+
+pub fn executeAttachmentToWriterWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+    var phase = std.heap.ArenaAllocator.init(temporary_allocator);
+    defer phase.deinit();
+    return retainAttachment(a, try executeAttachmentToWriterScoped(io, phase.allocator(), temporary_allocator, config, account, request, expected, writer));
+}
+
+fn executeAttachmentToWriterScoped(io: std.Io, a: std.mem.Allocator, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
     try mime.validateAttachment(expected.filename, expected.mimeType);
     if (expected.id.len == 0 or expected.id.len > 1024) return error.InvalidAttachmentId;
     if (expected.size > types.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
     const message_id = try j.required(request, "messageId");
     try b.identifier(message_id);
     var session: NetworkSession = undefined;
-    try session.init(io, a, config, account, "mail.attachment", request);
+    try session.initWithAllocator(io, a, temporary_allocator, config, account, "mail.attachment", request);
     defer session.close();
-    const transport = session.transport();
+    var transport = session.transport();
+    transport.temporary_allocator = temporary_allocator;
     return downloadToWriter(&session, a, message_id, expected, writer) catch |err| switch (err) {
         error.MessageNotFound, error.ProviderRejected => {
             const fresh = try read(a, transport, message_id);
@@ -291,11 +468,13 @@ fn downloadToWriter(session: *NetworkSession, a: std.mem.Allocator, message_id: 
     var decoder = try @import("attachment_json.zig").Decoder.init(writer, expected.size);
     const url = try std.fmt.allocPrint(a, "{s}/attachments/{s}?fields=size,data", .{ try messageUrl(a, message_id, ""), try escaped(a, expected.id) });
     var response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
-    if (response.status == 401 and !session.network.refreshed_401) {
-        session.network.refreshed_401 = true;
-        const token = try oauth.refreshScoped(session.io, &session.client, &session.desktop, session.refresh_token, session.access, session.scopes);
-        session.network.access = token.access_token;
-        response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
+    if (response.status == 401) {
+        session.network.invalidate();
+        if (!session.network.refreshed_401) {
+            try session.network.refreshRead();
+            response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
+            if (response.status == 401) session.network.invalidate();
+        }
     }
     if (response.status < 200 or response.status >= 300) _ = try decodeResponse(a, .GET, url, response.status, response.body);
     try decoder.finish();
@@ -305,12 +484,190 @@ fn downloadToWriter(session: *NetworkSession, a: std.mem.Allocator, message_id: 
 /// On-demand original source for forwarding. It shares the ordinary read
 /// grant and verified account session; no raw message is added to the cache.
 pub fn executeRawMessage(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) ![]const u8 {
+    return executeRawMessageWithAllocator(io, a, a, config, account, request, progress_sink);
+}
+
+pub fn executeRawMessageWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, progress_sink: ?types.ProgressSink) ![]const u8 {
+    var phase = std.heap.ArenaAllocator.init(temporary_allocator);
+    defer phase.deinit();
+    const scratch = phase.allocator();
     var session: NetworkSession = undefined;
-    try session.init(io, a, config, account, "mail.read", request);
+    try session.initWithAllocator(io, scratch, temporary_allocator, config, account, "mail.read", request);
     defer session.close();
     var transport = session.transport();
+    transport.temporary_allocator = temporary_allocator;
     transport.progress_sink = progress_sink;
-    return readAuthorizedRawMessage(a, account, session.capabilities, transport, try j.required(request, "messageId"));
+    return a.dupe(u8, try readAuthorizedRawMessage(scratch, account, session.capabilities, transport, try j.required(request, "messageId")));
+}
+
+/// Stream a verified original directly to a private reservation. The full
+/// base64 RAW value and its decoded bytes never occupy a request arena.
+pub fn executeRawMessageToWriter(io: std.Io, temporary_allocator: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, writer: *std.Io.Writer) !usize {
+    var phase = std.heap.ArenaAllocator.init(temporary_allocator);
+    defer phase.deinit();
+    const a = phase.allocator();
+    const message_id = try j.required(request, "messageId");
+    var decoder = try @import("attachment_json.zig").Decoder.initRaw(writer, message_id);
+    var session: NetworkSession = undefined;
+    try session.initWithAllocator(io, a, temporary_allocator, config, account, "mail.read", request);
+    defer session.close();
+    _ = session.transport();
+    const url = try messageUrl(a, message_id, "?format=raw&fields=id,raw");
+    var response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
+    if (response.status == 401) {
+        session.network.invalidate();
+        if (!session.network.refreshed_401) {
+            try session.network.refreshRead();
+            response = session.client.requestTerminalDownload(url, session.network.access, &decoder.writer, http.terminal_download_bytes, session.response) catch |err| return decoder.failure orelse err;
+            if (response.status == 401) session.network.invalidate();
+        }
+    }
+    if (response.status < 200 or response.status >= 300) _ = try decodeResponse(a, .GET, url, response.status, response.body);
+    try decoder.finish();
+    return decoder.bytes;
+}
+
+/// Shared fixture/inline path into the same streaming decoder used by native
+/// HTTP. It checks all base64 bytes and length without another binary copy.
+pub fn writeAttachmentData(writer: *std.Io.Writer, attachment: types.Attachment) !void {
+    var decoder = try @import("attachment_json.zig").Decoder.init(writer, attachment.size);
+    std.json.Stringify.value(.{ .size = attachment.size, .data = attachment.data }, .{}, &decoder.writer) catch |err| return decoder.failure orelse err;
+    try decoder.finish();
+}
+
+pub fn attachmentAuthorizedToWriter(a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, message_id: []const u8, expected: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
+    try mime.validateAttachment(expected.filename, expected.mimeType);
+    if (expected.id.len == 0 or expected.id.len > 1024) return error.InvalidAttachmentId;
+    if (expected.size > types.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
+    try b.identifier(message_id);
+    return downloadTransportToWriter(a, transport, message_id, expected, writer) catch |err| switch (err) {
+        error.MessageNotFound, error.ProviderRejected => {
+            const fresh = try read(a, transport, message_id);
+            var resolved: ?types.Attachment = null;
+            for (fresh.attachments) |candidate| {
+                if (!std.mem.eql(u8, candidate.filename, expected.filename) or !std.mem.eql(u8, candidate.mimeType, expected.mimeType) or candidate.size != expected.size) continue;
+                if (expected.contentId) |id| if (candidate.contentId == null or !std.mem.eql(u8, id, candidate.contentId.?)) continue;
+                if (expected.contentLocation) |location| if (candidate.contentLocation == null or !std.mem.eql(u8, location, candidate.contentLocation.?)) continue;
+                if (resolved != null) return error.AmbiguousAttachment;
+                resolved = candidate;
+            }
+            return downloadTransportToWriter(a, transport, message_id, resolved orelse return error.AttachmentNotFound, writer);
+        },
+        else => return err,
+    };
+}
+fn downloadTransportToWriter(a: std.mem.Allocator, transport: Transport, message_id: []const u8, attachment: types.Attachment, writer: *std.Io.Writer) !types.Attachment {
+    var result = attachment;
+    if (attachment.data.len == 0 and attachment.size != 0) {
+        const value = try transport.request(a, .GET, try std.fmt.allocPrint(a, "{s}/attachments/{s}", .{ try messageUrl(a, message_id, ""), try escaped(a, attachment.id) }), null);
+        result.data = try j.required(value, "data");
+    }
+    try writeAttachmentData(writer, result);
+    result.data = "";
+    return result;
+}
+
+/// A refreshed descriptor may borrow every string from a temporary FULL read.
+/// Retain the verified result before reclaiming the network/decode workspace.
+pub fn retainAttachment(a: std.mem.Allocator, attachment: types.Attachment) !types.Attachment {
+    var result = attachment;
+    inline for (.{ "id", "filename", "mimeType", "data" }) |field| {
+        @field(result, field) = try a.dupe(u8, @field(attachment, field));
+    }
+    inline for (.{ "blobId", "contentId", "disposition", "contentLocation" }) |field| {
+        @field(result, field) = if (@field(attachment, field)) |value| try a.dupe(u8, value) else null;
+    }
+    return result;
+}
+
+test "forward memory: native response workspaces are reclaimed and retained files own every field" {
+    const Oracle = struct {
+        response: []u8,
+        wire: []const u8,
+        calls: usize = 0,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(body == null);
+            try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/forward-source/attachments/current-token", url);
+            @memcpy(self.response[0..self.wire.len], self.wire);
+            return decodeResponse(a, method, url, 200, self.response[0..self.wire.len]);
+        }
+    };
+    var fixtures = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixtures.deinit();
+    const fa = fixtures.allocator();
+    const sizes = [_]usize{ 14_999, 14_999, 83_694, 298_881 };
+    var wires: [sizes.len][]const u8 = undefined;
+    var bytes: [sizes.len][]const u8 = undefined;
+    for (sizes, 0..) |size, index| {
+        const data = try fa.alloc(u8, size);
+        for (data, 0..) |*byte, position| byte.* = @intCast((position + index) % 251);
+        bytes[index] = data;
+        const encoded = try fa.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(size));
+        _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, data);
+        wires[index] = try std.fmt.allocPrint(fa, "{{\"size\":{d},\"data\":\"{s}\"}}", .{ size, encoded });
+    }
+    const reservation = try std.testing.allocator.alloc(u8, 24 * 1024 * 1024);
+    defer std.testing.allocator.free(reservation);
+    var heap = @import("../fixed_heap.zig").Heap.init(reservation);
+    var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = 20 * 1024 * 1024, .reservation_bytes = reservation.len };
+    {
+        var command = std.heap.ArenaAllocator.init(cap.allocator());
+        defer command.deinit();
+        var retained: [sizes.len]types.Attachment = undefined;
+        for (sizes, 0..) |size, index| {
+            errdefer std.debug.print("\nforward-memory failed file={d} bytes={d}: {any}\n", .{ index, size, cap.snapshot() });
+            {
+                var phase = std.heap.ArenaAllocator.init(cap.allocator());
+                defer phase.deinit();
+                const scratch = phase.allocator();
+                // Use the exact native session allocation, not a tiny fixture
+                // response which would hide per-download retention of 3 MiB.
+                const buffers = try NetworkBuffers.init(cap.allocator());
+                defer buffers.deinit(cap.allocator());
+                const selected = try retainAttachment(scratch, .{ .id = "current-token", .filename = "fixture.bin", .mimeType = "application/octet-stream", .size = size, .contentId = "source-image", .disposition = "attachment", .contentLocation = "https://example.test/source.bin" });
+                var oracle: Oracle = .{ .response = buffers.response, .wire = wires[index] };
+                const downloaded = try attachmentAuthorized(scratch, "self@example.test", &.{"mail-read"}, .{ .context = &oracle, .requestFn = Oracle.request, .temporary_allocator = cap.allocator() }, "forward-source", selected);
+                retained[index] = try retainAttachment(command.allocator(), downloaded);
+                try std.testing.expectEqual(@as(usize, 1), oracle.calls);
+                // Deterministically poison all borrowed provider fields before
+                // destroying their arena, including the downloaded base64.
+                inline for (.{ "id", "filename", "mimeType", "data" }) |field| @memset(@constCast(@field(downloaded, field)), 0xcc);
+                inline for (.{ "contentId", "disposition", "contentLocation" }) |field| @memset(@constCast(@field(downloaded, field).?), 0xcc);
+            }
+            // Only the four retained file DTOs belong to the command; no
+            // completed native response/decode workspace survives its phase.
+            try std.testing.expect(cap.snapshot().allocatorUsedBytes < 2 * 1024 * 1024);
+        }
+        for (retained, 0..) |attachment, index| {
+            try std.testing.expectEqualStrings("current-token", attachment.id);
+            try std.testing.expectEqualStrings("fixture.bin", attachment.filename);
+            try std.testing.expectEqualStrings("application/octet-stream", attachment.mimeType);
+            try std.testing.expectEqualStrings("source-image", attachment.contentId.?);
+            try std.testing.expectEqualStrings("attachment", attachment.disposition.?);
+            try std.testing.expectEqualStrings("https://example.test/source.bin", attachment.contentLocation.?);
+            try std.testing.expectEqualSlices(u8, bytes[index], try mime.decodeBase64Url(attachment.data, fa));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().allocatorUsedBytes);
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+    try std.testing.expect(cap.snapshot().allocatorPeakBytes < 12 * 1024 * 1024);
+}
+
+test "forward memory: session buffer allocation failures release partial ownership" {
+    const Oracle = struct {
+        fn allocate(a: std.mem.Allocator) !void {
+            const buffers = try NetworkBuffers.init(a);
+            defer buffers.deinit(a);
+            @memset(buffers.refresh, 0x5a);
+            @memset(buffers.access, 0xa5);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Oracle.allocate, .{});
 }
 
 /// Fixture sources use this exact decoder too. RAW has no parsed payload, so
@@ -558,6 +915,12 @@ fn readValue(a: std.mem.Allocator, temporary: std.mem.Allocator, transport: Tran
 /// Internal typed read for bounded cache prefetch. Authorization and provider
 /// identity checks match dispatchAuthorized, while large body strings avoid a
 /// Message -> JSON Value -> Message round-trip in the caller's message arena.
+/// Exact provider metadata without requiring cache retention or downloading a body.
+pub fn readAuthorizedMetadata(a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, id: []const u8) !types.Message {
+    try recipients.validateAddress(account);
+    if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
+    return fetchMetadata(a, transport, id, null);
+}
 pub fn readAuthorizedMessage(a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, id: []const u8) !types.Message {
     try recipients.validateAddress(account);
     if (!permits(capabilities, "mail-read")) return error.PermissionDenied;
@@ -611,7 +974,8 @@ pub fn date(io: std.Io, a: std.mem.Allocator, calendar: bool) ![]const u8 {
 
 const MultipartSource = struct {
     io: std.Io,
-    file: std.Io.File,
+    file: ?std.Io.File = null,
+    source: ?mime.Source = null,
     size: usize,
     expected: []const u8,
     prefix: []const u8,
@@ -621,6 +985,10 @@ const MultipartSource = struct {
     suffix_offset: usize = 0,
     verified: bool = false,
     hash: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
+    fn readBody(self: *MultipartSource, bytes: []u8) !usize {
+        if (self.source) |source| return source.readFn(source.ctx, bytes);
+        return self.file.?.readPositional(self.io, &.{bytes}, self.file_offset);
+    }
     fn read(ctx: *anyopaque, buffer: []u8) !usize {
         const self: *MultipartSource = @ptrCast(@alignCast(ctx));
         if (self.prefix_offset < self.prefix.len) {
@@ -630,7 +998,7 @@ const MultipartSource = struct {
             return count;
         }
         if (self.file_offset < self.size) {
-            const count = try self.file.readPositional(self.io, &.{buffer[0..@min(buffer.len, self.size - self.file_offset)]}, self.file_offset);
+            const count = try self.readBody(buffer[0..@min(buffer.len, self.size - self.file_offset)]);
             if (count == 0) return error.AttachmentChanged;
             self.file_offset += count;
             self.hash.update(buffer[0..count]);
@@ -638,7 +1006,7 @@ const MultipartSource = struct {
         }
         if (!self.verified) {
             var extra: [1]u8 = undefined;
-            if (try self.file.readPositional(self.io, &.{&extra}, self.file_offset) != 0) return error.AttachmentChanged;
+            if (try self.readBody(&extra) != 0) return error.AttachmentChanged;
             var digest: [32]u8 = undefined;
             self.hash.final(&digest);
             if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), self.expected)) return error.AttachmentChanged;
@@ -703,16 +1071,11 @@ pub fn executeSpool(io: std.Io, a: std.mem.Allocator, config: *const Config, acc
     const suffix = try std.fmt.allocPrint(a, "\r\n--{s}--\r\n", .{boundary});
     const content_type = try std.fmt.allocPrint(a, "multipart/related; boundary=\"{s}\"", .{boundary});
     const url = "https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=multipart&fields=id,threadId";
-    const original: MultipartSource = .{ .io = io, .file = spool.file, .size = spool.size, .expected = &spool.hash, .prefix = prefix, .suffix = suffix };
-    var source = original;
-    var response = session.client.requestTerminalFile(url, .POST, session.network.access, content_type, .{ .ctx = &source, .readFn = MultipartSource.read }, prefix.len + spool.size + suffix.len, session.response) catch |err| return if (localRequestError(err)) err else error.UnknownOutcome;
-    if (response.status == 401 and !session.network.refreshed_401) {
-        session.network.refreshed_401 = true;
-        const token = try oauth.refreshScoped(io, &session.client, &session.desktop, session.refresh_token, session.access, session.scopes);
-        session.network.access = token.access_token;
-        source = original;
-        response = session.client.requestTerminalFile(url, .POST, session.network.access, content_type, .{ .ctx = &source, .readFn = MultipartSource.read }, prefix.len + spool.size + suffix.len, session.response) catch |err| return if (localRequestError(err)) err else error.UnknownOutcome;
-    }
+    var spool_reader = try spool.reader();
+    defer spool_reader.close();
+    var source: MultipartSource = .{ .io = io, .source = .{ .ctx = &spool_reader, .readFn = @import("send_spool.zig").Spool.Reader.read }, .size = spool.size, .expected = &spool.hash, .prefix = prefix, .suffix = suffix };
+    const response = session.client.requestTerminalFile(url, .POST, session.network.access, content_type, .{ .ctx = &source, .readFn = MultipartSource.read }, prefix.len + spool.size + suffix.len, session.response) catch |err| return if (localRequestError(err)) err else error.UnknownOutcome;
+    if (response.status == 401) session.network.invalidate();
     const value = try decodeResponse(a, .POST, url, response.status, response.body);
     const id = j.required(value, "id") catch return error.UnknownOutcome;
     b.identifier(id) catch return error.UnknownOutcome;
@@ -1204,6 +1567,49 @@ test "send preparation: frozen host body is ready before submission and oversize
     try std.testing.expectEqual(@as(usize, 1), oracle.sends);
 }
 
+fn progressiveThread(io: std.Io, a: std.mem.Allocator, transport: Transport, request: j.Value) !?j.Value {
+    const windows = @import("thread_window.zig");
+    const id = try j.required(request, "threadId");
+    try b.identifier(id);
+    var scope: std.heap.ArenaAllocator = .init(transport.temporary_allocator orelse a);
+    defer scope.deinit();
+    const temp = scope.allocator();
+    const url = try std.fmt.allocPrint(temp, "https://gmail.googleapis.com/gmail/v1/users/me/threads/{s}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date&fields=id,messages(id,threadId,labelIds,internalDate,snippet,payload(mimeType,headers))", .{id});
+    const value = try transport.request(temp, .GET, url, null);
+    if (!std.mem.eql(u8, j.text(value, "id"), id)) return error.MessageIdentityMismatch;
+    const entries = try array(value, "messages");
+    if (entries.len > windows.maximum) return error.ThreadTooLarge;
+    // Small conversations retain their existing complete-body behavior.
+    if (entries.len <= windows.limit and j.text(request, "beforeMessageId").len == 0 and j.text(request, "afterMessageId").len == 0 and j.text(request, "windowStartMessageId").len == 0 and j.text(request, "windowEndMessageId").len == 0) return null;
+    const members = try temp.alloc(windows.Member, entries.len);
+    for (entries, members, 0..) |entry, *member, index| {
+        const message_id = try j.required(entry, "id");
+        try b.identifier(message_id);
+        if (!std.mem.eql(u8, j.text(entry, "threadId"), id)) return error.MessageIdentityMismatch;
+        for (members[0..index]) |previous| if (std.mem.eql(u8, previous.id, message_id)) return error.DuplicateMessage;
+        member.* = .{ .id = message_id, .received_at = threadReceivedAt(entry) orelse 0, .source_index = index };
+    }
+    std.sort.heap(windows.Member, members, {}, windows.older);
+    const window = try windows.choose(members, request);
+    var messages: std.ArrayList(types.Message) = .empty;
+    var remaining: usize = types.Limits.thread_bytes;
+    transport.progress(.metadata, 0, window.end - window.start);
+    for (members[window.start..window.end], window.start..) |member, index| {
+        try io.checkCancel();
+        var message = try decode.normalizeMetadataBudgeted(entries[member.source_index], a, &remaining);
+        if (index == window.focus) {
+            transport.progress(.bodies, 0, 1);
+            message = try read(temp, transport, member.id);
+            if (!std.mem.eql(u8, message.threadId, id)) return error.MessageIdentityMismatch;
+            message.bodyCached = message.bodyCacheError.len == 0;
+            message = try decode.retainThreadMessage(message, a, &remaining);
+            transport.progress(.bodies, 1, 1);
+        }
+        try messages.append(a, message);
+    }
+    return try j.value(a, windows.response(messages.items, members.len, window));
+}
+
 pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8, capabilities: []const []const u8, transport: Transport, cmd: []const u8, request: j.Value) !j.Value {
     try recipients.validateAddress(account);
     const capability = requiredCapability(cmd) orelse return error.UnsupportedCommand;
@@ -1284,6 +1690,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     }
     if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) return listAuthorized(io, a, account, capabilities, transport, request);
     if (std.mem.eql(u8, cmd, "mail.thread")) {
+        if (try j.boolean(request, "progressive", false)) if (try progressiveThread(io, a, transport, request)) |result| return result;
         const id = try j.required(request, "threadId");
         try b.identifier(id);
         var thread_scope = std.heap.ArenaAllocator.init(transport.temporary_allocator orelse a);
@@ -1513,6 +1920,51 @@ fn contacts(a: std.mem.Allocator, transport: Transport, cmd: []const u8, request
     const page = try @import("contact_record.zig").readPage(scope.allocator(), temporary, value, .{ .search = search, .limit = if (search) 30 else @intCast(limit) });
     return j.value(a, page);
 }
+test "progressive thread: metadata first reads only the chosen body and validates stable windows" {
+    const Oracle = struct {
+        metadata_calls: usize = 0,
+        body_calls: usize = 0,
+        fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expect(method == .GET and body == null);
+            if (std.mem.indexOf(u8, url, "/threads/") != null) {
+                try std.testing.expect(std.mem.indexOf(u8, url, "format=metadata") != null);
+                self.metadata_calls += 1;
+                var messages: std.ArrayList(j.Value) = .empty;
+                // Reverse provider order so the oracle requires timestamp sort.
+                for (0..63) |index| {
+                    const number = 62 - index;
+                    try messages.append(a, try j.value(a, .{ .id = try std.fmt.allocPrint(a, "mail-{d:0>3}", .{number}), .threadId = "long-thread", .internalDate = try std.fmt.allocPrint(a, "{d}", .{number}), .labelIds = [_][]const u8{"INBOX"}, .snippet = "Metadata only", .payload = .{ .mimeType = "text/plain", .headers = .{ .{ .name = "From", .value = "Sender <sender@example.test>" }, .{ .name = "Subject", .value = "Synthetic conversation" } } } }));
+                }
+                return j.value(a, .{ .id = "long-thread", .messages = messages.items });
+            }
+            self.body_calls += 1;
+            const prefix = "https://gmail.googleapis.com/gmail/v1/users/me/messages/";
+            try std.testing.expect(std.mem.startsWith(u8, url, prefix));
+            const end = std.mem.indexOfScalarPos(u8, url, prefix.len, '?') orelse return error.UnexpectedProviderRequest;
+            const id = url[prefix.len..end];
+            const number = try std.fmt.parseInt(usize, id[5..], 10);
+            return j.value(a, .{ .id = id, .threadId = "long-thread", .internalDate = try std.fmt.allocPrint(a, "{d}", .{number}), .labelIds = [_][]const u8{"INBOX"}, .payload = .{ .mimeType = "text/plain", .headers = .{ .{ .name = "From", .value = "Sender <sender@example.test>" }, .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" } }, .body = .{ .size = @as(usize, 14), .data = "U2VsZWN0ZWQgYm9keQo" } } });
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var oracle: Oracle = .{};
+    const transport: Transport = .{ .context = &oracle, .requestFn = Oracle.request, .temporary_allocator = std.testing.allocator };
+    const result = try dispatchAuthorized(std.testing.io, a, "personal@example.test", &.{"mail-read"}, transport, "mail.thread", try j.value(a, .{ .threadId = "long-thread", .progressive = true, .focusMessageId = "mail-062" }));
+    const messages = try array(result, "messages");
+    try std.testing.expectEqual(@as(usize, 20), messages.len);
+    try std.testing.expectEqual(@as(usize, 1), oracle.metadata_calls);
+    try std.testing.expectEqual(@as(usize, 1), oracle.body_calls);
+    try std.testing.expectEqualStrings("mail-043", j.text(messages[0], "id"));
+    try std.testing.expectEqualStrings("sender@example.test", j.text(j.get(messages[0], "from").?, "address"));
+    try std.testing.expectEqualStrings("Selected body\n", j.text(messages[19], "bodyText"));
+    try std.testing.expectEqual(@as(i64, 19), try j.integer(result, "deferredMessages", -1));
+    try std.testing.expectError(error.ThreadWindowChanged, dispatchAuthorized(std.testing.io, a, "personal@example.test", &.{"mail-read"}, transport, "mail.thread", try j.value(a, .{ .threadId = "long-thread", .progressive = true, .beforeMessageId = "deleted" })));
+    try std.testing.expectEqual(@as(usize, 1), oracle.body_calls);
+}
+
 test "People stale-source response requires exact failedPrecondition reason" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1552,6 +2004,7 @@ test "mail response memory: live read and thread preserve two MiB HTML within th
         thread_wire: []const u8,
         html: []const u8,
         plain: []const u8,
+        response: []u8 = &.{},
         calls: usize = 0,
         fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
             const self: *@This() = @ptrCast(@alignCast(ctx));
@@ -1561,7 +2014,9 @@ test "mail response memory: live read and thread preserve two MiB HTML within th
             const wire = if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/large-html?format=full")) self.message_wire else if (std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/threads/large-thread?format=full")) self.thread_wire else return error.UnexpectedProviderRequest;
             // Match Network.request: decoded strings belong to the supplied
             // per-fetch allocator, with no mock stringify/parse roundtrip.
-            return decodeResponse(a, method, url, 200, wire);
+            try std.testing.expect(wire.len <= self.response.len);
+            @memcpy(self.response[0..wire.len], wire);
+            return decodeResponse(a, method, url, 200, self.response[0..wire.len]);
         }
         fn verify(self: *@This(), allocator: std.mem.Allocator, command: []const u8) !void {
             var request_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1569,7 +2024,15 @@ test "mail response memory: live read and thread preserve two MiB HTML within th
             const a = request_arena.allocator();
             const request_value = try std.json.parseFromSliceLeaky(j.Value, a, "{\"messageId\":\"large-html\",\"threadId\":\"large-thread\"}", .{ .allocate = .alloc_always });
             const before = self.calls;
-            const result = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, .{ .context = self, .requestFn = request, .temporary_allocator = allocator }, command, request_value);
+            const result = blk: {
+                const buffers = try NetworkBuffers.init(allocator);
+                defer buffers.deinit(allocator);
+                self.response = buffers.response;
+                defer self.response = &.{};
+                break :blk try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, .{ .context = self, .requestFn = request, .temporary_allocator = allocator }, command, request_value);
+            };
+            // The full native response storage is now wiped and freed. Both
+            // borrowed response containers must refer only to retained DTOs.
             try std.testing.expectEqual(before + 1, self.calls);
             const message = if (std.mem.eql(u8, command, "mail.read")) result else blk: {
                 const messages = try array(result, "messages");
@@ -2044,12 +2507,14 @@ test "forward attachment: expired token resolves unique current metadata and ref
         calls: usize = 0,
         ambiguous: bool = false,
         mismatch: bool = false,
+        wrong_message: bool = false,
+        forbidden: bool = false,
         fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.calls += 1;
             try std.testing.expectEqual(std.http.Method.GET, method);
             try std.testing.expect(body == null);
-            if (std.mem.endsWith(u8, url, "/attachments/cached-token")) return error.MessageNotFound;
+            if (std.mem.endsWith(u8, url, "/attachments/cached-token")) return if (self.forbidden) error.PermissionDenied else error.MessageNotFound;
             if (std.mem.endsWith(u8, url, "/attachments/fresh-token")) return j.value(a, .{ .data = if (self.mismatch) "AA==" else "AP8=" });
             try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/messages/forward-message?format=full", url);
             var parts: j.Value = .{ .array = .init(a) };
@@ -2057,7 +2522,7 @@ test "forward attachment: expired token resolves unique current metadata and ref
             for (0..if (self.ambiguous) @as(usize, 2) else 1) |index| {
                 try parts.array.append(try j.value(a, .{ .partId = if (index == 0) "1" else "2", .mimeType = "image/jpeg", .filename = "fixture.bin", .headers = .{.{ .name = "Content-Disposition", .value = "inline; filename=fixture.bin" }}, .body = .{ .size = 2, .attachmentId = if (index == 0) "fresh-token" else "another-fresh-token" } }));
             }
-            var message = try j.value(a, .{ .id = "forward-message", .threadId = "forward-thread", .internalDate = "42", .payload = .{ .mimeType = "multipart/mixed", .headers = .{ .{ .name = "From", .value = "Sender <sender@example.test>" }, .{ .name = "Message-ID", .value = "<original@example.test>" } } } });
+            var message = try j.value(a, .{ .id = if (self.wrong_message) "another-message" else "forward-message", .threadId = "forward-thread", .internalDate = "42", .payload = .{ .mimeType = "multipart/mixed", .headers = .{ .{ .name = "From", .value = "Sender <sender@example.test>" }, .{ .name = "Message-ID", .value = "<original@example.test>" } } } });
             try message.object.getPtr("payload").?.object.put(a, "parts", parts);
             return message;
         }
@@ -2079,6 +2544,12 @@ test "forward attachment: expired token resolves unique current metadata and ref
     oracle = .{ .mismatch = true };
     try std.testing.expectError(error.BodySizeMismatch, attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected));
     try std.testing.expectEqual(@as(usize, 3), oracle.calls);
+    oracle = .{ .wrong_message = true };
+    try std.testing.expectError(error.MessageIdentityMismatch, attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected));
+    try std.testing.expectEqual(@as(usize, 2), oracle.calls);
+    oracle = .{ .forbidden = true };
+    try std.testing.expectError(error.PermissionDenied, attachmentAuthorized(a, "self@example.test", &.{"mail-read"}, transport, "forward-message", expected));
+    try std.testing.expectEqual(@as(usize, 1), oracle.calls);
 }
 
 test "wishlist: labels minimal snapshot and exact modify wire" {

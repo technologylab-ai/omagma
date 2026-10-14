@@ -11,6 +11,26 @@ pub fn attachmentMetadata(a: std.mem.Allocator, input: []const t.Attachment) ![]
     return result;
 }
 
+/// Compact owned references protect file bytes independently of mutable
+/// metadata and summaries, which deliberately omit the original snapshot.
+pub fn blobReferences(a: std.mem.Allocator, attachments: []const t.Attachment) ![]const []const u8 {
+    if (attachments.len > 64) return error.TooManyAttachments;
+    var selected: [64][]const u8 = undefined;
+    var count: usize = 0;
+    for (attachments) |attachment| if (attachment.blobId) |id| {
+        try @import("draft_codec.zig").validateAttachmentHandle(id);
+        var duplicate = false;
+        for (selected[0..count]) |previous| duplicate = duplicate or std.mem.eql(u8, id, previous);
+        if (!duplicate) {
+            selected[count] = id;
+            count += 1;
+        }
+    };
+    const owned = try a.alloc([]const u8, count);
+    for (owned, selected[0..count]) |*target, id| target.* = try a.dupe(u8, id);
+    return owned;
+}
+
 /// Small fields retain the input lifetime, matching native Store previews.
 pub fn fromDraft(a: std.mem.Allocator, input: t.Draft) !t.Draft {
     var result = input;

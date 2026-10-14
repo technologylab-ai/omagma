@@ -1,18 +1,20 @@
 //! Search the text the reader actually lays out. Byte ranges refer to those
-//! rendered lines, never raw HTML. ASCII case folds; Unicode stays literal.
+//! rendered lines, never raw HTML. Full Unicode folding preserves source bytes.
 const std = @import("std");
+const unicode_search = @import("unicode_search.zig");
+const Pattern = unicode_search.Pattern(max_query_bytes);
 pub const max_query_bytes = 256;
 pub const max_matches = 256;
 pub const max_scan_bytes = 2 * 1024 * 1024;
 pub const Match = struct { row: usize, start: usize, end_row: usize, end: usize };
 pub const Join = enum { separate, space, none };
-const Point = struct { row: usize, byte: usize };
+const Point = struct { row: usize, byte: usize, complete: bool = true };
 pub const Model = struct {
     query: [max_query_bytes]u8 = undefined,
     query_len: usize = 0,
-    prefix: [max_query_bytes]usize = undefined,
-    partial: usize = 0,
-    points: [max_query_bytes]Point = undefined,
+    pattern: Pattern = .{},
+    points: [Pattern.capacity]Point = undefined,
+    scanned: usize = 0,
     fed: usize = 0,
     values: [max_matches]Match = undefined,
     count: usize = 0,
@@ -25,19 +27,13 @@ pub const Model = struct {
         for (query) |byte| if (byte < 32 or byte == 127) return error.InvalidFindQuery;
         self.* = .{};
         self.query_len = query.len;
-        for (query, 0..) |byte, index| self.query[index] = std.ascii.toLower(byte);
-        if (query.len == 0) return;
-        self.prefix[0] = 0;
-        var matched: usize = 0;
-        for (1..query.len) |index| {
-            while (matched > 0 and self.query[index] != self.query[matched]) matched = self.prefix[matched - 1];
-            if (self.query[index] == self.query[matched]) matched += 1;
-            self.prefix[index] = matched;
-        }
+        @memcpy(self.query[0..query.len], query);
+        self.pattern = try Pattern.init(query);
     }
     pub fn clearMatches(self: *Model) void {
-        self.partial = 0;
+        self.pattern.partial = 0;
         self.fed = 0;
+        self.scanned = 0;
         self.count = 0;
         self.truncated = false;
     }
@@ -51,11 +47,21 @@ pub const Model = struct {
     pub fn addWrappedLineAt(self: *Model, text: []const u8, row: usize, join: Join, byte_base: usize) void {
         if (self.query_len == 0) return;
         switch (join) {
-            .separate => self.partial = 0,
-            .space => if (self.fed > 0) self.feed(' ', .{ .row = row, .byte = byte_base }),
+            .separate => self.pattern.partial = 0,
+            .space => if (self.fed > 0) self.feed(' ', .{ .row = row, .byte = byte_base }, byte_base, true),
             .none => {},
         }
-        for (text, 0..) |byte, index| self.feed(byte, .{ .row = row, .byte = byte_base + index });
+        var iterator: unicode_search.Iterator = .{ .text = text };
+        while (iterator.next()) |unit| {
+            if (unit.first) {
+                if (unit.end - unit.start > max_scan_bytes - self.scanned) {
+                    self.truncated = true;
+                    return;
+                }
+                self.scanned += unit.end - unit.start;
+            }
+            self.feed(unit.value, .{ .row = row, .byte = byte_base + unit.start, .complete = unit.first }, byte_base + unit.end, unit.last);
+        }
     }
     /// Preserve navigation while rebuilding after a redraw/resize. Clamping
     /// after each line would reset a later match before it was scanned again.
@@ -65,24 +71,18 @@ pub const Model = struct {
     pub fn addLine(self: *Model, text: []const u8, row: usize) void {
         self.addWrappedLine(text, row, .separate);
     }
-    fn feed(self: *Model, byte: u8, point: Point) void {
-        if (self.fed == max_scan_bytes) {
-            self.truncated = true;
-            return;
-        }
-        self.points[self.fed % max_query_bytes] = point;
+    fn feed(self: *Model, cp: u21, point: Point, end: usize, complete: bool) void {
+        self.points[self.fed % Pattern.capacity] = point;
         self.fed += 1;
-        const folded = std.ascii.toLower(byte);
-        while (self.partial > 0 and folded != self.query[self.partial]) self.partial = self.prefix[self.partial - 1];
-        if (folded == self.query[self.partial]) self.partial += 1;
-        if (self.partial == self.query_len) {
-            const start = self.points[(self.fed - self.query_len) % max_query_bytes];
+        if (self.pattern.feed(cp) and complete) {
+            const start = self.points[(self.fed - self.pattern.len) % Pattern.capacity];
+            if (!start.complete) return;
             if (self.count < max_matches) {
-                self.values[self.count] = .{ .row = start.row, .start = start.byte, .end_row = point.row, .end = point.byte + 1 };
+                self.values[self.count] = .{ .row = start.row, .start = start.byte, .end_row = point.row, .end = end };
                 self.count += 1;
             } else self.truncated = true;
-            // Conventional find advances after each complete match.
-            self.partial = 0;
+            // Conventional find advances after each complete source match.
+            self.pattern.partial = 0;
         }
     }
     pub fn current(self: *const Model) ?Match {
@@ -161,4 +161,20 @@ test "reader find: rebuilding wrapped lines preserves selection until the full s
     model.addLine("First meeting notes", 3);
     model.finish();
     try std.testing.expectEqual(@as(usize, 3), model.current().?.row);
+}
+
+test "reader find: expanded Unicode folds cross wraps with exact original coordinates" {
+    var model: Model = .{};
+    try model.reset("STRASSE CAFÉ");
+    model.addLine("Die Straße", 2);
+    model.addWrappedLineAt("café!", 3, .space, 4);
+    try std.testing.expectEqualDeep(Match{ .row = 2, .start = 4, .end_row = 3, .end = 9 }, model.current().?);
+    try model.reset("s");
+    model.addLine("ß s", 7);
+    try std.testing.expectEqual(@as(usize, 1), model.count);
+    try std.testing.expectEqualDeep(Match{ .row = 7, .start = 3, .end_row = 7, .end = 4 }, model.current().?);
+    try model.reset("СС");
+    model.addLine("с", 8);
+    model.addWrappedLine("с", 9, .none);
+    try std.testing.expectEqualDeep(Match{ .row = 8, .start = 0, .end_row = 9, .end = 2 }, model.current().?);
 }

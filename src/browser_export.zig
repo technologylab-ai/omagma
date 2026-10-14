@@ -80,6 +80,7 @@ pub fn collect(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: 
     errdefer std.crypto.secureZero(u8, out);
     var config: Config = undefined;
     try loadConfig(io, a, home, config_path, &config);
+    if (config.credential_store == .vault) return error.VaultExportRequiresOwner;
     const registry = try auth.load(io, a, grant_path);
     var clients: [3]oauth.DesktopClient = @splat(.{});
     defer for (&clients) |*client| client.wipe();

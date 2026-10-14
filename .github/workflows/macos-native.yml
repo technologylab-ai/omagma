@@ -14,7 +14,7 @@ concurrency:
 jobs:
   linux-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install exact Linux compiler
@@ -23,10 +23,24 @@ jobs:
         run: |
           set -e
           for mode in debug safe; do
-            zig build test -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all
+            zig build test probes -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --prefix ".verification-linux-$mode"
             zig build -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --prefix ".verification-linux-$mode"
+            python3 tests/calendar_native_http.py --probe ".verification-linux-$mode/bin/calendar_http_probe"
             python3 tests/terminal_integration.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode"
           done
+      - name: Linux first-use mail, Calendar and vault workflows
+        run: |
+          for mode in debug safe; do
+            python3 tests/terminal_workflow_regressions.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode" --output "tests/results/workflows-linux-$mode.json"
+          done
+      - name: Preserve synthetic workflow receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: workflows-linux-x86_64
+          path: tests/results/workflows-*.json
+          if-no-files-found: warn
+          retention-days: 30
   native:
     strategy:
       fail-fast: false
@@ -35,7 +49,7 @@ jobs:
         # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install exact compiler from checked native archive metadata
@@ -57,6 +71,12 @@ jobs:
             python3 tests/launch_macos.py --binary "$binary"
             ".verification-macos-$mode/bin/auth_probe" launch
             ".verification-macos-$mode/bin/auth_probe" callback
+            python3 tests/calendar_native_http.py --probe ".verification-macos-$mode/bin/calendar_http_probe"
+          done
+      - name: Native first-use mail, Calendar and vault workflows
+        run: |
+          for mode in debug safe; do
+            python3 tests/terminal_workflow_regressions.py --binary ".verification-macos-$mode/bin/omagma" --build-mode "$mode" --output "tests/results/workflows-macos-$mode.json"
           done
       - name: Native credential upgrade boundary
         run: |
@@ -74,3 +94,11 @@ jobs:
           for kind in cli tui; do
             python3 tests/terminal_measure_macos.py --binary .verification-macos-safe/bin/omagma --kind "$kind" --cycles 1000 --warmup 100 --idle-seconds 60 --output "$RUNNER_TEMP/macos-$kind-safe.json"
           done
+      - name: Preserve synthetic workflow receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: workflows-${{ matrix.runner }}
+          path: tests/results/workflows-*.json
+          if-no-files-found: warn
+          retention-days: 30

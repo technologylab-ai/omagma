@@ -46,6 +46,7 @@ fn save(io: std.Io, settings: keyring.Settings, record: *const Record) !void {
 }
 
 pub fn migrate(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: []const u8, grant_path: []const u8, target: keyring.Settings) !Result {
+    if (target.kind == .vault) return error.VaultMigrationRequired;
     const absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, config_path, a);
     const parent_path = std.fs.path.dirname(absolute) orelse return error.InvalidConfigPath;
     var parent = try file.directory(io, parent_path, false);
@@ -58,6 +59,7 @@ pub fn migrate(io: std.Io, a: std.mem.Allocator, home: []const u8, config_path: 
     const config = try a.create(Config);
     const original = try loadConfig(io, a, home, config_path, config);
     const source = config.credentials();
+    if (source.kind == .vault) return error.VaultMigrationRequired;
     var same = source.kind == .keyring and target.kind == .keyring;
     if (target.kind == .file) {
         var destination = try file.directory(io, target.directory, true);

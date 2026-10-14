@@ -9,6 +9,7 @@ const families = [_]Family{
     .{ .name = "contacts", .summary = "Read, search and update the address book", .verbs = &.{ "list", "search", "upsert" } },
     .{ .name = "labels", .summary = "Manage custom label definitions and colors", .verbs = &.{ "list", "create", "rename", "delete", "color", "palette" } },
     .{ .name = "invitations", .summary = "Inspect invitations or send an RSVP", .verbs = &.{ "inspect", "reply" } },
+    .{ .name = "calendar", .summary = "Browse calendars and review invitation imports or updates", .verbs = &.{ "list", "agenda", "event", "freebusy", "invitation-plan", "review", "apply", "import", "update", "cancel", "reconcile" } },
     .{ .name = "cache", .summary = "Inspect or clear retained mail", .verbs = &.{ "stats", "clear", "activity", "refresh-status" } },
     .{ .name = "operation", .summary = "Inspect recorded submission outcomes", .verbs = &.{ "list", "read" } },
     .{ .name = "terminal-auth", .summary = "Inspect, authorize or revoke terminal grants", .verbs = &.{ "status", "authorize", "revoke" } },
@@ -168,6 +169,13 @@ fn shellArguments(mode: []const u8, verb: []const u8) []const u8 {
     } else if (eq(mode, "invitations")) {
         if (eq(verb, "reply")) return " --message-id RETURNED_MESSAGE_ID --status accepted --operation-id UNIQUE_RSVP_ID";
         return " --message-id RETURNED_MESSAGE_ID";
+    } else if (eq(mode, "calendar")) {
+        if (eq(verb, "list")) return "";
+        if (eq(verb, "agenda") or eq(verb, "freebusy")) return " --calendar-id RETURNED_CALENDAR_ID --date 2026-10-13 --view week";
+        if (eq(verb, "event")) return " --calendar-id RETURNED_CALENDAR_ID --event-id RETURNED_EVENT_ID";
+        if (eq(verb, "invitation-plan")) return " --calendar-id RETURNED_CALENDAR_ID --message-id RETURNED_MESSAGE_ID";
+        if (eq(verb, "review")) return " --calendar-id RETURNED_CALENDAR_ID --message-id RETURNED_MESSAGE_ID --operation-id UNIQUE_CALENDAR_ID";
+        return " --calendar-id RETURNED_CALENDAR_ID --operation-id RETURNED_OPERATION_ID --review-hash RETURNED_REVIEW_HASH";
     } else if (eq(mode, "operation")) {
         if (eq(verb, "read")) return " --operation-id RETURNED_OPERATION_ID";
     } else if (eq(mode, "terminal-auth")) {
@@ -243,13 +251,19 @@ fn spec(mode: []const u8, verb: []const u8) Spec {
         return .{ .summary = "Delete a custom label definition, preserving its messages", .flags = "--label-id ID --confirm-name NAME --operation-id ID", .fields = "labelId, confirmName (exact current name), operationId. System labels are protected." };
     } else if (eq(mode, "invitations")) {
         if (eq(verb, "reply")) return .{ .summary = "Send an invitation RSVP email", .flags = "--message-id ID --status accepted|tentative|declined --operation-id ID", .fields = "messageId, status (accepted|tentative|declined), operationId. Inspect first; this sends an RSVP email, not a Google Calendar update." };
-        return .{ .summary = "Read validated invitation identities, times and joining details", .flags = "--message-id ID", .fields = "messageId. Result includes organizer/attendee, startDisplay/endDisplay/durationDisplay, joinUrl and attendeeStatus." };
+        return .{ .summary = "Read invitation details or check an uncertain RSVP in Sent", .flags = "--message-id ID [--cached | --reconcile]", .fields = "messageId; cacheOnly? reads retained source without network; reconcile? checks positive Sent evidence without resending. Result includes organizer/attendee, startDisplay/endDisplay/durationDisplay, joinUrl, attendeeStatus, confirmedResponse and responseOutcome." };
     } else if (eq(mode, "operation")) {
         return .{ .summary = "Inspect durable outcomes and recovery-draft references", .flags = if (eq(verb, "read")) "--operation-id ID" else "", .fields = if (eq(verb, "read")) "operationId." else "No command-specific fields." };
+    } else if (eq(mode, "calendar")) {
+        if (eq(verb, "list")) return .{ .summary = "List calendars and effective read/write permissions", .fields = "Optional Calendar consent is required; see docs/CALENDAR-PERMISSIONS.md." };
+        if (eq(verb, "agenda") or eq(verb, "freebusy")) return .{ .summary = if (eq(verb, "agenda")) "Read a bounded day or week with server-expanded recurring events" else "Read busy periods with the separate FreeBusy capability", .flags = "--calendar-id ID --date YYYY-MM-DD [--view day|week] [--time-zone IANA_ZONE]", .fields = "date is a civil date in timeZone or the selected calendar's timezone. Agenda snapshots remain explicitly stale after a failed refresh." };
+        if (eq(verb, "event")) return .{ .summary = "Inspect one event in an explicit account and calendar", .flags = "--calendar-id ID --event-id ID", .fields = "calendarId, eventId. This does not change the event." };
+        if (eq(verb, "invitation-plan") or eq(verb, "review")) return .{ .summary = if (eq(verb, "review")) "Save the exact invitation action for separate confirmation" else "Compare a received invitation with existing calendar events", .flags = "--calendar-id ID --message-id ID\n  review also requires --operation-id UNIQUE_ID\n  Timezone review: --start-time-zone IANA_ZONE --end-time-zone IANA_ZONE\n  --accept-floating-time | --reinterpret-embedded-timezones (explicit choice only)", .fields = "Source comes from the account's received message. Review returns an operationId and reviewHash; no calendar write occurs. Ambiguous local times require resolution." };
+        return .{ .summary = if (eq(verb, "reconcile")) "Check a previously uncertain calendar action without replaying it" else if (eq(verb, "cancel")) "Apply a reviewed invitation cancellation" else if (eq(verb, "update")) "Apply a reviewed invitation update" else if (eq(verb, "import")) "Apply a reviewed invitation import" else "Apply the exact previously reviewed invitation action once", .flags = "--calendar-id ID --operation-id ID --review-hash HASH", .fields = "Use the ID and hash returned by calendar review. Outcomes survive restart; unknown outcomes must be reconciled, never blindly resent. Import/update/cancel must match the stored action." };
     } else if (eq(mode, "cache")) {
         return .{ .summary = if (eq(verb, "clear")) "Clear retained mail while keeping drafts, contacts and operations" else "Inspect local cache limits, arrival activity or refresh state", .fields = "No command-specific fields. These operations do not fetch mail." };
     } else if (eq(mode, "terminal-auth")) {
-        if (eq(verb, "authorize")) return .{ .summary = "Authorize explicitly requested terminal capabilities through Google consent", .flags = "--capabilities CSV (1..6 names; mail-read is required) [--client-file FILE]\n  Allowed: mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp", .fields = "clientFile defaults to configured oauthClientFile; capabilities select only the requested set. Opens Google consent in this account's Chrome profile. See setup instructions for credential-store selection." };
+        if (eq(verb, "authorize")) return .{ .summary = "Authorize explicitly requested terminal capabilities through Google consent", .flags = "--capabilities CSV (1..10 unique names; mail-read is required) [--client-file FILE]\n  Mail: mail-read,mail-send,mail-modify\n  Contacts: contacts-read,contacts-write\n  Invitations: calendar-rsvp (response email)\n  Calendar: calendar-read,calendar-write-owned,calendar-write-shared,calendar-freebusy", .fields = "clientFile defaults to configured oauthClientFile; request the complete desired set, retaining existing mail/contact capabilities. Opens Google consent in this account's Chrome profile. Calendar is optional; see docs/CALENDAR-PERMISSIONS.md. See setup instructions for credential-store selection." };
         return .{ .summary = if (eq(verb, "status")) "Inspect locally configured grants and credential-store selection" else "Revoke this account's local terminal grant and selected-store credential", .fields = "No command-specific fields. Local revoke is not Google's account-wide revocation." };
     } else if (eq(mode, "updates")) {
         return .{ .summary = if (eq(verb, "automatic")) "Enable or disable automatic daily TUI release checks" else if (eq(verb, "check")) "Fetch official stable release metadata" else if (eq(verb, "guide")) "Show instructions for this installation; never installs files" else if (eq(verb, "dismiss")) "Dismiss the available-version notice" else "Read cached release metadata", .flags = if (eq(verb, "automatic")) "on|off [--json]" else "[--json]", .fields = "Standalone command: no JSONL account operation, account config or OAuth required." };

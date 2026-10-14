@@ -67,7 +67,8 @@ jobs:
             zig_arch: aarch64
             target: aarch64-linux-musl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # Full Debug/Safe mail, Calendar and vault workflows supplement the legacy gates.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared Zig compiler
@@ -107,6 +108,7 @@ jobs:
           .verification-debug/bin/callback_budget
           .verification-debug/bin/transport_probe
           python3 tests/terminal_attachment_streams.py --probe .verification-debug/bin/terminal_stream_probe
+          python3 tests/calendar_native_http.py --probe .verification-debug/bin/calendar_http_probe
           node tests/ui_model.mjs
           python3 tests/terminal_fixture_check.py
           python3 tests/terminal_screen.py
@@ -155,6 +157,11 @@ jobs:
           do
             python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
           done
+      - name: Debug first-use mail, Calendar and vault workflows
+        run: python3 tests/terminal_workflow_regressions.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/workflows-linux-debug.json
+      - name: Debug independent HTML preservation oracle
+        if: matrix.arch == 'x86_64'
+        run: python3 tests/terminal_html_compatibility.py --binary .verification-debug/bin/omagma --browser "$(command -v google-chrome)" --receipt tests/results/terminal-debug-html-compatibility.json
       - name: Shared mail, contacts and browser adapter correctness
         run: |
           zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
@@ -167,6 +174,7 @@ jobs:
           .verification-safe/bin/callback_budget
           .verification-safe/bin/transport_probe
           python3 tests/terminal_attachment_streams.py --probe .verification-safe/bin/terminal_stream_probe
+          python3 tests/calendar_native_http.py --probe .verification-safe/bin/calendar_http_probe
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
@@ -244,6 +252,11 @@ jobs:
           do
             python3 "tests/$suite.py" --binary "dist/omagma-linux-$RELEASE_ARCH"
           done
+      - name: Safe packaged first-use mail, Calendar and vault workflows
+        run: python3 tests/terminal_workflow_regressions.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/workflows-linux-safe.json
+      - name: Safe packaged independent HTML preservation oracle
+        if: matrix.arch == 'x86_64'
+        run: python3 tests/terminal_html_compatibility.py --binary dist/omagma-linux-x86_64 --browser "$(command -v google-chrome)" --receipt tests/results/terminal-safe-html-compatibility.json
       - name: Safe terminal workflows and memory
         run: |
           python3 tests/terminal_cache.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-cache-safe.json
@@ -301,7 +314,8 @@ jobs:
             machine: x86_64
             target: x86_64-macos.13.0
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # Native Intel hosts also run the complete encrypted-vault and attachment suites.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared native Zig compiler
@@ -355,6 +369,7 @@ jobs:
           python3 tests/terminal_cache_windows.py --binary .verification-macos-debug/bin/omagma
           python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-debug/bin/terminal_stream_probe
+          python3 tests/calendar_native_http.py --probe .verification-macos-debug/bin/calendar_http_probe
       - name: Debug portable Markdown, invitation and command acceptance
         run: |
           python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
@@ -367,6 +382,8 @@ jobs:
           python3 tests/terminal_queue_send_now.py --binary .verification-macos-debug/bin/omagma
           python3 tests/credential_storage.py --binary .verification-macos-debug/bin/omagma
           python3 tests/updates.py --binary .verification-macos-debug/bin/omagma
+      - name: Debug native first-use mail, Calendar and vault workflows
+        run: python3 tests/terminal_workflow_regressions.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/workflows-macos-debug.json
       - name: Debug native terminal, Keychain and detached lifecycle
         run: |
           # This guardian keeps the owned Darwin PTY alive for termios checks.
@@ -397,6 +414,7 @@ jobs:
           .verification-macos-safe/bin/auth_probe callback
           .verification-macos-safe/bin/callback_budget
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-safe/bin/terminal_stream_probe
+          python3 tests/calendar_native_http.py --probe .verification-macos-safe/bin/calendar_http_probe
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
@@ -441,6 +459,8 @@ jobs:
           python3 tests/terminal_queue_send_now.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/credential_storage.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/updates.py --binary dist/omagma-macos-$RELEASE_ARCH
+      - name: Safe packaged first-use mail, Calendar and vault workflows
+        run: python3 tests/terminal_workflow_regressions.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/workflows-macos-safe.json
       - name: Native Keychain survives the packaged binary upgrade
         run: |
           python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}

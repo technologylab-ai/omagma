@@ -1,0 +1,16 @@
+{
+  "id":"fixture-imported-event",
+  "iCalUID":"planning-2026@example.test",
+  "etag":"\"imported-version-4\"",
+  "status":"confirmed",
+  "organizer":{"email":"host@example.test"},
+  "summary":"Planning, café",
+  "description":"Discuss the next release.\nKeep the complete source.",
+  "start":{"dateTime":"2026-10-13T14:00:00Z","timeZone":"UTC"},
+  "end":{"dateTime":"2026-10-13T15:00:00Z","timeZone":"UTC"},
+  "sequence":4,
+  "privateCopy":true,
+  "attendees":[{"email":"self@example.test","self":true,"responseStatus":"needsAction"}],
+  "extendedProperties":{"private":{"omagmaOperation":"calendar-service-1","omagmaSource":"8ce15e0ad4c0ae0f8a68bc83660a24118ad3f53e3373c2a07d7b8ee435a2edb9","unrelated":"retained"},"shared":{"otherClient":"retained"}},
+  "conferenceData":{"entryPoints":[{"entryPointType":"video","uri":"https://meet.example.test/planning?key=fictional"}]}
+}

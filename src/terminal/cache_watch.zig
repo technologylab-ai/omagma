@@ -51,7 +51,7 @@ pub const Watch = struct {
     }
 
     pub fn start(self: *Watch) !void {
-        if (self.client.cacheStampFn == null or self.client.cachedFn == null) return;
+        if (self.idleFn == null and (self.client.cacheStampFn == null or self.client.cachedFn == null)) return;
         self.stopping.store(false, .release);
         self.future = try self.io.concurrent(run, .{self});
     }
@@ -71,6 +71,9 @@ pub const Watch = struct {
             if (self.idleFn) |idle| idle(self.context) catch |err| {
                 if (err == error.Canceled) return;
             };
+            // Remote vault clients still need UI timers, even though their
+            // cache has no local stamp/activity callbacks to poll.
+            if (self.client.cacheStampFn == null or self.client.cachedFn == null) continue;
             for (self.accounts, 0..) |account, index| {
                 if (self.stopping.load(.acquire)) return;
                 if (account.len == 0) continue;
@@ -101,6 +104,74 @@ pub const Watch = struct {
         return .{ .mask = mask, .values = self.latest };
     }
 };
+
+test "cache watcher idle ticks do not require local cache support" {
+    const Probe = struct {
+        const Support = enum { none, stamp_only, cached_only };
+        io: std.Io,
+        ticks: usize = 0,
+        cache_calls: usize = 0,
+        entered: std.Io.Event = .unset,
+        hold: std.Io.Event = .unset,
+        acknowledged: std.atomic.Value(bool) = .init(false),
+        fn stamp(ctx: *anyopaque, _: []const u8) !?types.CacheStamp {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.cache_calls += 1;
+            return error.UnexpectedCachePoll;
+        }
+        fn activity(ctx: *anyopaque, _: std.mem.Allocator, _: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.cache_calls += 1;
+            return error.UnexpectedCachePoll;
+        }
+        fn idle(ctx: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.ticks += 1;
+            if (self.ticks == 1) return; // Complete a loop without cache polling.
+            self.entered.set(self.io);
+            self.hold.wait(self.io) catch |err| {
+                if (err == error.Canceled) self.acknowledged.store(true, .release);
+                return err;
+            };
+            return error.UnexpectedRelease;
+        }
+        fn post(_: *anyopaque) !bool {
+            return error.UnexpectedCacheEvent;
+        }
+    };
+    for ([_]Probe.Support{ .none, .stamp_only, .cached_only }) |support| {
+        var probe: Probe = .{ .io = std.testing.io };
+        var watch: Watch = .{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .client = .{
+                .ctx = &probe,
+                .callFn = Probe.activity,
+                .cachedFn = if (support == .cached_only) Probe.activity else null,
+                .cacheStampFn = if (support == .stamp_only) Probe.stamp else null,
+            },
+            .accounts = .{ "personal@example.test", "", "" },
+            .context = &probe,
+            .postFn = Probe.post,
+        };
+        defer watch.stop();
+        // A client with neither usable cache polling nor idle work stays idle.
+        try watch.start();
+        try std.testing.expect(watch.future == null);
+        watch.idleFn = Probe.idle;
+        try watch.prime();
+        try watch.start();
+        try probe.entered.waitTimeout(probe.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } });
+        const before = std.Io.Timestamp.now(probe.io, .awake);
+        watch.stop();
+        const elapsed = before.durationTo(std.Io.Timestamp.now(probe.io, .awake));
+        try std.testing.expect(elapsed.toMilliseconds() < 1000);
+        try std.testing.expect(probe.acknowledged.load(.acquire));
+        try std.testing.expect(watch.future == null);
+        try std.testing.expectEqual(@as(usize, 2), probe.ticks);
+        try std.testing.expectEqual(@as(usize, 0), probe.cache_calls);
+    }
+}
 
 test "cache watcher cancellation terminates after a cache call acknowledges it" {
     const Probe = struct {

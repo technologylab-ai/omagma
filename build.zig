@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) void {
     const t = b.addTest(.{ .root_module = m, .filters = test_filters, .use_llvm = if (vaxis != null) true else null });
     const correctness = b.step("test", "Run correctness tests");
     correctness.dependOn(&b.addRunArtifact(t).step);
-    for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig", "src/terminal_mail_acceptance_tests.zig", "src/terminal_ux_backend_tests.zig", "src/terminal_ux_helper_tests.zig", "src/platform_tests.zig", "src/updates_tests.zig" }) |path| {
+    for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig", "src/terminal_mail_acceptance_tests.zig", "src/terminal_ux_backend_tests.zig", "src/terminal_ux_helper_tests.zig", "src/platform_tests.zig", "src/updates_tests.zig", "src/calendar_tests.zig", "src/calendar_service_tests.zig", "src/calendar_native_tests.zig", "src/calendar_commands_tests.zig", "src/calendar_embedded_tests.zig", "src/calendar_duration_tests.zig", "src/calendar_fixture_tests.zig", "src/calendar_store_tests.zig", "src/calendar_vault_grants_tests.zig", "src/vault_crypto_tests.zig", "src/vault_storage_tests.zig", "src/vault_catalog_tests.zig", "src/vault_store_tests.zig", "src/vault_mail_tests.zig", "src/vault_daemon_tests.zig", "src/vault_identity_tests.zig", "src/vault_activation_tests.zig", "src/vault_migration_tests.zig", "src/vault_migration_store_tests.zig", "src/session_cache_integration_tests.zig", "src/draft_continuity_tests.zig" }) |path| {
         const terminal_test = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
         terminal_test.root_module.addOptions("build_options", options);
         if (macos_sdk) |sdk| linkNativeKeychain(terminal_test.root_module, sdk);
@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const probes = b.step("probes", "Compile all standalone transport/auth/budget probes");
-    for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
+    for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "src/calendar_http_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
         const probe = b.addExecutable(.{
             .name = std.fs.path.stem(path),
             .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }),

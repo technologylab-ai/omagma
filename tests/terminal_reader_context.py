@@ -90,7 +90,7 @@ def reader_case(binary, directory):
         terminal.send(b"B")
         terminal.until(lambda: all(value in terminal.text() for value in
                                    ("Received attachments", "reader-two.txt", "[s Save]",
-                                    "[o Save & open]", "[Back]",
+                                    "[o Save & open]", "[q Back]",
                                     "Tab Controls · Enter Activate · j/k Choose")))
         destination = directory / "second received attachment.txt"
         click(terminal, *point(terminal, "reader-two.txt"))

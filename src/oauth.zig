@@ -25,6 +25,13 @@ pub fn loadDesktop(io: std.Io, path: []const u8, desktop: *DesktopClient) !void 
     if (data.len == desktop_body.len) return error.DesktopClientTooLarge;
     try parseDesktop(data, desktop);
 }
+pub fn loadDesktopWithSettings(io: std.Io, path: []const u8, desktop: *DesktopClient, settings: keyring.Settings) !void {
+    if (settings.kind != .vault) return loadDesktop(io, path, desktop);
+    desktop.wipe();
+    const provider = settings.provider orelse return error.VaultLocked;
+    const bytes = (try provider.read(.desktop_client, .{ .name = path })) orelse return error.OAuthClientRequired;
+    return parseDesktop(bytes, desktop);
+}
 pub fn parseDesktop(data: []const u8, desktop: *DesktopClient) !void {
     if (data.len > desktop_body.len) return error.DesktopClientTooLarge;
     desktop.wipe();
@@ -142,7 +149,19 @@ pub fn parseTokensScoped(status: u16, data: []const u8, out_access: []u8, out_re
 }
 pub fn validateScopeSet(scopes: []const []const u8) !void {
     if (scopes.len == 0 or scopes.len > 8) return error.UnexpectedScope;
-    const allowed = [_][]const u8{ readonly_scope, "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/contacts.readonly", "https://www.googleapis.com/auth/contacts" };
+    const allowed = [_][]const u8{
+        readonly_scope,
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/contacts",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.events.owned",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+    };
     for (scopes, 0..) |scope, index| {
         var valid = false;
         for (allowed) |option| valid = valid or std.mem.eql(u8, option, scope);
@@ -268,7 +287,7 @@ var auth_desktop: DesktopClient = .{};
 pub fn authorize(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, credentials: keyring.Settings) !void {
     try authorizeScoped(io, client_file, address, profile, chrome, &.{readonly_scope}, null, credentials);
 }
-pub const TerminalCredential = struct { grant_id: []const u8 };
+pub const TerminalCredential = struct { grant_id: []const u8, capture: ?*b.Text(limits.secret) = null };
 pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8, profile: []const u8, chrome: []const u8, scopes: []const []const u8, terminal: ?TerminalCredential, credentials: keyring.Settings) !void {
     try validateScopeSet(scopes);
     if (terminal == null and (scopes.len != 1 or !std.mem.eql(u8, scopes[0], readonly_scope))) return error.UnexpectedScope;
@@ -284,7 +303,7 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
         std.crypto.secureZero(u8, &form_buffer);
         std.crypto.secureZero(u8, &token_body);
     }
-    try loadDesktop(io, client_file, &auth_desktop);
+    try loadDesktopWithSettings(io, client_file, &auth_desktop, credentials);
     const loopback = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
     var listener = try loopback.listen(io, .{ .kernel_backlog = 2 });
     var listener_closed = false;
@@ -346,7 +365,9 @@ pub fn authorizeScoped(io: std.Io, client_file: []const u8, address: []const u8,
     const identity = try client.request("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress", .GET, tokens.access_token, null, &token_body);
     try verifyProfile(identity.status, identity.body, address);
     const refresh_token = std.mem.sliceTo(&auth_refresh, 0);
-    if (terminal) |credential| try keyring.storeTerminal(io, credentials, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token) else try keyring.store(io, credentials, address, auth_desktop.client_id.slice(), refresh_token);
+    if (terminal) |credential| {
+        if (credential.capture) |capture| try capture.set(refresh_token) else try keyring.storeTerminal(io, credentials, address, auth_desktop.client_id.slice(), credential.grant_id, refresh_token);
+    } else try keyring.store(io, credentials, address, auth_desktop.client_id.slice(), refresh_token);
 }
 fn acceptCallback(io: std.Io, listener: *std.Io.net.Server, callback: *Callback) anyerror![]const u8 {
     for (0..2) |_| {
@@ -515,5 +536,23 @@ test "terminal scopes match complete returned grant without relaxing bar policy"
     try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, missing, &access, null, &expected));
     const repeated = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-access\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.readonly\"}";
     try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, repeated, &access, null, &expected));
+    try std.testing.expectError(error.UnexpectedScope, authorizeScoped(std.testing.io, "/nonexistent-synthetic-client", "synthetic@example.test", "synthetic-profile", "/usr/bin/true", &expected, null, .{}));
+}
+
+test "calendar: optional scopes require the complete returned terminal grant and remain forbidden to the bar" {
+    const expected = [_][]const u8{
+        readonly_scope,
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+    };
+    try validateScopeSet(&expected);
+    const complete = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-calendar\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/calendar.events.freebusy https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly\"}";
+    var access: [64]u8 = @splat(0x7f);
+    _ = try parseTokensScoped(200, complete, &access, null, &expected);
+    try std.testing.expectError(error.UnexpectedScope, parseTokens(200, complete, &access, null));
+    for (access) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    const incomplete = "{\"token_type\":\"Bearer\",\"access_token\":\"synthetic-calendar\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly\"}";
+    try std.testing.expectError(error.UnexpectedScope, parseTokensScoped(200, incomplete, &access, null, &expected));
     try std.testing.expectError(error.UnexpectedScope, authorizeScoped(std.testing.io, "/nonexistent-synthetic-client", "synthetic@example.test", "synthetic-profile", "/usr/bin/true", &expected, null, .{}));
 }

@@ -13,6 +13,7 @@ var response_buffer: [response_limit]u8 = undefined;
 var response_metadata: [2]u32 = undefined;
 const readonly_scope = "https://www.googleapis.com/auth/gmail.readonly";
 const send_scope = "https://www.googleapis.com/auth/gmail.send";
+const compose_scope = "https://www.googleapis.com/auth/gmail.compose";
 const modify_scope = "https://www.googleapis.com/auth/gmail.modify";
 const full_scope = "https://mail.google.com/";
 const contacts_read_scope = "https://www.googleapis.com/auth/contacts.readonly";
@@ -203,7 +204,7 @@ pub fn connect(a: std.mem.Allocator, bytes: []const u8) !Session {
         } else if (!std.ascii.isHex(byte)) return error.InvalidSessionNonce;
     }
     try recipients.validateAddress(value.account);
-    if (value.session == 0 or value.clientId.len > 256 or value.capabilities.len > 6 or value.scopes.len > 8 or value.actualScopes.len > 8) return error.InvalidCredentialMetadata;
+    if (value.session == 0 or value.clientId.len > 256 or value.capabilities.len > auth.allowed_capabilities.len or value.scopes.len > 8 or value.actualScopes.len > 8) return error.InvalidCredentialMetadata;
     const expected = try auth.scopesFor(a, value.capabilities);
     if (expected.len != value.scopes.len) return error.InvalidGrantRegistry;
     for (expected, value.scopes) |left, right| if (!std.mem.eql(u8, left, right)) return error.InvalidGrantRegistry;
@@ -211,7 +212,7 @@ pub fn connect(a: std.mem.Allocator, bytes: []const u8) !Session {
         if (!std.mem.endsWith(u8, value.clientId, ".apps.googleusercontent.com") or !std.mem.eql(u8, grant_id, &auth.grantIdentity(value.scopes))) return error.InvalidGrantRegistry;
     } else if (value.capabilities.len != 1 or !has(value.capabilities, "mail-read")) return error.PermissionDenied;
     const read_granted = has(value.actualScopes, readonly_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
-    const send_granted = has(value.actualScopes, send_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
+    const send_granted = has(value.actualScopes, send_scope) or has(value.actualScopes, compose_scope) or has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
     const modify_granted = has(value.actualScopes, modify_scope) or has(value.actualScopes, full_scope);
     const contacts_granted = has(value.actualScopes, contacts_read_scope) or has(value.actualScopes, contacts_write_scope);
     if (!read_granted) return error.PermissionDenied;

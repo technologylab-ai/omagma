@@ -22,7 +22,7 @@ from terminal_integration import ACCOUNTS, Client, FIXTURES, addresses, require
 
 POSITIVE = ("named-calendar", "named-octet", "named-application", "duplicate", "wide")
 STATUSES = ("accepted", "tentative", "declined")
-CASE_NAMES = ("formats", "refusals", "replay", "unknown", "legacy")
+CASE_NAMES = ("formats", "refusals", "replay", "unknown", "cached_source", "legacy")
 CONFLICT_BODY = ("Fictional mail remains readable.\n"
                  "The two attached calendar requests conflict; keep all files available.\n")
 CONFLICT_FILE_NAME = "conflict-notes.txt"
@@ -286,6 +286,16 @@ def refusals(binary, directory, source):
                 ordinary = client.request("mail.read", messageId=ordinary["id"], cacheOnly=True)
                 ordinary_digest = body_digest(directory, ordinary["id"])
             for command, params in (("invitation.inspect", {}), ("invitation.reply", {"status": "accepted", "operationId": "refused-" + case})):
+                if command == "invitation.inspect" and case in ("foreign", "publish", "multi-event"):
+                    # Displaying an event is allowed without permission to RSVP.
+                    # Keep the mutation refusal below as the independent oracle.
+                    notice = client.request(command, messageId="invite-" + case)
+                    require(notice["canReply"] is False, f"{case}: inspection authorized an RSVP")
+                    require(notice["method"] == ("publish" if case == "publish" else "request"),
+                            f"{case}: inspection changed the scheduling method")
+                    if case == "multi-event":
+                        require(notice["additionalEvents"] == 1, "inspection hid additional calendar events")
+                    continue
                 error = client.request(command, messageId="invite-" + case, ok=False, **params)
                 require(error["code"] == expected, f"{case}: refused with an unexpected error {error['code']}")
             require(client.request("operation.list")["operations"] == before, "invalid invitation created a submission record")
@@ -332,17 +342,70 @@ def unknown(binary, directory, source):
             reply_identity(first, "named-octet", ACCOUNTS[0], "tentative", params["operationId"])
             before = client.request("cache.stats")
             require(before["fixtureSends"] == sends, "fault scenario has the wrong actual send count")
-            for operation_id in (params["operationId"], "new-id-same-uncertain-rsvp"):
-                require(client.request("invitation.reply", **{**params, "operationId": operation_id}) == first,
-                        "unknown RSVP was redispatched or re-journaled")
+            journal = client.request("operation.list")["operations"]
+            require(len(journal) == 1 and journal[0]["id"] == params["operationId"]
+                    and journal[0]["outcome"] == "unknown", "unknown RSVP lost its durable receipt")
+            require(client.request("invitation.reply", **params) == first, "same-ID unknown RSVP replay changed its receipt")
+            refused = client.request("invitation.reply", **{**params, "operationId": "new-id-same-uncertain-rsvp"}, ok=False)
+            require(refused["code"] == "UnknownOutcome", "new ID bypassed the uncertain RSVP guard")
             client.restart()
-            require(client.request("invitation.reply", **{**params, "operationId": "after-restart-uncertain-rsvp"}) == first,
-                    "restart permitted a new operation ID to resend uncertain RSVP")
+            require(client.request("invitation.reply", **params) == first, "restart changed the same-ID unknown RSVP receipt")
+            refused = client.request("invitation.reply", **{**params, "operationId": "after-restart-uncertain-rsvp"}, ok=False)
+            require(refused["code"] == "UnknownOutcome", "restart permitted a new ID to resend uncertain RSVP")
             after = client.request("cache.stats")
             require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == sends,
                     "uncertain RSVP retry reached the provider")
-            require(client.request("operation.list")["operations"] == [first], "unknown RSVP duplicated its journal")
+            require(client.request("operation.list")["operations"] == journal, "unknown RSVP changed or duplicated its journal")
         finished(client)
+
+
+def cached_source(binary, directory, source):
+    """An ordinary full thread read must persist ICS recovered from an old cache."""
+    account, other = ACCOUNTS[:2]
+    message_id = "invite-named-calendar"
+    with Client(binary, directory, extra=source.options()) as client:
+        original = client.request("mail.read", account, messageId=message_id)
+        require(original.get("invitation"), "source fixture has no decoded invitation")
+        client.request("mail.read", other, messageId=message_id)
+        foreign_digest = body_digest(directory, message_id, other)
+    finished(client)
+    account_dir = directory / "cache" / "fixtures" / hashlib.sha256(account.encode()).hexdigest()
+    body_path = account_dir / ("mail-" + hashlib.sha256(message_id.encode()).hexdigest() + ".json")
+    body = json.loads(body_path.read_bytes())
+    body["message"].pop("invitation", None)
+    for attachment in body["message"]["attachments"]:
+        attachment["data"] = ""
+    raw = json.dumps(body, ensure_ascii=False).encode()
+    body_path.write_bytes(raw)
+    index_path = account_dir / "index.json"
+    index = json.loads(index_path.read_bytes())
+    entry = next(e for e in index["entries"] if e["message"]["id"] == message_id)
+    entry["bytes"] = len(raw)
+    entry["bodyHash"] = hashlib.sha256(raw).hexdigest()
+    # Retain the current decoder revision: these caches can be otherwise valid.
+    index_path.write_text(json.dumps(index))
+    with Client(binary, directory, extra=source.options()) as client:
+        before = client.request("cache.stats", account)
+        old = client.request("mail.read", account, messageId=message_id, cacheOnly=True)
+        require(old.get("invitation") is None, "cache-only read fetched invitation data")
+        require(client.request("cache.stats", account)["fixtureCalls"] == before["fixtureCalls"],
+                "cache-only read attempted a provider request")
+        result = client.request("mail.thread", account, threadId=original["threadId"], progressive=True,
+                                focusMessageId=message_id)
+        current = next(m for m in result["messages"] if m["id"] == message_id)
+        require(current.get("invitation") == original["invitation"], "thread read missed invitation source")
+        client.restart()
+        before = client.request("cache.stats", account)
+        retained = client.request("mail.read", account, messageId=message_id, cacheOnly=True)
+        require(client.request("cache.stats", account)["fixtureCalls"] == before["fixtureCalls"],
+                "reopened cached invitation contacted the provider")
+        require(retained.get("invitation") == original["invitation"],
+                "ordinary thread read did not persist the recovered invitation across restart")
+        require(retained["bodyText"] == original["bodyText"], "calendar repair changed message text")
+        require(body_digest(directory, message_id, other) == foreign_digest, "repair touched another account")
+        require(client.request("cache.stats", account)["fixtureSends"] == 0, "calendar repair sent mail")
+        require(client.request("operation.list", account)["operations"] == [], "repair created a write intent")
+    finished(client)
 
 
 def legacy(binary, old_binary, directory, source):

@@ -77,6 +77,12 @@ pub const ResourcePlan = struct {
 /// other identified resources are retained for opaque conditional markup too.
 /// Selected resources keep the 32-part and 2 MiB decoded aggregate limits.
 pub fn resourcePlan(html: []const u8, attachments: []const t.Attachment) !ResourcePlan {
+    return resourcePlanWithLimit(html, attachments, t.Limits.body_bytes);
+}
+
+/// Native adapters can retain larger resources in verified private blobs;
+/// portable adapters explicitly keep the smaller embedded-byte allowance.
+pub fn resourcePlanWithLimit(html: []const u8, attachments: []const t.Attachment, byte_limit: usize) !ResourcePlan {
     if (html.len == 0) return error.OriginalHtmlUnavailable;
     const usage = try resourceUsage(html, attachments);
     _ = try scan(html);
@@ -88,7 +94,7 @@ pub fn resourcePlan(html: []const u8, attachments: []const t.Attachment) !Resour
         if (!has_identity or (is_file and !referenced)) continue;
         if (plan.count == plan.indices.len) return error.TooManyAttachments;
         plan.bytes = std.math.add(usize, plan.bytes, attachment.size) catch return error.AttachmentsTooLarge;
-        if (plan.bytes > t.Limits.body_bytes) return error.AttachmentsTooLarge;
+        if (plan.bytes > @min(byte_limit, t.Limits.attachment_bytes)) return error.AttachmentsTooLarge;
         if (attachment.contentId) |id| {
             _ = try @import("mime.zig").contentId(id);
             for (plan.indices[0..plan.count]) |previous| if (attachments[previous].contentId) |other| if (std.mem.eql(u8, id, other)) return error.AmbiguousContentId;
@@ -969,6 +975,9 @@ test "original mail: resource plan separates unloaded file metadata from bounded
     try std.testing.expectEqual(photo.size, (try resourcePlan(html, &.{photo})).bytes);
     photo.size = 5 * 1024 * 1024;
     try std.testing.expectError(error.AttachmentsTooLarge, resourcePlan(html, &.{photo}));
+    try std.testing.expectEqual(photo.size, (try resourcePlanWithLimit(html, &.{photo}, t.Limits.attachment_bytes)).bytes);
+    photo.size = t.Limits.attachment_bytes + 1;
+    try std.testing.expectError(error.AttachmentsTooLarge, resourcePlanWithLimit(html, &.{photo}, t.Limits.attachment_bytes));
     // A large explicit file becomes a resource when referenced, so it cannot
     // evade the preservation limit merely by using attachment disposition.
     try std.testing.expectError(error.AttachmentsTooLarge, resourcePlan("<img src='report.pptx'>", &resources));

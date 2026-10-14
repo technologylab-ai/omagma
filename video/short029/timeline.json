@@ -1,0 +1,752 @@
+{
+  "schema": "omagma.video.timeline.v1",
+  "revision": "07-meeting-keyboard-access",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "chapters": [
+    {
+      "number": 1,
+      "title": "Encrypt local mail. Unlock once."
+    },
+    {
+      "number": 2,
+      "title": "Calendar in your terminal"
+    },
+    {
+      "number": 3,
+      "title": "Meeting reminders and profile-aware Join"
+    },
+    {
+      "number": 4,
+      "title": "Accept invitations into Calendar"
+    },
+    {
+      "number": 5,
+      "title": "Local follow-up reminders"
+    },
+    {
+      "number": 6,
+      "title": "Continue drafts in Gmail"
+    }
+  ],
+  "parts": [
+    {
+      "id": "intro",
+      "frameIn": 0,
+      "frameOut": 60,
+      "chapter": 0,
+      "asset": null,
+      "headline": null,
+      "subtitle": "",
+      "transition": 0,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      },
+      "cropToROI": false,
+      "editorial": "intro",
+      "editorialText": "What’s new in v0.2.9"
+    },
+    {
+      "id": "vault-story",
+      "frameIn": 60,
+      "frameOut": 450,
+      "chapter": 1,
+      "asset": null,
+      "headline": "Encryption + a new background daemon",
+      "subtitle": "Optional encryption on disk. Unlock once for your TUI and agents.",
+      "transition": 0.32,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      },
+      "cropToROI": false,
+      "editorial": "vault"
+    },
+    {
+      "id": "cal-discover",
+      "frameIn": 450,
+      "frameOut": 612,
+      "chapter": 2,
+      "asset": "sidebar.overview",
+      "headline": "Two new places in your sidebar",
+      "subtitle": "",
+      "transition": 0.32,
+      "camera": {
+        "to": "sidebar_portal",
+        "moveFrom": 0.25,
+        "moveUntil": 1.25,
+        "freeCenter": true,
+        "from": "full"
+      },
+      "cropToROI": true,
+      "director": "destinations",
+      "frame": [
+        160,
+        280,
+        730,
+        680
+      ],
+      "frameFrom": [
+        160,
+        224,
+        1600,
+        784
+      ],
+      "frameMoveFrom": 0.25,
+      "frameMoveUntil": 1.25,
+      "cue": {
+        "key": "Enter",
+        "label": "Open Calendar",
+        "show": 3.75,
+        "at": 5.1,
+        "x": 1030,
+        "y": 884
+      },
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "sidebar.overview"
+        },
+        {
+          "offset": 4.55,
+          "asset": "calendar.sidebar"
+        }
+      ]
+    },
+    {
+      "id": "cal-agenda",
+      "frameIn": 612,
+      "frameOut": 702,
+      "chapter": 2,
+      "asset": "calendar.agenda",
+      "headline": "Calendar in your terminal",
+      "subtitle": "Your schedule, at a glance.",
+      "transition": 0.28,
+      "camera": {
+        "to": "agenda",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true,
+        "from": "agenda"
+      },
+      "cropToROI": true,
+      "cue": {
+        "key": "3",
+        "label": "See the week",
+        "show": 1.65,
+        "at": 2.75,
+        "x": 1280,
+        "y": 884
+      },
+      "frame": [
+        160,
+        224,
+        1600,
+        630
+      ]
+    },
+    {
+      "id": "cal-week",
+      "frameIn": 702,
+      "frameOut": 792,
+      "chapter": 2,
+      "asset": "calendar.week",
+      "headline": "Calendar in your terminal",
+      "subtitle": "A week of meetings. Design review at 09:30.",
+      "transition": 0,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      },
+      "cropToROI": false,
+      "frame": [
+        120,
+        224,
+        1680,
+        650
+      ]
+    },
+    {
+      "id": "notification-arrives",
+      "frameIn": 792,
+      "frameOut": 924,
+      "chapter": 3,
+      "asset": "notification.upcoming",
+      "headline": "Meeting reminders, right in your TUI",
+      "subtitle": "10 minutes before. Dismiss or join.",
+      "transition": 0.28,
+      "camera": {
+        "from": "mail_context",
+        "to": "card_context",
+        "moveFrom": 1.1,
+        "moveUntil": 2.1,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        224,
+        1600,
+        650
+      ],
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "notification.mail"
+        },
+        {
+          "offset": 0.6,
+          "asset": "notification.upcoming"
+        }
+      ]
+    },
+    {
+      "id": "notification-ongoing",
+      "frameIn": 924,
+      "frameOut": 986,
+      "chapter": 3,
+      "asset": "notification.ongoing",
+      "headline": "Meeting reminders, right in your TUI",
+      "subtitle": "During the meeting · time remaining updates automatically.",
+      "transition": 0,
+      "camera": {
+        "from": "card_context",
+        "to": "card_context",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        224,
+        1600,
+        650
+      ],
+      "cue": {
+        "key": "M",
+        "label": "Meeting actions",
+        "show": 0.9,
+        "at": 1.7,
+        "x": 570,
+        "y": 910,
+        "target": "focus_control"
+      }
+    },
+    {
+      "id": "notification-join",
+      "frameIn": 986,
+      "frameOut": 1026,
+      "chapter": 3,
+      "asset": "notification.focused",
+      "headline": "Meeting reminders, right in your TUI",
+      "subtitle": "During the meeting · time remaining updates automatically.",
+      "transition": 0,
+      "camera": {
+        "from": "card_context",
+        "to": "card_context",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        224,
+        1600,
+        650
+      ],
+      "cue": {
+        "key": "o",
+        "label": "Join meeting",
+        "show": 0.35,
+        "at": 1.05,
+        "x": 570,
+        "y": 910,
+        "target": "join_control"
+      },
+      "focus": "join_control",
+      "focusFrom": 0.45,
+      "focusUntil": 0.85,
+      "highlightPadding": [
+        35,
+        26
+      ]
+    },
+    {
+      "id": "notification-profile",
+      "frameIn": 1026,
+      "frameOut": 1116,
+      "chapter": 3,
+      "asset": "notification.profile",
+      "headline": "Join in the right Chrome profile",
+      "subtitle": "",
+      "transition": 0.28,
+      "camera": {
+        "from": "profile_close",
+        "to": "profile_close",
+        "moveFrom": 0.1,
+        "moveUntil": 1,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        440,
+        835,
+        200
+      ],
+      "frameFrom": [
+        160,
+        400,
+        1600,
+        280
+      ],
+      "frameMoveFrom": 0,
+      "frameMoveUntil": 1,
+      "director": "profile"
+    },
+    {
+      "id": "rsvp-invite",
+      "frameIn": 1116,
+      "frameOut": 1206,
+      "chapter": 4,
+      "asset": "rsvp.invitation",
+      "headline": "Accept an invitation. Add it to Calendar.",
+      "subtitle": "",
+      "transition": 0.32,
+      "camera": {
+        "from": "reader",
+        "to": "invitation",
+        "moveFrom": 0.25,
+        "moveUntil": 1.25,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "cue": {
+        "key": "I",
+        "label": "Respond to this invitation",
+        "show": 1.5,
+        "at": 2.75,
+        "x": 560,
+        "y": 875
+      }
+    },
+    {
+      "id": "rsvp-review",
+      "frameIn": 1206,
+      "frameOut": 1314,
+      "chapter": 4,
+      "asset": "rsvp.review",
+      "headline": "Accept an invitation. Add it to Calendar.",
+      "subtitle": "",
+      "transition": 0.24,
+      "camera": {
+        "to": "action_close",
+        "moveFrom": 0.65,
+        "moveUntil": 1.55,
+        "freeCenter": true,
+        "from": "review"
+      },
+      "cropToROI": true,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "rsvp.review_opened"
+        },
+        {
+          "offset": 2.5,
+          "asset": "rsvp.accept_focus"
+        }
+      ],
+      "cue": {
+        "key": "Enter",
+        "label": "Accept invitation",
+        "show": 2.5,
+        "at": 3.3,
+        "x": 575,
+        "y": 886,
+        "target": "control"
+      },
+      "frame": [
+        160,
+        224,
+        1600,
+        630
+      ],
+      "focus": "control",
+      "focusFrom": 2.5,
+      "focusUntil": 2.9
+    },
+    {
+      "id": "rsvp-accepted",
+      "frameIn": 1314,
+      "frameOut": 1452,
+      "chapter": 4,
+      "asset": "rsvp.confirmed",
+      "headline": "One reply. Calendar updated.",
+      "subtitle": "",
+      "transition": 0,
+      "camera": {
+        "to": "outcome_close",
+        "moveFrom": 0.15,
+        "moveUntil": 0.95,
+        "freeCenter": true,
+        "from": "outcome_close",
+        "zoomFrom": 0.82
+      },
+      "cropToROI": true,
+      "director": "rsvp-result",
+      "frame": [
+        160,
+        305,
+        1600,
+        420
+      ]
+    },
+    {
+      "id": "rsvp-saved",
+      "frameIn": 1452,
+      "frameOut": 1512,
+      "chapter": 4,
+      "asset": "rsvp.calendar",
+      "headline": "The invitation is now in Calendar",
+      "subtitle": "",
+      "transition": 0.28,
+      "camera": {
+        "to": "event_summary",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true,
+        "from": "event_summary"
+      },
+      "cropToROI": true,
+      "frame": [
+        210,
+        270,
+        1500,
+        620
+      ]
+    },
+    {
+      "id": "fu-sidebar",
+      "frameIn": 1512,
+      "frameOut": 1566,
+      "chapter": 5,
+      "asset": "sidebar.overview",
+      "headline": "Follow up on emails, right on time",
+      "subtitle": "",
+      "transition": 0.32,
+      "camera": {
+        "to": "sidebar_portal",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true,
+        "from": "sidebar_portal"
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        280,
+        730,
+        680
+      ],
+      "director": "followups"
+    },
+    {
+      "id": "fu-message",
+      "frameIn": 1566,
+      "frameOut": 1626,
+      "chapter": 5,
+      "asset": "followup.message",
+      "headline": "Follow up on emails, right on time",
+      "subtitle": "",
+      "transition": 0.28,
+      "camera": {
+        "from": "reader",
+        "to": "message_excerpt",
+        "moveFrom": 0.05,
+        "moveUntil": 0.65,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        224,
+        1600,
+        690
+      ],
+      "cue": {
+        "key": "b",
+        "label": "Set a follow-up date",
+        "show": 0.5,
+        "at": 1.75,
+        "x": 565,
+        "y": 886
+      }
+    },
+    {
+      "id": "fu-schedule",
+      "frameIn": 1626,
+      "frameOut": 1746,
+      "chapter": 5,
+      "asset": "followup.schedule",
+      "headline": "Follow up on emails, right on time",
+      "subtitle": "",
+      "transition": 0.24,
+      "camera": {
+        "to": "preset_close",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true,
+        "from": "preset_close"
+      },
+      "cropToROI": true,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "followup.schedule"
+        },
+        {
+          "offset": 1.25,
+          "asset": "followup.today"
+        }
+      ],
+      "frame": [
+        160,
+        224,
+        1600,
+        640
+      ],
+      "cue": {
+        "key": "Ctrl+S",
+        "label": "Save for today",
+        "show": 1.8,
+        "at": 3.75,
+        "x": 550,
+        "y": 886
+      }
+    },
+    {
+      "id": "fu-saved",
+      "frameIn": 1746,
+      "frameOut": 1821,
+      "chapter": 5,
+      "asset": "followup.sidebar",
+      "headline": "One reminder, waiting in Follow-ups",
+      "subtitle": "",
+      "transition": 0.24,
+      "camera": {
+        "from": "sidebar_and_list",
+        "to": "sidebar_and_list",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        224,
+        1600,
+        650
+      ],
+      "cue": {
+        "key": "Enter",
+        "label": "Open Follow-ups",
+        "show": 1.1,
+        "at": 2.25,
+        "x": 600,
+        "y": 910
+      }
+    },
+    {
+      "id": "fu-list",
+      "frameIn": 1821,
+      "frameOut": 1902,
+      "chapter": 5,
+      "asset": "followup.list",
+      "headline": "One reminder, waiting in Follow-ups",
+      "subtitle": "The email is ready to return to.",
+      "transition": 0.24,
+      "camera": {
+        "from": "sidebar_and_list",
+        "to": "sidebar_and_list",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": true
+      },
+      "cropToROI": true,
+      "frame": [
+        160,
+        224,
+        1600,
+        650
+      ],
+      "frameMoveFrom": 0.15,
+      "frameMoveUntil": 1
+    },
+    {
+      "id": "draft-compose",
+      "frameIn": 1902,
+      "frameOut": 1986,
+      "chapter": 6,
+      "asset": "draft.compose",
+      "headline": "Continue a draft in Gmail",
+      "subtitle": "",
+      "transition": 0.32,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      },
+      "cropToROI": false,
+      "frame": [
+        160,
+        224,
+        1600,
+        640
+      ],
+      "cue": {
+        "key": "Enter",
+        "label": "Continue in Gmail",
+        "show": 0.65,
+        "at": 2.55,
+        "x": 330,
+        "y": 886,
+        "command": ":gmail-draft"
+      }
+    },
+    {
+      "id": "draft-continue",
+      "frameIn": 1986,
+      "frameOut": 2082,
+      "chapter": 6,
+      "asset": "draft.continue",
+      "headline": "Continue a draft in Gmail",
+      "subtitle": "",
+      "transition": 0.24,
+      "camera": {
+        "to": "upload_close",
+        "moveFrom": 0.6,
+        "moveUntil": 1.45,
+        "freeCenter": true,
+        "from": "focus"
+      },
+      "cropToROI": true,
+      "sequence": [
+        {
+          "offset": 0,
+          "asset": "draft.continue"
+        },
+        {
+          "offset": 1.8,
+          "asset": "draft.upload_focus"
+        }
+      ],
+      "frame": [
+        160,
+        224,
+        1600,
+        625
+      ],
+      "cue": {
+        "key": "Enter",
+        "label": "Upload this draft",
+        "show": 1.3,
+        "at": 2.95,
+        "x": 570,
+        "y": 886
+      }
+    },
+    {
+      "id": "draft-handoff",
+      "frameIn": 2082,
+      "frameOut": 2220,
+      "chapter": 6,
+      "asset": "draft.handoff",
+      "headline": "Continue a draft in Gmail",
+      "subtitle": "",
+      "transition": 0,
+      "camera": {
+        "to": "gmail_result",
+        "moveFrom": 0.15,
+        "moveUntil": 0.95,
+        "freeCenter": true,
+        "from": "gmail_result",
+        "zoomFrom": 0.82
+      },
+      "cropToROI": true,
+      "frame": [
+        190,
+        295,
+        1540,
+        310
+      ],
+      "frameMoveFrom": 0.15,
+      "frameMoveUntil": 0.95,
+      "director": "gmail-result"
+    },
+    {
+      "id": "recap",
+      "frameIn": 2220,
+      "frameOut": 2340,
+      "chapter": 0,
+      "asset": null,
+      "headline": null,
+      "subtitle": "",
+      "transition": 0.32,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      },
+      "cropToROI": false,
+      "editorial": "recap",
+      "editorialTitle": "Smoother everyday mail",
+      "editorialRows": [
+        "Faster conversations",
+        "Remembered reader format",
+        "Better Unicode search",
+        "Reliable attachments"
+      ]
+    },
+    {
+      "id": "outro",
+      "frameIn": 2340,
+      "frameOut": 2527,
+      "chapter": 0,
+      "asset": null,
+      "headline": null,
+      "subtitle": "",
+      "transition": 0.32,
+      "camera": {
+        "from": "full",
+        "to": "full",
+        "moveFrom": 0,
+        "moveUntil": 0,
+        "freeCenter": false
+      },
+      "cropToROI": false,
+      "editorial": "outro",
+      "editorialTitle": "Omagma v0.2.9",
+      "editorialText": "Linux · macOS · native TUI + agent CLI"
+    }
+  ]
+}

@@ -54,7 +54,12 @@ pub fn checkProfile(io: std.Io, config: *const Config, account: *const model.Acc
 }
 pub fn launch(io: std.Io, config: *const Config, account: *const model.Account, target: *const Target) !void {
     try checkProfile(io, config, account);
-    try platform.launchDetached(io, &.{ config.chrome.slice(), target.profile_arg.slice(), target.url.slice() });
+    var data_buffer: [4128]u8 = undefined;
+    const data_argument = try userDataArgument(config, &data_buffer);
+    try platform.launchDetached(io, &.{ config.chrome.slice(), target.profile_arg.slice(), data_argument, target.url.slice() });
+}
+pub fn userDataArgument(config: *const Config, buffer: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "--user-data-dir={s}", .{config.chrome_data.slice()});
 }
 
 /// Explicit links from the terminal reader use the same account Chrome

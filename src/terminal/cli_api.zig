@@ -4,8 +4,9 @@ const j = @import("json.zig");
 const Value = j.Value;
 const read_source = @embedFile("cli_api_read.json");
 const write_source = @embedFile("cli_api_write.json");
+const calendar_source = @embedFile("cli_api_calendar.json");
 comptime {
-    if (read_source.len + write_source.len > 512 * 1024) @compileError("CLI discovery metadata exceeds its bound");
+    if (read_source.len + write_source.len + calendar_source.len > 512 * 1024) @compileError("CLI discovery metadata exceeds its bound");
 }
 pub const Catalogue = struct {
     commands: []Value,
@@ -18,7 +19,7 @@ pub const Catalogue = struct {
 pub fn load(a: std.mem.Allocator) !Catalogue {
     var commands: std.ArrayList(Value) = .empty;
     var definitions = j.object(a);
-    for ([_][]const u8{ read_source, write_source }) |bytes| {
+    for ([_][]const u8{ read_source, write_source, calendar_source }) |bytes| {
         const part = try std.json.parseFromSliceLeaky(Value, a, bytes, .{ .duplicate_field_behavior = .@"error", .max_value_len = 65536 });
         const entries = j.get(part, "commands") orelse return error.InvalidDiscoveryMetadata;
         if (entries != .array) return error.InvalidDiscoveryMetadata;

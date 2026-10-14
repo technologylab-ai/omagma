@@ -49,7 +49,14 @@ Consent opens your configured Chrome profile and returns through a temporary loc
 
 The experimental TUI and CLI can read complete messages, threads and attachments using an existing read-only grant. Sending, mailbox changes and contacts require [separate terminal authorization](SETUP.md#full-tuicli-permissions). Terminal refresh tokens use a separate namespace in the selected credential store. If you use a bar/read-only registration, broader terminal access uses a different Google OAuth registration so the read-only authorization remains intact. Terminal-only setup needs just one registration. Installation or read access alone does not authorize an agent to send mail or change contacts.
 
-Terminal modes save cached mail, local drafts, contacts and operation receipts in owner-only directories and files. The defaults are `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; directories use mode 0700 and files use 0600. Live and fixture data have separate namespaces, and account/message filename components are hashes. **Mail and drafts are plaintext on disk, not encrypted at rest.** Filesystem permissions restrict access; a backup or administrator with file access can still read them.
+By default, terminal modes save cached mail, local drafts, contacts, Calendar data and operation receipts in owner-only directories and files. The defaults are `$XDG_CACHE_HOME/omagma/terminal` or `$HOME/.cache/omagma/terminal`; directories use mode 0700 and files use 0600. Live and fixture data have separate namespaces, and account/message filename components are hashes. **The default store keeps mail and drafts as plaintext on disk.** Filesystem permissions restrict access; a backup or administrator with file access can still read them.
+
+Omagma 0.2.9 adds an optional [encrypted native vault](ENCRYPTION.md)
+with explicit migration and a password-unlocked daemon for the TUI, CLI and SSH
+clients. Migration preserves
+the original plaintext source; explicit attachment saves, exports and external
+editor files also remain plaintext outputs. The vault guide explains activation,
+recovery and these storage boundaries.
 
 The cache keeps the newest mail within message-count and byte quotas. Old-tail eviction removes mail and its cached bodies while preserving drafts and uncertain-operation receipts. Clearing the mail cache also preserves drafts, contacts and receipts. See [cache behavior](TUI-CACHE.md). Omagma also saves account addresses, mailbox/selected-message context and key/layout preferences in the private `omagma/ui.json` configuration file.
 

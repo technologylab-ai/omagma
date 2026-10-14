@@ -5,6 +5,12 @@ const keyring = @import("../keyring.zig");
 const platform = @import("../platform.zig");
 const Config = @import("../config.zig").Config;
 const j = @import("json.zig");
+const calendar_permissions = @import("calendar_permissions.zig");
+
+pub const allowed_capabilities = [_][]const u8{
+    "mail-read",     "mail-drafts",          "mail-send",             "mail-modify",       "contacts-read", "contacts-write", "calendar-rsvp",
+    "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy",
+};
 
 pub const Grant = struct {
     account: []const u8,
@@ -24,29 +30,40 @@ pub const Registry = struct { version: u8 = 1, accounts: []Grant = &.{} };
 const max_registry_bytes = 64 * 1024;
 
 pub fn scopesFor(a: std.mem.Allocator, capabilities: []const []const u8) ![]const []const u8 {
-    if (capabilities.len == 0 or capabilities.len > 6) return error.InvalidCapabilities;
-    const allowed = [_][]const u8{ "mail-read", "mail-send", "mail-modify", "contacts-read", "contacts-write", "calendar-rsvp" };
+    if (capabilities.len == 0 or capabilities.len > allowed_capabilities.len) return error.InvalidCapabilities;
     var read = false;
     var send = false;
     var modify = false;
+    var drafts = false;
     var contacts_read = false;
     var contacts_write = false;
+    var calendar: calendar_permissions.Selection = .{};
     for (capabilities, 0..) |capability, index| {
         var known = false;
-        for (allowed) |item| known = known or std.mem.eql(u8, item, capability);
+        for (allowed_capabilities) |item| known = known or std.mem.eql(u8, item, capability);
         if (!known) return error.InvalidCapabilities;
         for (capabilities[0..index]) |previous| if (std.mem.eql(u8, previous, capability)) return error.InvalidCapabilities;
         read = read or std.mem.eql(u8, capability, "mail-read");
         send = send or std.mem.eql(u8, capability, "mail-send") or std.mem.eql(u8, capability, "calendar-rsvp");
         modify = modify or std.mem.eql(u8, capability, "mail-modify");
+        drafts = drafts or std.mem.eql(u8, capability, "mail-drafts");
         contacts_read = contacts_read or std.mem.eql(u8, capability, "contacts-read");
         contacts_write = contacts_write or std.mem.eql(u8, capability, "contacts-write");
+        calendar.read = calendar.read or std.mem.eql(u8, capability, "calendar-read");
+        calendar.write_owned = calendar.write_owned or std.mem.eql(u8, capability, "calendar-write-owned");
+        calendar.write_shared = calendar.write_shared or std.mem.eql(u8, capability, "calendar-write-shared");
+        calendar.availability = calendar.availability or std.mem.eql(u8, capability, "calendar-freebusy");
     }
     if (!read) return error.MailReadCapabilityRequired;
     var scopes: std.ArrayList([]const u8) = .empty;
     try scopes.append(a, if (modify) "https://www.googleapis.com/auth/gmail.modify" else oauth.readonly_scope);
-    if (send and !modify) try scopes.append(a, "https://www.googleapis.com/auth/gmail.send");
+    if (!modify) {
+        if (drafts) try scopes.append(a, "https://www.googleapis.com/auth/gmail.compose") else if (send) try scopes.append(a, "https://www.googleapis.com/auth/gmail.send");
+    }
     if (contacts_write) try scopes.append(a, "https://www.googleapis.com/auth/contacts") else if (contacts_read) try scopes.append(a, "https://www.googleapis.com/auth/contacts.readonly");
+    const calendar_scopes = try calendar_permissions.scopes(a, calendar);
+    defer a.free(calendar_scopes);
+    try scopes.appendSlice(a, calendar_scopes);
     return try scopes.toOwnedSlice(a);
 }
 pub fn grantIdentity(scopes: []const []const u8) [64]u8 {
@@ -66,6 +83,12 @@ pub fn defaultFile(a: std.mem.Allocator, env: *const std.process.Environ.Map) ![
 }
 pub fn load(io: std.Io, a: std.mem.Allocator, path: []const u8) !Registry {
     return loadFrom(std.Io.Dir.cwd(), io, a, path);
+}
+pub fn loadConfigured(io: std.Io, a: std.mem.Allocator, config: *const Config, path: []const u8) !Registry {
+    if (config.credential_store != .vault) return load(io, a, path);
+    const provider = config.runtime_provider orelse return error.VaultLocked;
+    const bytes = (try provider.read(.grants, .{})) orelse return error.VaultIdentityRequired;
+    return parse(a, bytes);
 }
 fn validateRegistryFile(stat: std.Io.File.Stat) !void {
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureGrantRegistryFile;
@@ -90,6 +113,10 @@ fn loadFrom(dir: std.Io.Dir, io: std.Io, a: std.mem.Allocator, path: []const u8)
         error.StreamTooLong => return error.GrantRegistryTooLarge,
         else => return err,
     };
+    return parse(a, bytes);
+}
+pub fn parse(a: std.mem.Allocator, bytes: []const u8) !Registry {
+    if (bytes.len > max_registry_bytes) return error.GrantRegistryTooLarge;
     try b.preflight(bytes);
     const registry = try std.json.parseFromSliceLeaky(Registry, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = 4096 });
     if (registry.version != 1 or registry.accounts.len > 3) return error.InvalidGrantRegistry;
@@ -127,7 +154,7 @@ fn save(io: std.Io, a: std.mem.Allocator, path: []const u8, registry: Registry) 
 }
 fn requestCapabilities(a: std.mem.Allocator, request: j.Value) ![]const []const u8 {
     const field = j.get(request, "capabilities") orelse return error.CapabilitiesRequired;
-    if (field != .array or field.array.items.len > 6) return error.InvalidCapabilities;
+    if (field != .array or field.array.items.len > allowed_capabilities.len) return error.InvalidCapabilities;
     const result = try a.alloc([]const u8, field.array.items.len);
     for (field.array.items, result) |item, *dest| dest.* = try j.string(item);
     _ = try scopesFor(a, result);
@@ -139,16 +166,19 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
     const account = try j.required(request, "account");
     const index = config.index(account) orelse return error.UnknownAccount;
     if (!config.accounts[index].enabled) return error.AccountDisabled;
-    const path = if (j.get(request, "grantFile")) |v| try j.string(v) else try defaultFile(a, env);
-    var registry = try load(io, a, path);
+    const path = if (config.credential_store == .vault) "" else if (j.get(request, "grantFile")) |v| try j.string(v) else try defaultFile(a, env);
+    var registry = try loadConfigured(io, a, config, path);
     const current = find(&registry, account);
     if (std.mem.eql(u8, command, "auth.status")) return j.value(a, .{ .account = account, .namespace = keyring.terminal_service, .configured = current != null, .grant = current, .credentialStore = @tagName(config.credential_store), .credentialDirectory = config.credential_directory.slice() });
     if (std.mem.eql(u8, command, "auth.revoke")) {
-        try keyring.clearTerminal(io, config.credentials(), account);
+        if (config.credential_store != .vault) try keyring.clearTerminal(io, config.credentials(), account);
         var accounts: std.ArrayList(Grant) = .empty;
         for (registry.accounts) |grant| if (!std.mem.eql(u8, grant.account, account)) try accounts.append(a, grant);
         registry.accounts = accounts.items;
-        try save(io, a, path, registry);
+        if (config.credential_store == .vault) {
+            const bytes = try j.encodeAlloc(a, registry, .{});
+            try (config.runtime_provider orelse return error.VaultLocked).apply(&.{ .{ .kind = .terminal_token, .key = .{ .account = account }, .value = null }, .{ .kind = .grants, .value = bytes } });
+        } else try save(io, a, path, registry);
         return j.value(a, .{ .account = account, .cleared = true, .namespace = keyring.terminal_service });
     }
     if (!std.mem.eql(u8, command, "auth.authorize")) return error.UnsupportedCommand;
@@ -158,26 +188,31 @@ pub fn run(io: std.Io, a: std.mem.Allocator, config: *const Config, env: *const 
     if (client_file.len == 0) return error.OAuthClientRequired;
     var desktop: oauth.DesktopClient = .{};
     defer desktop.wipe();
-    try oauth.loadDesktop(io, client_file, &desktop);
+    try oauth.loadDesktopWithSettings(io, client_file, &desktop, config.credentials());
     // A new scope grant on the bar's OAuth client can change its refresh-token
     // scope response. Require a distinct Desktop client for broader access.
     if (scopes.len != 1 or !std.mem.eql(u8, scopes[0], oauth.readonly_scope)) {
         if (config.client_file.len != 0) {
             var bar: oauth.DesktopClient = .{};
             defer bar.wipe();
-            try oauth.loadDesktop(io, config.client_file.slice(), &bar);
+            try oauth.loadDesktopWithSettings(io, config.client_file.slice(), &bar, config.credentials());
             if (std.mem.eql(u8, bar.client_id.slice(), desktop.client_id.slice())) return error.SeparateTerminalClientRequired;
         }
     }
+    var captured: b.Text(@import("../limits.zig").secret) = .{};
+    defer captured.wipe();
     const identity = grantIdentity(scopes);
-    try platform.deadline(io, platform.seconds(180), oauth.authorizeScoped, .{ io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, @as(?oauth.TerminalCredential, .{ .grant_id = &identity }), config.credentials() });
+    try platform.deadline(io, platform.seconds(180), oauth.authorizeScoped, .{ io, client_file, account, config.accounts[index].profile.slice(), config.chrome.slice(), scopes, @as(?oauth.TerminalCredential, .{ .grant_id = &identity, .capture = if (config.credential_store == .vault) &captured else null }), config.credentials() });
     const grant: Grant = .{ .account = try a.dupe(u8, account), .clientFile = try a.dupe(u8, client_file), .clientId = try a.dupe(u8, desktop.client_id.slice()), .grantId = try a.dupe(u8, &identity), .capabilities = caps, .scopes = scopes };
     var accounts: std.ArrayList(Grant) = .empty;
     for (registry.accounts) |old| if (!std.mem.eql(u8, old.account, account)) try accounts.append(a, old);
     try accounts.append(a, grant);
     if (accounts.items.len > 3) return error.InvalidGrantRegistry;
     registry.accounts = accounts.items;
-    try save(io, a, path, registry);
+    if (config.credential_store == .vault) {
+        const bytes = try j.encodeAlloc(a, registry, .{});
+        try (config.runtime_provider orelse return error.VaultLocked).apply(&.{ .{ .kind = .terminal_token, .key = .{ .account = account }, .value = null }, .{ .kind = .grants, .value = bytes }, .{ .kind = .terminal_token, .key = .{ .account = account, .client = desktop.client_id.slice(), .grant = &identity }, .value = captured.slice() } });
+    } else try save(io, a, path, registry);
     return j.value(a, .{ .account = account, .authorized = true, .namespace = keyring.terminal_service, .capabilities = caps, .scopes = scopes });
 }
 
@@ -189,11 +224,37 @@ test "terminal scopes are minimal canonical and identity-bound" {
     try std.testing.expectEqual(@as(usize, 3), send.len);
     try std.testing.expectEqualStrings(oauth.readonly_scope, send[0]);
     try std.testing.expectEqualStrings("https://www.googleapis.com/auth/gmail.send", send[1]);
-    const modify = try scopesFor(a, &.{ "mail-read", "mail-modify", "mail-send", "contacts-write" });
+    const drafts = try scopesFor(a, &.{ "mail-read", "mail-send", "mail-drafts" });
+    try std.testing.expectEqual(@as(usize, 2), drafts.len);
+    try std.testing.expectEqualStrings("https://www.googleapis.com/auth/gmail.compose", drafts[1]);
+    try oauth.validateScopeSet(drafts);
+    const modify = try scopesFor(a, &.{ "mail-read", "mail-modify", "mail-send", "mail-drafts", "contacts-write" });
     try std.testing.expectEqual(@as(usize, 2), modify.len);
     try std.testing.expectEqualStrings("https://www.googleapis.com/auth/gmail.modify", modify[0]);
     try std.testing.expect(!std.mem.eql(u8, &grantIdentity(send), &grantIdentity(modify)));
     try std.testing.expectError(error.InvalidCapabilities, scopesFor(a, &.{ "mail-read", "mail-read" }));
+}
+
+test "calendar: terminal grants preserve mail and contacts while requesting exact optional scopes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const shared = try scopesFor(a, &allowed_capabilities);
+    try std.testing.expectEqual(@as(usize, 5), shared.len);
+    try std.testing.expectEqualStrings("https://www.googleapis.com/auth/gmail.modify", shared[0]);
+    try std.testing.expectEqualStrings("https://www.googleapis.com/auth/contacts", shared[1]);
+    try std.testing.expectEqualStrings(calendar_permissions.calendar_list, shared[2]);
+    try std.testing.expectEqualStrings(calendar_permissions.events_write, shared[3]);
+    try std.testing.expectEqualStrings(calendar_permissions.free_busy, shared[4]);
+    try oauth.validateScopeSet(shared);
+    const reordered = try scopesFor(a, &.{ "calendar-freebusy", "contacts-write", "calendar-write-shared", "mail-modify", "mail-read" });
+    try std.testing.expectEqualSlices(u8, &grantIdentity(shared), &grantIdentity(reordered));
+    const owned = try scopesFor(a, &.{ "mail-read", "calendar-write-owned" });
+    try std.testing.expectEqualStrings(calendar_permissions.events_owned, owned[2]);
+    try std.testing.expect(!std.mem.eql(u8, &grantIdentity(owned), &grantIdentity(shared)));
+    try std.testing.expectError(error.MailReadCapabilityRequired, scopesFor(a, &.{"calendar-read"}));
+    try std.testing.expectError(error.InvalidCapabilities, scopesFor(a, &.{ "mail-read", "calendar-read", "calendar-read" }));
+    try std.testing.expectError(error.InvalidCapabilities, scopesFor(a, &.{ "mail-read", "calendar-admin" }));
 }
 
 test "grant registry reads require private regular files and reject final symlinks" {

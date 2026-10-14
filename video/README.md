@@ -13,13 +13,19 @@ Omagma.
 
 ## Release films
 
+- [v0.2.9 — six native workflows](short029/README.md): encrypted local mail,
+  an unlocked daemon for the TUI and agents, Calendar, invitation acceptance,
+  profile-aware Join, follow-ups and Gmail draft handoff.
+- [v0.2.8 — native usability and a browser tech demo](short028/README.md):
+  Mac setup, agent command discovery, copying text, editor access, Send now
+  and the Zig/WebAssembly browser surprise.
 - [v0.2.7 — eight workflow highlights](short027/README.md): bar-to-TUI launch,
   searchable actions, find, staged labels, meeting Join, files, intact HTML
   originals and cancellable sending, with a closing everyday-polish recap.
 - [v0.2.6 short film](short026/README.md): new-mail cards, the attachment
   browser and Markdown composition.
 
-Both reuse the original Slow Eruption MP3. Their separate sources and output
+These reuse the original Slow Eruption MP3. Their separate sources and output
 names preserve the earlier launch film and each delivered master.
 
 ## One command per stage

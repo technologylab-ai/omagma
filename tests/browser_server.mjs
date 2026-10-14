@@ -30,7 +30,17 @@ await mkdir(empty, { recursive: true, mode: 0o700 });
 assert.deepEqual(await readdir(empty), [], "server launch directory is not empty");
 const environment = { PATH: process.env.PATH, LANG: "C.UTF-8", HOME: join(work, "home"),
   XDG_CONFIG_HOME: join(work, "config"), XDG_CACHE_HOME: join(work, "cache"), XDG_DATA_HOME: join(work, "data") };
-const scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"];
+const grantSelections = [
+  { capabilities: ["mail-read", "mail-send"],
+    scopes: ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"] },
+  // A native grant with all supported capabilities must connect to browser
+  // mail just like a legacy grant; it does not enable browser Calendar APIs.
+  { capabilities: ["mail-read", "mail-drafts", "mail-send", "mail-modify", "contacts-read", "contacts-write", "calendar-rsvp",
+      "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy"],
+    scopes: ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/contacts",
+      "https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/calendar.events.freebusy"] },
+];
 const clientId = "synthetic-browser-test.apps.googleusercontent.com";
 const clientSecret = "synthetic-client-secret-never-valid";
 const addresses = ["ada.browser@example.test", "bea.browser@example.test"];
@@ -41,8 +51,8 @@ const credentialDirectory = join(work, "private-credentials");
 await mkdir(configDirectory, { recursive: true, mode: 0o700 });
 await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
 const clientFile = join(configDirectory, "synthetic-oauth-client.json");
-const grants = addresses.map((account) => ({ account, clientFile, clientId,
-  grantId: tupleHash(["omagma-terminal-grant-v1", ...scopes]), capabilities: ["mail-read", "mail-send"], scopes, enabled: true }));
+const grants = addresses.map((account, index) => ({ account, clientFile, clientId,
+  grantId: tupleHash(["omagma-terminal-grant-v1", ...grantSelections[index].scopes]), ...grantSelections[index], enabled: true }));
 await writeFile(clientFile, JSON.stringify({ installed: { client_id: clientId, client_secret: clientSecret,
   project_id: "synthetic-browser-project", auth_uri: "https://accounts.google.com/o/oauth2/auth",
   token_uri: "https://oauth2.googleapis.com/token", redirect_uris: ["http://localhost"] } }) + "\n", { mode: 0o600 });

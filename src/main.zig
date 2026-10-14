@@ -26,7 +26,7 @@ var config_storage: [16 * 1024]u8 = undefined;
 var probe_storage: [l.response]u8 = undefined;
 // All module-owned static storage is accounted at compile time; unassigned
 // capacity is physically reserved and touched once, with no allocator fallback.
-const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + @import("terminal/background.zig").reservation_bytes + daemon.reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0) + (if (@import("build_options").browser) @import("browser_server.zig").reservation_bytes else 0);
+const assigned_bytes = @sizeOf(Config) + @sizeOf(@TypeOf(startup_storage)) + @sizeOf(@TypeOf(config_storage)) + @sizeOf(@TypeOf(probe_storage)) + 256 + @import("terminal/background.zig").reservation_bytes + daemon.reservation_bytes + @import("terminal/vault_daemon.zig").reservation_bytes + @import("providers/gmail.zig").reservation_bytes + http.reservation_bytes + oauth.reservation_bytes + @import("platform.zig").reservation_bytes + @import("keyring.zig").reservation_bytes + (if (@import("build_options").tui) @import("terminal/tui.zig").reservation_bytes else 0) + (if (@import("build_options").browser) @import("browser_server.zig").reservation_bytes else 0);
 comptime {
     if (assigned_bytes > l.app_reservation) @compileError("Application reservation exceeds16MiB");
 }
@@ -135,14 +135,49 @@ fn standaloneHelpRequested(mode: []const u8, args: *std.process.Args.Iterator) ?
 }
 fn app(minimal: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
+    // Inspect mode before allocating provider workers or touching the unused
+    // native reserve. Relay requests are served by the unlocked owner process.
+    var early = minimal.args.iterate();
+    _ = early.skip();
+    const early_mode = early.next() orelse "help";
+    var lean_client = false;
+    if (std.mem.eql(u8, early_mode, "vault")) {
+        const verb = early.next() orelse "help";
+        lean_client = !std.mem.eql(u8, verb, "serve") and !std.mem.eql(u8, verb, "init") and !std.mem.eql(u8, verb, "migrate");
+    } else if (std.mem.eql(u8, early_mode, "cli") or std.mem.eql(u8, early_mode, "agent") or std.mem.eql(u8, early_mode, "tui") or @import("terminal/cli_help.zig").knownFamily(early_mode)) {
+        while (early.next()) |arg| if (std.mem.eql(u8, arg, "--backend")) {
+            lean_client = true;
+            break;
+        };
+    }
     var runtime: memory.Runtime = .{};
     try runtime.init(minimal, runtime_storage.buffers(), memory.application_limit);
     defer runtime.deinit();
-    try runtime.seal();
+    if (!lean_client and (std.mem.eql(u8, early_mode, "cli") or std.mem.eql(u8, early_mode, "agent") or std.mem.eql(u8, early_mode, "tui") or @import("terminal/cli_help.zig").knownFamily(early_mode))) {
+        var fixture_scan = minimal.args.iterate();
+        var fixtures = false;
+        while (fixture_scan.next()) |arg| if (std.mem.eql(u8, arg, "--fixtures")) {
+            fixtures = true;
+            break;
+        };
+        if (!fixtures) {
+            // Resolve the strictly private activation before reserving provider
+            // workers/touching the native reserve. Startup permits local I/O;
+            // no provider or client can run until the chosen pool is sealed.
+            var routing_arena: std.heap.ArenaAllocator = .init(runtime.application_meter.allocator());
+            defer routing_arena.deinit();
+            lean_client = try @import("terminal/vault_activation.zig").load(runtime.threaded.io(), routing_arena.allocator(), &runtime.environ) != null;
+        }
+    }
+    if (lean_client) {
+        if (std.mem.eql(u8, early_mode, "tui")) try runtime.sealFrontend() else try runtime.sealClient();
+    } else try runtime.seal();
     const init = runtime.context();
     const io = runtime.io();
-    @memset(&unassigned_reserve, 0);
-    std.mem.doNotOptimizeAway(&unassigned_reserve);
+    if (!lean_client) {
+        @memset(&unassigned_reserve, 0);
+        std.mem.doNotOptimizeAway(&unassigned_reserve);
+    }
     var f = std.heap.FixedBufferAllocator.init(&startup_storage);
     var args = try init.minimal.args.iterateAllocator(f.allocator());
     defer args.deinit();
@@ -157,6 +192,7 @@ fn app(minimal: std.process.Init.Minimal) !void {
         const assets = @import("browser_assets").assets(server.Asset);
         return @import("browser_connection.zig").run(init, io, &args, &assets);
     }
+    if (std.mem.eql(u8, mode, "vault")) return @import("terminal/vault_daemon.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "credentials")) return @import("terminal/credential_cli.zig").run(init, io, &args);
     if (std.mem.eql(u8, mode, "__wait-probe-child")) return @import("platform.zig").waitCancellationChild(io);
     if (std.mem.eql(u8, mode, "probe-keyring-upgrade")) {
@@ -209,7 +245,7 @@ fn app(minimal: std.process.Init.Minimal) !void {
         try writer.interface.flush();
         return;
     }
-    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or std.mem.eql(u8, mode, "mail") or std.mem.eql(u8, mode, "contacts") or std.mem.eql(u8, mode, "labels") or std.mem.eql(u8, mode, "invitations") or std.mem.eql(u8, mode, "draft") or std.mem.eql(u8, mode, "queue") or std.mem.eql(u8, mode, "attachment") or std.mem.eql(u8, mode, "cache") or std.mem.eql(u8, mode, "operation") or std.mem.eql(u8, mode, "terminal-auth") or std.mem.eql(u8, mode, "updates")) {
+    if (std.mem.eql(u8, mode, "tui") or std.mem.eql(u8, mode, "cli") or std.mem.eql(u8, mode, "agent") or @import("terminal/cli_help.zig").knownFamily(mode)) {
         try @import("terminal/cli.zig").run(init, io, mode, &args);
         return;
     }

@@ -1,0 +1,568 @@
+{
+  "commands": [
+    {
+      "cmd": "calendar.list",
+      "summary": "List bounded calendars and their actual read, write and availability permissions.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared",
+        "calendar-freebusy"
+      ],
+      "properties": {
+        "persistCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save successful provider results to the local Calendar cache. Set false for background polling to preserve foreground snapshots. Existing cached fallback and cacheOnly behavior are unchanged. Older backends may ignore this option."
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Read retained local Calendar data without credentials or provider traffic. Results are marked cached and stale. An uncached calendar, window or event returns a cache miss."
+        }
+      },
+      "required": [],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "Returns account, calendars and complete. Each entry contains calendar, canRead, canWrite and canFreeBusy. Calendar fields include target.account, target.calendar_id, summary, time_zone, access, primary and owned_scope_verified.",
+        "Includes hidden calendars. At most 24 calendars and 16 pages are retained; complete:false is not proof that an omitted calendar does not exist. CalendarList read scope is required with all Calendar capability sets.",
+        "Read-only provider operation. This does not change calendar subscriptions or the bar.",
+        "Cached reads still validate the current local account grant. Cached calendar permissions cannot authorize writes or assert availability. Transient connection failures may return retained data with refreshError; revoked authorization is never hidden by that fallback."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.list",
+          "account": "personal@example.com"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.agenda",
+      "summary": "Read a bounded day or week with provider-expanded recurring events.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week"
+          ],
+          "default": "day",
+          "description": "Complete requested local day or seven-day window. Calendar recurrences expand on the provider within this window."
+        },
+        "timeZone": {
+          "$ref": "#/$defs/CalendarZone",
+          "description": "Optional window display zone; default is the selected calendar's time_zone. Day boundaries preserve daylight-saving changes."
+        },
+        "persistCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save successful provider results and calendar discovery to the local Calendar cache. Set false for background polling to preserve foreground snapshots. Existing cached fallback and cacheOnly behavior are unchanged. Older backends may ignore this option."
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Read retained local Calendar data without credentials or provider traffic. Results are marked cached and stale. An uncached calendar, window or event returns a cache miss."
+        }
+      },
+      "required": [
+        "calendarId",
+        "date"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Returns calendar, snapshot and refreshError. Snapshot contains target, window, events, complete, stale and fetched_at_ms. DATE values remain civil days; timed values are epoch milliseconds with explicit kind.",
+        "At most 500 events, 16 pages, 1 MiB per response and 4 MiB aggregate response bytes. An incomplete refresh is an error; it never replaces a complete cache with empty data. When a host cache has the exact previous complete account/calendar/window snapshot, it may return it marked stale with refreshError.",
+        "No provider writes. A freeBusyReader calendar requires calendar.freebusy instead.",
+        "Cached reads still validate the current local account grant. Cached calendar permissions cannot authorize writes or assert availability. Transient connection failures may return retained data with refreshError; revoked authorization is never hidden by that fallback."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.agenda",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "date": "2026-10-13",
+          "view": "week"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.event",
+      "summary": "Read one exact provider event in the selected calendar.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "eventId": {
+          "$ref": "#/$defs/CalendarEventId"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Read retained local Calendar data without credentials or provider traffic. Results are marked cached and stale. An uncached calendar, window or event returns a cache miss."
+        }
+      },
+      "required": [
+        "calendarId",
+        "eventId"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Returns calendar and event, including original occurrence identity, description, safe join/html links, exact ETag and explicit DATE/instant times. A recurring event can be inspected even though recurring invitation writes remain unsupported.",
+        "The returned event ID must match the requested event. CalendarNotFound remains a Calendar-specific result; it does not authorize an absent import.",
+        "Cached reads still validate the current local account grant. Cached calendar permissions cannot authorize writes or assert availability. Transient connection failures may return retained data with refreshError; revoked authorization is never hidden by that fallback."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "eventId": "RETURNED_EVENT_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.freebusy",
+      "summary": "Read availability ranges without requiring event-detail access.",
+      "capabilities": [
+        "mail-read",
+        "calendar-freebusy"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "First local civil date in the selected zone. A week begins on this exact date and spans seven local days."
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week"
+          ],
+          "default": "day",
+          "description": "Complete requested local day or seven-day window. Calendar recurrences expand on the provider within this window."
+        },
+        "timeZone": {
+          "$ref": "#/$defs/CalendarZone",
+          "description": "Optional window display zone; default is the selected calendar's time_zone. Day boundaries preserve daylight-saving changes."
+        }
+      },
+      "required": [
+        "calendarId",
+        "date"
+      ],
+      "notes": [
+        "Requires mail-read plus calendar-freebusy and its exact calendar.events.freebusy scope. This command does not accept calendar-read or a write capability as a substitute for the separately recorded availability capability.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Read-only FreeBusy POST. Returns target, window, ranges, complete and reason. Each range uses start_ms/end_ms. Per-calendar provider errors yield complete:false, never a claim that the time is free.",
+        "At most 500 ranges in the bounded day/week window. A calendar with access none is refused. FreeBusy access never authorizes an import or event-detail read."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.freebusy",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "date": "2026-10-13"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.invitation-plan",
+      "summary": "Inspect an account mail invitation and locate its provider UID before any write.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "messageId": {
+          "$ref": "#/$defs/CalendarMessageId"
+        },
+        "startTimeZone": {
+          "$ref": "#/$defs/CalendarZone",
+          "description": "Explicit interpretation zone for DTSTART. A valid source IANA TZID is otherwise used without changing the source."
+        },
+        "endTimeZone": {
+          "$ref": "#/$defs/CalendarZone",
+          "description": "Explicit interpretation zone for DTEND. When no end binding exists, the start binding also applies to its wall time."
+        },
+        "acceptFloatingTime": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly accept fixing floating wall times to the named startTimeZone/endTimeZone. A zone selection alone does not consent."
+        },
+        "reinterpretEmbeddedTimezones": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly accept interpreting embedded VTIMEZONE wall times with the named startTimeZone/endTimeZone. Requires an explicit zone per endpoint whose embedded rules are not verified; original rules remain retained."
+        }
+      },
+      "required": [
+        "calendarId",
+        "messageId"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "The host loads original invitation bytes from messageId in this explicit account and supplies only verified account aliases. The command does not accept caller-provided source bytes or verifiedAliases. Without verified aliases, only the selected account may match the attendee.",
+        "Returns calendar, invitation, resolved, decision, writable, lookupComplete, timeError and any event/operation. The complete original source and unknown properties remain preserved; plan inspection does not claim or dispatch a Calendar write.",
+        "UID lookup includes hidden invitations and deleted events. Bounded or incomplete lookup never means absent. Existing recurrences can be located; recurrence imports/updates remain unsupported.",
+        "Floating times, embedded VTIMEZONE reinterpretation and DST gaps/folds require explicit review. Unresolved source times remain visible in timeError and do not enable writes."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.invitation-plan",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.review",
+      "summary": "Prepare and durably preserve one exact invitation change for review.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "messageId": {
+          "$ref": "#/$defs/CalendarMessageId"
+        },
+        "startTimeZone": {
+          "$ref": "#/$defs/CalendarZone",
+          "description": "Explicit interpretation zone for DTSTART. A valid source IANA TZID is otherwise used without changing the source."
+        },
+        "endTimeZone": {
+          "$ref": "#/$defs/CalendarZone",
+          "description": "Explicit interpretation zone for DTEND. When no end binding exists, the start binding also applies to its wall time."
+        },
+        "acceptFloatingTime": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly accept fixing floating wall times to the named startTimeZone/endTimeZone. A zone selection alone does not consent."
+        },
+        "reinterpretEmbeddedTimezones": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly accept interpreting embedded VTIMEZONE wall times with the named startTimeZone/endTimeZone. Requires an explicit zone per endpoint whose embedded rules are not verified; original rules remain retained."
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        }
+      },
+      "required": [
+        "calendarId",
+        "messageId",
+        "operationId"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Loads the original source from this account's messageId and performs read-only lookup/current-event checks. A writable calendar plus the matching owned/shared capability is required; no Calendar mutation or unknown claim occurs during review.",
+        "Returns reviewHash plus account, calendarId, calendarName, operationId, action, uid, version, eventId, expectedEtag, invitation and resolved. Inspect these exact values before calendar.apply. Mutation action is import_event, update_event or cancel_event.",
+        "The saved review includes the complete source and exact prepared request. Reusing its operationId with altered identity or bytes is refused. Conditional updates/cancellations bind a fresh provider ETag.",
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.review",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "messageId": "RETURNED_MESSAGE_ID",
+          "operationId": "calendar-reviewed-1"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.apply",
+      "summary": "Apply an exact saved review after confirming its returned hash.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Load the saved review for this account/calendar/operation and pass its exact returned reviewHash. Do not send a review object, source, request body or ETag override; these are refused. A wrong hash or identity fails before provider access.",
+        "Refreshes calendar metadata and checks current UID absence or ETag. The host durably records unknown before the single provider dispatch. Returns state applied/rejected/unknown, providerId, reconciled, errorCode and any event; inspect state even when the outer envelope is ok.",
+        "Updates preserve unrelated event properties and do not replace attendee, recurrence, attachment or conference arrays. Cancellation uses conditional deletion with sendUpdates=none; import uses the attendee-copy import endpoint.",
+        "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.apply",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "calendar-reviewed-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.import",
+      "summary": "Apply a saved import review with exact confirmation.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Same saved-review and durable-claim contract as calendar.apply, additionally requiring review.intent.kind to equal import_event before provider access. The alias never converts a saved review to a different action.",
+        "Use the exact operationId and reviewHash returned by calendar.review; request body/source/ETag overrides are refused. Inspect applied/rejected/unknown state and errorCode.",
+        "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.import",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "calendar-reviewed-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.update",
+      "summary": "Apply a saved conditional update review with exact confirmation.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Same saved-review and durable-claim contract as calendar.apply, additionally requiring review.intent.kind to equal update_event before provider access. The alias never converts a saved review to a different action.",
+        "Use the exact operationId and reviewHash returned by calendar.review; request body/source/ETag overrides are refused. Inspect applied/rejected/unknown state and errorCode.",
+        "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.update",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "calendar-reviewed-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.cancel",
+      "summary": "Apply a saved conditional cancellation review with exact confirmation.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Same saved-review and durable-claim contract as calendar.apply, additionally requiring review.intent.kind to equal cancel_event before provider access. The alias never converts a saved review to a different action.",
+        "Use the exact operationId and reviewHash returned by calendar.review; request body/source/ETag overrides are refused. Inspect applied/rejected/unknown state and errorCode.",
+        "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.cancel",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "calendar-reviewed-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.reconcile",
+      "summary": "Read provider state to resolve a saved unknown operation without replaying it.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
+        "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
+        "Loads the exact saved review and receipt. Performs reads only and never dispatches a mutation, even when lookup returns no matching event.",
+        "Import/update reconciliation requires complete UID lookup, unique matching operation marker, source hash, source sequence, organizer and exact event identity. Cancellation needs its exact cancelled tombstone; 404 alone leaves unknown.",
+        "Returns the same outcome shape as calendar.apply. An applied/rejected saved receipt is returned unchanged; durable record failure remains UnknownOutcome.",
+        "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
+        "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.reconcile",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "calendar-reviewed-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "CalendarId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Exact target.calendar_id returned by calendar.list for this explicit account. Runtime bound: 1,024 UTF-8 bytes, no controls. Display names and implicit primary aliases are not accepted."
+    },
+    "CalendarMessageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Provider mail message ID belonging to the explicit account; host resolves its original invitation bytes. Runtime bound: 1,024 UTF-8 bytes, no controls."
+    },
+    "CalendarEventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Exact provider event ID in the selected calendar. Runtime bound: 1,024 UTF-8 bytes, no controls."
+    },
+    "CalendarOperationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "description": "Stable reviewed operation ID. Reuse only for the same exact saved review; a different ID cannot bypass an unknown outcome for its identity."
+    },
+    "CalendarReviewHash": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Copy the exact lowercase SHA-256 reviewHash returned by calendar.review after inspecting the review. Example zeros are a placeholder, not a valid confirmation for an arbitrary review."
+    },
+    "CalendarZone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9/_+.-]+$",
+      "description": "IANA zone name such as Europe/Vienna or UTC. Runtime bound: 512 UTF-8 bytes; absolute paths and '..' are refused. No silent machine-zone fallback."
+    }
+  }
+}

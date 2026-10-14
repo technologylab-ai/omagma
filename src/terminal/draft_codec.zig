@@ -110,7 +110,9 @@ fn validateInlineBytes(a: std.mem.Allocator, draft: t.Draft) !void {
     for (draft.attachments) |attachment| if (attachment.blobId == null) {
         _ = try @import("mime.zig").composeAttachments(&.{attachment}, a);
     };
-    if (draft.original) |original| _ = try @import("mime.zig").composeAttachments(original.resources, a);
+    if (draft.original) |original| for (original.resources) |resource| if (resource.blobId == null) {
+        _ = try @import("mime.zig").composeAttachments(&.{resource}, a);
+    };
 }
 pub fn requestBodyFormat(v: Value) !t.BodyFormat {
     const field = j.get(v, "bodyFormat") orelse return .plain;
@@ -162,7 +164,6 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
         }
     };
     for (related, 0..) |resource, index| {
-        if (resource.blobId != null) return error.InvalidOriginalResource;
         if (std.ascii.startsWithIgnoreCase(resource.mimeType, "message/")) return error.UnsupportedRelatedType;
         if (resource.contentId == null and resource.contentLocation == null) return error.MissingRelatedIdentity;
         for (related[0..index]) |previous| {
@@ -198,6 +199,24 @@ test "draft codec: incomplete recipients stay editable and send validation remai
     try std.testing.expectError(error.TooManyAttachments, decodeDraft(a, try j.value(a, .{ .omittedAttachments = @as(i64, -1) })));
     try std.testing.expectError(error.InvalidAttachmentHandle, validateAttachmentHandle("not-a-blob"));
     try std.testing.expectError(error.HeaderInjection, validateDraft(.{ .subject = "Hi\r\nInjected: no" }, false));
+}
+
+test "related originals: codec accepts bounded file references without decoding empty embedded data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var resource: t.Attachment = .{ .id = "large-photo", .filename = "photo.png", .mimeType = "image/png", .size = 2_200_000, .blobId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .contentId = "photo" };
+    var draft: t.Draft = .{ .original = .{ .bodyHtml = "<img src='cid:photo'>", .resources = &.{resource} } };
+    const decoded = try decodeDraft(a, try j.value(a, draft));
+    try validateDraft(decoded, false);
+    try std.testing.expectEqual(@as(usize, 0), decoded.original.?.resources[0].data.len);
+    resource.size = t.Limits.attachment_bytes + 1;
+    draft.original.?.resources = &.{resource};
+    try std.testing.expectError(error.InvalidAttachment, validateDraft(draft, false));
+    resource.size = 3;
+    resource.data = "YWJj";
+    draft.original.?.resources = &.{resource};
+    try std.testing.expectError(error.InvalidAttachmentHandle, validateDraft(draft, false));
 }
 
 test "draft codec: temporary attachment validation releases bytes without borrowing draft data" {

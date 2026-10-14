@@ -1,0 +1,6 @@
+{
+  "kind":"calendar#freeBusy",
+  "timeMin":"2026-10-13T00:00:00Z",
+  "timeMax":"2026-10-14T00:00:00Z",
+  "calendars":{"busy-team@example.test":{"busy":[{"start":"2026-10-13T14:00:00Z","end":"2026-10-13T15:00:00Z"}]}}
+}

@@ -1,0 +1,491 @@
+{
+  "account": "personal@example.com",
+  "generation": 500,
+  "sync": {
+    "historyId": "500",
+    "history": []
+  },
+  "messages": [
+    {
+      "id": "attachment-received",
+      "threadId": "attachment-review-thread",
+      "internalDate": "1791885660000",
+      "historyId": "500",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Received original PDF for review.",
+      "sizeEstimate": 4096,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Maya Fixture <maya@example.test>"
+          },
+          {
+            "name": "To",
+            "value": "personal@example.com, teammate@example.test"
+          },
+          {
+            "name": "Cc",
+            "value": "copied@example.test"
+          },
+          {
+            "name": "Reply-To",
+            "value": "Maya Fixture <maya@example.test>"
+          },
+          {
+            "name": "Subject",
+            "value": "Synthetic attachment review"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<attachment-received-personal@example.test>"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 13 Oct 2026 10:01:00 +0000"
+          },
+          {
+            "name": "Content-Type",
+            "value": "multipart/mixed"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=utf-8"
+              }
+            ],
+            "body": {
+              "size": 34,
+              "data": "UmVjZWl2ZWQgb3JpZ2luYWwgUERGIGZvciByZXZpZXcuCg"
+            }
+          },
+          {
+            "partId": "1",
+            "mimeType": "application/pdf",
+            "filename": "report.pdf",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "application/pdf"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"report.pdf\""
+              }
+            ],
+            "body": {
+              "size": 49,
+              "attachmentId": "received-token-A/+%?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "attachment-sent",
+      "threadId": "attachment-review-thread",
+      "internalDate": "1791885720000",
+      "historyId": "500",
+      "labelIds": [
+        "SENT"
+      ],
+      "snippet": "Sent PDF with my corrections.",
+      "sizeEstimate": 4096,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Fixture Owner <personal@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "maya@example.test"
+          },
+          {
+            "name": "Cc",
+            "value": "copied@example.test"
+          },
+          {
+            "name": "Reply-To",
+            "value": "Fixture Owner <personal@example.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Synthetic attachment review"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<attachment-sent-personal@example.test>"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 13 Oct 2026 10:02:00 +0000"
+          },
+          {
+            "name": "Content-Type",
+            "value": "multipart/mixed"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<attachment-received-personal@example.test>"
+          },
+          {
+            "name": "References",
+            "value": "<attachment-received-personal@example.test>"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=utf-8"
+              }
+            ],
+            "body": {
+              "size": 30,
+              "data": "U2VudCBQREYgd2l0aCBteSBjb3JyZWN0aW9ucy4K"
+            }
+          },
+          {
+            "partId": "1",
+            "mimeType": "application/pdf",
+            "filename": "report.pdf",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "application/pdf"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"report.pdf\""
+              }
+            ],
+            "body": {
+              "size": 49,
+              "attachmentId": "sent-token-A/+%?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "attachment-duplicates",
+      "threadId": "attachment-review-thread",
+      "internalDate": "1791885780000",
+      "historyId": "500",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Two reports with the same filename.",
+      "sizeEstimate": 4096,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Maya Fixture <maya@example.test>"
+          },
+          {
+            "name": "To",
+            "value": "personal@example.com, teammate@example.test"
+          },
+          {
+            "name": "Cc",
+            "value": "copied@example.test"
+          },
+          {
+            "name": "Reply-To",
+            "value": "Maya Fixture <maya@example.test>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Synthetic attachment review"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<attachment-duplicates-personal@example.test>"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 13 Oct 2026 10:03:00 +0000"
+          },
+          {
+            "name": "Content-Type",
+            "value": "multipart/mixed"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<attachment-received-personal@example.test>"
+          },
+          {
+            "name": "References",
+            "value": "<attachment-received-personal@example.test>"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=utf-8"
+              }
+            ],
+            "body": {
+              "size": 36,
+              "data": "VHdvIHJlcG9ydHMgd2l0aCB0aGUgc2FtZSBmaWxlbmFtZS4K"
+            }
+          },
+          {
+            "partId": "1",
+            "mimeType": "application/pdf",
+            "filename": "report.pdf",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "application/pdf"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"report.pdf\""
+              }
+            ],
+            "body": {
+              "size": 49,
+              "attachmentId": "duplicate-token-a"
+            }
+          },
+          {
+            "partId": "2",
+            "mimeType": "application/pdf",
+            "filename": "report.pdf",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "application/pdf"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"report.pdf\""
+              }
+            ],
+            "body": {
+              "size": 49,
+              "attachmentId": "duplicate-token-b"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "attachment-formatted",
+      "threadId": "attachment-review-thread",
+      "internalDate": "1791885840000",
+      "historyId": "500",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Final formatted reply with Unicode and empty files.",
+      "sizeEstimate": 4096,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Maya Fixture <maya@example.test>"
+          },
+          {
+            "name": "To",
+            "value": "personal@example.com, teammate@example.test"
+          },
+          {
+            "name": "Cc",
+            "value": "copied@example.test"
+          },
+          {
+            "name": "Reply-To",
+            "value": "Maya Fixture <maya@example.test>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Synthetic attachment review"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<attachment-formatted-personal@example.test>"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 13 Oct 2026 10:04:00 +0000"
+          },
+          {
+            "name": "Content-Type",
+            "value": "multipart/mixed"
+          },
+          {
+            "name": "In-Reply-To",
+            "value": "<attachment-received-personal@example.test>"
+          },
+          {
+            "name": "References",
+            "value": "<attachment-received-personal@example.test>"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=utf-8"
+              }
+            ],
+            "body": {
+              "size": 52,
+              "data": "RmluYWwgZm9ybWF0dGVkIHJlcGx5IHdpdGggVW5pY29kZSBhbmQgZW1wdHkgZmlsZXMuCg"
+            }
+          },
+          {
+            "partId": "1",
+            "mimeType": "text/html",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/html"
+              }
+            ],
+            "body": {
+              "size": 151,
+              "data": "PGh0bWw-PGJvZHk-PHRhYmxlPjx0cj48dGQ-RmluYWwgZm9ybWF0dGVkIHJlcGx5IHdpdGggVW5pY29kZSBhbmQgZW1wdHkgZmlsZXMuPC90ZD48L3RyPjwvdGFibGU-PGltZyBzcmM9ImNpZDpzb3VyY2UtaW1hZ2VAZXhhbXBsZS50ZXN0Ij48L2JvZHk-PC9odG1sPg"
+            }
+          },
+          {
+            "partId": "2",
+            "mimeType": "application/octet-stream",
+            "filename": "café β notes.bin",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "application/octet-stream"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"café β notes.bin\""
+              }
+            ],
+            "body": {
+              "size": 50,
+              "data": "AP-ADQpMaXRlcmFsIGNhZsOpIGZpbGUgZm9yIHBlcnNvbmFsQGV4YW1wbGUuY29tAAo"
+            }
+          },
+          {
+            "partId": "3",
+            "mimeType": "text/plain",
+            "filename": "empty.txt",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"empty.txt\""
+              }
+            ],
+            "body": {
+              "size": 0,
+              "data": ""
+            }
+          },
+          {
+            "partId": "4",
+            "mimeType": "image/png",
+            "filename": "source-image.png",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "image/png"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "inline; filename=\"source-image.png\""
+              },
+              {
+                "name": "Content-ID",
+                "value": "<source-image@example.test>"
+              }
+            ],
+            "body": {
+              "size": 91,
+              "attachmentId": "image-token-A"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "externalBodies": {
+    "received-token-A/+%?": {
+      "size": 49,
+      "data": "JVBERi0xLjQKJSBTeW50aGV0aWMgcGVyc29uYWwgcmVjZWl2ZWQgICAgCiUlRU9GCg"
+    },
+    "sent-token-A/+%?": {
+      "size": 49,
+      "data": "JVBERi0xLjQKJSBTeW50aGV0aWMgcGVyc29uYWwgc2VudCAgICAgICAgCiUlRU9GCg"
+    },
+    "duplicate-token-a": {
+      "size": 49,
+      "data": "JVBERi0xLjQKJSBTeW50aGV0aWMgcGVyc29uYWwgZHVwbGljYXRlLWEgCiUlRU9GCg"
+    },
+    "duplicate-token-b": {
+      "size": 49,
+      "data": "JVBERi0xLjQKJSBTeW50aGV0aWMgcGVyc29uYWwgZHVwbGljYXRlLWIgCiUlRU9GCg"
+    },
+    "image-token-A": {
+      "size": 91,
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI_ScLbtAAAAABJRU5ErkJgggBwZXJzb25hbEBleGFtcGxlLmNvbQ"
+    }
+  }
+}

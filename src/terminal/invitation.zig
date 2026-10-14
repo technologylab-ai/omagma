@@ -15,7 +15,17 @@ test "invitation display: only the inspected attendee's stated response is shown
 pub const max_calendar_bytes = 128 * 1024;
 pub const max_calendar_properties = 1024;
 pub const Status = enum { accepted, tentative, declined };
+pub const Method = enum { request, publish, reply, cancel, counter, refresh, declinecounter };
+fn methodValue(value: []const u8) !Method {
+    inline for (std.meta.tags(Method)) |tag| if (std.ascii.eqlIgnoreCase(value, @tagName(tag))) return tag;
+    return error.NotInvitationRequest;
+}
 pub const Invitation = struct {
+    method: Method = .request,
+    cancelled: bool = false,
+    additional_events: usize = 0,
+    response_blocked: bool = false,
+    stamp: b.Text(16) = .{},
     uid: b.Text(1024) = .{},
     organizer: b.Text(254) = .{},
     attendee: b.Text(254) = .{},
@@ -33,6 +43,9 @@ pub const Invitation = struct {
     join_url: b.Text(4096) = .{},
     recurrence_rule: b.Text(1024) = .{},
     timezones: b.Text(32 * 1024) = .{},
+    pub fn canRespond(self: *const Invitation) bool {
+        return self.method == .request and !self.cancelled and !self.response_blocked and self.additional_events == 0 and self.attendee.len > 0;
+    }
 };
 
 /// A REQUEST for exactly one event/instance. Deliberately rejects ambiguous
@@ -43,14 +56,35 @@ pub fn parse(ics: []const u8, account: []const u8, aliases: []const []const u8, 
 pub fn parseReply(ics: []const u8, account: []const u8, aliases: []const []const u8, out: *Invitation) !void {
     try parseMethod(ics, account, aliases, "REPLY", out);
 }
-fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8, expected_method: []const u8, out: *Invitation) !void {
+/// Read-only display accepts scheduling notices which cannot authorize RSVP.
+/// The write parser remains REQUEST-only and requires a verified attendee.
+pub fn parseDisplay(ics: []const u8, account: []const u8, aliases: []const []const u8, out: *Invitation) !void {
+    try parseMethod(ics, account, aliases, null, out);
+}
+fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8, expected_method: ?[]const u8, out: *Invitation) !void {
     if (ics.len > max_calendar_bytes) return error.CalendarTooLarge;
     try recipients.validateAddress(account);
     if (aliases.len > recipients.max_recipients) return error.TooManyAliases;
     for (aliases) |alias| try recipients.validateAddress(alias);
     out.* = .{};
-    var lines = Lines{ .input = ics };
-    var unfolded: [4096]u8 = undefined;
+    // METHOD may follow VEVENT properties. Find its calendar-level value
+    // before selecting an attendee; the full pass still validates duplicates
+    // and component nesting, including malformed scheduling messages.
+    const source = if (std.mem.startsWith(u8, ics, "\xef\xbb\xbf")) ics[3..] else ics;
+    if (expected_method == null) out.method = .publish;
+    var method_lines = Lines{ .input = source };
+    // A folded Outlook DESCRIPTION/X-ALT-DESC can exceed4KiB. One reused
+    // scratch buffer is bounded by the complete calendar byte budget.
+    var unfolded: [max_calendar_bytes]u8 = undefined;
+    var method_depth: usize = 0;
+    while (try method_lines.next(&unfolded)) |line| {
+        if (line.len == 0) continue;
+        const prop = try property(line);
+        if (std.ascii.eqlIgnoreCase(prop.name, "BEGIN")) method_depth += 1 else if (std.ascii.eqlIgnoreCase(prop.name, "END")) method_depth -|= 1 else if (method_depth == 1 and std.ascii.eqlIgnoreCase(prop.name, "METHOD")) {
+            out.method = try methodValue(prop.value);
+        }
+    }
+    var lines = Lines{ .input = source };
     var calendar = false;
     var ended = false;
     var event = false;
@@ -66,6 +100,7 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
     var sequence = false;
     var recurrence = false;
     var stamp = false;
+    var status_seen = false;
     var attendee = false;
     var attendees: usize = 0;
     var properties: usize = 0;
@@ -90,7 +125,8 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
             } else if (std.ascii.eqlIgnoreCase(prop.value, "VEVENT")) {
                 if (!calendar or event or nested != 0) return error.InvalidCalendar;
                 events += 1;
-                if (events > 1) return error.AmbiguousInvitation;
+                if (events > 1 and expected_method != null) return error.AmbiguousInvitation;
+                out.additional_events = events - 1;
                 event = true;
             } else {
                 if (!calendar or ended) return error.InvalidCalendar;
@@ -128,7 +164,8 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
         if (!event) {
             if (std.ascii.eqlIgnoreCase(prop.name, "METHOD")) {
                 if (method) return error.AmbiguousInvitation;
-                if (!std.ascii.eqlIgnoreCase(prop.value, expected_method)) return error.NotInvitationRequest;
+                if (expected_method) |expected| if (!std.ascii.eqlIgnoreCase(prop.value, expected)) return error.NotInvitationRequest;
+                out.method = try methodValue(prop.value);
                 method = true;
             } else if (std.ascii.eqlIgnoreCase(prop.name, "VERSION")) {
                 if (version or !std.mem.eql(u8, prop.value, "2.0")) return error.InvalidCalendar;
@@ -136,6 +173,9 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
             }
             continue;
         }
+        // Display the first event of a series notice, but never let that
+        // preview authorize a response for an implicitly chosen occurrence.
+        if (events > 1) continue;
         if (std.ascii.eqlIgnoreCase(prop.name, "UID")) {
             if (uid or prop.value.len == 0) return error.AmbiguousInvitation;
             try out.uid.set(prop.value);
@@ -159,12 +199,19 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
             // Incoming meetings can have more participants than an outgoing
             // mail envelope. This scan retains one responding identity and
             // stays bounded by the calendar property/byte budgets.
-            const address = try mailto(prop.value);
+            const address = mailto(prop.value) catch continue;
             var selected = std.ascii.eqlIgnoreCase(address, account);
             for (aliases) |alias| selected = selected or std.ascii.eqlIgnoreCase(address, alias);
+            if (expected_method == null and out.method == .reply) selected = true;
             if (selected) {
-                if (attendee) return error.AmbiguousAttendee;
-                if (std.mem.eql(u8, expected_method, "REPLY")) {
+                if (attendee) {
+                    if (expected_method != null) return error.AmbiguousAttendee;
+                    out.response_blocked = true;
+                    out.attendee = .{};
+                    out.attendee_status = .{};
+                    continue;
+                }
+                if (out.method == .reply) {
                     const partstat = @import("mime.zig").parameter(prop.parameters, "PARTSTAT") orelse return error.InvalidInvitationStatus;
                     if (!std.ascii.eqlIgnoreCase(partstat, "ACCEPTED") and !std.ascii.eqlIgnoreCase(partstat, "TENTATIVE") and !std.ascii.eqlIgnoreCase(partstat, "DECLINED")) return error.InvalidInvitationStatus;
                 }
@@ -182,7 +229,12 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DTSTAMP")) {
             if (stamp) return error.AmbiguousInvitation;
             try validateStamp(prop.value);
+            try out.stamp.set(prop.value);
             stamp = true;
+        } else if (std.ascii.eqlIgnoreCase(prop.name, "STATUS")) {
+            if (status_seen) return error.AmbiguousInvitation;
+            status_seen = true;
+            out.cancelled = std.ascii.eqlIgnoreCase(prop.value, "CANCELLED");
         } else if (std.ascii.eqlIgnoreCase(prop.name, "SUMMARY")) {
             out.summary.display(unescapeText(prop.value, &unfolded));
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DTSTART")) {
@@ -213,17 +265,14 @@ fn parseMethod(ics: []const u8, account: []const u8, aliases: []const []const u8
             offerJoin(out, &join_priority, prop.value, 3);
         } else if (std.ascii.eqlIgnoreCase(prop.name, "DESCRIPTION")) {
             const description = unescapeText(prop.value, &unfolded);
-            var paragraphs = std.mem.splitScalar(u8, description, '\n');
-            while (paragraphs.next()) |paragraph| {
-                if (std.ascii.findIgnoreCase(paragraph, "join") == null and std.ascii.findIgnoreCase(paragraph, "meeting") == null) continue;
-                var urls: reader_tools.LinkIterator = .{ .input = paragraph };
-                if (urls.next()) |url| offerJoin(out, &join_priority, url.url, 1);
-            }
+            offerJoin(out, &join_priority, @import("meeting_link.zig").plain(description), 1);
         }
     }
-    if (calendar or event or nested != 0 or !ended or events != 1 or !method or !version or !uid or !organizer) return error.InvalidCalendar;
-    if (!attendee) return error.NotAnAttendee;
-    if (std.mem.eql(u8, expected_method, "REPLY") and (!stamp or attendees != 1)) return error.InvalidCalendar;
+    if (calendar or event or nested != 0 or !ended or events == 0 or (!method and expected_method != null) or !version or !uid or (!organizer and out.method != .publish)) return error.InvalidCalendar;
+    if (expected_method != null and !attendee) return error.NotAnAttendee;
+    if (out.method == .reply and (!stamp or attendees != 1)) return error.InvalidCalendar;
+    out.cancelled = out.cancelled or out.method == .cancel;
+    if (expected_method != null and out.method == .request and out.cancelled) return error.InvitationCancelled;
 }
 /// iCalendar TEXT escapes are presentation data, never header syntax. Input
 /// may borrow a later part of output (the parser's unfolded line buffer).
@@ -252,6 +301,7 @@ fn offerJoin(out: *Invitation, priority: *u8, url: []const u8, offered: u8) void
 }
 
 pub const Friendly = struct {
+    original_start: []const u8 = "",
     start: []const u8 = "",
     end: []const u8 = "",
     duration: []const u8 = "",
@@ -301,14 +351,50 @@ pub fn friendly(allocator: std.mem.Allocator, invite: *const Invitation, local_z
     return friendlyWithZone(allocator, invite, local_zone, null);
 }
 pub fn friendlyWithZone(allocator: std.mem.Allocator, invite: *const Invitation, local_zone: *const timezone.Zone, event_zone: ?*const timezone.Zone) !Friendly {
+    return friendlyResolved(allocator, invite, local_zone, event_zone, false);
+}
+/// Resolve common embedded zones by proving their offsets across the event,
+/// including nearby DST transitions. A candidate name alone proves nothing.
+pub fn friendlyNative(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, invite: *const Invitation, local_zone: *const timezone.Zone) !Friendly {
+    const name = eventTimezone(invite);
+    if (name.len == 0) return friendly(a, invite, local_zone);
+    if (timezone.loadNamed(io, a, env, name)) |loaded| {
+        var zone = loaded;
+        defer zone.deinit(a);
+        if (invite.timezones.len == 0 or embeddedMatches(invite, &zone)) return friendlyResolved(a, invite, local_zone, &zone, true);
+    } else |_| {}
+    if (invite.timezones.len != 0) {
+        if (embeddedMatches(invite, local_zone)) return friendlyResolved(a, invite, local_zone, local_zone, true);
+        for ([_][]const u8{ "Europe/Berlin", "Europe/London", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney" }) |candidate| {
+            var zone = timezone.loadNamed(io, a, env, candidate) catch continue;
+            defer zone.deinit(a);
+            if (embeddedMatches(invite, &zone)) return friendlyResolved(a, invite, local_zone, &zone, true);
+        }
+    }
+    return friendly(a, invite, local_zone);
+}
+fn embeddedMatches(invite: *const Invitation, candidate: *const timezone.Zone) bool {
+    const start = CalendarTime.parse(invite.start.slice(), invite.start_parameters.slice()) catch return false;
+    if (start.kind != .zoned) return false;
+    const first = candidate.fromLocal(start.civil) catch return false;
+    const last = if (invite.end.len != 0) last: {
+        const end = CalendarTime.parse(invite.end.slice(), invite.end_parameters.slice()) catch return false;
+        if (end.kind != .zoned or !std.mem.eql(u8, start.zone_id, end.zone_id)) return false;
+        break :last candidate.fromLocal(end.civil) catch return false;
+    } else first + 86400000;
+    return @import("calendar_embedded.zig").matches(invite.timezones.slice(), start.zone_id, candidate, first, last);
+}
+fn friendlyResolved(allocator: std.mem.Allocator, invite: *const Invitation, local_zone: *const timezone.Zone, event_zone: ?*const timezone.Zone, verified_embedded: bool) !Friendly {
     var result: Friendly = .{ .location = invite.location.slice(), .join_url = if (reader_tools.safeUrl(invite.join_url.slice())) invite.join_url.slice() else "" };
+    if (invite.cancelled) result.join_url = "";
     const start = if (invite.start.len > 0) CalendarTime.parse(invite.start.slice(), invite.start_parameters.slice()) catch null else null;
     const end = if (invite.end.len > 0) CalendarTime.parse(invite.end.slice(), invite.end_parameters.slice()) catch null else null;
     result.all_day = if (start) |value| value.kind == .date else false;
     var start_ms: ?i64 = null;
     var end_ms: ?i64 = null;
     if (start) |value| {
-        const rendered = try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0) event_zone else null, eventTimezone(invite));
+        if (value.kind == .zoned or value.kind == .utc) result.original_start = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} {s}", .{ value.civil.year, value.civil.month, value.civil.day, value.civil.hour, value.civil.minute, if (value.kind == .utc) "UTC" else value.zone_id });
+        const rendered = try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0 or verified_embedded) event_zone else null, eventTimezone(invite));
         result.start = rendered.text;
         start_ms = rendered.milliseconds;
         result.timezone_unavailable = rendered.unavailable;
@@ -317,7 +403,7 @@ pub fn friendlyWithZone(allocator: std.mem.Allocator, invite: *const Invitation,
         result.timezone_unavailable = true;
     }
     if (end) |value| {
-        const rendered = try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0) event_zone else null, eventTimezone(invite));
+        const rendered = try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0 or verified_embedded) event_zone else null, eventTimezone(invite));
         result.end = if (value.kind == .date) try std.fmt.allocPrint(allocator, "{s} (exclusive)", .{rendered.text}) else rendered.text;
         end_ms = rendered.milliseconds;
         result.timezone_unavailable = result.timezone_unavailable or rendered.unavailable;
@@ -336,6 +422,8 @@ pub fn friendlyWithZone(allocator: std.mem.Allocator, invite: *const Invitation,
     } else if (result.all_day and invite.end.len == 0) result.duration = "1 day";
     if (invite.recurrence_id.len > 0) {
         const instance = CalendarTime.parse(invite.recurrence_id.slice(), invite.recurrence_parameters.slice()) catch null;
+        // The equivalence proof covers this event, not an arbitrary recurrence
+        // identifier in another season. Keep embedded recurrence IDs literal.
         const instance_text = if (instance) |value| (try friendlyTime(allocator, value, local_zone, if (invite.timezones.len == 0) event_zone else null, eventTimezone(invite))).text else invite.recurrence_id.slice();
         result.recurrence = try std.fmt.allocPrint(allocator, "This occurrence: {s}", .{instance_text});
     } else if (invite.recurrence_rule.len > 0) {
@@ -534,6 +622,7 @@ fn folded(w: *std.Io.Writer, line: []const u8) !void {
 }
 
 pub fn reply(invite: *const Invitation, status: Status, utc_stamp: []const u8, out: []u8) ![]const u8 {
+    if (!invite.canRespond()) return error.NotInvitationRequest;
     try validateStamp(utc_stamp);
     try recipients.validateAddress(invite.organizer.slice());
     try recipients.validateAddress(invite.attendee.slice());
@@ -741,4 +830,100 @@ test "invitation parse: UTF8 folds property budget and unrelated event ambiguity
     try properties.appendSlice(a, "END:VEVENT\nEND:VCALENDAR\n");
     try std.testing.expectError(error.TooManyCalendarProperties, parse(properties.items, "self@example.test", &.{}, &invite));
     try std.testing.expectError(error.NotInvitationRequest, parse("BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:PUBLISH\nBEGIN:VEVENT\nUID:zoom-import@example.test\nEND:VEVENT\nEND:VCALENDAR\n", "self@example.test", &.{}, &invite));
+}
+
+test "invitation notices: publish reply and cancellation display without authorizing RSVP" {
+    const a = std.testing.allocator;
+    const event = "BEGIN:VEVENT\r\nUID:notice@example.test\r\nDTSTAMP:20261013T100000Z\r\nDTSTART:20261014T100000Z\r\nSUMMARY:Planning\r\n";
+    var invite: Invitation = .{};
+    for ([_][]const u8{ "PUBLISH", "REPLY", "CANCEL" }) |method| {
+        const raw = try std.fmt.allocPrint(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{s}ORGANIZER:mailto:host@example.test\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:other@example.test\r\nEND:VEVENT\r\nMETHOD:{s}\r\nEND:VCALENDAR\r\n", .{ event, method });
+        defer a.free(raw);
+        try parseDisplay(raw, "self@example.test", &.{}, &invite);
+        try std.testing.expect(!invite.canRespond());
+        try std.testing.expectEqualStrings("20261013T100000Z", invite.stamp.slice());
+        try std.testing.expectError(error.NotInvitationRequest, parse(raw, "self@example.test", &.{}, &invite));
+    }
+    const cancelled = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:cancelled@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    try parseDisplay(cancelled, "self@example.test", &.{}, &invite);
+    try std.testing.expect(!invite.canRespond());
+    try std.testing.expectError(error.InvitationCancelled, parse(cancelled, "self@example.test", &.{}, &invite));
+    const published = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:published@example.test\r\nDTSTART:20261014T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    try parseDisplay(published, "self@example.test", &.{}, &invite);
+    try std.testing.expectEqual(Method.publish, invite.method);
+    try std.testing.expect(!invite.canRespond());
+}
+
+test "invitation zones: embedded offsets must be proved before local conversion" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var invite: Invitation = .{};
+    try parseDisplay("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Custom/Office\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:office@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nDTSTART;TZID=Custom/Office:20261014T100000\r\nDTEND;TZID=Custom/Office:20261014T110000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", "self@example.test", &.{}, &invite);
+    const matching = try timezone.Zone.fromPosix("CET-1");
+    const wrong = try timezone.Zone.fromPosix("WRONG-2");
+    const local = try timezone.Zone.fromPosix("UTC0");
+    try std.testing.expect(embeddedMatches(&invite, &matching));
+    try std.testing.expect(!embeddedMatches(&invite, &wrong));
+    const unresolved = try friendlyWithZone(a, &invite, &local, &matching);
+    try std.testing.expect(unresolved.timezone_unavailable);
+    const resolved = try friendlyResolved(a, &invite, &local, &matching, true);
+    try std.testing.expect(!resolved.timezone_unavailable);
+    try std.testing.expect(std.mem.indexOf(u8, resolved.start, "09:00 UTC") != null);
+    try std.testing.expectEqualStrings("2026-10-14 10:00 Custom/Office", resolved.original_start);
+}
+
+test "invitation compatibility: long folded descriptions and nonmail attendees preserve the responding identity" {
+    const source = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:long@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:invalid:nomail\r\nATTENDEE:urn:uuid:meeting-room\r\nATTENDEE:mailto:self@example.test\r\nDESCRIPTION:" ++ (@as([6000]u8, @splat('x'))) ++ "\r\n " ++ (@as([2000]u8, @splat('x'))) ++ "\r\nX-ALT-DESC;FMTTYPE=text/html:" ++ (@as([10000]u8, @splat('x'))) ++ "\r\nCONFERENCE:https://meet.example.test/room\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    var invite: Invitation = .{};
+    try parse(source, "self@example.test", &.{}, &invite);
+    try std.testing.expect(invite.canRespond());
+    try std.testing.expectEqualStrings("https://meet.example.test/room", invite.join_url.slice());
+    var buffer: [max_calendar_bytes]u8 = undefined;
+    const response = try reply(&invite, .accepted, "20261013T120000Z", &buffer);
+    var sent: Invitation = .{};
+    try parseReply(response, "self@example.test", &.{}, &sent);
+    try std.testing.expectEqualStrings("ACCEPTED", sent.attendee_status.slice());
+    try parseDisplay(source, "self@example.test", &.{}, &invite);
+    try std.testing.expect(invite.canRespond());
+    try std.testing.expectError(error.NotAnAttendee, parse(source, "other@example.test", &.{}, &invite));
+}
+
+test "invitation compatibility: ambiguous attendees and recurring notices display without authorizing RSVP" {
+    const event = "BEGIN:VEVENT\r\nUID:series@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nATTENDEE:mailto:alias@example.test\r\nSUMMARY:Weekly planning\r\nEND:VEVENT\r\n";
+    const source = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\n" ++ event ++ "END:VCALENDAR\r\n";
+    var invite: Invitation = .{};
+    try parseDisplay(source, "self@example.test", &.{"alias@example.test"}, &invite);
+    try std.testing.expect(!invite.canRespond());
+    try std.testing.expectEqualStrings("", invite.attendee.slice());
+    try std.testing.expectError(error.AmbiguousAttendee, parse(source, "self@example.test", &.{"alias@example.test"}, &invite));
+    for ([_][]const u8{ "REQUEST", "CANCEL", "PUBLISH" }) |method| {
+        const a = std.testing.allocator;
+        const series = try std.fmt.allocPrint(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:{s}\r\n{s}BEGIN:VEVENT\r\nUID:series@example.test\r\nRECURRENCE-ID:20261013T100000Z\r\nSUMMARY:Moved occurrence\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", .{ method, event });
+        defer a.free(series);
+        try parseDisplay(series, "self@example.test", &.{}, &invite);
+        try std.testing.expectEqual(@as(usize, 1), invite.additional_events);
+        try std.testing.expectEqualStrings("Weekly planning", invite.summary.slice());
+        try std.testing.expect(!invite.canRespond());
+        try std.testing.expectEqual(std.mem.eql(u8, method, "CANCEL"), invite.cancelled);
+        if (std.mem.eql(u8, method, "REQUEST")) try std.testing.expectError(error.AmbiguousInvitation, parse(series, "self@example.test", &.{}, &invite));
+    }
+}
+
+test "invitation compatibility: BOM published calendars and other scheduling notices never become REQUEST" {
+    const event = "BEGIN:VEVENT\r\nUID:notice@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nEND:VEVENT\r\n";
+    var invite: Invitation = .{};
+    const published = "\xef\xbb\xbfBEGIN:VCALENDAR\r\nVERSION:2.0\r\n" ++ event ++ "END:VCALENDAR\r\n";
+    try parseDisplay(published, "self@example.test", &.{}, &invite);
+    try std.testing.expectEqual(Method.publish, invite.method);
+    try std.testing.expect(!invite.canRespond());
+    try std.testing.expectError(error.InvalidCalendar, parse(published, "self@example.test", &.{}, &invite));
+    for ([_][]const u8{ "COUNTER", "REFRESH", "DECLINECOUNTER" }) |method| for ([_]bool{ false, true }) |after| {
+        const a = std.testing.allocator;
+        const source = if (after) try std.fmt.allocPrint(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{s}METHOD:{s}\r\nEND:VCALENDAR\r\n", .{ event, method }) else try std.fmt.allocPrint(a, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:{s}\r\n{s}END:VCALENDAR\r\n", .{ method, event });
+        defer a.free(source);
+        try parseDisplay(source, "self@example.test", &.{}, &invite);
+        try std.testing.expect(!invite.canRespond());
+        try std.testing.expectError(error.NotInvitationRequest, parse(source, "self@example.test", &.{}, &invite));
+    };
 }

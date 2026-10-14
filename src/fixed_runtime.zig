@@ -62,6 +62,7 @@ pub const Runtime = struct {
     pub fn init(self: *Runtime, minimal: std.process.Init.Minimal, buffers: Buffers, payload_limit: usize) !void {
         if (self.phase != .cold) return error.RuntimeAlreadyInitialized;
         self.minimal = minimal;
+        @import("platform.zig").configureLaunchEnvironment(minimal.environ);
         self.application_heap = Heap.init(buffers.application);
         self.application_meter = .{ .backing = self.application_heap.allocator(), .limit = payload_limit, .reservation_bytes = buffers.application.len };
         self.io_heap = Heap.init(buffers.io);
@@ -83,8 +84,29 @@ pub const Runtime = struct {
     /// Once sealed, both limits equal the permanent prestarted pool size.
     pub fn seal(self: *Runtime) !void {
         if (self.phase != .startup) return error.RuntimeNotInStartup;
-        try prestartWorkers(&self.threaded);
+        try prestartWorkers(&self.threaded, worker_count);
         std.debug.assert(self.workerCount() == worker_count);
+        self.phase = .sealed;
+    }
+
+    /// Relays/control clients do no provider work. Keep their worker pool and
+    /// untouched static reservation small while preserving deadline support.
+    pub fn sealClient(self: *Runtime) !void {
+        return self.sealRelay(4);
+    }
+
+    /// The interactive relay also owns terminal/signal waits and one UI job.
+    /// IPC deadline tasks must fit alongside them without adding provider work.
+    pub fn sealFrontend(self: *Runtime) !void {
+        return self.sealRelay(8);
+    }
+
+    fn sealRelay(self: *Runtime, count: usize) !void {
+        if (self.phase != .startup) return error.RuntimeNotInStartup;
+        self.threaded.concurrent_limit = .limited(count);
+        self.threaded.async_limit = .limited(count);
+        try prestartWorkers(&self.threaded, count);
+        std.debug.assert(self.workerCount() == count);
         self.phase = .sealed;
     }
 
@@ -141,33 +163,35 @@ pub const Runtime = struct {
 };
 
 const StartupBarrier = struct {
+    target: usize = worker_count,
     started: std.atomic.Value(usize) = .init(0),
     all_started: std.Io.Event = .unset,
     released: std.Io.Event = .unset,
 
     fn waitForRelease(io: std.Io, barrier: *StartupBarrier) void {
-        if (barrier.started.fetchAdd(1, .acq_rel) + 1 == worker_count) barrier.all_started.set(io);
+        if (barrier.started.fetchAdd(1, .acq_rel) + 1 == barrier.target) barrier.all_started.set(io);
         barrier.released.wait(io) catch {};
     }
 };
 
-fn prestartWorkers(threaded: *std.Io.Threaded) !void {
+fn prestartWorkers(threaded: *std.Io.Threaded, target: usize) !void {
+    std.debug.assert(target > 0 and target <= worker_count);
     const io = threaded.io();
-    var barrier: StartupBarrier = .{};
+    var barrier: StartupBarrier = .{ .target = target };
     var futures: [worker_count]std.Io.Future(void) = undefined;
     var count: usize = 0;
     errdefer for (futures[0..count]) |*future| future.cancel(io);
     // Threaded counts a spawned worker before that worker has entered its
     // callback. Keep every callback blocked until all workers have actually
     // entered; otherwise an early worker can consume a late worker's task.
-    for (&futures) |*future| {
+    for (futures[0..target]) |*future| {
         future.* = try io.concurrent(StartupBarrier.waitForRelease, .{ io, &barrier });
         count += 1;
     }
     try barrier.all_started.wait(io);
-    std.debug.assert(barrier.started.load(.acquire) == worker_count);
+    std.debug.assert(barrier.started.load(.acquire) == target);
     barrier.released.set(io);
-    for (&futures) |*future| future.await(io);
+    for (futures[0..target]) |*future| future.await(io);
     // A future publishes completion just before Threaded returns that worker
     // to its idle pool. Finish that handoff before the first application job.
     while (true) {
@@ -209,7 +233,7 @@ test "fixed runtime: startup barrier waits for a delayed callback on every prest
     var count: usize = 0;
     defer for (futures[0..count]) |*future| future.cancel(io);
     for (&futures, &identities, 0..) |*future, *identity, index| {
-        future.* = try io.concurrent(Callback.run, .{ io, if (index + 1 == worker_count) &delay_last else null, &barrier, identity, &completed });
+        future.* = try io.concurrent(Callback.run, .{ io, if (index + 1 == barrier.target) &delay_last else null, &barrier, identity, &completed });
         count += 1;
     }
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });

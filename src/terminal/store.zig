@@ -3,9 +3,53 @@ const t = @import("types.zig");
 const j = @import("json.zig");
 const draft_summary = @import("draft_summary.zig");
 const mail_limits = @import("mail_limits.zig");
+const vault_catalog = @import("vault_catalog.zig");
+const vault_storage = @import("vault_storage.zig");
+const vault_types = @import("vault_types.zig");
+const VaultObject = struct { name: []const u8, kind: vault_types.RecordKind, handle: []const u8 };
+const VaultIndex = struct { schema: u8 = 1, state: State, objects: []VaultObject = &.{} };
+pub const vault_object_limit = t.Limits.metadata_hard + 3 * 128 + 16;
+pub const MigrationObject = @import("store_migration.zig").Object;
+fn vaultKind(name: []const u8) !vault_types.RecordKind {
+    if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return .preferences;
+    if (std.mem.eql(u8, name, "calendar-state.json") or std.mem.eql(u8, name, "calendar-provider-fixture.json")) return .operation_ledger;
+    if (std.mem.eql(u8, name, "calendar-agenda.json")) return .cache_index;
+    const kind: vault_types.RecordKind = if (std.mem.startsWith(u8, name, "mail-")) .mail_body else if (std.mem.startsWith(u8, name, "draft-")) .draft else if (std.mem.startsWith(u8, name, "outbox-")) .outbox else if (std.mem.startsWith(u8, name, "blob-")) .attachment else return error.VaultOperationUnsupported;
+    const prefix: usize = switch (kind) {
+        .mail_body, .attachment => 5,
+        .outbox => 7,
+        else => 6,
+    };
+    const suffix: []const u8 = if (kind == .attachment) ".bin" else ".json";
+    if (name.len != prefix + 64 + suffix.len or !std.mem.endsWith(u8, name, suffix)) return error.InvalidVaultObject;
+    _ = try vault_storage.Handle.parse(name[prefix..][0..64]);
+    return kind;
+}
 pub const index_read_bytes = 16 * 1024 * 1024;
 pub const index_write_bytes = 8 * 1024 * 1024;
-pub const Entry = struct { message: t.Message, bytes: usize = 0, bodyHash: []const u8 = "", bodyError: []const u8 = "" };
+/// The plaintext cap excludes the sealed object map. Leave a separate bounded
+/// allowance for that map, still below the authenticated index read ceiling.
+pub const vault_index_write_bytes = 12 * 1024 * 1024;
+pub const MigrationCapacity = struct {
+    index_bytes: usize,
+    sealed_bytes: usize,
+    required_disk_bytes: usize,
+    disk_limit: usize,
+};
+/// Revision 1 retains named zero-byte files in successful decoded bodies.
+/// This is separate from retrying historical decoder refusals.
+pub const body_decoder_revision: u32 = 1;
+pub const Entry = struct {
+    message: t.Message,
+    bytes: usize = 0,
+    bodyHash: []const u8 = "",
+    bodyError: []const u8 = "",
+    bodyDecoderRevision: u32 = 0,
+    /// Null means a legacy body's references have not been inspected yet.
+    /// These references belong to bodyHash, not the latest metadata tokens.
+    bodyBlobIds: ?[]const []const u8 = null,
+};
+pub const DraftBlobReferences = struct { draftId: []const u8, blobs: []const []const u8 };
 const attachmentMetadata = draft_summary.attachmentMetadata;
 // Address count alone allows tens of KiB per broad inbound header. Bound the
 // compact To/Cc index independently; immutable full messages retain all data.
@@ -122,6 +166,62 @@ pub const RefreshLease = struct {
         self.dir.close(self.io);
     }
 };
+
+/// A migration retains only these descriptors across account-sized arenas.
+/// Shared cache access permits readers; the exclusive refresh lease prevents
+/// a provider operation from starting while the exact source snapshot is held.
+pub const MigrationLease = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+    lock: std.Io.File,
+    refresh: ?std.Io.File,
+    account_hash: [64]u8,
+    fixtures: bool,
+    closed: bool = false,
+
+    pub fn acquire(io: std.Io, root: []const u8, account: []const u8, options: t.Options, allow_create_leases: bool) !?MigrationLease {
+        const account_hash = Store.hash(account);
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}/{s}", .{ root, if (options.fixtures) @as([]const u8, "fixtures") else "live", account_hash });
+        const dir = @import("../keyring_file.zig").directory(io, path, false) catch |err| if (err == error.FileNotFound) return null else return err;
+        errdefer dir.close(io);
+        const index = vault_storage.openPrivate(io, dir, "index.json") catch |err| {
+            if (err != error.FileNotFound) return err;
+            var iterator = dir.iterate();
+            while (try iterator.next(io)) |entry| {
+                if (!std.mem.eql(u8, entry.name, "lock") and !std.mem.eql(u8, entry.name, "refresh.lock")) return error.MigrationIndexMissing;
+            }
+            dir.close(io);
+            return null;
+        };
+        index.close(io);
+        const refresh = openRefreshFile(dir, io, allow_create_leases) catch |err| if (err == error.FileNotFound and !allow_create_leases) null else return err;
+        errdefer if (refresh) |file| file.close(io);
+        if (refresh) |file| {
+            try @import("../keyring_file.zig").privateFile(io, file);
+            if (!try file.tryLock(io, .exclusive)) return error.CacheBusy;
+        }
+        errdefer if (refresh) |file| file.unlock(io);
+        const lock = if (allow_create_leases) try openPrivateLock(dir, io) else vault_storage.openPrivate(io, dir, "lock") catch |err| if (err == error.FileNotFound) return error.MigrationLeaseRequired else return err;
+        errdefer lock.close(io);
+        try @import("../keyring_file.zig").privateFile(io, lock);
+        if ((try lock.stat(io)).size != 0) return error.MigrationSourceInvalid;
+        if (!try lock.tryLock(io, .shared)) return error.CacheBusy;
+        return .{ .io = io, .dir = dir, .lock = lock, .refresh = refresh, .account_hash = account_hash, .fixtures = options.fixtures };
+    }
+
+    pub fn close(self: *MigrationLease) void {
+        if (self.closed) return;
+        self.closed = true;
+        self.lock.unlock(self.io);
+        self.lock.close(self.io);
+        if (self.refresh) |file| {
+            file.unlock(self.io);
+            file.close(self.io);
+        }
+        self.dir.close(self.io);
+    }
+};
 pub fn refreshActive(io: std.Io, root: []const u8, account: []const u8, options: t.Options) !bool {
     const dir = openAccountDirectory(io, root, account, options, false) catch |err| if (err == error.FileNotFound) return false else return err;
     defer dir.close(io);
@@ -145,7 +245,7 @@ pub fn cacheStamp(io: std.Io, root: []const u8, account: []const u8, options: t.
     return .{ .inode = @intCast(stat.inode), .size = stat.size, .mtime_ns = stat.mtime.toNanoseconds() };
 }
 
-pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "", kind: []const u8 = "", label: ?Label = null, labelId: []const u8 = "", deleted: bool = false };
+pub const Operation = struct { id: []const u8, hash: []const u8, outcome: []const u8 = "unknown", messageId: []const u8 = "", rfcMessageId: []const u8 = "", draftId: []const u8 = "", errorCode: []const u8 = "", icalendar: []const u8 = "", sourceInvitationHash: []const u8 = "", invitationCalendarId: []const u8 = "", calendarSync: ?@import("calendar_rsvp.zig").Result = null, kind: []const u8 = "", label: ?Label = null, labelId: []const u8 = "", deleted: bool = false };
 pub const View = struct { key: []const u8, query: []const u8, label: []const u8, labelId: []const u8 = "", ids: []const []const u8 = &.{}, remoteCursor: []const u8 = "", stale: bool = false, lastSyncAt: i64 = 0, lastSyncStartedAt: i64 = 0, incomplete: bool = false };
 pub const QuotaFloor = struct { receivedAt: i64, id: []const u8 };
 pub const FixtureProviderRecord = struct { id: []const u8, labels: []const []const u8 = &.{}, deleted: bool = false, sourceHistoryId: []const u8 = "1" };
@@ -162,6 +262,8 @@ pub const QueuedSend = struct {
     operationId: []const u8,
     hash: []const u8,
     state: SendState = .queued,
+    /// Migrated queued sends require a fresh explicit resume/send decision.
+    resumeRequired: bool = false,
     createdAtMs: i64,
     dueAtMs: i64,
     errorCode: []const u8 = "",
@@ -176,7 +278,12 @@ pub const State = struct {
     generation: u64 = 1,
     serial: u64 = 0,
     entries: []Entry = &.{},
+    /// Verified FULL-read descriptors survive index eviction and token rotation
+    /// without adding mail to any folder or retaining its body bytes.
+    attachmentReceipts: []const @import("attachment_receipts.zig").Receipt = &.{},
     drafts: []t.Draft = &.{},
+    draftLinks: []@import("draft_link.zig").Link = &.{},
+    relatedDraftBlobs: []const DraftBlobReferences = &.{},
     outbox: []t.Message = &.{},
     contacts: []t.Contact = &.{},
     contactsReady: bool = false,
@@ -224,6 +331,187 @@ pub const Store = struct {
     lockHeld: bool = true,
     closed: bool = false,
     entriesStorage: []Entry = &.{},
+    vault: ?*vault_catalog.Account = null,
+    vaultObjects: []VaultObject = &.{},
+    vaultRetired: std.ArrayList(vault_storage.Handle) = .empty,
+    vaultFailed: bool = false,
+    migration_source: bool = false,
+    migration_inventory: ?[]const MigrationObject = null,
+    migration_destination: bool = false,
+    migration_refresh: ?std.Io.File = null,
+    migration_lease: ?*const MigrationLease = null,
+    /// Exact charged ciphertext while this migration owns its account lease.
+    /// Ordinary Stores continue to scan because other write adapters exist.
+    migration_disk_bytes: ?usize = null,
+    disk_scan_count: usize = 0,
+    owns_vault: bool = false,
+    /// The daemon keeps Account, key and workspace alive. This first bridge is
+    /// fixture-only until Core routing, sealed attachments and migration land.
+    pub fn openVault(io: std.Io, a: std.mem.Allocator, account: *vault_catalog.Account, options: t.Options, readonly: bool) !Store {
+        if (!options.fixtures and !account.owner.live_enabled) return error.VaultIntegrationNotReady;
+        try account.claim();
+        errdefer account.release();
+        return openCommon(io, a, "", account.entry.address(), options, readonly, account, null, false, null);
+    }
+    pub fn createVaultAccount(owner: *vault_catalog.Owner, a: std.mem.Allocator, account: []const u8, options: t.Options) !void {
+        if (!options.fixtures) return error.VaultIntegrationNotReady;
+        if (options.metadata_limit == 0 or options.metadata_limit > t.Limits.metadata_hard or options.disk_limit < 64 * 1024 or options.disk_limit > t.Limits.disk_hard) return error.CacheLimitExceeded;
+        const bytes = try initialVaultIndex(a, account, options);
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            a.free(bytes);
+        }
+        try owner.addAccount(account, bytes, options.disk_limit);
+    }
+    /// Prepare initial indexes for one atomic catalog + identity onboarding.
+    pub fn initialVaultIndex(a: std.mem.Allocator, account: []const u8, options: t.Options) ![]u8 {
+        if (options.metadata_limit == 0 or options.metadata_limit > t.Limits.metadata_hard or options.disk_limit < 64 * 1024 or options.disk_limit > t.Limits.disk_hard) return error.CacheLimitExceeded;
+        const value: VaultIndex = .{ .state = .{ .account = account, .metadataPolicy = options.metadata_limit, .diskPolicy = options.disk_limit, .decoderRevision = decoder_revision } };
+        return j.encodeAlloc(a, value, .{});
+    }
+    /// A migration inventory never creates missing data/cache directories,
+    /// changes State, cleans scratch files or enforces a different policy.
+    pub fn openMigration(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options, allow_create_leases: bool) !?Store {
+        return openCommon(io, a, root, account, options, true, null, allow_create_leases, true, null) catch |err| if (err == error.FileNotFound) null else err;
+    }
+    /// Borrow a pinned source without reacquiring its exclusive refresh lock.
+    /// The caller must keep the lease alive after closing this parsed Store.
+    pub fn openMigrationLeased(io: std.Io, a: std.mem.Allocator, lease: *const MigrationLease, account: []const u8, options: t.Options) !Store {
+        if (lease.closed or lease.fixtures != options.fixtures or !std.mem.eql(u8, &lease.account_hash, &hash(account))) return error.MigrationSourceRequired;
+        return openCommon(io, a, "", account, options, true, null, false, true, lease);
+    }
+    /// Internal local-migration entry point; normal openVault activation guards
+    /// remain unchanged. Accounts must already exist in an atomic identity.
+    pub fn openMigrationDestination(io: std.Io, a: std.mem.Allocator, owner: *vault_catalog.Owner, account: []const u8, options: t.Options) !Store {
+        if (owner.identity == null) return error.VaultIdentityRequired;
+        const selected = try a.create(vault_catalog.Account);
+        errdefer a.destroy(selected);
+        selected.* = try owner.openAccount(account);
+        errdefer selected.close();
+        try selected.claim();
+        errdefer selected.release();
+        var result = try openCommon(io, a, "", account, options, true, selected, null, true, null);
+        // The coordinator passes the validated source policy; the empty
+        // bootstrap index must not narrow an existing source account quota.
+        result.options.metadata_limit = options.metadata_limit;
+        result.options.disk_limit = options.disk_limit;
+        result.owns_vault = true;
+        result.migration_destination = true;
+        result.migration_disk_bytes = try result.diskBytes();
+        return result;
+    }
+    pub fn migrationTargetState(s: *const Store, a: std.mem.Allocator) !State {
+        try s.migrationSourceReady();
+        const capacity = try s.migrationCapacity(s.migration_inventory orelse return error.MigrationInventoryRequired);
+        var state = s.state;
+        if (capacity.disk_limit > s.options.disk_limit) state.diskPolicy = capacity.disk_limit;
+        state.sendQueue = try a.dupe(QueuedSend, s.state.sendQueue);
+        for (state.sendQueue) |*queued| if (queued.state == .queued) {
+            queued.resumeRequired = true;
+        };
+        return state;
+    }
+    pub fn migrationSourceReady(s: *const Store) !void {
+        if (!s.migration_source or s.closed or !s.lockHeld or (s.migration_lease != null and s.migration_lease.?.closed)) return error.MigrationSourceRequired;
+    }
+    /// Exact count-only admission: no serialized index or second object map is
+    /// allocated. Two indexes cover the full initial and resumed replacement.
+    pub fn migrationCapacity(s: *const Store, objects: []const MigrationObject) !MigrationCapacity {
+        try s.migrationSourceReady();
+        const count = @import("gmail_decode.zig").serializedBytes;
+        var base = count(VaultIndex{ .state = s.state });
+        for (s.state.sendQueue) |queued| if (queued.state == .queued and !queued.resumeRequired) {
+            base -= 1; // false -> true
+        };
+        var object_bytes: usize = 0;
+        for (objects, 0..) |object, index| {
+            const text = object.handle.text();
+            base = try std.math.add(usize, base, count(VaultObject{ .name = object.name, .kind = object.kind, .handle = &text }) + @intFromBool(index != 0));
+            object_bytes = try std.math.add(usize, object_bytes, try vault_types.sealedSize(object.size));
+        }
+        var policy = s.state.diskPolicy;
+        while (true) {
+            const index_bytes = base - count(s.state.diskPolicy) + count(policy);
+            if (index_bytes >= vault_index_write_bytes) return error.MigrationIndexTooLarge;
+            const sealed_index = try vault_types.sealedSize(index_bytes);
+            const overlap = try std.math.mul(usize, 2, try vault_types.sealedSize(@max(index_bytes, 4096)));
+            const required = try std.math.add(usize, object_bytes, overlap);
+            if (required > t.Limits.disk_hard) return error.MigrationDiskQuotaExceeded;
+            const limit = @max(s.options.disk_limit, required);
+            if (limit > s.options.disk_limit and policy != limit) {
+                policy = limit;
+                continue;
+            }
+            return .{ .index_bytes = index_bytes, .sealed_bytes = try std.math.add(usize, object_bytes, sealed_index), .required_disk_bytes = required, .disk_limit = limit };
+        }
+    }
+    pub fn migrationObjects(s: *Store, a: std.mem.Allocator) ![]MigrationObject {
+        return @import("store_migration.zig").inventory(s, a);
+    }
+    pub fn migrationRecordKind(name: []const u8) !vault_types.RecordKind {
+        return vaultKind(name);
+    }
+    pub fn migrationRecordLimit(s: *const Store, name: []const u8) !usize {
+        return switch (try vaultKind(name)) {
+            .mail_body, .draft, .outbox => 4 * t.Limits.body_bytes,
+            .attachment => t.Limits.incoming_attachment_bytes,
+            .operation_ledger, .cache_index, .preferences => s.documentLimit(name),
+            else => error.MigrationSourceInvalid,
+        };
+    }
+    pub fn copyMigrationObject(s: *Store, source: *Store, object: *const MigrationObject) !void {
+        return @import("store_migration.zig").copy(s, source, object);
+    }
+    pub fn publishMigrationSnapshot(s: *Store, source: *const Store, objects: []const MigrationObject) !void {
+        const account = try s.vaultReady();
+        try source.migrationSourceReady();
+        if (!s.migration_destination or !source.migration_source or source.closed or !source.lockHeld or !std.mem.eql(u8, s.state.account, source.state.account)) return error.MigrationSourceRequired;
+        try @import("store_migration.zig").validatePlan(source, objects);
+        if (objects.len > vault_object_limit or source.state.entries.len > s.options.metadata_limit) return error.CacheLimitExceeded;
+        var names: std.StringHashMap(usize) = .init(s.allocator);
+        defer names.deinit();
+        var handles: std.AutoHashMap([32]u8, void) = .init(s.allocator);
+        defer handles.deinit();
+        const map = try s.allocator.alloc(VaultObject, objects.len);
+        var blobs: usize = 0;
+        for (objects, 0..) |*object, index| {
+            const named = try names.getOrPut(object.name);
+            if (named.found_existing or (try handles.getOrPut(object.handle.bytes)).found_existing) return error.MigrationSourceInvalid;
+            named.value_ptr.* = index;
+            if (object.kind == .attachment) blobs += 1;
+            if (blobs > 128) return error.AttachmentLimitExceeded;
+            try @import("store_migration.zig").verifyCiphertext(s, object);
+            map[index] = .{ .name = try s.allocator.dupe(u8, object.name), .kind = object.kind, .handle = try s.allocator.dupe(u8, &object.handle.text()) };
+        }
+        // An existing published map must be this exact planned map. Resume
+        // never retires unrelated ciphertext or replaces a different snapshot.
+        for (s.vaultObjects) |existing| {
+            const object = map[names.get(existing.name) orelse return error.MigrationSourceChanged];
+            if (existing.kind != object.kind or !std.mem.eql(u8, existing.handle, object.handle)) return error.MigrationSourceChanged;
+        }
+        const target = try source.migrationTargetState(s.allocator);
+        const value: VaultIndex = .{ .state = target, .objects = map };
+        const size_bytes = @import("gmail_decode.zig").serializedBytes(value);
+        if (size_bytes >= vault_index_write_bytes) return error.MigrationIndexTooLarge;
+        const sealed_bytes = try vault_types.sealedSize(size_bytes);
+        try s.reserveVaultCiphertext(sealed_bytes);
+        const previous_bytes: usize = @intCast((try account.directory.dir.statFile(s.io, &account.entry.index.filename(), .{ .follow_symlinks = false })).size);
+        var output: @import("vault_stream.zig").Writer = undefined;
+        try output.init(&account.directory, account.owner.key, account.record(.cache_index, account.entry.index), size_bytes, account.owner.workspace, true, .{});
+        defer output.deinit();
+        std.json.Stringify.value(value, .{}, &output.interface) catch |err| return output.failure orelse err;
+        output.finish() catch |err| {
+            if (err == error.VaultDurabilityUncertain) account.owner.uncertain = true;
+            return err;
+        };
+        try s.accountMigrationCiphertext(sealed_bytes, previous_bytes);
+        s.state = target;
+        s.entriesStorage = target.entries;
+        s.vaultObjects = map;
+    }
+    pub fn requirePlainFiles(s: *const Store) !void {
+        if (s.vault != null) return error.VaultOperationUnsupported;
+    }
     pub fn open(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options) !Store {
         return openMode(io, a, root, account, options, false);
     }
@@ -231,24 +519,92 @@ pub const Store = struct {
         return openMode(io, a, root, account, options, true);
     }
     fn openMode(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options, readonly: bool) !Store {
-        const dir = try openAccountDirectory(io, root, account, options, true);
-        errdefer dir.close(io);
-        const lock = try openPrivateLock(dir, io);
-        errdefer lock.close(io);
+        return openCommon(io, a, root, account, options, readonly, null, null, false, null);
+    }
+    fn openCommon(io: std.Io, a: std.mem.Allocator, root: []const u8, account: []const u8, options: t.Options, readonly: bool, sealed: ?*vault_catalog.Account, migration: ?bool, preserve_order: bool, borrowed: ?*const MigrationLease) !Store {
+        const dir = if (borrowed) |lease| lease.dir else if (sealed) |vault| vault.directory.dir else if (migration != null)
+            try @import("../keyring_file.zig").directory(io, try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ root, if (options.fixtures) @as([]const u8, "fixtures") else "live", hash(account) }), false)
+        else
+            try openAccountDirectory(io, root, account, options, true);
+        errdefer if (sealed == null and borrowed == null) dir.close(io);
+        if (migration != null) {
+            const index = vault_storage.openPrivate(io, dir, "index.json") catch |err| {
+                if (err != error.FileNotFound) return err;
+                var iterator = dir.iterate();
+                while (try iterator.next(io)) |entry| {
+                    if (!std.mem.eql(u8, entry.name, "lock") and !std.mem.eql(u8, entry.name, "refresh.lock")) return error.MigrationIndexMissing;
+                }
+                return error.FileNotFound;
+            };
+            index.close(io);
+        }
+        var refresh: ?std.Io.File = null;
+        errdefer if (refresh) |file| {
+            file.unlock(io);
+            file.close(io);
+        };
+        if (if (borrowed == null) migration else null) |create_lease| {
+            refresh = openRefreshFile(dir, io, create_lease) catch |err| if (err == error.FileNotFound and !create_lease) null else return err;
+            if (refresh) |file| {
+                try @import("../keyring_file.zig").privateFile(io, file);
+                if (!try file.tryLock(io, .exclusive)) {
+                    file.close(io);
+                    refresh = null;
+                    return error.CacheBusy;
+                }
+            }
+        }
+        const lock = if (borrowed) |lease| lease.lock else if (sealed) |vault| vault.directory.lease else if (migration != null and !migration.?) vault_storage.openPrivate(io, dir, "lock") catch |err| if (err == error.FileNotFound) return error.MigrationLeaseRequired else return err else try openPrivateLock(dir, io);
+        errdefer if (sealed == null and borrowed == null) lock.close(io);
+        if (migration != null) try @import("../keyring_file.zig").privateFile(io, lock);
         const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(if (readonly) 250 else 2000) });
-        while (!try lock.tryLock(io, if (readonly) .shared else .exclusive)) {
+        while (sealed == null and borrowed == null and !try lock.tryLock(io, if (readonly) .shared else .exclusive)) {
             if (deadline.durationFromNow(io).raw.toNanoseconds() <= 0) return error.CacheBusy;
             try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(io);
         }
-        if (!readonly) try cleanupScratch(dir, io, a);
+        if (!readonly and sealed == null) try cleanupScratch(dir, io, a);
         var state: State = .{ .account = account };
-        const raw = readPrivate(dir, io, a, "index.json", index_read_bytes) catch |err| if (err == error.FileNotFound) null else return err;
+        var objects: []VaultObject = &.{};
+        const raw: ?[]const u8 = if (sealed) |vault| try vault.read(a, .cache_index, vault.entry.index, index_read_bytes) else if (migration != null) try @import("store_migration.zig").readIndex(io, dir, a) else readPrivate(dir, io, a, "index.json", index_read_bytes) catch |err| if (err == error.FileNotFound) null else return err;
         if (raw) |bytes| {
             // readPrivate owns this immutable buffer in the same caller arena
             // as State. Borrow unescaped strings instead of copying each field
             // on every short refresh commit; escaped strings still allocate.
-            state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_if_needed });
+            if (sealed != null) {
+                const envelope = try std.json.parseFromSliceLeaky(VaultIndex, a, bytes, .{ .allocate = .alloc_if_needed });
+                if (envelope.schema != 1 or envelope.objects.len > vault_object_limit) return error.InvalidVaultIndex;
+                state = envelope.state;
+                objects = envelope.objects;
+                var names: std.StringHashMap(void) = .init(a);
+                defer names.deinit();
+                var handles: std.StringHashMap(void) = .init(a);
+                defer handles.deinit();
+                var blob_count: usize = 0;
+                for (objects) |object| {
+                    if (try vaultKind(object.name) != object.kind) return error.InvalidVaultIndex;
+                    if (object.kind == .attachment) blob_count += 1;
+                    if (blob_count > 128) return error.AttachmentLimitExceeded;
+                    const handle = try vault_storage.Handle.parse(object.handle);
+                    if (std.mem.eql(u8, &handle.bytes, &sealed.?.entry.index.bytes) or (try names.getOrPut(object.name)).found_existing or (try handles.getOrPut(object.handle)).found_existing) return error.InvalidVaultIndex;
+                }
+            } else state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_if_needed });
             if (state.schema != 1 or !std.mem.eql(u8, state.account, account)) return error.CacheIdentityMismatch;
+            try @import("attachment_receipts.zig").validate(state.attachmentReceipts);
+            try @import("draft_link.zig").validate(state.draftLinks);
+            for (state.draftLinks) |link| {
+                var found = false;
+                for (state.drafts) |draft_value| found = found or std.mem.eql(u8, draft_value.id, link.draftId);
+                if (!found) return error.CacheIdentityMismatch;
+            }
+            if (state.relatedDraftBlobs.len > 128) return error.CacheLimitExceeded;
+            for (state.relatedDraftBlobs, 0..) |references, index| {
+                if (references.blobs.len > t.Limits.related_resources) return error.CacheLimitExceeded;
+                var found = false;
+                for (state.drafts) |draft_value| found = found or std.mem.eql(u8, draft_value.id, references.draftId);
+                if (!found) return error.CacheIdentityMismatch;
+                for (state.relatedDraftBlobs[0..index]) |previous| if (std.mem.eql(u8, previous.draftId, references.draftId)) return error.CacheIdentityMismatch;
+                for (references.blobs) |id| try @import("draft_codec.zig").validateAttachmentHandle(id);
+            }
             if (state.entries.len > t.Limits.metadata_hard or state.drafts.len > 128 or state.outbox.len > 128 or state.contacts.len > 1024 or state.operations.len > 1000 or state.sendQueue.len > 128 or state.fixtureProvider.len > 1024 or state.labels.len > 512 or state.fixtureDeletedLabels.len > 512 or state.identities.len > 32 or state.undo.len > 16) return error.CacheLimitExceeded;
             for (state.sendQueue) |entry| {
                 if (entry.queueId.len == 0 or entry.queueId.len > 256 or entry.draftId.len == 0 or entry.draftId.len > 256 or entry.operationId.len == 0 or entry.operationId.len > 256 or entry.hash.len != 64 or entry.errorCode.len > 128 or entry.dueAtMs < entry.createdAtMs or entry.dueAtMs - entry.createdAtMs > 30000) return error.CacheLimitExceeded;
@@ -256,7 +612,8 @@ pub const Store = struct {
             for (state.labels) |label| if (label.id.len > 256 or label.name.len > 512) return error.CacheLimitExceeded;
             for (state.fixtureDeletedLabels) |id| if (id.len == 0 or id.len > 256) return error.CacheLimitExceeded;
             for (state.operations) |operation| {
-                if (operation.kind.len > 64 or operation.labelId.len > 256) return error.CacheLimitExceeded;
+                if (operation.kind.len > 64 or operation.labelId.len > 256 or (operation.sourceInvitationHash.len != 0 and operation.sourceInvitationHash.len != 64)) return error.CacheLimitExceeded;
+                for (operation.sourceInvitationHash) |byte| if (!std.ascii.isHex(byte)) return error.CacheIdentityMismatch;
                 if (operation.label) |label| if (label.id.len > 256 or label.name.len > 512 or label.type.len > 16) return error.CacheLimitExceeded;
             }
             for (state.identities) |identity| if (identity.address.len > mail_limits.outgoing_address_bytes or identity.name.len > mail_limits.display_name_bytes or identity.signature.len > 8192) return error.CacheLimitExceeded;
@@ -273,15 +630,21 @@ pub const Store = struct {
         if (state.metadataPolicy != 0 and (state.metadataPolicy > t.Limits.metadata_hard or state.diskPolicy < 64 * 1024 or state.diskPolicy > t.Limits.disk_hard)) return error.CacheLimitExceeded;
         if (state.metadataPolicy != 0 and (readonly or options.use_persisted_policy or (!options.metadata_limit_set and options.metadata_limit == t.Limits.metadata))) resolved.metadata_limit = state.metadataPolicy;
         if (state.diskPolicy != 0 and (readonly or options.use_persisted_policy or (!options.disk_limit_set and options.disk_limit == t.Limits.disk_bytes))) resolved.disk_limit = state.diskPolicy;
-        var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = resolved, .entriesStorage = state.entries };
+        var s: Store = .{ .io = io, .dir = dir, .lock = lock, .allocator = a, .state = state, .options = resolved, .entriesStorage = state.entries, .vault = sealed, .vaultObjects = objects, .migration_source = migration != null, .migration_refresh = refresh, .migration_lease = borrowed };
         if (state.views.len > 16 or state.historyId.len > 32) return error.CacheLimitExceeded;
         for (state.views) |view| if (view.ids.len > t.Limits.metadata_hard or view.query.len > 4096 or view.label.len > 256 or view.remoteCursor.len > 4096) return error.CacheLimitExceeded;
-        for (state.entries) |entry| if (entry.bodyError.len > 64 or entry.message.bodyCacheError.len > 64 or entry.message.decodeWarning.len > 64) return error.CacheLimitExceeded;
+        for (state.entries) |entry| {
+            if (entry.bodyError.len > 64 or entry.message.bodyCacheError.len > 64 or entry.message.decodeWarning.len > 64) return error.CacheLimitExceeded;
+            if (entry.bodyBlobIds) |ids| {
+                if (ids.len > 64) return error.CacheLimitExceeded;
+                for (ids) |id| try @import("draft_codec.zig").validateAttachmentHandle(id);
+            }
+        }
         if (!options.fixtures and (state.fixtureProvider.len != 0 or state.fixtureLabelsReady or state.fixtureDeletedLabels.len != 0)) return error.CacheIdentityMismatch;
         for (state.fixtureProvider) |record| try validateFixtureRecord(record);
         // Persisted indexes already have this order. Keep the legacy fallback
         // without heap-sorting thousands of rows on every cached/body read.
-        if (!entriesSorted(s.state.entries)) std.sort.heap(Entry, s.state.entries, {}, newestFirst);
+        if (!preserve_order and !entriesSorted(s.state.entries)) std.sort.heap(Entry, s.state.entries, {}, newestFirst);
         if (!readonly) try s.enforceLimits();
         return s;
     }
@@ -314,12 +677,44 @@ pub const Store = struct {
         }
     }
     pub fn release(s: *Store) void {
+        if (s.migration_lease != null) {
+            s.lockHeld = false;
+            return;
+        }
+        if (s.migration_refresh) |file| {
+            file.unlock(s.io);
+            file.close(s.io);
+            s.migration_refresh = null;
+        }
+        if (s.vault) |vault| {
+            if (s.lockHeld) vault.release();
+            s.lockHeld = false;
+            return;
+        }
         if (s.lockHeld) s.lock.unlock(s.io);
         s.lockHeld = false;
     }
     pub fn close(s: *Store) void {
         if (s.closed) return;
         s.closed = true;
+        if (s.migration_lease != null) {
+            s.lockHeld = false;
+            return;
+        }
+        if (s.migration_refresh) |file| {
+            file.unlock(s.io);
+            file.close(s.io);
+            s.migration_refresh = null;
+        }
+        if (s.vault) |vault| {
+            if (s.lockHeld) vault.release();
+            s.lockHeld = false;
+            if (s.owns_vault) {
+                vault.close();
+                s.allocator.destroy(vault);
+            }
+            return;
+        }
         if (s.lockHeld) s.lock.unlock(s.io);
         s.lock.close(s.io);
         s.dir.close(s.io);
@@ -333,7 +728,193 @@ pub const Store = struct {
         const key = hash(id);
         return std.fmt.allocPrint(s.allocator, "{s}-{s}.json", .{ prefix, key });
     }
+    fn vaultReady(s: *const Store) !*vault_catalog.Account {
+        if (s.closed or !s.lockHeld) return error.VaultSessionClosed;
+        if (s.vaultFailed) return error.VaultSessionFailed;
+        const vault = s.vault orelse return error.VaultLocked;
+        try vault.requireActive();
+        if (vault.reader_owner != null) return error.VaultBusy;
+        return vault;
+    }
+    fn vaultObject(s: *const Store, name: []const u8) ?VaultObject {
+        for (s.vaultObjects) |object| if (std.mem.eql(u8, object.name, name)) return object;
+        return null;
+    }
+    fn readRecord(s: *Store, a: std.mem.Allocator, name: []const u8, limit: usize) ![]const u8 {
+        if (s.vault != null) {
+            const vault = try s.vaultReady();
+            _ = try vaultKind(name);
+            const object = s.vaultObject(name) orelse return error.FileNotFound;
+            return vault.read(a, object.kind, try vault_storage.Handle.parse(object.handle), limit) catch |err| if (err == error.FileNotFound) error.VaultRecordMissing else err;
+        }
+        return readPrivate(s.dir, s.io, a, name, limit);
+    }
+    fn removeRecord(s: *Store, name: []const u8) !void {
+        if (s.migration_source) return error.MigrationSourceReadOnly;
+        if (s.vault != null) {
+            _ = try s.vaultReady();
+            const previous = s.vaultObject(name) orelse return;
+            const next = try s.allocator.alloc(VaultObject, s.vaultObjects.len - 1);
+            var count: usize = 0;
+            for (s.vaultObjects) |object| if (!std.mem.eql(u8, object.name, name)) {
+                next[count] = object;
+                count += 1;
+            };
+            try s.vaultRetired.append(s.allocator, try vault_storage.Handle.parse(previous.handle));
+            s.vaultObjects = next;
+            return;
+        }
+        s.dir.deleteFile(s.io, name) catch |err| if (err != error.FileNotFound) return err;
+    }
+    fn writeVault(s: *Store, name: []const u8, bytes: []const u8) !void {
+        const vault = try s.vaultReady();
+        const kind = try vaultKind(name);
+        const limit: usize = switch (kind) {
+            .mail_body, .draft, .outbox => 4 * t.Limits.body_bytes,
+            .attachment => t.Limits.incoming_attachment_bytes,
+            .operation_ledger => 4 * 1024 * 1024,
+            .cache_index => 8 * 1024 * 1024,
+            .preferences => 512 * 1024,
+            else => unreachable,
+        };
+        if (bytes.len > limit) return error.CacheLimitExceeded;
+        try s.makeRoom(bytes.len, name);
+        const previous = s.vaultObject(name);
+        const next = try s.allocator.alloc(VaultObject, s.vaultObjects.len + @intFromBool(previous == null));
+        @memcpy(next[0..s.vaultObjects.len], s.vaultObjects);
+        var position: usize = s.vaultObjects.len;
+        for (s.vaultObjects, 0..) |object, index| if (std.mem.eql(u8, object.name, name)) {
+            position = index;
+            break;
+        };
+        const handle = try vault_storage.Handle.create(s.io);
+        next[position] = .{ .name = try s.allocator.dupe(u8, name), .kind = kind, .handle = try s.allocator.dupe(u8, &handle.text()) };
+        if (previous) |_| try s.vaultRetired.ensureUnusedCapacity(s.allocator, 1);
+        try vault.write(kind, handle, bytes, false);
+        if (previous) |old| s.vaultRetired.appendAssumeCapacity(try vault_storage.Handle.parse(old.handle));
+        s.vaultObjects = next;
+    }
+    pub fn vaultContext(s: *const Store) !*vault_catalog.Account {
+        return s.vaultReady();
+    }
+    pub fn vaultBlobCount(s: *const Store) usize {
+        var count: usize = 0;
+        for (s.vaultObjects) |object| if (object.kind == .attachment) {
+            count += 1;
+        };
+        return count;
+    }
+    pub fn hasVaultBlob(s: *const Store, name: []const u8) bool {
+        return s.vaultObject(name) != null;
+    }
+    pub fn openVaultStream(s: *Store, name: []const u8) !@import("vault_stream.zig").Reader {
+        const vault = try s.vaultReady();
+        if (try vaultKind(name) != .attachment) return error.InvalidVaultObject;
+        const object = s.vaultObject(name) orelse return error.AttachmentHandleNotFound;
+        return @import("vault_stream.zig").Reader.init(&vault.directory, vault.owner.key, vault.record(.attachment, try vault_storage.Handle.parse(object.handle)), &vault.owner.workspace.ciphertext, &vault.reader_owner) catch |err| if (err == error.FileNotFound) error.VaultRecordMissing else err;
+    }
+    /// Reserve the entire overlap, including existing/orphan/staging files.
+    /// Used only by internal encrypted streaming adapters, never export paths.
+    pub fn vaultIndexStagingBytes(s: *const Store) !usize {
+        _ = try s.vaultReady();
+        const current = @import("gmail_decode.zig").serializedBytes(VaultIndex{ .state = s.state, .objects = s.vaultObjects });
+        // One opaque blob map entry fits within this conservative allowance.
+        return vault_types.sealedSize(current + 512);
+    }
+    pub fn reserveVaultCiphertext(s: *Store, count: usize) !void {
+        _ = try s.vaultReady();
+        const used = s.migration_disk_bytes orelse try s.diskBytes();
+        if (count > s.options.disk_limit -| used) return error.DiskQuotaExceeded;
+    }
+    /// Called only after a completed migration publication. Existing/reused
+    /// objects were included in the single scan and are never charged twice.
+    pub fn accountMigrationCiphertext(s: *Store, added: usize, removed: usize) !void {
+        if (!s.migration_destination or s.migration_disk_bytes == null) return error.MigrationDestinationRequired;
+        const used = s.migration_disk_bytes.?;
+        if (removed > used) return error.InvalidVaultIndex;
+        s.migration_disk_bytes = try std.math.add(usize, used - removed, added);
+    }
+    pub fn beginVaultStream(s: *Store, writer: *@import("vault_stream.zig").Writer, kind: vault_types.RecordKind, size_bytes: usize) !vault_storage.Handle {
+        const vault = try s.vaultReady();
+        if (kind != .attachment and kind != .send_spool) return error.InvalidVaultObject;
+        try s.makeRoom(size_bytes, "");
+        const handle = try vault_storage.Handle.create(s.io);
+        try writer.initInPlace(&vault.directory, vault.owner.key, vault.record(kind, handle), size_bytes, &vault.owner.workspace.plaintext);
+        return handle;
+    }
+    /// Publish a completed immutable blob and its map in one fresh index
+    /// transaction. Failed index persistence leaves charged orphan ciphertext.
+    pub fn adoptVaultBlob(s: *Store, name: []const u8, handle: vault_storage.Handle) !void {
+        _ = try s.vaultReady();
+        if (try vaultKind(name) != .attachment or s.vaultObject(name) != null) return error.InvalidVaultObject;
+        if (s.vaultBlobCount() >= 128) return error.AttachmentLimitExceeded;
+        const next = try s.allocator.alloc(VaultObject, s.vaultObjects.len + 1);
+        @memcpy(next[0..s.vaultObjects.len], s.vaultObjects);
+        next[s.vaultObjects.len] = .{ .name = try s.allocator.dupe(u8, name), .kind = .attachment, .handle = try s.allocator.dupe(u8, &handle.text()) };
+        s.vaultObjects = next;
+        try s.saveVault();
+    }
+    pub fn discardVaultBlob(s: *Store, name: []const u8) !void {
+        if (try vaultKind(name) != .attachment) return error.InvalidVaultObject;
+        try s.removeRecord(name);
+        try s.saveVault();
+    }
+    fn saveVault(s: *Store) !void {
+        const vault = try s.vaultReady();
+        errdefer s.vaultFailed = true;
+        if (s.state.entries.len > s.options.metadata_limit) return error.DiskQuotaExceeded;
+        const value: VaultIndex = .{ .state = s.state, .objects = s.vaultObjects };
+        const bytes = @import("gmail_decode.zig").serializedBytes(value);
+        if (bytes >= vault_index_write_bytes) return error.CacheLimitExceeded;
+        try s.makeRoom(bytes, "index.json");
+        var writer: @import("vault_stream.zig").Writer = undefined;
+        try writer.init(&vault.directory, vault.owner.key, vault.record(.cache_index, vault.entry.index), bytes, vault.owner.workspace, true, .{});
+        defer writer.deinit();
+        std.json.Stringify.value(value, .{}, &writer.interface) catch |err| return writer.failure orelse err;
+        writer.finish() catch |err| {
+            if (err == error.VaultDurabilityUncertain) vault.owner.uncertain = true;
+            return err;
+        };
+        // Delete only records this authenticated index has just retired. A
+        // failed cleanup leaves charged ciphertext; no orphan sweep here.
+        for (s.vaultRetired.items) |handle| vault.remove(handle) catch {};
+        s.vaultRetired.clearRetainingCapacity();
+    }
+    fn documentLimit(s: *const Store, name: []const u8) !usize {
+        if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return 512 * 1024;
+        if (std.mem.eql(u8, name, "calendar-state.json")) return 4 * 1024 * 1024;
+        if (std.mem.eql(u8, name, "calendar-agenda.json")) return 8 * 1024 * 1024;
+        if (std.mem.eql(u8, name, "calendar-provider-fixture.json") and s.options.fixtures) return 4 * 1024 * 1024;
+        return error.InvalidStoreDocument;
+    }
+    /// Internal account documents share the same private-file and quota policy.
+    /// Accept fixed names only: request JSON must never select filesystem paths.
+    pub fn readDocument(s: *Store, a: std.mem.Allocator, name: []const u8, max_bytes: usize) !?[]const u8 {
+        const bound = try s.documentLimit(name);
+        return s.readRecord(a, name, @min(bound, max_bytes)) catch |err| if (err == error.FileNotFound) null else err;
+    }
+    pub fn writeDocument(s: *Store, name: []const u8, bytes: []const u8) !void {
+        if (bytes.len > try s.documentLimit(name)) return error.CacheLimitExceeded;
+        if (s.vault != null) {
+            errdefer s.vaultFailed = true;
+            try s.writeVault(name, bytes);
+            return s.saveVault();
+        }
+        // Reserve the complete new file while the old copy still exists, and
+        // persist any mail evictions before publishing this document.
+        while (true) {
+            try s.makeRoom(bytes.len, name);
+            try s.save();
+            // Saving an initially empty index or quota annotations can grow
+            // it slightly. If that used the reserved room, evict and persist
+            // again; every further iteration must remove a cache entry or fail.
+            if (bytes.len <= s.options.disk_limit -| try s.diskBytes()) break;
+        }
+        try s.write(name, bytes);
+    }
     pub fn write(s: *Store, name: []const u8, bytes: []const u8) !void {
+        if (s.migration_source) return error.MigrationSourceReadOnly;
+        if (s.vault != null) return s.writeVault(name, bytes);
         var af = try s.dir.createFileAtomic(s.io, name, .{ .permissions = .fromMode(0o600), .replace = true });
         defer af.deinit(s.io);
         try af.file.writeStreamingAll(s.io, bytes);
@@ -344,6 +925,8 @@ pub const Store = struct {
         try parent.sync(s.io);
     }
     pub fn save(s: *Store) !void {
+        if (s.migration_source) return error.MigrationSourceReadOnly;
+        if (s.vault != null) return s.saveVault();
         try s.admitIndex();
         // The admitted state stays fixed through serialization. A small file
         // buffer avoids growing and retaining an index-sized arena allocation.
@@ -357,6 +940,9 @@ pub const Store = struct {
         try af.replace(s.io);
         const parent: std.Io.File = .{ .handle = s.dir.handle, .flags = .{ .nonblocking = false } };
         try parent.sync(s.io);
+    }
+    pub fn rememberAttachments(s: *Store, message: t.Message) !void {
+        s.state.attachmentReceipts = try @import("attachment_receipts.zig").remember(s.allocator, s.state.attachmentReceipts, message);
     }
     fn indexFits(s: *const Store, state: State, bytes: usize, used: usize) bool {
         return state.entries.len <= s.options.metadata_limit and bytes < index_write_bytes and
@@ -441,7 +1027,30 @@ pub const Store = struct {
         state.entries = state.entries[0..last];
         return removed;
     }
+    pub const BlobStats = struct { count: usize = 0, bytes: usize = 0 };
+    /// Sealed stats count indexed attachment ciphertext only; total diskBytes
+    /// additionally charges all orphan and staging files whose role is unknown.
+    pub fn blobStats(s: *Store) !BlobStats {
+        var result: BlobStats = .{};
+        if (s.vault != null) {
+            _ = try s.vaultReady();
+            for (s.vaultObjects) |object| if (object.kind == .attachment) {
+                result.count += 1;
+                result.bytes += try s.size(object.name);
+            };
+        } else {
+            var iterator = s.dir.iterate();
+            while (try iterator.next(s.io)) |entry| if (std.mem.startsWith(u8, entry.name, "blob-") and std.mem.endsWith(u8, entry.name, ".bin")) {
+                const stat = try s.dir.statFile(s.io, entry.name, .{ .follow_symlinks = false });
+                if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureAttachmentFile;
+                result.count += 1;
+                result.bytes = std.math.add(usize, result.bytes, @intCast(stat.size)) catch return error.CacheLimitExceeded;
+            };
+        }
+        return result;
+    }
     pub fn diskBytes(s: *Store) !usize {
+        s.disk_scan_count +|= 1;
         var total: usize = 0;
         var it = s.dir.iterate();
         while (try it.next(s.io)) |e| {
@@ -452,10 +1061,26 @@ pub const Store = struct {
         return total;
     }
     fn size(s: *Store, name: []const u8) !usize {
+        if (s.vault != null) {
+            const vault = try s.vaultReady();
+            const object = s.vaultObject(name) orelse return 0;
+            var reader = try vault.directory.reader(try vault_storage.Handle.parse(object.handle));
+            defer reader.close();
+            return @intCast((try reader.file.stat(s.io)).size);
+        }
         const st = s.dir.statFile(s.io, name, .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) return 0 else return err;
         return @intCast(st.size);
     }
     fn makeRoom(s: *Store, n: usize, replacing: []const u8) !void {
+        if (s.vault != null) {
+            _ = try s.vaultReady();
+            // Count EVERY directory file: current records, retired records,
+            // interrupted complete writes, and concurrent ciphertext staging.
+            const sealed_bytes = try vault_types.sealedSize(n);
+            const used = try s.diskBytes();
+            if (sealed_bytes > s.options.disk_limit - @min(used, s.options.disk_limit)) return error.DiskQuotaExceeded;
+            return;
+        }
         if (n > s.options.disk_limit) return error.DiskQuotaExceeded;
         var used = try s.diskBytes();
         // The old file remains while an atomic replacement is written. Include
@@ -474,18 +1099,63 @@ pub const Store = struct {
         }
     }
     pub fn reserveBytes(s: *Store, count: usize) !void {
+        try s.requirePlainFiles();
         try s.makeRoom(count, "");
     }
     pub fn blobReferenced(s: *const Store, id: []const u8) bool {
         for (s.state.drafts) |draft_value| for (draft_value.attachments) |attachment| if (attachment.blobId) |blob| if (std.mem.eql(u8, blob, id)) return true;
         for (s.state.outbox) |message| for (message.attachments) |attachment| if (attachment.blobId) |blob| if (std.mem.eql(u8, blob, id)) return true;
         for (s.state.entries) |entry| for (entry.message.attachments) |attachment| if (attachment.blobId) |blob| if (std.mem.eql(u8, blob, id)) return true;
+        for (s.state.entries) |entry| if (entry.bytes != 0) if (entry.bodyBlobIds) |ids| for (ids) |blob| if (std.mem.eql(u8, blob, id)) return true;
+        for (s.state.relatedDraftBlobs) |references| for (references.blobs) |blob| if (std.mem.eql(u8, blob, id)) return true;
         return false;
+    }
+
+    /// Discard discovers legacy references lazily, one verified body at a
+    /// time. Missing/corrupt bodies fail closed; startup never scans bodies.
+    pub fn blobReferencedVerified(s: *Store, id: []const u8) !bool {
+        if (s.blobReferenced(id)) return true;
+        var changed = false;
+        for (s.state.entries) |*entry| if (entry.bytes != 0 and entry.bodyBlobIds == null) {
+            var ids: [64][64]u8 = undefined;
+            var count: usize = 0;
+            {
+                var phase: std.heap.ArenaAllocator = .init(s.allocator);
+                defer phase.deinit();
+                const message = (try s.readWithAllocator(phase.allocator(), entry.message.id)) orelse return error.AttachmentReferenceUnavailable;
+                if (!std.mem.eql(u8, message.threadId, entry.message.threadId)) return error.CacheIdentityMismatch;
+                for (message.attachments) |attachment| if (attachment.blobId) |blob| {
+                    try @import("draft_codec.zig").validateAttachmentHandle(blob);
+                    var duplicate = false;
+                    for (ids[0..count]) |previous| duplicate = duplicate or std.mem.eql(u8, &previous, blob);
+                    if (!duplicate) {
+                        if (count == ids.len) return error.CacheLimitExceeded;
+                        @memcpy(&ids[count], blob);
+                        count += 1;
+                    }
+                };
+            }
+            const owned = try s.allocator.alloc([]const u8, count);
+            for (owned, ids[0..count]) |*target, blob| target.* = try s.allocator.dupe(u8, &blob);
+            entry.bodyBlobIds = owned;
+            changed = true;
+            for (owned) |blob| if (std.mem.eql(u8, blob, id)) {
+                try s.save();
+                return true;
+            };
+        };
+        if (changed) try s.save();
+        return false;
+    }
+
+    pub fn bodyNeedsUpgrade(s: *Store, id: []const u8) bool {
+        const entry = s.find(id) orelse return false;
+        return entry.bytes != 0 and entry.bodyDecoderRevision < body_decoder_revision;
     }
 
     fn evict(s: *Store, i: usize) !void {
         const name = try s.fileName("mail", s.state.entries[i].message.id);
-        s.dir.deleteFile(s.io, name) catch |err| if (err != error.FileNotFound) return err;
+        try s.removeRecord(name);
         for (s.state.views) |*view| {
             var kept: usize = 0;
             for (view.ids) |id| if (!std.mem.eql(u8, id, s.state.entries[i].message.id)) {
@@ -597,8 +1267,9 @@ pub const Store = struct {
         }
         if (full) _ = try s.putBody(message);
     }
-    /// Attach immutable bytes only to retained metadata. Never resurrect an ID,
-    /// update ordering/labels, or rewrite an already valid cached body.
+    /// Attach bytes only to retained metadata. Valid current-decoder bodies
+    /// remain immutable; a complete FULL read may atomically upgrade legacy
+    /// decoding without changing membership, ordering or labels.
     pub fn putBody(s: *Store, message: t.Message) !bool {
         if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         var e = s.find(message.id) orelse return false;
@@ -606,31 +1277,45 @@ pub const Store = struct {
         // Conversation aggregate quotas never make an individual body a final
         // refusal. An ordinary read/prefetch may still fetch it independently.
         if (std.mem.eql(u8, message.bodyCacheError, "ThreadBodyBudgetExceeded")) return false;
-        if (e.bytes != 0) if (try s.read(message.id)) |_| return false;
+        if (e.bytes != 0) if (try s.read(message.id)) |previous| {
+            // Old caches can retain the named .ics file without its invitation
+            // source. A complete thread read or refresh must persist the newly
+            // decoded source too, not only an explicit invitation inspection.
+            const adds_invitation = previous.invitation == null and message.invitation != null and hasCalendarAttachment(previous);
+            if (e.bodyDecoderRevision >= body_decoder_revision and !adds_invitation) return false;
+            if (!std.mem.eql(u8, previous.threadId, message.threadId)) return error.MessageIdentityMismatch;
+            if (message.metadataPartial or message.bodyCacheError.len != 0) return false;
+        };
+        if (message.invitation) |calendar| if (calendar.len > @import("invitation.zig").max_calendar_bytes) return error.CalendarTooLarge;
         if (message.bodyCacheError.len != 0) {
             e.bodyError = message.bodyCacheError;
             e.message.decodeWarning = message.decodeWarning;
             e.message.metadataPartial = true;
             return false;
         }
-        e.bytes = 0;
-        e.bodyHash = "";
-        const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
+        const raw = try j.encodeAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
         if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
         const name = try s.fileName("mail", message.id);
         s.makeRoom(raw.len, name) catch |err| {
             if (err != error.DiskQuotaExceeded) return err;
-            if (s.find(message.id)) |entry| entry.bodyError = "DiskQuotaExceeded";
+            if (s.find(message.id)) |entry| if (entry.bytes == 0) {
+                entry.bodyError = "DiskQuotaExceeded";
+            };
             s.state.quotaDiskLimit = s.options.disk_limit;
             return false;
         };
+        const blobs = try draft_summary.blobReferences(s.allocator, message.attachments);
+        const digest = hash(raw);
+        const owned_hash = try s.allocator.dupe(u8, &digest);
+        const metadata = try attachmentMetadata(s.allocator, message.attachments);
         e = s.find(message.id) orelse return false;
         try s.write(name, raw);
         e.bodyError = "";
         e.bytes = raw.len;
-        e.message.attachments = try attachmentMetadata(s.allocator, message.attachments);
-        const digest = hash(raw);
-        e.bodyHash = try s.allocator.dupe(u8, &digest);
+        e.message.attachments = metadata;
+        e.bodyHash = owned_hash;
+        e.bodyBlobIds = blobs;
+        e.bodyDecoderRevision = if (message.metadataPartial) 0 else body_decoder_revision;
         return true;
     }
     /// Final per-message refusals remain readable as explicit placeholders;
@@ -648,6 +1333,7 @@ pub const Store = struct {
     pub fn bodyAvailable(s: *Store, id: []const u8) !bool {
         const entry = s.find(id) orelse return false;
         if (entry.bytes == 0) return false;
+        if (s.vault != null) return try s.size(try s.fileName("mail", id)) == try vault_types.sealedSize(entry.bytes);
         const stat = s.dir.statFile(s.io, try s.fileName("mail", id), .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) return false else return err;
         if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureCacheFile;
         return stat.size == entry.bytes;
@@ -660,23 +1346,30 @@ pub const Store = struct {
         if (calendar.len > @import("invitation.zig").max_calendar_bytes) return error.CalendarTooLarge;
         const previous = (try s.read(message.id)) orelse return false;
         if (previous.invitation != null) return false;
-        var named_calendar = false;
-        for (previous.attachments) |part| named_calendar = named_calendar or @import("mime.zig").isCalendarPart(part.mimeType, part.filename);
-        if (!named_calendar) return false;
+        if (!hasCalendarAttachment(previous)) return false;
+        if (!std.mem.eql(u8, previous.threadId, message.threadId)) return error.MessageIdentityMismatch;
+        if (message.metadataPartial or message.bodyCacheError.len != 0) return false;
         if (message.bodyText.len > t.Limits.body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.body_bytes)) return error.BodyTooLarge;
-        const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
+        const raw = try j.encodeAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
         if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
         const name = try s.fileName("mail", message.id);
         try s.makeRoom(raw.len, name);
         const entry = s.find(message.id) orelse return false;
         const digest = hash(raw);
         const owned_hash = try s.allocator.dupe(u8, &digest);
+        const blobs = try draft_summary.blobReferences(s.allocator, message.attachments);
         // The checked atomic write succeeds before the old reference changes.
         try s.write(name, raw);
         entry.bytes = raw.len;
         entry.bodyHash = owned_hash;
         entry.bodyError = "";
+        entry.bodyBlobIds = blobs;
+        entry.bodyDecoderRevision = if (message.metadataPartial) 0 else body_decoder_revision;
         return true;
+    }
+    fn hasCalendarAttachment(message: t.Message) bool {
+        for (message.attachments) |part| if (@import("mime.zig").isCalendarPart(part.mimeType, part.filename)) return true;
+        return false;
     }
     pub fn read(s: *Store, id: []const u8) !?t.Message {
         return s.readWithAllocator(s.allocator, id);
@@ -685,24 +1378,31 @@ pub const Store = struct {
         const e = s.find(id) orelse return null;
         if (e.bytes == 0) return null;
         const key = hash(id);
-        const raw = readPrivate(s.dir, s.io, allocator, try std.fmt.allocPrint(allocator, "mail-{s}.json", .{key}), 4 * t.Limits.body_bytes) catch |err| if (err == error.FileNotFound) return null else return err;
+        const raw = s.readRecord(allocator, try std.fmt.allocPrint(allocator, "mail-{s}.json", .{key}), 4 * t.Limits.body_bytes) catch |err| if (err == error.FileNotFound) return null else return err;
         const digest = hash(raw);
         const record = try std.json.parseFromSliceLeaky(BodyRecord, allocator, raw, .{ .allocate = .alloc_if_needed });
         if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
         if (!std.mem.eql(u8, e.bodyHash, &digest)) {
             e.bytes = 0;
             e.bodyHash = "";
+            e.bodyBlobIds = &.{};
+            e.bodyDecoderRevision = 0;
             return null;
         }
         return try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
     }
     pub fn putOutbox(s: *Store, message: t.Message) !void {
+        errdefer if (s.vault != null) {
+            s.vaultFailed = true;
+        };
         if (s.state.outbox.len == 128) return error.OutboxLimitExceeded;
         const name = try s.fileName("outbox", message.id);
-        const raw = try std.json.Stringify.valueAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
+        const raw = try j.encodeAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
         try s.makeRoom(raw.len, name);
         try s.write(name, raw);
-        errdefer s.dir.deleteFile(s.io, name) catch {};
+        errdefer if (s.vault == null) {
+            s.dir.deleteFile(s.io, name) catch {};
+        };
         var list: std.ArrayList(t.Message) = .empty;
         try list.appendSlice(s.allocator, s.state.outbox);
         var metadata = message;
@@ -721,7 +1421,7 @@ pub const Store = struct {
     }
     pub fn readOutboxWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
         for (s.state.outbox) |m| if (std.mem.eql(u8, m.id, id)) {
-            const raw = try readPrivate(s.dir, s.io, allocator, try std.fmt.allocPrint(allocator, "outbox-{s}.json", .{hash(id)}), 4 * t.Limits.body_bytes);
+            const raw = try s.readRecord(allocator, try std.fmt.allocPrint(allocator, "outbox-{s}.json", .{hash(id)}), 4 * t.Limits.body_bytes);
             const record = try std.json.parseFromSliceLeaky(BodyRecord, allocator, raw, .{ .allocate = .alloc_if_needed });
             if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
             var result = try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
@@ -746,20 +1446,43 @@ pub const Store = struct {
     }
     pub fn draft(s: *Store, id: []const u8) !t.Draft {
         for (s.state.drafts) |d| if (std.mem.eql(u8, d.id, id)) {
-            const raw = try readPrivate(s.dir, s.io, s.allocator, try s.fileName("draft", id), 4 * t.Limits.body_bytes);
-            const result = try std.json.parseFromSliceLeaky(t.Draft, s.allocator, raw, .{ .allocate = .alloc_always });
+            const raw = try s.readRecord(s.allocator, try s.fileName("draft", id), 4 * t.Limits.body_bytes);
+            const result = try std.json.parseFromSliceLeaky(t.Draft, s.allocator, raw, .{ .allocate = .alloc_if_needed });
             if (!std.mem.eql(u8, result.id, id)) return error.CacheIdentityMismatch;
             return result;
         };
         return error.DraftNotFound;
     }
+    const DraftImport = struct { sourceId: []const u8, expectedVersion: u64, remoteMessageId: []const u8 };
     pub fn putDraft(s: *Store, input: t.Draft, id: ?[]const u8) !t.Draft {
+        return s.putDraftImpl(input, id, null);
+    }
+    /// Publish the new local copy and its duplicate-send guard in one index
+    /// commit. The original local source and remote draft are retained.
+    pub fn putImportedDraft(s: *Store, input: t.Draft, source_id: []const u8, expected_version: u64, remote_message_id: []const u8) !t.Draft {
+        return s.putDraftImpl(input, null, .{ .sourceId = source_id, .expectedVersion = expected_version, .remoteMessageId = remote_message_id });
+    }
+    fn putDraftImpl(s: *Store, input: t.Draft, id: ?[]const u8, imported: ?DraftImport) !t.Draft {
+        if (imported) |selected| {
+            const link_index = @import("draft_link.zig").find(s.state.draftLinks, selected.sourceId) orelse return error.GmailDraftNotLinked;
+            try s.state.draftLinks[link_index].expectVersion(selected.expectedVersion);
+            if (s.state.draftLinks.len >= @import("draft_link.zig").limit) return error.DraftLinkLimitReached;
+            if (s.state.draftLinks[link_index].phase == .unknown or s.state.draftLinks[link_index].remoteDraftId.len == 0) return error.GmailDraftOutcomeUnknown;
+            try @import("../bounded.zig").identifier(selected.remoteMessageId);
+        }
+        if (id) |draft_id| if (@import("draft_link.zig").find(s.state.draftLinks, draft_id)) |index| {
+            if (s.state.draftLinks[index].paused) return error.DraftPausedInGmail;
+        };
+        errdefer if (s.vault != null) {
+            s.vaultFailed = true;
+        };
         if (input.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
         if (!std.unicode.utf8ValidateSlice(input.bodyText)) return error.InvalidUtf8;
         var d = input;
-        for (d.attachments) |attachment| if (attachment.blobId) |blob_id| {
-            const file = try @import("attachment_blob.zig").open(s, blob_id, attachment.size);
-            file.close(s.io);
+        const related = if (d.original) |original| original.resources else &.{};
+        if (d.attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
+        for ([_][]const t.Attachment{ d.attachments, related }) |list| for (list) |attachment| if (attachment.blobId != null) {
+            try @import("attachment_blob.zig").verify(s, attachment);
         };
         if (d.from) |sender| if (sender.name.len == 0 and std.ascii.eqlIgnoreCase(sender.address, s.state.account)) {
             d.from = null;
@@ -776,39 +1499,92 @@ pub const Store = struct {
         // Keep an unchanged legacy uncertain draft byte-for-byte compatible.
         if (d.bodyFormat == .plain) _ = draft_value.object.orderedRemove("bodyFormat");
         if (d.omittedAttachments == 0) _ = draft_value.object.orderedRemove("omittedAttachments");
-        const raw = try std.json.Stringify.valueAlloc(s.allocator, draft_value, .{ .emit_null_optional_fields = false });
+        const raw = try j.encodeAlloc(s.allocator, draft_value, .{ .emit_null_optional_fields = false });
         const name = try s.fileName("draft", d.id);
-        const previous = if (index != null) try readPrivate(s.dir, s.io, s.allocator, name, 4 * t.Limits.body_bytes) else null;
+        const previous = if (index != null) try s.readRecord(s.allocator, name, 4 * t.Limits.body_bytes) else null;
         if (previous) |old| for (s.state.operations) |operation| {
             if (std.mem.eql(u8, operation.draftId, d.id) and std.mem.eql(u8, operation.outcome, "unknown") and !std.mem.eql(u8, old, raw)) return error.UnknownOutcome;
         };
-        if (previous) |old| if (!std.mem.eql(u8, old, raw)) try s.cancelDraftQueue(d.id);
+        if (previous) |old| if (!std.mem.eql(u8, old, raw)) {
+            try s.cancelDraftQueue(d.id);
+            if (@import("draft_link.zig").find(s.state.draftLinks, d.id)) |link_index| {
+                s.state.draftLinks[link_index].sendAcknowledgedDigest = "";
+                try s.state.draftLinks[link_index].bump();
+            }
+        };
         try s.makeRoom(raw.len, name);
         try s.write(name, raw);
-        errdefer {
+        errdefer if (s.vault == null) {
             if (previous) |old| s.write(name, old) catch {} else s.dir.deleteFile(s.io, name) catch {};
-        }
+        };
         const preview = try draft_summary.fromDraft(s.allocator, d);
+        const previous_references = s.state.relatedDraftBlobs;
+        try s.setRelatedDraftBlobs(d.id, related);
+        errdefer s.state.relatedDraftBlobs = previous_references;
         if (index) |i| s.state.drafts[i] = preview else {
             var list: std.ArrayList(t.Draft) = .empty;
             try list.appendSlice(s.allocator, s.state.drafts);
             try list.append(s.allocator, preview);
             s.state.drafts = list.items;
         }
+        if (imported) |selected| {
+            const link_type = @import("draft_link.zig");
+            const source_index = link_type.find(s.state.draftLinks, selected.sourceId).?;
+            var source_link = s.state.draftLinks[source_index];
+            source_link.lastImportedMessageId = try s.allocator.dupe(u8, selected.remoteMessageId);
+            source_link.lastImportedDraftId = try s.allocator.dupe(u8, d.id);
+            try source_link.bump();
+            var copy_link = source_link;
+            copy_link.draftId = try s.allocator.dupe(u8, d.id);
+            copy_link.remoteMessageId = try s.allocator.dupe(u8, selected.remoteMessageId);
+            copy_link.phase = .linked;
+            copy_link.version = 1;
+            copy_link.paused = false;
+            copy_link.possiblySentElsewhere = false;
+            copy_link.sendAcknowledgedDigest = "";
+            copy_link.errorCode = "";
+            copy_link.lastImportedMessageId = "";
+            copy_link.lastImportedDraftId = "";
+            copy_link.uploadedDigest = try s.allocator.dupe(u8, &(try link_type.contentDigest(s.allocator, d, s.state.account)));
+            const new_links = try s.allocator.alloc(link_type.Link, s.state.draftLinks.len + 1);
+            @memcpy(new_links[0..s.state.draftLinks.len], s.state.draftLinks);
+            new_links[source_index] = source_link;
+            new_links[s.state.draftLinks.len] = copy_link;
+            s.state.draftLinks = new_links;
+        }
         try s.save();
         return d;
     }
+    fn setRelatedDraftBlobs(s: *Store, id: []const u8, resources: []const t.Attachment) !void {
+        const blobs = try draft_summary.blobReferences(s.allocator, resources);
+        var references: std.ArrayList(DraftBlobReferences) = .empty;
+        for (s.state.relatedDraftBlobs) |previous| if (!std.mem.eql(u8, previous.draftId, id)) try references.append(s.allocator, previous);
+        if (blobs.len != 0) try references.append(s.allocator, .{ .draftId = try s.allocator.dupe(u8, id), .blobs = blobs });
+        s.state.relatedDraftBlobs = references.items;
+    }
     pub fn discardDraft(s: *Store, id: []const u8) !void {
+        const linked_index = @import("draft_link.zig").find(s.state.draftLinks, id);
+        if (linked_index) |index| if (s.state.draftLinks[index].paused) return error.DraftPausedInGmail;
+        errdefer if (s.vault != null) {
+            s.vaultFailed = true;
+        };
         for (s.state.operations) |operation| if (std.mem.eql(u8, operation.draftId, id) and std.mem.eql(u8, operation.outcome, "unknown")) return error.UnknownOutcome;
         for (s.state.drafts, 0..) |draft_value, i| if (std.mem.eql(u8, draft_value.id, id)) {
             try s.cancelDraftQueue(id);
             // The account has one regenerable browser artifact. Removing a
             // draft must also remove any rendered copy of discarded content.
-            s.dir.deleteFile(s.io, "preview.html") catch |err| if (err != error.FileNotFound) return err;
+            if (s.vault == null) s.dir.deleteFile(s.io, "preview.html") catch |err| if (err != error.FileNotFound) return err;
             std.mem.copyForwards(t.Draft, s.state.drafts[i .. s.state.drafts.len - 1], s.state.drafts[i + 1 ..]);
             s.state.drafts = s.state.drafts[0 .. s.state.drafts.len - 1];
+            try s.setRelatedDraftBlobs(id, &.{});
+            if (linked_index) |index| {
+                const links = s.state.draftLinks;
+                std.mem.copyForwards(@import("draft_link.zig").Link, links[index .. links.len - 1], links[index + 1 ..]);
+                s.state.draftLinks = links[0 .. links.len - 1];
+            }
+            if (s.vault != null) try s.removeRecord(try s.fileName("draft", id));
             try s.save();
-            try s.dir.deleteFile(s.io, try s.fileName("draft", id));
+            if (s.vault == null) try s.dir.deleteFile(s.io, try s.fileName("draft", id));
             return;
         };
         return error.DraftNotFound;
@@ -822,6 +1598,7 @@ pub const Store = struct {
     }
     pub fn clearMail(s: *Store) !void {
         while (s.state.entries.len > 0) try s.evict(0);
+        s.state.attachmentReceipts = &.{};
         s.state.generation += 1;
         s.state.historyId = "";
         s.state.quotaFloor = null;
@@ -995,6 +1772,160 @@ fn entryPosition(entries: []const Entry, entry: Entry) usize {
         if (newestFirst({}, entries[middle], entry)) start = middle + 1 else end = middle;
     }
     return start;
+}
+
+test "legacy bodies: complete decoder upgrade is atomic and keeps membership and current bodies immutable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/legacy-empty", .{tmp.sub_path});
+    const old: t.Message = .{ .id = "mail", .threadId = "thread", .bodyText = "Original body", .labels = &.{"INBOX"}, .unread = true };
+    {
+        var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+        defer store.close();
+        try store.put(old, true);
+        store.find(old.id).?.bodyDecoderRevision = 0;
+        try store.save();
+    }
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    try std.testing.expect(store.bodyNeedsUpgrade(old.id));
+    const original_hash = try a.dupe(u8, store.find(old.id).?.bodyHash);
+    var fresh = old;
+    fresh.labels = &.{"SENT"};
+    fresh.unread = false;
+    fresh.attachments = &.{.{ .id = "empty-part", .filename = "empty.bin", .size = 0 }};
+    fresh.metadataPartial = true;
+    try std.testing.expect(!try store.putBody(fresh));
+    fresh.metadataPartial = false;
+    fresh.threadId = "neighbor-thread";
+    try std.testing.expectError(error.MessageIdentityMismatch, store.putBody(fresh));
+    fresh.threadId = old.threadId;
+    const disk_limit = store.options.disk_limit;
+    store.options.disk_limit = 1;
+    try std.testing.expect(!try store.putBody(fresh));
+    try std.testing.expectEqualStrings(original_hash, store.find(old.id).?.bodyHash);
+    try std.testing.expectEqualStrings(old.bodyText, (try store.read(old.id)).?.bodyText);
+    try std.testing.expect(store.bodyNeedsUpgrade(old.id));
+    store.options.disk_limit = disk_limit;
+    try std.testing.expect(try store.putBody(fresh));
+    try std.testing.expect(!store.bodyNeedsUpgrade(old.id));
+    try std.testing.expect(store.find(old.id).?.message.unread);
+    try std.testing.expectEqualStrings("INBOX", store.find(old.id).?.message.labels[0]);
+    try std.testing.expectEqual(@as(usize, 1), (try store.read(old.id)).?.attachments.len);
+    fresh.bodyText = "Later provider version must not replace the current decoded body";
+    try std.testing.expect(!try store.putBody(fresh));
+    try store.save();
+    store.close();
+    var reopened = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer reopened.close();
+    const retained = (try reopened.read(old.id)).?;
+    try std.testing.expectEqualStrings(old.bodyText, retained.bodyText);
+    try std.testing.expectEqualStrings("empty.bin", retained.attachments[0].filename);
+    try std.testing.expectEqual(@as(usize, 0), retained.attachments[0].size);
+    try std.testing.expect(!reopened.bodyNeedsUpgrade(old.id));
+}
+
+test "legacy invitations: fetched thread source upgrades only a complete matching calendar body" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/legacy-invitation", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    const old: t.Message = .{ .id = "mail", .threadId = "thread", .bodyText = "Meeting body", .labels = &.{"INBOX"}, .unread = true, .attachments = &.{.{ .id = "calendar", .filename = "invite.ics", .mimeType = "text/calendar" }} };
+    try store.put(old, true);
+    try std.testing.expect(!store.bodyNeedsUpgrade(old.id));
+    var fresh = old;
+    fresh.invitation = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+    fresh.metadataPartial = true;
+    try std.testing.expect(!try store.putBody(fresh));
+    fresh.metadataPartial = false;
+    fresh.threadId = "other-thread";
+    try std.testing.expectError(error.MessageIdentityMismatch, store.putBody(fresh));
+    fresh.threadId = old.threadId;
+    try std.testing.expect(try store.putBody(fresh));
+    const digest = try a.dupe(u8, store.find(old.id).?.bodyHash);
+    fresh.bodyText = "Later unrelated replacement";
+    try std.testing.expect(!try store.putBody(fresh));
+    try std.testing.expectEqualStrings(digest, store.find(old.id).?.bodyHash);
+    try store.save();
+    store.close();
+    var reopened = try Store.openCached(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer reopened.close();
+    const retained = (try reopened.read(old.id)).?;
+    try std.testing.expectEqualStrings(old.bodyText, retained.bodyText);
+    try std.testing.expectEqualStrings(fresh.invitation.?, retained.invitation.?);
+    try std.testing.expectEqualStrings("INBOX", reopened.find(old.id).?.message.labels[0]);
+    try std.testing.expect(reopened.find(old.id).?.message.unread);
+}
+
+test "related originals: body and draft blob references survive metadata rotation and cold reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/protected-blob", .{tmp.sub_path});
+    const blob = @import("attachment_blob.zig");
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    var incoming = try blob.Incoming.create(&store, 3);
+    defer incoming.close();
+    try incoming.write("abc");
+    const image = try incoming.commit(&store, .{ .id = "token-A", .filename = "photo.png", .mimeType = "image/png", .size = 3, .contentId = "photo" });
+    const original: t.Message = .{ .id = "source", .threadId = "thread", .bodyText = "Old retained body", .bodyHtml = "<img src='cid:photo'>", .attachments = &.{image} };
+    try store.put(original, true);
+    var latest = original;
+    latest.bodyText = "";
+    latest.attachments = &.{.{ .id = "token-B", .filename = image.filename, .mimeType = image.mimeType, .size = image.size, .contentId = image.contentId }};
+    try store.put(latest, false);
+    try store.save();
+    store.close();
+    store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    try std.testing.expectEqualStrings("token-B", store.find(original.id).?.message.attachments[0].id);
+    try std.testing.expect(store.blobReferenced(image.blobId.?));
+    try std.testing.expectError(error.AttachmentInUse, blob.discard(&store, image.blobId.?));
+    // The same account opened from an older index discovers its immutable
+    // body's exact hash-checked references before allowing an explicit delete.
+    store.find(original.id).?.bodyBlobIds = null;
+    try store.save();
+    try std.testing.expect(!store.blobReferenced(image.blobId.?));
+    try std.testing.expectError(error.AttachmentInUse, blob.discard(&store, image.blobId.?));
+    try std.testing.expect(store.blobReferenced(image.blobId.?));
+    const draft = try store.putDraft(.{ .original = .{ .bodyHtml = original.bodyHtml.?, .resources = &.{image} } }, null);
+    try std.testing.expect(store.state.drafts[0].original == null);
+    try store.invalidate(original.id);
+    try store.save();
+    store.close();
+    store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    try std.testing.expectEqualStrings(image.blobId.?, (try store.draft(draft.id)).original.?.resources[0].blobId.?);
+    try std.testing.expectError(error.AttachmentInUse, blob.discard(&store, image.blobId.?));
+    var other = try Store.open(std.testing.io, a, root, "neighbor@example.test", .{ .fixtures = true });
+    defer other.close();
+    try std.testing.expectError(error.AttachmentHandleNotFound, other.putDraft(.{ .original = .{ .bodyHtml = original.bodyHtml.?, .resources = &.{image} } }, null));
+    try store.discardDraft(draft.id);
+    try blob.discard(&store, image.blobId.?);
+    try std.testing.expectError(error.AttachmentHandleNotFound, blob.open(&store, image.blobId.?, image.size));
+}
+
+test "related originals: legacy corrupt body prevents deletion without inventing references" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/corrupt-refs", .{tmp.sub_path});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    try store.put(.{ .id = "source", .threadId = "thread", .bodyText = "Old body" }, true);
+    store.find("source").?.bodyBlobIds = null;
+    try store.write(try store.fileName("mail", "source"), try std.json.Stringify.valueAlloc(a, BodyRecord{ .account = "self@example.test", .message = .{ .id = "source", .threadId = "thread", .bodyText = "Corrupt replacement" } }, .{}));
+    try std.testing.expectError(error.AttachmentReferenceUnavailable, store.blobReferencedVerified("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 }
 
 test "recipient cache: compact To Cc persistence bounds counts and bytes without truncating full mail" {

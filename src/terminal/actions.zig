@@ -28,7 +28,11 @@ pub const Id = enum {
     save_search,
     sender,
     preview_browser,
+    gmail_draft,
     contacts,
+    calendar,
+    follow_up,
+    follow_ups,
     add_contact,
     files,
     save_all,
@@ -74,6 +78,8 @@ pub const Entry = struct {
     }
 };
 pub const entries = [_]Entry{
+    .{ .id = .follow_up, .name = "Follow up", .detail = "Set a local date for this message", .keys = "b / :follow-up", .needs_mail = true },
+    .{ .id = .follow_ups, .name = "Follow-ups", .detail = "See this account’s due and upcoming local reminders", .keys = ":follow-ups" },
     .{ .id = .compose, .name = "Compose", .detail = "Write a new message", .keys = "c" },
     .{ .id = .reply, .name = "Reply", .detail = "Reply to the focused message", .keys = "r", .needs_mail = true },
     .{ .id = .reply_all, .name = "Reply all", .detail = "Reply to its sender and recipients", .keys = "R", .needs_mail = true },
@@ -97,7 +103,9 @@ pub const entries = [_]Entry{
     .{ .id = .saved_searches, .name = "Saved searches", .detail = "Open a named account-specific query", .keys = ":saved-searches" },
     .{ .id = .save_search, .name = "Save this search", .detail = "Name the current query and its scope", .keys = ":save-search", .needs_search = true },
     .{ .id = .sender, .name = "Choose sender", .detail = "Choose a verified sending identity", .keys = "f", .needs_compose = true },
+    .{ .id = .gmail_draft, .name = "Continue in Gmail", .detail = "Upload once, pause local edits, or check an existing Gmail draft", .keys = ":gmail-draft", .needs_compose = true },
     .{ .id = .preview_browser, .name = "Preview in browser", .detail = "Inspect the rendered outgoing email", .keys = ":preview-browser", .needs_compose = true },
+    .{ .id = .calendar, .name = "Calendar", .detail = "Browse Agenda, Day and Week; review invitation imports separately", .keys = "C" },
     .{ .id = .contacts, .name = "Contacts", .detail = "Find or edit account contacts", .keys = "a" },
     .{ .id = .add_contact, .name = "Add sender to contacts", .detail = "Prefill a contact from this mail", .needs_mail = true, .contact_write = true },
     .{ .id = .files, .name = "Attachments", .detail = "Save or open received files", .keys = "B", .needs_mail = true },

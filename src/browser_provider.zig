@@ -326,7 +326,7 @@ pub const Provider = struct {
         }
         const index = try self.actor(try j.required(request, "account"));
         const explicitly_cached = cached_call or try j.boolean(request, "cacheOnly", false);
-        if (explicitly_cached and !@import("terminal/client_contract.zig").cachedCommand(cmd)) return error.CacheUnsupported;
+        if (explicitly_cached and !@import("terminal/client_contract.zig").cachedRequest(request)) return error.CacheUnsupported;
         const cached = explicitly_cached or self.live_count == 0;
         if (std.mem.eql(u8, cmd, "accounts.identities")) return j.value(a, .{ .identities = [_]struct { address: []const u8, name: []const u8 = "", signature: []const u8 = "" }{.{ .address = self.address(index) }}, .cached = true });
         if (std.mem.eql(u8, cmd, "labels.list")) {
@@ -430,6 +430,9 @@ pub const Provider = struct {
                 var cache_partial = false;
                 for (selected) |*value| {
                     const decoded = try j.decode(t.Message, a, value.*);
+                    // An explicitly requested progressive window contains
+                    // metadata-only cards. They must not replace cached bodies.
+                    if (try j.boolean(result, "progressive", false)) if (!decoded.bodyCached and decoded.bodyCacheError.len == 0) continue;
                     const admitted = try self.cacheRead(index, decoded);
                     if (!std.mem.eql(u8, admitted.decodeWarning, decoded.decodeWarning) or admitted.metadataPartial != decoded.metadataPartial or admitted.bodyCached != decoded.bodyCached) {
                         // Annotate only the small map. Re-encoding the complete
@@ -920,6 +923,7 @@ pub const Provider = struct {
         // Session drafts retain inline bytes; native filesystem blob handles
         // cannot be interpreted by this portable storage adapter.
         for (draft.attachments) |attachment| if (attachment.blobId != null) return error.BrowserAttachmentsUnavailable;
+        if (draft.original) |original| for (original.resources) |resource| if (resource.blobId != null) return error.BrowserAttachmentsUnavailable;
         const slot = if (id) |value| try self.draftSlot(a, index, value) else find: {
             for (&self.drafts[index]) |*candidate| if (candidate.raw == null or self.reclaimableDraft(index, candidate)) break :find candidate;
             return error.BrowserDraftLimit;

@@ -1,0 +1,9 @@
+{
+  "items": [
+    {"id":"self@example.test","summary":"Personal","timeZone":"Europe/Vienna","accessRole":"owner","primary":true,"selected":true},
+    {"id":"owned-secondary@example.test","summary":"My project","timeZone":"UTC","accessRole":"owner","dataOwner":"self@example.test"},
+    {"id":"shared-team@example.test","summary":"Managed team","timeZone":"Europe/Vienna","accessRole":"owner","dataOwner":"owner@example.test"},
+    {"id":"read-team@example.test","summary":"Read team","timeZone":"UTC","accessRole":"reader"},
+    {"id":"busy-team@example.test","summary":"Busy team","timeZone":"UTC","accessRole":"freeBusyReader"}
+  ]
+}

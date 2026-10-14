@@ -39,7 +39,9 @@ The list holds at most 32 messages at a time. Move past its last row with `j`, D
 
 After the cached tail, ordinary forward movement can fetch one older Gmail page. Backward movement uses cached metadata; a selected body that is missing can still be fetched read-only. `/` cache searches never fetch missing bodies or older provider results. `[` and `]` remain explicit page controls; `[` selects the previous window's first row.
 
-Enter opens the full thread. `h`/`l` or Tab changes pane, `v` moves the reader beside or below the list, and `z` expands it. With the reader focused, `J`/`K` moves to adjacent mail across windows while lowercase `j`/`k` scrolls the body. `{`/`}` chooses a thread message, `t` or a click folds its body, and `Q`/`S` folds quoted history/a standard signature. The header stays compact in short panes and shows reading position. These controls do not change stored mail.
+Enter opens the conversation. Long conversations use 20-message windows with selected bodies loaded on demand. With the reader focused, `[`/`]` (or `:thread-older` / `:thread-newer`) loads an older/newer window; counts distinguish bodies still to load from messages outside the window. `{`/`}` selects and opens a message, and keeps reply and file actions attached to its message ID. Cached windows are explicitly incomplete.
+
+`h`/`l` or Tab changes pane, `v` moves the reader beside or below the list, and `z` expands it. With the reader focused, `J`/`K` moves to adjacent mail across windows while lowercase `j`/`k` scrolls the body. `{`/`}` chooses a thread message, `t` or a click folds its body, and `Q`/`S` folds quoted history/a standard signature. The header stays compact in short panes and shows reading position. These controls do not change stored mail.
 
 Mouse support is enabled by default. Click accounts, mailboxes, messages and contacts; the wheel scrolls the pane under the pointer. Loading placeholders and gaps cannot select unfinished mail. Drag across the received message body to select text, then press `y` or choose **Copy**. Your terminal's selection modifier, or `--no-mouse`, also retains ordinary terminal text selection.
 
@@ -109,11 +111,13 @@ automatic checking off. All controls support Tab/Shift+Tab, Enter and mouse.
 The guide follows your actual Omarchy, Homebrew, source or manual installation.
 See [updating Omagma](UPDATES.md) for the procedures and shared CLI commands.
 
-## Reading HTML-only mail
+## Received message views
 
-The reader prefers a nonempty plain-text MIME alternative. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use your chosen TUI palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
+The reader initially prefers a nonempty plain-text MIME alternative. Press `p` in the reader to switch between **Plain** and **Formatted** for that message, including messages with a weak plain alternative. `:received plain`, `:received formatted` and `:received auto` select the mode explicitly. The choice follows that message through an in-session refresh or thread-window change; the last 32 explicit message choices are remembered in that session. For HTML-only mail, a native text view keeps headings, bold/italic emphasis, lists, quotes, preformatted blocks and simple tables. Colors use your chosen TUI palette. Narrow tables stack their cells; complex presentation tables flatten into reading order.
 
 Scripts, remote images and other resources never run or load. Images show `[Image: caption]` using alt text or a title, or `[Image]` when neither is available; explicitly empty alt text hides decorative images. Links use the theme's cyan and underline, including HTTP(S) URLs in plain-text mail. Human-written link labels stay intact. Long visible URLs are shortened to their host/path and an ellipsis; `L` retains the complete destinations, including query parameters. These display changes leave stored mail and CLI bodies intact.
+
+`:density compact` gives one-line mail rows and smaller reader headers; `:density comfortable` restores the spaced layout. The preference survives restart. `H` expands the current message’s sender, recipients, date, read state and labels.
 
 Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted lines remain intact; overwide words split within the pane. The composer uses the same layout for its caret and text, keeping its editable content complete.
 
@@ -121,7 +125,7 @@ Paragraphs wrap at word boundaries. Hard newlines and indented/preformatted line
 
 `/` searches this account's retained metadata and downloaded plaintext without fetching missing bodies. It supports quoted phrases, AND terms, negative terms, and `from:`, `to:`, `cc:`, `subject:`, `body:`, `label:`, `in:`, `filename:`, `is:unread|read|starred|important`, `has:attachment` and `status:partial` predicates. `status:partial` finds decode warnings, unavailable bodies and incomplete metadata; use All Mail or the retained-cache view to include rows whose labels could not be verified. `after:` (inclusive), `before:` (exclusive) and `on:` compare local calendar dates written as `YYYY-MM-DD` or `YYYY/MM/DD`; `newer:`/`older:` are absolute-date aliases. Unsupported named operators and invalid values produce a diagnostic. Use Gmail search for its full query language.
 
-`\` explicitly searches Gmail using Google's query syntax. That can reach mail outside the cache and may take network time. `q` leaves search results and restores the original mailbox, selected message and reader position where still cached.
+`\` explicitly searches Gmail using Google's query syntax. While entering a mail search, **Ctrl+G** switches between Cache and Gmail and keeps the query; **Enter** runs it in the selected scope. That can reach mail outside the cache and may take network time. `q` leaves search results and restores the original mailbox, selected message and reader position where still cached.
 
 `:search-history` lists recent queries for this account, keeping Cache/Gmail
 scope visible. `:save-search NAME` saves the current query and its scope;
@@ -133,12 +137,14 @@ that account's named entry with the current query and scope.
 
 `:find TEXT` searches literal text in the focused message's displayed
 subject/body and visible link labels, including the native HTML view. It
-matches ASCII case-insensitively and other Unicode literally, including soft
-wraps; folded quotes/signatures, other headers/messages and hidden URLs are
+uses Unicode case folding (for example, `Straße` matches `STRASSE`), including
+soft wraps; folded quotes/signatures, other headers/messages and hidden URLs are
 excluded. It highlights matches and keeps a
 **Find 1/3** style counter visible. `n`/`N` visits the next/previous match;
 Escape ends finding. This is separate from mailbox search and makes no server
-request. The message needs a loaded body.
+request. The message needs a loaded body. Case folding preserves the original
+text and highlight boundaries; accents are not removed. Cached mailbox search
+uses the same Unicode matching.
 
 `:next-unread` and `:previous-unread` select adjacent unread cached mail in the
 current mailbox, label or cache search, crossing cached windows as needed.
@@ -405,8 +411,78 @@ Gmail draft or message, and pending/unknown submissions remain protected.
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
 
-Invitations show a distinct callout below the message's labels, with
-a calendar icon and **I · Respond** cue. A blank line separates it from the
+In the development build, **Accept** and **Tentative** also save supported
+invitations and your response to the same account's primary calendar when
+Calendar write access is enabled. The RSVP review shows this before confirmation.
+An existing event is matched by its invitation identity to avoid duplicates.
+Mail and Calendar outcomes are shown separately: a Calendar failure never
+resends your RSVP. **C · Check status** checks an uncertain Calendar result or retries a temporary
+Calendar failure without resending the RSVP.
+Without Calendar access, RSVP email continues to work as before. Unsupported
+recurring changes or ambiguous times remain explicit rather than guessed.
+
+The native Calendar view requires optional per-account Calendar access.
+Press `C`, choose Calendar in the sidebar, or use the
+action palette. `1`/`2`/`3` switch Agenda/Day/Week; `g` chooses a calendar in the
+current account, `h`/`l` move the date range, `Ctrl+G` jumps to a date, and `t` returns to today. `j`/`k`
+select an event and Enter opens its details. `/` searches only the loaded date
+range. Buttons also support Tab/Shift+Tab, Enter and mouse clicks. Narrow
+terminals use a compact presentation, with all-day dates kept separate from
+timed appointments. `?` opens the same searchable help presentation as Mail:
+`/` finds keys, actions and sections; `n`/`N` visits matches. Esc clears a search
+first, then returns to the Calendar page you opened it from. The Back control
+also supports mouse, Tab and Enter.
+
+Events with a usable meeting link have a camera marker. Press **o** on the
+selected event, or use **Join** in its event card, to open the meeting in that
+account's configured Chrome profile. The card keeps the event title, time and
+actions visible while long descriptions scroll. Local times, date-only events
+and any differing event timezone are labeled explicitly. An event opened here
+already belongs to the displayed calendar; **A** is the invitation action in Mail.
+
+While the native TUI is open, meeting reminders appear ten minutes before a
+timed event in a readable primary or selected calendar. You can stay in Mail;
+opening Calendar first is not required. The card shows minutes until the start,
+then minutes remaining during the event, and disappears when the event ends.
+All-day, declined and cancelled events do not raise reminders.
+
+The reminder leaves your typing focus alone. Click its controls, or press **M**
+(**Shift+m**, Meeting actions) to focus the card: **Ctrl+D** dismisses it, **o** joins an online meeting in that event
+account's configured Chrome profile, and **n** moves to another due reminder.
+Tab/Shift+Tab and Enter also operate its controls; Esc or M returns to your work.
+In compose, search and other text fields, `M` remains text. Plain `d` does not
+dismiss the reminder. Without card focus, Ctrl+D keeps its
+normal scrolling behavior. Cards appear on the main Mail and Calendar screens;
+composing, external editors, event details and modal dialogs keep their own screen and input.
+After returning to Mail or Calendar, a still-due reminder shows its current time.
+Join appears only for a usable meeting link. Dismissal lasts for that occurrence
+in the current TUI session, including subsequent calendar refreshes. Reminders
+run only while the TUI is open and use the existing Calendar read permission.
+
+From an invitation, `A` opens a review for adding the event to the selected
+calendar, or applying a supported newer update/cancellation. Review the account,
+calendar and times before confirming. The saved review fixes the exact action;
+it never sends an RSVP email. If the connection fails after dispatch, the outcome
+remains unknown. **r · Check Calendar** checks the recorded action without
+applying it again, including after restart. Do not resubmit the event to resolve
+an unknown result.
+
+Calendar access requires optional Google permissions. The missing-permission
+screen can copy an authorization command retaining existing capabilities; it
+does not start consent automatically. See [Calendar permissions and account
+setup](CALENDAR-PERMISSIONS.md) for scope choices and Google Console steps.
+Retained offline views show their stale state and cannot establish availability
+or authorize a calendar change. Event details show the display timezone and
+original invitation timezone; ambiguous floating times require an explicit
+decision.
+
+Invitations show a themed event card below the message's labels, with a bold
+title, accent-colored time and **I · Respond** cue. A roomy reader uses a quiet
+border and three content rows; smaller panes retain a compact one-to-three-row
+summary so the message body stays readable. Invitations with a detected, usable
+meeting link show the ** video-call icon**, matching Calendar; cancelled meetings
+do not. The same marker appears in invitation review, where `o` joins in the
+invitation account's Chrome profile. A blank line separates the card from the
 labels when the reader has room; very short panes omit that spacing. Once
 that header scrolls away, the callout pins to the reader's top, so a long
 message cannot hide the response
@@ -414,11 +490,22 @@ action. Click the callout or press `I`
 to review a response; neither action sends a reply by itself.
 
 The card shows the meeting title and friendly start/duration where available.
-Invitation review keeps account, attendee and organizer identities visible,
-with local start/end, duration, location and stated response. UTC and supported
-TZID times use local zoneinfo; embedded, custom or unavailable timezone data
-keeps its stated wall time and label. All-day end dates are explicitly
+Invitation review uses the same card styling as Calendar, sizing itself to the
+content. The title and time, account, attendee, organizer and separate RSVP and
+Calendar outcomes stay visible while longer details scroll. Join is prominent
+near the title; response controls remain at the bottom. Local start/end,
+duration, location and stated response remain available. UTC and supported
+TZID times use local zoneinfo. An embedded/custom timezone converts only when its rules agree with a known zone for the event; unresolved rules keep their stated wall time and label. All-day end dates are explicitly
 exclusive, and ambiguous/nonexistent local times stay labeled.
+
+In the development build, cancellation, publication and RSVP notices also open
+in the invitation drawer, with response controls disabled. Cancelled events do
+not offer Join. Inspection uses retained verified aliases and cached invitation
+data without a provider call when available. A response confirmed by Omagma is
+shown only for the exact invitation source it answered; an uncertain response
+remains protected across restart. **C · Check Sent** looks for the exact recorded
+RSVP in Sent without sending again. Only a matching sent response confirms it;
+a missing result leaves the outcome unknown.
 
 Tab/Shift+Tab reaches Cancel, Accept, Tentative, Decline, Details and Join;
 Cancel starts focused. `v`/Details toggles UID, sequence and recurrence details.
@@ -526,9 +613,13 @@ appearance only; desktop themes and terminal fonts stay with your terminal.
 
 Follow [full TUI/CLI permissions](SETUP.md#full-tuicli-permissions) for the Google project, People API and per-account consent. Fresh terminal-only setup uses one registration; alongside an existing read-only registration, use a different one for broader terminal access. The TUI and CLI share the terminal grant; an existing bar retains its read-only registration and credentials.
 
-For all implemented live features, authorize the complete local capability set:
+For the published mail/contact features, authorize the complete local capability set:
 `mail-read,mail-send,mail-modify,contacts-read,contacts-write,calendar-rsvp`.
-The setup guide explains the corresponding two Google scopes and the browser steps. A Console scope change alone does not replace an account's existing token. Restart an open TUI after authorizing its updated grant.
+The setup guide explains the corresponding Google scopes and browser steps.
+The development Calendar features use the optional grants described in
+[Calendar permissions](CALENDAR-PERMISSIONS.md). A Console scope change alone
+does not replace an account's existing token. Restart an open TUI after
+authorizing its updated grant.
 
 You can use your own accounts after consent, including sending a first message to yourself. Agent actions still need your task authorization. A dedicated test mailbox is a development qualification tool, not an installation requirement.
 
@@ -538,11 +629,11 @@ You can use your own accounts after consent, including sending a first message t
 | --- | --- |
 | Retained mail per account | Default 2,000 entries / 256 MiB; configurable up to 10,000 / 1 GiB |
 | Display/result window | 32 in the TUI; up to 100 per CLI page |
-| Loaded thread | 100 messages |
+| Native conversation window | 20 message cards at a time; up to 1,000 member IDs; 4 MiB of loaded body DTOs per window |
 | Message body / draft source / each rendered alternative | 2 MiB |
 | Ordinary outgoing attachments | 16 files, 25 MiB combined decoded bytes |
-| Retained original inline resources | 32 resources, 2 MiB combined decoded bytes, separate from ordinary files |
-| Original email (.eml) source | 2 MiB; encoded draft must also fit the request limit |
+| Retained original inline resources | 32 resources; native resources and ordinary outgoing files share the 25 MiB decoded limit; browser resources retain a 2 MiB limit |
+| Original email (.eml) source | Native: up to the 25 MiB outgoing-file limit, stored as a blob; browser: 2 MiB |
 | Parsed incoming file/resource descriptors | 49 per message, within 128 MIME parts; streamed file content up to 50 MiB each; cached blobs also obey the account disk quota |
 | Outgoing recipients | 32 across To/Cc/Bcc |
 | Local drafts / undo receipts | 128 / 16 per account |
@@ -557,11 +648,12 @@ You can use your own accounts after consent, including sending a first message t
 
 Large inline photos remain unloaded while reading: the reader shows image
 placeholders, and received-file controls can save their content within the
-50 MiB incoming limit. Keeping original formatting still has a separate
-2 MiB combined embedded-resource limit. The reply/forward chooser checks that
-before downloading images, disables unavailable choices and explains when to
-use Text quote. A known oversized original email also disables its `.eml`
-choice; the backend rechecks the fresh source when creating the draft.
+50 MiB incoming limit. Native replies, reply-all and forwards retain larger
+embedded images as bounded attachment blobs. Those resources and ordinary
+outgoing files share the 25 MiB decoded limit. The browser keeps its smaller
+2 MiB resource limit. The mode chooser checks known sizes before downloading
+content; the backend rechecks the fresh source before saving a draft.
+The final 35 MiB encoded-MIME limit still applies.
 
 Inline JSON body/resource data must fit the request limit. Ordinary file
 handles avoid embedding large file bytes in that frame; the final encoded MIME
@@ -572,10 +664,72 @@ local drafts, their retained originals and operation receipts are preserved.
 
 Every send or RSVP has an operation identity and a recorded outcome: applied, rejected or unknown. Applied means provider acceptance, not delivery. An unknown receipt protects its recovery draft; inspect the provider before deciding what to do next. Local duplicate guards do not guarantee server-side idempotency.
 
-Cache files and drafts contain plaintext protected by owner-only filesystem permissions, not encryption at rest. Keep private configuration, credentials, cache files and real-mail captures outside Git. See [cache behavior](TUI-CACHE.md), [agent CLI](AGENT-CLI.md) and [developer references](DEVELOPMENT.md) for the deeper contracts.
+The default file store protects cache files and drafts with owner-only
+filesystem permissions; it does not encrypt them. An optional
+[encrypted native vault](ENCRYPTION.md) with explicit migration and a
+shared unlocked daemon for CLI/TUI sessions encrypts retained data at rest.
+Migration preserves the original plaintext source files. Keep private configuration,
+credentials, cache files and real-mail captures outside Git. See [cache behavior](TUI-CACHE.md), [agent CLI](AGENT-CLI.md) and [developer references](DEVELOPMENT.md) for the deeper contracts.
 
 Omagma uses Ctrl for modified app commands and reserves Ctrl+B. Letter
 alternatives, Tab/Shift+Tab and Enter keep flows usable without Home, End,
 Insert or Alt. `i` enters editing, `gg`/`G` navigate mail, and Ctrl+A/E move to
 line start/end. Arrow and Home/End keys remain optional aliases; Ctrl+1/2/3
 switches accounts from the mailbox, matching the bar popup.
+
+Local follow-ups are available in the native terminal. Press `b` on a received
+message (or `:follow-up`) and choose Today, Tomorrow, or enter `YYYY-MM-DD`.
+`Ctrl+S` saves the date; `Esc` cancels. Open **Follow-ups** in navigation or use
+`:follow-ups` to see this account's overdue, due-today, and upcoming reminders.
+Within the list, `b` edits the selected reminder and `d` marks it done. Done
+removes the local reminder permanently; it does not archive, snooze, mark read,
+or otherwise change Gmail. `Enter` opens the selected mail and may download it
+if its body is unavailable offline.
+
+Follow-ups stay on this computer, survive restarts and `cache.clear`, and use
+the account's configured vault or private-file storage. There is one active
+reminder per message and a maximum of 100 per account; the app refuses new
+reminders at the limit until some are marked done. Missing or deleted mail does
+not silently remove its reminder. When a new reminder's message metadata is no
+longer cached, Omagma reads that exact message's metadata from its account in
+Gmail without requiring cache retention. This needs a connection and read access;
+existing dates can be edited offline even after cache cleanup.
+Dates use the computer's local calendar day without a time-of-day alarm.
+The JSONL commands are `reminder.list`, `reminder.set`, and `reminder.done`;
+writes require `expectedVersion` (0 for creation, the current entry version for
+editing or completion) so two clients cannot silently overwrite one another.
+
+## Continue a draft in Gmail
+
+In a saved native draft, open the command palette's **Continue in Gmail** or
+use `:gmail-draft`. This account needs `mail-drafts` authorization
+(`gmail.compose`), or its existing `mail-modify` grant. Adding permission is an
+explicit authorization step; the old grant stays usable until consent succeeds.
+The handoff uploads one MIME draft, including recipients, Bcc, sender and files,
+and pauses local edits and sending. It retains the original local Markdown and
+reply source. It does not send mail.
+
+The handoff survives restart. **Check Gmail draft** reads the remote draft's
+current version. **Take back** enables the original local copy and keeps the
+Gmail copy. If Gmail has newer edits, choose explicitly between keeping the
+original local source or importing Gmail's complete text into a **new** local
+draft. Import preserves To/Cc/Bcc and supported files, uses Plain text, and does
+not append another quote or footer. It rechecks the remote version after
+fetching the content. The original local draft and Gmail draft both remain.
+Unsupported, ambiguous, or oversized content stays in Gmail; Omagma refuses a
+partial import. Normal outgoing limits apply: 16 files and 25 MiB decoded files.
+
+Before sending a reclaimed or imported copy, check Gmail and acknowledge the
+copy warning in Review send. The acknowledgement belongs to the exact reviewed
+content and is invalidated by edits. A missing Gmail draft may have been sent or
+deleted; absence does not establish delivery. An uncertain upload remains
+paused and is never retried automatically. A positive exact-message lookup can
+recover its link; an empty search leaves the outcome unknown.
+
+The JSONL interface provides `draft.gmail-info`, `draft.gmail-save`,
+`draft.gmail-status`, `draft.gmail-take-back`, and `draft.gmail-import`.
+Provider operations require the current `expectedVersion`; upload also requires
+`expectedDigest`, and import requires `expectedRemoteMessageId`. Copy warnings
+on `draft.send` / `draft.queue` require `acknowledgeGmailCopy: true` and the
+current `gmailCopyDigest`. Omagma never updates or deletes the Gmail draft as
+part of this workflow.

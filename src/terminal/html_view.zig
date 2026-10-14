@@ -254,7 +254,7 @@ pub const Prepared = struct {
                 text_length += run.text.len;
             }
             const line_text = text_buffer[0..text_length];
-            var match = if (highlight.len > 0) std.ascii.findIgnoreCase(line_text, highlight) else null;
+            var match = @import("cache_query.zig").findRange(line_text, highlight);
             var run_offset: usize = 0;
             for (runs) |run| {
                 var iterator = vaxis.unicode.graphemeIterator(run.text);
@@ -263,12 +263,11 @@ pub const Prepared = struct {
                     const columns = @max(vaxis.gwidth.gwidth(glyph, self.method), 1);
                     const byte_offset = run_offset + gr.start;
                     while (match) |start| {
-                        if (byte_offset < start + highlight.len) break;
-                        const next = start + highlight.len;
-                        match = if (std.ascii.findIgnoreCase(line_text[next..], highlight)) |relative| next + relative else null;
+                        if (byte_offset < start.end) break;
+                        match = @import("cache_query.zig").findRangeAt(line_text, highlight, start.end);
                     }
                     var appearance = style(palette, mono, run.flags, run.role);
-                    if (match) |start| if (byte_offset >= start and byte_offset < start + highlight.len) {
+                    if (match) |start| if (byte_offset >= start.start and byte_offset < start.end) {
                         appearance.bold = true;
                         if (mono) appearance.reverse = true else {
                             appearance.fg = .{ .rgb = palette.background };

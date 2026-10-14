@@ -339,6 +339,31 @@
           "type": "boolean",
           "description": "Default false. True reads only this account's retained local data without a provider request; cached results may be absent, stale or partial.",
           "default": false
+        },
+        "progressive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Metadata-first long conversation reader. More than20 members returns one stable20-message window, with the selected body and other bodies on demand; at most1000 metadata members."
+        },
+        "focusMessageId": {
+          "type": "string",
+          "description": "Stable selected message ID. Initial windows retain this member even when it is old. Progressive mode only."
+        },
+        "beforeMessageId": {
+          "type": "string",
+          "description": "Load the20 members before this current first ID; cannot combine with afterMessageId or window boundaries. Progressive mode only."
+        },
+        "afterMessageId": {
+          "type": "string",
+          "description": "Load the20 members after this current last ID; cannot combine with beforeMessageId or window boundaries. Progressive mode only."
+        },
+        "windowStartMessageId": {
+          "type": "string",
+          "description": "Keep this existing first member while fetching focusMessageId; requires windowEndMessageId. Progressive mode only."
+        },
+        "windowEndMessageId": {
+          "type": "string",
+          "description": "Keep this existing last member while fetching focusMessageId; requires windowStartMessageId. Progressive mode only."
         }
       },
       "required": [
@@ -349,7 +374,8 @@
         "Messages are sorted oldest first by receivedAt, breaking equal timestamps by provider message ID. Reads do not mark mail read.",
         "cacheOnly:true returns only retained full bodies for this thread, sorted chronologically, with cached:true and partial:true. Missing bodies are omitted; no retained full body fails CacheMiss. It never proves thread completeness.",
         "Message bodies, MIME decoding and attachments retain the same limits and descriptor semantics as mail.read.",
-        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data."
+        "The mail-read capability listed here applies to live fetches. cacheOnly:true reads this account's existing private cache without refreshing or verifying a current provider grant; it does not grant access to new provider data.",
+        "progressive:true returns progressive, totalMessages, olderMessages, newerMessages, deferredMessages and focusMessageId. bodyCached:false with no bodyCacheError is metadata whose body was deferred. A missing stable boundary returns ThreadWindowChanged. Cached counts describe only retained metadata, and cached:true remains partial."
       ],
       "examples": [
         {
@@ -935,7 +961,7 @@
         "Explicit setup action: opens consent in this account's configured Chrome profile and a temporary local callback listener; requires the user's approval. Deadline 180 seconds, with PKCE/state checks and returned Gmail identity verification.",
         "Request the complete desired unique capability array, always containing mail-read. It replaces this account's recorded terminal set; adding Google Console scopes alone does not upgrade an existing token.",
         "Scope mapping: mail-read uses gmail.readonly; mail-send or calendar-rsvp adds gmail.send; mail-modify uses gmail.modify instead of readonly/send. contacts-read adds contacts.readonly; contacts-write uses contacts instead. Scope URLs use https://www.googleapis.com/auth/ as prefix.",
-        "Local capabilities remain distinct even where Google scopes overlap. Request mail-send for ordinary sending, contacts-read for browsing, and calendar-rsvp for RSVP emails. Calendar API/scope is unnecessary for current RSVP behavior.",
+        "Local capabilities remain distinct even where Google scopes overlap. Request mail-send for ordinary sending, contacts-read for browsing, and calendar-rsvp for RSVP emails. Calendar API/scope is unnecessary for RSVP email. Optional calendar-read, calendar-write-owned, calendar-write-shared and calendar-freebusy select Calendar API access; see docs/CALENDAR-PERMISSIONS.md. Shared writes subsume event-read/owned scopes, while freebusy uses a separate scope.",
         "For fresh terminal-only setup, one registration and clientFile is enough with config.oauthClientFile omitted. Alongside a read-only/bar setup, broader terminal authorization requires a different Desktop Client ID in the same project; copying/renaming its JSON does not create another registration.",
         "Stores the verified refresh token in the selected keyring/file backend, then persists the terminal grant registry. The file backend is private owner-only unencrypted storage. Does not send mail or modify contacts; later writes still require the user's task authorization.",
         "Run accounts sequentially and wait for successful command completion after the callback. Restart open Omagma sessions after grant changes. Fixtures refuse authorization. Prefer one-shot terminal-auth authorize for an interactive consent workflow."
@@ -982,6 +1008,22 @@
           "account": "personal@example.com"
         }
       ]
+    },
+    {
+      "cmd": "reminder.list",
+      "summary": "List this account’s local follow-ups, in due-date order.",
+      "capabilities": [],
+      "properties": {},
+      "required": [],
+      "notes": [
+        "Local-only, available offline. Returns entries with messageId, threadId, dueDate (YYYY-MM-DD), subject, counterpart and version, plus cached message metadata. Missing mail does not remove its reminder. At most 100 active reminders per account."
+      ],
+      "examples": [
+        {
+          "cmd": "reminder.list",
+          "account": "personal@example.com"
+        }
+      ]
     }
   ],
   "$defs": {
@@ -1017,7 +1059,7 @@
     "ReadCapabilities": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 6,
+      "maxItems": 10,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -1027,7 +1069,11 @@
           "mail-modify",
           "contacts-read",
           "contacts-write",
-          "calendar-rsvp"
+          "calendar-rsvp",
+          "calendar-read",
+          "calendar-write-owned",
+          "calendar-write-shared",
+          "calendar-freebusy"
         ]
       },
       "contains": {

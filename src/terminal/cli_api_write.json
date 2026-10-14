@@ -1,6 +1,155 @@
 {
   "commands": [
     {
+      "cmd": "draft.gmail-info",
+      "summary": "Read this local draft’s Gmail ownership and exact content digest.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        }
+      },
+      "required": [
+        "draftId"
+      ],
+      "notes": [
+        "Local read; no provider request. Result includes contentDigest and optional link."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "draft.gmail-save",
+      "summary": "Upload this saved draft once and pause local edits/sending.",
+      "capabilities": [
+        "mail-drafts"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current local Gmail link version; 0 before first upload."
+        },
+        "expectedDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "draftId",
+        "expectedVersion",
+        "expectedDigest"
+      ],
+      "notes": [
+        "Streams complete MIME, including Bcc and files. Unfinished empty recipient lists are allowed; invalid recovery fields are refused. Durable unknown state is recorded before upload.",
+        "Native terminal only. Requires this account’s mail-drafts or mail-modify grant for provider access. Never set auto, cacheOnly, or barGrantOnly.",
+        "No Gmail draft is updated or deleted. Remote writes are never automatically retried; an unknown upload remains paused.",
+        "All local draft and remote IDs are account-scoped. Read draft.gmail-info before acting on a persisted version."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "draft.gmail-status",
+      "summary": "Check the current Gmail draft version or reconcile an unknown upload.",
+      "capabilities": [
+        "mail-drafts"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current local Gmail link version; 0 before first upload."
+        }
+      },
+      "required": [
+        "draftId",
+        "expectedVersion"
+      ],
+      "notes": [
+        "Unknown uploads reconcile only through a positive exact Message-ID match. Empty or ambiguous searches leave edits paused.",
+        "Native terminal only. Requires this account’s mail-drafts or mail-modify grant for provider access. Never set auto, cacheOnly, or barGrantOnly.",
+        "No Gmail draft is updated or deleted. Remote writes are never automatically retried; an unknown upload remains paused.",
+        "All local draft and remote IDs are account-scoped. Read draft.gmail-info before acting on a persisted version."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "draft.gmail-take-back",
+      "summary": "Resume the original local source while keeping the Gmail copy.",
+      "capabilities": [
+        "mail-drafts"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current local Gmail link version; 0 before first upload."
+        },
+        "keepLocalAfterChange": {
+          "type": "boolean"
+        },
+        "expectedRemoteMessageId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "acknowledgeMissingCopy": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "draftId",
+        "expectedVersion"
+      ],
+      "notes": [
+        "Fresh remote changes require keepLocalAfterChange:true and exact expectedRemoteMessageId from status. Missing drafts require acknowledgeMissingCopy:true; they may already have been sent.",
+        "Native terminal only. Requires this account’s mail-drafts or mail-modify grant for provider access. Never set auto, cacheOnly, or barGrantOnly.",
+        "No Gmail draft is updated or deleted. Remote writes are never automatically retried; an unknown upload remains paused.",
+        "All local draft and remote IDs are account-scoped. Read draft.gmail-info before acting on a persisted version."
+      ],
+      "examples": []
+    },
+    {
+      "cmd": "draft.gmail-import",
+      "summary": "Download the current Gmail text and files into a new guarded local draft.",
+      "capabilities": [
+        "mail-drafts"
+      ],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current local Gmail link version; 0 before first upload."
+        },
+        "expectedRemoteMessageId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        }
+      },
+      "required": [
+        "draftId",
+        "expectedVersion",
+        "expectedRemoteMessageId"
+      ],
+      "notes": [
+        "Rechecks Gmail version after the full download. Atomically saves a new Plain draft plus copy-warning link and returns importedDraftId; original local draft and Gmail copy remain.",
+        "Preserves To/Cc/Bcc, sender, full text and supported files. Refuses ambiguous, unavailable or oversized content; never silently imports a partial draft. Existing quote/footer are not appended again.",
+        "Native terminal only. Requires this account’s mail-drafts or mail-modify grant for provider access. Never set auto, cacheOnly, or barGrantOnly.",
+        "No Gmail draft is updated or deleted. Remote writes are never automatically retried; an unknown upload remains paused.",
+        "All local draft and remote IDs are account-scoped. Read draft.gmail-info before acting on a persisted version."
+      ],
+      "examples": []
+    },
+    {
       "cmd": "draft.list",
       "summary": "List this account's local draft summaries.",
       "capabilities": [],
@@ -10,7 +159,8 @@
         "Local account cache operation; no provider call and no mail is sent.",
         "All identities and content handles remain scoped to the explicit account.",
         "Result data.drafts contains summaries: bodyText is empty and attachments omit content bytes; recoveryFields/original are omitted from this index. Use draft.read before editing or sending a saved draft.",
-        "At most 128 local drafts; this does not list Gmail server drafts."
+        "At most 128 local drafts; this does not list Gmail server drafts.",
+        "Result gmailLinks describes each retained draft’s Gmail ownership, paused state and latest import, without provider access."
       ],
       "examples": [
         {
@@ -289,6 +439,16 @@
         },
         "operationId": {
           "$ref": "#/$defs/WriteOperationId"
+        },
+        "acknowledgeGmailCopy": {
+          "type": "boolean",
+          "description": "Explicitly acknowledge that a kept Gmail copy may also be sent."
+        },
+        "gmailCopyDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "description": "Exact current contentDigest from draft.gmail-info; required with acknowledgement."
         }
       },
       "required": [
@@ -301,7 +461,8 @@
         "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
         "At most 32 recipients, 16 ordinary files and 32 original resources. All decoded attachment bytes total at most 25 MiB; embedded bytes/resources total at most 2 MiB. Body/rendered alternatives are bounded to 2 MiB. Requests are at most 3 MiB; blob-backed outgoing MIME is at most 35 MiB. Small inline sends can hit the smaller JSON/base64 transport bound.",
-        "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands."
+        "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
+        "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it."
       ],
       "examples": [
         {
@@ -332,6 +493,16 @@
           "maximum": 30,
           "default": 10,
           "description": "Countdown duration in whole seconds; zero is explicit immediate eligibility, not automatic processing."
+        },
+        "acknowledgeGmailCopy": {
+          "type": "boolean",
+          "description": "Explicitly acknowledge that a kept Gmail copy may also be sent."
+        },
+        "gmailCopyDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "description": "Exact current contentDigest from draft.gmail-info; required with acknowledgement."
         }
       },
       "required": [
@@ -343,7 +514,8 @@
         "Returns queueId, draftId, operationId, state, createdAtMs, dueAtMs, errorCode and optional operation receipt. Timestamps are Unix epoch milliseconds.",
         "An identical repeated stage returns the existing intent. Changed content or a reused operation identity conflicts. A queued matching draft is refused as DraftQueued; unknown/submitting matching content remains fenced.",
         "At most 32 active queued/submitting/unknown intents and 128 retained queue entries. Only terminal history can be evicted; uncertain entries stay protected.",
-        "No countdown is automatically processed after a process restart. Use queue.list/read, then explicitly resume/process/cancel after review."
+        "No countdown is automatically processed after a process restart. Use queue.list/read, then explicitly resume/process/cancel after review.",
+        "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it."
       ],
       "examples": [
         {
@@ -626,7 +798,7 @@
         "Default text forwarding includes the original ordinary attachments. Missing/oversized files fail rather than being silently omitted; ordinary outgoing totals remain 16 files and 25 MiB.",
         "omitAttachments:true skips source file downloads and explicitly retains the omission warning; it never implies sending the draft.",
         "preserveFormatting:true uses a fresh full read, a validated opaque Original snapshot (up to 32 related resources/2 MiB), and remaining ordinary files. It requires unambiguous supported HTML and resolvable local CID resources.",
-        "original:true downloads raw source and attaches unchanged original.eml, limited to 2 MiB decoded source. It may use message/rfc822, message/global or application/octet-stream according to encoding safety. It does not reuse the text-reader rendering.",
+        "original:true downloads raw source and attaches unchanged original.eml. Native clients stream up to 25 MiB of decoded original MIME into a private file; the browser retains its 2 MiB source limit. It may use message/rfc822, message/global or application/octet-stream according to encoding safety. It does not reuse the text-reader rendering.",
         "No reply-all flag or recipient field is applied by mail.forward; use draft.update on the returned draft."
       ],
       "examples": [
@@ -1451,16 +1623,25 @@
         "messageId": {
           "$ref": "#/$defs/WriteIdentifier",
           "description": "Provider message ID from this account's list/read result; not the RFC Message-ID header."
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "description": "Read retained mail and verified identities only; no network fetch or receipt reconciliation."
+        },
+        "reconcile": {
+          "type": "boolean",
+          "description": "Explicitly look in Sent for an exact previous unknown RSVP, then resume or reconcile its Calendar continuation when the reply is confirmed. No message is resent. Incompatible with cacheOnly."
         }
       },
       "required": [
         "messageId"
       ],
       "notes": [
-        "Reads the received message and parses an actual bounded iCalendar REQUEST attachment/source. It does not treat arbitrary body links or text as an invitation; calendar source is limited to 128 KiB.",
-        "If an old cached message only has calendar attachment metadata, this explicit inspection may fetch fresh provider source. Missing/unsupported/ambiguous invitations fail explicitly.",
-        "Validates organizer, selected account/aliases as attendee, UID, sequence and recurrence information. Returns uid/organizer/attendee/attendeeStatus, start, startDisplay/endDisplay/durationDisplay, location/joinUrl, recurrenceDisplay, allDay and timezoneUnavailable.",
-        "Does not send RSVP, open links or modify Google Calendar. Inspect timezoneUnavailable and preserve the displayed timezone context."
+        "Reads a bounded iCalendar source (128KiB). REQUEST, REPLY, PUBLISH, CANCEL and other scheduling notices can be displayed; only an unambiguous REQUEST for a verified attendee can authorize RSVP.",
+        "An explicit online inspection may refresh old calendar references or verified aliases. cacheOnly:true uses retained source and identities without network access. Ambiguous display stays read-only.",
+        "Validates organizer, selected account/aliases as attendee, UID, sequence and recurrence information. Returns uid/organizer/attendee/attendeeStatus, start, startDisplay/endDisplay/durationDisplay, location/joinUrl, recurrenceDisplay, allDay and timezoneUnavailable. calendarSyncAvailable reports the local write grant; calendarSyncTarget identifies the primary-calendar policy. The durable calendarSync result is independent of confirmedResponse/responseOutcome.",
+        "Ordinary or cache-only inspection does not send RSVP, open links or modify Calendar. Explicit reconcile may continue the previously authorized Calendar save after confirming the sent reply. Inspect timezoneUnavailable and preserve the displayed timezone context.",
+        "reconcile:true checks at most eight Sent candidates by the recorded RFC Message-ID and exact RSVP protocol identity. No match remains unknown; it never implies rejection or triggers a resend."
       ],
       "examples": [
         {
@@ -1472,7 +1653,7 @@
     },
     {
       "cmd": "invitation.reply",
-      "summary": "Send a validated email RSVP for a received invitation.",
+      "summary": "Send a validated RSVP and save accepted/tentative invitations when Calendar is authorized.",
       "capabilities": [
         "calendar-rsvp",
         "mail-read"
@@ -1491,6 +1672,18 @@
           ],
           "description": "Requested attendee participation response."
         },
+        "attendee": {
+          "type": "string",
+          "description": "Optional verified attendee from invitation.inspect; a changed identity refuses the write."
+        },
+        "sourceHash": {
+          "type": "string",
+          "description": "Optional sourceHash from invitation.inspect; a changed invitation refuses the write."
+        },
+        "calendarId": {
+          "type": "string",
+          "description": "Optional explicit writable calendar within the same account. Omit to use its uniquely identified primary calendar. The original choice binds operationId and cannot change on retry."
+        },
         "operationId": {
           "$ref": "#/$defs/WriteOperationId"
         }
@@ -1501,10 +1694,12 @@
         "operationId"
       ],
       "notes": [
-        "Real email send: reads and validates the received invitation, identifies this account/verified alias attendee and organizer, and generates a METHOD:REPLY message. This does not create/update a Google Calendar event.",
+        "Real email send: reads and validates the received invitation, identifies this account/verified alias attendee and organizer, and generates a METHOD:REPLY message. After a confirmed accepted/tentative reply, authorized Calendar access adds or updates the attendee event. Decline remains email-only.",
         "Requires calendar-rsvp plus mail-read for the source/alias reads. It does not require the ordinary mail-send capability in place of calendar-rsvp.",
-        "No caller-supplied organizer, attendee, raw ICS, preparedCalendar, arbitrary draft or recipient field is applied by the public Session command. Use invitation.inspect first, then the same source messageId and selected status.",
+        "No caller-supplied organizer, raw ICS, preparedCalendar, arbitrary draft or recipient field is applied. Optional attendee and sourceHash are comparison guards, never replacement identities. Use invitation.inspect first, then the same source messageId and selected status.",
         "Uses the durable send operation journal. Inspect applied/rejected/unknown, retain the same operationId for the same reviewed RSVP, and reconcile unknown results instead of sending a second response with a new identity.",
+        "The mail outcome and optional calendarSync receipt are independent: Calendar skipped/rejected/unknown never changes an applied mail outcome. calendarSync includes state, calendarId, eventId, errorCode and canRetry. Use invitation.inspect with reconcile=true for Calendar-only recovery; it never resends the RSVP.",
+        "Calendar writes require a separate Calendar write grant, complete UID/organizer lookup, safe source time resolution and conditional updates. Existing attendee responses use attendeesOmitted=true; unsupported recurrence and ambiguous or stale events are surfaced without blocking the email reply.",
         "Does not use the queue/countdown API; submission starts immediately. Normal message, calendar, account and MIME bounds apply."
       ],
       "examples": [
@@ -1560,6 +1755,74 @@
           "cmd": "operation.read",
           "account": "personal@example.com",
           "operationId": "reviewed-send-001"
+        }
+      ]
+    },
+    {
+      "cmd": "reminder.set",
+      "summary": "Create or edit a local follow-up without changing Gmail.",
+      "capabilities": [],
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "description": "Stable message ID in the explicitly selected account."
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "description": "Required optimistic version: 0 to create, current entry.version to edit or complete."
+        },
+        "dueDate": {
+          "type": "string",
+          "description": "Strict civil date YYYY-MM-DD; no time of day or timezone conversion."
+        }
+      },
+      "required": [
+        "messageId",
+        "expectedVersion",
+        "dueDate"
+      ],
+      "notes": [
+        "One active follow-up per message, maximum 100 per account. If a new reminder lacks cached metadata, its exact message ID is verified with a provider metadata read without requiring retention. Read access and a connection are then required; existing reminders remain editable offline after cache cleanup.",
+        "A stale expectedVersion returns FollowUpChanged. Local storage inherits the configured account vault or private-file policy."
+      ],
+      "examples": [
+        {
+          "cmd": "reminder.set",
+          "account": "personal@example.com",
+          "messageId": "message-1",
+          "expectedVersion": 0,
+          "dueDate": "2026-10-14"
+        }
+      ]
+    },
+    {
+      "cmd": "reminder.done",
+      "summary": "Mark a local follow-up done by removing its reminder.",
+      "capabilities": [],
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "description": "Stable message ID in the explicitly selected account."
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "description": "Required optimistic version: 0 to create, current entry.version to edit or complete."
+        }
+      },
+      "required": [
+        "messageId",
+        "expectedVersion"
+      ],
+      "notes": [
+        "Removes only the local reminder; it never archives, snoozes, marks read or changes Gmail.",
+        "The current expectedVersion is required. Completion is permanent; a new reminder may be created later."
+      ],
+      "examples": [
+        {
+          "cmd": "reminder.done",
+          "account": "personal@example.com",
+          "messageId": "message-1",
+          "expectedVersion": 1
         }
       ]
     }

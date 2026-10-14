@@ -4,8 +4,9 @@ const native = @import("keyring_darwin.zig");
 const limits = @import("limits.zig");
 const platform = @import("platform.zig");
 const file = @import("keyring_file.zig");
-pub const Kind = enum { keyring, file };
-pub const Settings = struct { kind: Kind = .keyring, directory: []const u8 = "" };
+const identity = @import("native_identity.zig");
+pub const Kind = enum { keyring, file, vault };
+pub const Settings = struct { kind: Kind = .keyring, directory: []const u8 = "", provider: ?identity.Provider = null };
 pub const service = "io.github.technologylab_ai.omagma";
 pub const terminal_service = "io.github.technologylab_ai.omagma.terminal";
 pub var last_child_peak_rss: usize = 0;
@@ -24,6 +25,10 @@ pub fn lookup(io: std.Io, settings: Settings, address: []const u8, client: []con
     try addressValid(address);
     if (out.len == 0 or out.len > limits.secret) return error.InvalidSecretBuffer;
     errdefer std.crypto.secureZero(u8, out);
+    if (settings.kind == .vault) {
+        try clientValid(client);
+        return vaultLookup(settings, .bar_token, .{ .account = address, .client = client }, out);
+    }
     if (settings.kind == .file) {
         try clientValid(client);
         return file.lookup(io, settings.directory, .{ .terminal = false, .account = address, .client = client }, out);
@@ -42,7 +47,7 @@ pub fn lookupAutomatic(io: std.Io, settings: Settings, address: []const u8, clie
     try addressValid(address);
     if (out.len == 0 or out.len > limits.secret) return error.InvalidSecretBuffer;
     errdefer std.crypto.secureZero(u8, out);
-    if (settings.kind == .file) return lookup(io, settings, address, client, out);
+    if (settings.kind == .file or settings.kind == .vault) return lookup(io, settings, address, client, out);
     if (builtin.os.tag == .macos) return nativeLookup(io, "lookup-auto", false, address, "", "", out);
     var capture: [16 * 1024]u8 = undefined;
     defer std.crypto.secureZero(u8, &capture);
@@ -67,6 +72,10 @@ fn automaticSecret(capture: []const u8, out: []u8) !?[]const u8 {
 pub fn store(io: std.Io, settings: Settings, address: []const u8, client: []const u8, secret: []const u8) !void {
     try addressValid(address);
     try validSecret(secret);
+    if (settings.kind == .vault) {
+        try clientValid(client);
+        return (settings.provider orelse return error.VaultLocked).apply(&.{.{ .kind = .bar_token, .key = .{ .account = address, .client = client }, .value = secret }});
+    }
     if (settings.kind == .file) {
         try clientValid(client);
         return file.store(io, settings.directory, .{ .terminal = false, .account = address, .client = client }, secret);
@@ -81,6 +90,7 @@ pub fn store(io: std.Io, settings: Settings, address: []const u8, client: []cons
 }
 pub fn clear(io: std.Io, settings: Settings, address: []const u8) !void {
     try addressValid(address);
+    if (settings.kind == .vault) return (settings.provider orelse return error.VaultLocked).apply(&.{.{ .kind = .bar_token, .key = .{ .account = address }, .value = null }});
     if (settings.kind == .file) return file.clear(io, settings.directory, address, .bar);
     if (builtin.os.tag == .macos) {
         var output: [1]u8 = undefined;
@@ -97,6 +107,7 @@ pub fn lookupTerminal(io: std.Io, settings: Settings, address: []const u8, clien
     try terminalIdentity(address, client_id, grant_id);
     if (out.len == 0 or out.len > limits.secret) return error.InvalidSecretBuffer;
     errdefer std.crypto.secureZero(u8, out);
+    if (settings.kind == .vault) return vaultLookup(settings, .terminal_token, .{ .account = address, .client = client_id, .grant = grant_id }, out);
     if (settings.kind == .file) return file.lookup(io, settings.directory, .{ .terminal = true, .account = address, .client = client_id, .grant = grant_id }, out);
     if (builtin.os.tag == .macos) return nativeLookup(io, "lookup", true, address, client_id, grant_id, out);
     const n = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "lookup", "service", terminal_service, "account", address, "client", client_id, "grant", grant_id }, @as(?[]const u8, null), out, true });
@@ -108,6 +119,7 @@ pub fn lookupTerminal(io: std.Io, settings: Settings, address: []const u8, clien
 pub fn storeTerminal(io: std.Io, settings: Settings, address: []const u8, client_id: []const u8, grant_id: []const u8, secret: []const u8) !void {
     try terminalIdentity(address, client_id, grant_id);
     try validSecret(secret);
+    if (settings.kind == .vault) return (settings.provider orelse return error.VaultLocked).apply(&.{.{ .kind = .terminal_token, .key = .{ .account = address, .client = client_id, .grant = grant_id }, .value = secret }});
     if (settings.kind == .file) return file.store(io, settings.directory, .{ .terminal = true, .account = address, .client = client_id, .grant = grant_id }, secret);
     if (builtin.os.tag == .macos) {
         var output: [1]u8 = undefined;
@@ -119,6 +131,7 @@ pub fn storeTerminal(io: std.Io, settings: Settings, address: []const u8, client
 }
 pub fn clearTerminal(io: std.Io, settings: Settings, address: []const u8) !void {
     try addressValid(address);
+    if (settings.kind == .vault) return (settings.provider orelse return error.VaultLocked).apply(&.{.{ .kind = .terminal_token, .key = .{ .account = address }, .value = null }});
     if (settings.kind == .file) return file.clear(io, settings.directory, address, .terminal);
     if (builtin.os.tag == .macos) {
         var output: [1]u8 = undefined;
@@ -127,6 +140,14 @@ pub fn clearTerminal(io: std.Io, settings: Settings, address: []const u8) !void 
     }
     var out: [1]u8 = undefined;
     _ = try platform.deadline(io, platform.seconds(limits.keyring_seconds), run, .{ io, &.{ "/usr/bin/secret-tool", "clear", "service", terminal_service, "account", address }, @as(?[]const u8, null), out[0..], false });
+}
+fn vaultLookup(settings: Settings, kind: identity.Kind, key: identity.Key, out: []u8) !?[]const u8 {
+    const provider = settings.provider orelse return error.VaultLocked;
+    const secret = (try provider.read(kind, key)) orelse return null;
+    try validSecret(secret);
+    if (secret.len > out.len) return error.SecretOutputTooLarge;
+    @memcpy(out[0..secret.len], secret);
+    return out[0..secret.len];
 }
 fn terminalIdentity(address: []const u8, client_id: []const u8, grant_id: []const u8) !void {
     try addressValid(address);

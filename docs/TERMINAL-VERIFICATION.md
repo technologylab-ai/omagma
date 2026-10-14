@@ -98,6 +98,77 @@ Mac touchpad gesture, compositor placement or remote terminal integration.
 Source-only documentation changes need link/privacy/syntax checks, not these
 runtime suites.
 
+The shared [workflow runner](../tests/terminal_workflow_regressions.py) covers
+first-use mail, Calendar and encrypted-vault paths. It runs each selected suite
+in a separate Python process, checks the binary's compiler/mode/version, and
+records its SHA-256, platform, elapsed times and pass/fail results. Use a fresh
+receipt filename on each attempt; existing receipts are preserved. Suites that
+provide detailed JSON receipts write them beside the runner's receipt.
+
+| Suite selection (`--suite`, repeatable) | Observable coverage |
+| --- | --- |
+| `terminal_attachment_lifecycle` | All 13 default groups: provider bytes and ownership, rotated/missing/unindexed sources, reply/forward formats, large files and related resources, send boundaries, draft persistence, uncertain outcomes, failure recovery and actual TUI attachment/forward actions |
+| `terminal_formatted_original`, `terminal_formatted_tui`, `terminal_message_isolation` | Preserved-format reply, reply-all and forward through CLI/TUI, and independent message body, link and attachment identities |
+| `terminal_calendar`, `terminal_calendar_tui`, `terminal_calendar_review_stale` | Calendar reads and mutation review, offline/permission guards, lost responses, narrow dialogs, grid navigation and stale-review recovery |
+| `terminal_calendar_join_profile`, `terminal_invitation_calendar_ui` | Actual native browser launch arguments and account profile selection; Accept/Tentative through Mail with separate Calendar outcomes and no duplicate RSVP |
+| `terminal_calendar_notifications` | Mail-startup reminders, countdown/expiry, overlapping events, held-key dismissal, exact typed/pasted draft retention, reminder arrival during review and Send/Undo, editor isolation, account-bound Join after Mail account changes, focused event cancellation/rescheduling, and vault lock/unlock/restart recovery |
+| `terminal_invitation_notices`, `terminal_invitation_reconcile` | Non-actionable invitation notices, disabled RSVP controls and explicit Sent reconciliation after uncertain replies without resending |
+| `terminal_reader_next_ux` | Plain/Formatted choice, legacy charset, compact headers, 63-message progressive windows, selected-body budgets and same-name attachment ownership |
+| `terminal_follow_ups`, `terminal_foreground_priority` | Persistent reminders, stale-version conflicts, cache eviction/offline handling and foreground actions while background work is held |
+| `terminal_gmail_drafts` | Remote-draft handoff, paused local editing, conflicts, permissions, uncertain outcomes and owned-PTY actions; the runner always includes `--pty` |
+| `vault_migration`, `vault_daemon` | Migration checkpoint/resume and activation, encrypted persistence, disconnects, lock/restart, busy TUI exit, activation routing and 11 encrypted reply/forward/RAW draft workflows across two accounts |
+
+For focused changes, select the relevant complete suites, for example:
+
+```sh
+python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+  --suite terminal_attachment_lifecycle --suite terminal_reader_next_ux \
+  --output tests/results/workflows-reader-debug.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+  --suite terminal_calendar --suite terminal_calendar_tui --suite terminal_calendar_review_stale \
+  --suite terminal_calendar_notifications \
+  --suite terminal_invitation_notices --suite terminal_invitation_reconcile \
+  --output tests/results/workflows-calendar-debug.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+  --suite terminal_follow_ups --suite terminal_foreground_priority --suite terminal_gmail_drafts \
+  --output tests/results/workflows-drafts-debug.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+  --suite vault_migration --suite vault_daemon --output tests/results/workflows-vault-debug.json
+```
+
+Omit `--suite` for all 18 suites. The release workflow requires the full runner
+once in Debug and once against the packaged Safe executable on native Linux
+x86_64/arm64 and macOS x86_64/arm64. The native macOS pull-request workflow also
+runs it in both modes on Linux x86_64 and both Mac architectures. Existing
+correctness, lifecycle and resource gates remain required; receipts are uploaded
+even after failure. Local equivalent commands are:
+
+```sh
+python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug --output tests/results/workflows-all-debug.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe --output tests/results/workflows-all-safe.json
+```
+
+The `probes` build also installs `calendar_http_probe`. All four native release
+platforms run `tests/calendar_native_http.py --probe PATH` in Debug and Safe to
+check Calendar HTTP methods, conditional updates, error mapping and no-replay
+behavior. Linux x86_64 additionally runs `terminal_html_compatibility.py` against
+an isolated headless browser in both modes to validate preserved HTML with an
+independent renderer.
+
+Use this runner on macOS so shared cases use the existing Darwin guardian PTY
+and short, canonical temporary paths. It preserves the same terminal-cell,
+termios, ownership and provider-effect assertions. All fixtures remain
+synthetic; no real account or desktop is used. `vault_daemon` already includes
+activation routing, busy-exit, resource and encrypted-conversation checks; do
+not repeat those child suites separately in a full gate.
+
+The vault resource check runs only on Linux: after large operations settle, it
+requires the combined daemon, TUI and agent RSS to stay below 256 MiB across
+three samples. This is a steady-state gate, not a transient peak ceiling; PSS
+is reported only when accessible. Darwin explicitly skips this `/proc` check,
+and the existing native Safe memory/quiet gates remain separate. A Debug pass
+does not replace Safe resource qualification.
+
 ## Release resource qualification
 
 Run memory/quiet gates when qualifying a release or investigating a resource

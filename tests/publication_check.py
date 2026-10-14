@@ -31,6 +31,17 @@ PUBLIC_RASTERS = {
     "assets/omagma-logo.png": "e2e844a35476454f11b513404041135327fec6354f7b6e7e0269a32fdf56d3c4",
     "src/terminal/omagma-logo.png": "e2e844a35476454f11b513404041135327fec6354f7b6e7e0269a32fdf56d3c4",
 }
+# Reviewed synthetic attachment bytes: a fixed 1x1 PNG or deliberate invalid
+# UTF-8, each carrying only its fictional example.com account marker. Keep the
+# exact path and digest together; other binaries and changed fixtures need review.
+PUBLIC_BINARY_FIXTURES = {
+    "tests/fixtures/terminal/attachment-lifecycle/payloads/personal-image.bin": "b3f7bfa5338c8d062f7ec1bb107642a0e5b68b918daecb6ba03a405e22fdaeed",
+    "tests/fixtures/terminal/attachment-lifecycle/payloads/personal-unicode.bin": "a9a7f784611bb4fd82c049b3d2a347cb2889acfda3170d42a43ce107d4365fc3",
+    "tests/fixtures/terminal/attachment-lifecycle/payloads/work-image.bin": "c86e859dba25464d6f1bf0cea3309706d174a69c382c4dffc76dc0b914ed0ddd",
+    "tests/fixtures/terminal/attachment-lifecycle/payloads/work-unicode.bin": "6c14146f26d78a5bc63866dab7e38671b3ca5c99ac328d554f3e5b988bbb815f",
+    "tests/fixtures/terminal/attachment-lifecycle/payloads/optional-image.bin": "e7ce168b7dddc9b8cc74c13e87d1f91dca2baee8c7cc4975a7a1ca2493f9b907",
+    "tests/fixtures/terminal/attachment-lifecycle/payloads/optional-unicode.bin": "3a03ead4a19fa6f388e9d40b1e23891f15c1c65cdbfdbe18ec71f192a9365a85",
+}
 # This documentation example describes a pane truncating a fictional address.
 # Accept only that exact ellipsis-terminated excerpt in its reviewed source;
 # .exam and other prefixes are not generally fictional domains.
@@ -61,6 +72,10 @@ def reviewed_raster(name, data):
     if name in PUBLIC_RASTERS:
         return hashlib.sha256(data).hexdigest() == PUBLIC_RASTERS[name]
     return name.startswith("docs/images/omagma")
+
+
+def reviewed_binary_fixture(name, data):
+    return PUBLIC_BINARY_FIXTURES.get(name) == hashlib.sha256(data).hexdigest()
 
 
 def validate_gif(data):
@@ -179,6 +194,10 @@ def main():
                 if chunk in {b"tEXt", b"iTXt", b"zTXt", b"eXIf"}:
                     issues.append({"file": name, "reason": "PNG metadata requires review"})
                 offset += size + 12
+            continue
+        if name in PUBLIC_BINARY_FIXTURES:
+            if not reviewed_binary_fixture(name, data):
+                issues.append({"file": name, "reason": "changed binary fixture requires review"})
             continue
         try:
             data.decode("utf-8")

@@ -94,7 +94,12 @@ membership changes until Apply. Account-scoped custom label
 creation, renaming, colors and reviewed deletion share the executor and operation
 journal, separately from message assignment; system definitions are protected.
 Contacts support read/search/create/update, not
-deletion. Calendar views are unsupported; invitations use reviewed RSVP email.
+deletion. Native Calendar provides Agenda/Day/Week views
+and source-bound invitation Add/Update/Cancel reviews, separately from RSVP
+email. Calendar provider,
+timezone, persistence and command modules are shared by the native TUI and CLI;
+the browser does not yet expose these views. See [permissions](CALENDAR-PERMISSIONS.md)
+and [service contracts](CALENDAR-SERVICE.md).
 
 The contextual action palette, rendered-message find and saved/history query
 lists stay local and bounded. Unread navigation uses cache predicates and

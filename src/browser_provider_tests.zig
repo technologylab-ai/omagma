@@ -178,6 +178,50 @@ fn seedInventory(provider: *Provider, a: A, index: usize, count: usize) !void {
     try provider.cache.restore(index, raw, false);
 }
 
+test "browser provider: native Calendar grants connect without advertising unsupported operations" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const auth = @import("terminal/auth.zig");
+    const scopes = try auth.scopesFor(a, &auth.allowed_capabilities);
+    const metadata = try std.json.Stringify.valueAlloc(a, .{
+        .session = @as(u32, 11), .nonce = nonce, .account = account, .clientId = client_id,
+        .grantId = &auth.grantIdentity(scopes), .capabilities = auth.allowed_capabilities,
+        .scopes = scopes, .actualScopes = scopes,
+    }, .{});
+    resetHost(&.{.{ .url = profile_url, .body = "{\"emailAddress\":\"ada@example.test\"}" }});
+    var session = try live.connect(a, metadata);
+    try expect(session.can_send and session.can_modify and session.can_contacts);
+    const supported = [_][]const u8{ "mail-read", "mail-send", "mail-modify", "contacts-read" };
+    try equal(supported.len, session.capabilities().len);
+    for (supported, session.capabilities()) |expected, actual| try strings(expected, actual);
+    const transport = session.transport();
+    try std.testing.expectError(error.InvalidHost, transport.requestFn(transport.context, a, .GET, "https://www.googleapis.com/calendar/v3/users/me/calendarList", null));
+    try std.testing.expectError(error.PermissionDenied, transport.requestFn(transport.context, a, .POST, "https://gmail.googleapis.com/gmail/v1/users/me/drafts", null));
+    try verifyHost();
+    try equal(@as(usize, 1), host.requests);
+}
+
+test "browser provider: native compose scope preserves explicitly granted mail sending" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const auth = @import("terminal/auth.zig");
+    const caps = [_][]const u8{ "mail-read", "mail-drafts", "mail-send", "calendar-read" };
+    const scopes = try auth.scopesFor(a, &caps);
+    const metadata = try std.json.Stringify.valueAlloc(a, .{
+        .session = @as(u32, 11), .nonce = nonce, .account = account, .clientId = client_id,
+        .grantId = &auth.grantIdentity(scopes), .capabilities = caps,
+        .scopes = scopes, .actualScopes = scopes,
+    }, .{});
+    resetHost(&.{.{ .url = profile_url, .body = "{\"emailAddress\":\"ada@example.test\"}" }});
+    const session = try live.connect(a, metadata);
+    try expect(session.can_send and !session.can_modify and !session.can_contacts);
+    try equal(@as(usize, 2), session.capabilities().len);
+    try strings("mail-send", session.capabilities()[1]);
+    try verifyHost();
+}
+
 test "browser provider: cached mutations cannot change drafts cache or a successful send receipt" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

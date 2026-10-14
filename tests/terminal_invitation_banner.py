@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import copy
 from pathlib import Path
-import re
 import sys
 import tempfile
 
@@ -13,7 +12,8 @@ from terminal_cache import ProviderFixture
 from terminal_file_dialog import b64, capture
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_invitations import identity, invitation, part
-from terminal_mouse import click, report, start
+from terminal_mouse import MouseTerminal, click, report
+from terminal_theme_picker import ThemeScreen
 from terminal_pty import wait_saved_compose
 from terminal_reader import reader_contains, reader_rectangle, reader_rows
 
@@ -46,6 +46,8 @@ def fixture_setup(binary, directory):
             parts = [plain]
             if number != "094":
                 wire = invitation(case, account)
+                if number == "095":
+                    wire = wire.replace(b"DESCRIPTION:Join this fictional meeting at https://teams.microsoft.com/\r\n l/meetup-join/fictional", b"LOCATION:Meeting room 4")
                 external = f"calendar-{number}"
                 parts.append(part("application/octet-stream", wire, "invite.ics", external))
                 baseline.setdefault("externalBodies", {})[external] = {"size": len(wire), "data": b64(wire)}
@@ -63,39 +65,56 @@ def fixture_setup(binary, directory):
     return source
 
 
-def banner(terminal, mono=False):
+def banner(terminal, mono=False, camera=True):
     where = terminal.screen.locate("I · Respond")
     area = reader_rectangle(terminal.screen)
     require(where is not None and area is not None, "sticky invitation action absent from reader")
     require(area["left"] <= where["column"] < area["right"]
             and area["top"] <= where["row"] < area["bottom"],
             "invitation action is outside the visible reader")
-    # The friendly event title and Respond share the card's first row.
-    edge_row = where["row"]
-    expected_edge = "┃" if mono else "▌"
-    edge = next((column for column in range(area["left"], min(area["left"] + 3, area["right"]))
-                 if terminal.screen.cells[edge_row][column] == expected_edge), None)
-    require(edge is not None, "callout has no distinct visual edge")
-    style = terminal.screen.styles[where["row"]][where["column"]]
-    if mono:
-        # The existing six-field cell oracle tracks italic/underline/strike,
-        # not reverse. Independently require the literal reverse-I wire token.
-        require(re.search(rb"\x1b\[7m(?:\x1b\[[0-9;:]*m)*I\x1b\[27m", terminal.output) is not None,
-                "NO_COLOR invitation shortcut lacks reverse emphasis")
+    # The title/action are inside a bordered card on roomy readers; compact
+    # readers retain the low-height edge. Locate the actual top, not a fixed row.
+    action_row = where["row"]
+    left = area["left"]
+    border_left = next((x for x in range(left, min(left + 3, area["right"]))
+                        if action_row > area["top"] and terminal.screen.cells[action_row - 1][x] in {"╭", "┌", "╔"}), None)
+    bordered = border_left is not None
+    card_top = action_row - 1 if bordered else action_row
+    if bordered:
+        require(terminal.screen.cells[card_top + 4][border_left] in {"╰", "└", "╚"},
+                "invitation card is not a complete compact five-row frame")
+        require("Invitation" in "".join(terminal.screen.cells[card_top][left:area["right"]]),
+                "invitation card has no readable type badge")
+        require(terminal.screen.cells[action_row][border_left] in {"│", "║"},
+                "invitation card hero is outside its border")
     else:
-        require(style[1] == ("rgb", 57, 43, 48), "callout does not use theme's tinted surface")
-        require(style[0] != ("rgb", 255, 158, 97), "callout action blends into orange label text")
-        body_row = next(row for row, _ in reader_rows(terminal.screen)
-                        if not any(terminal.screen.cells[row][column] == expected_edge
-                                   for column in range(area["left"], min(area["left"] + 3, area["right"]))))
-        body_style = terminal.screen.styles[body_row][area["left"] + 3]
-        require(style[1] != body_style[1], "callout surface blends into the body")
+        expected_edge = "┃" if mono else "▌"
+        require(any(terminal.screen.cells[action_row][column] == expected_edge
+                    for column in range(left, min(left + 3, area["right"]))),
+                "compact invitation has no distinct visual edge")
+    card_row = "".join(terminal.screen.cells[action_row][left:area["right"]])
+    require(("" in card_row) == camera,
+            "video-call marker does not match the focused invitation's Join link")
+    style = terminal.screen.styles[action_row][where["column"]]
+    if mono:
+        require(terminal.screen.reversed[action_row][where["column"]],
+                "NO_COLOR invitation shortcut lacks current-cell reverse emphasis")
+    else:
+        require(style[0] == ("rgb", 255, 158, 97) and style[2],
+                "invitation shortcut must use the theme's bold accent")
+        require(style[1] != ("rgb", 57, 43, 48),
+                "ordinary invitation must not look like a selected message")
+    where = dict(where, card_top=card_top)
+
     return where
 
 
 def review(terminal, account, case):
     terminal.until(lambda: "Meeting · review reply" in terminal.text() and "[v Details]" in terminal.text())
     text = terminal.text()
+    hero = next(line for line in text.splitlines() if "Fictional calendar meeting" in line)
+    require(("" in hero) == (case == "first"),
+            "review card video marker does not match the inspected invitation")
     require(f"Account: {account}" in text and identity(case, account)["organizer"] in text,
             "RSVP callout reviewed a different message or account")
     require("UID:" not in text, "friendly meeting summary exposed protocol-only identifiers")
@@ -107,15 +126,18 @@ def review(terminal, account, case):
 
 def run(binary, directory, capture_dir=None, mono=False):
     source = fixture_setup(binary, directory)
-    terminal = start(binary, directory, source, columns=160, rows=42,
-                     environment={"NO_COLOR": "1" if mono else None})
+    terminal = MouseTerminal(binary, directory, extra=source.options(), screen_type=ThemeScreen,
+                             columns=160, rows=42,
+                             environment={"NO_COLOR": "1" if mono else None, "COLORTERM": "truecolor"})
     try:
         terminal.until(lambda: reader_contains(terminal.screen, f"First meeting opening for {ACCOUNTS[0]}.")
                        and terminal.screen.locate("I · Respond") is not None)
         first = banner(terminal, mono)
         require("Labels:" in "\n".join(text for _, text in reader_rows(terminal.screen)),
                 "busy label header missing from visual contrast fixture")
-        edge_row = first["row"]
+        require(first["card_top"] == first["row"] - 1,
+                "roomy split reader did not render its bordered invitation card")
+        edge_row = first["card_top"]
         before = "".join("".join(text.split()) for row, text in reader_rows(terminal.screen) if row < edge_row)
         require(before.endswith("Product/launchplanning9"),
                 "invitation callout is not after the full label header")
@@ -124,7 +146,7 @@ def run(binary, directory, capture_dir=None, mono=False):
         require(preceding[-1][0] == edge_row - 2,
                 "invitation callout must have exactly one blank row above it")
         opening = terminal.screen.locate(f"First meeting opening for {ACCOUNTS[0]}.")
-        require(opening is not None and opening["row"] > first["row"],
+        require(opening is not None and opening["row"] > first["card_top"] + 4,
                 "invitation callout must precede the message body")
         require(not reader_contains(terminal.screen, "Last first meeting line."),
                 "fixture body did not exceed its initial viewport")
@@ -151,7 +173,7 @@ def run(binary, directory, capture_dir=None, mono=False):
         terminal.send(b"{")
         terminal.until(lambda: "2/3 mails" in terminal.text()
                        and reader_contains(terminal.screen, "I · Respond"))
-        banner(terminal, mono)
+        banner(terminal, mono, camera=False)
         terminal.send(b"I")
         review(terminal, ACCOUNTS[0], "second")
         terminal.send(b"{")
@@ -198,7 +220,7 @@ def run(binary, directory, capture_dir=None, mono=False):
                 require(client.request("operation.list", account=account)["operations"] == [],
                         "display/review created a write intent")
         terminal.finish()
-        print(f"PASS invitation callout ({'NO_COLOR' if mono else 'theme'}): below-label placement, tinted distinct header, "
+        print(f"PASS invitation callout ({'NO_COLOR' if mono else 'theme'}): below-label placement, themed bordered/compact card, "
               "scroll/wheel pinning, exact thread/account review, below/expanded/narrow, compose suppression, zero sends")
     except Exception:
         print(terminal.text(), file=sys.stderr)

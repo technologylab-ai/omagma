@@ -1,11 +1,22 @@
 const encoder = new TextEncoder();
 const READ = 'https://www.googleapis.com/auth/gmail.readonly';
 const SEND = 'https://www.googleapis.com/auth/gmail.send';
+const COMPOSE = 'https://www.googleapis.com/auth/gmail.compose';
 const MODIFY = 'https://www.googleapis.com/auth/gmail.modify';
 const CONTACTS = 'https://www.googleapis.com/auth/contacts';
 const CONTACTS_READ = 'https://www.googleapis.com/auth/contacts.readonly';
-const capabilities = new Set(['mail-read', 'mail-send', 'mail-modify', 'contacts-read', 'contacts-write', 'calendar-rsvp']);
-const scopes = new Set([READ, SEND, MODIFY, CONTACTS, CONTACTS_READ]);
+const CALENDAR_LIST = 'https://www.googleapis.com/auth/calendar.calendarlist.readonly';
+const CALENDAR_READ = 'https://www.googleapis.com/auth/calendar.events.readonly';
+const CALENDAR_OWNED = 'https://www.googleapis.com/auth/calendar.events.owned';
+const CALENDAR_WRITE = 'https://www.googleapis.com/auth/calendar.events';
+const CALENDAR_FREE_BUSY = 'https://www.googleapis.com/auth/calendar.events.freebusy';
+// Validate complete native grant identities without advertising native-only
+// operations. Browser permissions and transport endpoints remain separate.
+const capabilities = new Set(['mail-read', 'mail-drafts', 'mail-send', 'mail-modify', 'contacts-read', 'contacts-write', 'calendar-rsvp',
+  'calendar-read', 'calendar-write-owned', 'calendar-write-shared', 'calendar-freebusy']);
+const scopes = new Set([READ, SEND, COMPOSE, MODIFY, CONTACTS, CONTACTS_READ,
+  CALENDAR_LIST, CALENDAR_READ, CALENDAR_OWNED, CALENDAR_WRITE, CALENDAR_FREE_BUSY]);
+const maxScopes = 8; // src/oauth.zig validateScopeSet
 
 function reject(message) { throw new Error(message); }
 function printable(value, max = 4096) {
@@ -16,11 +27,23 @@ function uniqueStrings(values, allowed, max) {
 }
 
 export function scopesFor(caps) {
-  if (!uniqueStrings(caps, capabilities, 6) || !caps.includes('mail-read')) reject('The account permissions must include Gmail reading access.');
+  if (!uniqueStrings(caps, capabilities, capabilities.size) || !caps.includes('mail-read')) reject('The account permissions must include Gmail reading access.');
   const result = [caps.includes('mail-modify') ? MODIFY : READ];
-  if ((caps.includes('mail-send') || caps.includes('calendar-rsvp')) && !caps.includes('mail-modify')) result.push(SEND);
+  if (!caps.includes('mail-modify')) {
+    if (caps.includes('mail-drafts')) result.push(COMPOSE);
+    else if (caps.includes('mail-send') || caps.includes('calendar-rsvp')) result.push(SEND);
+  }
   if (caps.includes('contacts-write')) result.push(CONTACTS);
   else if (caps.includes('contacts-read')) result.push(CONTACTS_READ);
+  if (['calendar-read', 'calendar-write-owned', 'calendar-write-shared', 'calendar-freebusy'].some(capability => caps.includes(capability))) {
+    result.push(CALENDAR_LIST);
+    if (caps.includes('calendar-write-shared')) result.push(CALENDAR_WRITE);
+    else {
+      if (caps.includes('calendar-read')) result.push(CALENDAR_READ);
+      if (caps.includes('calendar-write-owned')) result.push(CALENDAR_OWNED);
+    }
+    if (caps.includes('calendar-freebusy')) result.push(CALENDAR_FREE_BUSY);
+  }
   return result;
 }
 
@@ -56,7 +79,7 @@ async function validatedGrant(grant, seen) {
   if (!grant || typeof grant !== 'object' || Array.isArray(grant)) reject('The connection contains invalid account data.');
   if (!printable(grant.account, 254) || !grant.account.includes('@') || seen.has(grant.account.toLowerCase())) reject('The connection has an invalid or duplicate account.');
   seen.add(grant.account.toLowerCase());
-  if (!printable(grant.clientId) || !grant.clientId.endsWith('.apps.googleusercontent.com') || !uniqueStrings(grant.scopes, scopes, 5)) reject('The connection has an invalid registration or scope set.');
+  if (!printable(grant.clientId) || !grant.clientId.endsWith('.apps.googleusercontent.com') || !uniqueStrings(grant.scopes, scopes, maxScopes)) reject('The connection has an invalid registration or scope set.');
   const expectedScopes = scopesFor(grant.capabilities);
   if (expectedScopes.length !== grant.scopes.length || expectedScopes.some((scope, index) => scope !== grant.scopes[index])) reject('The account permissions and recorded scopes do not match.');
   const identity = await identityHash(['omagma-terminal-grant-v1', ...grant.scopes]);
@@ -114,7 +137,7 @@ export async function importCredentialFiles(clientFiles, grantFile, tokenFiles) 
 
 export function permissions(caps, actualScopes) {
   const readScope = actualScopes.includes(READ) || actualScopes.includes(MODIFY);
-  const sendScope = actualScopes.includes(SEND) || actualScopes.includes(MODIFY);
+  const sendScope = actualScopes.includes(SEND) || actualScopes.includes(COMPOSE) || actualScopes.includes(MODIFY);
   return { canRead: caps.includes('mail-read') && readScope, canSend: caps.includes('mail-send') && sendScope,
     canModify: caps.includes('mail-modify') && actualScopes.includes(MODIFY) };
 }
@@ -123,6 +146,6 @@ export function parseRefreshedToken(data, originalScopes) {
   if (!data || !printable(data.access_token) || typeof data.token_type !== 'string' || data.token_type.toLowerCase() !== 'bearer' || !Number.isInteger(data.expires_in) || data.expires_in <= 0 || data.expires_in > 86400) reject('Google returned an invalid access-token response.');
   // RFC 6749 permits omission when the original scopes have not changed.
   const actualScopes = data.scope === undefined ? [...originalScopes] : (typeof data.scope === 'string' ? data.scope.split(/\s+/).filter(Boolean) : []);
-  if (!uniqueStrings(actualScopes, scopes, 5)) reject('Google returned an unsupported access-token scope set.');
+  if (!uniqueStrings(actualScopes, scopes, maxScopes)) reject('Google returned an unsupported access-token scope set.');
   return { accessToken: data.access_token, actualScopes, expiresAt: Date.now() + data.expires_in * 1000 };
 }

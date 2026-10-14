@@ -4,6 +4,8 @@ const platform = @import("platform.zig");
 pub const Source = @import("byte_stream.zig").Source;
 pub const terminal_upload_bytes = 36 * limits.MiB;
 pub const terminal_download_bytes = @import("attachment_limits.zig").download_json_bytes;
+pub const calendar_response_bytes = 1024 * 1024;
+pub const calendar_body_bytes = 256 * 1024;
 var slab: [limits.http_workspace]u8 align(16) = undefined;
 var reserved = std.atomic.Value(bool).init(false);
 
@@ -48,6 +50,26 @@ const Workspace = struct {
 };
 
 pub const Response = struct { status: u16, body: []const u8, retry_after: u32 = 0, bytes: usize = 0 };
+/// Unit-test-only routing for real HTTP authorization/count oracles. Original
+/// production host/method/body validation still runs first. No runtime option,
+/// environment variable or production declaration can redirect credentials.
+pub const TestRoute = if (@import("builtin").is_test) struct {
+    pub var origin: ?[]const u8 = null;
+} else struct {};
+fn routeForTest(original: std.Uri, url: []const u8, buffer: []u8) !std.Uri {
+    if (comptime @import("builtin").is_test) {
+        if (TestRoute.origin) |origin| {
+            if (std.mem.startsWith(u8, url, "https://")) {
+                const routed = try std.fmt.bufPrint(buffer, "{s}/{s}", .{ origin, url["https://".len..] });
+                const uri = try std.Uri.parse(routed);
+                try validateDestination(uri, true, true);
+                return uri;
+            }
+        }
+    }
+    return original;
+}
+
 /// Fixed, public destinations. This policy never accepts OAuth credentials or
 /// caller-controlled URLs and never follows redirects.
 pub const MetadataEndpoint = enum {
@@ -154,6 +176,21 @@ pub const Client = struct {
         const duration: std.Io.Clock.Duration = .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
         return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, token, json_body, out, false, true });
     }
+    /// Calendar has its own authority/path policy and conditional-write header.
+    /// Raw statuses remain available to the Calendar service. No request retry.
+    pub fn requestCalendar(self: *Client, url: []const u8, method: std.http.Method, token: []const u8, json_body: ?[]const u8, if_match: ?[]const u8, out: []u8) !Response {
+        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, token), json_body, out, false, true, if_match, true });
+    }
+    /// Synthetic wire acceptance only: a fixed bearer and plain loopback.
+    /// This entrypoint cannot accept a credential or contact a production host.
+    pub fn requestLoopbackCalendarProbe(self: *Client, url: []const u8, method: std.http.Method, json_body: ?[]const u8, if_match: ?[]const u8, out: []u8) !Response {
+        return platform.deadline(self.io, try self.calendarDuration(), requestWithHeadersInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-calendar-bearer"), json_body, out, true, true, if_match, true });
+    }
+    fn calendarDuration(self: *Client) !std.Io.Clock.Duration {
+        const remaining = self.job_deadline.durationFromNow(self.io);
+        if (remaining.raw.toNanoseconds() <= 0) return error.Timeout;
+        return .{ .clock = .awake, .raw = .fromNanoseconds(@min(remaining.raw.toNanoseconds(), @as(i96, limits.request_seconds) * std.time.ns_per_s)) };
+    }
     /// Terminal media only. Source is consumed once, with exact Content-Length
     /// and an EOF check. Any explicit authorized retry needs a fresh source.
     /// Response JSON retains the ordinary terminal response-buffer ceiling.
@@ -209,10 +246,18 @@ pub const Client = struct {
         return try platform.deadline(self.io, duration, requestInner, .{ self, url, method, @as(?[]const u8, "synthetic-omagma-bearer"), body, out, true, true });
     }
     fn requestInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool) anyerror!Response {
+        return requestWithHeadersInner(self, url, method, token, form, out, loopback, terminal, null, false);
+    }
+    fn requestWithHeadersInner(self: *Client, url: []const u8, method: std.http.Method, token: ?[]const u8, form: ?[]const u8, out: []u8, loopback: bool, terminal: bool, if_match: ?[]const u8, calendar: bool) anyerror!Response {
         if (out.len > (if (terminal) @as(usize, 3 * limits.MiB) else limits.response)) return error.ResponseBufferTooLarge;
         if (url.len > 4096) return error.UrlTooLarge;
         const uri = try std.Uri.parse(url);
-        try validateDestination(uri, loopback, terminal);
+        if (calendar) {
+            try validateCalendarDestination(uri, loopback);
+            try validateCalendarHeaders(method, form, if_match);
+            if (out.len > calendar_response_bytes) return error.ResponseBufferTooLarge;
+            if (form) |body| if (body.len > calendar_body_bytes) return error.FormTooLarge;
+        } else try validateDestination(uri, loopback, terminal);
         // Refuse oversized payloads before client.request can acquire a TCP
         // connection. This applies equally to the existing bar form wrapper.
         if (form) |f| if (f.len > (if (terminal) @as(usize, 3 * limits.MiB) else 32 * 1024)) return error.FormTooLarge;
@@ -224,13 +269,17 @@ pub const Client = struct {
             for (t) |b| if (b <= 32 or b >= 127) return error.InvalidToken;
             break :blk try std.fmt.bufPrint(&authorization, "Bearer {s}", .{t});
         } else null;
-        var req = try self.inner.?.request(method, uri, .{
+        const conditional_headers: []const std.http.Header = if (if_match) |etag| &.{.{ .name = "If-Match", .value = etag }} else &.{};
+        var route_buffer: [4096]u8 = undefined;
+        const request_uri = try routeForTest(uri, url, &route_buffer);
+        var req = try self.inner.?.request(method, request_uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
             // Exact Zig 0.17.0 sendHead still omits privileged_headers while
             // emitting the standard authorization override. Keep this override;
             // redirects remain unhandled and destination hosts restricted.
             .headers = .{ .authorization = if (bearer) |value| .{ .override = value } else .omit, .accept_encoding = .{ .override = "identity" }, .content_type = if (form != null) .{ .override = if (terminal) "application/json" else "application/x-www-form-urlencoded" } else .omit },
+            .extra_headers = conditional_headers,
         });
         defer req.deinit();
         if (form) |f| {
@@ -284,7 +333,9 @@ pub const Client = struct {
             for (secret) |byte| if (byte <= 32 or byte >= 127) return error.InvalidToken;
             break :blk try std.fmt.bufPrint(&authorization, "Bearer {s}", .{secret});
         } else null;
-        var request_value = try self.inner.?.request(method, uri, .{
+        var route_buffer: [4096]u8 = undefined;
+        const request_uri = try routeForTest(uri, url, &route_buffer);
+        var request_value = try self.inner.?.request(method, request_uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
             .headers = .{ .authorization = if (bearer) |value| .{ .override = value } else .omit, .accept_encoding = .{ .override = "identity" }, .content_type = if (upload) |body| .{ .override = body.content_type } else .omit },
@@ -340,6 +391,29 @@ pub const Client = struct {
         return .{ .status = status, .body = if (destination != null) "" else out[0..received], .retry_after = retry_after, .bytes = received };
     }
 };
+fn validateCalendarDestination(uri: std.Uri, loopback: bool) !void {
+    if (loopback) return validateDestination(uri, true, true);
+    if (!std.mem.eql(u8, uri.scheme, "https")) return error.InsecureUrl;
+    const host = uri.host orelse return error.InvalidHost;
+    if (!std.mem.eql(u8, host.percent_encoded, "www.googleapis.com")) return error.InvalidHost;
+    if (uri.user != null or uri.password != null or uri.fragment != null or (uri.port != null and uri.port.? != 443)) return error.InvalidUrl;
+    if (!std.mem.startsWith(u8, uri.path.percent_encoded, "/calendar/v3/")) return error.InvalidCalendarPath;
+    var segments = std.mem.splitScalar(u8, uri.path.percent_encoded, '/');
+    while (segments.next()) |segment| if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidCalendarPath;
+}
+fn validateCalendarHeaders(method: std.http.Method, body: ?[]const u8, if_match: ?[]const u8) !void {
+    switch (method) {
+        .GET => if (body != null or if_match != null) return error.InvalidCalendarRequest,
+        .POST => if (body == null or if_match != null) return error.InvalidCalendarRequest,
+        .PATCH => if (body == null or if_match == null) return error.InvalidCalendarRequest,
+        .DELETE => if (body != null or if_match == null) return error.InvalidCalendarRequest,
+        else => return error.InvalidCalendarRequest,
+    }
+    if (if_match) |etag| {
+        if (etag.len < 2 or etag.len > 1024 or etag[0] != '"' or etag[etag.len - 1] != '"') return error.InvalidCalendarEtag;
+        for (etag[1 .. etag.len - 1]) |byte| if (byte < 33 or byte >= 127 or byte == '"') return error.InvalidCalendarEtag;
+    }
+}
 fn validateDestination(uri: std.Uri, loopback: bool, terminal: bool) !void {
     if (loopback) {
         if (!std.mem.eql(u8, uri.scheme, "http")) return error.InsecureUrl;
@@ -362,6 +436,26 @@ test "HTTP slab rejects excess requests and captures high-water" {
     a.free(mem);
     try std.testing.expectEqual(@as(usize, 120), work.peak);
     try std.testing.expectEqual(@as(usize, 1), work.rejected);
+}
+
+test "calendar HTTP: dedicated authority path and exact ETag leave generic policies unchanged" {
+    const calendar = try std.Uri.parse("https://www.googleapis.com/calendar/v3/calendars/primary/events/event?sendUpdates=none");
+    try validateCalendarDestination(calendar, false);
+    try std.testing.expectError(error.InvalidHost, validateDestination(calendar, false, true));
+    try std.testing.expectError(error.InvalidHost, validateDestination(calendar, false, false));
+    try std.testing.expectError(error.InvalidCalendarPath, validateCalendarDestination(try std.Uri.parse("https://www.googleapis.com/drive/v3/files"), false));
+    try std.testing.expectError(error.InvalidCalendarPath, validateCalendarDestination(try std.Uri.parse("https://www.googleapis.com/calendar/v3/../drive"), false));
+    try std.testing.expectError(error.InvalidHost, validateCalendarDestination(try std.Uri.parse("https://www.googleapis.com.attacker.invalid/calendar/v3/events"), false));
+    try std.testing.expectError(error.InvalidUrl, validateCalendarDestination(try std.Uri.parse("https://www.googleapis.com:8443/calendar/v3/events"), false));
+    var credentialed_calendar = calendar;
+    credentialed_calendar.user = .{ .raw = "synthetic@example.test" };
+    try std.testing.expectError(error.InvalidUrl, validateCalendarDestination(credentialed_calendar, false));
+    try validateCalendarHeaders(.PATCH, "{}", "\"version-4\"");
+    try validateCalendarHeaders(.DELETE, null, "\"version-4\"");
+    try validateCalendarHeaders(.POST, "{}", null);
+    try std.testing.expectError(error.InvalidCalendarRequest, validateCalendarHeaders(.PATCH, "{}", null));
+    try std.testing.expectError(error.InvalidCalendarRequest, validateCalendarHeaders(.DELETE, "{}", "\"v\""));
+    for ([_][]const u8{ "*", "W/\"v\"", "\"v\r\nInjected: true\"", "\"v\"x\"" }) |etag| try std.testing.expectError(error.InvalidCalendarEtag, validateCalendarHeaders(.PATCH, "{}", etag));
 }
 
 test "attachment streaming: explicit downloads have a separate bounded job deadline" {

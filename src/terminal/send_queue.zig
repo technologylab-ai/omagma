@@ -24,6 +24,7 @@ pub fn receipt(a: std.mem.Allocator, store: *storage.Store, entry: storage.Queue
         .draftId = entry.draftId,
         .operationId = entry.operationId,
         .state = entry.state,
+        .resumeRequired = entry.resumeRequired,
         .createdAtMs = entry.createdAtMs,
         .dueAtMs = entry.dueAtMs,
         .errorCode = entry.errorCode,
@@ -85,6 +86,7 @@ pub fn cancel(store: *storage.Store, id: []const u8) !*storage.QueuedSend {
 pub fn resumeEntry(store: *storage.Store, id: []const u8, now_ms: i64, delay_ms: i64) !*storage.QueuedSend {
     const entry = try find(store, id);
     if (entry.state != .queued) return error.SendAlreadySubmitted;
+    entry.resumeRequired = false;
     entry.createdAtMs = now_ms;
     entry.dueAtMs = std.math.add(i64, now_ms, delay_ms) catch return error.InvalidSendDelay;
     try store.save();

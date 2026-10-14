@@ -1,0 +1,19 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:planning-2026@example.test
+DTSTAMP:20261012T090000Z
+SEQUENCE:4
+ORGANIZER;CN=Fictional Host:mailto:host@example.test
+ATTENDEE;RSVP=TRUE:mailto:self@example.test
+ATTENDEE:mailto:other@example.test
+DTSTART:20261013T140000Z
+DTEND:20261013T150000Z
+SUMMARY:Planning\, café
+DESCRIPTION:Discuss the next release.\nKeep the complete source.
+LOCATION:Room 4
+CONFERENCE;VALUE=URI:https://meet.example.test/planning?key=fictional
+X-FICTIONAL-SOURCE:preserved even when no provider field exists
+END:VEVENT
+END:VCALENDAR

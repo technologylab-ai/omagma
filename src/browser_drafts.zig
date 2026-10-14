@@ -37,6 +37,19 @@ fn text(value: []const u8, maximum: usize) !void {
     if (value.len > maximum or !std.unicode.utf8ValidateSlice(value)) return error.InvalidBrowserDrafts;
     try @import("terminal/recipients.zig").validateHeader(value);
 }
+
+test "related originals: browser snapshots refuse native resource handles explicitly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const binding: Binding = .{ .account = "self@example.test", .clientId = "client", .grantId = "grant" };
+    const draft: t.Draft = .{ .id = "draft", .original = .{
+        .bodyHtml = "<img src='cid:photo'>",
+        .resources = &.{.{ .id = "photo", .filename = "photo.png", .mimeType = "image/png", .size = 2_200_000, .blobId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .contentId = "photo" }},
+    } };
+    const raw = try std.json.Stringify.valueAlloc(a, Document{ .version = 1, .revision = 1, .account = binding.account, .clientId = binding.clientId, .grantId = binding.grantId, .drafts = &.{draft}, .operations = &.{} }, .{});
+    try std.testing.expectError(error.BrowserAttachmentsUnavailable, decode(a, std.testing.allocator, binding, raw));
+}
 pub fn decode(a: std.mem.Allocator, backing: std.mem.Allocator, binding: Binding, raw: []const u8) !Document {
     if (raw.len == 0 or raw.len > snapshot_bytes) return error.InvalidBrowserDrafts;
     // Strict typed parse rejects fields outside the passive envelope, including
@@ -50,6 +63,7 @@ pub fn decode(a: std.mem.Allocator, backing: std.mem.Allocator, binding: Binding
         for (document.drafts[0..index]) |previous| if (std.mem.eql(u8, previous.id, draft.id)) return error.InvalidBrowserDrafts;
         try codec.validateDraft(draft, false);
         for (draft.attachments) |attachment| if (attachment.blobId != null) return error.BrowserAttachmentsUnavailable;
+        if (draft.original) |original| for (original.resources) |resource| if (resource.blobId != null) return error.BrowserAttachmentsUnavailable;
         // Exercise the same binary/original validation as an incoming update,
         // with disposable scratch copies released after each whole draft.
         var scratch: std.heap.ArenaAllocator = .init(backing);

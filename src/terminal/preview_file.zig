@@ -7,9 +7,13 @@ const t = @import("types.zig");
 const markdown_mail = @import("markdown_mail.zig");
 const logo = @import("markdown_logo.zig");
 const policy = @import("mail_limits.zig");
+const cache_storage = @import("store.zig");
+const blob = @import("attachment_blob.zig");
 
 pub const filename = "preview.html";
-pub const max_file_bytes: usize = 16 * 1024 * 1024;
+// 25 MiB of image bytes become at most 34 MiB of base64; 2 MiB of
+// HTML can expand sixfold in srcdoc. Output streams to a private file.
+pub const max_file_bytes: usize = 48 * 1024 * 1024;
 pub const Result = struct { path: []const u8 };
 const max_tag_bytes = 16384;
 const max_tokens = 65536;
@@ -73,14 +77,40 @@ const Out = struct {
 /// Exact output budget without allocating another HTML copy. The backend
 /// can reserve this count instead of the maximum, preserving small caches.
 pub fn byteSize(prepared: markdown_mail.Prepared, draft: t.Draft) !usize {
+    return byteSizeWithStore(null, prepared, draft);
+}
+pub fn byteSizeWithStore(store: ?*cache_storage.Store, prepared: markdown_mail.Prepared, draft: t.Draft) !usize {
     var sink: std.Io.Writer.Discarding = .init(&.{});
-    try render(&sink.writer, prepared, draft);
+    try renderWithStore(&sink.writer, prepared, draft, store);
     return @intCast(sink.fullCount());
 }
 
 /// Caller reserves byteSize (or max_file_bytes) in its account store first.
 /// The one fixed file is atomically replaced, never appended or accumulated.
 pub fn writePreview(io: std.Io, allocator: std.mem.Allocator, account_store_dir: std.Io.Dir, prepared: markdown_mail.Prepared, draft: t.Draft) !Result {
+    return writePreviewResolved(io, allocator, account_store_dir, prepared, draft, null);
+}
+pub fn writePreviewWithStore(store: *cache_storage.Store, allocator: std.mem.Allocator, prepared: markdown_mail.Prepared, draft: t.Draft) !Result {
+    try store.requirePlainFiles();
+    return writePreviewResolved(store.io, allocator, store.dir, prepared, draft, store);
+}
+/// Explicit user-requested plaintext export. Keep one bounded preview outside
+/// the encrypted store, in an owner-only runtime directory with an opaque name.
+/// Source images are still resolved/authenticated through the selected Store.
+pub fn writePrivateExport(store: *cache_storage.Store, allocator: std.mem.Allocator, env: *const std.process.Environ.Map, prepared: markdown_mail.Prepared, draft: t.Draft) !Result {
+    const account = try store.vaultContext();
+    const base = env.get("XDG_RUNTIME_DIR") orelse "/tmp";
+    if (!std.fs.path.isAbsolute(base)) return error.InvalidRuntimeDirectory;
+    const canonical = try std.Io.Dir.cwd().realPathFileAlloc(store.io, base, allocator);
+    defer allocator.free(canonical);
+    const path = try std.fmt.allocPrint(allocator, "{s}/omagma-preview-{s}-{s}", .{ canonical, std.fmt.bytesToHex(account.owner.key.vault_id, .lower), account.entry.index.text() });
+    defer allocator.free(path);
+    var directory = try @import("../keyring_file.zig").directory(store.io, path, true);
+    defer directory.close(store.io);
+    _ = try byteSizeWithStore(store, prepared, draft);
+    return writePreviewResolved(store.io, allocator, directory, prepared, draft, store);
+}
+fn writePreviewResolved(io: std.Io, allocator: std.mem.Allocator, account_store_dir: std.Io.Dir, prepared: markdown_mail.Prepared, draft: t.Draft, store: ?*cache_storage.Store) !Result {
     const directory_stat = try account_store_dir.stat(io);
     if (directory_stat.kind != .directory or directory_stat.permissions.toMode() & 0o077 != 0) return error.InsecurePreviewDirectory;
     const existing: ?std.Io.File.Stat = account_store_dir.statFile(io, filename, .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) null else return err;
@@ -93,7 +123,7 @@ pub fn writePreview(io: std.Io, allocator: std.mem.Allocator, account_store_dir:
     defer atomic.deinit(io);
     var buffer: [8192]u8 = undefined;
     var writer = atomic.file.writer(io, &buffer);
-    try render(&writer.interface, prepared, draft);
+    try renderWithStore(&writer.interface, prepared, draft, store);
     try writer.interface.flush();
     try atomic.file.sync(io);
     try atomic.replace(io);
@@ -120,9 +150,12 @@ fn addresses(out: *Out, values: []const t.Address) !void {
 }
 
 pub fn render(writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft) !void {
+    return renderWithStore(writer, prepared, draft, null);
+}
+fn renderWithStore(writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft, store: ?*cache_storage.Store) !void {
     if (draft.subject.len > policy.subject_bytes) return error.InvalidPreviewHeading;
     var out: Out = .{ .writer = writer };
-    const context = try Context.init(prepared);
+    const context = try Context.initWithStore(prepared, store);
     try out.raw("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"");
     try out.escaped(outer_csp);
     try out.raw("\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Outgoing preview</title><style>" ++
@@ -251,20 +284,57 @@ fn nextAttribute(input: []const u8, position: *usize, end: usize) ?Attribute {
     return .{ .name = name, .start = start, .value_start = value_start, .value_end = value_end, .end = index };
 }
 
-const Image = struct { mime: []const u8, encoded: ?[]const u8 = null, bytes: ?[]const u8 = null };
+const Image = struct {
+    mime: []const u8,
+    encoded: ?[]const u8 = null,
+    bytes: ?[]const u8 = null,
+    attachment: ?t.Attachment = null,
+    store: ?*cache_storage.Store = null,
+};
 const Context = struct {
     prepared: markdown_mail.Prepared,
     images: [64]?Image = @splat(null),
     fn init(prepared: markdown_mail.Prepared) !Context {
+        return initWithStore(prepared, null);
+    }
+    fn initWithStore(prepared: markdown_mail.Prepared, store: ?*cache_storage.Store) !Context {
         if (prepared.resources.len > 64) return error.PreviewTooLarge;
         const source = prepared.html orelse prepared.plain;
         if (source.len > t.Limits.body_bytes or !std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidPreviewBody;
         var result: Context = .{ .prepared = prepared };
         // Verify retained bytes once even when one image is referenced many times.
-        for (prepared.resources, 0..) |resource, index| result.images[index] = verifiedImage(resource.mimeType, resource.data);
+        var total: usize = 0;
+        for (prepared.resources, 0..) |resource, index| {
+            total = std.math.add(usize, total, resource.size) catch return error.PreviewTooLarge;
+            if (total > t.Limits.attachment_bytes) return error.PreviewTooLarge;
+            result.images[index] = if (resource.blobId != null)
+                try verifiedBlobImage(store orelse return error.PreviewResourceUnavailable, resource)
+            else
+                verifiedImage(resource.mimeType, resource.data);
+        }
         return result;
     }
 };
+fn rasterPrefix(mime: []const u8, bytes: []const u8) bool {
+    return if (equal(mime, "image/png")) bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") else if (equal(mime, "image/jpeg")) bytes.len >= 3 and std.mem.eql(u8, bytes[0..3], "\xff\xd8\xff") else bytes.len >= 6 and (std.mem.eql(u8, bytes[0..6], "GIF87a") or std.mem.eql(u8, bytes[0..6], "GIF89a"));
+}
+fn verifiedBlobImage(store: *cache_storage.Store, attachment: t.Attachment) !?Image {
+    const mime = rasterMime(attachment.mimeType) orelse return null;
+    var source = try blob.Stream.init(store, attachment);
+    defer source.close();
+    var prefix: [12]u8 = undefined;
+    var prefix_len: usize = 0;
+    var buffer: [32 * 1024]u8 = undefined;
+    while (true) {
+        const count = try blob.Stream.read(&source, &buffer);
+        if (count == 0) break;
+        const keep = @min(prefix.len - prefix_len, count);
+        @memcpy(prefix[prefix_len..][0..keep], buffer[0..keep]);
+        prefix_len += keep;
+    }
+    if (!rasterPrefix(mime, prefix[0..prefix_len])) return null;
+    return .{ .mime = mime, .attachment = attachment, .store = store };
+}
 fn rasterMime(input: []const u8) ?[]const u8 {
     for ([_][]const u8{ "image/png", "image/jpeg", "image/gif" }) |mime| if (equal(input, mime)) return mime;
     return null;
@@ -288,8 +358,7 @@ fn verifiedImage(mime_input: []const u8, encoded_input: []const u8) ?Image {
     var decoded: [12]u8 = undefined;
     const size = std.base64.standard_no_pad.Decoder.calcSizeForSlice(prefix[0..length]) catch return null;
     std.base64.standard_no_pad.Decoder.decode(decoded[0..size], prefix[0..length]) catch return null;
-    const valid = if (equal(mime, "image/png")) size >= 8 and std.mem.eql(u8, decoded[0..8], "\x89PNG\r\n\x1a\n") else if (equal(mime, "image/jpeg")) size >= 3 and std.mem.eql(u8, decoded[0..3], "\xff\xd8\xff") else size >= 6 and (std.mem.eql(u8, decoded[0..6], "GIF87a") or std.mem.eql(u8, decoded[0..6], "GIF89a"));
-    if (!valid) return null;
+    if (!rasterPrefix(mime, decoded[0..size])) return null;
     return .{ .mime = mime, .encoded = encoded };
 }
 
@@ -382,7 +451,23 @@ fn dataUrl(out: *Out, image: Image) !void {
     try out.escaped("data:");
     try out.escaped(image.mime);
     try out.escaped(";base64,");
-    if (image.bytes) |bytes| {
+    if (image.attachment) |attachment| {
+        var source = try blob.Stream.init(image.store.?, attachment);
+        defer source.close();
+        var bytes: [3072]u8 = undefined;
+        var encoded: [4096]u8 = undefined;
+        var buffered: usize = 0;
+        while (true) {
+            const count = try blob.Stream.read(&source, bytes[buffered..]);
+            if (count == 0) break;
+            buffered += count;
+            const complete = buffered / 3 * 3;
+            try out.escaped(std.base64.standard.Encoder.encode(&encoded, bytes[0..complete]));
+            std.mem.copyForwards(u8, &bytes, bytes[complete..buffered]);
+            buffered -= complete;
+        }
+        if (buffered != 0) try out.escaped(std.base64.standard.Encoder.encode(&encoded, bytes[0..buffered]));
+    } else if (image.bytes) |bytes| {
         var index: usize = 0;
         var encoded: [4096]u8 = undefined;
         while (index < bytes.len) {
@@ -583,9 +668,10 @@ test "preview file: symlink targets are refused and output overflow keeps the ol
     try directory.deleteFile(io, filename);
     const first = try writePreview(io, std.testing.allocator, directory, .{ .plain = "Previous preview" }, .{});
     defer std.testing.allocator.free(first.path);
-    const html = try std.testing.allocator.alloc(u8, 1000 * "<img src='cid:omagma-logo@omagma.invalid'>".len);
+    const repetitions = max_file_bytes / std.base64.standard.Encoder.calcSize(logo.png.len) + 1;
+    const html = try std.testing.allocator.alloc(u8, repetitions * "<img src='cid:omagma-logo@omagma.invalid'>".len);
     defer std.testing.allocator.free(html);
-    for (0..1000) |index| @memcpy(html[index * "<img src='cid:omagma-logo@omagma.invalid'>".len ..][0.."<img src='cid:omagma-logo@omagma.invalid'>".len], "<img src='cid:omagma-logo@omagma.invalid'>");
+    for (0..repetitions) |index| @memcpy(html[index * "<img src='cid:omagma-logo@omagma.invalid'>".len ..][0.."<img src='cid:omagma-logo@omagma.invalid'>".len], "<img src='cid:omagma-logo@omagma.invalid'>");
     const encoded = try std.testing.allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(logo.png.len));
     defer std.testing.allocator.free(encoded);
     _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, logo.png);

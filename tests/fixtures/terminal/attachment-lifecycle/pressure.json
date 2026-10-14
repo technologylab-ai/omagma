@@ -1,0 +1,52 @@
+{
+  "metadataCounts": [
+    414,
+    2000
+  ],
+  "plainBytes": 8037,
+  "htmlBytes": 45794,
+  "attachments": [
+    {
+      "filename": "avatar.png",
+      "mimeType": "image/png",
+      "size": 14999,
+      "contentId": "avatar@pressure.example.test",
+      "patternSeed": 19,
+      "sha256": "cd52543424b438848510a47ff38be31d1b06e65ae8d2551c30534a7318e6b6e0"
+    },
+    {
+      "filename": "logo.png",
+      "mimeType": "image/png",
+      "size": 14999,
+      "contentId": "logo@pressure.example.test",
+      "patternSeed": 53,
+      "sha256": "c59771e633f725009d6dd68c8396620eb03bd1fc4bd38e35f25722f811bd1f10"
+    },
+    {
+      "filename": "report.pdf",
+      "mimeType": "application/pdf",
+      "size": 83694,
+      "contentId": null,
+      "patternSeed": 101,
+      "sha256": "5f3e594856cd6bb53d191fa7f2613bd24d2193f76f4a6d711869ca8777a10350"
+    },
+    {
+      "filename": "annex.pdf",
+      "mimeType": "application/pdf",
+      "size": 298881,
+      "contentId": null,
+      "patternSeed": 173,
+      "sha256": "827bf68d5052ae4eeca878f07c221cbc6118eb4edc73a51287952c55774cd20f"
+    }
+  ],
+  "modes": [
+    "forward-text",
+    "forward-formatted",
+    "forward-original",
+    "forward-omit",
+    "reply-text",
+    "reply-formatted",
+    "reply-all-text",
+    "reply-all-formatted"
+  ]
+}

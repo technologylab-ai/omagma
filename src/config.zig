@@ -11,8 +11,10 @@ pub const Config = struct {
     refresh_seconds: u32 = 0,
     credential_store: @import("keyring.zig").Kind = .keyring,
     credential_directory: b.Text(4096) = .{},
+    runtime_provider: ?@import("native_identity.zig").Provider = null,
+    runtime_access_cache: ?*@import("terminal/session_cache.zig").Cache = null,
     pub fn credentials(self: *const Config) @import("keyring.zig").Settings {
-        return .{ .kind = self.credential_store, .directory = self.credential_directory.slice() };
+        return .{ .kind = self.credential_store, .directory = self.credential_directory.slice(), .provider = self.runtime_provider };
     }
     pub fn defaults(self: *Config, home: []const u8) !void {
         self.* = .{};
@@ -88,6 +90,13 @@ pub const Config = struct {
                 for (self.accounts[0..i]) |*prev| if (std.ascii.eqlIgnoreCase(prev.address.slice(), addr) or std.mem.eql(u8, prev.profile.slice(), prof)) return error.DuplicateAccountOrProfile;
             }
         }
+    }
+    /// Explicit schema: the runtime provider and account status are never JSON.
+    pub fn snapshot(self: *const Config, a: std.mem.Allocator) ![]const u8 {
+        const Row = struct { address: []const u8, profile: []const u8, enabled: bool, required: bool, senderName: []const u8, signature: []const u8 };
+        var rows: [l.max_accounts]Row = undefined;
+        for (self.accounts[0..self.count], 0..) |*account, i| rows[i] = .{ .address = account.address.slice(), .profile = account.profile.slice(), .enabled = account.enabled, .required = account.required, .senderName = account.sender_name.slice(), .signature = account.signature.slice() };
+        return @import("terminal/json.zig").encodeAlloc(a, .{ .credentialStore = @tagName(self.credential_store), .oauthClientFile = self.client_file.slice(), .chrome = self.chrome.slice(), .chromeUserData = self.chrome_data.slice(), .refreshIntervalSeconds = self.refresh_seconds, .accounts = rows[0..self.count] }, .{});
     }
     pub fn index(self: *const Config, addr: []const u8) ?usize {
         for (self.accounts[0..self.count], 0..) |*a, i| if (std.mem.eql(u8, a.address.slice(), addr)) return i;

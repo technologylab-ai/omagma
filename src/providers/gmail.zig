@@ -44,7 +44,7 @@ pub fn refresh(io: std.Io, config: *const Config, account: *const model.Account,
     defer std.crypto.secureZero(u8, &refresh_secret);
     defer std.crypto.secureZero(u8, &access_secret);
     if (config.client_file.len == 0) return error.OAuthClientRequired;
-    try oauth.loadDesktop(io, config.client_file.slice(), &desktop);
+    try oauth.loadDesktopWithSettings(io, config.client_file.slice(), &desktop, config.credentials());
     defer std.crypto.secureZero(u8, std.mem.asBytes(&desktop));
     const refresh_token = try keyring.lookup(io, config.credentials(), account.address.slice(), desktop.client_id.slice(), &refresh_secret) orelse return error.NotConnected;
     const token = try oauth.refresh(io, &client, &desktop, refresh_token, &access_secret);

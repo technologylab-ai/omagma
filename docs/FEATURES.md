@@ -79,7 +79,16 @@ bar UI together; Chrome and unrelated widgets are excluded. See
 - A cancellable local send countdown with an explicit Send now action after review, paused pending-send
   recovery after restart, and reviewed local draft discard.
 - Inspect calendar invitations and send accept/tentative/decline RSVP emails.
-  There are no calendar views.
+  Optional Calendar permissions enable agenda, day and week views, reviewed
+  invitation saving, meeting reminders and Join in the account's Chrome profile.
+  Mail replies and Calendar write outcomes remain separately visible.
+- Save local follow-up reminders and browse due messages, including offline.
+- Explicitly continue a draft in Gmail while preserving its local copy and
+  pausing local editing/sending; check status or import supported content into
+  a new local Plain draft for review.
+- Optional encrypted storage uses one unlocked native daemon for the TUI and
+  agent CLI. Migration and activation are explicit; original source files and
+  exported files remain plaintext. [Vault setup](ENCRYPTION.md).
 - Daily background release checks, a dismissible main-screen upgrade card and
   installation-specific instructions, with an optional agent handoff. Check
   timing and per-release dismissal survive restart; automatic checks can be
@@ -406,20 +415,23 @@ allocation exhaustion remain failures; individual malformed contacts are isolate
 
 ## Permissions, storage and current limits
 
-Full TUI/CLI use requests six local capabilities that map to two Google scopes:
+Full mail/contact TUI/CLI use requests six local capabilities that map to two Google scopes:
 `gmail.modify` and `contacts`. A terminal-only installation uses one terminal Google OAuth registration and grant.
 Alongside the bar, use a different registration; the bar continues using its
-single `gmail.readonly` permission.
+single `gmail.readonly` permission. Calendar adds optional per-account capabilities
+and Google scopes; choose only the access needed in [Calendar setup](CALENDAR-PERMISSIONS.md).
 [Account setup](SETUP.md) is the canonical permission guide.
 
-Tokens use Secret Service on Linux or the default user Keychain on macOS by default. Explicit Agent-enabled setup uses owner-only credential files shared by the TUI and CLI; [Mac setup](MACOS.md#choose-interactive-or-agent-enabled-setup) explains the choice. Private terminal cache, drafts, contacts and
-receipts are plaintext protected by filesystem permissions. The bar's mail
+Tokens use Secret Service on Linux or the default user Keychain on macOS by default. Explicit Agent-enabled setup uses owner-only credential files shared by the TUI and CLI; [Mac setup](MACOS.md#choose-interactive-or-agent-enabled-setup) explains the choice. The default terminal store keeps cache, drafts, contacts, Calendar data and
+receipts as owner-only plaintext. The optional native vault encrypts retained
+data and migrated credentials at rest. Migration preserves the original sources;
+attachment saves, exports and external-editor files remain plaintext. The bar's mail
 cache is memory-only. Accounts, credentials, message IDs and profile routing
 remain separate. [Privacy details](PRIVACY.md).
 
-Current limitations: no unified Inbox/unread total, calendar views, permanent
-mail deletion or contact deletion. Drafts
-are local rather than synchronized Gmail drafts. The external editor uses a
+Current limitations: no unified Inbox/unread total, permanent
+mail deletion or contact deletion. Drafts remain local until an explicit Gmail
+handoff; there is no continuous two-way draft synchronization. The external editor uses a
 full-terminal takeover; there is no embedded editor pane. See
 [CLI/TUI coverage](AGENT-CLI.md#cli-and-tui-coverage) and
 [terminal bounds](TERMINAL.md#bounds-and-recovery).

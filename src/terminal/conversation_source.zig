@@ -15,7 +15,7 @@ pub const Attachments = struct {
     max_bytes: ?usize = null,
 
     fn hydrate(self: Attachments, a: std.mem.Allocator, message: t.Message, attachment: t.Attachment) !t.Attachment {
-        if (attachment.data.len > 0 or attachment.size == 0) return attachment;
+        if (attachment.data.len > 0 or (attachment.size == 0 and attachment.blobId == null)) return attachment;
         return self.fetchFn(self.context, a, message, attachment);
     }
 };
@@ -25,7 +25,7 @@ pub fn captureOriginal(a: std.mem.Allocator, message: t.Message, source: Attachm
     const html = message.bodyHtml orelse return error.OriginalHtmlUnavailable;
     if (html.len == 0) return error.OriginalHtmlUnavailable;
     if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
-    const plan = try original_mail.resourcePlan(html, message.attachments);
+    const plan = try original_mail.resourcePlanWithLimit(html, message.attachments, source.max_bytes orelse t.Limits.attachment_bytes);
     if (source.max_bytes) |limit| if (plan.bytes > limit) return error.AttachmentsTooLarge;
     const resources = try a.alloc(t.Attachment, plan.count);
     for (plan.indices[0..plan.count], resources) |index, *resource| resource.* = try source.hydrate(a, message, message.attachments[index]);
@@ -70,7 +70,7 @@ pub fn forward(a: std.mem.Allocator, message: t.Message, options: ForwardOptions
     if (preserve) {
         if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
         // Refuse an unsupported resource plan before downloading any file.
-        _ = try original_mail.resourcePlan(message.bodyHtml orelse return error.OriginalHtmlUnavailable, message.attachments);
+        _ = try original_mail.resourcePlanWithLimit(message.bodyHtml orelse return error.OriginalHtmlUnavailable, message.attachments, source.max_bytes orelse t.Limits.attachment_bytes);
     }
     const attachments = try a.dupe(t.Attachment, message.attachments);
     for (attachments) |*attachment| attachment.* = try source.hydrate(a, message, attachment.*);

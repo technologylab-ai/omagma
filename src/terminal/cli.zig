@@ -22,6 +22,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
     if (eq(mode, "updates")) return runUpdates(io, sa, init.environ_map, args);
     var options: t.Options = .{};
     var metrics_file: ?[]const u8 = null;
+    var backend_path: ?[]const u8 = null;
     var req = j.object(sa);
     var draft = j.object(sa);
     var has_draft = false;
@@ -77,6 +78,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try req.object.put(sa, "cacheOnly", .{ .bool = true });
             continue;
         }
+        if (eq(arg, "--reconcile")) {
+            if (interactive or jsonl or !eq(j.text(req, "cmd"), "invitation.inspect")) return error.InvalidRequest;
+            try req.object.put(sa, "reconcile", .{ .bool = true });
+            continue;
+        }
         if (eq(arg, "--server")) {
             if (interactive or jsonl or !eq(j.text(req, "cmd"), "mail.search")) return error.ServerFlagRequiresSearch;
             if (j.get(req, "cacheOnly")) |prior| if (prior == .bool and prior.bool) return error.ConflictingSearchMode;
@@ -92,6 +98,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         if (eq(arg, "--wait")) {
             if (interactive or jsonl or !eq(j.text(req, "cmd"), "queue.process")) return error.WaitRequiresQueueProcess;
             try req.object.put(sa, "wait", .{ .bool = true });
+            continue;
+        }
+        if (eq(arg, "--accept-floating-time") or eq(arg, "--reinterpret-embedded-timezones")) {
+            if (interactive or jsonl or !eq(mode, "calendar")) return error.InvalidCalendarRequest;
+            try req.object.put(sa, if (eq(arg, "--accept-floating-time")) "acceptFloatingTime" else "reinterpretEmbeddedTimezones", .{ .bool = true });
             continue;
         }
         if (eq(arg, "--original")) {
@@ -125,7 +136,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         }
         if (!valueOption(arg)) return error.UnknownOption;
         const v = args.next() orelse return error.ValueRequired;
-        if (eq(arg, "--config")) options.config_file = v else if (eq(arg, "--metrics-file")) metrics_file = v else if (eq(arg, "--grant-file")) options.grant_file = v else if (eq(arg, "--client-file")) try req.object.put(sa, "clientFile", .{ .string = v }) else if (eq(arg, "--capabilities")) {
+        if (eq(arg, "--backend")) backend_path = v else if (eq(arg, "--config")) options.config_file = v else if (eq(arg, "--metrics-file")) metrics_file = v else if (eq(arg, "--grant-file")) options.grant_file = v else if (eq(arg, "--client-file")) try req.object.put(sa, "clientFile", .{ .string = v }) else if (eq(arg, "--capabilities")) {
             var values: j.Value = .{ .array = .init(sa) };
             var split = std.mem.splitScalar(u8, v, ',');
             while (split.next()) |part| try values.array.append(.{ .string = part });
@@ -144,6 +155,9 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         } else if (eq(arg, "--account")) {
             options.account = v;
             try req.object.put(sa, "account", .{ .string = v });
+        } else if (calendarField(arg)) |key| {
+            if (interactive or jsonl or !eq(mode, "calendar")) return error.InvalidCalendarRequest;
+            try req.object.put(sa, key, .{ .string = v });
         } else if (eq(arg, "--name") or eq(arg, "--label-id") or eq(arg, "--confirm-name")) {
             const key = if (eq(arg, "--label-id")) "labelId" else if (eq(arg, "--confirm-name")) "confirmName" else "name";
             try req.object.put(sa, key, .{ .string = v });
@@ -232,14 +246,28 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try req.object.put(sa, "draft", formatted);
         } else return error.FormatRequiresComposeCommand;
     }
-    var session = try core.Session.init(io, a, init.environ_map, options);
-    defer session.deinit();
-    session.meter = cap;
+    const activation = if (!options.fixtures and backend_path == null) try @import("vault_activation.zig").load(io, sa, init.environ_map) else null;
+    if (activation) |selected| {
+        // An active encrypted store is an explicit persistent choice. Never
+        // silently switch to a plaintext folder because a stale command line
+        // still contains paths from the previous setup.
+        if (options.config_file != null or options.grant_file != null or options.cache_dir != null or options.ui_file != null or options.metadata_limit_set or options.disk_limit_set) return error.VaultOptionConflict;
+        backend_path = selected.socketPath;
+    }
+    var session: ?core.Session = null;
+    defer if (session) |*local| local.deinit();
+    var backend: @import("vault_transport.zig").Client = .{ .io = io, .socket_path = backend_path orelse "", .expected_vault_id = if (activation) |selected| try selected.id() else null };
+    options.remote_preferences = backend_path != null;
+    const client = if (backend_path != null) backend.client() else local: {
+        session = try core.Session.init(io, a, init.environ_map, options);
+        session.?.meter = cap;
+        break :local session.?.client();
+    };
     var html_metrics: ?HtmlMetrics = null;
     defer if (metrics_file) |path| writeMetrics(io, path, cap, init.memory, html_metrics) catch {};
     if (interactive) {
         if (@import("build_options").tui) {
-            const stats = try @import("tui.zig").run(io, a, session.client(), options, init.environ_map);
+            const stats = try @import("tui.zig").run(io, a, client, options, init.environ_map);
             html_metrics = .{
                 .htmlDocumentBuilds = stats.htmlDocumentBuilds,
                 .htmlLayoutBuilds = stats.htmlLayoutBuilds,
@@ -251,7 +279,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
     var output_buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(io, &output_buffer);
     if (!jsonl) {
-        const reply = try @import("cli_plan.zig").execute(io, sa, session.client(), req, .{ .attachments = attachment_paths.items, .send_delay = send_delay, .browser = browser_preview });
+        const reply = try @import("cli_plan.zig").execute(io, sa, client, req, .{ .attachments = attachment_paths.items, .send_delay = send_delay, .browser = browser_preview });
         try output.interface.writeAll(reply);
         try output.interface.writeByte('\n');
         try output.interface.flush();
@@ -266,6 +294,9 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         defer frame.deinit();
         const fa = frame.allocator();
         var bytes: std.ArrayList(u8) = .empty;
+        // Grow on the reclaiming allocator, not the reply arena: otherwise
+        // older capacities can remain resident beside a large draft request.
+        defer bytes.deinit(a);
         var oversized = false;
         var eof = false;
         while (true) {
@@ -274,10 +305,10 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
                 break;
             } else return err;
             if (byte == '\n') break;
-            if (bytes.items.len < t.Limits.request_bytes) try bytes.append(fa, byte) else oversized = true;
+            if (bytes.items.len < t.Limits.request_bytes) try bytes.append(a, byte) else oversized = true;
         }
         if (eof and bytes.items.len == 0 and !oversized) break;
-        const response = try session.execute(fa, if (oversized) "" else bytes.items);
+        const response = try client.call(fa, if (oversized) "" else bytes.items);
         try output.interface.writeAll(response);
         try output.interface.writeByte('\n');
         try output.interface.flush();
@@ -335,21 +366,35 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
 // Boolean flags have already been handled above. Check the name before taking
 // a value so an unknown final flag stays UnknownOption rather than ValueRequired.
 fn valueOption(arg: []const u8) bool {
+    if (calendarField(arg) != null) return true;
     for ([_][]const u8{
-        "--config",               "--metrics-file",     "--grant-file",       "--client-file",       "--capabilities",
-        "--fixture-root",         "--fixture-scenario", "--cache-dir",        "--ui-file",           "--editor-mode",
-        "--metadata-limit",       "--cache-messages",   "--prefetch-bodies",  "--disk-limit-bytes",  "--cache-bytes",
-        "--account",              "--action",           "--undo-token",       "--url",               "--path",
-        "--message-ids",          "--message-id",       "--id",               "--before-message-id", "--after-message-id",
-        "--boundary-received-at", "--format",           "--from",             "--limit",             "--cursor",
-        "--query",                "--label",            "--thread-id",        "--draft-id",          "--attachment-id",
-        "--operation-id",         "--status",           "--to",               "--cc",                "--bcc",
-        "--subject",              "--body",             "--attach-file",      "--name",              "--label-id",
-        "--confirm-name",         "--body-file",        "--draft-file",       "--contact-file",      "--expected-etag",
-        "--add-label",            "--remove-label",     "--background-color", "--text-color",        "--queue-id",
-        "--blob-id",              "--mime-type",        "--scope",            "--send-delay",        "--delay-seconds",
+        "--backend",           "--config",           "--metrics-file",         "--grant-file",  "--client-file",  "--capabilities",
+        "--fixture-root",      "--fixture-scenario", "--cache-dir",            "--ui-file",     "--editor-mode",  "--metadata-limit",
+        "--cache-messages",    "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes", "--account",      "--action",
+        "--undo-token",        "--url",              "--path",                 "--message-ids", "--message-id",   "--id",
+        "--before-message-id", "--after-message-id", "--boundary-received-at", "--format",      "--from",         "--limit",
+        "--cursor",            "--query",            "--label",                "--thread-id",   "--draft-id",     "--attachment-id",
+        "--operation-id",      "--status",           "--to",                   "--cc",          "--bcc",          "--subject",
+        "--body",              "--attach-file",      "--name",                 "--label-id",    "--confirm-name", "--body-file",
+        "--draft-file",        "--contact-file",     "--expected-etag",        "--add-label",   "--remove-label", "--background-color",
+        "--text-color",        "--queue-id",         "--blob-id",              "--mime-type",   "--scope",        "--send-delay",
+        "--delay-seconds",
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
+}
+fn calendarField(arg: []const u8) ?[]const u8 {
+    const fields = [_]struct { flag: []const u8, key: []const u8 }{
+        .{ .flag = "--calendar-id", .key = "calendarId" },
+        .{ .flag = "--event-id", .key = "eventId" },
+        .{ .flag = "--date", .key = "date" },
+        .{ .flag = "--view", .key = "view" },
+        .{ .flag = "--time-zone", .key = "timeZone" },
+        .{ .flag = "--start-time-zone", .key = "startTimeZone" },
+        .{ .flag = "--end-time-zone", .key = "endTimeZone" },
+        .{ .flag = "--review-hash", .key = "reviewHash" },
+    };
+    for (fields) |field| if (eq(arg, field.flag)) return field.key;
+    return null;
 }
 fn writeMetrics(io: std.Io, path: []const u8, cap: *CappedAllocator, memory: *@import("../fixed_runtime.zig").Runtime, html_metrics: ?HtmlMetrics) !void {
     var buffer: [4096]u8 = undefined;

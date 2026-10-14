@@ -38,10 +38,13 @@ const path_completion = @import("path_completion.zig");
 const file_dialog = @import("file_dialog.zig");
 const mail_display = @import("mail_display.zig");
 const invitation = @import("invitation.zig");
+const calendar_ui = @import("calendar_ui.zig");
+const calendar_notifications = @import("calendar_notifications.zig");
 const action_palette = @import("actions.zig");
 const edit_history = @import("edit_history.zig");
 const reader_find = @import("reader_find.zig");
 const reader_selection = @import("reader_selection.zig");
+const reader_plain = @import("reader_plain.zig");
 const composer_hints = @import("composer_hints.zig");
 const updates = @import("updates.zig");
 const label_selection = @import("label_selection.zig");
@@ -65,8 +68,9 @@ const ComposeView = enum { rendered, original, plain };
 const Mode = enum { browse, search, command, compose, review, contacts, contact_edit, help, trash_confirm, invitation, labels, label_manager, attachment, theme };
 const LabelManagerPage = enum { list, create, rename, delete };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
+const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
-const JobKind = enum { updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation, open, attachment_save };
+const JobKind = enum { meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -77,9 +81,16 @@ const SyncStatus = struct {
 };
 const PendingCompose = enum { none, new, reply, reply_all, forward };
 const ComposeSourceMode = enum { choose, text, formatted, attached };
-const UxOverlay = enum { none, actions, scope, triage_review, aliases, history, saved, save_search, grace, discard, contact_addresses, label_colors, save_all, find };
+const UxOverlay = enum { none, gmail_draft, follow_up, actions, scope, triage_review, aliases, history, saved, save_search, grace, discard, contact_addresses, label_colors, save_all, find };
 const UxRow = struct { label: []const u8, detail: []const u8 = "", value: []const u8 = "", index: usize = 0 };
-const ReaderMarkup = struct { prepared: ?html_view.Prepared = null, fallback: bool = false, attempted: bool = false, display_text: ?[]const u8 = null };
+const ReceivedView = enum { automatic, plain, formatted };
+const ReaderChoice = struct {
+    account: @import("../bounded.zig").Text(254) = .{},
+    message: @import("../bounded.zig").Text(128) = .{},
+    mode: ReceivedView = .automatic,
+    details: bool = false,
+};
+const ReaderMarkup = struct { prepared: ?html_view.Prepared = null, plain: ?reader_plain.Prepared = null, fallback: bool = false, attempted: bool = false, display_text: ?[]const u8 = null, mode: ReceivedView = .automatic, details: bool = false };
 const ContactsState = enum { loading, cached, current, denied, failed, busy };
 const QueryScope = enum { cache, server };
 const ScrollBoundary = struct { id: []const u8, received_at: i64 = 0 };
@@ -157,6 +168,24 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "CacheChanged", .label = "Mail changed · try again" },
         .{ .code = "InvalidCursor", .label = "Mail changed · reload this view" },
         .{ .code = "CacheBoundaryGone", .label = "This cached boundary is no longer available" },
+        .{ .code = "ThreadWindowChanged", .label = "Conversation changed · reopen the thread" },
+        .{ .code = "ThreadWindowBoundary", .label = "No more messages in this direction" },
+        .{ .code = "InvalidThreadWindow", .label = "Conversation window is invalid · reopen the thread" },
+        .{ .code = "FollowUpChanged", .label = "Not saved · changed elsewhere · showing the latest follow-ups" },
+        .{ .code = "FollowUpLimitReached", .label = "Follow-up limit reached (100 active) · mark some done first" },
+        .{ .code = "InvalidFollowUpDate", .label = "Enter a valid date as YYYY-MM-DD" },
+        .{ .code = "FollowUpSingleMessage", .label = "Follow up applies to one message · Esc clears the selection" },
+        .{ .code = "FollowUpMessageUnavailable", .label = "Message could not be verified for this follow-up" },
+        .{ .code = "FollowUpMetadataUnavailableOffline", .label = "Metadata is no longer cached · reconnect to add this follow-up" },
+        .{ .code = "GmailDraftImportUnsupported", .label = "This draft cannot be imported completely · continue in Gmail" },
+        .{ .code = "DraftPausedInGmail", .label = "Draft is paused in Gmail · :gmail-draft checks or takes it back" },
+        .{ .code = "GmailDraftOutcomeUnknown", .label = "Upload unconfirmed · Check status; do not upload again" },
+        .{ .code = "GmailDraftChanged", .label = "Draft handoff changed · reopen :gmail-draft" },
+        .{ .code = "GmailDraftConflict", .label = "Gmail draft changed · Check status before choosing a local copy" },
+        .{ .code = "GmailDraftMissing", .label = "Gmail copy is missing · it may have been sent or deleted" },
+        .{ .code = "GmailCopyUnchecked", .label = "Review the Gmail copy warning and press g to acknowledge" },
+        .{ .code = "GmailDraftAlreadyLinked", .label = "This draft already has a Gmail copy · open :gmail-draft" },
+        .{ .code = "FollowUpStoreCorrupt", .label = "Local follow-ups could not be read · saved data kept" },
         .{ .code = "CacheMiss", .label = "This body is not cached yet" },
         .{ .code = "BodySizeMismatch", .label = "Mail body is incomplete" },
         .{ .code = "BodyNotCached", .label = "Body is not cached · Enter downloads this message" },
@@ -215,6 +244,12 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "NotMailbox", .label = "Open label management from the mailbox" },
         .{ .code = "UnverifiedSender", .label = "Sending identity is not verified" },
         .{ .code = "UnknownOutcome", .label = "Outcome unknown · check before retrying" },
+        .{ .code = "VaultLocked", .label = "Encrypted mail is locked · run omagma vault unlock" },
+        .{ .code = "VaultBusy", .label = "Encrypted mail is busy · waiting for the current operation" },
+        .{ .code = "BackendRequired", .label = "Start the encrypted mail service with omagma vault start" },
+        .{ .code = "BackendStopped", .label = "Encrypted mail service stopped · start it and reopen mail" },
+        .{ .code = "VaultIdentityMismatch", .label = "Wrong encrypted mail service · check the selected vault" },
+        .{ .code = "VaultOptionConflict", .label = "Encrypted mail is active · remove plaintext store path options" },
         .{ .code = "Timeout", .label = "Request timed out" },
         .{ .code = "Canceled", .label = "Request canceled" },
         .{ .code = "RateLimited", .label = "Gmail rate limit · try later" },
@@ -316,9 +351,14 @@ fn setMouseReporting(vx: *vaxis.Vaxis, writer: *Io.Writer, enabled: bool) !void 
 }
 const folders = [_][]const u8{ "Inbox", "Sent", "Drafts", "Archive", "Trash", "Spam", "All Mail", "Unread" };
 const folder_labels = [_][]const u8{ "INBOX", "SENT", "DRAFT", "", "TRASH", "SPAM", "", "UNREAD" };
-const HelpFeature = enum { always, files, attachments, editor, clipboard, aliases, updates, durable_drafts, send_queue, preferences, mail_changes, contacts_write, invitations, open_urls, session_drafts };
+const HelpFeature = enum { always, native, files, attachments, editor, clipboard, aliases, updates, durable_drafts, send_queue, preferences, mail_changes, contacts_write, invitations, open_urls, session_drafts };
 const HelpRow = struct { keys: []const u8 = "", action: []const u8 = "", section: []const u8 = "", requires: HelpFeature = .always };
 const help_rows = [_]HelpRow{
+    .{ .keys = "b / :follow-up", .action = "Set a local follow-up date for the focused message · Today, Tomorrow or YYYY-MM-DD", .requires = .native },
+    .{ .keys = ":gmail-draft · Actions Continue in Gmail", .action = "Upload a saved local draft once and pause local edits; check status or take back while keeping Gmail's copy. Requires mail-drafts (gmail.compose) or mail-modify permission", .requires = .native },
+    .{ .keys = "g in Review send after Gmail takeback", .action = "Check Gmail Drafts and Sent, then acknowledge the kept copy before sending locally. Any edit requires a fresh acknowledgement", .requires = .native },
+    .{ .keys = ":follow-ups · Navigation Follow-ups", .action = "View this account's due and upcoming reminders · j/k Choose · Enter Open · b Edit · d Done", .requires = .native },
+    .{ .keys = "Tab / Enter · Ctrl+S in Follow up", .action = "Choose a preset or save the date · Esc Cancel · Done removes only the local reminder; Gmail is unchanged", .requires = .native },
     .{ .keys = ":updates · Ctrl+P Updates", .action = "Check stable releases and see installation-specific upgrade instructions", .requires = .updates },
     .{ .keys = "Tab / Shift+Tab on Upgrade available", .action = "Focus Dismiss or How to update without moving the selected mail; Enter activates", .requires = .updates },
     .{ .keys = "Tab / Enter in Updates · Esc/q Back", .action = "Copy commands, open guides, check again, choose daily/manual checks or copy an agent request", .requires = .updates },
@@ -338,6 +378,8 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":add-contact / :discard-draft / :spam / :unspam", .action = "Complete contact, local draft and Spam workflows with explicit actions", .requires = .mail_changes },
     .{ .keys = ":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", .action = "During the countdown, Undo keeps the draft; Send now skips this wait; Tab/Enter chooses", .requires = .send_queue },
     .{ .section = "NAVIGATION" },
+    .{ .keys = "C / :calendar", .action = "Open native Calendar · 1/2/3 Agenda/Day/Week · g Choose calendar", .requires = .native },
+    .{ .keys = "A / :calendar-import", .action = "Review Add / Update / Cancel in the selected calendar; I remains RSVP", .requires = .native },
     .{ .keys = "j / k · arrows", .action = "Move through the focused pane" },
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
     .{ .keys = "Enter", .action = "Open mail or choose the focused item" },
@@ -354,6 +396,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "?", .action = "Open or close this help" },
     .{ .section = "SEARCH & READING" },
     .{ .keys = "/", .action = "Search retained mail in the local cache" },
+    .{ .keys = "Ctrl+G in mail search", .action = "Switch Cache / Gmail while keeping the query; Enter searches" },
     .{ .keys = "status:partial in Cache search", .action = "Find warnings and partial metadata; use All Mail" },
     .{ .keys = "\\", .action = "Search Gmail on the server" },
     .{ .keys = "q after a search", .action = "Clear the search and return to the mailbox" },
@@ -371,6 +414,10 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":copy-message · Ctrl+P Copy message", .action = "Explicitly copy this message's decoded envelope and full plaintext body to the terminal clipboard", .requires = .clipboard },
     .{ .action = "Reader text selection excludes headers, UI controls, pane borders and other messages. Normal v still changes reader layout.", .requires = .clipboard },
     .{ .keys = "v", .action = "Place the reader on the right or below" },
+    .{ .keys = "p in the reader · :received plain/formatted/auto", .action = "Choose the current message's plain or formatted alternative. Formatted mail uses the safe local semantic reader; remote resources stay unloaded." },
+    .{ .keys = "H in the reader · :headers", .action = "Expand or collapse the full envelope and status of the current message" },
+    .{ .keys = ":density compact/comfortable", .action = "Compact mail uses one-line rows and smaller reader headers; the density preference is saved" },
+    .{ .keys = "[ / ] · :thread-older / :thread-newer", .action = "Long conversations: load an older or newer 20-message window. Braces select a card; t opens its body. Counts show bodies still on demand and messages outside this window." },
     .{ .keys = "z", .action = "Expand or shrink the reader" },
     .{ .keys = "o", .action = "Open mail in this account's browser profile", .requires = .open_urls },
     .{ .keys = ":save-attachment N /path", .action = "Save attachment N to a new file", .requires = .files },
@@ -457,6 +504,45 @@ const help_rows = [_]HelpRow{
     .{ .keys = ":split below 40", .action = "Use 40% of vertical space for the mail list" },
     .{ .keys = ":bind n down", .action = "Remap n in mailbox mode; :unbind n restores it" },
     .{ .action = "Account, mailbox, selected mail and reader scroll restore on startup.", .requires = .preferences },
+    .{ .section = "MEETING REMINDERS" },
+    .{ .keys = "M · :meeting", .action = "Focus an upcoming meeting card; Dismiss is selected first" },
+    .{ .keys = "Ctrl+D / o / n in a meeting card", .action = "Dismiss / Join online meeting / Next reminder; Tab moves controls" },
+    .{ .keys = "Esc / M in a meeting card", .action = "Return to your view without dismissing; reminders stay hidden while composing" },
+};
+
+// Calendar uses the same searchable help document and navigation as Mail.
+const calendar_help_rows = [_]HelpRow{
+    .{ .section = "VIEWS & NAVIGATION" },
+    .{ .keys = "M · click card", .action = "Focus an upcoming meeting card; Dismiss is selected first" },
+    .{ .keys = "1 / 2 / 3", .action = "Agenda / Day / Week for the selected calendar" },
+    .{ .keys = "h / l · left / right", .action = "Previous or next period" },
+    .{ .keys = "t · Ctrl+G", .action = "Today · jump to a date (YYYY-MM-DD)" },
+    .{ .keys = "j / k · arrows", .action = "Choose an event; scroll an open event or review" },
+    .{ .keys = "Enter", .action = "Open the selected event or activate the focused control" },
+    .{ .keys = "g", .action = "Choose an account-bound calendar" },
+    .{ .keys = "/", .action = "Search events in the loaded calendar window" },
+    .{ .keys = "Ctrl+R", .action = "Refresh the selected calendar" },
+    .{ .keys = "Ctrl+P", .action = "Open Calendar actions" },
+    .{ .keys = "Tab / Shift+Tab", .action = "Move between controls; Enter activates" },
+    .{ .keys = "q / Esc", .action = "Return to Calendar; from its main view, return to Mail" },
+    .{ .section = "EVENTS & MEETINGS" },
+    .{ .keys = "o ·   Join", .action = "Open a meeting link in this account's configured Chrome profile" },
+    .{ .keys = "? · ~ · ×", .action = "Needs reply · Tentative · Declined" },
+    .{ .keys = "Ctrl+D / Ctrl+U", .action = "Scroll event details or a review by half a page" },
+    .{ .keys = "Ctrl+G / G · Home/End", .action = "Start or end of event details or a review" },
+    .{ .action = "All-day events keep their civil dates. Cancelled events are hidden. Stale or incomplete results never establish availability." },
+    .{ .section = "INVITATIONS & ACCOUNTS" },
+    .{ .keys = "I in Mail", .action = "Review an RSVP reply. Accept/Tentative also saves supported events when Calendar access is available" },
+    .{ .keys = "A in Mail", .action = "Review a separate Add / Update / Cancel action in the selected calendar; it sends no RSVP email" },
+    .{ .keys = "r in an uncertain review", .action = "Check Calendar without automatically replaying the action" },
+    .{ .keys = "1 / 2 / 3 in Mail · C", .action = "Switch Mail account, then open that account's Calendar" },
+    .{ .section = "HELP SEARCH" },
+    .{ .keys = "/ in help", .action = "Find keys, actions or section names, ignoring case" },
+    .{ .keys = "Enter · n / N", .action = "Keep the search; jump to the next or previous match" },
+    .{ .keys = "j/k · Ctrl+D/U", .action = "Scroll help by a line or half a page" },
+    .{ .keys = "Ctrl+G / G · Home/End", .action = "Start or end of help" },
+    .{ .keys = "Esc · q / ?", .action = "Esc clears the search first; close help to return to the same Calendar view" },
+    .{ .action = "While typing a help search, q and other letters are text." },
 };
 
 const TextPosition = text_layout.Position;
@@ -719,6 +805,23 @@ const Compose = struct {
     new_draft: bool = false,
     insert_mode: bool = false,
     unknown_outcome: bool = false,
+    gmail_link: ?@import("draft_link.zig").Link = null,
+    gmail_arena: ?std.heap.ArenaAllocator = null,
+    gmail_guard_unknown: bool = false,
+    fn gmailPaused(self: *const Compose) bool {
+        return self.gmail_guard_unknown or (if (self.gmail_link) |link| link.paused else false);
+    }
+    fn replaceGmailLink(self: *Compose, allocator: Allocator, raw: Value) !void {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        errdefer arena.deinit();
+        const link: ?@import("draft_link.zig").Link = if (raw == .null) null else try std.json.parseFromValueLeaky(@import("draft_link.zig").Link, arena.allocator(), raw, .{ .allocate = .alloc_always });
+        if (link) |value| try value.validate();
+        if (self.gmail_arena) |*previous| previous.deinit();
+        self.gmail_arena = arena;
+        self.gmail_link = link;
+        self.gmail_guard_unknown = false;
+        if (self.gmailPaused()) self.insert_mode = false;
+    }
     fn deinit(self: *Compose, allocator: Allocator) void {
         for (&self.fields) |*field| field.deinit(allocator);
         self.id.deinit(allocator);
@@ -736,6 +839,9 @@ const Compose = struct {
         if (self.original_arena) |*arena| arena.deinit();
         self.original_arena = null;
         self.original = null;
+        if (self.gmail_arena) |*arena| arena.deinit();
+        self.gmail_arena = null;
+        self.gmail_link = null;
     }
     fn mailboxes(allocator: Allocator, value: Value) ![]const u8 {
         return displayMailboxes(allocator, value, recipients.formatDisplay);
@@ -756,6 +862,7 @@ const Compose = struct {
         try self.fields[3].set(allocator, text(get(value_in, "subject")));
         try self.fields[4].set(allocator, text(get(value_in, "bodyText")));
         try self.id.set(allocator, text(get(value_in, "id")));
+        try self.replaceGmailLink(allocator, get(value_in, "gmailLink"));
         try self.thread.set(allocator, text(get(value_in, "threadId")));
         try self.reply.set(allocator, text(get(value_in, "inReplyTo")));
         try self.references.set(allocator, text(get(value_in, "references")));
@@ -871,7 +978,12 @@ const Job = struct {
     draft_target: @import("../bounded.zig").Text(128) = .{},
     unread_target: @import("../bounded.zig").Text(128) = .{},
     requested_at: i64 = 0,
+    preferences_revision: u64 = 0,
     saved_attachment_open: bool = false,
+    calendar_join_open: bool = false,
+    meeting_account: u8 = 0,
+    meeting_target: u8 = 0,
+    meeting_key: ?calendar_notifications.Key = null,
     progress: fetch_progress.Mailbox = .{},
     loading_rows: loading.Mailbox = .{},
     waiting_external: std.atomic.Value(bool) = .init(false),
@@ -907,6 +1019,26 @@ const App = struct {
     html_stats: html_view.Stats = .{},
     mouse_hits: layout.HitMap = .{},
     dialog_focus: dialog_controls.Focus = .{},
+    calendar: calendar_ui.State = .{},
+    meetings: calendar_notifications.State = .{},
+    meeting_enabled: bool = false,
+    meeting_wake: std.atomic.Value(bool) = .init(false),
+    meeting_clock: @import("../bounded.zig").Text(4096) = .{},
+    meeting_now: i64 = 0,
+    meeting_visual: u64 = 0,
+    meeting_selected: ?calendar_notifications.Key = null,
+    meeting_focused: bool = false,
+    meeting_window_small: bool = false,
+    meeting_control: usize = 0,
+    meeting_rect: ?layout.Rect = null,
+    meeting_mouse_hits: layout.HitMap = .{},
+    meeting_feedback: @import("../bounded.zig").Text(256) = .{},
+    meeting_feedback_key: ?calendar_notifications.Key = null,
+    meeting_closed_until: i64 = 0,
+    meeting_changed_until: i64 = 0,
+    meeting_drawn_key: ?calendar_notifications.Key = null,
+    calendar_query: Field = .{},
+    calendar_date: Field = .{},
     contacts: []const Value = &.{},
     selected: usize = 0,
     top: usize = 0,
@@ -920,6 +1052,10 @@ const App = struct {
     reader_invitation_account: @import("../bounded.zig").Text(254) = .{},
     reader_invitation_message: @import("../bounded.zig").Text(128) = .{},
     reader_invitation_title: @import("../bounded.zig").Text(512) = .{},
+    reader_invitation_can_reply: bool = false,
+    reader_invitation_badge: []const u8 = "Invitation",
+    reader_invitation_badge_tone: Tone = .sender,
+    reader_invitation_has_join: bool = false,
     reader_invitation_when: @import("../bounded.zig").Text(768) = .{},
     reader_invitation_where: @import("../bounded.zig").Text(1280) = .{},
     reader_account: Field = .{},
@@ -928,6 +1064,14 @@ const App = struct {
     reader_cached_view: bool = false,
     reader_omitted_messages: usize = 0,
     reader_is_thread: bool = false,
+    reader_progressive: bool = false,
+    reader_total_messages: usize = 0,
+    reader_older_messages: usize = 0,
+    reader_newer_messages: usize = 0,
+    reader_deferred_messages: usize = 0,
+    reader_hint_buffer: [768]u8 = undefined,
+    reader_choices: [32]?ReaderChoice = @splat(null),
+    reader_choice_next: usize = 0,
     reader_cards: [types.Limits.page]bool = @splat(true),
     reader_card_rows: [types.Limits.page]usize = @splat(0),
     reader_card: usize = 0,
@@ -970,6 +1114,7 @@ const App = struct {
     reader_find_reveal: bool = false,
     reader_find_width: u16 = 0,
     reader_find_height: u16 = 0,
+    reader_find_layout_key: ?u64 = null,
     fold_quotes: bool = false,
     fold_signatures: bool = false,
     reader_overlay: ReaderOverlay = .none,
@@ -1127,6 +1272,22 @@ const App = struct {
     previous_mode: Mode = .browse,
     expanded: bool = false,
     drafts_list: bool = false,
+    follow_ups_list: bool = false,
+    follow_up_arena: ?std.heap.ArenaAllocator = null,
+    follow_up_entries: []const Value = &.{},
+    gmail_draft_outcome: Field = .{},
+    gmail_remote_version: Field = .{},
+    gmail_content_digest: Field = .{},
+    gmail_reload_pending: bool = false,
+    gmail_send_ack: bool = false,
+    gmail_scroll: usize = 0,
+    gmail_description_lines: usize = 0,
+    gmail_description_height: usize = 0,
+    gmail_review_ready: bool = false,
+    follow_up_account: Field = .{},
+    follow_up_subject: Field = .{},
+    follow_up_version: i64 = 0,
+    follow_up_checked_at: i64 = 0,
     picker: bool = false,
     paste: bool = false,
     paste_cr: bool = false,
@@ -1173,6 +1334,15 @@ const App = struct {
     pending_compose_id: [256]u8 = undefined,
     pending_compose_id_len: usize = 0,
     invitation_review: invitation.Invitation = .{},
+    invitation_original_start: @import("../bounded.zig").Text(640) = .{},
+    invitation_confirmed_status: @import("../bounded.zig").Text(32) = .{},
+    invitation_response_unknown: bool = false,
+    invitation_calendar_sync_available: bool = false,
+    invitation_calendar_can_retry: bool = false,
+    invitation_calendar_sync_state: @import("../bounded.zig").Text(32) = .{},
+    invitation_calendar_sync_error: @import("../bounded.zig").Text(128) = .{},
+    invitation_calendar_sync_target: @import("../bounded.zig").Text(1024) = .{},
+    invitation_source_hash: @import("../bounded.zig").Text(64) = .{},
     invitation_operation_id: Field = .{},
     invitation_operation_error: Field = .{},
     invitation_unknown: bool = false,
@@ -1249,6 +1419,11 @@ const App = struct {
     preferences_file: Field = .{},
     ui_preferences: preferences.Preferences = .{},
     preferences_warning: bool = false,
+    remote_preferences_loaded: bool = false,
+    remote_preferences_pending: bool = false,
+    remote_preferences_retry_after: i64 = 0,
+    preferences_revision: u64 = 0,
+    preferences_saved_revision: u64 = 0,
     ux_overlay: UxOverlay = .none,
     ux_arena: ?std.heap.ArenaAllocator = null,
     ux_rows: std.ArrayList(UxRow) = .empty,
@@ -1280,6 +1455,7 @@ const App = struct {
     grace_due: i64 = 0,
     grace_close: bool = false,
     grace_recovery: bool = false,
+    grace_resume_required: bool = false,
     receipt_unknown: bool = false,
     grace_rect: ?layout.Rect = null,
     bulk_save_pending: bool = false,
@@ -1308,6 +1484,15 @@ const App = struct {
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        if (self.follow_up_arena) |*arena| arena.deinit();
+        self.gmail_draft_outcome.deinit(self.allocator);
+        self.gmail_remote_version.deinit(self.allocator);
+        self.gmail_content_digest.deinit(self.allocator);
+        self.follow_up_account.deinit(self.allocator);
+        self.follow_up_subject.deinit(self.allocator);
+        self.calendar.deinit(self.allocator);
+        self.calendar_query.deinit(self.allocator);
+        self.calendar_date.deinit(self.allocator);
         self.clearContactComposeIntent();
         self.reader_copy.deinit(self.allocator);
         self.reader_copy_test_value.deinit(self.allocator);
@@ -1388,7 +1573,7 @@ const App = struct {
         const self: *App = @ptrCast(@alignCast(context));
         const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
         const update_tick = now >= self.update_tick_at;
-        if (!self.theme_following.load(.acquire) and !self.grace_pending.load(.acquire) and !update_tick) return;
+        if (!self.theme_following.load(.acquire) and !self.grace_pending.load(.acquire) and !self.meeting_wake.load(.acquire) and !update_tick) return;
         if (now < self.theme_tick_at) return;
         self.theme_tick_at = now +| if (self.grace_pending.load(.acquire)) @as(i64, 500) else 2000;
         if (update_tick) self.update_tick_at = now +| 60000;
@@ -1438,7 +1623,8 @@ const App = struct {
         }
     }
     fn adoptBackgroundCache(self: *App) !void {
-        if (!self.cache_reload[self.account_index] or self.mode != .browse or self.drafts_list or self.label_picker or self.reader_overlay != .none or self.query.value().len > 0 or self.job.future != null or self.page_loading) return;
+        if (self.calendar.open) return;
+        if (!self.cache_reload[self.account_index] or self.mode != .browse or self.drafts_list or self.follow_ups_list or self.label_picker or self.reader_overlay != .none or self.query.value().len > 0 or self.job.future != null or self.page_loading) return;
         // Provider-visible older mail can lie outside the retained cache.
         // Probe the anchor before changing the page or its navigation history.
         const screen_row = self.selected -| self.top;
@@ -1466,7 +1652,7 @@ const App = struct {
         return self.ordinaryMailbox() and self.new_mail.visible();
     }
     fn ordinaryMailbox(self: *const App) bool {
-        return self.mode == .browse and !self.readerCopyVisible() and !self.update_open and self.ux_overlay == .none and !self.compose_active and !self.grace_active and !self.compose_choice and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0;
+        return !self.calendar.open and self.mode == .browse and !self.readerCopyVisible() and !self.update_open and self.ux_overlay == .none and !self.compose_active and !self.grace_active and !self.compose_choice and !self.expanded and !self.drafts_list and !self.label_picker and self.reader_overlay == .none and self.query.value().len == 0 and self.mail_selection.count == 0;
     }
     fn updateVisible(self: *const App) bool {
         return self.update_loaded and self.ordinaryMailbox() and updates.visible(&self.update_snapshot, @import("build_options").version);
@@ -1544,6 +1730,7 @@ const App = struct {
     }
     fn activateUpdate(self: *App, index: usize) !void {
         if (browser_target) return error.UpdatesUnavailable;
+        _ = self.cancelMeetingRead();
         switch (index) {
             0 => try self.copyUpdateText(try updates.commands(self.frame.allocator(), &self.update_snapshot)),
             1, 2 => {
@@ -1678,7 +1865,7 @@ const App = struct {
         self.notice_rect = rect;
     }
     fn jumpFirstMail(self: *App) !void {
-        if (self.drafts_list) {
+        if (self.drafts_list or self.follow_ups_list) {
             self.selected = 0;
             self.top = 0;
             return;
@@ -2432,7 +2619,7 @@ const App = struct {
             self.say(false, "Selection cleared", .{});
             return true;
         }
-        if (key.matches(' ', .{}) and self.focus == .list and !self.drafts_list) {
+        if (key.matches(' ', .{}) and self.focus == .list and !self.drafts_list and !self.follow_ups_list) {
             const id = self.messageId();
             if (id.len > 0) {
                 try self.mail_selection.toggle(id);
@@ -2441,7 +2628,7 @@ const App = struct {
             self.say(false, "{d} selected · x Archive · D Trash · m Label · :undo", .{self.mail_selection.count});
             return true;
         }
-        if (key.matches('a', .{ .ctrl = true }) and self.focus == .list and !self.drafts_list) {
+        if (key.matches('a', .{ .ctrl = true }) and self.focus == .list and !self.drafts_list and !self.follow_ups_list) {
             self.mail_selection.clear();
             for (self.messages) |message| try self.mail_selection.toggle(text(get(message, "id")));
             self.say(false, "{d} selected on this page", .{self.mail_selection.count});
@@ -2504,7 +2691,290 @@ const App = struct {
         }
         return null;
     }
+    fn gmailCopyWarning(self: *const App) bool {
+        return if (self.compose.gmail_link) |link| link.phase != .rejected and !link.paused else false;
+    }
+    fn openGmailDraft(self: *App) !void {
+        if (browser_target) return error.UnsupportedCommand;
+        if (!self.compose_active or self.compose.id.value().len == 0) return error.DraftNotFound;
+        if (self.compose.unknown_outcome) return error.UnknownOutcome;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        self.mode = .compose;
+        if (!self.compose.gmailPaused() and self.compose.revision != self.compose.saved_revision) try self.saveDraft(.save_gmail) else try self.requestGmailDraftInfo();
+    }
+    fn requestGmailDraftInfo(self: *App) !void {
+        self.cancelAutosaveTimer();
+        self.autosave_due = false;
+        try self.start(.gmail_draft_info, .{ .cmd = "draft.gmail-info", .account = self.account(), .draftId = self.compose.id.value() });
+    }
+    fn presentGmailDraft(self: *App) !void {
+        try self.beginUx(.gmail_draft, " Continue in Gmail ");
+        try self.ux_target.set(self.allocator, self.compose.id.value());
+        self.ux_focus = 1;
+        self.gmail_scroll = 0;
+        self.gmail_review_ready = false;
+        try self.uxRow(.{ .label = "Back to local draft", .index = 0 });
+        const permitted = self.hasCapability("mail-drafts") or self.hasCapability("mail-modify");
+        const link = self.compose.gmail_link;
+        if (link == null or link.?.phase == .rejected) {
+            if (permitted) try self.uxRow(.{ .label = "Upload once · pause local edits", .index = 1 });
+        } else {
+            try self.uxRow(.{ .label = "Open Gmail Drafts", .index = 2 });
+            if (permitted) {
+                try self.uxRow(.{ .label = if (link.?.phase == .unknown) "Check upload status" else "Check Gmail draft", .index = 3 });
+                if (link.?.phase != .unknown and self.gmail_remote_version.value().len > 0) try self.uxRow(.{ .label = "Import Gmail text as a new draft", .index = 5 });
+                if (link.?.paused and link.?.phase != .unknown) try self.uxRow(.{ .label = if (same(self.gmail_draft_outcome.value(), "changed")) "Keep local copy + Gmail edits" else if (same(self.gmail_draft_outcome.value(), "missing")) "Keep local · I checked Gmail" else "Take back · keep Gmail copy", .index = 4 });
+            }
+        }
+        self.say(false, "Continue in Gmail · Tab / j/k Choose · Enter Activate · Esc Back", .{});
+    }
+    fn activateGmailDraft(self: *App) !void {
+        _ = self.cancelMeetingRead();
+        if (!same(self.ux_account.value(), self.account()) or !same(self.ux_target.value(), self.compose.id.value())) return error.DraftChanged;
+        const row = self.uxAt(self.ux_selected) orelse return;
+        if (row.index == 0) {
+            self.dismissGmailDraft();
+            return;
+        }
+        if ((row.index == 1 or row.index == 4 or row.index == 5) and !self.gmail_review_ready) {
+            self.say(false, "Read the handoff details · Ctrl+D scrolls", .{});
+            return;
+        }
+        if (self.job.future != null) return error.OperationPending;
+        if (row.index == 2) {
+            var bytes: [2048]u8 = undefined;
+            var writer: Io.Writer = .fixed(&bytes);
+            try writer.writeAll("https://mail.google.com/mail/u/0/?authuser=");
+            try @import("../open_target.zig").encode(&writer, self.account());
+            try writer.writeAll("#drafts");
+            self.closeUx();
+            try self.start(.open, .{ .cmd = "browser.open", .account = self.account(), .url = writer.buffered() });
+            return;
+        }
+        const expected: u64 = if (self.compose.gmail_link) |link| link.version else 0;
+        const choice = row.index;
+        const changed = same(self.gmail_draft_outcome.value(), "changed");
+        const missing = same(self.gmail_draft_outcome.value(), "missing");
+        self.closeUx();
+        if (choice == 1) {
+            self.compose.gmail_guard_unknown = true;
+            try self.start(.gmail_draft_action, .{ .cmd = "draft.gmail-save", .account = self.account(), .draftId = self.compose.id.value(), .expectedVersion = expected, .expectedDigest = self.gmail_content_digest.value() });
+        } else if (choice == 3) {
+            try self.start(.gmail_draft_action, .{ .cmd = "draft.gmail-status", .account = self.account(), .draftId = self.compose.id.value(), .expectedVersion = expected });
+        } else if (choice == 5) {
+            try self.start(.gmail_draft_action, .{ .cmd = "draft.gmail-import", .account = self.account(), .draftId = self.compose.id.value(), .expectedVersion = expected, .expectedRemoteMessageId = self.gmail_remote_version.value() });
+        } else if (choice == 4) {
+            try self.start(.gmail_draft_action, .{ .cmd = "draft.gmail-take-back", .account = self.account(), .draftId = self.compose.id.value(), .expectedVersion = expected, .keepLocalAfterChange = changed, .expectedRemoteMessageId = self.gmail_remote_version.value(), .acknowledgeMissingCopy = missing });
+        }
+    }
+    fn drawGmailDraft(self: *App, win: vaxis.Window) !void {
+        self.mouse_hits.clear();
+        const width = @min(win.width -| 2, 78);
+        const height = @min(win.height -| 2, 24);
+        if (width < 26 or height < 10) return;
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " Continue in Gmail ", true);
+        const linked = self.compose.gmail_link;
+        const permitted = self.hasCapability("mail-drafts") or self.hasCapability("mail-modify");
+        const explanation: []const u8 = if (!permitted) "Permission needed: add mail-drafts to this account's authorization (gmail.compose), or use its existing mail-modify grant. See Help (?) / Gmail drafts. Existing authorization remains usable until the new grant succeeds." else if (linked == null or linked.?.phase == .rejected) "Upload this saved draft once to Gmail, then continue on Gmail or your phone. Local edits and sending pause. Your local Markdown source, original formatting and files are retained. Nothing is sent." else if (linked.?.phase == .unknown) "Upload not confirmed. The Gmail copy may exist or may already have been sent. Check upload status or inspect Gmail; an empty search is not proof of failure. Omagma will not upload again. Local edits remain paused." else if (!linked.?.paused) "This local copy can be edited again. The Gmail copy was kept and may still be edited or sent there. Before sending locally, check Gmail and acknowledge the copy warning in Review send." else if (same(self.gmail_draft_outcome.value(), "changed")) "Gmail has newer edits. Import creates a new Plain draft with Gmail’s complete text, recipients and supported files; your original local source and Gmail copy stay intact. Keep local copy resumes the original source instead. Check both copies before sending." else if (same(self.gmail_draft_outcome.value(), "missing")) "Gmail draft is missing. It may have been sent or deleted; this is not delivery confirmation. Check Gmail Drafts and Sent first. Keeping the local copy enables editing, with a duplicate-send warning." else "Draft is available in Gmail. Local edits and sending are paused. Import creates a new Plain draft with complete text, recipients and files, preserving both existing copies. Take back rechecks Gmail and resumes this local source. No Gmail draft is deleted or overwritten.";
+        const description = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\nSubject: {s}\nFiles: {d}\n\n{s}\n", .{ self.account(), self.compose.fields[3].value(), self.compose.attachments.len, explanation });
+        const count = self.uxCount();
+        const content_height = inner.height -| @as(u16, @intCast(count + 2));
+        const content = inner.child(.{ .height = content_height });
+        const lines = try self.flowTone(content, description, self.gmail_scroll, 0, if (linked != null and linked.?.phase == .unknown) .warning else .text);
+        self.gmail_description_lines = lines;
+        self.gmail_description_height = content.height;
+        self.gmail_scroll = @min(self.gmail_scroll, lines -| @as(usize, content.height));
+        if (content.height > 0 and self.gmail_scroll + content.height >= lines) self.gmail_review_ready = true;
+        for (self.ux_rows.items, 0..) |row, index| {
+            const label = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (index == self.ux_selected) @as([]const u8, "› ") else "  ", row.label });
+            try self.line(inner, content_height + index, try self.fitLine(inner, label, inner.width), if (index == self.ux_selected and self.ux_focus != 3) .selected else .text);
+            self.mouseRows(inner, content_height + index, 1, .dialog_action, 100 + index);
+        }
+        const x = try self.actionButton(inner, inner.height -| 2, 0, "[Enter Choose]", self.ux_focus == 2, true, .dialog_action, 12);
+        _ = try self.actionButton(inner, inner.height -| 2, x, "[Esc Back]", self.ux_focus == 3, true, .dialog_action, 13);
+        try self.line(inner, inner.height -| 1, try self.fitLine(inner, if (self.gmail_review_ready) "j/k Choose · Tab · Ctrl+D/U Text" else "Ctrl+D Read more · Esc Back", inner.width), .muted);
+    }
+    fn followUpEntry(self: *const App, id: []const u8) ?Value {
+        if (!same(self.follow_up_account.value(), self.account())) return null;
+        for (self.follow_up_entries) |entry| if (same(text(get(entry, "messageId")), id)) return entry;
+        return null;
+    }
+    fn followUpToday(self: *App) ![]const u8 {
+        return @import("follow_up.zig").dateForDay(self.frame.allocator(), try self.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()));
+    }
+    fn followUpDueCount(self: *App) usize {
+        if (!same(self.follow_up_account.value(), self.account())) return 0;
+        const today = self.followUpToday() catch return 0;
+        var count: usize = 0;
+        for (self.follow_up_entries) |entry| if (std.mem.order(u8, text(get(entry, "dueDate")), today) != .gt) {
+            count += 1;
+        };
+        return count;
+    }
+    fn replaceFollowUps(self: *App, response: []const u8) !void {
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        var transferred = false;
+        defer if (!transferred) arena.deinit();
+        const result = try self.data(arena.allocator(), response);
+        const entries = items(get(result, "entries"));
+        if (entries.len > @import("follow_up.zig").limit) return error.FollowUpStoreCorrupt;
+        for (entries) |entry| {
+            try @import("../bounded.zig").identifier(text(get(entry, "messageId")));
+            try @import("follow_up.zig").date(text(get(entry, "dueDate")));
+            if (integer(get(entry, "version")) <= 0) return error.FollowUpStoreCorrupt;
+        }
+        try self.follow_up_account.set(self.allocator, self.account());
+        if (self.follow_up_arena) |*old| old.deinit();
+        self.follow_up_arena = arena;
+        transferred = true;
+        self.follow_up_entries = entries;
+        self.follow_up_checked_at = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        if (self.follow_ups_list) {
+            try self.replaceList(.follow_up_list, response);
+            if (self.messages.len > 0) try self.preview(false);
+        }
+    }
+    fn loadFollowUps(self: *App) !void {
+        if (browser_target or self.account().len == 0) return;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const response = try self.cached(arena.allocator(), .{ .cmd = "reminder.list", .account = self.account() }) orelse return;
+        try self.replaceFollowUps(response);
+    }
+    fn followUpTick(self: *App) void {
+        if (browser_target or self.job.future != null or self.ux_overlay != .none or self.mode != .browse or self.calendar.open) return;
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        if (now -| self.follow_up_checked_at < 60000) return;
+        // Local read only; the existing minute event also redraws due counts at
+        // midnight. Failed reads wait until the next tick, without provider work.
+        self.follow_up_checked_at = now;
+        self.loadFollowUps() catch {};
+    }
+    fn openFollowUps(self: *App) !void {
+        if (browser_target) return error.NativeOnly;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        self.rememberWorkingContext();
+        self.closeCalendar();
+        self.closeUx();
+        self.clearReader();
+        self.clearHistory();
+        self.mail_selection.clear();
+        try self.query.set(self.allocator, "");
+        try self.cursor.set(self.allocator, "");
+        self.follow_ups_list = true;
+        self.drafts_list = false;
+        self.mode = .browse;
+        self.focus = .list;
+        self.expanded = false;
+        self.selected = 0;
+        self.top = 0;
+        self.messages = &.{};
+        self.pending_list = false;
+        self.pending_remote_list = false;
+        self.pending_cached_list = false;
+        self.pending_read = false;
+        self.pending_thread = false;
+        self.pending_page = false;
+        self.pending_window_provider = false;
+        self.generation +%= 1;
+        try self.loadFollowUps();
+        self.say(false, "Follow-ups · {s} · {d} due · local to this computer", .{ self.account(), self.followUpDueCount() });
+    }
+    fn editFollowUp(self: *App) !void {
+        if (browser_target) return error.NativeOnly;
+        if (self.drafts_list or self.compose_active) return error.DraftNotMail;
+        if (self.mail_selection.count > 0) return error.FollowUpSingleMessage;
+        const message = self.focusedMessage() orelse return error.MessageRequired;
+        // Pin before refreshing the reminder list: a concurrent completion can
+        // change its selection, but cannot change this editor's target.
+        try self.ux_target.set(self.allocator, text(get(message, "id")));
+        try self.follow_up_subject.set(self.allocator, text(get(message, "subject")));
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        try self.loadFollowUps();
+        const entry = self.followUpEntry(self.ux_target.value());
+        self.follow_up_version = if (entry) |value| integer(get(value, "version")) else 0;
+        try self.beginUx(.follow_up, " Follow up ");
+        const day = try self.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds());
+        const today = try @import("follow_up.zig").dateForDay(self.frame.allocator(), day);
+        const tomorrow = try @import("follow_up.zig").dateForDay(self.frame.allocator(), day + 1);
+        try self.ux_query.set(self.allocator, if (entry) |value| text(get(value, "dueDate")) else tomorrow);
+        try self.uxRow(.{ .label = "Today", .value = today });
+        try self.uxRow(.{ .label = "Tomorrow", .value = tomorrow });
+        if (entry != null) try self.uxRow(.{ .label = "Done · remove this local reminder", .value = "done" });
+        self.ux_focus = if (entry != null) 0 else 1;
+        self.ux_selected = self.ux_rows.items.len;
+        for (self.ux_rows.items, 0..) |row, index| if (same(row.value, self.ux_query.value())) {
+            self.ux_selected = index;
+            break;
+        };
+    }
+    fn selectFollowUpPreset(self: *App, index: usize) !void {
+        self.ux_selected = @min(index, self.ux_rows.items.len -| 1);
+        const row = self.uxAt(self.ux_selected) orelse return;
+        if (!same(row.value, "done")) try self.ux_query.set(self.allocator, row.value);
+    }
+    fn saveFollowUp(self: *App, allow_done: bool) !void {
+        if (!same(self.ux_account.value(), self.account())) return error.AccountContextChanged;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        const selected = if (self.ux_focus == 1) self.uxAt(self.ux_selected) else null;
+        const done_choice = allow_done and selected != null and same(selected.?.value, "done");
+        const value = self.ux_query.value();
+        if (done_choice) {
+            try self.start(.follow_up_write, .{ .cmd = "reminder.done", .account = self.account(), .messageId = self.ux_target.value(), .expectedVersion = self.follow_up_version });
+        } else {
+            try @import("follow_up.zig").date(value);
+            try self.start(.follow_up_write, .{ .cmd = "reminder.set", .account = self.account(), .messageId = self.ux_target.value(), .dueDate = value, .expectedVersion = self.follow_up_version });
+        }
+        self.closeUx();
+    }
+    fn completeFollowUp(self: *App) !void {
+        const entry = self.followUpEntry(self.messageId()) orelse return error.MessageRequired;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        try self.start(.follow_up_write, .{ .cmd = "reminder.done", .account = self.account(), .messageId = text(get(entry, "messageId")), .expectedVersion = integer(get(entry, "version")) });
+    }
+    fn drawFollowUpEditor(self: *App, win: vaxis.Window) !void {
+        self.mouse_hits.clear();
+        const width = @min(win.width -| 2, 76);
+        const height = @min(win.height -| 2, 13);
+        if (width < 28 or height < 10) return;
+        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const inner = self.panel(area, 0, width, " Follow up ", true);
+        try self.line(inner, 0, try self.fitLine(inner, self.follow_up_subject.value(), inner.width), .subject);
+        try self.line(inner, 1, try self.fitLine(inner, self.ux_account.value(), inner.width), .muted);
+        try self.editLine(inner, 2, "Date YYYY-MM-DD", &self.ux_query, self.ux_focus == 0, if (self.ux_focus == 0) .selected else .text);
+        self.mouseRows(inner, 2, 1, .dialog_action, 10);
+        for (self.ux_rows.items, 0..) |entry, index| {
+            try self.line(inner, 3 + index, entry.label, if (self.ux_focus == 1 and self.ux_selected == index) .selected else .text);
+            self.mouseRows(inner, 3 + index, 1, .dialog_action, 100 + index);
+        }
+        try self.line(inner, inner.height -| 3, try self.fitLine(inner, "Local reminder on this computer · Gmail is unchanged", inner.width), .muted);
+        const x = try self.actionButton(inner, inner.height -| 2, 0, if (inner.width >= 32) "[Ctrl+S Save date]" else "[Enter Save]", self.ux_focus == 2, true, .dialog_action, 12);
+        _ = try self.actionButton(inner, inner.height -| 2, x, "[Esc Cancel]", self.ux_focus == 3, true, .dialog_action, 13);
+        try self.line(inner, inner.height -| 1, try self.fitLine(inner, "Tab Controls · Enter Choose · Ctrl+S Save date · Esc Cancel", inner.width), .muted);
+    }
+    fn drawFollowUpRow(self: *App, win: vaxis.Window, row: usize, index: usize) !void {
+        if (row >= win.height or index >= self.messages.len) return;
+        const message = self.messages[index];
+        const due = text(get(message, "followUpDate"));
+        const today = self.followUpToday() catch "";
+        const status = if (std.mem.lessThan(u8, due, today)) "Overdue" else if (same(due, today)) "Today" else "Upcoming";
+        const item = win.child(.{ .y_off = @intCast(row), .height = @intCast(@min(@min(self.mailRowStride(), 2), win.height - row)) });
+        if (index == self.selected) item.fill(.{ .style = self.listStyle(.text, true) });
+        const title = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s} · {s}", .{ due, status, text(get(message, "subject")) });
+        _ = item.printSegment(.{ .text = try self.fitLine(item, title, item.width), .style = self.listStyle(if (std.mem.order(u8, due, today) != .gt) .accent else .subject, index == self.selected) }, .{ .wrap = .none });
+        if (self.mailRowStride() > 1 and item.height > 1) _ = item.printSegment(.{ .text = try self.fitLine(item, text(get(get(message, "from"), "name")), item.width), .style = self.listStyle(.muted, index == self.selected) }, .{ .row_offset = 1, .wrap = .none });
+        self.mouseRows(win, row, @intCast(self.mailRowStride()), .mail, index);
+    }
     fn mailboxTitle(self: *App) []const u8 {
+        if (self.follow_ups_list) return "Follow-ups";
         if (self.custom_label.value().len == 0) return folders[self.folder];
         for (self.labels) |label_value| if (same(text(get(label_value, "id")), self.custom_label.value())) return text(get(label_value, "name"));
         return self.custom_label.value();
@@ -2577,6 +3047,10 @@ const App = struct {
         self.status_error_len = code.len;
     }
     fn sayError(self: *App, code: []const u8) void {
+        if (self.calendar.open) {
+            self.calendar.error_code.set(code[0..@min(code.len, 128)]) catch {};
+            self.calendar.notice.set("Calendar operation failed · retained data kept") catch {};
+        }
         if (validDiagnosticCode(code)) self.say(true, "{s} · {s}", .{ humanError(code), code }) else self.say(true, "{s}", .{humanError(code)});
         self.diagnostic(code);
         if (same(code, "UnknownOutcome")) self.status_kind = .unknown;
@@ -2688,8 +3162,76 @@ const App = struct {
             if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.previewTheme(.follow_omarchy) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.previewTheme(.omagma);
         }
     }
+    fn loadRemotePreferences(self: *App) !void {
+        var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const response = try @import("backend_retry.zig").call(self.io, self.allocator, a, self.client, "{\"cmd\":\"preferences.get\"}", 35000);
+        const result = try self.data(a, response);
+        if (result != .object or !result.object.contains("preferences")) return error.InvalidPreferencesResponse;
+        const value = get(result, "preferences");
+        if (value != .null) {
+            if (value != .object) return error.InvalidPreferencesResponse;
+            const bytes = try @import("json.zig").encodeAlloc(a, value, .{});
+            self.ui_preferences = try preferences.parse(a, bytes);
+        }
+        self.reader_layout = self.ui_preferences.readerLayout;
+        self.remote_preferences_loaded = true;
+        self.preferences_warning = false;
+    }
+    fn remotePreferencesRequest(self: *App, a: Allocator) !Value {
+        if (!self.remote_preferences_loaded) return error.PreferencesNotLoaded;
+        const bytes = try preferences.encode(a, &self.ui_preferences);
+        const value = try std.json.parseFromSliceLeaky(Value, a, bytes, .{});
+        return @import("json.zig").value(a, .{ .cmd = "preferences.set", .preferences = value });
+    }
+    fn flushRemotePreferences(self: *App) !void {
+        if (!self.options.remote_preferences or self.preferences_revision == self.preferences_saved_revision) return;
+        var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        const request = try @import("json.zig").encodeAlloc(a, try self.remotePreferencesRequest(a), .{});
+        const response = try @import("backend_retry.zig").call(self.io, self.allocator, a, self.client, request, 35000);
+        const result = try self.data(a, response);
+        if (!truth(get(result, "saved"))) return error.InvalidPreferencesResponse;
+        self.preferences_saved_revision = self.preferences_revision;
+        self.remote_preferences_pending = false;
+        self.remote_preferences_retry_after = 0;
+        self.preferences_warning = false;
+    }
+    fn finishRemotePreferences(self: *App) void {
+        // A failed admission or connection leaves the latest snapshot pending.
+        // Never discard a newer edit merely because an older save completed.
+        self.remote_preferences_pending = true;
+        self.remote_preferences_retry_after = Io.Timestamp.now(self.io, .awake).toMilliseconds() + 2000;
+        if (self.job.failure) |err| {
+            self.preferences_warning = true;
+            self.sayFailure("UI preferences not saved", @errorName(err));
+            return;
+        }
+        const result = self.data(self.job_arena.allocator(), self.job.response orelse "") catch {
+            self.preferences_warning = true;
+            return;
+        };
+        if (!truth(get(result, "saved"))) {
+            self.preferences_warning = true;
+            self.sayFailure("UI preferences not saved", "InvalidPreferencesResponse");
+            return;
+        }
+        self.preferences_saved_revision = self.job.preferences_revision;
+        self.remote_preferences_pending = self.preferences_saved_revision != self.preferences_revision;
+        self.remote_preferences_retry_after = 0;
+        self.preferences_warning = false;
+    }
     fn loadPreferences(self: *App) void {
         if (browser_target) return;
+        if (self.options.remote_preferences) {
+            self.loadRemotePreferences() catch |err| {
+                self.preferences_warning = true;
+                self.sayFailure("Encrypted UI preferences unavailable", @errorName(err));
+            };
+            return;
+        }
         const filename = preferences.path(self.allocator, self.environ, self.options.ui_file) catch |err| {
             self.preferences_warning = true;
             self.say(true, "UI preferences fallback · {s}", .{@errorName(err)});
@@ -2722,6 +3264,18 @@ const App = struct {
             self.preferences_warning = false;
             return;
         }
+        if (self.options.remote_preferences) {
+            if (!self.remote_preferences_loaded) {
+                self.preferences_warning = true;
+                self.sayFailure("UI preferences not saved", "PreferencesNotLoaded");
+                return;
+            }
+            self.ui_preferences.readerLayout = self.reader_layout;
+            self.preferences_revision +%= 1;
+            self.remote_preferences_pending = true;
+            self.preferences_warning = false;
+            return;
+        }
         if (self.preferences_file.value().len == 0) {
             self.preferences_warning = true;
             return;
@@ -2735,7 +3289,7 @@ const App = struct {
         self.preferences_warning = false;
     }
     fn rememberWorkingContext(self: *App) void {
-        if (self.account().len == 0 or self.compose_active or self.query.value().len > 0) return;
+        if (self.account().len == 0 or self.compose_active or self.follow_ups_list or self.query.value().len > 0) return;
         var slot: ?usize = null;
         for (&self.ui_preferences.contexts, 0..) |*entry, index| {
             if (entry.*) |*context| {
@@ -2793,6 +3347,8 @@ const App = struct {
                 .reply => 'r',
                 .reply_all => 'R',
                 .contacts => 'a',
+                .calendar => 'C',
+                .follow_up => 'b',
                 .cache_search => '/',
                 .server_search => '\\',
                 .layout => 'v',
@@ -2811,6 +3367,36 @@ const App = struct {
         return key;
     }
     fn onReaderCommand(self: *App, command: []const u8) !bool {
+        if (same(command, "thread-older") or same(command, "thread-newer")) {
+            try self.loadThreadWindow(same(command, "thread-newer"));
+            return true;
+        }
+        if (std.mem.startsWith(u8, command, "density ")) {
+            const chosen = std.meta.stringToEnum(preferences.Density, std.mem.trim(u8, command[8..], " ")) orelse return error.InvalidDensity;
+            self.ui_preferences.density = chosen;
+            self.readerLayoutChanged();
+            self.saveUiPreferences();
+            self.say(self.preferences_warning, "Density {s} · {s}", .{ @tagName(chosen), if (self.preferences_warning) "preference not saved" else if (browser_target) "this session" else "preference saved" });
+            return true;
+        }
+        if (same(command, "headers")) {
+            try self.toggleReaderHeaders();
+            return true;
+        }
+        if (std.mem.startsWith(u8, command, "received ")) {
+            const raw = std.mem.trim(u8, command[9..], " ");
+            const mode: ReceivedView = if (same(raw, "auto")) .automatic else std.meta.stringToEnum(ReceivedView, raw) orelse return error.InvalidReceivedView;
+            try self.setReceivedView(mode);
+            return true;
+        }
+        if (same(command, "calendar")) {
+            try self.openCalendar(false);
+            return true;
+        }
+        if (same(command, "calendar-import")) {
+            try self.openCalendar(true);
+            return true;
+        }
         if (same(command, "view-editor")) {
             self.viewReaderEditor() catch |err| switch (err) {
                 error.MessageRequired, error.ReaderMessageChanging => self.say(false, "Current message is still loading · wait for this preview", .{}),
@@ -2882,6 +3468,10 @@ const App = struct {
         }
         return false;
     }
+    fn dismissGmailDraft(self: *App) void {
+        self.closeUx();
+        self.say(false, "{s}", .{if (self.compose.gmailPaused()) @as([]const u8, "Draft paused in Gmail · g Status or takeback") else if (self.gmailCopyWarning()) "Local draft · Gmail copy kept" else "Local draft · no mail sent"});
+    }
     fn closeUx(self: *App) void {
         if (self.ux_arena) |*arena| arena.deinit();
         self.ux_arena = null;
@@ -2911,7 +3501,7 @@ const App = struct {
         };
     }
     fn uxInput(self: *const App) bool {
-        return self.ux_overlay != .scope and self.ux_overlay != .discard and self.ux_overlay != .triage_review;
+        return self.ux_overlay != .gmail_draft and self.ux_overlay != .scope and self.ux_overlay != .discard and self.ux_overlay != .triage_review;
     }
     fn uxMatches(self: *const App, row: UxRow) bool {
         return !self.uxFilter() or self.ux_query.value().len == 0 or cache_query.find(row.label, self.ux_query.value()) != null or cache_query.find(row.detail, self.ux_query.value()) != null;
@@ -2938,7 +3528,9 @@ const App = struct {
         try self.beginUx(.actions, " Actions ");
         for (action_palette.entries, 0..) |entry, index| {
             if (!entry.available(context) or (composing and (entry.id == .compose or entry.id == .theme))) continue;
+            if (composing and self.compose.gmailPaused() and entry.id != .gmail_draft and entry.id != .help) continue;
             const supported = switch (entry.id) {
+                .calendar, .follow_up, .follow_ups, .gmail_draft => !browser_target,
                 .updates => self.capabilities.updates,
                 .files, .save_all => self.capabilities.files,
                 .sender => self.capabilities.aliases,
@@ -2980,6 +3572,23 @@ const App = struct {
         self.saveUiPreferences();
     }
     fn onUxCommand(self: *App, command: []const u8) !bool {
+        if (same(command, "meeting")) {
+            if (self.mode == .command) self.mode = self.previous_mode;
+            self.focusMeeting();
+            return true;
+        }
+        if (same(command, "gmail-draft")) {
+            try self.openGmailDraft();
+            return true;
+        }
+        if (same(command, "follow-ups")) {
+            try self.openFollowUps();
+            return true;
+        }
+        if (same(command, "follow-up")) {
+            try self.editFollowUp();
+            return true;
+        }
         if (same(command, "updates")) {
             self.openUpdates();
             return true;
@@ -3089,6 +3698,8 @@ const App = struct {
             return error.AccountContextChanged;
         }
         const kind = self.ux_overlay;
+        if (kind == .gmail_draft) return self.activateGmailDraft();
+        if (kind == .follow_up) return self.saveFollowUp(true);
         if (kind == .save_all) {
             const folder = try self.allocator.dupe(u8, self.ux_query.value());
             defer self.allocator.free(folder);
@@ -3140,6 +3751,9 @@ const App = struct {
             };
             if (key) |letter| return self.onKey(.{ .codepoint = letter });
             switch (action) {
+                .calendar => try self.openCalendar(false),
+                .follow_up => try self.editFollowUp(),
+                .follow_ups => try self.openFollowUps(),
                 .updates => self.openUpdates(),
                 .manage_labels => try self.openLabelManager(),
                 .scope => {
@@ -3182,6 +3796,20 @@ const App = struct {
         } else try self.activateExtendedUx(kind, index, value);
     }
     fn onUxKey(self: *App, key: Key) !void {
+        if (self.ux_overlay == .gmail_draft) {
+            if (self.job.future != null) return;
+            if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) {
+                self.gmail_scroll = @min(self.gmail_scroll +| @max(self.gmail_description_height, 1), self.gmail_description_lines -| self.gmail_description_height);
+                return;
+            }
+            if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) {
+                self.gmail_scroll -|= @max(self.gmail_description_height, 1);
+                return;
+            }
+        }
+        if (self.ux_overlay == .follow_up and key.matches('s', .{ .ctrl = true })) {
+            return self.saveFollowUp(false);
+        }
         if (self.ux_overlay == .save_all and self.ux_focus == 1 and key.matches(' ', .{})) {
             if (self.uxAt(self.ux_selected)) |selected| {
                 self.bulk_save_flags[selected.index] = !self.bulk_save_flags[selected.index];
@@ -3191,7 +3819,7 @@ const App = struct {
             return;
         }
         if (key.matches(Key.escape, .{}) or key.matches('c', .{ .ctrl = true }) or (self.ux_focus != 0 and key.matches('q', .{}))) {
-            self.closeUx();
+            if (self.ux_overlay == .gmail_draft) self.dismissGmailDraft() else self.closeUx();
             return;
         }
         const rows = self.uxCount();
@@ -3207,18 +3835,28 @@ const App = struct {
             return;
         }
         if (key.matches('n', .{ .ctrl = true }) or key.matches(Key.down, .{}) or (self.ux_focus == 1 and key.matches('j', .{}))) {
+            const was_list = self.ux_focus == 1;
             self.ux_focus = 1;
-            self.ux_selected = @min(self.ux_selected +| 1, rows -| 1);
+            if (self.ux_overlay == .follow_up) {
+                const next = if (self.ux_selected >= rows) @as(usize, 0) else if (was_list) @min(self.ux_selected +| 1, rows -| 1) else self.ux_selected;
+                try self.selectFollowUpPreset(next);
+            } else self.ux_selected = @min(self.ux_selected +| 1, rows -| 1);
         } else if (key.matches('p', .{ .ctrl = true }) or key.matches(Key.up, .{}) or (self.ux_focus == 1 and key.matches('k', .{}))) {
+            const was_list = self.ux_focus == 1;
             self.ux_focus = 1;
-            self.ux_selected -|= 1;
+            if (self.ux_overlay == .follow_up) {
+                const previous = if (self.ux_selected >= rows) @as(usize, 1) else if (was_list) self.ux_selected -| 1 else self.ux_selected;
+                try self.selectFollowUpPreset(previous);
+            } else self.ux_selected -|= 1;
         } else if (self.ux_focus == 0) {
             if (key.matches('u', .{ .ctrl = true })) try self.ux_query.set(self.allocator, "") else try self.ux_query.handleKey(self.allocator, key, false, 4096);
-            self.ux_selected = 0;
+            self.ux_selected = if (self.ux_overlay == .follow_up) self.ux_rows.items.len else 0;
         }
     }
     fn drawUx(self: *App, win: vaxis.Window) !void {
         if (self.ux_overlay == .none) return;
+        if (self.ux_overlay == .follow_up) return self.drawFollowUpEditor(win);
+        if (self.ux_overlay == .gmail_draft) return self.drawGmailDraft(win);
         self.mouse_hits.clear();
         const width = @min(win.width -| 2, 72);
         const desired_height: usize = @as(usize, @min(self.uxCount(), 12)) + 7;
@@ -3256,6 +3894,7 @@ const App = struct {
         switch (action) {
             .sender => try self.cycleComposeIdentity(),
             .preview_browser => try self.saveDraft(.save_browser),
+            .gmail_draft => try self.openGmailDraft(),
             .discard_draft => try self.openDiscardDraft(),
             .add_contact => try self.addCurrentSender(),
             .save_all => try self.openSaveAll(null),
@@ -3471,7 +4110,16 @@ const App = struct {
         self.closeReaderOverlay();
         self.reader_overlay = .attachments;
         self.dialog_focus.reset(.attachments, 0);
-        self.say(false, "Received attachments · s Save · o Save & open · Esc Back", .{});
+        var preceding: usize = 0;
+        for (self.thread, 0..) |message, index| {
+            const count = items(get(message, "attachments")).len;
+            if (index == self.reader_card and count > 0) {
+                self.reader_choice = preceding;
+                break;
+            }
+            preceding += count;
+        }
+        self.say(false, "{s} · s Save · o Save & open · Esc Back", .{if (self.reader_progressive and self.reader_partial) @as([]const u8, "Attachments in loaded messages") else "Received attachments"});
     }
     fn readerAttachmentPrompt(self: *App, open_after: bool) !void {
         if (browser_target) return error.FileAccessUnavailable;
@@ -3567,6 +4215,20 @@ const App = struct {
             return true;
         }
         if (self.focus != .reader and !self.expanded) return false;
+        if (key.matches('[', .{}) or key.matches(']', .{})) {
+            try self.loadThreadWindow(key.matches(']', .{}));
+            return true;
+        }
+        if (key.matches('p', .{})) {
+            const message = try self.readerCopyTarget();
+            const view = &self.markup[self.reader_card];
+            try self.setReceivedView(if (self.readerFormatted(view.*, message)) .plain else .formatted);
+            return true;
+        }
+        if (key.matches('H', .{}) or key.matches('h', .{ .shift = true })) {
+            try self.toggleReaderHeaders();
+            return true;
+        }
         if (key.matches('Q', .{}) or key.matches('q', .{ .shift = true })) {
             self.fold_quotes = !self.fold_quotes;
             self.reader_anchor_card = true;
@@ -3584,12 +4246,17 @@ const App = struct {
             self.reader_cards[self.reader_card] = !self.reader_cards[self.reader_card];
             self.reader_anchor_card = true;
             self.reader_card_pinned = true;
+            if (self.reader_cards[self.reader_card]) try self.fetchReaderCard();
             return true;
         }
         if (key.matches('}', .{}) or key.matches('{', .{})) {
             self.reader_card = if (key.matches('}', .{})) @min(self.reader_card +| 1, self.thread.len - 1) else self.reader_card -| 1;
             self.reader_anchor_card = true;
             self.reader_card_pinned = true;
+            if (self.reader_progressive) {
+                self.reader_cards[self.reader_card] = true;
+                try self.fetchReaderCard();
+            }
             return true;
         }
         return false;
@@ -3598,6 +4265,27 @@ const App = struct {
         if ((self.focus == .reader or self.expanded) and self.reader_card < self.thread.len) return text(get(self.thread[self.reader_card], "id"));
         return self.messageId();
     }
+    fn fetchReaderCard(self: *App) !void {
+        if (!self.reader_progressive or self.reader_card >= self.thread.len) return;
+        const message = self.thread[self.reader_card];
+        if (truth(get(message, "bodyCached")) or bodyRefusal(message) != null) return;
+        self.preemptReaderAction();
+        if (self.job.future != null) {
+            self.say(false, "Body on demand · wait for the current operation, then t to reopen", .{});
+            return;
+        }
+        try self.start(.thread, .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(message, "threadId")), .progressive = true, .focusMessageId = text(get(message, "id")), .windowStartMessageId = text(get(self.thread[0], "id")), .windowEndMessageId = text(get(self.thread[self.thread.len - 1], "id")) });
+    }
+    fn loadThreadWindow(self: *App, newer: bool) !void {
+        const message = try self.readerCopyTarget();
+        if (!self.reader_progressive or (if (newer) self.reader_newer_messages else self.reader_older_messages) == 0) {
+            self.say(false, "No {s} conversation window", .{if (newer) @as([]const u8, "newer") else "older"});
+            return;
+        }
+        self.preemptReaderAction();
+        if (self.job.future != null) return error.OperationPending;
+        try self.start(.thread, .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(message, "threadId")), .progressive = true, .beforeMessageId = if (newer) "" else text(get(self.thread[0], "id")), .afterMessageId = if (newer) text(get(self.thread[self.thread.len - 1], "id")) else "" });
+    }
     fn onReaderHit(self: *App, hit: layout.Hit) !bool {
         switch (hit.kind) {
             .reader_thread => {
@@ -3605,6 +4293,7 @@ const App = struct {
                 self.reader_card = hit.index;
                 self.reader_cards[hit.index] = !self.reader_cards[hit.index];
                 self.focus = .reader;
+                if (self.reader_cards[hit.index]) try self.fetchReaderCard();
                 self.reader_anchor_card = true;
                 self.reader_card_pinned = true;
             },
@@ -3655,15 +4344,19 @@ const App = struct {
         const height = @min(win.height -| 2, 25);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
-        const inner = self.panel(area, 0, width, if (links) " Links · explicit browser open " else " Received attachments ", true);
+        const subset = self.reader_progressive and self.reader_partial;
+        const inner = self.panel(area, 0, width, if (links) " Links · explicit browser open " else if (subset) " Attachments · loaded messages " else " Received attachments ", true);
         if (inner.height < 4) return;
         const count = if (links) self.reader_links.count else self.readerAttachmentCount();
-        const visible = inner.height - 3;
+        const scope_hint = subset and inner.height >= 5;
+        const button_rows: u16 = if (!links and inner.width < 28) 2 else 1;
+        const stride: usize = if (links) 1 else 2;
+        const visible = @max((inner.height -| (button_rows + 2 + @as(u16, @intFromBool(scope_hint)))) / stride, 1);
         self.reader_choice = @min(self.reader_choice, count -| 1);
         if (count == 0 and self.dialog_focus.index == 1) self.dialog_focus.index = 0;
         if (count == 0 and !links and self.dialog_focus.index == 2) self.dialog_focus.index = 0;
         const top = self.reader_choice -| (visible - 1);
-        if (count == 0) try self.line(inner, 1, if (links) "No safe HTTP(S) URLs found" else "No received attachments in this view", .muted);
+        if (count == 0) try self.line(inner, 1, if (links) "No safe HTTP(S) URLs found in loaded messages" else if (subset) "No attachments in loaded messages" else "No received attachments in this view", .muted);
         var index = top;
         while (index < count and index - top < visible) : (index += 1) {
             const label = if (links) self.reader_links.values[index] else blk: {
@@ -3672,17 +4365,33 @@ const App = struct {
                 const size: u64 = if (value == .integer and value.integer >= 0) @intCast(value.integer) else 0;
                 break :blk try std.fmt.allocPrint(self.frame.allocator(), "{d}. {s} · {s}", .{ index + 1, text(get(attachment, "filename")), try attachmentSizeLabel(self.frame.allocator(), size) });
             };
-            try self.line(inner, index - top, try self.fitLine(inner, label, inner.width), if (index == self.reader_choice) (if (self.dialog_focus.index == 0) .selected else .subject) else .text);
-            self.mouseRows(inner, index - top, 1, .reader_picker, index);
+            const row = (index - top) * stride;
+            const selected = index == self.reader_choice;
+            try self.line(inner, row, try self.fitLine(inner, label, inner.width), if (selected) (if (self.dialog_focus.index == 0) .selected else .subject) else .text);
+            if (!links) {
+                const message = self.readerAttachment(index).?.message;
+                const sender = get(message, "from");
+                const name = if (text(get(sender, "name")).len > 0) text(get(sender, "name")) else text(get(sender, "address"));
+                const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
+                const date = if (inner.width < 60 and stamp.len >= 16) stamp[5..16] else stamp;
+                const date_width: u16 = @intCast(@min(date.len, inner.width));
+                const owner_width = inner.width -| date_width -| 3;
+                try self.line(inner.child(.{ .width = owner_width }), row + 1, try self.fitLine(inner, if (name.len > 0) name else "Unknown sender", owner_width), if (selected) .accent else .muted);
+                try self.line(inner.child(.{ .x_off = inner.width - date_width, .width = date_width }), row + 1, date, if (selected) .accent else .muted);
+            }
+            self.mouseRows(inner, row, @intCast(stride), .reader_picker, index);
         }
+        if (scope_hint) try self.line(inner, inner.height -| (button_rows + 2), "Loaded messages only · open other cards or [/] windows to find more", .muted);
+        const action_row = inner.height -| (button_rows + 1);
         var x: u16 = 0;
         if (links) {
-            x = try self.actionButton(inner, inner.height - 2, x, "[Open]", self.dialog_focus.index == 1, count > 0, .reader_picker_activate, 0);
+            x = try self.actionButton(inner, action_row, x, "[Enter Open]", self.dialog_focus.index == 1, count > 0, .reader_picker_activate, 0);
         } else {
-            x = try self.actionButton(inner, inner.height - 2, x, "[s Save]", self.dialog_focus.index == 1, count > 0, .reader_picker_save, 0);
-            x = try self.actionButton(inner, inner.height - 2, x, if (inner.width >= 32) "[o Save & open]" else "[o Open]", self.dialog_focus.index == 2, count > 0, .reader_picker_open, 0);
+            x = try self.actionButton(inner, action_row, x, "[s Save]", self.dialog_focus.index == 1, count > 0, .reader_picker_save, 0);
+            x = try self.actionButton(inner, action_row, x, if (inner.width >= 32) "[o Save & open]" else "[o Open]", self.dialog_focus.index == 2, count > 0, .reader_picker_open, 0);
         }
-        _ = try self.actionButton(inner, inner.height - 2, x, "[Back]", self.dialog_focus.index == (if (links) @as(usize, 2) else 3), true, .reader_picker_back, 0);
+        if (button_rows > 1) x = 0;
+        _ = try self.actionButton(inner, inner.height - 2, x, "[q Back]", self.dialog_focus.index == (if (links) @as(usize, 2) else 3), true, .reader_picker_back, 0);
         try self.line(inner, inner.height - 1, if (links and self.reader_links.truncated) "First 128 safe destinations · Tab Controls · Esc/q Back" else "Tab Controls · Enter Activate · j/k Choose · Esc/q Back", if (links and self.reader_links.truncated) .warning else .muted);
     }
     fn syncFailed(self: *App, index: usize, code: []const u8) void {
@@ -3815,6 +4524,7 @@ const App = struct {
         return std.fmt.allocPrint(self.frame.allocator(), " {s} | {s}{s}", .{ try self.fitLine(win, self.account(), account_width), try self.fitLine(win, context, context_width), suffix });
     }
     fn listTitle(self: *App) ![]const u8 {
+        if (self.follow_ups_list) return std.fmt.allocPrint(self.frame.allocator(), " Follow-ups · {d} due · {d} total ", .{ self.followUpDueCount(), self.messages.len });
         if (self.messages.len == 0) return if (self.loadingActive()) " Mail · Loading " else " Mail · Empty ";
         const before = self.has_more_cached_before orelse (self.previous_cursor.value().len > 0 or self.previous_cursors.items.len > 0);
         const after = (self.has_more_cached_after orelse false) or self.next_cursor.value().len > 0 or self.remote_cursor.value().len > 0;
@@ -3836,6 +4546,11 @@ const App = struct {
         self.reader_cached_view = false;
         self.reader_omitted_messages = 0;
         self.reader_is_thread = false;
+        self.reader_progressive = false;
+        self.reader_total_messages = 0;
+        self.reader_older_messages = 0;
+        self.reader_newer_messages = 0;
+        self.reader_deferred_messages = 0;
         self.body_cache_miss = false;
         self.reader_cache_busy = false;
         self.pending_cached_read = false;
@@ -3858,7 +4573,10 @@ const App = struct {
         self.markup = &.{};
     }
     fn deinitMarkup(markup: []ReaderMarkup) void {
-        for (markup) |*view| if (view.prepared) |*prepared| prepared.deinit();
+        for (markup) |*view| {
+            if (view.prepared) |*prepared| prepared.deinit();
+            if (view.plain) |*plain| plain.deinit();
+        }
     }
     fn htmlEligible(self: *App, message: Value) bool {
         const source = text(get(message, "bodySource"));
@@ -3876,11 +4594,75 @@ const App = struct {
         const safe_html = mime.sanitizeText(converted, allocator) catch return false;
         return same(safe_html, text(get(message, "bodyText")));
     }
+    fn readerLayoutChanged(self: *App) void {
+        self.readerCopyChanged();
+        self.reader_find_refresh = true;
+        self.reader_anchor_card = self.thread.len > 0;
+        self.reader_card_pinned = self.thread.len > 0;
+    }
+    fn toggleReaderHeaders(self: *App) !void {
+        const message = try self.readerCopyTarget();
+        if (self.reader_card >= self.markup.len) return error.MessageRequired;
+        self.markup[self.reader_card].details = !self.markup[self.reader_card].details;
+        try self.rememberReaderChoice(message, self.markup[self.reader_card]);
+        self.readerLayoutChanged();
+    }
+    fn readerChoice(self: *const App, message: Value) ?ReaderChoice {
+        for (self.reader_choices) |optional| if (optional) |choice| if (same(choice.account.slice(), self.account()) and same(choice.message.slice(), text(get(message, "id")))) return choice;
+        return null;
+    }
+    fn rememberReaderChoice(self: *App, message: Value, view: ReaderMarkup) !void {
+        var slot: ?usize = null;
+        var empty: ?usize = null;
+        for (self.reader_choices, 0..) |optional, index| {
+            if (optional) |choice| {
+                if (same(choice.account.slice(), self.account()) and same(choice.message.slice(), text(get(message, "id")))) {
+                    slot = index;
+                    break;
+                }
+            } else if (empty == null) empty = index;
+        }
+        if (view.mode == .automatic and !view.details) {
+            if (slot) |index| self.reader_choices[index] = null;
+            return;
+        }
+        var choice: ReaderChoice = .{ .mode = view.mode, .details = view.details };
+        try choice.account.set(self.account());
+        try choice.message.set(text(get(message, "id")));
+        const index = slot orelse empty orelse self.reader_choice_next;
+        self.reader_choices[index] = choice;
+        self.reader_choice_next = (index + 1) % self.reader_choices.len;
+    }
+    fn readerFormatted(self: *App, view: ReaderMarkup, message: Value) bool {
+        return switch (view.mode) {
+            .plain => false,
+            .formatted => text(get(message, "bodyHtml")).len > 0,
+            .automatic => self.htmlEligible(message),
+        };
+    }
+    fn setReceivedView(self: *App, mode: ReceivedView) !void {
+        const message = try self.readerCopyTarget();
+        if (self.reader_card >= self.markup.len) return error.MessageRequired;
+        if (mode == .formatted and text(get(message, "bodyHtml")).len == 0) {
+            self.say(false, "Plain text · this message has no formatted alternative", .{});
+            return;
+        }
+        const view = &self.markup[self.reader_card];
+        view.mode = mode;
+        try self.rememberReaderChoice(message, view.*);
+        // A previous automatic choice may have intentionally skipped HTML.
+        if (view.prepared == null) view.attempted = false;
+        self.readerLayoutChanged();
+        self.say(false, "{s} · current message · p Switch view", .{if (self.readerFormatted(view.*, message)) @as([]const u8, "Formatted") else "Plain text"});
+    }
     fn prepareMarkup(self: *App, allocator: Allocator, messages: []const Value) ![]ReaderMarkup {
-        _ = self;
         const views = try allocator.alloc(ReaderMarkup, messages.len);
         for (views, messages) |*view, message| {
             view.* = .{};
+            if (self.readerChoice(message)) |choice| {
+                view.mode = choice.mode;
+                view.details = choice.details;
+            }
             view.display_text = mail_display.preparePlainBodyDisplay(allocator, text(get(message, "bodyText"))) catch null;
         }
         return views;
@@ -3888,7 +4670,7 @@ const App = struct {
     fn prepareVisibleMarkup(self: *App, view: *ReaderMarkup, message: Value) void {
         if (view.attempted) return;
         view.attempted = true;
-        if (!self.htmlEligible(message)) return;
+        if (!self.readerFormatted(view.*, message)) return;
         self.html_stats.htmlDocumentBuilds += 1;
         view.prepared = html_view.Prepared.init(self.allocator, text(get(message, "bodyHtml"))) catch {
             self.html_stats.htmlFallbacks += 1;
@@ -4017,6 +4799,16 @@ const App = struct {
         var replacement: std.heap.ArenaAllocator = .init(self.allocator);
         defer replacement.deinit();
         const result = try self.data(replacement.allocator(), response);
+        if (kind == .drafts) {
+            const draft_rows = get(result, "drafts");
+            if (draft_rows == .array) for (draft_rows.array.items) |*message| {
+                if (message.* != .object) continue;
+                for (items(get(result, "gmailLinks"))) |link| if (same(text(get(message.*, "id")), text(get(link, "draftId")))) {
+                    try message.object.put(replacement.allocator(), "gmailLink", link);
+                    break;
+                };
+            };
+        }
         const messages = items(get(result, if (kind == .drafts) "drafts" else "messages"));
         if (messages.len > types.Limits.page) return error.PageTooLarge;
         if (messages.len == 0 and self.pageLoadCurrent()) {
@@ -4111,7 +4903,7 @@ const App = struct {
         std.mem.swap(Field, &self.remote_cursor, &remote);
         if (!retain_reader) self.clearReader();
         if (retain_reader and truth(get(result, "cached")) and self.readerNeedsCacheRefresh()) self.pending_cached_reader_refresh = true;
-        if (kind != .drafts) self.syncMetadata(self.account_index, result);
+        if (kind != .drafts and kind != .follow_up_list) self.syncMetadata(self.account_index, result);
         if (!self.compose_active and !self.background_merge) self.say(false, "{s}", .{if (messages.len == 0 and self.list_cached and self.list_partial) "No rows in cached subset · Ready" else if (messages.len == 0) "No messages match this mailbox" else "Ready"});
     }
     fn replaceReader(self: *App, full_thread: bool, response: []const u8, cached_view: bool) !void {
@@ -4144,10 +4936,14 @@ const App = struct {
         var preserved_focus: ?usize = null;
         for (messages, 0..) |message, index| {
             const id = text(get(message, "id"));
-            if (same(id, self.messageId())) default_focus = index;
+            if (same(id, if (text(get(result, "focusMessageId")).len > 0) text(get(result, "focusMessageId")) else self.messageId())) default_focus = index;
             if (same_reader) for (self.thread, 0..) |previous_message, previous_index| {
                 if (!same(id, text(get(previous_message, "id")))) continue;
                 cards[index] = self.reader_cards[previous_index];
+                if (previous_index < self.markup.len) {
+                    markup[index].mode = self.markup[previous_index].mode;
+                    markup[index].details = self.markup[previous_index].details;
+                }
                 if (previous_index == self.reader_card) preserved_focus = index;
                 break;
             };
@@ -4156,7 +4952,8 @@ const App = struct {
         // thread card. Preserve that card by identity even when the mailbox's
         // originally selected message occurs later in the replacement.
         const focused = preserved_focus orelse default_focus;
-        if (!same_reader and messages.len > 0) cards[focused] = true;
+        const changed_window = preserved_focus == null and truth(get(result, "progressive"));
+        if ((!same_reader or changed_window) and messages.len > 0) cards[focused] = true;
         try self.reader_account.set(self.allocator, self.account());
         try self.reader_message.set(self.allocator, self.messageId());
         self.clearMarkup();
@@ -4171,12 +4968,17 @@ const App = struct {
         self.reader_cached_view = cached_view;
         self.reader_omitted_messages = if (full_thread) @intCast(@min(@max(integer(get(result, "omittedMessages")), 0), types.Limits.metadata_hard)) else 0;
         self.reader_is_thread = full_thread;
+        self.reader_progressive = full_thread and truth(get(result, "progressive"));
+        self.reader_total_messages = if (self.reader_progressive) @intCast(@min(@max(integer(get(result, "totalMessages")), 0), @import("thread_window.zig").maximum)) else messages.len;
+        self.reader_older_messages = if (self.reader_progressive) @intCast(@min(@max(integer(get(result, "olderMessages")), 0), self.reader_total_messages)) else 0;
+        self.reader_newer_messages = if (self.reader_progressive) @intCast(@min(@max(integer(get(result, "newerMessages")), 0), self.reader_total_messages)) else 0;
+        self.reader_deferred_messages = if (self.reader_progressive) @intCast(@min(@max(integer(get(result, "deferredMessages")), 0), messages.len)) else 0;
         self.body_cache_miss = false;
         self.reader_cache_busy = false;
         self.pending_cached_read = false;
         self.pending_cached_thread = false;
         self.pending_cached_reader_refresh = false;
-        if (!same_reader) {
+        if (!same_reader or changed_window) {
             self.closeReaderOverlay();
             self.reader_scroll = 0;
             self.reader_anchor_card = full_thread and messages.len > 1;
@@ -4222,7 +5024,7 @@ const App = struct {
         if (refresh_retained) self.reader_cache_busy = false;
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
-        const response = (if (full_thread) self.cached(arena.allocator(), .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(selected_value, "threadId")) }) else self.cached(arena.allocator(), .{ .account = self.account(), .cmd = "mail.read", .messageId = text(get(selected_value, "id")) })) catch |err| {
+        const response = (if (full_thread) self.cached(arena.allocator(), .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(selected_value, "threadId")), .progressive = !browser_target, .focusMessageId = if (same_target and self.reader_card < self.thread.len) text(get(self.thread[self.reader_card], "id")) else text(get(selected_value, "id")), .windowStartMessageId = if (same_target and self.reader_progressive) text(get(self.thread[0], "id")) else "", .windowEndMessageId = if (same_target and self.reader_progressive) text(get(self.thread[self.thread.len - 1], "id")) else "" }) else self.cached(arena.allocator(), .{ .account = self.account(), .cmd = "mail.read", .messageId = text(get(selected_value, "id")) })) catch |err| {
             if (err == error.CacheBusy) {
                 if (!same_target and !self.compose_active) self.clearReader();
                 self.reader_cache_busy = true;
@@ -4256,6 +5058,7 @@ const App = struct {
         return self.loadCachedListImpl(requested_anchor, false);
     }
     fn loadCachedListImpl(self: *App, requested_anchor: []const u8, require_anchor: bool) !bool {
+        if (self.follow_ups_list) return false;
         const anchor = if (self.first_mail_pending) "" else requested_anchor;
         if (!self.synchronous_cache_search and self.cacheSearch() and cache_query.needsBody(self.query.value())) {
             try self.startCachedSearch(anchor);
@@ -4363,13 +5166,14 @@ const App = struct {
     fn startTarget(self: *App, kind: JobKind, request_value: anytype, unread_target: ?[]const u8) !void {
         // Release checks yield the sole worker to every user/mail operation.
         if (!updateJob(kind) and self.job.future != null and updateJob(self.job.kind)) self.cancelJob();
+        if (!meetingReadJob(kind)) _ = self.cancelMeetingRead();
         if (self.job.future != null) {
             if (kind == .cached_search) self.pending_cached_list = true else if (kind == .refresh or kind == .list or kind == .drafts) self.pending_list = true else if (kind == .read or kind == .thread) self.pending_read = true else self.say(true, "Please wait for the current operation", .{});
             return;
         }
         _ = self.job_arena.reset(.retain_capacity);
         self.job = .{ .kind = kind, .update_snapshot = self.update_snapshot, .generation = self.generation, .selection_generation = self.selection_generation, .account_index = self.account_index, .contacts_generation = self.contacts_generation, .requested_at = Io.Timestamp.now(self.io, .real).toMilliseconds() };
-        if (kind == .send or kind == .draft_operations or kind == .queue_inspect) try self.job.draft_target.set(self.compose.id.value());
+        if (kind == .send or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
         if (unread_target) |target| try self.job.unread_target.set(target);
         self.job.request = try std.json.Stringify.valueAlloc(self.job_arena.allocator(), request_value, .{});
         if (self.job.request.len > types.Limits.request_bytes) return error.RequestTooLarge;
@@ -4378,7 +5182,7 @@ const App = struct {
             status.state = if (status.cache_ready) .refreshing else .fetching;
             status.error_len = 0;
             self.say(false, "{s}", .{if (status.cache_ready) "Cached mail ready · fetching latest changes" else "Fetching mail…"});
-        } else if (!updateJob(kind) and !self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
+        } else if (kind != .preferences_save and !updateJob(kind) and !meetingJob(kind) and !self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
             .cached_search => "Searching cached mail…",
             .recipient_cache => "Loading recent-mail recipients… · typing remains available",
             .recipient_refresh => "Updating recent sent-mail recipients… · typing remains available",
@@ -4474,7 +5278,8 @@ const App = struct {
             _ = platform.postEvent(self.loop, .operation_done) catch {};
             return;
         }
-        self.job.response = (if (self.job.kind == .cached_search or self.job.kind == .recipient_cache) self.cachedSearchResponse() else if (self.job.kind == .refresh) self.refreshResponse() else self.client.callWithProgress(self.job_arena.allocator(), self.job.request, self.fetchSink())) catch |err| blk: {
+        const retry_snapshot = self.options.remote_preferences and @import("backend_retry.zig").snapshotCommand(self.job_arena.allocator(), self.job.request);
+        self.job.response = (if (retry_snapshot) @import("backend_retry.zig").call(self.io, self.allocator, self.job_arena.allocator(), self.client, self.job.request, 35000) else if (self.job.kind == .cached_search or self.job.kind == .recipient_cache) self.cachedSearchResponse() else if (self.job.kind == .refresh) self.refreshResponse() else self.client.callWithProgress(self.job_arena.allocator(), self.job.request, self.fetchSink())) catch |err| blk: {
             self.job.failure = err;
             break :blk null;
         };
@@ -4562,7 +5367,30 @@ const App = struct {
         try result.object.put(allocator, "refreshed", .{ .bool = false });
         return std.json.Stringify.valueAlloc(allocator, envelope, .{});
     }
+    // Background reminders do not own foreground intents. Cancel only their
+    // worker, retaining pending reply/compose/navigation state for the user.
+    fn cancelMeetingRead(self: *App) bool {
+        if (self.job.future == null or !meetingReadJob(self.job.kind)) return false;
+        const retry_after = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 5000;
+        if (self.job.kind == .meeting_calendars) self.meetings.list_after[self.job.meeting_account] = retry_after else self.meetings.targets[self.job.meeting_target].poll_after = retry_after;
+        self.job.future.?.cancel(self.io);
+        self.job.future = null;
+        return true;
+    }
+    fn foregroundWorkerAvailable(self: *const App) bool {
+        return self.job.future == null or meetingReadJob(self.job.kind);
+    }
     fn cancelJob(self: *App) void {
+        if (self.job.future != null and self.job.kind == .meeting_open) {
+            self.meeting_feedback_key = self.job.meeting_key;
+            self.meeting_feedback.display("Meeting open interrupted · check your browser");
+        }
+        if (self.job.future != null and meetingReadJob(self.job.kind)) {
+            const retry_after = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 5000;
+            if (self.job.kind == .meeting_calendars) self.meetings.list_after[self.job.meeting_account] = retry_after else self.meetings.targets[self.job.meeting_target].poll_after = retry_after;
+        }
+        if (self.job.future != null and self.job.kind == .preferences_save and self.preferences_revision != self.preferences_saved_revision)
+            self.remote_preferences_pending = true;
         self.clearContactComposeIntent();
         self.stopLoadingAnimation();
         if (self.job.future) |*future| future.cancel(self.io);
@@ -4593,6 +5421,7 @@ const App = struct {
         if (self.job.future != null and self.job.kind == .cached_search and (!self.cacheSearch() or !cache_query.needsBody(self.query.value()))) self.preemptReadOnly();
         self.pending_read = false;
         self.pending_thread = false;
+        self.follow_ups_list = false;
         self.drafts_list = self.folder == 2;
         if (self.drafts_list) return self.start(.drafts, .{ .account = self.account(), .cmd = "draft.list" });
         if (self.cacheSearch()) {
@@ -4664,6 +5493,9 @@ const App = struct {
         });
     }
     fn preview(self: *App, full_thread: bool) !void {
+        // Enter is an explicit foreground request. Join the refresh before
+        // resolving its target; ordinary cached navigation keeps prefetch alive.
+        if (full_thread and self.job.future != null and self.job.kind == .refresh) self.preemptReadOnly();
         const selected_value = self.selectedMessage() orelse return;
         if (self.drafts_list) return;
         const cached_hit = self.cachedPreview(full_thread) catch |err| blk: {
@@ -4689,13 +5521,13 @@ const App = struct {
             self.sayFailure("Selected body unavailable", reason);
             return;
         }
-        if (self.cacheSearch() and !full_thread) {
+        if ((self.cacheSearch() or self.follow_ups_list) and !full_thread) {
             self.pending_read = false;
             self.pending_thread = false;
             return;
         }
         if (self.job.future != null) self.pending_thread = full_thread;
-        if (full_thread) try self.start(.thread, .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(selected_value, "threadId")) }) else try self.start(.read, .{ .account = self.account(), .cmd = "mail.read", .messageId = text(get(selected_value, "id")) });
+        if (full_thread) try self.start(.thread, .{ .account = self.account(), .cmd = "mail.thread", .threadId = text(get(selected_value, "threadId")), .progressive = !browser_target, .focusMessageId = text(get(selected_value, "id")) }) else try self.start(.read, .{ .account = self.account(), .cmd = "mail.read", .messageId = text(get(selected_value, "id")) });
     }
     fn finish(self: *App) !void {
         if (self.job.future == null or !self.job.done.load(.acquire)) return;
@@ -4712,7 +5544,15 @@ const App = struct {
             self.job.response = null;
             _ = self.job_arena.reset(.free_all);
         };
-        if (self.job.kind == .send) {
+        if (meetingJob(self.job.kind)) {
+            self.finishMeetingJob() catch {
+                if (self.job.kind == .meeting_agenda) self.meetings.fail(self.job.meeting_target);
+            };
+        } else if (self.job.kind == .preferences_save) {
+            self.finishRemotePreferences();
+        } else if (calendarJob(self.job.kind)) {
+            try self.finishCalendar();
+        } else if (self.job.kind == .send) {
             try self.finishSend();
         } else if (updateJob(self.job.kind)) {
             if (self.job.failure) |err| {
@@ -4744,7 +5584,7 @@ const App = struct {
                     self.syncMetadata(index, value_in);
                     self.sync[index].state = if (refreshIsCurrent(value_in, self.job.requested_at)) .current else .cached;
                     self.sync[index].error_len = 0;
-                    if (index == self.account_index and !self.drafts_list) {
+                    if (index == self.account_index and !self.drafts_list and !self.follow_ups_list) {
                         // A committed refresh advances cache cursor generation.
                         // Re-anchor the user's current view, never replay an old
                         // page/query response or use its now-stale cursor.
@@ -4763,7 +5603,7 @@ const App = struct {
                 // A failed bounded bootstrap may have committed useful bodies
                 // without advancing its checkpoint. Read those short local
                 // commits too, while retaining the failed/offline phase.
-                if (index == self.account_index and !self.drafts_list) {
+                if (index == self.account_index and !self.drafts_list and !self.follow_ups_list) {
                     try self.cursor.set(self.allocator, "");
                     self.clearHistory();
                     _ = self.loadCachedList(self.messageId()) catch false;
@@ -4792,7 +5632,7 @@ const App = struct {
                 }
             }
         } else if (((self.job.kind == .identities or self.job.kind == .labels_list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh or self.job.kind == .triage_scope or self.job.kind == .label_state or self.job.kind == .unread_navigation or self.job.kind == .queue_inspect or self.job.kind == .draft_operations) and self.job.account_index != self.account_index) or
-            ((self.job.kind == .draft_operations or self.job.kind == .queue_inspect) and (!self.compose_active or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value()))) or
+            ((self.job.kind == .draft_operations or self.job.kind == .queue_inspect or self.job.kind == .gmail_draft_info or self.job.kind == .gmail_draft_action) and (self.job.account_index != self.account_index or !self.compose_active or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value()))) or
             (self.job.kind == .contacts and (self.job.contacts_generation != self.contacts_generation or !self.contactsOpen() or self.job.account_index != self.account_index)) or
             (self.job.generation != self.generation and (self.job.kind == .list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh or self.job.kind == .drafts or self.job.kind == .read or self.job.kind == .thread or self.job.kind == .contacts or self.job.kind == .invitation_inspect or self.job.kind == .triage_scope or self.job.kind == .label_state or self.job.kind == .unread_navigation)) or
             (self.job.selection_generation != self.selection_generation and (self.job.kind == .read or self.job.kind == .thread or self.job.kind == .invitation_inspect or self.job.kind == .triage_scope or self.job.kind == .label_state or self.job.kind == .unread_navigation or self.job.unread_target.len > 0)))
@@ -4801,6 +5641,10 @@ const App = struct {
             if (self.page_loading and self.page_loading_account == self.job.account_index and self.page_loading_generation == self.job.generation) self.completePageLoad();
             if (self.job.kind == .triage_scope) self.triage_waiting = false;
         } else if (self.job.failure) |err| {
+            if (self.job.kind == .gmail_draft_action) {
+                self.compose.gmail_guard_unknown = true;
+                self.gmail_reload_pending = true;
+            }
             if (self.job.kind == .grace_cancel) {
                 self.graceCancelUnconfirmed(@errorName(err));
                 return;
@@ -4822,14 +5666,16 @@ const App = struct {
             } else if (self.job.kind == .send or self.job.kind == .grace_process or self.job.kind == .invitation) {
                 (if (self.job.kind != .invitation) &self.compose.operation_error else &self.invitation_operation_error).set(self.allocator, @errorName(err)) catch {};
                 self.markUnknown(if (self.job.kind == .grace_process) .send else self.job.kind);
-            } else if (self.job.kind == .draft_operations) self.say(true, "Receipt lookup failed · draft remains protected", .{}) else if (err != error.Canceled) {
+            } else if (self.job.kind == .invitation_reconcile) self.invitationCheckUncertain(@errorName(err)) else if (self.job.kind == .draft_operations) self.say(true, "Receipt lookup failed · draft remains protected", .{}) else if (err != error.Canceled) {
                 if (self.job.kind == .list) self.syncFailed(self.job.account_index, @errorName(err));
                 if (self.job.kind == .contacts) self.contacts_state = if (err == error.PermissionDenied) .denied else .failed;
+                if (self.job.kind == .open and self.job.calendar_join_open) self.calendarJoinFailed(@errorName(err));
                 if (self.job.kind == .attachment_save) self.fileDialogFailure(err) else if (self.job.kind == .open and self.job.saved_attachment_open) self.attachmentOpenFailed(@errorName(err)) else self.sayError(@errorName(err));
             }
         } else if (self.job.response) |response| {
             self.apply(self.job.kind, response) catch |err| {
                 if (completed_kind == .grace_process or completed_kind == .invitation) self.markUnknown(completed_kind);
+                if (completed_kind == .invitation_reconcile) self.invitationCheckUncertain(@errorName(err));
                 if (self.job.kind == .attachments_save) self.abortSaveAll(@errorName(err));
                 if (self.job.kind == .attachment_import) self.pending_file_count = 0;
                 return err;
@@ -4910,6 +5756,12 @@ const App = struct {
         return true;
     }
     fn dispatchPending(self: *App) !void {
+        if (self.calendar.open) return self.dispatchMeetings();
+        if (self.gmail_reload_pending and self.compose_active and self.job.future == null) {
+            self.gmail_reload_pending = false;
+            try self.requestGmailDraftInfo();
+            return;
+        }
         if (self.compose_choice) return;
         if (try self.dispatchComposer()) return;
         // At most six coalesced flags exist. Local cache hits may complete
@@ -4936,7 +5788,7 @@ const App = struct {
                 try self.dispatchWindowProvider();
             } else if (self.pending_list) {
                 self.pending_list = false;
-                try self.reload();
+                if (self.follow_ups_list) try self.loadFollowUps() else try self.reload();
             } else if (self.pending_remote_list) {
                 self.pending_remote_list = false;
                 try self.cursor.set(self.allocator, "");
@@ -4952,6 +5804,14 @@ const App = struct {
             } else if (self.pending_labels) {
                 self.pending_labels = false;
                 try self.start(.labels_list, .{ .cmd = "labels.list", .account = self.account() });
+            } else if (self.remote_preferences_pending and Io.Timestamp.now(self.io, .awake).toMilliseconds() >= self.remote_preferences_retry_after) {
+                var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+                defer scratch.deinit();
+                const request = try self.remotePreferencesRequest(scratch.allocator());
+                try self.start(.preferences_save, request);
+                self.job.preferences_revision = self.preferences_revision;
+                self.remote_preferences_pending = false;
+                return;
             } else if (self.capabilities.updates and (!self.update_loaded or self.update_pending) and (self.ordinaryMailbox() or self.update_open)) {
                 if (self.options.fixtures and !self.update_fixture_enabled) {
                     self.update_loaded = true;
@@ -4970,7 +5830,7 @@ const App = struct {
                 }
                 try self.start(kind, .{ .cmd = "updates" });
                 return;
-            } else return;
+            } else return self.dispatchMeetings();
         }
     }
     fn apply(self: *App, kind: JobKind, response: []const u8) !void {
@@ -4985,10 +5845,20 @@ const App = struct {
                 self.markUnknown(.send);
                 return;
             }
+            if (kind == .gmail_draft_action) {
+                self.compose.gmail_guard_unknown = true;
+                self.gmail_reload_pending = true;
+            }
             if (err == error.OperationRejected) {
+                if (kind == .follow_up_write and same(self.status_error_code[0..self.status_error_len], "FollowUpChanged")) {
+                    self.loadFollowUps() catch {};
+                    self.sayError("FollowUpChanged");
+                    return;
+                }
                 if (kind == .attachments_save) self.abortSaveAll(self.status_error_code[0..self.status_error_len]);
                 if (kind == .attachment_import) self.pending_file_count = 0;
                 if (kind == .attachment_save) try self.file_browser_error.set(self.allocator, humanError(self.status_error_code[0..self.status_error_len]));
+                if (kind == .open and self.job.calendar_join_open) self.calendarJoinFailed(self.status_error_code[0..self.status_error_len]);
                 if (kind == .open and self.job.saved_attachment_open) {
                     var code_buffer: [64]u8 = undefined;
                     const code = self.status_error_code[0..self.status_error_len];
@@ -5010,7 +5880,16 @@ const App = struct {
             return err;
         };
         switch (kind) {
-            .updates_load, .updates_check => return error.InvalidUpdateResponse,
+            .follow_up_list => try self.replaceFollowUps(response),
+            .follow_up_write => {
+                const result = try self.data(self.job_arena.allocator(), response);
+                const completed = truth(get(result, "done"));
+                try self.loadFollowUps();
+                self.say(false, "{s} · Gmail is unchanged", .{if (completed) @as([]const u8, "Follow-up done · local reminder removed") else "Local follow-up saved"});
+            },
+            .preferences_save => return error.InvalidPreferencesResponse,
+            .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_apply, .calendar_reconcile => return error.InvalidCalendarResponse,
+            .updates_load, .updates_check, .meeting_calendars, .meeting_agenda, .meeting_open => return error.InvalidUpdateResponse,
             .labels_list => {
                 try self.replaceLabels(response);
                 if (!self.keepBackgroundDiagnostic(.labels_list)) self.say(false, "{s}", .{if (self.label_picker) "Choose label · Enter Add · - Remove" else "Ready"});
@@ -5119,6 +5998,15 @@ const App = struct {
                 try self.grace_draft.set(self.allocator, text(get(result, "draftId")));
                 try self.grace_account.set(self.allocator, self.account());
                 self.grace_due = integer(get(result, "dueAtMs"));
+                self.grace_resume_required = truth(get(result, "resumeRequired"));
+                if (self.grace_resume_required) {
+                    self.grace_active = false;
+                    self.grace_recovery = true;
+                    self.grace_pending.store(false, .release);
+                    self.mode = .compose;
+                    self.say(false, "Imported send paused · Ctrl+S Review · :resume-send / :cancel-send", .{});
+                    return;
+                }
                 self.grace_active = true;
                 self.grace_focus = 0;
                 self.grace_recovery = false;
@@ -5152,13 +6040,17 @@ const App = struct {
                         try self.grace_queue.set(self.allocator, text(get(entry, "queueId")));
                         try self.grace_draft.set(self.allocator, text(get(entry, "draftId")));
                         try self.grace_account.set(self.allocator, self.account());
-                        if (same(state, "queued")) self.grace_recovery = true else {
+                        if (same(state, "queued")) {
+                            self.grace_recovery = true;
+                            self.grace_resume_required = truth(get(entry, "resumeRequired"));
+                            self.grace_due = integer(get(entry, "dueAtMs"));
+                        } else {
                             self.compose.unknown_outcome = true;
                             try self.compose.operation_id.set(self.allocator, text(get(entry, "operationId")));
                         }
                     }
                 }
-                if (self.compose.unknown_outcome) self.markUnknown(.send) else if (self.grace_recovery) self.say(false, "Queued send paused · :resume-send / :cancel-send · no automatic send", .{}) else self.say(false, "Receipts checked · Ctrl+S Review send", .{});
+                if (self.compose.unknown_outcome) self.markUnknown(.send) else if (self.grace_recovery) self.say(false, "{s}", .{if (self.grace_resume_required) @as([]const u8, "Imported send paused · Ctrl+S Review · :resume-send / :cancel-send") else "Queued send paused · :resume-send / :cancel-send · no automatic send"}) else self.say(false, "Receipts checked · Ctrl+S Review send", .{});
             },
             .label_write, .label_receipt, .label_color => try self.applyManagerLabel(response),
             .batch, .undo => {
@@ -5333,7 +6225,23 @@ const App = struct {
                 self.compose.unknown_outcome = true;
                 try self.start(.queue_inspect, .{ .cmd = "queue.list", .account = self.account() });
             },
-            .save, .save_review, .save_back, .save_browser => {
+            .gmail_draft_info, .gmail_draft_action => {
+                const result = try self.data(self.job_arena.allocator(), response);
+                if (!same(text(get(result, "draftId")), self.compose.id.value())) return error.DraftChanged;
+                try self.compose.replaceGmailLink(self.allocator, get(result, "link"));
+                try self.gmail_draft_outcome.set(self.allocator, text(get(result, "outcome")));
+                try self.gmail_content_digest.set(self.allocator, text(get(result, "contentDigest")));
+                try self.gmail_remote_version.set(self.allocator, text(get(get(result, "remote"), "messageId")));
+                self.mode = .compose;
+                self.gmail_send_ack = false;
+                const imported_id = text(get(result, "importedDraftId"));
+                if (imported_id.len > 0) {
+                    self.closeUx();
+                    self.say(false, "Imported as a new Plain draft · original local and Gmail copies kept", .{});
+                    try self.start(.draft_read, .{ .cmd = "draft.read", .account = self.account(), .draftId = imported_id });
+                } else try self.presentGmailDraft();
+            },
+            .save, .save_review, .save_back, .save_browser, .save_gmail => {
                 const result = self.data(self.job_arena.allocator(), response) catch |err| {
                     if (err == error.OperationRejected) return;
                     return err;
@@ -5342,6 +6250,7 @@ const App = struct {
                 self.compose.saved_revision = self.autosave_revision;
                 self.mode = if (kind == .save_review) .review else if (kind == .save_back) .browse else .compose;
                 if (kind == .save_review) {
+                    self.gmail_send_ack = false;
                     self.review_ready = false;
                     self.dialog_focus.reset(.send, 0);
                 }
@@ -5358,8 +6267,9 @@ const App = struct {
                 if (kind == .save_back and self.folder == 2) self.pending_list = true;
                 if (kind == .save_back) try self.resumeMailboxReader();
                 if (kind == .save_browser) try self.start(.open, .{ .cmd = "draft.open-preview", .account = self.account(), .draftId = self.compose.id.value() });
+                if (kind == .save_gmail) try self.requestGmailDraftInfo();
             },
-            .invitation_inspect => {
+            .invitation_inspect, .invitation_reconcile => {
                 const result = try self.data(self.job_arena.allocator(), response);
                 self.invitation_review = .{};
                 try self.invitation_review.uid.set(text(get(result, "uid")));
@@ -5373,7 +6283,7 @@ const App = struct {
                 self.invitation_confirm_ready = false;
                 self.mode = .invitation;
                 self.dialog_focus.reset(.invitation, 0);
-                self.say(false, "Review RSVP · a Accept · t Tentative · d Decline · Esc Cancel", .{});
+                self.say(false, "{s}", .{if (self.invitation_response_unknown) "RSVP not confirmed · C Check Sent · no automatic resend" else if (self.invitationCalendarUnknown()) "RSVP confirmed · Calendar not confirmed · C Check status" else if (self.invitation_confirmed_status.len > 0) "Previous RSVP confirmed · review before changing your response" else if (self.invitation_review.canRespond()) "Review RSVP · a Accept · t Tentative · d Decline · Esc Cancel" else "Calendar notice · Esc Back"});
             },
             .send, .invitation => {
                 const result = self.data(self.job_arena.allocator(), response) catch |err| {
@@ -5396,8 +6306,19 @@ const App = struct {
                 } else {
                     self.mode = .browse;
                     if (kind == .send) self.compose_active = false;
-                    self.sayAction(false, "{s}", .{if (self.options.fixtures) "Saved by mock provider" else "Submitted; recipient delivery is not confirmed"});
-                    if (kind == .send) try self.resumeMailboxReader();
+                    if (kind == .invitation) {
+                        try self.loadInvitationCalendarSync(get(result, "calendarSync"));
+                        const calendar_state = self.invitation_calendar_sync_state.slice();
+                        const calendar_notice = self.invitationCalendarNotice();
+                        if (same(calendar_state, "applied") or same(calendar_state, "existing")) {
+                            self.sayAction(false, "RSVP sent · {s}", .{calendar_notice});
+                        } else if (calendar_notice.len > 0) {
+                            self.sayAction(true, "RSVP sent · Calendar {s} · I for details", .{if (self.invitationCalendarUnknown()) @as([]const u8, "not confirmed") else "not updated"});
+                        } else self.sayAction(false, "RSVP sent", .{});
+                    } else {
+                        self.sayAction(false, "{s}", .{if (self.options.fixtures) "Saved by mock provider" else "Submitted; recipient delivery is not confirmed"});
+                        try self.resumeMailboxReader();
+                    }
                 }
             },
             .contacts => {
@@ -5423,6 +6344,17 @@ const App = struct {
             },
             .open => {
                 self.action_notice = false;
+                if (self.job.calendar_join_open) {
+                    const result = try self.data(self.job_arena.allocator(), response);
+                    const raw_profile = text(get(result, "profile"));
+                    const prefix = "--profile-directory=";
+                    const profile = if (std.mem.startsWith(u8, raw_profile, prefix)) raw_profile[prefix.len..] else raw_profile;
+                    const message = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s}", .{ if (truth(get(result, "fixture"))) @as([]const u8, "Join target validated") else "Join link opened in Chrome", if (profile.len > 0) @as([]const u8, " · ") else "", profile[0..@min(profile.len, 120)] });
+                    try self.calendar.notice.set(message);
+                    self.calendar.error_code = .{};
+                    self.sayAction(false, "{s}", .{message});
+                    return;
+                }
                 if (self.job.saved_attachment_open) self.sayAction(false, "{s}", .{if (self.options.fixtures) "Attachment saved · mock file-open validated" else "Attachment saved and opened"}) else self.sayAction(false, "{s}", .{if (self.options.fixtures) "Mock browser target validated" else "Opened in the configured browser profile"});
             },
             .attachment_save => {
@@ -5467,6 +6399,7 @@ const App = struct {
         try self.restoreWorkingContext();
         try self.prepareLabels();
         try self.reloadWithRefresh(self.capabilities.refresh_on_account_switch);
+        self.loadFollowUps() catch {};
     }
     fn providerPageCursor(self: *const App, cursor_value: []const u8) bool {
         return std.mem.startsWith(u8, cursor_value, "L:") or (self.options.fixtures and std.mem.startsWith(u8, cursor_value, "1:"));
@@ -5557,6 +6490,7 @@ const App = struct {
         } else self.say(false, "Mail changed · scroll again to continue", .{});
     }
     fn scrollWindow(self: *App, forward: bool) !void {
+        if (self.follow_ups_list) return;
         try self.cacheWindow(forward, true, null);
     }
     fn dispatchWindowProvider(self: *App) !void {
@@ -5631,6 +6565,7 @@ const App = struct {
         if (self.page_loading) self.say(false, "Loading {s} cached mail…", .{if (forward) "older" else "newer"});
     }
     fn page(self: *App, forward: bool) !void {
+        if (self.follow_ups_list) return self.move(forward, self.mail_page_size);
         if (!forward) {
             const previous = if (self.previous_cursor.value().len > 0) self.previous_cursor.value() else if (self.previous_cursors.items.len > 0) self.previous_cursors.items[self.previous_cursors.items.len - 1] else "";
             if (self.providerPageCursor(previous)) return self.cacheWindow(false, false, null);
@@ -5744,7 +6679,7 @@ const App = struct {
         }
         // The RAW original contains every file. This is only a definite lower
         // bound; a smaller descriptor total does not promise a usable .eml.
-        self.compose_source_original_too_large = lower_bound > types.Limits.body_bytes;
+        self.compose_source_original_too_large = lower_bound > self.capabilities.source_attachment_bytes;
         self.compose_source_omit_files = lower_bound > self.capabilities.source_attachment_bytes or values.len > types.Limits.attachments;
         self.compose_source_forward_over_quota = lower_bound > self.capabilities.source_attachment_bytes or values.len > types.Limits.attachments + types.Limits.related_resources;
         if (self.compose_source_html) preflight: {
@@ -5773,7 +6708,7 @@ const App = struct {
                     .contentLocation = if (get(value, "contentLocation") == .string) text(get(value, "contentLocation")) else null,
                 };
             }
-            const plan = original_mail.resourcePlan(text(get(message, "bodyHtml")), metadata[0..values.len]) catch |err| {
+            const plan = original_mail.resourcePlanWithLimit(text(get(message, "bodyHtml")), metadata[0..values.len], self.capabilities.source_attachment_bytes) catch |err| {
                 self.compose_source_format_error = err;
                 break :preflight;
             };
@@ -5784,6 +6719,9 @@ const App = struct {
         self.compose_source_ready = true;
     }
     fn requestConversationCompose(self: *App, intent: PendingCompose) !void {
+        // Cancellation clears queued compose state, so yield the speculative
+        // refresh before pinning the user's reply/forward identity.
+        if (self.job.future != null and self.job.kind == .refresh) self.preemptReadOnly();
         const target = self.readerReplyId();
         if (target.len == 0) return;
         if (self.pending_compose != .none or self.compose_source_probe) {
@@ -5945,7 +6883,7 @@ const App = struct {
         if (index == 0 and !self.compose_source_html) return "Plain-text source · choose Text quote or .eml";
         if (index == 2 and self.compose_intent == .forward and !self.capabilities.original_attachment) return "Original attachment unavailable here · choose Text quote";
         if (index == 0) if (self.compose_source_format_error) |err| return switch (err) {
-            error.AttachmentsTooLarge => "Embedded images exceed 2 MiB · choose Text quote",
+            error.AttachmentsTooLarge => "Embedded images exceed this platform's limit · choose Text quote",
             error.TooManyAttachments => "Too many embedded images · choose Text quote",
             error.AmbiguousOriginalHtml => "Several HTML bodies · choose Text quote",
             error.AmbiguousContentId => "Several images share a reference · choose Text quote",
@@ -5954,7 +6892,7 @@ const App = struct {
             else => "Original formatting is unavailable · choose Text quote",
         };
         if (index == 0 and self.compose_intent == .forward and self.compose_source_forward_over_quota) return "Forward files exceed this platform's limit · Text quote omits files";
-        if (index == 2 and self.compose_intent == .forward and self.compose_source_original_too_large) return "Original email exceeds 2 MiB · choose Text quote";
+        if (index == 2 and self.compose_intent == .forward and self.compose_source_original_too_large) return "Original email exceeds this platform's limit · choose Text quote";
         return null;
     }
     fn composeIntentLabel(self: *const App) []const u8 {
@@ -6033,6 +6971,7 @@ const App = struct {
         };
     }
     fn toggleComposeFormat(self: *App) !void {
+        if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
         if (!self.capabilities.markdown) return error.MarkdownUnavailable;
         if (self.compose.unknown_outcome) return;
         self.compose.body_format = if (self.compose.body_format == .markdown) .plain else .markdown;
@@ -6159,6 +7098,8 @@ const App = struct {
         try self.autosaveDraft();
     }
     fn composerChanged(self: *App) !void {
+        if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
+        self.gmail_send_ack = false;
         self.completion_dismissed = false;
         self.review_ready = false;
         self.compose.revision +%= 1;
@@ -6177,6 +7118,7 @@ const App = struct {
         return @intCast(std.math.clamp(deadline - now, 0, 1500));
     }
     fn autosaveDraft(self: *App) !void {
+        if (self.compose.gmailPaused()) return;
         self.cancelAutosaveTimer();
         if (self.paste) {
             self.autosave_due = true;
@@ -6279,6 +7221,7 @@ const App = struct {
         try self.identities_account.set(self.allocator, self.account());
     }
     fn setComposeSignature(self: *App, signature_in: []const u8) !void {
+        if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
         if (signature_in.len > 8192) return error.InvalidSignature;
         const literal_signature = try safe(self.frame.allocator(), signature_in, true);
         const clean = if (self.compose.body_format == .markdown) try markdown_mail.escapeSource(self.frame.allocator(), literal_signature) else literal_signature;
@@ -6390,6 +7333,17 @@ const App = struct {
         self.compose_portable_warning = draftExceedsPortableTransport(draft);
     }
     fn saveDraft(self: *App, kind: JobKind) !void {
+        if (self.compose.gmailPaused()) {
+            if (kind == .save_back) {
+                self.clearGraceRecovery();
+                self.mode = .browse;
+                self.compose_active = false;
+                self.say(false, "Draft kept · local editing is paused in Gmail", .{});
+                try self.resumeMailboxReader();
+                return;
+            }
+            return error.DraftPausedInGmail;
+        }
         if (kind == .save_browser and !self.capabilities.open_urls) return error.LinksUnavailable;
         if (self.compose.unknown_outcome) {
             if (kind == .save_back) {
@@ -6420,7 +7374,7 @@ const App = struct {
         try self.start(kind, .{ .account = self.account(), .cmd = "draft.update", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), draft_value), .acknowledgementOnly = true });
     }
     fn persistDraftAtExit(self: *App) !void {
-        if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.unknown_outcome) return;
+        if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.unknown_outcome or self.compose.gmailPaused()) return;
         // A signal/EOF can arrive while text insertion or the picker is open.
         // Preserve valid edited fields through the same local draft operation.
         try self.saveDraft(.save);
@@ -6444,7 +7398,7 @@ const App = struct {
         return id.len != 0 and same(id, self.compose.id.value());
     }
     fn canEditAttachments(self: *const App) bool {
-        return !self.compose.unknown_outcome and (self.job.future == null or readOnlyJob(self.job.kind));
+        return !self.compose.gmailPaused() and !self.compose.unknown_outcome and (self.job.future == null or readOnlyJob(self.job.kind));
     }
     fn promptAttachment(self: *App) !void {
         if (browser_target) return error.FileAccessUnavailable;
@@ -6988,6 +7942,8 @@ const App = struct {
         return platform.operationId(self.io, allocator, self.operation_nonce, &self.operation_sequence);
     }
     fn sendDraft(self: *App) !void {
+        if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
+        if (self.gmailCopyWarning() and !self.gmail_send_ack) return error.GmailCopyUnchecked;
         if (self.compose.unknown_outcome) {
             self.markUnknown(.send);
             return;
@@ -7000,10 +7956,11 @@ const App = struct {
         defer self.allocator.free(id);
         try self.compose.operation_id.set(self.allocator, id);
         try self.compose.operation_error.set(self.allocator, "");
-        if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id }) else {
+        const gmail_digest = try @import("draft_link.zig").contentDigest(self.frame.allocator(), try self.compose.draft(self.frame.allocator()), self.account());
+        if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..] }) else {
             self.cancelAutosaveTimer();
             self.autosave_due = false;
-            try self.start(.grace_stage, .{ .account = self.account(), .cmd = "draft.queue", .draftId = self.compose.id.value(), .operationId = id, .delaySeconds = self.ui_preferences.sendGraceSeconds });
+            try self.start(.grace_stage, .{ .account = self.account(), .cmd = "draft.queue", .draftId = self.compose.id.value(), .operationId = id, .delaySeconds = self.ui_preferences.sendGraceSeconds, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..] });
         }
     }
     fn pausedGraceForCompose(self: *const App) bool {
@@ -7013,6 +7970,7 @@ const App = struct {
             same(self.account(), self.grace_account.value());
     }
     fn clearGraceRecovery(self: *App) void {
+        self.grace_resume_required = false;
         // The durable queue stays paused. Only its association with this view
         // is cleared; an active countdown retains its cancellation owner.
         if (self.grace_active) return;
@@ -7047,6 +8005,7 @@ const App = struct {
         if (self.grace_close) self.quit = true;
     }
     fn processGrace(self: *App, send_now: bool) !void {
+        if (self.grace_resume_required and !send_now) return;
         if (!self.grace_active or !self.grace_pending.load(.acquire) or self.grace_close) return;
         if (!send_now and Io.Timestamp.now(self.io, .real).toMilliseconds() < self.grace_due) return;
         self.preemptReadOnly();
@@ -7062,6 +8021,14 @@ const App = struct {
         const state = text(get(result, "state"));
         self.grace_active = false;
         self.grace_pending.store(false, .release);
+        self.grace_resume_required = truth(get(result, "resumeRequired"));
+        if (same(state, "queued") and self.grace_resume_required) {
+            self.grace_recovery = true;
+            self.compose.unknown_outcome = false;
+            self.mode = .compose;
+            self.say(false, "Imported send paused · Ctrl+S Review · :resume-send / :cancel-send", .{});
+            return;
+        }
         if (same(state, "applied")) {
             self.compose.unknown_outcome = false;
             self.compose_active = false;
@@ -7111,6 +8078,13 @@ const App = struct {
     fn inspectDraftOperations(self: *App) !void {
         self.compose.unknown_outcome = true;
         try self.start(.draft_operations, .{ .account = self.account(), .cmd = "operation.list", .draftId = self.compose.id.value() });
+    }
+    fn invitationCheckUncertain(self: *App, code: []const u8) void {
+        self.invitation_calendar_sync_state.set("unknown") catch {};
+        self.invitation_calendar_sync_error.display(code);
+        self.invitation_calendar_can_retry = true;
+        self.mode = .invitation;
+        self.say(true, "Status check not confirmed · C Check status · no RSVP resent", .{});
     }
     fn markUnknown(self: *App, kind: JobKind) void {
         if (kind == .send or kind == .grace_process) {
@@ -7284,12 +8258,13 @@ const App = struct {
     }
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
-            .updates_load, .updates_check => true,
+            .follow_up_list, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
             .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
             else => false,
         };
     }
     fn preemptReadOnly(self: *App) void {
+        if (self.cancelMeetingRead()) return;
         if (self.job.future == null or !readOnlyJob(self.job.kind)) return;
         const index = self.job.account_index;
         const refresh = self.job.kind == .refresh;
@@ -7326,6 +8301,13 @@ const App = struct {
         return true;
     }
     fn browseBack(self: *App) !void {
+        if (self.follow_ups_list and self.job.future != null and !readOnlyJob(self.job.kind)) return error.OperationPending;
+        if (self.follow_ups_list and self.focus != .reader and !self.expanded) {
+            self.follow_ups_list = false;
+            self.generation +%= 1;
+            try self.restoreWorkingContext();
+            return self.reloadWithRefresh(false);
+        }
         if (self.expanded) {
             self.expanded = false;
             return;
@@ -7399,11 +8381,14 @@ const App = struct {
         const moved = if (down) self.selected -| selected_before else selected_before -| self.selected;
         self.top = if (down) @min(top_before +| moved, self.messages.len -| self.mail_page_size) else top_before -| moved;
     }
+    fn calendarNavigationIndex(self: *App) usize {
+        return self.accounts.len + folders.len + 1 + (if (self.capabilities.mail_changes) 1 + self.userLabelCount() else 0);
+    }
     fn move(self: *App, down: bool, amount: usize) !void {
         if (self.focus == .reader) {
             self.scrollReader(down, amount);
         } else if (self.focus == .navigation) {
-            const total = self.accounts.len + folders.len + 1 + (if (self.capabilities.mail_changes) 1 + self.userLabelCount() else 0);
+            const total = self.calendarNavigationIndex() + @as(usize, if (browser_target) 0 else 2);
             self.navigation = if (down) @min(self.navigation +| amount, total - 1) else self.navigation -| amount;
         } else {
             if (self.pageLoadCurrent()) {
@@ -7412,11 +8397,11 @@ const App = struct {
             }
             const previous = self.selected;
             if (self.pending_page and down != self.pending_page_forward) self.pending_page = false;
-            if (down and self.messages.len > 0 and previous +| amount >= self.messages.len and !self.drafts_list) {
+            if (down and self.messages.len > 0 and previous +| amount >= self.messages.len and !self.drafts_list and !self.follow_ups_list) {
                 try self.scrollWindow(true);
                 return;
             }
-            if (!down and self.messages.len > 0 and amount > previous and !self.drafts_list) {
+            if (!down and self.messages.len > 0 and amount > previous and !self.drafts_list and !self.follow_ups_list) {
                 try self.scrollWindow(false);
                 return;
             }
@@ -7430,6 +8415,7 @@ const App = struct {
         const selected = layout.stepMessage(self.messages.len, self.selected, next);
         if (selected == self.selected) {
             self.focus = .reader;
+            if (self.follow_ups_list) return;
             try self.scrollWindow(next);
             return;
         }
@@ -7444,6 +8430,8 @@ const App = struct {
     }
     fn enter(self: *App) !void {
         if (self.focus == .navigation) {
+            if (!browser_target and self.navigation == self.calendarNavigationIndex()) return self.openCalendar(false);
+            if (!browser_target and self.navigation == self.calendarNavigationIndex() + 1) return self.openFollowUps();
             if (self.navigation < self.accounts.len) try self.chooseAccount(self.navigation) else if (self.navigation < self.accounts.len + folders.len) {
                 self.rememberWorkingContext();
                 try self.custom_label.set(self.allocator, "");
@@ -7468,6 +8456,10 @@ const App = struct {
             if (id.len == 0) return error.MessageRequired;
             self.preemptReadOnly();
             try self.start(.read, .{ .account = self.account(), .cmd = "mail.read", .messageId = id });
+        } else if (self.follow_ups_list) {
+            self.focus = .reader;
+            if (self.job.future != null and self.job.kind == .refresh) self.preemptReadOnly();
+            if (self.messageId().len > 0) try self.start(.read, .{ .account = self.account(), .cmd = "mail.read", .messageId = self.messageId() });
         } else if (self.drafts_list) {
             if (self.messageId().len > 0) try self.start(.draft_read, .{ .account = self.account(), .cmd = "draft.read", .draftId = self.messageId() });
         } else {
@@ -7540,6 +8532,8 @@ const App = struct {
         self.leaveContacts();
     }
     fn onMouse(self: *App, mouse: vaxis.Mouse) !void {
+        if (!self.options.no_mouse and mouse.type == .press) _ = self.cancelMeetingRead();
+        if (try self.onMeetingMouse(mouse)) return;
         if (try self.onReaderCopyMouse(mouse)) return;
         if (self.grace_active) {
             if (!self.options.no_mouse and mouse.type == .press and mouse.button == .left and !mouse.mods.shift and !mouse.mods.alt and !mouse.mods.ctrl) if (self.grace_rect) |rect| if (mouse.col >= rect.x and mouse.col < rect.x + rect.width and mouse.row >= rect.y and mouse.row < rect.y + rect.height) {
@@ -7594,15 +8588,54 @@ const App = struct {
             .left => null,
             else => return,
         };
+        if (self.calendar.open) {
+            if (self.calendarHelpVisible()) {
+                if (wheel) |down| self.help_scroll = if (down) @min(self.help_scroll +| 3, self.help_lines -| self.help_height) else self.help_scroll -| 3 else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                    if (hit.kind == .dialog_action and hit.index == 0) self.closeHelp();
+                }
+                return;
+            }
+            if (wheel) |down| {
+                for (0..3) |_| try self.onCalendarKey(.{ .codepoint = if (down) 'j' else 'k' });
+            } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+                if (hit.kind == .dialog_action) {
+                    try self.calendarActivate(hit.index);
+                } else if (hit.kind == .contact) {
+                    if (self.calendar.page == .calendars) {
+                        self.calendar.picker = hit.index;
+                        try self.selectCalendar(hit.index);
+                    } else {
+                        self.calendar.selected = hit.index;
+                        try self.calendarActivate(10);
+                    }
+                }
+            }
+            return;
+        }
+        if (self.mode == .browse and self.ux_overlay == .none and wheel == null) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+            if (hit.kind == .dialog_action and hit.index == 100) {
+                try self.openCalendar(false);
+                return;
+            }
+            if (hit.kind == .dialog_action and hit.index == 101) {
+                try self.openFollowUps();
+                return;
+            }
+        };
         if (self.ux_overlay != .none) {
             if (wheel) |down| {
+                const was_list = self.ux_focus == 1;
                 self.ux_focus = 1;
-                self.ux_selected = if (down) @min(self.ux_selected +| 1, self.uxCount() -| 1) else self.ux_selected -| 1;
+                if (self.ux_overlay == .follow_up) {
+                    const next = if (self.ux_selected >= self.uxCount()) @as(usize, 0) else if (!was_list) self.ux_selected else if (down) @min(self.ux_selected +| 1, self.uxCount() -| 1) else self.ux_selected -| 1;
+                    try self.selectFollowUpPreset(next);
+                } else self.ux_selected = if (down) @min(self.ux_selected +| 1, self.uxCount() -| 1) else self.ux_selected -| 1;
             } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
                 if (hit.kind == .dialog_action and self.composeChoiceEnabled(hit.index)) {
                     if (hit.index >= 100) {
                         self.ux_selected = hit.index - 100;
                         self.ux_focus = 1;
+                        if (self.ux_overlay == .follow_up) try self.selectFollowUpPreset(self.ux_selected);
                     } else if (hit.index == 10) self.ux_focus = 0 else if (hit.index == 12) {
                         self.ux_focus = 2;
                         try self.activateUx();
@@ -7795,7 +8828,7 @@ const App = struct {
                 }
             },
             .compose_field => {
-                if (self.mode != .compose or self.compose.unknown_outcome or hit.index >= self.compose.fields.len) return;
+                if (self.mode != .compose or self.compose.unknown_outcome or self.compose.gmailPaused() or hit.index >= self.compose.fields.len) return;
                 if (wheel) |down| {
                     if (hit.index == 4) self.compose.body_scroll = if (down) self.compose.body_scroll +| 3 else self.compose.body_scroll -| 3;
                     return;
@@ -7864,6 +8897,7 @@ const App = struct {
         }
     }
     fn runEditor(self: *App) !void {
+        if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
         if (browser_target) return error.EditorUnavailable;
         if (!self.capabilities.editor) return error.EditorUnavailable;
         // Vaxis uses an integer-only fake TTY for screen unit tests. Owned-PTY
@@ -7903,6 +8937,7 @@ const App = struct {
         if (self.tty.getWinsize()) |size| try self.resize(size) else |_| {}
         self.vx.queueRefresh();
         try self.loop.start();
+        _ = self.meetingTick();
         const value_in = result catch |err| {
             self.sayEditorFailure(err);
             return;
@@ -7918,6 +8953,16 @@ const App = struct {
     fn onComposeKey(self: *App, key: Key) !void {
         if (self.job.future != null and !readOnlyJob(self.job.kind)) {
             if (key.matches('q', .{}) or key.matches(Key.escape, .{})) self.say(false, "Draft operation pending · wait for its result", .{});
+            return;
+        }
+        if (self.compose.gmailPaused()) {
+            if (key.matches('p', .{})) return self.cycleComposePreview();
+            if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.saveDraft(.save_back);
+            if (key.matches(':', .{})) {
+                self.previous_mode = .compose;
+                self.mode = .command;
+                try self.input.set(self.allocator, "");
+            } else if (key.matches('g', .{}) or key.matches(Key.enter, .{})) try self.openGmailDraft() else self.sayError("DraftPausedInGmail");
             return;
         }
         if (key.matches('s', .{ .ctrl = true })) return self.saveDraft(.save_review);
@@ -8068,8 +9113,9 @@ const App = struct {
         self.dialog_focus.ensure(context, 0);
         if (self.mode == .invitation and self.job.future != null) return;
         if (tabDirection(key)) |backwards| {
-            const enabled: u8 = if (self.mode == .invitation) self.invitationControlMask() else if (self.job.future == null) 0b11 else 0b01;
-            self.dialog_focus.move(backwards, if (self.mode == .invitation) 6 else 2, enabled);
+            const copy_warning = self.mode == .review and self.gmailCopyWarning();
+            const enabled: u8 = if (self.mode == .invitation) self.invitationControlMask() else if (self.job.future == null) (if (copy_warning) @as(u8, 0b111) else 0b11) else 0b01;
+            self.dialog_focus.move(backwards, if (self.mode == .invitation) 8 else if (copy_warning) 3 else 2, enabled);
             return;
         }
         if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (self.mode != .invitation and key.matches('n', .{})) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 0)) {
@@ -8077,6 +9123,10 @@ const App = struct {
             return;
         }
         if (self.mode == .review) {
+            if (self.gmailCopyWarning() and (key.matches('g', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2))) {
+                self.gmail_send_ack = !self.gmail_send_ack;
+                return;
+            }
             if ((key.matches('y', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) and self.job.future == null) try self.sendDraft() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.compose_preview_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.compose_preview_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.compose_preview_scroll +|= self.vx.window().height / 2 else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.compose_preview_scroll -|= self.vx.window().height / 2;
             return;
         }
@@ -8085,6 +9135,16 @@ const App = struct {
                 try self.batchMail("trash", null, null, null, null);
                 self.mode = .browse;
             }
+            return;
+        }
+        if (key.matches('C', .{}) or key.matches('c', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 7)) {
+            if ((self.invitationControlMask() & 0b10000000) == 0) return;
+            try self.start(.invitation_reconcile, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.inspect", .messageId = self.invitation_inspected_id.value(), .reconcile = true });
+            self.say(false, "{s}", .{if (self.invitationCalendarCheckNeeded()) "Checking RSVP and Calendar status…" else "Checking Sent for the previous RSVP…"});
+            return;
+        }
+        if (key.matches('A', .{}) or key.matches('a', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 6)) {
+            if ((self.invitationControlMask() & 0b1000000) != 0) try self.openCalendar(true);
             return;
         }
         if (key.matches('v', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 4)) {
@@ -8099,6 +9159,7 @@ const App = struct {
             return;
         }
         if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.invitation_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.invitation_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.invitation_scroll +|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.invitation_scroll -|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.invitation_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.invitation_scroll = self.invitation_lines -| self.invitation_height else {
+            if (!self.invitation_review.canRespond() or self.invitation_response_unknown or self.invitationCalendarUnknown()) return;
             const status = if (key.matches('a', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) "accepted" else if (key.matches('t', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) "tentative" else if (key.matches('d', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) "declined" else return;
             if (!self.invitation_confirm_ready) {
                 self.say(true, "Resize to review RSVP identity before confirmation", .{});
@@ -8115,7 +9176,7 @@ const App = struct {
             try self.invitation_message_id.set(self.allocator, self.invitation_inspected_id.value());
             try self.invitation_account.set(self.allocator, self.invitation_inspected_account.value());
             self.invitation_unknown = false;
-            try self.start(.invitation, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.reply", .messageId = self.invitation_inspected_id.value(), .status = status, .operationId = id });
+            try self.start(.invitation, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.reply", .messageId = self.invitation_inspected_id.value(), .status = status, .operationId = id, .attendee = self.invitation_review.attendee.slice(), .sourceHash = self.invitation_source_hash.slice() });
         }
     }
     fn pasteInto(self: *App, field: *Field, key: Key, multiline: bool, limit: usize) !void {
@@ -8138,7 +9199,7 @@ const App = struct {
         self.paste_cr = false;
         self.acknowledgeNewMail();
         self.paste_history_field = null;
-        if (self.mode == .compose and !self.compose.attachment_focus and !self.compose.unknown_outcome and !self.grace_active and self.compose.selected < self.compose.fields.len) {
+        if (self.mode == .compose and !self.compose.attachment_focus and !self.compose.unknown_outcome and !self.compose.gmailPaused() and !self.grace_active and self.compose.selected < self.compose.fields.len) {
             const field = &self.compose.fields[self.compose.selected];
             if (field.history.record(self.allocator, field.value(), field.cursor)) {
                 self.paste_history_field = self.compose.selected;
@@ -8155,6 +9216,9 @@ const App = struct {
     }
     fn onKey(self: *App, original_key: Key) !void {
         self.acknowledgeNewMail();
+        if (!self.paste) _ = self.cancelMeetingRead();
+        if (try self.onMeetingKey(original_key)) return;
+        if (self.calendar.open) return self.onCalendarKey(original_key);
         if (!self.paste and try self.onReaderCopyKey(original_key)) return;
         self.action_notice = false;
         var key = original_key;
@@ -8230,7 +9294,7 @@ const App = struct {
         };
         if (self.paste) {
             const changing = self.job.future != null and !readOnlyJob(self.job.kind);
-            if ((self.mode == .compose and (changing or self.compose.unknown_outcome)) or (self.mode == .contact_edit and changing)) {
+            if ((self.mode == .compose and (changing or self.compose.unknown_outcome or self.compose.gmailPaused())) or (self.mode == .contact_edit and changing)) {
                 self.say(true, "Paste not applied while saving or protecting an uncertain draft", .{});
                 return;
             }
@@ -8265,12 +9329,16 @@ const App = struct {
                 const index = self.job.account_index;
                 const contacts_waiting = self.mode == .contacts and self.pending_contacts;
                 self.cancelJob();
+                if (kind == .gmail_draft_action) {
+                    self.compose.gmail_guard_unknown = true;
+                    self.gmail_reload_pending = true;
+                }
                 if (kind == .label_write or kind == .label_color) {
                     self.label_unknown[index] = true;
                     self.label_manager_page = .list;
                     self.dialog_focus.reset(.label_manager, 1);
                     self.labelUnknownNotice();
-                } else if (kind == .send or kind == .grace_process or kind == .invitation) self.markUnknown(kind) else {
+                } else if (kind == .send or kind == .grace_process or kind == .invitation) self.markUnknown(kind) else if (kind == .invitation_reconcile) self.invitationCheckUncertain("Canceled") else {
                     if (kind == .refresh) {
                         self.sync[index].state = if (self.sync[index].cache_ready) .cached else .failed;
                         self.sync[index].error_len = 0;
@@ -8315,6 +9383,11 @@ const App = struct {
         if (self.mode == .attachment and key.matches('u', .{ .ctrl = true })) {
             self.path_candidates.reset();
             return self.input.set(self.allocator, "");
+        }
+        if (self.mode == .search and self.previous_mode != .contacts and key.matches('g', .{ .ctrl = true })) {
+            self.input_query_scope = if (self.input_query_scope == .cache) .server else .cache;
+            self.say(false, "{s}", .{if (self.input_query_scope == .cache) @as([]const u8, "Search downloaded mail · Ctrl+G switches to Gmail") else "Search Gmail · Enter runs the query online"});
+            return;
         }
         if (self.mode == .search or self.mode == .command or self.mode == .labels or self.mode == .attachment) {
             if (key.matches(Key.escape, .{})) self.mode = self.previous_mode else if (key.matches(Key.enter, .{})) {
@@ -8443,13 +9516,21 @@ const App = struct {
         } else if (key.matches('c', .{})) try self.composeNew(null) else if (key.matches('r', .{})) try self.composeNew(false) else if (key.matches('R', .{}) or key.matches('r', .{ .shift = true })) try self.composeNew(true) else if (key.matches('a', .{})) {
             self.picker = false;
             try self.loadContacts("");
+        } else if (key.matches('C', .{}) or key.matches('c', .{ .shift = true })) {
+            try self.openCalendar(false);
+        } else if (key.matches('b', .{})) {
+            try self.editFollowUp();
+        } else if (self.follow_ups_list and key.matches('d', .{})) {
+            try self.completeFollowUp();
+        } else if (key.matches('A', .{}) or key.matches('a', .{ .shift = true })) {
+            try self.openCalendar(true);
         } else if (key.matches('z', .{})) {
             self.expanded = !self.expanded;
             self.focus = .reader;
         } else if (key.matches('?', .{})) {
             try self.openHelp();
         } else if (key.matches('r', .{ .ctrl = true })) {
-            if (self.cacheSearch()) try self.refreshMailbox() else try self.reload();
+            if (self.follow_ups_list) try self.loadFollowUps() else if (self.cacheSearch()) try self.refreshMailbox() else try self.reload();
         } else if (key.matches('x', .{}) and self.messageId().len > 0) try self.start(.mutation, .{ .account = self.account(), .cmd = "mail.archive", .messageId = self.messageId() }) else if ((key.matches('D', .{}) or key.matches('d', .{ .shift = true })) and self.messageId().len > 0) self.mode = .trash_confirm else if (key.matches('U', .{}) or key.matches('u', .{ .shift = true })) try self.start(.mutation, .{ .account = self.account(), .cmd = "mail.restore", .messageId = self.messageId() }) else if (key.matches('s', .{}) and self.messageId().len > 0) {
             var starred = false;
             for (items(get(self.selectedMessage().?, "labels"))) |label| if (same(text(label), "STARRED")) {
@@ -8609,8 +9690,16 @@ const App = struct {
         }
         try self.line(win, row + folders.len + 1, "Contacts", if (self.focus == .navigation and self.navigation == self.accounts.len + folders.len) .selected else .text);
         self.mouseRows(win, row + folders.len + 1, 1, .contacts, 0);
+        if (!browser_target) {
+            try self.line(win, row + folders.len + 2, "Calendar · C", if (self.focus == .navigation and self.navigation == self.calendarNavigationIndex()) .selected else .text);
+            self.mouseRows(win, row + folders.len + 2, 1, .dialog_action, 100);
+            const due = self.followUpDueCount();
+            const label = if (due > 0) try std.fmt.allocPrint(self.frame.allocator(), "Follow-ups · {d} due", .{due}) else "Follow-ups";
+            try self.line(win, row + folders.len + 3, label, if (self.focus == .navigation and self.navigation == self.calendarNavigationIndex() + 1) .selected else if (due > 0) .accent else .text);
+            self.mouseRows(win, row + folders.len + 3, 1, .dialog_action, 101);
+        }
         if (!self.capabilities.mail_changes) return;
-        var label_row = row + folders.len + 3;
+        var label_row = row + folders.len + 5;
         if (label_row + 2 >= win.height and self.focus == .navigation and self.navigation > self.accounts.len + folders.len) {
             win.fill(.{ .style = self.style(.text) });
             self.mouse_hits.count = navigation_hit_start;
@@ -8643,12 +9732,37 @@ const App = struct {
         }
         return @min(widest, 36);
     }
+    fn draftRowName(value: Value) []const u8 {
+        const link = get(value, "gmailLink");
+        if (link == .null or same(text(get(link, "phase")), "rejected")) return "Draft";
+        if (same(text(get(link, "phase")), "unknown")) return "Gmail: check status";
+        return if (truth(get(link, "paused"))) "In Gmail · paused" else "Gmail copy kept";
+    }
     fn drawMailRow(self: *App, win: vaxis.Window, row: usize, index: usize) !void {
+        if (self.follow_ups_list) return self.drawFollowUpRow(win, row, index);
         if (row >= win.height or index >= self.messages.len) return;
         const value_in = self.messages[index];
         const sender = get(value_in, "from");
         const sender_text = if (text(get(sender, "name")).len > 0) text(get(sender, "name")) else text(get(sender, "address"));
         const selected = index == self.selected;
+        if (self.ui_preferences.density == .compact) {
+            const item = win.child(.{ .y_off = @intCast(row), .height = 1 });
+            self.mouseArea(item, .mail, index);
+            item.fill(.{ .style = self.style(if (selected) .selected else .text) });
+            const stamp = try timestamp(self.frame.allocator(), &self.zone, get(value_in, "receivedAt"));
+            const date = if (stamp.len >= 16) stamp[5..16] else stamp;
+            const date_width: u16 = if (win.width >= 48) @intCast(date.len) else 0;
+            const content_width = win.width -| date_width -| @as(u16, if (date_width > 0) 1 else 0);
+            const raw_subject = text(get(value_in, "subject"));
+            const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
+            const shown_sender = try self.fitLine(win, if (self.drafts_list) draftRowName(value_in) else sender_text, @min(content_width / 3, 22));
+            const line_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s} {s} · {s}{s}", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " ", if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) @as([]const u8, "*") else " ", shown_sender, if (items(get(value_in, "attachments")).len > 0) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
+            var appearance = self.listStyle(.subject, selected);
+            appearance.bold = messageUnread(value_in);
+            _ = item.child(.{ .width = content_width }).printSegment(.{ .text = try self.fitLine(win, line_text, content_width), .style = appearance }, .{ .wrap = .none });
+            if (date_width > 0) _ = item.child(.{ .x_off = win.width - date_width, .width = date_width }).printSegment(.{ .text = date, .style = self.listStyle(.muted, selected) }, .{ .wrap = .none });
+            return;
+        }
         const item = win.child(.{ .y_off = @intCast(row), .height = @min(@as(u16, 2), win.height -| @as(u16, @intCast(row))) });
         self.mouseArea(item, .mail, index);
         item.fill(.{ .style = self.style(if (selected) .selected else .text) });
@@ -8671,7 +9785,7 @@ const App = struct {
         if (date_width > 0) _ = item.child(.{ .x_off = win.width - date_width, .height = 1, .width = date_width }).printSegment(.{ .text = compact, .style = self.listStyle(.muted, selected) }, .{ .wrap = .none });
         if (item.height < 2) return;
         const sender_limit = @min((win.width -| gutter_width) / 2, 28);
-        const shown_sender = try self.fitLine(win, if (self.drafts_list) "Draft" else sender_text, sender_limit);
+        const shown_sender = try self.fitLine(win, if (self.drafts_list) draftRowName(value_in) else sender_text, sender_limit);
         if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) {
             const star = if (item.gwidth("⭐") <= 2) "⭐" else "*";
             _ = item.child(.{ .y_off = 1, .height = 1, .width = gutter_width }).printSegment(.{ .text = star, .style = self.listStyle(.accent, selected) }, .{ .wrap = .none });
@@ -8712,16 +9826,16 @@ const App = struct {
             // Keep the old focused row and reader until the replacement is
             // committed. Provisional incoming IDs have no interactive hit.
             try self.drawMailRow(win, 0, @min(self.selected, self.messages.len - 1));
-            row = 3;
+            row = self.mailRowStride();
         }
         const reported = self.job.progress.snapshot();
         const known = if (self.job.loading_rows.count() > 0) self.job.loading_rows.count() else if (reported.phase == .metadata) @min(reported.total, loading.window) else 0;
-        const visible = mailRowCapacity(@as(usize, win.height) -| row);
+        const visible = self.mailRows(@as(usize, win.height) -| row);
         const count = if (known > 0) @min(known, visible) else @min(@as(usize, 3), visible);
         for (0..count) |index| {
-            const current = row + index * 3;
+            const current = row + index * self.mailRowStride();
             if (current >= win.height) break;
-            const item = win.child(.{ .y_off = @intCast(current), .height = @min(@as(u16, 2), win.height -| @as(u16, @intCast(current))) });
+            const item = win.child(.{ .y_off = @intCast(current), .height = @min(@as(u16, if (self.ui_preferences.density == .compact) 1 else 2), win.height -| @as(u16, @intCast(current))) });
             item.fill(.{ .style = self.style(.text) });
             if (self.job.loading_rows.slots[index].metadata()) |received| {
                 const subject = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (received.unread) @as([]const u8, "● ") else "  ", if (received.subject.value().len > 0) received.subject.value() else "(no subject)" });
@@ -8744,19 +9858,29 @@ const App = struct {
         return true;
     }
     fn listDraw(self: *App, win: vaxis.Window) !void {
-        self.mail_page_size = mailRowCapacity(win.height);
+        self.mail_page_size = self.mailRows(win.height);
         self.mouseArea(win, .mail_scroll, 0);
-        if (try self.drawIncomingWindow(win)) return;
+        if (!self.follow_ups_list and try self.drawIncomingWindow(win)) return;
         const count = self.mail_page_size;
         if (self.selected < self.top) self.top = self.selected;
         if (self.selected >= self.top + count) self.top = self.selected + 1 - count;
         if (self.messages.len == 0) {
+            if (self.follow_ups_list) {
+                try self.line(win, 1, "No follow-ups · press b on a message to add one", .muted);
+                return;
+            }
             const state = self.sync[self.account_index].state;
             try self.line(win, 1, if (state == .fetching) "Fetching mail…" else if (self.job.future != null and self.drafts_list) "Loading drafts…" else if (state == .failed or self.warning) "Mail unavailable; see status below" else if (self.list_cached and self.list_partial) "No rows in cached subset" else "No matching messages", if (state == .fetching) .fetching else .muted);
             return;
         }
         var index = self.top;
-        while (index < self.messages.len and index < self.top + count) : (index += 1) try self.drawMailRow(win, (index - self.top) * 3, index);
+        while (index < self.messages.len and index < self.top + count) : (index += 1) try self.drawMailRow(win, (index - self.top) * self.mailRowStride(), index);
+    }
+    fn mailRowStride(self: *const App) usize {
+        return if (self.ui_preferences.density == .compact) 1 else 3;
+    }
+    fn mailRows(self: *const App, height: usize) usize {
+        return if (self.ui_preferences.density == .compact) @max(height, 1) else mailRowCapacity(height);
     }
     fn searchExcerpt(self: *App, message: Value) []const u8 {
         for (self.search_matches) |match_value| {
@@ -8797,10 +9921,70 @@ const App = struct {
         defer self.reader_find_text = false;
         return self.flowStyled(win, display.text, offset, base_row, .text, .{}, display.ranges);
     }
+    fn preparedPlainDraw(self: *App, view: *ReaderMarkup, win: vaxis.Window, body: []const u8, base_row: usize) !usize {
+        if (win.width == 0) return base_row;
+        if (view.plain) |*plain| if (plain.quotes != self.fold_quotes or plain.signatures != self.fold_signatures) {
+            plain.deinit();
+            view.plain = null;
+        };
+        if (view.plain == null) {
+            const clean = try safe(self.frame.allocator(), body, true);
+            view.plain = try reader_plain.Prepared.init(self.allocator, clean, self.fold_quotes, self.fold_signatures);
+        }
+        const prepared = &view.plain.?;
+        try prepared.ensure(win.width, win.screen.width_method);
+        if (self.reader_find_collect or self.reader_copy_collect) {
+            self.reader_find_text = true;
+            defer self.reader_find_text = false;
+            return self.flowStyled(win, prepared.text, self.reader_scroll, base_row, .text, .{}, prepared.links);
+        }
+        const end = base_row + prepared.rows;
+        if (base_row >= self.reader_scroll +| win.height or end <= self.reader_scroll) return end;
+        var iterator = prepared.iteratorAt(self.reader_scroll -| base_row);
+        const highlight = if (!self.calendar.open and self.cacheSearch()) self.search_highlight.value() else "";
+        // Bound highlighting to the visible source and enough preceding bytes
+        // to cover a match spanning the first visible wrapped row.
+        var scan = iterator;
+        while (scan.next()) |glyph| if (base_row + glyph.position.row >= self.reader_scroll +| win.height) break;
+        const visible_source = prepared.text[0..scan.offset];
+        const match_start = iterator.offset -| (highlight.len *| 4);
+        var match = cache_query.findRangeAt(visible_source, highlight, match_start);
+        var link_index: usize = 0;
+        var row = iterator.position.row;
+        var shown_byte: usize = 0;
+        while (iterator.next()) |glyph| {
+            if (glyph.position.row != row) {
+                row = glyph.position.row;
+                shown_byte = 0;
+            }
+            const glyph_start = shown_byte;
+            shown_byte += glyph.text.len;
+            const absolute = base_row + row;
+            if (absolute >= self.reader_scroll +| win.height) break;
+            if (absolute < self.reader_scroll or glyph.columns > win.width) continue;
+            while (link_index < prepared.links.len and glyph.byte_offset >= prepared.links[link_index].end) link_index += 1;
+            while (match) |range| {
+                if (glyph.byte_offset < range.end) break;
+                match = cache_query.findRangeAt(visible_source, highlight, range.end);
+            }
+            var appearance = self.style(.text);
+            if (link_index < prepared.links.len and glyph.byte_offset >= prepared.links[link_index].start) appearance = html_view.style(self.palette, self.mono, .{}, .link);
+            if (match) |range| if (glyph.byte_offset < range.end and iterator.offset > range.start) {
+                if (self.mono) appearance.reverse = true else {
+                    appearance.bg = .{ .rgb = self.palette.yellow };
+                    appearance.fg = .{ .rgb = self.palette.background };
+                }
+            };
+            if (self.reader_find_paint and self.reader_find_scope) appearance = self.readerFindStyle(appearance, absolute, glyph_start, shown_byte);
+            if (self.reader_copy_paint and self.reader_copy_scope) appearance = self.readerCopyStyle(appearance, absolute, glyph_start, shown_byte);
+            win.writeCell(glyph.position.column, @intCast(absolute - self.reader_scroll), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = appearance });
+        }
+        return end;
+    }
     fn flowStyled(self: *App, win: vaxis.Window, clean: []const u8, offset: usize, base_row: usize, tone: Tone, options: text_layout.Options, link_ranges: []const reader_tools.LinkRange) usize {
         if (win.width == 0) return base_row;
-        const highlight = if (self.cacheSearch()) self.search_highlight.value() else "";
-        var next_match = cache_query.find(clean, highlight);
+        const highlight = if (!self.calendar.open and self.cacheSearch()) self.search_highlight.value() else "";
+        var next_match = cache_query.findRange(clean, highlight);
         var layout_options = options;
         layout_options.base_row = base_row;
         const find_here = self.reader_find_scope and (self.reader_find_text or tone == .subject);
@@ -8820,16 +10004,15 @@ const App = struct {
             if (self.reader_find_collect or self.reader_copy_collect) continue;
             while (link_index < link_ranges.len and glyph.byte_offset >= link_ranges[link_index].end) link_index += 1;
             while (next_match) |match_at| {
-                if (glyph.byte_offset < match_at + highlight.len) break;
-                const after = match_at + highlight.len;
-                next_match = if (cache_query.find(clean[after..], highlight)) |relative| after + relative else null;
+                if (glyph.byte_offset < match_at.end) break;
+                next_match = cache_query.findRangeAt(clean, highlight, match_at.end);
             }
             // Count every row/byte for the full-body scrollbar, but construct
             // styles only for cells that can actually reach this viewport.
             if (glyph.position.row < offset or glyph.position.row - offset >= win.height or glyph.columns > win.width) continue;
             var cell_style = self.style(if (glyph.marker) .accent else tone);
             if (!glyph.marker and link_index < link_ranges.len and glyph.byte_offset >= link_ranges[link_index].start) cell_style = html_view.style(self.palette, self.mono, .{}, .link);
-            if (!glyph.marker) if (next_match) |match_at| if (glyph.byte_offset >= match_at and glyph.byte_offset < match_at + highlight.len) {
+            if (!glyph.marker) if (next_match) |match_at| if (glyph.byte_offset >= match_at.start and glyph.byte_offset < match_at.end) {
                 if (self.mono) cell_style.reverse = true else {
                     cell_style.bg = .{ .rgb = self.palette.yellow };
                     cell_style.fg = .{ .rgb = self.palette.background };
@@ -8880,63 +10063,78 @@ const App = struct {
         self.reader_invitation_title.display(if (subject.len > 0) subject else "Meeting invitation");
         self.reader_invitation_when.display("Time details in review");
         self.reader_invitation_where.display("");
+        self.reader_invitation_can_reply = false;
+        self.reader_invitation_badge = "Invitation";
+        self.reader_invitation_badge_tone = .sender;
+        self.reader_invitation_has_join = false;
         var invite: invitation.Invitation = .{};
-        invitation.parse(raw, self.account(), aliases[0..count], &invite) catch return;
+        invitation.parseDisplay(raw, self.account(), aliases[0..count], &invite) catch return;
+        self.reader_invitation_can_reply = invite.canRespond();
         const a = self.frame.allocator();
-        var event_zone: ?timezone.Zone = null;
-        defer if (event_zone) |*zone| zone.deinit(a);
-        const tzid = invitation.eventTimezone(&invite);
-        if (!browser_target and tzid.len > 0 and invite.timezones.len == 0) event_zone = timezone.loadNamed(self.io, a, self.environ, tzid) catch null;
-        const presentation = try invitation.friendlyWithZone(a, &invite, &self.zone, if (event_zone) |*zone| zone else null);
-        if (invite.summary.len > 0) self.reader_invitation_title.display(invite.summary.slice());
+        const presentation = if (browser_target) try invitation.friendly(a, &invite, &self.zone) else try invitation.friendlyNative(self.io, a, self.environ, &invite, &self.zone);
+        self.reader_invitation_has_join = presentation.join_url.len > 0;
+        self.reader_invitation_badge = if (invite.cancelled) "Cancelled" else if (invite.method == .reply) "RSVP received" else if (invite.method == .publish) "Calendar event" else "Invitation";
+        self.reader_invitation_badge_tone = if (invite.cancelled) .warning else if (invite.method == .request) .sender else .muted;
+        self.reader_invitation_title.display(if (invite.summary.len > 0) invite.summary.slice() else subject);
         if (presentation.start.len > 0) self.reader_invitation_when.display(try std.fmt.allocPrint(a, "{s}{s}{s}", .{ presentation.start, if (presentation.duration.len > 0) " · " else "", presentation.duration }));
         self.reader_invitation_where.display(try std.fmt.allocPrint(a, "{s}{s}Organizer: {s}", .{ presentation.location, if (presentation.location.len > 0) " · " else "", invite.organizer.slice() }));
     }
+    fn drawJoinCamera(self: *App, win: vaxis.Window, x: u16, row: usize) !void {
+        if (row >= win.height or @as(usize, x) + 3 > win.width or win.gwidth("") > 2) return;
+        // Nerd Font U+F03D may overhang its first cell. Keep two cells and a gap.
+        try self.line(win.child(.{ .x_off = x, .width = 2 }), row, " ", .accent);
+    }
+    fn measureCardBlocks(self: *App, win: vaxis.Window, blocks: []CardBlock) !usize {
+        var rows: usize = 0;
+        for (blocks) |*block| {
+            block.text = try safe(self.frame.allocator(), block.text, true);
+            rows += positionAfter(win, block.text).row + 1;
+        }
+        return rows;
+    }
+    fn drawCardBlocks(self: *App, win: vaxis.Window, blocks: []const CardBlock, scroll: usize) !void {
+        var row: usize = 0;
+        for (blocks) |block| row = try self.flowTone(win, block.text, scroll, row, block.tone);
+    }
     fn readerInvitationDraw(self: *App, win: vaxis.Window, message_index: usize) !void {
         try self.prepareReaderInvitation(self.thread[message_index]);
-        var card_style = self.style(.text);
-        card_style.bold = true;
-        if (!self.mono) card_style.bg = .{ .rgb = self.palette.selection };
-        win.fill(.{ .style = card_style });
-        var edge_style = card_style;
-        if (!self.mono) edge_style.fg = .{ .rgb = self.palette.accent };
-        for (0..win.height) |row| win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (self.mono) "┃" else "▌", .width = 1 }, .style = edge_style });
-        const content = win.child(.{ .x_off = 2, .width = win.width -| 3 });
-        if (!self.mono and content.width >= 32) {
-            // Always reserve two icon cells, even when the terminal reports
-            // this emoji as one; its width never shifts the text or edge.
-            _ = content.child(.{ .width = 2, .height = 1 }).printSegment(.{ .text = "📅", .style = card_style }, .{ .wrap = .none });
-        }
-        const icon_width: u16 = if (!self.mono and content.width >= 32) 3 else 0;
-        const action_width: u16 = @min(content.width, 11);
+        const bordered = win.height >= 5 and win.width >= 48;
+        win.fill(.{ .style = self.style(.text) });
+        const content = if (bordered) blk: {
+            const inside = win.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } });
+            try self.line(win.child(.{ .x_off = 2, .width = win.width -| 4, .height = 1 }), 0, try std.fmt.allocPrint(self.frame.allocator(), " {s} ", .{self.reader_invitation_badge}), self.reader_invitation_badge_tone);
+            break :blk inside.child(.{ .x_off = 1, .width = inside.width -| 2 });
+        } else blk: {
+            for (0..win.height) |row| win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (self.mono) "┃" else "▌", .width = 1 }, .style = self.style(self.reader_invitation_badge_tone) });
+            break :blk win.child(.{ .x_off = 2, .width = win.width -| 3 });
+        };
+        const video_icon = self.reader_invitation_has_join and content.width >= 20 and content.gwidth("") <= 2;
+        const icon_width: u16 = if (video_icon) 3 else 0;
+        if (video_icon) try self.drawJoinCamera(content, 0, 0);
+        const action = if (self.reader_invitation_can_reply) @as([]const u8, "I · Respond") else "I · Details";
+        const action_width: u16 = @intCast(@min(content.width, content.gwidth(action)));
         const action_x = content.width - action_width;
         const title_win = content.child(.{ .x_off = icon_width, .width = action_x -| icon_width -| 1, .height = 1 });
         const when_text = self.reader_invitation_when.slice();
         const short_when = if (when_text.len >= 16 and when_text[4] == '-' and when_text[7] == '-' and when_text[10] == ' ' and when_text[13] == ':') when_text[5..16] else when_text;
-        const title = if (win.height > 1) self.reader_invitation_title.slice() else try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ short_when, self.reader_invitation_title.slice() });
-        _ = title_win.printSegment(.{ .text = try self.fitLine(title_win, title, title_win.width), .style = card_style }, .{ .wrap = .none });
+        const title = if (content.height > 1) self.reader_invitation_title.slice() else try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ short_when, self.reader_invitation_title.slice() });
+        const shown_title = if (!bordered and !same(self.reader_invitation_badge, "Invitation")) try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ self.reader_invitation_badge, title }) else title;
+        try self.line(title_win, 0, try self.fitLine(title_win, shown_title, title_win.width), .subject);
         const actions = content.child(.{ .x_off = action_x, .width = action_width, .height = 1 });
-        _ = actions.printSegment(.{ .text = "I · Respond", .style = card_style }, .{ .wrap = .none });
-        if (self.mono) {
-            var shortcut_style = card_style;
-            shortcut_style.reverse = true;
-            actions.writeCell(0, 0, .{ .char = .{ .grapheme = "I", .width = 1 }, .style = shortcut_style });
-        }
-        if (win.height > 1) {
-            const when = content.child(.{ .y_off = 1, .height = 1 });
-            _ = when.printSegment(.{ .text = try self.fitLine(when, self.reader_invitation_when.slice(), when.width), .style = card_style }, .{ .wrap = .none });
-        }
-        if (win.height > 2) {
-            const where = content.child(.{ .y_off = 2, .height = 1 });
-            var detail_style = card_style;
-            detail_style.bold = false;
-            _ = where.printSegment(.{ .text = try self.fitLine(where, self.reader_invitation_where.slice(), where.width), .style = detail_style }, .{ .wrap = .none });
-        }
+        try self.line(actions, 0, action, .muted);
+        var shortcut_style = self.style(.accent);
+        shortcut_style.bold = true;
+        if (self.mono) shortcut_style.reverse = true;
+        actions.writeCell(0, 0, .{ .char = .{ .grapheme = "I", .width = 1 }, .style = shortcut_style });
+        if (content.height > 1) try self.line(content, 1, try self.fitLine(content, when_text, content.width), .accent);
+        if (content.height > 2) try self.line(content, 2, try self.fitLine(content, self.reader_invitation_where.slice(), content.width), .muted);
         self.mouseArea(win, .reader_invitation, message_index);
     }
     fn readerInvitationRows(win: vaxis.Window) u16 {
         if (win.height < 3 or win.width < 16) return 0;
-        return @min(win.height / 3, if (win.width >= 60) @as(u16, 3) else if (win.width >= 40) @as(u16, 2) else @as(u16, 1));
+        if (win.width >= 48 and win.height >= 20) return 5;
+        if (win.width >= 40 and win.height >= 9) return 3;
+        return if (win.height >= 6) 2 else 1;
     }
     fn startReaderFind(self: *App, query: []const u8) !void {
         if (query.len == 0) {
@@ -8953,6 +10151,7 @@ const App = struct {
         };
         const chosen = index orelse return error.BodyNotCached;
         try self.reader_finder.reset(query);
+        self.reader_find_layout_key = null;
         try self.reader_find_query.set(query);
         try self.reader_find_account.set(self.account());
         try self.reader_find_message.set(target);
@@ -9034,6 +10233,7 @@ const App = struct {
     }
     fn requestReaderCopy(self: *App, mode: reader_selection.Mode, row: usize, column: usize) !void {
         const message = try self.readerCopyTarget();
+        if (self.reader_progressive and !truth(get(message, "bodyCached")) and text(get(message, "bodyCacheError")).len == 0) return error.ReaderMessageChanging;
         self.clearReaderCopy();
         try self.reader_copy_account.set(self.account());
         try self.reader_copy_message.set(text(get(message, "id")));
@@ -9085,6 +10285,7 @@ const App = struct {
     }
     fn readerSnapshot(self: *App) ![]const u8 {
         const message = try self.readerCopyTarget();
+        if (self.reader_progressive and !truth(get(message, "bodyCached")) and text(get(message, "bodyCacheError")).len == 0) return error.ReaderMessageChanging;
         const from = get(message, "from");
         const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), displayIncomingMailbox);
         const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), displayIncomingMailbox);
@@ -9121,6 +10322,7 @@ const App = struct {
         if (self.tty.getWinsize()) |size| try self.resize(size) else |_| {}
         self.vx.queueRefresh();
         try self.loop.start();
+        _ = self.meetingTick();
         const exit_code = result catch |err| {
             self.sayFailure("Editor view closed · received mail unchanged", @errorName(err));
             return;
@@ -9337,6 +10539,7 @@ const App = struct {
         self.reader_find_anchor_message.wipe();
         self.reader_find_refresh = false;
         self.reader_find_reveal = false;
+        self.reader_find_layout_key = null;
     }
     fn reconcileReaderFind(self: *App) void {
         if (!self.reader_find_active) return;
@@ -9461,7 +10664,7 @@ const App = struct {
         }
     }
     fn readerRichDraw(self: *App, prepared: *const html_view.Prepared, win: vaxis.Window, base_row: usize) usize {
-        if (!self.reader_find_collect and !self.reader_copy_collect and !(self.reader_find_paint and self.reader_find_scope) and !(self.reader_copy_paint and self.reader_copy_scope)) return prepared.drawHighlightedFolded(win, self.reader_scroll, base_row, self.palette, self.mono, self.fold_quotes, self.fold_signatures, self.search_highlight.value());
+        if (!self.reader_find_collect and !self.reader_copy_collect and !(self.reader_find_paint and self.reader_find_scope) and !(self.reader_copy_paint and self.reader_copy_scope)) return prepared.drawHighlightedFolded(win, self.reader_scroll, base_row, self.palette, self.mono, self.fold_quotes, self.fold_signatures, if (self.calendar.open) "" else self.search_highlight.value());
         var row = base_row;
         var in_quote = false;
         var in_signature = false;
@@ -9520,19 +10723,18 @@ const App = struct {
             }
             var column: u16 = 0;
             var byte_offset: usize = 0;
-            var match = cache_query.find(buffer[0..length], highlight);
+            var match = cache_query.findRange(buffer[0..length], highlight);
             for (runs) |segment| {
                 var glyphs = vaxis.unicode.graphemeIterator(segment.text);
                 while (glyphs.next()) |gr| {
                     const glyph = text_layout.cellGrapheme(gr.bytes(segment.text), prepared.method);
                     const columns = @max(vaxis.gwidth.gwidth(glyph, prepared.method), 1);
                     while (match) |match_at| {
-                        if (byte_offset < match_at + highlight.len) break;
-                        const next = match_at + highlight.len;
-                        match = if (cache_query.find(buffer[@min(next, length)..length], highlight)) |relative| next + relative else null;
+                        if (byte_offset < match_at.end) break;
+                        match = cache_query.findRangeAt(buffer[0..length], highlight, match_at.end);
                     }
                     var appearance = html_view.style(self.palette, self.mono, segment.flags, segment.role);
-                    if (match) |match_at| if (byte_offset >= match_at and byte_offset < match_at + highlight.len) {
+                    if (match) |match_at| if (byte_offset >= match_at.start and byte_offset < match_at.end) {
                         appearance.bold = true;
                         if (self.mono) appearance.reverse = true else {
                             appearance.fg = .{ .rgb = self.palette.background };
@@ -9561,11 +10763,19 @@ const App = struct {
         if (toolbar_rows > 0) try self.line(outer, 0, try self.fitLine(outer, if (!self.capabilities.open_urls) "l Focus reader · r Reply · f Forward" else "l Focus reader · o Gmail · L Links · B Files", outer.width), .accent);
         const partial_rows: u16 = if (self.reader_partial and outer.height >= 14) 1 else 0;
         if (partial_rows > 0) {
-            const notice = if (self.reader_omitted_messages > 0) try std.fmt.allocPrint(self.frame.allocator(), "Thread · partial · {d} earlier messages omitted", .{self.reader_omitted_messages}) else if (self.reader_cached_view) "Cached thread · partial" else "Thread · partial";
+            const notice = if (self.reader_progressive) try std.fmt.allocPrint(self.frame.allocator(), "{s}{d} bodies on demand · [ {d} older · ] {d} newer", .{ if (self.reader_cached_view) @as([]const u8, "Cached subset · ") else "", self.reader_deferred_messages, self.reader_older_messages, self.reader_newer_messages }) else if (self.reader_omitted_messages > 0) try std.fmt.allocPrint(self.frame.allocator(), "Thread · partial · {d} earlier messages omitted", .{self.reader_omitted_messages}) else if (self.reader_cached_view) "Cached thread · partial" else "Thread · partial";
             try self.line(outer, toolbar_rows + summary_rows, notice, .warning);
         }
         const invitation_index = self.readerInvitationIndex();
-        const header_rows = toolbar_rows + summary_rows + partial_rows;
+        const follow_up_entry = if (!browser_target and browsing) self.followUpEntry(self.readerReplyId()) else null;
+        const follow_up_rows: u16 = if (follow_up_entry != null and outer.height >= 7) 1 else 0;
+        if (follow_up_rows > 0) {
+            const due = text(get(follow_up_entry.?, "dueDate"));
+            const today = self.followUpToday() catch "";
+            const caption = try std.fmt.allocPrint(self.frame.allocator(), "Follow up {s}{s} · b Change", .{ due, if (std.mem.lessThan(u8, due, today)) @as([]const u8, " · overdue") else if (same(due, today)) " · today" else "" });
+            try self.line(outer, toolbar_rows + summary_rows + partial_rows, try self.fitLine(outer, caption, outer.width), .accent);
+        }
+        const header_rows = toolbar_rows + summary_rows + partial_rows + follow_up_rows;
         const win = outer.child(.{ .y_off = header_rows, .height = outer.height -| header_rows -| find_rows -| copy_rows });
         self.reader_height = win.height;
         self.reader_copy_rect = .{ .x = @intCast(win.x_off), .y = @intCast(win.y_off), .width = win.width, .height = win.height };
@@ -9578,11 +10788,11 @@ const App = struct {
             } else if (self.body_cache_miss) {
                 const fetching = self.job.future != null and (self.job.kind == .read or self.job.kind == .thread);
                 const refused = if (self.selectedMessage()) |message| bodyRefusal(message) else null;
-                try self.line(win, 1, if (refused) |reason| try std.fmt.allocPrint(self.frame.allocator(), "Body unavailable · {s}", .{reason}) else if (fetching or self.pending_read) try std.fmt.allocPrint(self.frame.allocator(), "{s} {s}", .{ loading.frame(self.loading_frame), if (fetching) "Fetching mail body…" else "Mail body queued…" }) else "Body not cached · Enter fetches full mail", if (refused != null) .warning else if (fetching or self.pending_read) .fetching else .muted);
+                const notice_end = try self.flowTone(win, if (refused) |reason| try std.fmt.allocPrint(self.frame.allocator(), "Body unavailable · {s}", .{reason}) else if (fetching or self.pending_read) try std.fmt.allocPrint(self.frame.allocator(), "{s} {s}", .{ loading.frame(self.loading_frame), if (fetching) "Fetching mail body…" else "Mail body queued…" }) else if (self.follow_ups_list) "Message not available offline\nReminder kept · Enter Fetch" else "Body not cached · Enter fetches full mail", 0, 1, if (refused != null) .warning else if (fetching or self.pending_read) .fetching else .muted);
                 if (self.selectedMessage()) |message| {
-                    try self.line(win, 3, text(get(message, "subject")), .text);
-                    if (refused != null) try self.line(win, 4, if (!self.capabilities.open_urls) "Snippet only · full body unavailable" else "Snippet only · o Open in Gmail", .muted);
-                    _ = try self.flow(win, text(get(message, "snippet")), 0, 5);
+                    try self.line(win, notice_end + 1, text(get(message, "subject")), .text);
+                    if (refused != null) try self.line(win, notice_end + 2, if (!self.capabilities.open_urls) "Snippet only · full body unavailable" else "Snippet only · o Open in Gmail", .muted);
+                    _ = try self.flow(win, text(get(message, "snippet")), 0, notice_end + 3);
                 }
             } else try self.line(win, 1, if (self.sync[self.account_index].state == .fetching) "Fetching mail · cached bodies appear here" else "Select mail · Enter opens the thread", .muted);
             if (find_rows > 0) try self.readerFindBar(outer);
@@ -9591,15 +10801,19 @@ const App = struct {
         const body_hit_start = self.mouse_hits.count;
         if (self.reader_find_active) {
             const previous = self.reader_finder.current();
-            self.reader_finder.clearMatches();
-            self.reader_find_collect = true;
-            self.reader_lines = self.readerBodyDraw(win) catch |err| {
+            const key = self.readerFindLayoutKey(win);
+            if (self.reader_find_layout_key == null or self.reader_find_layout_key.? != key) {
+                self.reader_finder.clearMatches();
+                self.reader_find_collect = true;
+                self.reader_lines = self.readerBodyDraw(win) catch |err| {
+                    self.reader_find_collect = false;
+                    return err;
+                };
                 self.reader_find_collect = false;
-                return err;
-            };
-            self.reader_find_collect = false;
-            self.mouse_hits.count = body_hit_start;
-            self.reader_finder.finish();
+                self.mouse_hits.count = body_hit_start;
+                self.reader_finder.finish();
+                self.reader_find_layout_key = key;
+            }
             if (self.reader_finder.current()) |match| {
                 const moved = if (previous) |old| old.row != match.row or old.end_row != match.end_row else true;
                 if (self.reader_find_reveal or moved or self.reader_find_width != win.width or self.reader_find_height != win.height) {
@@ -9702,11 +10916,31 @@ const App = struct {
             var unread: usize = 0;
             for (self.thread) |message| unread += @intFromBool(truth(get(message, "unread")));
             const earlier = if (self.reader_card > 0 and self.reader_scroll >= self.reader_card_rows[self.reader_card]) try std.fmt.allocPrint(self.frame.allocator(), " · ↑{d} earlier", .{self.reader_card}) else "";
-            const summary = try std.fmt.allocPrint(self.frame.allocator(), "{d}/{d} mails · {d} unread{s} · {s}", .{ self.reader_card + 1, self.thread.len, unread, earlier, try self.readerProgressText() });
+            const summary = if (self.reader_progressive) try std.fmt.allocPrint(self.frame.allocator(), "{d}/{d} mails · window {d}–{d}{s} · {s}", .{ self.reader_older_messages + self.reader_card + 1, self.reader_total_messages, self.reader_older_messages + 1, self.reader_older_messages + self.thread.len, if (self.reader_cached_view) @as([]const u8, " cached") else "", try self.readerProgressText() }) else try std.fmt.allocPrint(self.frame.allocator(), "{d}/{d} mails · {d} unread{s} · {s}", .{ self.reader_card + 1, self.thread.len, unread, earlier, try self.readerProgressText() });
             try self.line(outer, toolbar_rows, try self.fitLine(outer, summary, outer.width), .muted);
         }
         if (find_rows > 0) try self.readerFindBar(outer);
         if (self.readerCopyVisible()) try self.readerCopyBar(outer);
+    }
+    fn readerFindLayoutKey(self: *App, win: vaxis.Window) u64 {
+        var hash = std.hash.Wyhash.init(self.reader_copy_generation);
+        hash.update(std.mem.asBytes(&win.width));
+        hash.update(std.mem.asBytes(&win.height));
+        hash.update(&.{ @intCast(@backingInt(win.screen.width_method)), @intFromBool(self.fold_quotes), @intFromBool(self.fold_signatures), @intFromBool(self.readerCopyVisible()), @intCast(@backingInt(self.ui_preferences.density)) });
+        hash.update(self.reader_find_query.slice());
+        const invitation_index = self.readerInvitationIndex() orelse std.math.maxInt(usize);
+        hash.update(std.mem.asBytes(&invitation_index));
+        for (self.reader_cards[0..self.thread.len]) |open| hash.update(&.{@intFromBool(open)});
+        for (self.markup) |view| hash.update(&.{ @intCast(@backingInt(view.mode)), @intFromBool(view.details) });
+        // Resolved label names can wrap and move the body without replacing
+        // its bytes. Include them in the same layout generation.
+        for (self.labels) |label| {
+            hash.update(text(get(label, "id")));
+            hash.update("\x00");
+            hash.update(text(get(label, "name")));
+            hash.update("\x00");
+        }
+        return hash.final();
     }
     fn readerScrollEnd(self: *const App) usize {
         const end = readerEnd(self.reader_lines, self.reader_height);
@@ -9800,18 +11034,26 @@ const App = struct {
                     continue;
                 }
             }
-            const compact = natural_height <= 12 or win.width < 60;
+            const show_details = message_index < self.markup.len and self.markup[message_index].details;
+            const compact = !show_details and (natural_height <= 12 or win.width < 60 or self.ui_preferences.density == .compact);
+            const single_header = compact and self.ui_preferences.density == .compact and win.width < 100;
             const to = try displayMailboxes(self.frame.allocator(), get(message, "to"), displayIncomingMailbox);
             const cc = try displayMailboxes(self.frame.allocator(), get(message, "cc"), displayIncomingMailbox);
             const subject = text(get(message, "subject"));
             const shown_subject = if (subject.len == 0) "(no subject)" else subject;
-            row = try self.flowTone(win, if (compact) try self.fitLine(win, shown_subject, win.width) else shown_subject, self.reader_scroll, row, .subject);
             const stamp = try timestamp(self.frame.allocator(), &self.zone, get(message, "receivedAt"));
-            if (!compact or self.thread.len == 1) {
+            if (single_header) {
+                const who = if (text(get(from, "name")).len > 0) text(get(from, "name")) else text(get(from, "address"));
+                const header = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s} · {s} · H Details", .{ who, if (stamp.len >= 16) stamp[5..16] else stamp, shown_subject });
+                row = try self.flowTone(win, try self.fitLine(win, header, win.width), self.reader_scroll, row, .subject);
+            } else row = try self.flowTone(win, if (compact) try self.fitLine(win, shown_subject, win.width) else shown_subject, self.reader_scroll, row, .subject);
+            if (!single_header and (!compact or self.thread.len == 1)) {
                 const sender_line = try std.fmt.allocPrint(self.frame.allocator(), "From: {s} <{s}>{s}{s}", .{ text(get(from, "name")), text(get(from, "address")), if (compact and stamp.len > 0) " · " else "", if (compact) (if (stamp.len >= 16) stamp[5..16] else stamp) else "" });
                 row = try self.flowTone(win, if (compact) try self.fitLine(win, sender_line, win.width) else sender_line, self.reader_scroll, row, .sender);
             }
-            if (compact) {
+            if (single_header) {
+                // Full recipients and status remain available through H.
+            } else if (compact) {
                 if (to.len > 0 or cc.len > 0) {
                     const envelope = try std.fmt.allocPrint(self.frame.allocator(), "To: {s}{s}{s}", .{ to, if (cc.len > 0) " · Cc: " else "", cc });
                     row = try self.flowTone(win, try self.fitLine(win, envelope, win.width), self.reader_scroll, row, .muted);
@@ -9820,10 +11062,12 @@ const App = struct {
                 const envelope = if (self.thread.len > 1) (if (cc.len > 0) try std.fmt.allocPrint(self.frame.allocator(), "To: {s}\nCc: {s}", .{ to, cc }) else try std.fmt.allocPrint(self.frame.allocator(), "To: {s}", .{to})) else try readerEnvelope(self.frame.allocator(), to, cc, stamp);
                 row = try self.flowTone(win, envelope, self.reader_scroll, row, .muted);
             }
-            const status = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (messageUnread(message)) @as([]const u8, "● Unread") else "Read", if (messageHasLabel(message, "STARRED") or truth(get(message, "starred"))) @as([]const u8, " · ⭐ Starred") else "" });
-            row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
-            const labels = try self.readerLabels(message);
-            if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
+            if (!single_header) {
+                const status = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (messageUnread(message)) @as([]const u8, "● Unread") else "Read", if (messageHasLabel(message, "STARRED") or truth(get(message, "starred"))) @as([]const u8, " · ⭐ Starred") else "" });
+                row = try self.flowTone(win, status, self.reader_scroll, row, .muted);
+                const labels = try self.readerLabels(message);
+                if (labels.len > 0) row = try self.flowTone(win, labels, self.reader_scroll, row, .accent);
+            }
             if (bodyRefusal(message)) |code| {
                 const notice = try std.fmt.allocPrint(self.frame.allocator(), "Body unavailable · {s} ({s})", .{ decodeWarningLabel(code), code });
                 row = try self.flowTone(win, notice, self.reader_scroll, row, .warning);
@@ -9832,6 +11076,14 @@ const App = struct {
                 self.reader_body_bounds[message_index] = .{ .start = row, .end = row };
                 attachment_number += items(get(message, "attachments")).len;
                 row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
+                continue;
+            }
+            if (self.reader_progressive and !truth(get(message, "bodyCached"))) {
+                const waiting = self.job.future != null and self.job.kind == .thread;
+                row = try self.flowTone(win, if (waiting) "Loading selected body…" else "Body on demand · t closes/opens and fetches · { / } selects", self.reader_scroll, row, if (waiting) .fetching else .muted);
+                row = try self.flowTone(win, text(get(message, "snippet")), self.reader_scroll, row, .muted);
+                self.reader_body_bounds[message_index] = .{ .start = row, .end = row };
+                attachment_number += items(get(message, "attachments")).len;
                 continue;
             }
             if (metadataWarning(message)) |code| {
@@ -9846,14 +11098,18 @@ const App = struct {
                     row += rows;
                 }
             }
-            row += 1;
+            if (self.ui_preferences.density != .compact) row += 1;
+            if (message_index < self.markup.len and text(get(message, "bodyHtml")).len > 0) {
+                const view_label = if (self.readerFormatted(self.markup[message_index], message)) @as([]const u8, "Formatted · p Plain · H Details") else "Plain · p Formatted · H Details";
+                row = try self.flowTone(win, view_label, self.reader_scroll, row, .muted);
+            }
             const body_start = row;
             self.reader_copy_scope = same(self.reader_copy_message.slice(), text(get(message, "id"))) and same(self.reader_copy_account.slice(), self.account());
             var rich_drawn = false;
             if (message_index < self.markup.len) {
                 const view = &self.markup[message_index];
-                self.prepareVisibleMarkup(view, message);
-                if (view.prepared) |*prepared| {
+                if (self.readerFormatted(view.*, message)) self.prepareVisibleMarkup(view, message);
+                if (self.readerFormatted(view.*, message)) if (view.prepared) |*prepared| {
                     const builds = prepared.layout_builds;
                     const ready = blk: {
                         prepared.ensure(win.width, win.screen.width_method) catch {
@@ -9869,13 +11125,17 @@ const App = struct {
                         row = self.readerRichDraw(prepared, win, row);
                         rich_drawn = true;
                     }
-                }
-                if (view.fallback) row = try self.flowTone(win, "Plain text · HTML layout unavailable", self.reader_scroll, row, .muted);
+                };
+                if (view.fallback and self.readerFormatted(view.*, message)) row = try self.flowTone(win, "Plain text · HTML layout unavailable", self.reader_scroll, row, .muted);
             }
             if (!rich_drawn) {
                 const body = if (message_index < self.markup.len) self.markup[message_index].display_text orelse text(get(message, "bodyText")) else text(get(message, "bodyText"));
-                const folded = try reader_tools.fold(self.frame.allocator(), body, self.fold_quotes, self.fold_signatures);
-                row = try self.flowReaderText(win, folded.text, self.reader_scroll, row);
+                if (message_index < self.markup.len) {
+                    row = try self.preparedPlainDraw(&self.markup[message_index], win, body, row);
+                } else {
+                    const folded = try reader_tools.fold(self.frame.allocator(), body, self.fold_quotes, self.fold_signatures);
+                    row = try self.flowReaderText(win, folded.text, self.reader_scroll, row);
+                }
             }
             self.reader_body_bounds[message_index] = .{ .start = body_start, .end = row };
             self.reader_copy_scope = false;
@@ -9886,14 +11146,23 @@ const App = struct {
                 row = try self.flowTone(win, if (!self.capabilities.open_urls) "Links shown literally · opening is unavailable on this platform" else "Links · L chooses a literal URL to open", self.reader_scroll, row, .sender);
                 if (self.capabilities.open_urls) self.readerMouseRows(win, block_start, row - block_start, .reader_link, 0);
             }
-            for (items(get(message, "attachments"))) |attachment| {
+            for (items(get(message, "attachments")), 0..) |attachment, attachment_index| {
                 attachment_number += 1;
-                const value_in = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} · {s}", .{ attachment_number, text(get(attachment, "filename")), if (self.capabilities.files) @as([]const u8, "B Save/open") else "file access unavailable" });
+                const size_value = get(attachment, "size");
+                const size: u64 = if (size_value == .integer and size_value.integer >= 0) @intCast(size_value.integer) else 0;
+                const title = try std.fmt.allocPrint(self.frame.allocator(), "Attachment {d}: {s} · {s}", .{ attachment_index + 1, text(get(attachment, "filename")), try attachmentSizeLabel(self.frame.allocator(), size) });
+                const action: []const u8 = if (self.capabilities.files) (if (win.width >= 13) "[B Save/open]" else "[B]") else "file access unavailable";
+                const together = try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ title, action });
                 const block_start = row;
-                row = try self.flowTone(win, value_in, self.reader_scroll, row, .sender);
+                if (positionAfter(win, together).row == 0) {
+                    row = try self.flowTone(win, together, self.reader_scroll, row, .sender);
+                } else {
+                    row = try self.flowTone(win, title, self.reader_scroll, row, .sender);
+                    row = try self.flowTone(win, action, self.reader_scroll, row, .sender);
+                }
                 if (self.capabilities.files) self.readerMouseRows(win, block_start, row - block_start, .reader_attachment, attachment_number - 1);
             }
-            row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
+            if (self.ui_preferences.density != .compact) row = try self.flow(win, "\n────────────────────\n", self.reader_scroll, row);
         }
         return row;
     }
@@ -9976,6 +11245,7 @@ const App = struct {
             const content = inner.child(.{ .height = inner.height -| 2 });
             const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
             var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            if (self.gmailCopyWarning()) rows = try self.flowTone(content, if (self.gmail_send_ack) "[x] I checked Gmail Drafts and Sent; I understand sending here may duplicate a message sent there.\n\n" else "[ ] Gmail copy kept: it may have been edited or sent there. Check Gmail Drafts and Sent. Press g to acknowledge before sending this exact local content.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose_portable_warning) rows = try self.flowTone(content, "Address exceeds portable SMTP limits · Gmail may reject delivery.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.omitted_attachments > 0) rows = try self.flowTone(content, "Text-only forward: original attachments are omitted.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.attachments.len == 0 and composer_hints.attachmentIntent(self.compose.fields[4].value())) {
@@ -9997,7 +11267,8 @@ const App = struct {
             self.compose_preview_scroll = @min(self.compose_preview_scroll, rows -| @as(usize, content.height));
             if (inner.height > 1) {
                 const x = try self.actionButton(inner, inner.height - 2, 0, "[Back]", self.dialog_focus.index == 0, true, .dialog_action, 0);
-                _ = try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome, .dialog_action, 1);
+                const next = try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome and (!self.gmailCopyWarning() or self.gmail_send_ack), .dialog_action, 1);
+                if (self.gmailCopyWarning()) _ = try self.actionButton(inner, inner.height - 2, next, if (self.gmail_send_ack) "[g Acknowledged]" else "[g I checked Gmail]", self.dialog_focus.index == 2, self.job.future == null, .dialog_action, 2);
                 try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · j/k Scroll · Esc/q Back", .muted);
                 self.review_ready = true;
             }
@@ -10010,7 +11281,7 @@ const App = struct {
             return;
         }
         const left_width = if (split) win.width * 3 / 5 else win.width;
-        const state_title = if (self.compose.unknown_outcome) "protected recovery draft" else if (!self.capabilities.durable_drafts) "session memory · not sent" else if (self.job.future != null and self.job.kind == .autosave) "saving locally…" else if (self.compose.revision != self.compose.saved_revision) "autosave pending" else "saved locally · not sent";
+        const state_title = if (self.compose.gmailPaused()) "paused in Gmail · :gmail-draft" else if (self.gmailCopyWarning()) "local copy · Gmail copy kept" else if (self.compose.unknown_outcome) "protected recovery draft" else if (!self.capabilities.durable_drafts) "session memory · not sent" else if (self.job.future != null and self.job.kind == .autosave) "saving locally…" else if (self.compose.revision != self.compose.saved_revision) "autosave pending" else "saved locally · not sent";
         const original_title: []const u8 = if (self.compose.original != null) " · formatted original" else if (self.compose_source_mode == .attached) " · original attached" else "";
         const title = try std.fmt.allocPrint(self.frame.allocator(), " Compose · {s}{s} · {s} ", .{ self.composeIntentLabel(), original_title, state_title });
         const left = self.panel(win, 0, left_width, title, true);
@@ -10018,8 +11289,8 @@ const App = struct {
         const alias_x = left.width - alias_width;
         try self.line(left.child(.{ .width = alias_x -| 1 }), 0, try std.fmt.allocPrint(self.frame.allocator(), "From: {s}", .{if (self.compose.from.value().len > 0) self.compose.from.value() else self.account()}), .text);
         const alias_action = left.child(.{ .x_off = alias_x, .width = alias_width, .height = 1 });
-        if (self.capabilities.aliases) try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
-        if (self.capabilities.aliases and !self.compose.unknown_outcome) self.mouseArea(alias_action, .compose_from, 0);
+        if (self.capabilities.aliases) try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome or self.compose.gmailPaused()) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
+        if (self.capabilities.aliases and !self.compose.unknown_outcome and !self.compose.gmailPaused()) self.mouseArea(alias_action, .compose_from, 0);
         if (self.compose.unknown_outcome) try self.line(left, 1, if (browser_target) "Send unconfirmed · recovery draft retained" else try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
         const original_note = self.compose.original != null or self.compose_source_mode == .attached or self.compose.omitted_attachments > 0;
         if (original_note and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.omitted_attachments > 0) "Text-only forward · original attachments are omitted" else if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", if (self.compose.omitted_attachments > 0) .warning else .muted);
@@ -10040,9 +11311,9 @@ const App = struct {
             const format_width: u16 = @min(@as(u16, 18), body_label.width -| preview_width);
             const format_area = body_label.child(.{ .x_off = body_label.width -| preview_width -| format_width, .width = format_width });
             const preview_area = body_label.child(.{ .x_off = body_label.width -| preview_width, .width = preview_width });
-            try self.line(format_area, 0, if (self.compose.body_format == .markdown) "[Plain Ctrl+T]" else "[Markdown Ctrl+T]", if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 1) .selected else .accent);
+            try self.line(format_area, 0, if (self.compose.body_format == .markdown) "[Plain Ctrl+T]" else "[Markdown Ctrl+T]", if (self.compose.gmailPaused()) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 1) .selected else .accent);
             try self.line(preview_area, 0, "[Preview p]", if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2) .selected else .accent);
-            self.mouseArea(format_area, .compose_format, 0);
+            if (!self.compose.gmailPaused()) self.mouseArea(format_area, .compose_format, 0);
             self.mouseArea(preview_area, .compose_preview_toggle, 0);
         }
         const end_row = left.height;
@@ -10129,16 +11400,19 @@ const App = struct {
         }
     }
     fn contextHints(self: *const App) []const u8 {
+        if (self.ux_overlay == .gmail_draft) return " Tab / j/k Choose · Enter Activate · Ctrl+D/U Details · Esc Back";
+        if (self.ux_overlay == .follow_up) return " Tab Controls · j/k Presets · Enter Choose · Ctrl+S Save date · Esc Cancel";
+        if (self.follow_ups_list and self.mode == .browse and self.ux_overlay == .none and self.focus != .reader) return " j/k Choose · Enter Open mail · b Change date · d Done · Ctrl+R Reload · q Back · ? Help";
         if (self.label_picker) return " Tab Controls · Enter Activate · / Filter · + Add · - Remove · Esc/q Back";
         if (self.mode == .label_manager) return if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text";
         if (browser_target) {
             if (self.ux_overlay == .discard) return " Tab Controls · Enter Discard/Cancel · Esc Keep draft";
             if (self.ux_overlay == .contact_addresses) return " Type filter · Ctrl+N/P Choose · Tab Controls · Enter Use · Esc Back";
             return switch (self.mode) {
-                .compose => if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · recovery draft retained" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · q is text" else " i Edit · a Contacts · d Discard · p Preview · Ctrl+T Format · Ctrl+S Review · q Save/back · ? Help",
+                .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Unconfirmed send · Check Sent in Gmail · q Return · recovery draft retained" else if (self.compose.attachment_focus) " Tab/Shift+Tab Buttons · Enter Activate · Esc Body · Ctrl+S Review" else if (self.compose.insert_mode and self.compose.selected < 3) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review · q is text" else " i Edit · a Contacts · d Discard · p Preview · Ctrl+T Format · Ctrl+S Review · q Save/back · ? Help",
                 .review => " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
                 .contacts => " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back",
-                .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Cached subset · Enter Search · Esc Back · q is text" else " Gmail search · Enter Search · Esc Back · q is text",
+                .search => if (self.previous_mode == .contacts) " Google contacts search · Enter Search · Esc Back · q is text" else if (self.input_query_scope == .cache) " Ctrl+G Gmail · Enter Search cached subset · Esc Back" else " Ctrl+G Cache · Enter Search Gmail · Esc Back",
                 .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help · n/N Match · j/k Scroll · Esc/q Return",
                 .theme => " j/k Choice · Tab Controls · Enter Activate · Esc/q Back",
                 .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
@@ -10162,24 +11436,88 @@ const App = struct {
             .contacts => if (!self.capabilities.contacts_write) " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back" else " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
+            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
-            .invitation => " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel",
+            .invitation => if (!browser_target and self.invitationCalendarCheckNeeded()) " Tab Controls · Enter Activate · C Check status · v Details · Esc/q Back" else if (!browser_target and (self.invitation_response_unknown or self.invitationUncertain())) " Tab Controls · Enter Activate · C Check Sent · v Details · Esc/q Back" else if (self.invitation_review.canRespond() and !self.invitation_response_unknown) " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel" else " Tab Controls · Enter Activate · v Details · Esc/q Back",
             .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  z/q Shrink  ? Help" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  q List  ? Help" else if (self.focus == .navigation) " j/k Navigate  Enter Choose  1–3 Accounts  a Contacts  T Theme  l/Esc/q Mail  ? Help" else if (self.cacheSearch()) " Cache subset · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else if (self.query.value().len > 0) " Gmail search · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  m Labels  s Star  u Unread  x Archive  D Trash  a Contacts  T Theme  / Cache  \\ Gmail  ? Help  q Quit",
             else => " Esc Back",
         };
     }
-    fn fittedHints(self: *const App, width: u16) []const u8 {
+    fn readerContextHints(self: *App, width: u16) []const u8 {
+        var labels: [16][]const u8 = undefined;
+        // Reply/Forward also work from a selected mailbox row while its
+        // cached body is still loading, so retain these primary actions.
+        labels[0] = "r/R Reply";
+        labels[1] = "f Forward";
+        var count: usize = 2;
+        if (!browser_target) {
+            labels[count] = "b Follow up";
+            count += 1;
+        }
+        if (self.thread.len > 0) {
+            if (self.reader_card < self.thread.len and text(get(self.thread[self.reader_card], "bodyHtml")).len > 0) {
+                labels[count] = "p Plain/Formatted";
+                count += 1;
+            }
+            if (self.reader_progressive and (self.reader_older_messages > 0 or self.reader_newer_messages > 0)) {
+                labels[count] = if (self.reader_older_messages > 0 and self.reader_newer_messages > 0) "[ / ] Windows" else if (self.reader_older_messages > 0) "[ Older" else "] Newer";
+                count += 1;
+            }
+            if (self.capabilities.files and self.readerAttachmentCount() > 0) {
+                labels[count] = "B Files";
+                count += 1;
+            }
+            labels[count] = "H Headers";
+            count += 1;
+            if (self.capabilities.clipboard) {
+                labels[count] = "V Select";
+                count += 1;
+            }
+            if (self.capabilities.editor) {
+                labels[count] = "e Editor";
+                count += 1;
+            }
+        }
+        labels[count] = "j/k Scroll";
+        count += 1;
+        labels[count] = "J/K Mail";
+        count += 1;
+        labels[count] = "q Back";
+        count += 1;
+        var length: usize = 0;
+        var columns: usize = 0;
+        const reserve: usize = 9; // Separator and always-visible Help.
+        for (labels[0..count]) |label| {
+            const extra = label.len + @as(usize, if (length == 0) 0 else 3);
+            if (columns + extra + reserve > width) break;
+            if (length > 0) {
+                @memcpy(self.reader_hint_buffer[length..][0..4], " · ");
+                length += 4;
+            }
+            @memcpy(self.reader_hint_buffer[length..][0..label.len], label);
+            length += label.len;
+            columns += extra;
+        }
+        const ending = if (length > 0) " · ? Help" else "? Help";
+        @memcpy(self.reader_hint_buffer[length..][0..ending.len], ending);
+        return self.reader_hint_buffer[0 .. length + ending.len];
+    }
+    fn fittedHints(self: *App, width: u16) []const u8 {
+        if (self.ux_overlay == .gmail_draft) return if (width < 66) "Tab Choose · Enter · Ctrl+D/U · Esc Back" else self.contextHints();
+        if (self.ux_overlay == .none and self.mode == .compose and self.compose.gmailPaused()) return if (width < 66) "Paused in Gmail · g Status · q Back" else self.contextHints();
+        if (self.ux_overlay == .follow_up) return self.contextHints();
+        if (self.follow_ups_list and self.mode == .browse and self.ux_overlay == .none and self.reader_overlay == .none and self.focus == .list and !self.expanded) return if (width < 42) "Enter Mail · b Date · q Back" else if (width < 48) "Enter Mail · b Date · d Done · q Back" else if (width < 66) "Enter Mail · b Date · d Done · q Back · ? Help" else "j/k Choose · Enter Mail · b Date · d Done · q Back · ? Help";
         if (self.compose_choice) {
             if (!self.capabilities.original_formatting and !self.capabilities.original_attachment) return "Tab / Shift+Tab · Enter · t Text quote · Esc/q Back";
             return if (self.compose_intent == .forward) "Tab / Shift+Tab · Enter · k Keep · t Text · e .eml · Esc/q Back" else "Tab / Shift+Tab · Enter · k Keep · t Text · Esc/q Back";
         }
+        if (self.mode == .browse and self.ux_overlay == .none and self.reader_overlay == .none and !self.label_picker and !self.readerCopyVisible() and !self.grace_active and (self.focus == .reader or self.expanded)) return self.readerContextHints(width);
         if (browser_target) {
             if (width >= 100 or self.ux_overlay != .none or self.label_picker or self.mode == .label_manager or self.mode == .trash_confirm) return self.contextHints();
             return switch (self.mode) {
-                .compose => if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
+                .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) " Check Sent in Gmail · q Back" else if (self.compose.attachment_focus) " Tab Buttons · Enter Activate · Esc Body" else if (self.compose.insert_mode and self.compose.selected < 3) " Ctrl+Space Recipients · Tab Field · Esc Close" else if (self.compose.insert_mode) " INSERT · Tab Field · Esc Normal · Ctrl+S Review" else " i Edit · a Contacts · d Discard · Ctrl+S Review · q Back",
                 .review => " Tab · Enter Activate · y Send · Esc Back",
                 .contacts => " Enter Choose · / Search · Ctrl+R Refresh · q Back",
                 .browse => if (self.focus == .navigation) " j/k Move · Enter Choose · 1–3 Accounts · a Contacts" else if (self.focus == .reader or self.expanded) " j/k Scroll · r/R Reply · f Forward · q List · ? Help" else if (width < 60) " j/k Mail · Enter Read · / Cache · ? Help" else " j/k Mail · c New · r Reply · f Forward · / Cache · \\ Gmail · ? Help",
@@ -10268,15 +11606,32 @@ const App = struct {
     fn openHelp(self: *App) !void {
         self.previous_mode = self.mode;
         self.mode = .help;
+        try self.resetHelp();
+    }
+    fn resetHelp(self: *App) !void {
         self.help_scroll = 0;
         try self.help_query.set(self.allocator, "");
         self.help_searching = false;
         self.help_match = null;
         self.help_reveal_match = false;
     }
+    fn calendarHelpVisible(self: *const App) bool {
+        return self.calendar.open and self.calendar.page == .help;
+    }
+    fn helpRows(self: *const App) []const HelpRow {
+        return if (self.calendarHelpVisible()) &calendar_help_rows else &help_rows;
+    }
+    fn closeHelp(self: *App) void {
+        if (self.calendarHelpVisible()) {
+            self.calendar.page = self.calendar.help_return;
+            self.calendar.scroll = self.calendar.help_return_scroll;
+            self.calendar.focus = self.calendar.help_return_focus;
+        } else self.mode = backMode(.help, self.previous_mode, self.picker);
+    }
     fn helpAvailable(self: *const App, entry: HelpRow) bool {
         return switch (entry.requires) {
             .always => true,
+            .native => !browser_target,
             .files => self.capabilities.files,
             .attachments => self.capabilities.attachments,
             .editor => self.capabilities.editor,
@@ -10300,7 +11655,7 @@ const App = struct {
     }
     fn resetHelpMatch(self: *App) void {
         self.help_match = null;
-        for (help_rows, 0..) |entry, index| if (self.helpMatches(entry)) {
+        for (self.helpRows(), 0..) |entry, index| if (self.helpMatches(entry)) {
             self.help_match = index;
             break;
         };
@@ -10309,9 +11664,9 @@ const App = struct {
     fn nextHelpMatch(self: *App, down: bool) void {
         const selected_match = self.help_match orelse return;
         var index = selected_match;
-        for (0..help_rows.len) |_| {
-            index = if (down) (index + 1) % help_rows.len else (index + help_rows.len - 1) % help_rows.len;
-            if (self.helpMatches(help_rows[index])) {
+        for (0..self.helpRows().len) |_| {
+            index = if (down) (index + 1) % self.helpRows().len else (index + self.helpRows().len - 1) % self.helpRows().len;
+            if (self.helpMatches(self.helpRows()[index])) {
                 self.help_match = index;
                 self.help_reveal_match = true;
                 return;
@@ -10344,22 +11699,21 @@ const App = struct {
         } else if (key.matches(Key.escape, .{}) and self.help_query.value().len > 0) {
             try self.help_query.set(self.allocator, "");
             self.resetHelpMatch();
-        } else if (key.matches('n', .{})) self.nextHelpMatch(true) else if (key.matches('N', .{}) or key.matches('n', .{ .shift = true })) self.nextHelpMatch(false) else if (key.matches('q', .{}) or key.matches('?', .{}) or key.matches(Key.escape, .{})) self.mode = backMode(.help, self.previous_mode, self.picker) else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.help_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.help_scroll -|= 1 else if (key.matches(Key.page_down, .{})) self.help_scroll +|= self.help_height else if (key.matches(Key.page_up, .{})) self.help_scroll -|= self.help_height else if (key.matches('d', .{ .ctrl = true })) self.help_scroll +|= @max(self.help_height / 2, 1) else if (key.matches('u', .{ .ctrl = true })) self.help_scroll -|= @max(self.help_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.help_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.help_scroll = self.help_lines -| self.help_height;
+        } else if (key.matches('n', .{})) self.nextHelpMatch(true) else if (key.matches('N', .{}) or key.matches('n', .{ .shift = true })) self.nextHelpMatch(false) else if (key.matches('q', .{}) or key.matches('?', .{}) or key.matches(Key.escape, .{})) self.closeHelp() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.help_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.help_scroll -|= 1 else if (key.matches(Key.page_down, .{})) self.help_scroll +|= self.help_height else if (key.matches(Key.page_up, .{})) self.help_scroll -|= self.help_height else if (key.matches('d', .{ .ctrl = true })) self.help_scroll +|= @max(self.help_height / 2, 1) else if (key.matches('u', .{ .ctrl = true })) self.help_scroll -|= @max(self.help_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.help_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.help_scroll = self.help_lines -| self.help_height;
     }
     fn helpFlow(self: *App, win: vaxis.Window, raw: []const u8, offset: usize, base_row: usize, tone: Tone, active_match: bool) !void {
         const clean = try safe(self.frame.allocator(), raw, true);
         const query = self.help_query.value();
-        var next_match = cache_query.find(clean, query);
+        var next_match = cache_query.findRange(clean, query);
         var iterator = text_layout.Iterator.init(clean, win.width, win.screen.width_method, .{ .base_row = base_row });
         while (iterator.next()) |glyph| {
             while (next_match) |at| {
-                if (glyph.byte_offset < at + query.len) break;
-                const after = at + query.len;
-                next_match = if (cache_query.find(clean[after..], query)) |relative| after + relative else null;
+                if (glyph.byte_offset < at.end) break;
+                next_match = cache_query.findRangeAt(clean, query, at.end);
             }
             if (glyph.position.row < offset or glyph.position.row - offset >= win.height or glyph.columns > win.width) continue;
             var cell_style = self.style(if (active_match) .selected else tone);
-            if (next_match) |at| if (glyph.byte_offset >= at and glyph.byte_offset < at + query.len) {
+            if (next_match) |at| if (glyph.byte_offset >= at.start and glyph.byte_offset < at.end) {
                 cell_style.bold = true;
                 if (self.mono) cell_style.reverse = true else {
                     cell_style.bg = .{ .rgb = self.palette.yellow };
@@ -10374,7 +11728,7 @@ const App = struct {
         var row: usize = 0;
         const aligned = win.width >= 62;
         const keys_width: u16 = if (aligned) 26 else win.width;
-        for (help_rows, 0..) |entry, index| {
+        for (self.helpRows(), 0..) |entry, index| {
             if (!self.helpAvailable(entry)) continue;
             const active_match = self.help_match == index;
             if (active_match) self.help_match_start = row + @as(usize, if ((entry.section.len > 0 and row > 0) or (entry.section.len == 0 and entry.keys.len == 0)) 1 else 0);
@@ -10410,10 +11764,10 @@ const App = struct {
         const height = @min(win.height -| 2, 42);
         const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
         area.fill(.{ .style = self.style(.text) });
-        const inner = self.panel(area, 0, width, " Keyboard & mouse ", true);
+        const inner = self.panel(area, 0, width, if (self.calendarHelpVisible()) " Calendar · keyboard & mouse " else " Keyboard & mouse ", true);
         if (inner.width <= 2 or inner.height <= 2) return;
         var diagnostic_rows: usize = 0;
-        if (self.status_error_len > 0) {
+        if (!self.calendarHelpVisible() and self.status_error_len > 0) {
             const code = self.status_error_code[0..self.status_error_len];
             const banner = inner.child(.{ .x_off = 1, .width = inner.width - 2, .height = inner.height -| 3 });
             diagnostic_rows = try self.flowTone(banner, humanError(code), 0, 0, .warning);
@@ -10424,7 +11778,7 @@ const App = struct {
         if (self.help_searching or self.help_query.value().len > 0) {
             var count: usize = 0;
             var ordinal: usize = 0;
-            for (help_rows, 0..) |entry, index| if (self.helpMatches(entry)) {
+            for (self.helpRows(), 0..) |entry, index| if (self.helpMatches(entry)) {
                 count += 1;
                 if (self.help_match == index) ordinal = count;
             };
@@ -10446,9 +11800,29 @@ const App = struct {
         self.help_scroll = @min(self.help_scroll, self.help_lines -| self.help_height);
         _ = try self.helpContent(content, self.help_scroll, true);
         const footer: []const u8 = if (self.help_searching) " Enter Keep · Esc Clear · q is text" else if (inner.width < 62) "/ Find · n/N Next · q Back" else if (self.help_query.value().len > 0) "/ Find · n/N Match · j/k Scroll · Esc Clear · q Back" else "/ Find · j/k Scroll · Ctrl+D/U Half · Esc/q Back";
-        try self.line(inner, inner.height - 1, try self.fitLine(inner, footer, inner.width), .muted);
+        if (self.calendarHelpVisible()) {
+            const back_x = inner.width -| 8;
+            try self.line(inner.child(.{ .width = back_x -| 1 }), inner.height - 1, try self.fitLine(inner, footer, back_x -| 1), .muted);
+            _ = try self.actionButton(inner, inner.height - 1, back_x, "[q Back]", self.calendar.help_focus_back, true, .dialog_action, 0);
+        } else try self.line(inner, inner.height - 1, try self.fitLine(inner, footer, inner.width), .muted);
     }
     fn loadInvitationPresentation(self: *App, result: Value) !void {
+        self.invitation_review.method = std.meta.stringToEnum(invitation.Method, text(get(result, "method"))) orelse .publish;
+        self.invitation_review.response_blocked = !truth(get(result, "canReply"));
+        self.invitation_review.additional_events = @intCast(@max(0, integer(get(result, "additionalEvents"))));
+        try self.invitation_source_hash.set(text(get(result, "sourceHash")));
+        self.invitation_review.cancelled = truth(get(result, "cancelled"));
+        try self.invitation_review.stamp.set(text(get(result, "dtstamp")));
+        try self.invitation_review.recurrence_parameters.set(text(get(result, "recurrenceParameters")));
+        try self.invitation_original_start.set(text(get(result, "originalStartDisplay")));
+        try self.invitation_confirmed_status.set(text(get(result, "confirmedResponse")));
+        self.invitation_response_unknown = same(text(get(result, "responseOutcome")), "unknown");
+        self.invitation_calendar_sync_available = !browser_target and truth(get(result, "calendarSyncAvailable"));
+        try self.loadInvitationCalendarSync(get(result, "calendarSync"));
+        if (same(text(get(result, "responseOutcome")), "applied") and self.invitationUncertain()) {
+            self.invitation_unknown = false;
+            try self.invitation_operation_error.set(self.allocator, "");
+        }
         const start_display = text(get(result, "startDisplay"));
         try self.invitation_start_display.set(if (start_display.len > 0) start_display else self.invitation_review.start.slice());
         try self.invitation_end_display.set(text(get(result, "endDisplay")));
@@ -10463,83 +11837,154 @@ const App = struct {
         self.invitation_timezone_unavailable = truth(get(result, "timezoneUnavailable"));
         self.invitation_details = false;
     }
+    fn loadInvitationCalendarSync(self: *App, result: Value) !void {
+        self.invitation_calendar_can_retry = truth(get(result, "canRetry"));
+        try self.invitation_calendar_sync_state.set(text(get(result, "state")));
+        try self.invitation_calendar_sync_error.set(text(get(result, "errorCode")));
+        self.invitation_calendar_sync_target.display(text(get(result, "calendarId")));
+    }
+    fn invitationCalendarUnknown(self: *const App) bool {
+        return same(self.invitation_calendar_sync_state.slice(), "unknown");
+    }
+    fn invitationCalendarCheckNeeded(self: *const App) bool {
+        return self.invitationCalendarUnknown() or self.invitation_calendar_can_retry;
+    }
+    fn invitationCalendarNotice(self: *const App) []const u8 {
+        const state = self.invitation_calendar_sync_state.slice();
+        const code = self.invitation_calendar_sync_error.slice();
+        if (same(state, "applied")) return "Calendar updated with your response";
+        if (same(state, "existing")) return "Your response is already saved in Calendar";
+        if (same(state, "unknown")) return "Calendar outcome unknown · C Check status · do not send another RSVP";
+        if (self.invitation_calendar_can_retry) return "Calendar was not updated · C retries Calendar without resending your RSVP";
+        if (same(state, "rejected")) return "Calendar was not updated · A reviews Calendar separately";
+        if (same(state, "skipped") and code.len > 0 and !same(code, "DeclinedReplyOnly") and !same(code, "MailReplyNotConfirmed") and !same(code, "CalendarPermissionRequired") and !same(code, "CalendarWritePermissionRequired")) return "Calendar was not updated · A reviews Calendar separately";
+        return "";
+    }
     fn invitationUncertain(self: *const App) bool {
         return self.invitation_unknown and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value());
     }
     fn invitationControlMask(self: *const App) u8 {
         if (!self.invitation_confirm_ready) return 1;
-        var mask: u8 = 0b010001;
-        if (!self.invitationUncertain()) mask |= 0b001110;
+        var mask: u8 = if (browser_target) 0b010001 else 0b1010001;
+        if (!self.invitationUncertain() and !self.invitation_response_unknown and self.invitation_review.canRespond()) mask |= 0b001110;
+        if ((self.invitation_review.method != .request and self.invitation_review.method != .cancel) or self.invitation_review.additional_events > 0) mask &= 0b0111111;
         if (reader_tools.safeUrl(self.invitation_join_url.slice())) mask |= 0b100000;
+        if (self.invitationCalendarUnknown()) mask &= 0b10110001;
+        if (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded())) mask |= 0b10000000;
         return mask;
     }
     fn invitationDraw(self: *App, win: vaxis.Window) !void {
         self.dialog_focus.ensure(.invitation, 0);
         self.invitation_confirm_ready = false;
         self.mouse_hits.clear();
-        const width = @min(win.width -| 2, 100);
-        const height = @min(win.height -| 2, 30);
-        const area = win.child(.{ .x_off = @intCast((win.width - width) / 2), .y_off = @intCast((win.height - height) / 2), .width = width, .height = height });
-        area.fill(.{ .style = self.style(.text) });
-        const inner = self.panel(area, 0, width, " Meeting · review reply ", true);
-        const identity = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\nAttendee: {s}\nOrganizer: {s}", .{ self.invitation_inspected_account.value(), self.invitation_review.attendee.slice(), self.invitation_review.organizer.slice() });
-        const clean_identity = try safe(self.frame.allocator(), identity, true);
-        const identity_rows = positionAfter(inner, clean_identity).row + 1;
-        const controls = [_][]const u8{ "[Cancel]", "[a Accept]", "[t Tentative]", "[d Decline]", if (self.invitation_details) "[v Less]" else "[v Details]", "[o Join]" };
-        const gap: u16 = if (inner.width < 26) 1 else 2;
+        const a = self.frame.allocator();
+        const width = calendar_ui.cardWidth(win.width -| 2);
+        const border: u16 = if (width >= 60) 1 else 0;
+        const inset: u16 = if (border > 0) 2 else 1;
+        const max_height = @min(win.height -| 2, 42);
+        const measure = win.child(.{ .width = width -| (border + inset) * 2, .height = max_height -| border * 2 });
+        const joinable = reader_tools.safeUrl(self.invitation_join_url.slice());
+        const hero_join = joinable and measure.width >= 44;
+        const title_width = measure.width -| @as(u16, if (hero_join) 12 else if (joinable) 4 else 0);
+        const title = self.invitation_review.summary.slice();
+        const start_text = if (self.invitation_start_display.len > 0) self.invitation_start_display.slice() else self.invitation_review.start.slice();
+        const when = try safe(a, try std.fmt.allocPrint(a, "{s}{s}{s}{s}", .{ start_text, if (self.invitation_all_day and std.mem.indexOf(u8, start_text, "all day") == null) @as([]const u8, " · all day") else "", if (self.invitation_duration_display.len > 0) @as([]const u8, " · ") else "", self.invitation_duration_display.slice() }), true);
+        const hero_rows = 1 + positionAfter(measure, when).row + 1;
+        var pinned: std.ArrayList(CardBlock) = .empty;
+        try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Account: {s}", .{self.invitation_inspected_account.value()}), .tone = .sender });
+        if (self.invitation_review.attendee.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Attendee: {s}", .{self.invitation_review.attendee.slice()}), .tone = .text });
+        if (self.invitation_review.organizer.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Organizer: {s}", .{self.invitation_review.organizer.slice()}), .tone = .muted });
+        if (self.invitation_review.cancelled) try pinned.append(a, .{ .text = "Meeting cancelled · RSVP unavailable", .tone = .warning }) else if (self.invitation_review.method == .reply) try pinned.append(a, .{ .text = "Attendee's RSVP · nothing to answer", .tone = .muted }) else if (self.invitation_review.method == .publish) try pinned.append(a, .{ .text = "Published event · no RSVP requested", .tone = .muted });
+        if (self.invitation_calendar_sync_available and self.invitation_review.canRespond()) try pinned.append(a, .{ .text = "Accept/Tentative also adds supported events to your primary calendar.", .tone = .muted });
+        if (self.invitation_confirmed_status.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Your confirmed RSVP: {s}", .{self.invitation_confirmed_status.slice()}), .tone = .current });
+        if (self.invitation_response_unknown or self.invitationUncertain()) try pinned.append(a, .{ .text = "Previous RSVP outcome unknown · C checks Sent without resending", .tone = .warning }) else if (self.invitation_operation_error.value().len > 0 and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value())) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Previous RSVP rejected: {s}", .{self.invitation_operation_error.value()}), .tone = .warning });
+        const calendar_notice = self.invitationCalendarNotice();
+        if (calendar_notice.len > 0) {
+            const success = same(self.invitation_calendar_sync_state.slice(), "applied") or same(self.invitation_calendar_sync_state.slice(), "existing");
+            try pinned.append(a, .{ .text = calendar_notice, .tone = if (self.invitationCalendarUnknown()) .warning else if (success) .current else .offline });
+            if (self.invitation_calendar_sync_target.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar: {s}", .{self.invitation_calendar_sync_target.slice()}), .tone = .muted });
+        }
+        if (self.invitation_review.additional_events > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "First event shown · {d} additional occurrences · respond in your calendar", .{self.invitation_review.additional_events}), .tone = .warning });
+        if (self.invitation_review.response_blocked and self.invitation_review.method == .request and !self.invitation_review.cancelled) try pinned.append(a, .{ .text = "No single verified attendee · RSVP unavailable", .tone = .warning });
+        const pinned_rows = try self.measureCardBlocks(measure, pinned.items);
+        var details: std.ArrayList(CardBlock) = .empty;
+        if (positionAfter(measure.child(.{ .width = title_width }), try safe(a, title, false)).row > 0) try details.append(a, .{ .text = title, .tone = .subject });
+        if (self.invitation_location.len > 0) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Where: {s}", .{self.invitation_location.slice()}) });
+        if (joinable) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Join · {s}", .{self.invitation_join_url.slice()}), .tone = .sender });
+        if (self.invitation_end_display.len > 0) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Ends · {s}", .{self.invitation_end_display.slice()}), .tone = .muted });
+        if (self.invitation_original_start.len > 0 and !same(self.invitation_original_start.slice(), start_text)) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "As sent · {s}", .{self.invitation_original_start.slice()}), .tone = .muted });
+        const stated = self.invitation_attendee_status.slice();
+        const response = if (same(stated, "NEEDS-ACTION")) "Not answered" else if (same(stated, "ACCEPTED")) "Accepted" else if (same(stated, "TENTATIVE")) "Tentative" else if (same(stated, "DECLINED")) "Declined" else if (same(stated, "DELEGATED")) "Delegated" else if (stated.len > 0) stated else "Not stated";
+        try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Invitation says · {s}", .{response}), .tone = .muted });
+        if (self.invitation_review.recurrence_id.len > 0) try details.append(a, .{ .text = "Repeating event · this occurrence · v Details", .tone = .muted }) else if (self.invitation_recurrence_display.len > 0) try details.append(a, .{ .text = "Repeating event · v Details", .tone = .muted });
+        if (self.invitation_timezone_unavailable) try details.append(a, .{ .text = "Timezone shown as sent · local conversion unavailable", .tone = .offline });
+        if (self.invitation_details) {
+            try details.append(a, .{ .text = "\nPROTOCOL", .tone = .muted });
+            try details.append(a, .{ .text = try std.fmt.allocPrint(a, "UID: {s}\nSequence: {d}\nRecurrence: {s}\nRecurrence ID: {s}", .{ self.invitation_review.uid.slice(), self.invitation_review.sequence, self.invitation_recurrence_display.slice(), self.invitation_review.recurrence_id.slice() }), .tone = .muted });
+            if (self.invitation_calendar_sync_error.len > 0) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar detail: {s}", .{self.invitation_calendar_sync_error.slice()}), .tone = .muted });
+            try details.append(a, .{ .text = if (self.invitation_calendar_sync_available) @as([]const u8, "Accept/Tentative sends your RSVP and saves supported events to your primary calendar. A reviews a separate Calendar action.") else "Reply sends an RSVP email. A reviews an optional Calendar action.", .tone = .muted });
+        }
+        const detail_rows = try self.measureCardBlocks(measure, details.items);
+        const controls = [_][]const u8{ if (self.invitation_review.canRespond()) "[Esc Cancel]" else "[Esc Close]", "[a Accept]", "[t Tentative]", "[d Decline]", if (self.invitation_details) "[v Less]" else "[v Details]", "[o Join]", "[A Calendar]", if (self.invitationCalendarCheckNeeded()) "[C Check status]" else "[C Check Sent]" };
+        const show = [_]bool{ true, self.invitation_review.canRespond(), self.invitation_review.canRespond(), self.invitation_review.canRespond(), true, joinable and !hero_join, !browser_target and (self.invitation_review.method == .request or self.invitation_review.method == .cancel) and self.invitation_review.additional_events == 0, !browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded()) };
+        const gap: u16 = if (measure.width < 26) 1 else 2;
         var button_rows: usize = 1;
         var button_x: usize = 0;
-        for (controls) |label| {
-            if (button_x > 0 and button_x + label.len > inner.width) {
+        for (controls, show) |label, visible| {
+            if (!visible) continue;
+            if (button_x > 0 and button_x + label.len > measure.width) {
                 button_rows += 1;
                 button_x = 0;
             }
             button_x += label.len + gap;
         }
-        // Identity and confirmation controls are never clipped to make room
-        // for event details. A very small viewport cannot authorize an RSVP.
-        if (inner.width < 30 or identity_rows + button_rows + 4 > inner.height) {
+        const fixed_rows = hero_rows + pinned_rows + button_rows + 4;
+        const height: u16 = @intCast(@min(max_height, fixed_rows + detail_rows + border * 2));
+        const area = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - height) / 2, .width = width, .height = height });
+        area.fill(.{ .style = self.style(.text) });
+        const bordered = if (border > 0) area.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } }) else area;
+        const inner = bordered.child(.{ .x_off = inset, .width = bordered.width -| inset * 2 });
+        const heading = if (self.invitation_review.canRespond()) " Meeting · review reply " else " Calendar notice · details ";
+        if (border > 0) try self.line(area.child(.{ .x_off = 2, .width = width -| 4, .height = 1 }), 0, heading, .sender);
+        // Every identity and outcome fence is visible before any reply is enabled.
+        if (inner.width < 30 or fixed_rows + 1 > inner.height) {
             self.invitation_height = 0;
             _ = try self.flow(inner.child(.{ .height = inner.height -| 1 }), "Resize to review RSVP identity.\nNo RSVP can be submitted at this size.", 0, 0);
             self.dialog_focus.index = 0;
             _ = try self.actionButton(inner, inner.height -| 1, 0, "[Cancel]", true, self.job.future == null, .dialog_action, 0);
             return;
         }
+        try self.line(inner.child(.{ .width = title_width }), 0, try self.fitLine(inner, if (title.len > 0) title else "Untitled event", title_width), .subject);
+        _ = try self.flowTone(inner, when, 0, 1, .accent);
+        const identity_row = hero_rows + 1;
+        try self.drawCardBlocks(inner.child(.{ .y_off = @intCast(identity_row), .height = @intCast(pinned_rows) }), pinned.items, 0);
         self.invitation_confirm_ready = true;
-        _ = try self.flow(inner.child(.{ .height = @intCast(identity_rows) }), clean_identity, 0, 0);
-        const details = inner.child(.{ .y_off = @intCast(identity_rows + 1), .height = @intCast(inner.height - identity_rows - button_rows - 2) });
-        var review: std.ArrayList(u8) = .empty;
-        const a = self.frame.allocator();
-        try review.appendSlice(a, try std.fmt.allocPrint(a, "Event: {s}\nWhen: {s}{s}", .{ self.invitation_review.summary.slice(), if (self.invitation_start_display.len > 0) self.invitation_start_display.slice() else self.invitation_review.start.slice(), if (self.invitation_all_day and std.mem.indexOf(u8, self.invitation_start_display.slice(), "all day") == null) " · all day" else "" }));
-        if (self.invitation_end_display.len > 0) try review.appendSlice(a, try std.fmt.allocPrint(a, "\nEnd: {s}", .{self.invitation_end_display.slice()}));
-        if (self.invitation_duration_display.len > 0) try review.appendSlice(a, try std.fmt.allocPrint(a, "\nDuration: {s}", .{self.invitation_duration_display.slice()}));
-        if (self.invitation_location.len > 0) try review.appendSlice(a, try std.fmt.allocPrint(a, "\nWhere: {s}", .{self.invitation_location.slice()}));
-        if (self.invitation_join_url.len > 0) try review.appendSlice(a, try std.fmt.allocPrint(a, "\nJoin: {s}", .{self.invitation_join_url.slice()}));
-        const stated = self.invitation_attendee_status.slice();
-        const response = if (same(stated, "NEEDS-ACTION")) "Not answered" else if (same(stated, "ACCEPTED")) "Accepted" else if (same(stated, "TENTATIVE")) "Tentative" else if (same(stated, "DECLINED")) "Declined" else if (same(stated, "DELEGATED")) "Delegated" else if (stated.len > 0) stated else "Not stated";
-        try review.appendSlice(a, try std.fmt.allocPrint(a, "\nResponse stated in invitation: {s}", .{response}));
-        if (self.invitationUncertain()) try review.appendSlice(a, "\nPrevious RSVP outcome unknown · check Sent before another reply") else if (self.invitation_operation_error.value().len > 0 and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value())) try review.appendSlice(a, try std.fmt.allocPrint(a, "\nPrevious RSVP rejected: {s}", .{self.invitation_operation_error.value()}));
-        if (self.invitation_review.recurrence_id.len > 0) try review.appendSlice(a, "\nRepeating event · this occurrence · v Details") else if (self.invitation_recurrence_display.len > 0) try review.appendSlice(a, "\nRepeating event · v Details");
-        if (self.invitation_timezone_unavailable) try review.appendSlice(a, "\nTimezone shown as sent · local conversion unavailable");
-        if (self.invitation_details) try review.appendSlice(a, try std.fmt.allocPrint(a, "\n\nUID: {s}\nSequence: {d}\nRecurrence: {s}\nRecurrence ID: {s}\n\nReply sends an RSVP email; Calendar is not updated here.", .{ self.invitation_review.uid.slice(), self.invitation_review.sequence, self.invitation_recurrence_display.slice(), self.invitation_review.recurrence_id.slice() }));
-        const clean_review = try safe(self.frame.allocator(), review.items, true);
-        self.invitation_lines = positionAfter(details, clean_review).row + 1;
-        self.invitation_height = details.height;
-        self.invitation_scroll = @min(self.invitation_scroll, self.invitation_lines -| self.invitation_height);
-        _ = try self.flow(details, clean_review, self.invitation_scroll, 0);
         const idle = self.job.future == null;
         const enabled = self.invitationControlMask();
         if (enabled & (@as(u8, 1) << @intCast(self.dialog_focus.index)) == 0) self.dialog_focus.index = 0;
+        if (hero_join) {
+            const button_x_pos = inner.width -| 8;
+            try self.drawJoinCamera(inner, button_x_pos -| 3, 0);
+            _ = try self.actionButton(inner, 0, button_x_pos, "[o Join]", self.dialog_focus.index == 5, idle and enabled & 0b100000 != 0, .dialog_action, 5);
+        } else if (joinable and inner.width >= 3) try self.drawJoinCamera(inner, inner.width - 3, 0);
+        const detail_top = identity_row + pinned_rows + 1;
+        const viewport = inner.child(.{ .y_off = @intCast(detail_top), .height = @intCast(inner.height - detail_top - button_rows - 2) });
+        self.invitation_lines = detail_rows;
+        self.invitation_height = viewport.height;
+        self.invitation_scroll = @min(self.invitation_scroll, self.invitation_lines -| self.invitation_height);
+        try self.drawCardBlocks(viewport, details.items, self.invitation_scroll);
         var row = inner.height - button_rows - 1;
+        if (self.invitation_scroll > 0 or self.invitation_scroll + viewport.height < detail_rows) try self.line(inner, row -| 1, try self.fitLine(inner, if (self.invitation_scroll + viewport.height < detail_rows) "↓ More · j/k Scroll · Ctrl+D/U Page" else "↑ Earlier details · j/k Scroll", inner.width), .muted);
         var x: u16 = 0;
-        for (controls, 0..) |label, index| {
+        for (controls, show, 0..) |label, visible, index| {
+            if (!visible) continue;
             if (x > 0 and @as(usize, x) + label.len > inner.width) {
                 row += 1;
                 x = 0;
             }
             x = try self.actionButton(inner, row, x, label, self.dialog_focus.index == index, idle and enabled & (@as(u8, 1) << @intCast(index)) != 0, .dialog_action, index);
         }
-        try self.line(inner, inner.height - 1, try self.fitLine(inner, "Tab Controls · Enter Activate · j/k Scroll · Esc Cancel", inner.width), .muted);
+        try self.line(inner, inner.height - 1, try self.fitLine(inner, "Tab Controls · Enter Activate · j/k Scroll · Esc Back", inner.width), .muted);
     }
     fn resize(self: *App, original: vaxis.Winsize) !void {
         self.reader_drag_anchor = null;
@@ -10549,11 +11994,1385 @@ const App = struct {
         size.rows = @min(@max(size.rows, 1), max_rows);
         try self.vx.resize(self.allocator, self.tty.writer(), size);
     }
+    fn meetingReadJob(kind: JobKind) bool {
+        return kind == .meeting_calendars or kind == .meeting_agenda;
+    }
+    fn meetingBlocked(self: *const App) bool {
+        return self.meeting_window_small or self.mode != .browse or self.pending_compose != .none or self.compose_source_probe or self.grace_active or self.grace_pending.load(.acquire) or self.update_open or self.ux_overlay != .none or self.label_picker or self.reader_overlay != .none or self.compose_choice or self.readerCopyVisible() or (self.calendar.open and (self.calendar.page != .main or self.calendar.searching or self.calendar.entering_date));
+    }
+    fn preemptForMeetingJoin(self: *App) void {
+        _ = self.cancelMeetingRead();
+        if (self.job.future == null or self.job.kind != .refresh) return;
+        // Only speculative refresh yields to Join. Preserve every queued Mail
+        // intent; generic cancelJob intentionally discards those on user cancel.
+        const index = self.job.account_index;
+        self.job.future.?.cancel(self.io);
+        self.job.future = null;
+        self.stopLoadingAnimation();
+        self.sync[index].state = if (self.sync[index].cache_ready) .cached else .failed;
+        self.sync[index].error_len = 0;
+    }
+    fn meetingJoinAvailable(self: *const App) bool {
+        return self.job.future == null or self.job.kind == .refresh or meetingReadJob(self.job.kind);
+    }
+    fn focusMeeting(self: *App) void {
+        if (!self.meeting_enabled or self.meetingBlocked()) return;
+        const index = self.meetingCurrent() orelse return;
+        self.meeting_selected = self.meetings.records[index].?.key;
+        self.meeting_focused = true;
+        self.meeting_control = 0;
+        self.meeting_closed_until = 0; // Fresh M/click explicitly owns the next action.
+    }
+    fn meetingAction(self: *App, action: usize) !void {
+        const index = self.meetingCurrent() orelse return;
+        const record = &self.meetings.records[index].?;
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        if (action == 0) {
+            self.meetings.dismiss(record.key);
+            self.meeting_feedback = .{};
+            self.meeting_control = 0;
+            // Never transfer a held dismissal key to another occurrence. Show
+            // the next card passively and require a fresh M/click for actions.
+            self.meeting_focused = false;
+            self.meeting_closed_until = now +| 700;
+            if (self.meetings.first()) |next_index| {
+                self.meeting_selected = self.meetings.records[next_index].?.key;
+                self.meeting_changed_until = now +| 600;
+            } else {
+                self.meeting_selected = null;
+            }
+        } else if (action == 2) {
+            if (self.meetings.next(index)) |next_index| {
+                self.meeting_selected = self.meetings.records[next_index].?.key;
+                self.meeting_control = 0;
+                self.meeting_changed_until = now +| 600;
+                self.meeting_feedback = .{};
+            }
+        } else if (action == 1 and record.join.len > 0 and std.mem.startsWith(u8, record.join.slice(), "https://") and reader_tools.safeUrl(record.join.slice())) {
+            const target = self.meetings.targets[record.target];
+            if (!target.active or !self.meetingAccountEnabled(target.account)) return;
+            self.preemptForMeetingJoin();
+            self.meeting_feedback_key = record.key;
+            if (self.job.future != null) {
+                self.meeting_feedback.display("Join waits for current mail work · press o again");
+                return;
+            }
+            const address = text(get(self.accounts[target.account], "address"));
+            try self.start(.meeting_open, .{ .cmd = "browser.open", .account = address, .url = record.join.slice() });
+            self.job.meeting_account = target.account;
+            self.job.meeting_key = record.key;
+            self.meeting_feedback.display(try std.fmt.allocPrint(self.frame.allocator(), "Opening meeting in Chrome · {s}", .{address}));
+            self.meeting_control = 0;
+        }
+    }
+    fn onMeetingKey(self: *App, key: Key) !bool {
+        if (browser_target or !self.meeting_enabled) return false;
+        if (self.meetingBlocked()) {
+            self.meeting_focused = false;
+            return false;
+        }
+        if (self.paste) return self.meeting_focused;
+        const now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        // Only protect repeated activation in browse mode. A dismissed card must
+        // never eat the next characters of a draft, command or search field.
+        if (self.mode == .browse and now < self.meeting_closed_until and (key.matches(Key.enter, .{}) or key.matches('d', .{ .ctrl = true }))) {
+            self.meeting_closed_until = now +| 700;
+            return true;
+        }
+        if (key.matches('M', .{}) or key.matches('m', .{ .shift = true }) or key.matches(Key.f8, .{})) {
+            if (!self.meeting_focused and self.meetingCurrent() == null) return false;
+            if (self.meeting_focused) self.meeting_focused = false else self.focusMeeting();
+            return true;
+        }
+        if (!self.meeting_focused) return false;
+        if (self.meetingBlocked() or self.meetingCurrent() == null) {
+            self.meeting_focused = false;
+            self.meeting_selected = null;
+            self.meeting_closed_until = now +| 700;
+            return true;
+        }
+        if (key.matches(Key.escape, .{})) {
+            self.meeting_focused = false;
+            return true;
+        }
+        const record = &self.meetings.records[self.meetingCurrent().?].?;
+        if (tabDirection(key)) |backwards| {
+            for (0..3) |_| {
+                self.meeting_control = (self.meeting_control + (if (backwards) @as(usize, 2) else 1)) % 3;
+                if (self.meeting_control == 0 or (self.meeting_control == 1 and record.join.len > 0) or (self.meeting_control == 2 and self.meetings.count() > 1)) break;
+            }
+        } else if (now >= self.meeting_changed_until) {
+            if (key.matches('d', .{ .ctrl = true })) try self.meetingAction(0) else if (key.matches('o', .{})) try self.meetingAction(1) else if (key.matches('n', .{})) try self.meetingAction(2) else if (key.matches(Key.enter, .{})) try self.meetingAction(self.meeting_control);
+        }
+        return true;
+    }
+    fn onMeetingMouse(self: *App, mouse: vaxis.Mouse) !bool {
+        if (browser_target or !self.meeting_enabled or self.meetingBlocked() or self.options.no_mouse or mouse.type != .press) return false;
+        const rect = self.meeting_rect orelse return false;
+        const inside = mouse.col >= rect.x and mouse.row >= rect.y and mouse.col < rect.x + rect.width and mouse.row < rect.y + rect.height;
+        if (!inside) {
+            if (!self.meeting_focused) return false;
+            self.meeting_focused = false;
+            return true;
+        }
+        if (mouse.button != .left or mouse.mods.shift or mouse.mods.alt or mouse.mods.ctrl) return true;
+        if (self.meetingCurrent() == null) {
+            self.meeting_focused = false;
+            self.meeting_selected = null;
+            return true;
+        }
+        const guarded = Io.Timestamp.now(self.io, .awake).toMilliseconds() < self.meeting_changed_until;
+        self.focusMeeting();
+        if (!guarded) if (self.meeting_mouse_hits.at(mouse.col, mouse.row)) |hit| {
+            if (hit.kind == .dialog_action and hit.index >= 520 and hit.index <= 522) {
+                try self.meetingAction(hit.index - 520);
+                self.meeting_closed_until = 0; // Mouse dismissal does not arm a keyboard guard.
+            }
+        };
+        return true;
+    }
+    fn drawMeetings(self: *App, win: vaxis.Window) !void {
+        self.meeting_mouse_hits.clear();
+        self.meeting_window_small = win.width < 30 or win.height < 10;
+        if (self.meeting_window_small) self.meeting_focused = false;
+        if (browser_target or !self.meeting_enabled or self.meeting_window_small) return;
+        const selected = self.meetingCurrent();
+        if (selected == null and !self.meeting_focused) return;
+        const a = self.frame.allocator();
+        const blocked = self.meetingBlocked();
+        if (blocked) {
+            self.meeting_focused = false;
+            return;
+        }
+        // Overlay controls must remain clickable even when the underlying
+        // reader has exhausted its bounded link/row hit map.
+        const underlying_hits = self.mouse_hits;
+        self.mouse_hits.clear();
+        defer {
+            self.meeting_mouse_hits = self.mouse_hits;
+            self.mouse_hits = underlying_hits;
+        }
+        const compact = win.width < 48 or win.height < 18;
+        const width: u16 = if (compact) win.width else @min(64, win.width -| 2);
+        const height: u16 = if (selected == null) 5 else if (compact) 5 else 11;
+        const y = win.height -| 2 -| height;
+        const area = win.child(.{ .x_off = if (compact) 0 else win.width - width - 1, .y_off = y, .width = width, .height = height });
+        self.meeting_rect = .{ .x = @intCast(area.x_off), .y = @intCast(area.y_off), .width = width, .height = height };
+        area.fill(.{ .style = self.style(.text) });
+        if (selected == null) {
+            const inner = self.panel(area, 0, width, " Meeting ended · keys here ", true);
+            try self.line(inner, 0, "Meeting ended or changed · no action taken", .muted);
+            try self.line(inner, inner.height -| 1, "Enter/Esc Back · nothing else happens", .accent);
+            return;
+        }
+        const index = selected.?;
+        const record = &self.meetings.records[index].?;
+        const target = &self.meetings.targets[record.target];
+        self.meeting_selected = record.key;
+        if (self.meeting_drawn_key == null or !std.mem.eql(u8, &self.meeting_drawn_key.?, &record.key)) {
+            self.meeting_drawn_key = record.key;
+            self.meeting_changed_until = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 600;
+        }
+        const count = self.meetings.count();
+        var ordinal: usize = 0;
+        for (0..index + 1) |at| ordinal += @intFromBool(self.meetings.available(at));
+        const title = try std.fmt.allocPrint(a, " {s}{s}{s} ", .{ if (self.meeting_now < record.start) @as([]const u8, "Upcoming meeting") else "Meeting now", if (self.meeting_focused) @as([]const u8, " · keys here") else "", if (count > 1) try std.fmt.allocPrint(a, " · {d} of {d}", .{ ordinal, count }) else @as([]const u8, "") });
+        const inner = if (compact) area.child(.{ .x_off = 2, .width = area.width -| 2 }) else self.panel(area, 0, width, title, self.meeting_focused);
+        if (compact) for (0..height) |row| area.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = if (self.mono) "┃" else "▌", .width = 1 }, .style = self.style(.accent) });
+        const headline = if (self.meeting_now < record.start) try std.fmt.allocPrint(a, "Starts in {d} min", .{calendar_notifications.minutes(record, self.meeting_now)}) else try std.fmt.allocPrint(a, "{d} min remaining", .{calendar_notifications.minutes(record, self.meeting_now)});
+        const joinable = record.join.len > 0;
+        const hero_width = inner.width -| @as(u16, if (compact) 4 else if (joinable) 12 else 0);
+        try self.line(inner.child(.{ .width = hero_width }), 0, try self.fitLine(inner, headline, hero_width), if (self.meeting_now < record.start) .accent else .current);
+        const account_address = text(get(self.accounts[target.account], "address"));
+        if (compact) {
+            try self.line(inner.child(.{ .x_off = inner.width -| 3, .width = 3 }), 0, if (self.meeting_focused) "Esc" else "M", .accent);
+            try self.line(inner, 1, try self.fitLine(inner, record.title.slice(), inner.width), .subject);
+            try self.line(inner, 2, try self.fitLine(inner, account_address, inner.width), .sender);
+        } else {
+            _ = try self.flowTone(inner.child(.{ .y_off = 1, .height = 2 }), record.title.slice(), 0, 0, .subject);
+            const start_label = try self.zone.format(a, record.start);
+            const end = try self.zone.format(a, record.end);
+            const same_day = start_label.len >= 16 and end.len >= 16 and same(start_label[0..10], end[0..10]);
+            const interval = try std.fmt.allocPrint(a, "{s} – {s}", .{ start_label, if (same_day) end[11..] else end });
+            try self.line(inner, 3, try self.fitLine(inner, interval, inner.width), .text);
+            try self.line(inner, 4, try self.fitLine(inner, account_address, inner.width), .sender);
+            try self.line(inner, 5, try self.fitLine(inner, try std.fmt.allocPrint(a, "{s}{s}{s}", .{ target.name.slice(), if (record.location.len > 0) @as([]const u8, " · ") else "", record.location.slice() }), inner.width), .muted);
+            const feedback = self.meeting_feedback_key != null and std.mem.eql(u8, &self.meeting_feedback_key.?, &record.key);
+            try self.line(inner, 6, try self.fitLine(inner, if (feedback) self.meeting_feedback.slice() else if (record.stale) "Saved details · Calendar refresh unavailable" else "", inner.width), if (feedback) .current else .offline);
+            if (joinable) {
+                const x = inner.width -| @as(u16, if (self.meeting_focused) 8 else 6);
+                try self.drawJoinCamera(inner, x -| 3, 0);
+                _ = try self.actionButton(inner, 0, x, if (self.meeting_focused) "[o Join]" else "[Join]", self.meeting_focused and self.meeting_control == 1, self.meetingJoinAvailable(), .dialog_action, 521);
+            }
+        }
+        const row: usize = if (compact) 3 else 7;
+        var x = try self.actionButton(inner, row, 0, if (self.meeting_focused) "[Ctrl+D Dismiss]" else "[Dismiss]", self.meeting_focused and self.meeting_control == 0, true, .dialog_action, 520);
+        if (compact and joinable) x = try self.actionButton(inner, row, x, if (self.meeting_focused) "[o Join]" else "[Join]", self.meeting_focused and self.meeting_control == 1, self.meetingJoinAvailable(), .dialog_action, 521);
+        if (count > 1) _ = try self.actionButton(inner, if (compact) 4 else row, if (compact) 0 else x, if (!self.meeting_focused) "[Next]" else "[n Next]", self.meeting_focused and self.meeting_control == 2, true, .dialog_action, 522);
+        if (!compact) try self.line(inner, 8, try self.fitLine(inner, if (self.meeting_focused) "Enter Selected · Tab Move · Esc/M Back" else if (self.calendar.open) "M Meeting actions · keys stay in Calendar" else "M Meeting actions · keys stay in Mail", inner.width), .muted);
+        if (self.meeting_focused) win.hideCursor();
+    }
+    fn meetingJob(kind: JobKind) bool {
+        return meetingReadJob(kind) or kind == .meeting_open;
+    }
+    fn meetingAccountEnabled(self: *const App, index: usize) bool {
+        if (index >= self.accounts.len) return false;
+        const account_value = self.accounts[index];
+        if (get(account_value, "enabled") != .null and !truth(get(account_value, "enabled"))) return false;
+        for (items(get(account_value, "capabilities"))) |capability| {
+            const capability_name = text(capability);
+            if (same(capability_name, "calendar-read") or same(capability_name, "calendar-write-owned") or same(capability_name, "calendar-write-shared")) return true;
+        }
+        return false;
+    }
+    fn readMeetingClock(self: *App) ?i64 {
+        if (browser_target) return null;
+        if (self.options.fixtures) {
+            if (self.meeting_clock.len == 0) return null;
+            var bytes: [32]u8 = undefined;
+            const raw = Io.Dir.cwd().readFile(self.io, self.meeting_clock.slice(), &bytes) catch return null;
+            const clock_ms = std.fmt.parseInt(i64, std.mem.trim(u8, raw, " \t\r\n"), 10) catch return null;
+            return if (clock_ms > 0 and clock_ms < std.math.maxInt(i64) - 86400000) clock_ms else null;
+        }
+        return Io.Timestamp.now(self.io, .real).toMilliseconds();
+    }
+    fn initMeetings(self: *App) !void {
+        if (browser_target) return;
+        if (!self.capabilities.timers) return;
+        if (self.options.fixtures) {
+            const root = self.options.fixture_root orelse return;
+            const path = try std.fs.path.join(self.allocator, &.{ root, "calendar-notification-now-ms" });
+            defer self.allocator.free(path);
+            try self.meeting_clock.set(path);
+        }
+        self.meeting_now = self.readMeetingClock() orelse return;
+        for (0..self.accounts.len) |index| self.meeting_enabled = self.meeting_enabled or self.meetingAccountEnabled(index);
+        self.meeting_wake.store(self.meeting_enabled, .release);
+    }
+    fn meetingCurrent(self: *const App) ?usize {
+        if (self.meeting_selected) |key| if (self.meetings.find(key)) |index| return index;
+        // Focus pins the exact occurrence. Its expiry must not retarget Dismiss
+        // or Join to a different event, nor forward a key to a destructive action.
+        return if (self.meeting_focused) null else self.meetings.first();
+    }
+    fn meetingTick(self: *App) bool {
+        if (!self.meeting_enabled) return false;
+        self.meeting_now = self.readMeetingClock() orelse self.meeting_now;
+        self.meetings.expire(self.meeting_now);
+        var hash = std.hash.Wyhash.init(0);
+        const count = self.meetings.count();
+        hash.update(std.mem.asBytes(&count));
+        if (self.meetingCurrent()) |index| {
+            const record = &self.meetings.records[index].?;
+            hash.update(&record.key);
+            const minutes = calendar_notifications.minutes(record, self.meeting_now);
+            hash.update(std.mem.asBytes(&minutes));
+            hash.update(&.{@intFromBool(self.meeting_now >= record.start)});
+        }
+        const visual_hash = hash.final();
+        const changed = self.meeting_visual != visual_hash;
+        self.meeting_visual = visual_hash;
+        if (changed) return true;
+        if (self.job.future != null or self.meetingBlocked()) return false;
+        const poll_now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        for (0..self.accounts.len) |index| if (self.meetingAccountEnabled(index) and self.meetings.list_after[index] <= poll_now) return true;
+        for (self.meetings.targets) |target| if (target.active and target.poll_after <= poll_now) return true;
+        return false;
+    }
+    fn dispatchMeetings(self: *App) !void {
+        if (browser_target) return;
+        if (!self.meeting_enabled or self.job.future != null or self.meetingBlocked()) return;
+        // Poll intervals use elapsed time; event eligibility keeps civil time.
+        // A clock correction or fixed fixture clock cannot stall retries.
+        const poll_now = Io.Timestamp.now(self.io, .awake).toMilliseconds();
+        for (0..self.accounts.len) |index| {
+            if (!self.meetingAccountEnabled(index) or self.meetings.list_after[index] > poll_now) continue;
+            self.meetings.list_after[index] = poll_now +| 10 * 60000;
+            try self.start(.meeting_calendars, .{ .cmd = "calendar.list", .account = text(get(self.accounts[index], "address")), .persistCache = false });
+            self.job.meeting_account = @intCast(index);
+            return;
+        }
+        for (0..self.meetings.targets.len) |offset| {
+            const index = (self.meetings.cursor + offset) % self.meetings.targets.len;
+            const target = &self.meetings.targets[index];
+            if (!target.active or target.poll_after > poll_now or !self.meetingAccountEnabled(target.account)) continue;
+            target.poll_after = poll_now +| if (self.options.fixtures) @as(i64, 2000) else 60000;
+            self.meetings.cursor = (index + 1) % self.meetings.targets.len;
+            // UTC yesterday through the bounded week includes overnight events
+            // and tomorrow's first ten minutes without civil/DST edge gaps.
+            const date = try calendar_ui.dayText(self.frame.allocator(), @max(0, @divFloor(self.meeting_now, 86400000) - 1));
+            try self.start(.meeting_agenda, .{ .cmd = "calendar.agenda", .account = text(get(self.accounts[target.account], "address")), .calendarId = target.id.slice(), .date = date, .view = "week", .timeZone = "UTC", .persistCache = false });
+            self.job.meeting_account = target.account;
+            self.job.meeting_target = @intCast(index);
+            return;
+        }
+    }
+    fn finishMeetingJob(self: *App) !void {
+        const account_index = self.job.meeting_account;
+        if (self.job.kind == .meeting_open) {
+            // Completion belongs to the occurrence that launched this job,
+            // even if the user has switched cards or tried another Join.
+            self.meeting_feedback_key = self.job.meeting_key;
+            if (self.job.failure != null or self.job.response == null) {
+                self.meeting_feedback.display("Could not open meeting · try o again");
+                return;
+            }
+            const envelope = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), self.job.response.?, .{});
+            if (!truth(get(envelope, "ok"))) {
+                self.meeting_feedback.display("Could not open meeting · check the account's Chrome profile");
+                return;
+            }
+            const result = get(envelope, "data");
+            const raw_profile = text(get(result, "profile"));
+            const profile = if (std.mem.startsWith(u8, raw_profile, "--profile-directory=")) raw_profile[20..] else raw_profile;
+            self.meeting_feedback.display(try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s}", .{ if (truth(get(result, "fixture"))) @as([]const u8, "Join target validated") else "Opened in account Chrome profile", if (profile.len > 0) @as([]const u8, " · ") else "", profile }));
+            return;
+        }
+        if (account_index >= self.accounts.len or !self.meetingAccountEnabled(account_index)) return;
+        // Discovery failures must not defer first reminders for ten minutes.
+        // Successful authoritative discovery below restores the normal interval.
+        if (self.job.kind == .meeting_calendars)
+            self.meetings.list_after[account_index] = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 30000;
+        if (self.job.failure != null or self.job.response == null) {
+            if (self.job.kind == .meeting_agenda) self.meetings.fail(self.job.meeting_target);
+            return;
+        }
+        const envelope = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), self.job.response.?, .{});
+        if (!truth(get(envelope, "ok"))) {
+            const code = text(get(get(envelope, "error"), "code"));
+            if (same(code, "CalendarPermissionRequired") or same(code, "CalendarReadPermissionRequired") or same(code, "InvalidGrant") or same(code, "UnexpectedScope") or same(code, "AuthorizationDenied")) {
+                for (self.meetings.targets, 0..) |target, index| if (target.account == account_index) {
+                    self.meetings.deactivate(index);
+                };
+                self.meetings.list_after[account_index] = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 10 * 60000;
+            } else if (self.job.kind == .meeting_agenda) self.meetings.fail(self.job.meeting_target);
+            return;
+        }
+        const address = text(get(self.accounts[account_index], "address"));
+        if (self.job.kind == .meeting_calendars) {
+            const result = get(envelope, "data");
+            try self.meetings.calendars(account_index, address, result);
+            // A fresh bounded list may legitimately be incomplete on every
+            // request; retrying it rapidly cannot repair that limit.
+            if (get(result, "complete") == .bool and !truth(get(result, "cached")) and !truth(get(result, "stale")))
+                self.meetings.list_after[account_index] = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 10 * 60000;
+        } else try self.meetings.ingest(self.job.meeting_target, address, get(envelope, "data"), self.meeting_now);
+    }
+    fn calendarJob(kind: JobKind) bool {
+        return switch (kind) {
+            .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_apply, .calendar_reconcile => true,
+            else => false,
+        };
+    }
+    fn calendarEntries(self: *const App) []const Value {
+        return items(get(self.calendar.calendars.value, "calendars"));
+    }
+    fn calendarEvents(self: *const App) []const Value {
+        return items(get(get(self.calendar.agenda.value, "snapshot"), "events"));
+    }
+    fn calendarEventAt(self: *const App, wanted: usize) ?Value {
+        var count: usize = 0;
+        for (self.calendarEvents()) |event| if (calendar_ui.matches(event, self.calendar_query.value())) {
+            if (count == wanted) return event;
+            count += 1;
+        };
+        return null;
+    }
+    fn calendarEventCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.calendarEvents()) |event| if (calendar_ui.matches(event, self.calendar_query.value())) {
+            count += 1;
+        };
+        return count;
+    }
+    fn openCalendar(self: *App, from_mail: bool) !void {
+        if (browser_target) {
+            self.say(true, "Calendar is available in the native TUI · use omagma tui", .{});
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        const source = if (!from_mail) "" else if (self.mode == .invitation) self.invitation_inspected_id.value() else self.readerReplyId();
+        if (from_mail and source.len == 0) return error.MessageRequired;
+        self.calendar.deinit(self.allocator);
+        try self.calendar_query.set(self.allocator, "");
+        try self.calendar.account.set(self.account());
+        try self.calendar.source_message.set(source);
+        self.calendar.open = true;
+        self.calendar.page = if (from_mail) .calendars else .main;
+        self.mode = .browse;
+        self.calendar.day = self.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch @divFloor(Io.Timestamp.now(self.io, .real).toMilliseconds(), 86400000);
+        try self.start(.calendar_list, .{ .cmd = "calendar.list", .account = self.calendar.account.slice() });
+        try self.calendar.notice.set("Loading calendars…");
+    }
+    fn closeCalendar(self: *App) void {
+        if (self.job.future != null and (self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile)) {
+            self.say(true, "Calendar operation pending · wait for its outcome", .{});
+            return;
+        }
+        self.preemptReadOnly();
+        self.calendar.open = false;
+        self.mode = .browse;
+        self.say(false, "Mail · C Calendar · I Review RSVP · A Calendar action", .{});
+    }
+    fn selectCalendar(self: *App, index: usize) !void {
+        if (browser_target) return error.NativeOnly;
+        _ = self.cancelMeetingRead();
+        if (index >= self.calendarEntries().len or self.job.future != null) return;
+        const entry = self.calendarEntries()[index];
+        const value = get(entry, "calendar");
+        if (!same(text(get(get(value, "target"), "account")), self.calendar.account.slice())) return error.CalendarAccountMismatch;
+        const access = text(get(value, "access"));
+        if (self.calendar.source_message.len > 0 and !same(access, "owner") and !same(access, "writer") and !same(access, "writer_without_private")) {
+            try self.calendar.notice.set("This calendar is read-only · choose a calendar you can change");
+            return;
+        }
+        self.calendar.picker = index;
+        try self.calendar.calendar_id.set(text(get(get(value, "target"), "calendar_id")));
+        try self.calendar.calendar_name.set(text(get(value, "summary")));
+        try self.calendar.zone_name.set(text(get(value, "time_zone")));
+        self.calendar.zone.deinit(self.allocator);
+        self.calendar.zone = timezone.loadNamed(self.io, self.allocator, self.environ, self.calendar.zone_name.slice()) catch .{ .unavailable = true };
+        self.calendar.selected = 0;
+        self.calendar.top = 0;
+        self.calendar.scroll = 0;
+        self.calendar.focus = null;
+        self.calendar.ready = false;
+        if (!truth(get(entry, "canRead"))) {
+            self.calendar.page = .permissions;
+            try self.calendar.notice.set("Calendar event access unavailable · availability is unknown");
+            return;
+        }
+        if (self.calendar.source_message.len > 0) {
+            self.calendar.page = .review;
+            self.calendar.review.deinit();
+            self.calendar.confirmed_review = false;
+            self.calendar.unknown = false;
+            self.calendar.outcome = .{};
+            self.calendar.hash = .{};
+            self.calendar.operation = .{};
+            try self.calendar.notice.set("Checking invitation identity and previous calendar outcomes…");
+            try self.start(.calendar_plan, .{ .cmd = "calendar.invitation-plan", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .messageId = self.calendar.source_message.slice() });
+        } else {
+            self.calendar.page = .main;
+            try self.loadCalendarAgenda(false);
+        }
+    }
+    fn loadCalendarAgenda(self: *App, cache_only: bool) !void {
+        if (self.calendar.calendar_id.len == 0) return;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        const date = try calendar_ui.dayText(self.frame.allocator(), self.calendar.day);
+        self.calendar.selected = 0;
+        self.calendar.top = 0;
+        self.calendar.page = .main;
+        try self.start(.calendar_agenda, .{ .cmd = "calendar.agenda", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .date = date, .view = if (self.calendar.view == .day) @as([]const u8, "day") else "week", .timeZone = self.calendar.zone_name.slice(), .cacheOnly = cache_only });
+        try self.calendar.notice.set(if (cache_only) "Loading saved calendar window…" else "Refreshing calendar…");
+    }
+    fn calendarPreclaimFailure(code: []const u8) bool {
+        // Stale is raised only after earlier operation checks and before a new
+        // durable claim. Permission and lookup errors can also arise while
+        // revisiting an uncertain operation, so they do not prove no submission.
+        return same(code, "CalendarReviewStale");
+    }
+    fn calendarFailure(self: *App, code: []const u8) !void {
+        try self.calendar.error_code.set(code[0..@min(code.len, 128)]);
+        const writing = self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile;
+        const invalid_review = self.job.kind == .calendar_apply and calendarPreclaimFailure(code);
+        if (invalid_review) {
+            self.calendar.unknown = false;
+            self.calendar.confirmed_review = false;
+            self.calendar.review_ready = false;
+            self.calendar.hash = .{};
+            self.calendar.operation = .{};
+            self.calendar.outcome = .{};
+            self.calendar.focus = null;
+        }
+        if (writing and !invalid_review) {
+            self.calendar.unknown = true;
+            try self.calendar.notice.set("Outcome unknown · r Check Calendar · no automatic retry");
+        } else if (std.mem.indexOf(u8, code, "Permission") != null or std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null or std.mem.indexOf(u8, code, "Scope") != null) {
+            self.calendar.page = .permissions;
+            self.calendar.scroll = 0;
+            try self.calendar.notice.set(if (same(code, "CalendarWritePermissionRequired")) "Calendar write access needed · copy the command below" else "Calendar access needed · copy the command below");
+        } else if (invalid_review) {
+            try self.calendar.notice.set("Review no longer valid · Enter reloads the invitation before a new review");
+        } else {
+            self.calendar.stale = self.calendar.ready;
+            try self.calendar.notice.set("Calendar unavailable · availability is unknown");
+        }
+        self.sayFailure(self.calendar.notice.slice(), code);
+    }
+    fn finishCalendar(self: *App) !void {
+        if (!self.calendar.open or !same(self.account(), self.calendar.account.slice())) return;
+        // A read may finish while the user is searching Help. Apply its result
+        // to the saved underlying page, including auto-selection after list,
+        // then keep Help visible until the user chooses Back.
+        const keep_help = self.calendarHelpVisible();
+        if (keep_help) {
+            self.calendar.page = self.calendar.help_return;
+            self.calendar.scroll = self.calendar.help_return_scroll;
+            self.calendar.focus = self.calendar.help_return_focus;
+        }
+        defer if (keep_help) {
+            self.calendar.help_return = self.calendar.page;
+            self.calendar.help_return_scroll = self.calendar.scroll;
+            self.calendar.help_return_focus = self.calendar.focus;
+            self.calendar.page = .help;
+        };
+        if (self.job.failure) |err| {
+            try self.calendarFailure(@errorName(err));
+            return;
+        }
+        const response = self.job.response orelse return error.InvalidProviderResponse;
+        const envelope = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{});
+        if (!truth(get(envelope, "ok"))) {
+            try self.calendarFailure(text(get(get(envelope, "error"), "code")));
+            return;
+        }
+        const result = get(envelope, "data");
+        self.calendar.error_code = .{};
+        switch (self.job.kind) {
+            .calendar_list => {
+                try self.calendar.calendars.replace(self.allocator, result);
+                self.calendar.stale = truth(get(result, "stale")) or truth(get(result, "cached"));
+                if (self.calendarEntries().len == 0) {
+                    self.calendar.page = .calendars;
+                    try self.calendar.notice.set("No readable calendars returned · availability is unknown");
+                } else if (self.calendar.source_message.len == 0) {
+                    var chosen: usize = 0;
+                    for (self.calendarEntries(), 0..) |entry, index| if (truth(get(get(entry, "calendar"), "primary")) and truth(get(entry, "canRead"))) {
+                        chosen = index;
+                        break;
+                    };
+                    try self.selectCalendar(chosen);
+                } else try self.calendar.notice.set("Choose the exact destination calendar · Enter Review invitation");
+            },
+            .calendar_agenda => {
+                const snap = get(result, "snapshot");
+                if (!same(text(get(get(snap, "target"), "account")), self.calendar.account.slice()) or !same(text(get(get(snap, "target"), "calendar_id")), self.calendar.calendar_id.slice())) return error.CalendarAccountMismatch;
+                try self.calendar.agenda.replace(self.allocator, result);
+                self.calendar.ready = true;
+                self.calendar.stale = truth(get(snap, "stale")) or truth(get(result, "cached"));
+                self.calendar.complete = truth(get(snap, "complete"));
+                const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
+                const today = self.calendar.zone.localDay(now) catch 0;
+                self.calendar.selected = self.calendarEventCount() -| 1;
+                var upcoming: usize = 0;
+                for (self.calendarEvents()) |event| {
+                    if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
+                    defer upcoming += 1;
+                    const ends = get(event, "end");
+                    if (ends == .null) continue;
+                    const end = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.job_arena.allocator(), ends, .{});
+                    if (end.value > (if (end.kind == .date) today else now)) {
+                        self.calendar.selected = upcoming;
+                        break;
+                    }
+                }
+                const code = text(get(result, "refreshError"));
+                const cache_error = text(get(result, "cacheError"));
+                try self.calendar.error_code.set(if (code.len > 0) code else cache_error);
+                try self.calendar.notice.set(if (self.calendar.stale) "Saved calendar · stale · availability is unknown" else if (!self.calendar.complete) "Partial calendar window · availability is unknown" else if (cache_error.len > 0) "Up to date · cache could not be saved" else "Up to date · / searches only the loaded window");
+            },
+            .calendar_event => {
+                try self.calendar.card.replace(self.allocator, get(result, "event"));
+                try self.calendarLoadCardZone();
+                self.calendar.page = .detail;
+                self.calendar.scroll = 0;
+                self.calendar.focus = null;
+                self.calendar.card_stale = truth(get(result, "cached"));
+                try self.calendar.notice.set(if (self.calendar.card_stale) "Saved event · refresh unavailable" else "Event is already in this calendar");
+            },
+            .calendar_plan => {
+                try self.calendar.review.replace(self.allocator, result);
+                self.calendar.page = .review;
+                self.calendar.confirmed_review = false;
+                self.calendar.review_ready = false;
+                self.calendar.scroll = 0;
+                const recovery = get(result, "recovery");
+                if (recovery != .null) {
+                    try self.calendar.operation.set(text(get(recovery, "operationId")));
+                    try self.calendar.hash.set(text(get(recovery, "reviewHash")));
+                    self.calendar.unknown = true;
+                    try self.calendar.notice.set("Previous outcome unknown · r checks Calendar without applying again");
+                } else try self.calendar.notice.set("Review the proposed Calendar action · RSVP is a separate action");
+            },
+            .calendar_review => {
+                if (!same(text(get(result, "account")), self.calendar.account.slice()) or !same(text(get(result, "calendarId")), self.calendar.calendar_id.slice())) return error.CalendarAccountMismatch;
+                try self.calendar.review.replace(self.allocator, result);
+                try self.calendar.operation.set(text(get(result, "operationId")));
+                try self.calendar.hash.set(text(get(result, "reviewHash")));
+                self.calendar.confirmed_review = true;
+                self.calendar.review_ready = false;
+                self.calendar.scroll = 0;
+                self.calendar.focus = null;
+                try self.calendar.notice.set("Saved review ready · Confirm applies this exact Calendar action");
+            },
+            .calendar_apply, .calendar_reconcile => {
+                const state = text(get(result, "state"));
+                try self.calendar.outcome.set(state);
+                self.calendar.unknown = !same(state, "applied") and !same(state, "rejected");
+                self.calendar.confirmed_review = false;
+                if (self.calendar.unknown) {
+                    try self.calendar.notice.set("Outcome unknown · r Check Calendar · no automatic retry");
+                } else if (same(state, "applied")) {
+                    try self.calendar.notice.set(if (truth(get(result, "reconciled"))) "Calendar action reconciled · applied · no RSVP email sent" else "Calendar action applied · no RSVP email sent");
+                    self.calendar.source_message = .{};
+                } else try self.calendar.notice.set("Calendar action rejected · no automatic retry");
+                try self.calendar.error_code.set(text(get(result, "errorCode")));
+                // Preserve the reviewed details and show the durable outcome.
+                self.calendar.review_ready = false;
+            },
+            else => unreachable,
+        }
+        self.say(self.calendar.error_code.len > 0, "{s}", .{self.calendar.notice.slice()});
+    }
+    fn calendarPoint(self: *App, value: Value) ![]const u8 {
+        if (value == .null) return "Time unavailable";
+        const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), value, .{ .ignore_unknown_fields = true });
+        if (point.kind == .date) return std.fmt.allocPrint(self.frame.allocator(), "{s} · all-day (civil date)", .{try calendar_ui.dayText(self.frame.allocator(), point.value)});
+        const formatted = try self.calendar.zone.format(self.frame.allocator(), point.value);
+        const local = try self.zone.format(self.frame.allocator(), point.value);
+        const display = if (same(formatted, local)) formatted else try std.fmt.allocPrint(self.frame.allocator(), "{s} · your local: {s}", .{ formatted, local });
+        if (point.zone.len == 0 or same(point.zone, self.calendar.zone_name.slice())) return display;
+        return std.fmt.allocPrint(self.frame.allocator(), "{s} · organizer's zone: {s}", .{ display, point.zone });
+    }
+    fn calendarChanges(self: *App, previous: Value, source: Value, span: Value) ![]const u8 {
+        const a = self.frame.allocator();
+        var lines: std.ArrayList(u8) = .empty;
+        for ([_][]const u8{ "summary", "location", "start", "end" }, [_][]const u8{ "Title", "Location", "Start", "End" }) |field, label| {
+            const instant = same(field, "start") or same(field, "end");
+            const before = if (instant) try self.calendarPoint(get(previous, field)) else text(get(previous, field));
+            const after = if (instant) try self.calendarPoint(get(span, field)) else text(get(source, field));
+            if (!same(before, after)) try lines.appendSlice(a, try std.fmt.allocPrint(a, "{s}: {s} → {s}\n", .{ label, if (before.len > 0) before else "(empty)", if (after.len > 0) after else "(empty)" }));
+        }
+        return if (lines.items.len > 0) try std.fmt.allocPrint(a, "\nChanges\n{s}", .{lines.items}) else "\nOrganizer's revision changed; displayed title, time and location are unchanged.\n";
+    }
+
+    fn calendarReviewText(self: *App) ![]const u8 {
+        const a = self.frame.allocator();
+        const value = self.calendar.review.value;
+        const source = get(value, "invitation");
+        const span = get(value, "resolved");
+        const action = if (text(get(value, "action")).len > 0) text(get(value, "action")) else if (text(get(get(value, "recovery"), "action")).len > 0) text(get(get(value, "recovery"), "action")) else text(get(value, "decision"));
+        const previous = if (get(value, "previous") != .null) get(value, "previous") else get(value, "event");
+        const changes = if (self.calendar.outcome.len == 0 and get(value, "recovery") == .null and previous != .null and (same(action, "update_event") or same(action, "review_update"))) try self.calendarChanges(previous, source, span) else "";
+        const canceled = same(action, "cancel_event") or same(action, "review_cancel");
+        const consequence = if (same(self.calendar.outcome.slice(), "applied"))
+            if (canceled) try std.fmt.allocPrint(a, "Removed from {s}. No RSVP email was sent.", .{self.calendar.calendar_name.slice()}) else @as([]const u8, "The selected calendar was updated. No RSVP email was sent.")
+        else if (same(self.calendar.outcome.slice(), "rejected"))
+            "The calendar action was not applied. No RSVP email was sent."
+        else if (canceled)
+            try std.fmt.allocPrint(a, "This removes the event from {s}. It does not send an RSVP email.", .{self.calendar.calendar_name.slice()})
+        else
+            "This changes only the selected calendar. It does not send an RSVP email.";
+        return std.fmt.allocPrint(a, "Action: {s}\n{s}\n\nEvent: {s}\nStart: {s}\nEnd{s}: {s}\nCalendar: {s}\nAccount: {s}\nOrganizer: {s}\nAttendee: {s}\n{s}\n{s}\n\nCalendar ID: {s}\nSource time: {s} {s}\nUID: {s}\n{s}{s}", .{
+            calendar_ui.actionLabel(action),
+            if (self.calendar.unknown) @as([]const u8, "Outcome unknown · r checks Google Calendar without applying again") else if (same(self.calendar.outcome.slice(), "applied")) "Completed · Calendar action applied" else if (same(self.calendar.outcome.slice(), "rejected")) "Not applied · Calendar rejected this action" else if (self.calendar.outcome.len > 0) self.calendar.outcome.slice() else if (self.calendar.confirmed_review) "Press y to confirm (or Tab to Confirm, then Enter)" else "Step 1 of 2 · review the proposed action",
+            text(get(source, "summary")),
+            try self.calendarPoint(get(span, "start")),
+            if (same(text(get(get(span, "end"), "kind")), "date")) @as([]const u8, " (exclusive)") else "",
+            try self.calendarPoint(get(span, "end")),
+            self.calendar.calendar_name.slice(),
+            self.calendar.account.slice(),
+            text(get(source, "organizer")),
+            text(get(source, "attendee")),
+            changes,
+            consequence,
+            self.calendar.calendar_id.slice(),
+            text(get(get(source, "start"), "raw")),
+            text(get(get(source, "start"), "zone")),
+            text(get(source, "uid")),
+            text(get(value, "timeError")),
+            if (same(text(get(get(source, "start"), "kind")), "floating")) " · floating time needs an explicit zone in the CLI review" else "",
+        });
+    }
+    fn prepareCalendarReview(self: *App) !void {
+        if (self.calendar.unknown or self.calendar.source_message.len == 0 or self.job.future != null) return;
+        const decision = text(get(self.calendar.review.value, "decision"));
+        // A failed or rejected saved review has no plan decision. Reload the
+        // source and current provider state before issuing a fresh review;
+        // never reconcile an operation that was refused before submission.
+        if (decision.len == 0) {
+            self.calendar.confirmed_review = false;
+            self.calendar.review_ready = false;
+            self.calendar.hash = .{};
+            self.calendar.operation = .{};
+            self.calendar.outcome = .{};
+            try self.start(.calendar_plan, .{ .cmd = "calendar.invitation-plan", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .messageId = self.calendar.source_message.slice() });
+            try self.calendar.notice.set("Reloading invitation and current Calendar state…");
+            return;
+        }
+        if (!same(decision, "import_missing") and !same(decision, "review_update") and !same(decision, "review_cancel")) {
+            try self.calendar.notice.set("Calendar action unavailable · see the decision and time details above");
+            self.say(true, "Calendar action unavailable · {s} · see the review details", .{decision});
+            return;
+        }
+        const id = try self.operationId(self.allocator);
+        defer self.allocator.free(id);
+        try self.start(.calendar_review, .{ .cmd = "calendar.review", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .messageId = self.calendar.source_message.slice(), .operationId = id });
+    }
+    fn applyCalendarReview(self: *App) !void {
+        if (self.job.future != null or self.calendar.hash.len != 64) return;
+        if (!self.calendar.unknown and (!self.calendar.review_ready or !self.calendar.confirmed_review)) {
+            try self.calendar.notice.set("Read the complete calendar review before confirming · j/k Scroll");
+            self.say(true, "Read the complete calendar review before confirming", .{});
+            return;
+        }
+        const reconcile = self.calendar.unknown;
+        self.calendar.review_ready = false;
+        try self.start(if (reconcile) .calendar_reconcile else .calendar_apply, .{ .cmd = if (reconcile) @as([]const u8, "calendar.reconcile") else "calendar.apply", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .operationId = self.calendar.operation.slice(), .reviewHash = self.calendar.hash.slice() });
+        try self.calendar.notice.set(if (reconcile) "Reconciling saved operation…" else "Applying the explicitly confirmed Calendar action…");
+    }
+    fn calendarBack(self: *App) void {
+        if (self.calendarHelpVisible()) return self.closeHelp();
+        if (self.calendar.page == .main or (self.calendar.page == .calendars and self.calendar.source_message.len > 0)) {
+            self.closeCalendar();
+        } else {
+            self.preemptReadOnly();
+            self.calendar.page = .main;
+            self.calendar.scroll = 0;
+            self.calendar.focus = null;
+            self.calendar.notice.set(if (self.calendar.stale) "Saved calendar · stale · availability is unknown" else if (!self.calendar.complete) "Partial calendar window · availability is unknown" else "Up to date · / searches only the loaded window") catch {};
+        }
+    }
+    fn calendarLoadCardZone(self: *App) !void {
+        if (browser_target) return error.NativeOnly;
+        if (self.calendar.card.arena) |*arena| {
+            const owned = arena.allocator();
+            const description = try calendar_ui.descriptionText(owned, text(get(self.calendar.card.value, "description")), text(get(self.calendar.card.value, "join_url")));
+            if (self.calendar.card.value == .object) try self.calendar.card.value.object.put(owned, "display_description", .{ .string = description });
+        }
+        const name = text(get(get(self.calendar.card.value, "start"), "zone"));
+        if (same(name, self.calendar.card_zone_name.slice())) return;
+        self.calendar.card_zone.deinit(self.allocator);
+        try self.calendar.card_zone_name.set(name);
+        self.calendar.card_zone = if (name.len > 0) timezone.loadNamed(self.io, self.allocator, self.environ, name) catch .{ .unavailable = true } else .{};
+    }
+    fn calendarJoinFailed(self: *App, code: []const u8) void {
+        self.calendar.notice.set("Could not open Join link · check the configured Chrome profile") catch {};
+        self.calendar.error_code.set(code[0..@min(code.len, 128)]) catch {};
+    }
+    fn calendarJoin(self: *App) !void {
+        _ = self.cancelMeetingRead();
+        if (self.job.future != null) return;
+        const event = if (self.calendar.page == .detail) self.calendar.card.value else self.calendarEventAt(self.calendar.selected) orelse return;
+        if (!calendar_ui.canJoin(event)) {
+            try self.calendar.notice.set("Selected event has no Join link · Enter opens details");
+            return;
+        }
+        if (!std.ascii.eqlIgnoreCase(text(get(get(event, "target"), "account")), self.calendar.account.slice())) {
+            try self.calendar.notice.set("Event account mismatch · Join link not opened");
+            return;
+        }
+        try self.start(.open, .{ .cmd = "browser.open", .account = self.calendar.account.slice(), .url = text(get(event, "join_url")) });
+        self.job.calendar_join_open = true;
+        self.calendar.error_code = .{};
+        try self.calendar.notice.set("Opening Join link in this account's Chrome profile…");
+    }
+    fn calendarActivate(self: *App, index: usize) !void {
+        switch (index) {
+            0 => self.calendarBack(),
+            1, 2, 3 => {
+                self.calendar.view = @fromBackingInt(@intCast(index - 1));
+                try self.loadCalendarAgenda(false);
+            },
+            4, 5 => {
+                self.calendar.day += calendar_ui.visiblePeriod(self.calendar.view, self.vx.window().width) * @as(i64, if (index == 4) -1 else 1);
+                try self.loadCalendarAgenda(false);
+            },
+            6 => {
+                self.calendar.day = try self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds());
+                try self.loadCalendarAgenda(false);
+            },
+            7 => {
+                self.calendar.page = .calendars;
+                self.calendar.focus = null;
+                self.calendar.scroll = 0;
+                try self.calendar.notice.set("Choose a calendar · j/k Move · Enter Select · q Back");
+            },
+            8 => try self.loadCalendarAgenda(false),
+            9 => {
+                if (self.calendar.page != .help) {
+                    self.calendar.help_return = self.calendar.page;
+                    self.calendar.help_return_scroll = self.calendar.scroll;
+                    self.calendar.help_return_focus = self.calendar.focus;
+                }
+                self.calendar.page = .help;
+                self.calendar.help_focus_back = false;
+                try self.resetHelp();
+            },
+            10 => {
+                if (self.calendar.page == .calendars) return self.selectCalendar(self.calendar.picker);
+                if (self.calendar.page == .permissions) {
+                    try self.emitReaderCopy(try self.calendarGrantCommand());
+                    try self.calendar.notice.set("Authorization command copied · run it explicitly in your terminal");
+                    return;
+                }
+                if (self.calendar.page == .review) {
+                    if (self.calendar.confirmed_review or self.calendar.unknown) return self.applyCalendarReview();
+                    return self.prepareCalendarReview();
+                }
+                if (self.calendar.page == .detail) {
+                    return self.calendarJoin();
+                }
+                const event = self.calendarEventAt(self.calendar.selected) orelse return;
+                try self.calendar.card.replace(self.allocator, event);
+                try self.calendarLoadCardZone();
+                self.calendar.page = .detail;
+                self.calendar.scroll = 0;
+                self.calendar.focus = null;
+                self.calendar.card_stale = self.calendar.stale;
+                try self.calendar.notice.set("Loading event…");
+                // The loaded card remains useful if fetching details fails.
+                try self.start(.calendar_event, .{ .cmd = "calendar.event", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .eventId = text(get(event, "id")) });
+            },
+            13 => try self.calendarJoin(),
+            12 => {
+                self.calendar.page = .main;
+                self.calendar.entering_date = true;
+                self.calendar.focus = null;
+                try self.calendar_date.set(self.allocator, try calendar_ui.dayText(self.frame.allocator(), self.calendar.day));
+            },
+            11 => {
+                self.calendar.searching = true;
+                self.calendar.focus = null;
+            },
+            else => {},
+        }
+    }
+    fn calendarControls(self: *const App) usize {
+        if (self.calendar.page == .actions) return 14;
+        if (self.calendar.page == .main) return if (calendar_ui.canJoin(self.calendarEventAt(self.calendar.selected) orelse .null)) 14 else 13;
+        if (self.calendar.page == .detail) return if (calendar_ui.canJoin(self.calendar.card.value)) 2 else 1;
+        return 2;
+    }
+    fn onCalendarKey(self: *App, key: Key) !void {
+        if (self.calendarHelpVisible()) {
+            if (!self.paste and !self.help_searching) {
+                if (tabDirection(key) != null) {
+                    self.calendar.help_focus_back = !self.calendar.help_focus_back;
+                    return;
+                }
+                if (self.calendar.help_focus_back and key.matches(Key.enter, .{})) return self.closeHelp();
+                self.calendar.help_focus_back = false;
+            }
+            if (self.paste) {
+                if (self.help_searching) {
+                    try self.pasteInto(&self.help_query, key, false, 256);
+                    self.resetHelpMatch();
+                }
+            } else try self.onHelpKey(key);
+            return;
+        }
+        if (self.paste) {
+            if (self.calendar.entering_date) try self.pasteInto(&self.calendar_date, key, false, 10) else if (self.calendar.searching) try self.pasteInto(&self.calendar_query, key, false, 256);
+            return;
+        }
+        if (self.calendar.entering_date) {
+            if (key.matches(Key.escape, .{})) {
+                self.calendar.entering_date = false;
+            } else if (key.matches(Key.enter, .{})) {
+                const day = timezone.dateDay(self.calendar_date.value()) catch {
+                    try self.calendar.notice.set("Choose a valid date · YYYY-MM-DD");
+                    return;
+                };
+                self.calendar.day = day;
+                self.calendar.entering_date = false;
+                try self.loadCalendarAgenda(false);
+            } else try self.calendar_date.handleKey(self.allocator, key, false, 10);
+            return;
+        }
+        if (self.calendar.searching) {
+            if (key.matches(Key.escape, .{})) {
+                try self.calendar_query.set(self.allocator, "");
+                self.calendar.searching = false;
+            } else if (key.matches(Key.enter, .{})) self.calendar.searching = false else try self.calendar_query.handleKey(self.allocator, key, false, 256);
+            self.calendar.selected = 0;
+            self.calendar.top = 0;
+            return;
+        }
+        if (self.job.future != null and (self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile)) {
+            self.say(false, "Calendar operation pending · waiting for its durable outcome", .{});
+            return;
+        }
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) {
+            self.calendarBack();
+            return;
+        }
+        if (key.matches('p', .{ .ctrl = true })) {
+            self.calendar.page = .actions;
+            self.calendar.focus = 0;
+            return;
+        }
+        if (tabDirection(key)) |back| {
+            if (self.calendar.page == .main and self.vx.window().width < 60) {
+                const event = self.calendarEventAt(self.calendar.selected) orelse .null;
+                const controls: []const usize = if (calendar_ui.canJoin(event)) &.{ 0, 10, 13 } else &.{ 0, 10 };
+                var current: usize = 0;
+                for (controls, 0..) |value, i| if (self.calendar.focus == value) {
+                    current = i;
+                };
+                self.calendar.focus = if (self.calendar.focus != null) controls[(current + if (back) controls.len - 1 else 1) % controls.len] else if (back) controls[controls.len - 1] else controls[0];
+                return;
+            }
+            const count = self.calendarControls();
+            self.calendar.focus = if (self.calendar.focus) |at| (at + if (back) count - 1 else 1) % count else if (back) count - 1 else 0;
+            return;
+        }
+        if (key.matches(Key.enter, .{})) {
+            if (self.calendar.page == .detail and self.calendar.focus == null) {
+                try self.calendar.notice.set(if (calendar_ui.canJoin(self.calendar.card.value)) "o Join · or Tab to Join, then Enter" else "q returns to Calendar");
+                return;
+            }
+            if (self.calendar.page == .review and self.calendar.confirmed_review and !self.calendar.unknown and self.calendar.focus == null) {
+                self.say(false, "Press y to confirm (or Tab to Confirm, then Enter)", .{});
+                return;
+            }
+            const at = self.calendar.focus orelse 10;
+            const action = if (self.calendar.page != .main and self.calendar.page != .actions and at == 1) 10 else at;
+            try self.calendarActivate(action);
+            return;
+        }
+        if (key.matches('?', .{})) {
+            try self.calendarActivate(9);
+            return;
+        }
+        if (self.calendar.page != .main and self.calendar.page != .calendars and self.calendar.page != .actions) {
+            if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.calendar.scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.calendar.scroll = std.math.maxInt(usize) else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.calendar.scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.calendar.scroll -|= 1 else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) self.calendar.scroll +|= @max(self.vx.window().height / 2, 1) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) self.calendar.scroll -|= @max(self.vx.window().height / 2, 1) else if (key.matches('y', .{}) and self.calendar.page == .review and self.calendar.confirmed_review and !self.calendar.unknown) try self.calendarActivate(10) else if (key.matches('r', .{}) and self.calendar.page == .review and self.calendar.unknown) try self.applyCalendarReview() else if (key.matches('o', .{}) and self.calendar.page == .detail) try self.calendarActivate(10);
+            return;
+        }
+        if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
+            if (self.calendar.page == .calendars) self.calendar.picker = @min(self.calendar.picker +| 1, self.calendarEntries().len -| 1) else if (self.calendar.page == .actions) self.calendar.focus = @min((self.calendar.focus orelse 0) +| 1, 13) else self.calendar.selected = @min(self.calendar.selected +| 1, self.calendarEventCount() -| 1);
+            if (self.calendar.page != .actions) self.calendar.focus = null;
+        } else if (key.matches('k', .{}) or key.matches(Key.up, .{})) {
+            if (self.calendar.page == .calendars) self.calendar.picker -|= 1 else if (self.calendar.page == .actions) self.calendar.focus = (self.calendar.focus orelse 0) -| 1 else self.calendar.selected -|= 1;
+            if (self.calendar.page != .actions) self.calendar.focus = null;
+        } else if (self.calendar.page == .main) {
+            if (key.matches('o', .{})) try self.calendarJoin() else if (key.matches('1', .{})) try self.calendarActivate(1) else if (key.matches('2', .{})) try self.calendarActivate(2) else if (key.matches('3', .{})) try self.calendarActivate(3) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) try self.calendarActivate(4) else if (key.matches('l', .{}) or key.matches(Key.right, .{})) try self.calendarActivate(5) else if (key.matches('t', .{})) try self.calendarActivate(6) else if (key.matches('g', .{})) try self.calendarActivate(7) else if (key.matches('r', .{ .ctrl = true })) try self.calendarActivate(8) else if (key.matches('/', .{})) try self.calendarActivate(11) else if (key.matches('g', .{ .ctrl = true })) try self.calendarActivate(12) else if (key.matches('c', .{ .ctrl = true })) self.closeCalendar();
+        }
+    }
+    fn calendarEventLine(self: *App, event: Value, include_date: bool) ![]const u8 {
+        const a = self.frame.allocator();
+        const value = get(event, "start");
+        var stamp: []const u8 = "time unknown";
+        if (value != .null) {
+            const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, value, .{});
+            const end = get(event, "end");
+            const at = if (point.kind == .instant and end != .null) try std.fmt.allocPrint(a, "{s}–{s}", .{ try calendar_ui.clock(a, point, &self.calendar.zone), try calendar_ui.clock(a, try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, end, .{}), &self.calendar.zone) }) else try calendar_ui.clock(a, point, &self.calendar.zone);
+            stamp = if (include_date) try std.fmt.allocPrint(a, "{s} {s}", .{ try calendar_ui.dayText(a, try calendar_ui.pointDay(point, &self.calendar.zone)), at }) else at;
+        }
+        return calendarEventLabel(a, stamp, calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), calendar_ui.canJoin(event));
+    }
+    // Match Caldir's U+F03D video-call camera glyph; it inherits the terminal theme.
+    fn calendarEventLabel(a: std.mem.Allocator, stamp: []const u8, raw_mark: []const u8, summary: []const u8, camera: bool) ![]const u8 {
+        const mark = std.mem.trim(u8, raw_mark, " ");
+        return std.fmt.allocPrint(a, "{s}{s}{s}{s}{s}{s}", .{ stamp, if (stamp.len > 0) @as([]const u8, " ") else "", mark, if (mark.len > 0) @as([]const u8, " ") else "", if (camera) @as([]const u8, " ") else "", summary });
+    }
+    fn calendarCardWhen(self: *App, event: Value, zone: *const timezone.Zone) ![]const u8 {
+        const a = self.frame.allocator();
+        const start_value = get(event, "start");
+        const end_value = get(event, "end");
+        if (start_value == .null) return "Time unavailable";
+        const first = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, start_value, .{ .ignore_unknown_fields = true });
+        if (first.kind == .date) {
+            const last = if (same(text(get(end_value, "kind")), "date")) @max(first.value, integer(get(end_value, "value")) - 1) else first.value;
+            return std.fmt.allocPrint(a, "{s}{s} · all day", .{ try calendar_ui.dayText(a, first.value), if (last > first.value) try std.fmt.allocPrint(a, " – {s}", .{try calendar_ui.dayText(a, last)}) else @as([]const u8, "") });
+        }
+        const first_text = try zone.format(a, first.value);
+        if (end_value == .null) return first_text;
+        const last = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, end_value, .{ .ignore_unknown_fields = true });
+        if (last.kind != .instant) return first_text;
+        const last_text = try zone.format(a, last.value);
+        const same_day = first_text.len >= 17 and last_text.len >= 17 and same(first_text[0..10], last_text[0..10]);
+        // Keep each endpoint's zone across a daylight-saving transition.
+        const same_zone = same_day and same(first_text[17..], last_text[17..]);
+        const interval = if (same_zone) try std.fmt.allocPrint(a, "{s}–{s}", .{ first_text[0..16], last_text[11..] }) else try std.fmt.allocPrint(a, "{s} – {s}", .{ first_text, if (same_day) last_text[11..] else last_text });
+        const minutes = @divFloor(last.value - first.value, 60000);
+        if (minutes <= 0) return interval;
+        const duration = if (minutes < 60) try std.fmt.allocPrint(a, "{d}m", .{minutes}) else if (@mod(minutes, 60) == 0) try std.fmt.allocPrint(a, "{d}h", .{@divFloor(minutes, 60)}) else try std.fmt.allocPrint(a, "{d}h {d}m", .{ @divFloor(minutes, 60), @mod(minutes, 60) });
+        return std.fmt.allocPrint(a, "{s} · {s}", .{ interval, duration });
+    }
+    fn drawCalendarCard(self: *App, body: vaxis.Window) !void {
+        const a = self.frame.allocator();
+        const event = self.calendar.card.value;
+        const joinable = calendar_ui.canJoin(event);
+        const width = calendar_ui.cardWidth(body.width);
+        if (width < 24 or body.height < 7) {
+            try self.line(body, 0, "Event · resize for details", .muted);
+            _ = try self.actionButton(body, body.height -| 1, 0, "[q Back]", true, true, .dialog_action, 0);
+            return;
+        }
+        const top: u16 = if (body.height > 20) 1 else 0;
+        var outer = body.child(.{ .x_off = (body.width - width) / 2, .y_off = top, .width = width, .height = body.height - top });
+        const border: u16 = if (body.width >= 60) 1 else 0;
+        const bordered = outer.child(.{ .x_off = border, .y_off = border, .width = outer.width -| (border * 2), .height = outer.height -| (border * 2) });
+        const inset: u16 = if (body.width >= 60) 2 else 1;
+        var inner = bordered.child(.{ .x_off = inset, .width = bordered.width -| (inset * 2) });
+        if (inner.height < 3) return;
+        const title = text(get(event, "summary"));
+        const when = try self.calendarCardWhen(event, &self.zone);
+        const response = calendar_ui.responseLabel(text(get(event, "response")));
+        const cancelled = truth(get(event, "cancelled"));
+        const identity = try std.fmt.allocPrint(a, "{s} · {s}", .{ self.calendar.calendar_name.slice(), self.calendar.account.slice() });
+        const title_width = inner.width -| @as(u16, if (joinable) 12 else 0);
+        try self.line(inner.child(.{ .width = title_width }), 0, try self.fitLine(inner, if (title.len > 0) title else "Untitled event", title_width), .subject);
+        if (joinable) {
+            const button_x = inner.width -| 8;
+            _ = try self.actionButton(inner, 0, button_x, "[o Join]", self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+            if (button_x >= 3) try self.drawJoinCamera(inner, button_x - 3, 0);
+        }
+        var row = try self.flowTone(inner, when, 0, 1, .accent);
+        if (row + 4 < inner.height) row += 1;
+        var footer = inner.height -| 1;
+        row = @min(row, footer -| 2);
+        var viewport = inner.child(.{ .y_off = @intCast(row), .height = @intCast(footer -| row -| 1) });
+        var blocks: std.ArrayList(CardBlock) = .empty;
+        if (body.width < 60 or positionAfter(inner, try safe(a, identity, false)).row > 0) try blocks.append(a, .{ .text = identity, .tone = .sender });
+        try blocks.append(a, .{ .text = if (cancelled) "Cancelled by organizer" else try std.fmt.allocPrint(a, "In {s}{s}{s}", .{ self.calendar.calendar_name.slice(), if (self.calendar.card_stale) @as([]const u8, " · saved copy") else "", if (text(get(event, "source_marker")).len > 0) @as([]const u8, " · linked to an invitation") else "" }), .tone = if (cancelled) .warning else if (self.calendar.card_stale) .offline else .current });
+        if (truth(get(event, "private_copy"))) try blocks.append(a, .{ .text = "Private copy · organizer updates arrive by email; Mail A reviews updates", .tone = .muted });
+        if (response.len > 0) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Your response · {s}", .{response}), .tone = if (same(response, "Accepted")) .current else if (same(response, "Declined")) .muted else .offline });
+        const calendar_when = try self.calendarCardWhen(event, &self.calendar.zone);
+        if (!same(when, calendar_when)) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar time · {s}", .{calendar_when}), .tone = .muted });
+        const source_zone = self.calendar.card_zone_name.slice();
+        if (source_zone.len > 0 and same(text(get(get(event, "start"), "kind")), "instant")) {
+            const source_when = if (self.calendar.card_zone.unavailable) @as([]const u8, "not installed") else try self.calendarCardWhen(event, &self.calendar.card_zone);
+            try blocks.append(a, .{ .text = if (same(when, source_when)) try std.fmt.allocPrint(a, "Event zone · {s}", .{source_zone}) else try std.fmt.allocPrint(a, "Event zone · {s} · {s}", .{ source_zone, source_when }), .tone = .muted });
+        }
+        if (self.zone.unavailable) try blocks.append(a, .{ .text = "Local timezone unavailable · showing UTC", .tone = .offline });
+        const location = text(get(event, "location"));
+        if (location.len > 0) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Where · {s}", .{location}), .tone = .text });
+        const organizer = text(get(event, "organizer"));
+        if (organizer.len > 0) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Organizer · {s}", .{organizer}), .tone = .muted });
+        if (joinable) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Join · {s}", .{text(get(event, "join_url"))}), .tone = .sender });
+        // The clipped hero is repeated here only when its full title needs wrapping.
+        if (positionAfter(inner.child(.{ .width = title_width }), try safe(a, title, false)).row > 0) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "\n{s}", .{title}), .tone = .subject });
+        const description = text(if (get(event, "display_description") != .null) get(event, "display_description") else get(event, "description"));
+        if (description.len > 0) {
+            try blocks.append(a, .{ .text = "\nDESCRIPTION", .tone = .muted });
+            try blocks.append(a, .{ .text = description, .tone = .text });
+        }
+        const total = try self.measureCardBlocks(viewport, blocks.items);
+        // Short events form a compact card; long descriptions use the remaining viewport.
+        outer.height = @intCast(@min(outer.height, row + total + 2 + border * 2));
+        inner.height = outer.height -| (border * 2);
+        footer = inner.height -| 1;
+        viewport.height = @intCast(footer -| row -| 1);
+        if (border > 0) {
+            _ = outer.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } });
+            try self.line(outer.child(.{ .x_off = 2, .width = outer.width -| 4, .height = 1 }), 0, try self.fitLine(inner, identity, outer.width -| 4), .sender);
+        }
+        self.calendar.scroll = @min(self.calendar.scroll, total -| viewport.height);
+        try self.drawCardBlocks(viewport, blocks.items, self.calendar.scroll);
+        if (self.calendar.scroll > 0 or self.calendar.scroll + viewport.height < total) try self.line(inner, footer -| 1, try std.fmt.allocPrint(a, "{s}{s} · j/k Scroll · Ctrl+D/U Page", .{ if (self.calendar.scroll > 0) @as([]const u8, "↑ ") else "", if (self.calendar.scroll + viewport.height < total) @as([]const u8, "↓ More") else "End" }), .muted);
+        var x = try self.actionButton(inner, footer, 0, "[q Back]", self.calendar.focus == 0, true, .dialog_action, 0);
+        if (joinable) x = try self.actionButton(inner, footer, x, "[o Join]", self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+    }
+    fn calendarFirstDay(self: *App, width: u16) !i64 {
+        var first = self.calendar.day;
+        if (self.calendar.ready) {
+            const window_start = get(get(get(self.calendar.agenda.value, "snapshot"), "window"), "start_ms");
+            if (window_start != .null) first = try self.calendar.zone.localDay(integer(window_start));
+        }
+        if (self.calendar.view == .week and calendar_ui.gridDays(width) == 3) if (self.calendarEventAt(self.calendar.selected)) |event| {
+            if (get(event, "start") != .null) {
+                const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), get(event, "start"), .{});
+                const selected_day = try calendar_ui.pointDay(point, &self.calendar.zone);
+                if (selected_day >= first + 3) first = @min(selected_day, first + 4);
+            }
+        };
+        return first;
+    }
+    fn drawCalendarAgenda(self: *App, win: vaxis.Window) !void {
+        const count = self.calendarEventCount();
+        if (!self.calendar.ready) {
+            try self.line(win, 1, if (self.job.future != null) "Loading calendar…" else "Calendar window unavailable · Ctrl+R Retry · g Calendars", .muted);
+            return;
+        }
+        if (count == 0) {
+            try self.line(win, 1, if (self.calendar_query.value().len > 0) "No matches in the loaded window" else if (self.calendar.stale or !self.calendar.complete) "No events in saved results · availability unknown" else "No events in this calendar window", .muted);
+            return;
+        }
+        const capacity = @max((@as(usize, win.height) -| 2) / 2, 1);
+        if (self.calendar.selected < self.calendar.top) self.calendar.top = self.calendar.selected;
+        if (self.calendar.selected >= self.calendar.top + capacity) self.calendar.top = self.calendar.selected - capacity + 1;
+        var row: usize = 0;
+        if (self.calendar.top > 0) {
+            try self.line(win, row, try std.fmt.allocPrint(self.frame.allocator(), "↑ {d} earlier event{s} · k", .{ self.calendar.top, if (self.calendar.top == 1) @as([]const u8, "") else "s" }), .muted);
+            row += 1;
+        }
+        var displayed: usize = 0;
+        const end_row = win.height -| 1;
+        var previous_day: ?i64 = null;
+        const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
+        for (self.calendar.top..count) |index| {
+            if (row >= end_row) break;
+            const event = self.calendarEventAt(index).?;
+            const starts = get(event, "start");
+            if (starts != .null) {
+                const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), starts, .{});
+                const day = try calendar_ui.pointDay(point, &self.calendar.zone);
+                if (previous_day == null or previous_day.? != day) {
+                    if (row + 2 > end_row) break;
+                    const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+                    try self.line(win, row, try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ names[@intCast(@mod(day + 3, 7))], try calendar_ui.dayText(self.frame.allocator(), day) }), .accent);
+                    row += 1;
+                    previous_day = day;
+                }
+            }
+            if (row >= end_row) break;
+            const ends = get(event, "end");
+            var past = false;
+            if (ends != .null) {
+                const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), ends, .{});
+                past = point.value <= (if (point.kind == .date) try self.calendar.zone.localDay(now) else now);
+            }
+            const tone: Tone = if (index == self.calendar.selected) .selected else if (past or self.calendar.stale or !self.calendar.complete or same(text(get(event, "response")), "declined")) .muted else .text;
+            const label = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (index == self.calendar.selected) @as([]const u8, "> ") else "  ", try self.calendarEventLine(event, false) });
+            try self.line(win, row, try self.fitLine(win, label, win.width), tone);
+            self.mouseRows(win, row, 1, .contact, index);
+            row += 1;
+            displayed += 1;
+        }
+        const remaining = count - self.calendar.top - displayed;
+        if (remaining > 0) try self.line(win, end_row, try std.fmt.allocPrint(self.frame.allocator(), "↓ {d} more event{s} · j to continue", .{ remaining, if (remaining == 1) @as([]const u8, "") else "s" }), .muted);
+    }
+    fn drawCalendarWeek(self: *App, win: vaxis.Window) !void {
+        const days = calendar_ui.gridDays(win.width);
+        if (days == 0) return self.drawCalendarAgenda(win);
+        if (!self.calendar.ready) return self.drawCalendarAgenda(win);
+        const a = self.frame.allocator();
+        const width: u16 = @intCast((win.width - 6) / days);
+        const today = self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch -1;
+        // Follow j/k selection into the three-day compact window.
+        const first = try self.calendarFirstDay(win.width);
+        try self.line(win, 1, "all", .muted);
+        try self.line(win, 2, "day", .muted);
+        const slots = @min(@as(usize, 24), win.height -| 6);
+        if (slots == 0) return self.drawCalendarAgenda(win);
+        const slot_rows: usize = @max((win.height -| 6) / slots, 1);
+        var start_hour: i64 = @min(8, 24 - @as(i64, @intCast(slots)));
+        if (self.calendarEventAt(self.calendar.selected)) |event| if (get(event, "start") != .null) {
+            const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
+            if (point.kind == .instant) {
+                const seconds = @divFloor(point.value, 1000);
+                const hour = @divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600);
+                if (hour < start_hour) start_hour = hour;
+                if (hour >= start_hour + @as(i64, @intCast(slots))) start_hour = @max(hour - @as(i64, @intCast(slots)) + 1, 0);
+            }
+        };
+        for (0..slots) |slot| try self.line(win, 5 + slot * slot_rows, try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + @as(i64, @intCast(slot))))}), .muted);
+        for (0..days) |column| {
+            const day = first + @as(i64, @intCast(column));
+            const cell = win.child(.{ .x_off = @intCast(6 + column * width), .width = width - 1 });
+            if (column > 0) {
+                const divider = win.child(.{ .x_off = @intCast(5 + column * width), .width = 1 });
+                for (0..win.height -| 1) |divider_row| try self.line(divider, divider_row, "│", .muted);
+            }
+            const date = try calendar_ui.dayText(a, day);
+            const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+            try self.line(cell, 0, try std.fmt.allocPrint(a, "{s} {s}", .{ names[@intCast(@mod(day + 3, 7))], if (date.len == 10) date[5..] else date }), if (day == today) .current else .accent);
+            var row: usize = 1;
+            var all_day_count: usize = 0;
+            var visible_index: usize = 0;
+            for (self.calendarEvents()) |event| {
+                if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
+                defer visible_index += 1;
+                if (get(event, "start") == .null or get(event, "end") == .null) continue;
+                const starts = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
+                const end = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "end"), .{});
+                if (starts.kind != .date or !try calendar_ui.touchesDay(starts, end, day, &self.calendar.zone)) continue;
+                all_day_count += 1;
+                if (row > 2) continue;
+                const selected = visible_index == self.calendar.selected;
+                try self.line(cell, row, try self.fitLine(cell, try calendarEventLabel(a, "", calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), cell.gwidth("") <= 2 and calendar_ui.canJoin(event)), cell.width), if (selected) .selected else .sender);
+                self.mouseRows(cell, row, 1, .contact, visible_index);
+                row += 1;
+            }
+            if (all_day_count > 2) try self.line(cell, 3, try std.fmt.allocPrint(a, "+{d} all-day", .{all_day_count - 2}), .muted);
+            var occupied: [24]usize = @splat(0);
+            var chosen: [24]?usize = @splat(null);
+            var continuations: [24]bool = @splat(false);
+            var earlier: usize = 0;
+            var later: usize = 0;
+            visible_index = 0;
+            for (self.calendarEvents()) |event| {
+                if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
+                defer visible_index += 1;
+                if (get(event, "start") == .null or get(event, "end") == .null) continue;
+                const starts = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
+                const end = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "end"), .{});
+                const coverage = (try calendar_ui.coverage(starts, end, day, &self.calendar.zone)) orelse continue;
+                const first_hour = coverage.first / 60;
+                const end_hour = (coverage.end + 59) / 60;
+                if (first_hour < start_hour) earlier += 1;
+                if (end_hour > start_hour + @as(i64, @intCast(slots))) later += 1;
+                for (0..slots) |slot| {
+                    const hour = start_hour + @as(i64, @intCast(slot));
+                    if (hour < first_hour or hour >= end_hour) continue;
+                    occupied[slot] += 1;
+                    if (chosen[slot] == null or visible_index == self.calendar.selected) {
+                        chosen[slot] = visible_index;
+                        continuations[slot] = hour > first_hour or try calendar_ui.pointDay(starts, &self.calendar.zone) < day;
+                    }
+                }
+            }
+            if (earlier > 0 or later > 0) {
+                const hidden = if (earlier > 0 and later > 0) try std.fmt.allocPrint(a, "↑{d} ↓{d} · j/k", .{ earlier, later }) else if (earlier > 0) try std.fmt.allocPrint(a, "↑{d} earlier · k", .{earlier}) else try std.fmt.allocPrint(a, "↓{d} later · j", .{later});
+                try self.line(cell, 4, try self.fitLine(cell, hidden, cell.width), .muted);
+            }
+            for (0..slots) |slot| {
+                const index = chosen[slot] orelse continue;
+                const event = self.calendarEventAt(index).?;
+                const starts = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
+                const selected = index == self.calendar.selected;
+                const tone: Tone = if (selected) .selected else if (self.calendar.stale or !self.calendar.complete or same(text(get(event, "response")), "declined")) .muted else .sender;
+                const camera = !continuations[slot] and cell.gwidth("") <= 2 and calendar_ui.canJoin(event);
+                const compact_overlap = camera and cell.width < 16 and occupied[slot] > 1;
+                const label = if (compact_overlap) try std.fmt.allocPrint(a, "{s}  {s}", .{ try calendar_ui.clock(a, starts, &self.calendar.zone), text(get(event, "summary")) }) else try calendarEventLabel(a, if (continuations[slot]) @as([]const u8, "│") else try calendar_ui.clock(a, starts, &self.calendar.zone), if (cell.width < 16 and calendar_ui.canJoin(event)) @as([]const u8, "") else calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), camera);
+                const more = if (occupied[slot] > 1) try std.fmt.allocPrint(a, "{s}+{d}", .{ if (compact_overlap) @as([]const u8, "") else " ", occupied[slot] - 1 }) else "";
+                const available: u16 = @intCast(cell.width -| more.len);
+                row = 5 + slot * slot_rows;
+                try self.line(cell, row, try std.fmt.allocPrint(a, "{s}{s}", .{ try self.fitLine(cell, label, available), more }), tone);
+                if (slot_rows > 1) try self.line(cell, row + 1, if (more.len > 0) "│ overlapping" else "│", tone);
+                self.mouseRows(cell, row, @intCast(slot_rows), .contact, index);
+            }
+            if (day == today) {
+                const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
+                const seconds = @divFloor(now, 1000);
+                const hour = @divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600);
+                if (hour >= start_hour and hour < start_hour + @as(i64, @intCast(slots))) {
+                    const slot: usize = @intCast(hour - start_hour);
+                    if (occupied[slot] == 0) try self.line(cell, 5 + slot * slot_rows, "— now —", .accent);
+                }
+            }
+        }
+        if (self.calendarEventAt(self.calendar.selected)) |event| try self.line(win, win.height -| 1, try self.fitLine(win, try self.calendarEventLine(event, true), win.width), .selected);
+    }
+    fn calendarGrantCommand(self: *App) ![]const u8 {
+        var caps: std.ArrayList(u8) = .empty;
+        const a = self.frame.allocator();
+        if (self.account_index < self.accounts.len) for (items(get(self.accounts[self.account_index], "capabilities"))) |cap| {
+            if (caps.items.len > 0) try caps.append(a, ',');
+            try caps.appendSlice(a, text(cap));
+        };
+        if (caps.items.len == 0) try caps.appendSlice(a, "mail-read");
+        if (!self.hasCapability("calendar-read")) try caps.appendSlice(a, ",calendar-read");
+        if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) {
+            const entry = if (self.calendar.picker < self.calendarEntries().len) self.calendarEntries()[self.calendar.picker] else @as(Value, .null);
+            const owned = truth(get(get(entry, "calendar"), "owned_scope_verified"));
+            const capability = if (owned) "calendar-write-owned" else "calendar-write-shared";
+            if (!self.hasCapability(capability) and !self.hasCapability("calendar-write-shared")) {
+                try caps.append(a, ',');
+                try caps.appendSlice(a, capability);
+            }
+        }
+        const config_arg = if (self.options.config_file) |path| try std.fmt.allocPrint(a, " --config {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
+        const grant_arg = if (self.options.grant_file) |path| try std.fmt.allocPrint(a, " --grant-file {s}", .{try calendar_ui.shellQuoted(a, path)}) else "";
+        return std.fmt.allocPrint(a, "omagma terminal-auth authorize --account {s}{s}{s} --capabilities {s}", .{ try calendar_ui.shellQuoted(a, self.calendar.account.slice()), config_arg, grant_arg, caps.items });
+    }
+    fn calendarGuide(self: *App) ![]const u8 {
+        return std.fmt.allocPrint(self.frame.allocator(), "{s}{s}\nAccount: {s}\n\nThe command below keeps your existing permissions and adds the Calendar access needed here. Copy it and run it in your terminal to review Google's consent screen.\n\n{s}\n\ncalendar-write-owned covers your calendars. calendar-write-shared also permits changes to calendars shared with you as a writer. Calendar sharing permissions still apply.\n\nSetup: https://github.com/technologylab-ai/omagma/blob/main/docs/CALENDAR-PERMISSIONS.md\n\nNo calendar is changed by opening this guide.", .{ if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) @as([]const u8, "Write access needed for ") else "Calendar not authorized", if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) self.calendar.calendar_name.slice() else "", self.calendar.account.slice(), try self.calendarGrantCommand() });
+    }
+
+    fn drawCalendar(self: *App, win: vaxis.Window) !void {
+        const a = self.frame.allocator();
+        self.mouse_hits.clear();
+        try self.line(win, 0, try self.fitLine(win, try std.fmt.allocPrint(a, " omagma | Calendar · {s} | {s}", .{ if (self.calendar.page == .main) calendar_ui.viewName(self.calendar.view) else if (self.calendar.page == .review) (if (self.calendar.outcome.len > 0) @as([]const u8, "Result") else "Review") else if (self.calendar.page == .detail) "Event" else if (self.calendar.page == .calendars) "Calendars" else if (self.calendar.page == .permissions) "Permissions" else if (self.calendar.page == .help) "Help" else "Actions", self.calendar.account.slice() }), win.width), switch (self.account_index) {
+            1 => .sender,
+            2 => .current,
+            else => .accent,
+        });
+        const refreshed = integer(get(get(self.calendar.agenda.value, "snapshot"), "fetched_at_ms"));
+        const freshness = if (refreshed > 0) try std.fmt.allocPrint(a, " · Synced {s}", .{try self.calendar.zone.format(a, refreshed)}) else "";
+        try self.line(win, 1, try self.fitLine(win, if (self.calendar.calendar_id.len == 0) " Choose an account-bound calendar" else try std.fmt.allocPrint(a, " {s} · {s}{s}{s}", .{ self.calendar.calendar_name.slice(), self.calendar.zone_name.slice(), if (self.calendar.stale) @as([]const u8, " · STALE / availability unknown") else if (self.calendar.ready and !self.calendar.complete) " · PARTIAL / availability unknown" else "", freshness }), win.width), if (self.calendar.stale) .warning else .muted);
+        if (self.calendarHelpVisible()) {
+            try self.helpDraw(win);
+            return;
+        }
+        const body = win.child(.{ .y_off = 2, .height = win.height -| 4 });
+        if (body.height < 3) return;
+        if (self.calendar.page == .main) {
+            const labels = [_][]const u8{ "[q Mail]", "[1 Agenda]", "[2 Day]", "[3 Week]", "[h Prev]", "[l Next]", "[t Today]", "[g Calendars]", "[Ctrl+R Refresh]", "[? Help]", "[Enter Open]", "[/ Find]", "[Ctrl+G Date]", "[o Join]" };
+            var x: u16 = 0;
+            var row: usize = 0;
+            for (labels, 0..) |label, index| {
+                if (index == 13 and !calendar_ui.canJoin(self.calendarEventAt(self.calendar.selected) orelse .null)) continue;
+                if (body.width < 60 and index != 0 and index != 10 and index != 13) continue;
+                if (x > 0 and @as(usize, x) + label.len > body.width) {
+                    row += 1;
+                    x = 0;
+                }
+                x = try self.actionButton(body, row, x, label, self.calendar.focus == index, self.foregroundWorkerAvailable() or index == 0 or index == 9 or index == 11, .dialog_action, index);
+            }
+            if (body.width < 60) try self.line(body, 1, "Ctrl+P Actions · 1/2/3 View", .muted);
+            if (body.width < 60) row = 1;
+            const first_day = try self.calendarFirstDay(win.width);
+            const date = try calendar_ui.dayText(a, first_day);
+            const period = calendar_ui.visiblePeriod(self.calendar.view, win.width);
+            const title = try std.fmt.allocPrint(a, "{s}{s}{s}{s}{s}", .{ date, if (period > 1) try std.fmt.allocPrint(a, " – {s}", .{try calendar_ui.dayText(a, first_day + period - 1)}) else @as([]const u8, ""), if (self.calendar.view == .week and win.width < 104) @as([]const u8, " · Week needs 104 cols") else "", if (self.calendar_query.value().len > 0) @as([]const u8, " · Filter: ") else "", self.calendar_query.value() });
+            row += 1;
+            try self.line(body, row, title, .accent);
+            row += 2;
+            if (row < body.height) {
+                const content = body.child(.{ .y_off = @intCast(row), .height = @intCast(body.height - row) });
+                if (self.calendar.view == .week) try self.drawCalendarWeek(content) else try self.drawCalendarAgenda(content);
+            }
+        } else if (self.calendar.page == .calendars) {
+            try self.line(body, 0, "Choose calendar", .accent);
+            const capacity = @max((@as(usize, body.height) -| 3) / 3, 1);
+            const first = self.calendar.picker -| (capacity - 1);
+            for (self.calendarEntries(), 0..) |entry, index| {
+                if (index < first or index >= first + capacity) continue;
+                const value = get(entry, "calendar");
+                const row = 2 + (index - first) * 3;
+                try self.line(body, row, try self.fitLine(body, try std.fmt.allocPrint(a, "{s}{s}{s} · {s}", .{ if (index == self.calendar.picker) @as([]const u8, "> ") else "  ", text(get(value, "summary")), if (same(text(get(get(value, "target"), "calendar_id")), self.calendar.calendar_id.slice())) @as([]const u8, " (current)") else "", if (truth(get(entry, "canWrite"))) @as([]const u8, "read/write") else if (truth(get(entry, "canRead"))) "read-only" else "permission required" }), body.width), if (index == self.calendar.picker) .selected else .text);
+                try self.line(body, row + 1, try self.fitLine(body, try std.fmt.allocPrint(a, "  {s} · {s}", .{ text(get(get(value, "target"), "calendar_id")), text(get(value, "time_zone")) }), body.width), .muted);
+                self.mouseRows(body, row, @intCast(@min(@as(usize, 2), body.height -| row)), .contact, index);
+            }
+            const next_x = try self.actionButton(body, body.height - 1, 0, "[q Back]", self.calendar.focus == 0, true, .dialog_action, 0);
+            _ = try self.actionButton(body, body.height - 1, next_x, "[Enter Select]", self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+        } else if (self.calendar.page == .detail) {
+            try self.drawCalendarCard(body);
+        } else if (self.calendar.page == .actions) {
+            const labels = [_][]const u8{ "Back to Mail", "Agenda", "Day", "Week", "Previous period", "Next period", "Today", "Choose calendars", "Refresh calendar", "Calendar help", "Open selected event", "Search loaded events", "Jump to date · Ctrl+G", "Join selected event · o" };
+            for (labels, 0..) |label, index| {
+                try self.line(body, index, label, if (self.calendar.focus == index) .selected else .text);
+                self.mouseRows(body, index, 1, .dialog_action, index);
+            }
+        } else {
+            const description = switch (self.calendar.page) {
+                .review => try self.calendarReviewText(),
+                .permissions => try self.calendarGuide(),
+
+                else => "",
+            };
+            const content = body.child(.{ .height = body.height -| 2 });
+            const clean = try safe(a, description, true);
+            const lines = positionAfter(content, clean).row + 1;
+            self.calendar.scroll = @min(self.calendar.scroll, lines -| content.height);
+            _ = try self.flow(content, clean, self.calendar.scroll, 0);
+            if (self.calendar.scroll + content.height < lines) try self.line(body, body.height - 2, try std.fmt.allocPrint(a, "↓ {d} more lines · j or Ctrl+D to read", .{lines - self.calendar.scroll - content.height}), .warning);
+            if (self.calendar.page == .review and self.calendar.confirmed_review and content.height > 0 and self.calendar.scroll + content.height >= lines) self.calendar.review_ready = true;
+            var x = try self.actionButton(body, body.height - 1, 0, "[q Back]", self.calendar.focus == 0, self.foregroundWorkerAvailable(), .dialog_action, 0);
+            const label: []const u8 = if (self.calendar.page == .review) (if (self.calendar.unknown) "[r Check Calendar]" else if (self.calendar.outcome.len > 0) "" else if (self.calendar.confirmed_review) "[y Confirm]" else "[Enter Review]") else if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) @as([]const u8, "[o Join]") else "") else if (self.calendar.page == .permissions) "[Enter Copy]" else "";
+            const enabled = self.foregroundWorkerAvailable() and if (self.calendar.page == .review) (self.calendar.unknown or (self.calendar.source_message.len > 0 and (!self.calendar.confirmed_review or self.calendar.review_ready))) else if (self.calendar.page == .detail) std.mem.startsWith(u8, text(get(self.calendar.card.value, "join_url")), "https://") else self.calendar.page == .permissions;
+            if (label.len > 0) x = try self.actionButton(body, body.height - 1, x, label, self.calendar.focus == 1, enabled, .dialog_action, 10);
+        }
+        if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Date YYYY-MM-DD · Enter Go · Esc Cancel:", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Loaded events /", &self.calendar_query, true, .selected) else try self.line(win, win.height - 2, try self.fitLine(win, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) "j More · Confirm unlocks at end · q Back" else "y Confirm · Tab Controls · q Back") else "j/k Scroll · Enter Review action · Tab Controls · q Back") else if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) @as([]const u8, "j/k Scroll · o Join · Tab Controls · q Back") else "j/k Scroll · q Back") else if (self.calendar.page == .calendars) "j/k Calendar · Enter Select · Tab Controls · q Back" else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · g Calendars · ? Help · q Mail", win.width), .muted);
+        const calendar_diagnostic = if (self.calendar.page == .permissions) @as([]const u8, "") else self.calendar.error_code.slice();
+        const notice = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ self.calendar.notice.slice(), if (calendar_diagnostic.len > 0) @as([]const u8, " · ") else "", calendar_diagnostic });
+        try self.line(win, win.height - 1, try self.fitLine(win, notice, win.width), if (self.calendar.error_code.len > 0 or self.calendar.unknown) .warning else .muted);
+    }
+
     fn draw(self: *App) !void {
         try self.ensureLoadingAnimation();
         _ = self.frame.reset(.retain_capacity);
         self.clearObsoleteStatus();
         self.mouse_hits.clear();
+        self.meeting_rect = null;
+        self.meeting_mouse_hits.clear();
         const win = self.vx.window();
         self.notice_rect = null;
         self.update_rect = null;
@@ -10562,8 +13381,15 @@ const App = struct {
         win.clear();
         win.hideCursor();
         win.fill(.{ .style = self.style(.text) });
-        if (win.width < 30 or win.height < 10) {
+        self.meeting_window_small = win.width < 30 or win.height < 10;
+        if (self.meeting_window_small) {
+            self.meeting_focused = false;
             try self.line(win, 0, "omagma · resize terminal · q quits", .accent);
+            return;
+        }
+        if (self.calendar.open) {
+            try self.drawCalendar(win);
+            try self.drawMeetings(win);
             return;
         }
         try self.line(win, 0, try self.fittedGlobalHeader(win), .accent);
@@ -10607,6 +13433,7 @@ const App = struct {
         try self.drawUx(win);
         try self.drawGrace(win);
         if (self.capabilities.updates) try self.drawUpdates(win);
+        try self.drawMeetings(win);
     }
 };
 
@@ -10659,6 +13486,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     };
     try app.boot();
     app.loadPreferences();
+    try app.initMeetings();
     app.theme_watch.configure(environ) catch {};
     _ = app.theme_watch.changed(io, Io.Timestamp.now(io, .awake).toMilliseconds()) catch false;
     app.reloadTheme();
@@ -10691,6 +13519,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
         app.sayFailure("Cache unavailable", @errorName(err));
         break :blk false;
     };
+    app.loadFollowUps() catch {};
     app.sync[app.account_index].state = if (app.sync[app.account_index].cache_ready) .refreshing else .fetching;
     try app.draw();
     try vx.render(tty.writer());
@@ -10720,7 +13549,8 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
                 // not a redraw of cached mail. Other input/work events keep
                 // their ordinary owner, backpressure and shutdown behavior.
                 const update_due = app.scheduleUpdateCheck();
-                if (!app.pollTheme() and !app.grace_active and !app.grace_pending.load(.acquire) and !update_due) continue;
+                const meeting_due = app.meetingTick();
+                if (!app.pollTheme() and !app.grace_active and !app.grace_pending.load(.acquire) and !update_due and !meeting_due) continue;
             }
             break :next_input received;
         };
@@ -10738,6 +13568,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
             .cache_changed => app.onCacheChanged() catch {},
             .theme_tick => {
                 app.theme_tick_pending.store(false, .release);
+                app.followUpTick();
                 app.graceTick() catch |err| app.sayFailure("Queued send paused · draft retained", @errorName(err));
             },
             .loading_tick => {
@@ -10756,6 +13587,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     try app.persistDraftAtExit();
     app.rememberWorkingContext();
     app.saveUiPreferences();
+    try app.flushRemotePreferences();
     return app.html_stats;
 }
 
@@ -10963,7 +13795,7 @@ test "invitation UX: friendly details and explicit join preserve the inspected a
     try app.invitation_review.summary.set("Planning meeting");
     try app.invitation_review.attendee.set("work@example.test");
     try app.invitation_review.organizer.set("host@example.test");
-    const presentation = try readerInvitationTestValue(app.frame.allocator(), "{\"startDisplay\":\"2026-10-12 10:00 CEST\",\"endDisplay\":\"2026-10-12 11:30 CEST\",\"durationDisplay\":\"1h 30m\",\"location\":\"Room 4\",\"joinUrl\":\"https://meet.example.test/room?fixture=1\",\"attendeeStatus\":\"TENTATIVE\",\"recurrenceDisplay\":\"Weekly: FREQ=WEEKLY\",\"sequence\":3}");
+    const presentation = try readerInvitationTestValue(app.frame.allocator(), "{\"method\":\"request\",\"canReply\":true,\"startDisplay\":\"2026-10-12 10:00 CEST\",\"endDisplay\":\"2026-10-12 11:30 CEST\",\"durationDisplay\":\"1h 30m\",\"location\":\"Room 4\",\"joinUrl\":\"https://meet.example.test/room?fixture=1\",\"attendeeStatus\":\"TENTATIVE\",\"recurrenceDisplay\":\"Weekly: FREQ=WEEKLY\",\"sequence\":3}");
     try app.loadInvitationPresentation(presentation);
     app.mode = .invitation;
     var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 36, .x_pixel = 0, .y_pixel = 0 });
@@ -10973,7 +13805,7 @@ test "invitation UX: friendly details and explicit join preserve the inspected a
     const normal = try markdownTestScreenText(a, &screen);
     defer a.free(normal);
     try std.testing.expect(std.mem.indexOf(u8, normal, "10:00 CEST") != null);
-    try std.testing.expect(std.mem.indexOf(u8, normal, "Duration: 1h 30m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, normal, "1h 30m") != null);
     try std.testing.expect(std.mem.indexOf(u8, normal, "Where: Room 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, normal, "Tentative") != null);
     try std.testing.expect(std.mem.indexOf(u8, normal, "protocol-only") == null);
@@ -10999,10 +13831,10 @@ test "invitation UX: friendly details and explicit join preserve the inspected a
     app.invitation_unknown = true;
     try app.invitation_account.set(a, "work@example.test");
     try app.invitation_message_id.set(a, "meeting");
-    try std.testing.expectEqual(@as(u8, 0b110001), app.invitationControlMask());
+    try std.testing.expectEqual(@as(u8, if (browser_target) 0b110001 else 0b11110001), app.invitationControlMask());
     try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), "{\"joinUrl\":\"javascript:alert(1)\"}"));
     try std.testing.expectEqual(@as(usize, 0), app.invitation_join_url.slice().len);
-    try std.testing.expectEqual(@as(u8, 0b010001), app.invitationControlMask());
+    try std.testing.expectEqual(@as(u8, if (browser_target) 0b010001 else 0b10010001), app.invitationControlMask());
     win.width = 30;
     win.height = 10;
     try app.invitationDraw(win);
@@ -11033,15 +13865,59 @@ test "invitation UX: sticky metadata converts local time and invalidates on refr
     try std.testing.expect(app.reader_invitation_hash != original_hash);
     app.account_index = 1;
     try app.prepareReaderInvitation(message);
-    try std.testing.expectEqualStrings("Source subject", app.reader_invitation_title.slice());
-    try std.testing.expectEqualStrings("Time details in review", app.reader_invitation_when.slice());
+    try std.testing.expectEqualStrings("Planning", app.reader_invitation_title.slice());
+    try std.testing.expect(std.mem.indexOf(u8, app.reader_invitation_when.slice(), "2026-10-12 10:00 CEST") != null);
+    try std.testing.expect(!app.reader_invitation_can_reply);
     var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(a);
-    for ([_]u16{ 30, 40, 80 }) |width| for ([_]u16{ 3, 5, 12, 24 }) |height| {
+    for ([_]u16{ 30, 40, 47, 48, 80 }) |width| for ([_]u16{ 3, 5, 12, 20, 24 }) |height| {
         const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
         const rows = App.readerInvitationRows(win);
-        try std.testing.expect(rows >= 1 and rows <= 3 and rows <= height / 3);
+        try std.testing.expect(rows >= 1 and rows <= 5 and rows <= height / 3);
     };
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "invitation UX: mail video marker follows safe Join detection and clears on replacement" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    const cases = [_]struct { properties: []const u8, joined: bool, malformed: bool = false }{
+        .{ .properties = "CONFERENCE:https://meet.example.test/room\r\n", .joined = true },
+        .{ .properties = "LOCATION:Meeting room 4\r\n", .joined = false },
+        .{ .properties = "DESCRIPTION:Join this meeting at https://teams.microsoft.com/\r\n l/meetup-join/fixture\r\n", .joined = true },
+        .{ .properties = "DESCRIPTION:Notes: https://docs.example.test/notes\r\n", .joined = false },
+        .{ .properties = "CONFERENCE:javascript:alert(1)\r\n", .joined = false },
+        .{ .properties = "LOCATION:https://meet.example.test/room\r\n", .joined = true },
+        .{ .properties = "CONFERENCE:https://meet.example.test/room\r\nSTATUS:CANCELLED\r\n", .joined = false },
+        .{ .properties = "CONFERENCE:https://meet.example.test/room\r\n", .joined = true },
+        .{ .properties = "", .joined = false, .malformed = true },
+    };
+    for (cases) |case| {
+        const raw = if (case.malformed) "Incomplete calendar" else try std.fmt.allocPrint(app.frame.allocator(), "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:marker@example.test\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.test\r\nSUMMARY:Planning\r\nDTSTART:20261012T080000Z\r\nDTEND:20261012T090000Z\r\n{s}END:VEVENT\r\nEND:VCALENDAR\r\n", .{case.properties});
+        const wire = try std.json.Stringify.valueAlloc(app.frame.allocator(), .{.{ .id = "same-message", .subject = "Planning", .invitation = raw }}, .{});
+        app.thread = items(try readerInvitationTestValue(app.frame.allocator(), wire));
+        for ([_]bool{ false, true }) |mono| for ([_]u16{ 30, 80 }) |width| {
+            app.mono = mono;
+            var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 3, .x_pixel = 0, .y_pixel = 0 });
+            defer screen.deinit(a);
+            const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 3, .screen = &screen };
+            try app.readerInvitationDraw(win, 0);
+            const rendered = try markdownTestScreenText(a, &screen);
+            defer a.free(rendered);
+            try std.testing.expectEqual(case.joined, std.mem.indexOf(u8, rendered, "") != null);
+            try std.testing.expect(std.mem.indexOf(u8, rendered, "I · ") != null);
+            if (case.joined) {
+                const icon = screen.readCell(2, 0).?;
+                try std.testing.expectEqualStrings("", icon.char.grapheme);
+                try std.testing.expectEqual(app.style(if (mono) .text else .accent).fg, icon.style.fg);
+                try std.testing.expectEqualStrings(" ", screen.readCell(3, 0).?.char.grapheme);
+                try std.testing.expectEqual(icon.style, screen.readCell(3, 0).?.style);
+            }
+        };
+    }
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -11136,11 +14012,17 @@ test "invitation UX: sticky callout follows actual reply target, survives scroll
         try app.readerDraw(win);
         const first = try markdownTestScreenText(a, &screen);
         defer a.free(first);
-        try std.testing.expect(std.mem.indexOf(u8, first, "I · Respond") != null);
-        var edge_row: u16 = 0;
-        while (edge_row < height and !same(screen.readCell(0, edge_row).?.char.grapheme, if (mono) "┃" else "▌")) edge_row += 1;
-        try std.testing.expect(edge_row < height);
-        try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, edge_row).?.char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, first, "I · Details") != null);
+        var card: ?layout.Rect = null;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .reader_invitation) {
+            card = hit.rect;
+        };
+        const rect = card orelse return error.MissingInvitationCard;
+        const bordered = rect.height == 5;
+        const edge_row = rect.y + @as(u16, if (bordered) 1 else 0);
+        try std.testing.expectEqualStrings(if (bordered) "│" else if (mono) "┃" else "▌", screen.readCell(0, edge_row).?.char.grapheme);
+        try std.testing.expect(rect.height <= 5 and rect.height <= height / 3);
+        if (bordered) try std.testing.expect(std.mem.indexOf(u8, first, " Invitation ") != null);
         if (mono) {
             var reversed_shortcut = false;
             for (edge_row..@min(height, edge_row + 2)) |row| for (0..width) |column| {
@@ -11148,7 +14030,7 @@ test "invitation UX: sticky callout follows actual reply target, survives scroll
                 reversed_shortcut = reversed_shortcut or (cell.style.reverse and same(cell.char.grapheme, "I"));
             };
             try std.testing.expect(reversed_shortcut);
-        } else try std.testing.expectEqual(vaxis.Color{ .rgb = app.palette.selection }, screen.readCell(5, edge_row).?.style.bg);
+        } else try std.testing.expectEqual(vaxis.Color{ .rgb = app.palette.background }, screen.readCell(5, edge_row).?.style.bg);
         const hit = app.mouse_hits.at(5, @intCast(edge_row)).?;
         try std.testing.expectEqual(layout.HitKind.reader_invitation, hit.kind);
         try std.testing.expectEqual(@as(usize, 1), hit.index);
@@ -11158,9 +14040,9 @@ test "invitation UX: sticky callout follows actual reply target, survives scroll
         try app.readerDraw(win);
         const last = try markdownTestScreenText(a, &screen);
         defer a.free(last);
-        try std.testing.expect(std.mem.indexOf(u8, last, "I · Respond") != null);
+        try std.testing.expect(std.mem.indexOf(u8, last, "I · Details") != null);
         const pinned_row: u16 = if (height >= 6) 1 else 0;
-        try std.testing.expectEqualStrings(if (mono) "┃" else "▌", screen.readCell(0, pinned_row).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (bordered) "│" else if (mono) "┃" else "▌", screen.readCell(0, pinned_row + @as(u16, if (bordered) 1 else 0)).?.char.grapheme);
     };
     app.mode = .compose;
     try std.testing.expect(app.readerInvitationIndex() == null);
@@ -12431,6 +15313,59 @@ test "local UI: one account switch cancels held labels and identity reads" {
     }
 }
 
+test "prepared reader: alternative choice survives refresh and caches invalidate body and fold changes" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"choice\"}]}}");
+    const response = "{\"ok\":true,\"data\":{\"id\":\"choice\",\"bodySource\":\"plain\",\"bodyText\":\"Plain body\\n> Quoted body\",\"bodyHtml\":\"<h1>Formatted body</h1><script>hidden</script>\"}}";
+    try app.replaceReader(false, response, true);
+    app.focus = .reader;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 20, .screen = &screen };
+    try app.readerDraw(win);
+    try std.testing.expectEqual(@as(usize, 1), app.markup[0].plain.?.builds);
+    const source = app.markup[0].plain.?.text.ptr;
+    try app.startReaderFind("body");
+    try app.readerDraw(win);
+    try std.testing.expectEqual(@as(usize, 2), app.reader_finder.count);
+    const key = app.reader_find_layout_key;
+    try app.readerDraw(win);
+    try std.testing.expectEqual(key, app.reader_find_layout_key);
+    try std.testing.expect(source == app.markup[0].plain.?.text.ptr);
+    _ = try app.onReaderKey(.{ .codepoint = 'Q' });
+    try app.readerDraw(win);
+    try std.testing.expectEqual(@as(usize, 1), app.reader_finder.count);
+    try std.testing.expect(app.markup[0].plain.?.quotes);
+    try app.setReceivedView(.formatted);
+    try app.readerDraw(win);
+    try std.testing.expectEqual(@as(usize, 1), app.reader_finder.count);
+    try std.testing.expect(app.markup[0].prepared != null);
+    try app.replaceReader(false, response, true);
+    try std.testing.expectEqual(ReceivedView.formatted, app.markup[0].mode);
+    try app.setReceivedView(.plain);
+    try app.replaceReader(false, "{\"ok\":true,\"data\":{\"id\":\"choice\",\"bodySource\":\"plain\",\"bodyText\":\"Changed source\",\"bodyHtml\":\"<p>Changed HTML</p>\"}}", true);
+    try app.readerDraw(win);
+    try std.testing.expectEqual(@as(usize, 0), app.reader_finder.count);
+    try std.testing.expectEqualStrings("Changed source", app.markup[0].plain.?.text);
+    try app.setReceivedView(.formatted);
+    try app.toggleReaderHeaders();
+    app.clearReader();
+    try app.replaceReader(false, response, true);
+    try std.testing.expectEqual(ReceivedView.formatted, app.markup[0].mode);
+    try std.testing.expect(app.markup[0].details);
+    // The same provider ID in another account must not inherit a choice.
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"other@example.test\"}]", .{}));
+    app.clearReader();
+    try app.replaceReader(false, response, true);
+    try std.testing.expectEqual(ReceivedView.automatic, app.markup[0].mode);
+    try std.testing.expect(!app.markup[0].details);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
 test "HTML reader provenance prefers plain and recognizes only exact legacy conversion" {
     const allocator = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -12898,13 +15833,24 @@ test "local UI: help aligns colored bindings and keeps the last instructions rea
     screen.clear();
     const narrow_lines = try app.helpContent(win, 0, false);
     try std.testing.expect(narrow_lines > wide_lines);
-    _ = try app.helpContent(win, narrow_lines - win.height, true);
+    app.help_lines = narrow_lines;
+    app.help_height = win.height;
+    try app.onHelpKey(.{ .codepoint = 'G' });
+    try std.testing.expectEqual(narrow_lines - win.height, app.help_scroll);
+    _ = try app.helpContent(win, app.help_scroll, true);
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(allocator);
     for (0..win.height) |row| {
-        for (0..win.width) |column| try rendered.appendSlice(allocator, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+        var row_text: std.ArrayList(u8) = .empty;
+        defer row_text.deinit(allocator);
+        for (0..win.width) |column| try row_text.appendSlice(allocator, screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme);
+        try rendered.appendSlice(allocator, std.mem.trim(u8, row_text.items, " "));
+        try rendered.append(allocator, ' ');
     }
-    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "startup.") != null);
+    // Meeting reminders follow the former PERSONALIZE tail. The actual final
+    // binding and its complete wrapped instruction must be reachable with G.
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "Esc / M in a meeting card") != null);
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.trim(u8, rendered.items, " "), "Return to your view without dismissing; reminders stay hidden while composing"));
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
@@ -12944,6 +15890,8 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = '/', .text = "/" });
     try app.onHelpKey(.{ .codepoint = 'c', .text = "ctrl+s" });
     try app.onHelpKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqualStrings("Tab / Enter · Ctrl+S in Follow up", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings(":send-grace 0..30 · Ctrl+Z Undo · Ctrl+S Send now", help_rows[app.help_match.?].keys);
@@ -12960,7 +15908,7 @@ test "local UI: help search matches actions keys and sections and cycles without
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("Ctrl+S", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
-    try std.testing.expectEqualStrings("Space · + / - · Ctrl+S in labels", help_rows[app.help_match.?].keys);
+    try std.testing.expectEqualStrings("Tab / Enter · Ctrl+S in Follow up", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
     try std.testing.expectEqualStrings("Ctrl+S", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'N', .text = "N" });
@@ -13349,8 +16297,9 @@ test "local reader: received attachment picker retains every item and freezes pr
     try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\"}]}}");
     try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"attachments\":[{\"id\":\"one\",\"filename\":\"one.txt\",\"size\":12},{\"id\":\"two\",\"filename\":\"two.pdf\",\"size\":33}]},{\"id\":\"b\",\"attachments\":[{\"id\":\"three\",\"filename\":\"three.txt\",\"size\":42}]}]}}", true);
     try std.testing.expectEqual(@as(usize, 3), app.readerAttachmentCount());
+    app.reader_card = 1;
     app.openReaderAttachments();
-    app.reader_choice = 2;
+    try std.testing.expectEqual(@as(usize, 2), app.reader_choice);
     try app.readerAttachmentPrompt(false);
     try std.testing.expectEqualStrings("b", app.reader_attachment_message.value());
     try std.testing.expectEqualStrings("three", app.reader_attachment_id.value());
@@ -13361,6 +16310,30 @@ test "local reader: received attachment picker retains every item and freezes pr
     _ = try app.onReaderOverlayKey(.{ .codepoint = 'q', .text = "q" });
     try std.testing.expectEqualStrings("q", app.reader_path.value());
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "attachment lifecycle: failed saves never dispatch an opener and keep the destination dialog" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "AttachmentNotFound", "BodySizeMismatch", "PermissionDenied", "AmbiguousAttachment" }) |code| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.reader_overlay = .open_attachment;
+        app.attachment_open_after = true;
+        app.attachment_expected_size = 17;
+        try app.attachment_destination.set(a, "/tmp/synthetic-report.pdf");
+        const response = try std.json.Stringify.valueAlloc(a, .{ .ok = false, .@"error" = .{ .code = code } }, .{});
+        defer a.free(response);
+        try app.apply(.attachment_save, response);
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(ReaderOverlay.open_attachment, app.reader_overlay);
+        try std.testing.expectEqualStrings("/tmp/synthetic-report.pdf", app.attachment_destination.value());
+        try std.testing.expectEqualStrings(code, app.status_error_code[0..app.status_error_len]);
+        try std.testing.expect(app.file_browser_error.value().len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "saved and opened") == null);
+    }
 }
 
 test "composer polish: body focus From action and attachment spacing match real input state" {
@@ -13465,6 +16438,88 @@ test "composer polish: saved file open intent has durable success and failure re
     app.say(false, "Ready", .{});
     try std.testing.expectEqual(length, app.status_len);
     try std.testing.expect(app.warning);
+}
+
+test "foreground priority: explicit reads join refresh while active writes keep ownership" {
+    const builtin = @import("builtin");
+    std.debug.print("foreground priority compiler={s} mode={s} target={s}-{s}\n", .{ builtin.zig_version_string, @tagName(builtin.mode), @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });
+    const Held = struct {
+        io: Io,
+        entered: Io.Event = .unset,
+        release: Io.Event = .unset,
+        canceled: std.atomic.Value(bool) = .init(false),
+        active: std.atomic.Value(usize) = .init(0),
+        foreground: std.atomic.Value(usize) = .init(0),
+        fn provider(context: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const parsed = try std.json.parseFromSlice(Value, allocator, request, .{});
+            defer parsed.deinit();
+            const cmd = text(get(parsed.value, "cmd"));
+            if (same(cmd, "mail.refresh") or same(cmd, "mail.archive")) {
+                _ = self.active.fetchAdd(1, .acq_rel);
+                defer _ = self.active.fetchSub(1, .acq_rel);
+                self.entered.set(self.io);
+                self.release.wait(self.io) catch |err| {
+                    if (err == error.Canceled) self.canceled.store(true, .release);
+                    return err;
+                };
+            } else {
+                try std.testing.expectEqual(@as(usize, 0), self.active.load(.acquire));
+                try std.testing.expect(same(cmd, "mail.read") or same(cmd, "mail.thread"));
+                const field = if (same(cmd, "mail.thread")) "focusMessageId" else "messageId";
+                try std.testing.expectEqualStrings("foreground-target", text(get(parsed.value, field)));
+                _ = self.foreground.fetchAdd(1, .acq_rel);
+            }
+            return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"TransientFailure\"}}");
+        }
+        fn local(_: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+            return error.CacheMiss;
+        }
+    };
+    const Action = enum { open, reply, forward };
+    const allocator = std.testing.allocator;
+    for ([_]JobKind{ .refresh, .mutation }) |kind| for ([_]Action{ .open, .reply, .forward }) |action| {
+        var client: Held = .{ .io = std.testing.io };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try allocator.create(Loop);
+        defer allocator.destroy(loop);
+        loop.init(std.testing.io, allocator, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(allocator);
+        defer app.deinit();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = Held.provider, .cachedFn = Held.local };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"foreground-target\",\"threadId\":\"foreground-thread\"}],\"cached\":true,\"cacheReady\":true}}");
+        app.focus = .list;
+        try app.start(kind, .{ .cmd = if (kind == .refresh) "mail.refresh" else "mail.archive", .account = app.account() });
+        try client.entered.waitTimeout(app.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(10) } });
+        switch (action) {
+            .open => try app.enter(),
+            .reply => try app.requestConversationCompose(.reply),
+            .forward => try app.requestConversationCompose(.forward),
+        }
+        if (kind == .refresh) {
+            try std.testing.expect(client.canceled.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), client.active.load(.acquire));
+            try std.testing.expectEqual(if (action == .open) JobKind.thread else JobKind.read, app.job.kind);
+            app.job.future.?.await(app.io);
+            try std.testing.expectEqual(@as(usize, 1), client.foreground.load(.acquire));
+            if (action != .open) try std.testing.expectEqualStrings("foreground-target", app.pending_compose_id[0..app.pending_compose_id_len]);
+        } else {
+            try std.testing.expect(!client.canceled.load(.acquire));
+            try std.testing.expectEqual(JobKind.mutation, app.job.kind);
+            try std.testing.expectEqual(@as(usize, 1), client.active.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), client.foreground.load(.acquire));
+            if (action == .open) try std.testing.expect(app.pending_read and app.pending_thread) else try std.testing.expect(app.pending_compose != .none);
+            client.release.set(app.io);
+            app.job.future.?.await(app.io);
+            try std.testing.expect(!client.canceled.load(.acquire));
+        }
+        app.cancelJob();
+    };
 }
 
 test "wishlist: cached body search worker retains navigation joins cancellation and never calls provider" {
@@ -14827,6 +17882,7 @@ test "dialog UX: all modal controls have reverse focus, safe Enter and distinct 
     try app.onLabelPickerKey(.{ .codepoint = Key.enter });
     try std.testing.expect(!app.label_picker);
     try std.testing.expectEqual(@as(usize, 0), app.label_memberships.changed());
+    try app.invitation_review.attendee.set("personal@example.test");
     for ([_]Mode{ .review, .trash_confirm, .invitation }) |mode| {
         app.mode = mode;
         app.dialog_focus.reset(.none, 0);
@@ -14908,7 +17964,7 @@ test "dialog UX: link and received-file pickers expose action focus independentl
         var found = false;
         for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == kind) {
             found = true;
-            try std.testing.expectEqual(@as(u16, if (kind == .reader_picker_back) 6 else 8), hit.rect.width);
+            try std.testing.expectEqual(@as(u16, 8), hit.rect.width);
         };
         try std.testing.expect(found); // Complete captions fit even the minimum TUI width.
     }
@@ -15097,7 +18153,34 @@ test "formatted composer: received classes stay untrusted and snapshot preview s
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
-test "formatted chooser: shared metadata plan rejects large images before keys tabs or mouse dispatch" {
+test "formatted chooser: native original forwarding uses file capacity while browser keeps its smaller bound" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    try app.pinComposeTarget(.forward, "documents");
+    app.compose_intent = .forward;
+    var attachment: types.Attachment = .{ .id = "pdf", .filename = "review.pdf", .mimeType = "application/pdf", .size = 5 * 1024 * 1024 };
+    var message: types.Message = .{ .id = "documents", .threadId = "review", .attachments = &.{attachment} };
+    try app.inspectComposeSource(try @import("json.zig").value(owned, message));
+    try std.testing.expect(!app.compose_source_original_too_large);
+    try std.testing.expect(app.composeChoiceEnabled(2));
+    app.capabilities = platform.browser_capabilities;
+    try app.inspectComposeSource(try @import("json.zig").value(owned, message));
+    try std.testing.expect(app.compose_source_original_too_large);
+    try std.testing.expect(!app.composeChoiceEnabled(2));
+    app.capabilities = .{};
+    attachment.size = types.Limits.attachment_bytes + 1;
+    message.attachments = &.{attachment};
+    try app.inspectComposeSource(try @import("json.zig").value(owned, message));
+    try std.testing.expect(!app.composeChoiceEnabled(2));
+    try std.testing.expect(app.composeChoiceReason(2) != null);
+}
+
+test "formatted chooser: platform metadata plan rejects oversized images before keys tabs or mouse dispatch" {
     const a = std.testing.allocator;
     var factory: CacheTestClient = .{};
     var app = factory.app(a);
@@ -15123,8 +18206,17 @@ test "formatted chooser: shared metadata plan rejects large images before keys t
     message.attachments = &.{photo};
     encoded = try std.json.Stringify.valueAlloc(owned, message, .{});
     try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
+    try std.testing.expect(app.compose_source_format_error == null);
+    app.capabilities = platform.browser_capabilities;
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
     try std.testing.expectEqual(error.AttachmentsTooLarge, app.compose_source_format_error.?);
-    try std.testing.expectEqualStrings("Embedded images exceed 2 MiB · choose Text quote", app.composeChoiceReason(0).?);
+    app.capabilities = .{};
+    photo.size = types.Limits.attachment_bytes + 1;
+    message.attachments = &.{photo};
+    encoded = try std.json.Stringify.valueAlloc(owned, message, .{});
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, encoded, .{}));
+    try std.testing.expectEqual(error.AttachmentsTooLarge, app.compose_source_format_error.?);
+    try std.testing.expectEqualStrings("Embedded images exceed this platform's limit · choose Text quote", app.composeChoiceReason(0).?);
     for ([_]PendingCompose{ .reply, .reply_all, .forward }) |intent| {
         app.compose_intent = intent;
         app.pending_compose = intent;
@@ -15762,3 +18854,1487 @@ pub const BrowserSession = struct {
         self.drain() catch |err| self.failure(err);
     }
 };
+
+const RemotePreferencesTestClient = struct {
+    bytes: [256 * 1024]u8 = undefined,
+    len: usize = 0,
+    reads: usize = 0,
+    writes: usize = 0,
+    locked: bool = false,
+
+    fn call(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.locked) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"VaultLocked\"}}");
+        const request = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+        if (same(text(get(request, "cmd")), "preferences.get")) {
+            self.reads += 1;
+            const value: Value = if (self.len == 0) .null else try std.json.parseFromSliceLeaky(Value, a, self.bytes[0..self.len], .{});
+            return @import("json.zig").encodeAlloc(a, .{ .ok = true, .data = .{ .preferences = value } }, .{});
+        }
+        if (same(text(get(request, "cmd")), "preferences.set")) {
+            const bytes = try @import("json.zig").encodeAlloc(a, get(request, "preferences"), .{});
+            if (bytes.len > self.bytes.len) return error.UiPreferencesTooLarge;
+            @memcpy(self.bytes[0..bytes.len], bytes);
+            self.len = bytes.len;
+            self.writes += 1;
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"saved\":true}}");
+        }
+        return error.UnexpectedCommand;
+    }
+};
+
+test "local UI: daemon preferences preserve saved searches and never resolve a plaintext path" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var client: RemotePreferencesTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    app.client = .{ .ctx = &client, .callFn = RemotePreferencesTestClient.call };
+    app.options.remote_preferences = true;
+    // environ is deliberately absent: the daemon route must never consult HOME.
+    app.options.ui_file = "/not-a-real-preferences-destination/ui.json";
+    app.loadPreferences();
+    try std.testing.expect(app.remote_preferences_loaded);
+    try std.testing.expectEqual(@as(usize, 0), app.preferences_file.value().len);
+    try preferences.rememberSearch(&app.ui_preferences, "personal@example.test", "subject:private-vault-marker", .cache, "Work");
+    app.ui_preferences.density = .compact;
+    app.reader_layout = .below;
+    app.saveUiPreferences();
+    try std.testing.expect(app.remote_preferences_pending);
+    try std.testing.expectEqual(@as(usize, 0), client.writes); // No blocking I/O in a key event.
+    try app.flushRemotePreferences();
+    try std.testing.expectEqual(@as(usize, 1), client.writes);
+    app.ui_preferences = .{};
+    app.reader_layout = .right;
+    app.loadPreferences();
+    try std.testing.expectEqual(layout.ReaderLayout.below, app.reader_layout);
+    try std.testing.expectEqual(preferences.Density.compact, app.ui_preferences.density);
+    try std.testing.expectEqualStrings("subject:private-vault-marker", app.ui_preferences.savedSearches[0].?.query.slice());
+    try std.testing.expectEqual(@as(usize, 0), baseline.local_calls + baseline.provider_calls);
+}
+
+test "local UI: locked daemon preferences cannot overwrite retained settings with defaults" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var client: RemotePreferencesTestClient = .{ .locked = true };
+    var app = baseline.app(a);
+    defer app.deinit();
+    app.client = .{ .ctx = &client, .callFn = RemotePreferencesTestClient.call };
+    app.options.remote_preferences = true;
+    app.loadPreferences();
+    try std.testing.expect(app.preferences_warning);
+    try std.testing.expect(!app.remote_preferences_loaded);
+    app.saveUiPreferences();
+    try std.testing.expect(!app.remote_preferences_pending);
+    try std.testing.expectError(error.PreferencesNotLoaded, app.remotePreferencesRequest(app.frame.allocator()));
+    try std.testing.expectEqual(@as(usize, 0), client.writes);
+}
+
+test "local UI: daemon preference acknowledgement does not erase a newer queued change" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    app.options.remote_preferences = true;
+    app.remote_preferences_loaded = true;
+    app.preferences_revision = 2;
+    app.remote_preferences_pending = true;
+    app.job.preferences_revision = 1;
+    app.job.response = "{\"ok\":true,\"data\":{\"saved\":true}}";
+    app.finishRemotePreferences();
+    try std.testing.expectEqual(@as(u64, 1), app.preferences_saved_revision);
+    try std.testing.expect(app.remote_preferences_pending);
+    app.job.failure = error.EndOfStream;
+    app.finishRemotePreferences();
+    try std.testing.expect(app.preferences_warning);
+    try std.testing.expectEqual(@as(u64, 1), app.preferences_saved_revision);
+}
+
+test "local UI: search scope switch preserves the query without submitting or changing the current view" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.mode = .search;
+    app.previous_mode = .browse;
+    try app.input.set(a, "subject:Straße");
+    try app.onKey(.{ .codepoint = 'g', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(QueryScope.server, app.input_query_scope);
+    try std.testing.expectEqual(QueryScope.cache, app.query_scope);
+    try std.testing.expectEqualStrings("subject:Straße", app.input.value());
+    try std.testing.expectEqual(@as(usize, 0), client.local_calls + client.provider_calls);
+    try app.onKey(.{ .codepoint = 'g', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(QueryScope.cache, app.input_query_scope);
+    try std.testing.expectEqualStrings("subject:Straße", app.input.value());
+}
+
+const FollowUpTestClient = struct {
+    reads: usize = 0,
+    providers: usize = 0,
+    fn provider(ctx: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.providers += 1;
+        return error.ProviderMustNotRun;
+    }
+    fn cached(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const request = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+        if (!same(text(get(request, "cmd")), "reminder.list")) return error.CacheMiss;
+        self.reads += 1;
+        return a.dupe(u8, "{\"ok\":true,\"data\":{\"entries\":[{\"messageId\":\"a\",\"threadId\":\"thread\",\"subject\":\"Fictional follow-up\",\"dueDate\":\"2000-01-01\",\"version\":7}],\"messages\":[{\"id\":\"a\",\"threadId\":\"thread\",\"subject\":\"Fictional follow-up\",\"followUpDate\":\"2000-01-01\",\"followUpVersion\":7}],\"cached\":true}}");
+    }
+};
+
+test "local UI: follow-ups pin dates and versions and keep offline list account scoped" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var client: FollowUpTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    app.client = .{ .ctx = &client, .callFn = FollowUpTestClient.provider, .cachedFn = FollowUpTestClient.cached };
+    app.zone = try timezone.Zone.fromPosix("UTC0");
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+    try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"a\",\"threadId\":\"thread\",\"subject\":\"Fictional follow-up\"}]}}");
+    try app.editFollowUp();
+    try std.testing.expectEqual(UxOverlay.follow_up, app.ux_overlay);
+    try std.testing.expectEqualStrings("a", app.ux_target.value());
+    try std.testing.expectEqual(@as(i64, 7), app.follow_up_version);
+    try std.testing.expectEqualStrings("2000-01-01", app.ux_query.value());
+    try app.ux_query.set(a, "2026-02-30");
+    try std.testing.expectError(error.InvalidFollowUpDate, app.saveFollowUp(false));
+    try app.ux_query.set(a, "done");
+    try std.testing.expectError(error.InvalidFollowUpDate, app.saveFollowUp(false));
+    try std.testing.expect(app.job.future == null);
+    try app.onUxKey(.{ .codepoint = Key.escape });
+    try app.openFollowUps();
+    try std.testing.expect(app.follow_ups_list);
+    try std.testing.expectEqualStrings("a", app.messageId());
+    try std.testing.expectEqual(@as(usize, 1), app.followUpDueCount());
+    try std.testing.expect(app.body_cache_miss);
+    try app.move(true, 100);
+    try std.testing.expectEqualStrings("a", app.messageId());
+    try std.testing.expectEqual(@as(usize, 0), client.providers);
+    app.account_index = 1;
+    try std.testing.expect(app.followUpEntry("a") == null);
+    try std.testing.expectEqual(@as(usize, 0), app.followUpDueCount());
+}
+
+test "send grace UX: imported queued receipts never restart the automatic countdown" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.compose_active = true;
+    try app.compose.id.set(a, "imported-draft");
+    try app.apply(.queue_inspect, "{\"ok\":true,\"data\":{\"queue\":[{\"queueId\":\"original-queue\",\"draftId\":\"imported-draft\",\"state\":\"queued\",\"dueAtMs\":1,\"resumeRequired\":true}]}}");
+    try std.testing.expect(app.grace_recovery and app.grace_resume_required);
+    try std.testing.expectEqualStrings("original-queue", app.grace_queue.value());
+    try std.testing.expectEqual(@as(i64, 1), app.grace_due);
+    try std.testing.expect(!app.grace_pending.load(.acquire));
+    try app.graceTick();
+    try std.testing.expect(app.job.future == null);
+    try app.apply(.grace_stage, "{\"ok\":true,\"data\":{\"queueId\":\"original-queue\",\"draftId\":\"imported-draft\",\"state\":\"queued\",\"dueAtMs\":1,\"resumeRequired\":true}}");
+    try std.testing.expect(!app.grace_active and !app.grace_pending.load(.acquire));
+    try app.graceTick();
+    try std.testing.expect(app.job.future == null);
+    try app.applyGraceResult("{\"ok\":true,\"data\":{\"state\":\"queued\",\"resumeRequired\":true}}");
+    try std.testing.expect(!app.compose.unknown_outcome and app.grace_recovery);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "invitation UX: notices missing permissions and unknown methods fail closed" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    try app.invitation_review.attendee.set("self@example.test");
+    for ([_][]const u8{
+        "{\"method\":\"cancel\",\"cancelled\":true,\"canReply\":false}",
+        "{\"method\":\"reply\",\"canReply\":false}",
+        "{\"method\":\"publish\",\"canReply\":false}",
+        "{\"method\":\"unknown\",\"canReply\":false}",
+        "{\"method\":\"request\",\"canReply\":false}",
+    }) |source| {
+        try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), source));
+        app.invitation_confirm_ready = true;
+        try std.testing.expect(!app.invitation_review.canRespond());
+        try std.testing.expectEqual(@as(u8, 0), app.invitationControlMask() & 0b001110);
+        if (app.invitation_review.method != .request and app.invitation_review.method != .cancel) {
+            try std.testing.expectEqual(@as(u8, 0), app.invitationControlMask() & 0b1000000);
+        }
+    }
+}
+
+test "Gmail draft UI: persisted paused ownership blocks keys format signature editor and attachment edits" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-drafts\"]}]", .{}));
+    const digest: [64]u8 = @splat('a');
+    const value = try @import("json.zig").value(app.frame.allocator(), .{ .id = "local", .subject = "Owned subject", .bodyText = "Keep source", .bodyFormat = "markdown", .gmailLink = @import("draft_link.zig").Link{ .draftId = "local", .phase = .linked, .remoteDraftId = "remote", .remoteMessageId = "version", .attemptMessageId = "<upload@mail.invalid>", .uploadedDigest = &digest } });
+    try app.compose.load(a, value);
+    app.compose_active = true;
+    app.mode = .compose;
+    app.compose.selected = 4;
+    app.compose.insert_mode = true; // A stale mouse focus must not enable typing.
+    try app.onComposeKey(.{ .codepoint = 'x' });
+    try std.testing.expectEqualStrings("Keep source", app.compose.fields[4].value());
+    try std.testing.expect(!app.canEditAttachments());
+    try std.testing.expectError(error.DraftPausedInGmail, app.toggleComposeFormat());
+    try std.testing.expectError(error.DraftPausedInGmail, app.setComposeSignature("Replacement"));
+    try std.testing.expectError(error.DraftPausedInGmail, app.runEditor());
+    try std.testing.expectEqual(.markdown, app.compose.body_format);
+    try std.testing.expectEqualStrings("Keep source", app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    for ([_]u16{ 48, 100, 160 }) |width| {
+        try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(width), "Paused in Gmail") != null);
+        try std.testing.expect(std.mem.indexOf(u8, app.fittedHints(width), "Editor") == null);
+    }
+    try app.presentGmailDraft();
+    try app.onUxKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Draft paused in Gmail") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Enter Activate") == null);
+    try app.presentGmailDraft();
+    try app.activateGmailDraft(); // The initial focused row is Back.
+    try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Draft paused in Gmail") != null);
+    try app.onComposeKey(.{ .codepoint = 'p' });
+    try std.testing.expect(app.compose_preview_full or app.compose_view == .plain);
+    try std.testing.expectEqualStrings("Keep source", app.compose.fields[4].value());
+}
+
+test "Gmail draft UI: copy acknowledgement is first person and fits narrow review controls" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    const digest: [64]u8 = @splat('a');
+    const value = try @import("json.zig").value(app.frame.allocator(), .{ .id = "copy", .subject = "Owned subject", .bodyText = "Local copy", .gmailLink = @import("draft_link.zig").Link{ .draftId = "copy", .phase = .linked, .remoteDraftId = "remote", .remoteMessageId = "version", .attemptMessageId = "<upload@mail.invalid>", .uploadedDigest = &digest, .paused = false } });
+    try app.compose.load(a, value);
+    app.compose_active = true;
+    app.mode = .review;
+    for ([_]u16{ 48, 100 }) |width| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
+        app.gmail_send_ack = false;
+        try app.composeDraw(win);
+        const before = try markdownTestScreenText(a, &screen);
+        defer a.free(before);
+        try std.testing.expect(std.mem.indexOf(u8, before, "[Back]  [y Send]  [g I checked Gmail]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "[g Check Gmail]") == null);
+        try app.onConfirmationKey(.{ .codepoint = 'g' });
+        try std.testing.expect(app.gmail_send_ack);
+        try std.testing.expect(app.job.future == null);
+        screen.clear();
+        try app.composeDraw(win);
+        const after = try markdownTestScreenText(a, &screen);
+        defer a.free(after);
+        try std.testing.expect(std.mem.indexOf(u8, after, "[Back]  [y Send]  [g Acknowledged]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, after, "[x] I checked Gmail Drafts and Sent;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, after, "Gmail copy checked") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "Gmail draft UI: handoff starts on Back and requires visible details before choosing upload" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-drafts\"]}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    try app.compose.id.set(a, "local");
+    try app.compose.fields[3].set(a, "A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review. A complete subject requiring several lines in this narrow review.");
+    try app.presentGmailDraft();
+    try std.testing.expectEqual(@as(usize, 0), app.uxAt(app.ux_selected).?.index);
+    app.ux_selected = 1;
+    try app.activateGmailDraft();
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(UxOverlay.gmail_draft, app.ux_overlay);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 18, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = 18, .screen = &screen };
+    try app.drawGmailDraft(win);
+    try std.testing.expect(!app.gmail_review_ready);
+    app.gmail_scroll = app.gmail_description_lines;
+    try app.drawGmailDraft(win);
+    try std.testing.expect(app.gmail_review_ready);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "calendar UI: event card keeps local and source time, profile Join and bounded scrolling" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .detail;
+    try app.calendar.account.set("work@example.test");
+    try app.calendar.calendar_name.set("Team");
+    app.zone = try timezone.Zone.fromPosix("CET-1CEST,M3.5.0/2,M10.5.0/3");
+    try app.calendar.zone_name.set("UTC");
+    try app.calendar.card_zone_name.set("America/New_York");
+    app.calendar.card_zone = try timezone.Zone.fromPosix("EST5EDT,M3.2.0/2,M11.1.0/2");
+    const event = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"work@example.test\"},\"summary\":\"Project planning\",\"start\":{\"kind\":\"instant\",\"value\":1791792000000,\"zone\":\"America/New_York\"},\"end\":{\"kind\":\"instant\",\"value\":1791797400000,\"zone\":\"America/New_York\"},\"join_url\":\"https://meet.example.test/planning\",\"response\":\"needs_action\",\"description\":\"First description line\\nSecond line\\nThird line\\nFourth line\\nFifth line\\nSixth line\\nSeventh line\\nEighth line\\nNinth line\\nTenth line\\nFinal description line\"}");
+    try app.calendar.card.replace(a, event);
+    for ([_]struct { u16, u16 }{ .{ 140, 38 }, .{ 82, 28 }, .{ 48, 22 } }) |size| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = size[0], .rows = size[1], .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size[0], .height = size[1], .screen = &screen };
+        app.calendar.scroll = 0;
+        try app.drawCalendarCard(win);
+        const initial = try markdownTestScreenText(a, &screen);
+        defer a.free(initial);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "Project planning") != null);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "10:00–11:30 CEST") != null);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "[o Join]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "") != null);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "work@example.test") != null);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "To RSVP") == null);
+        try std.testing.expect(std.mem.indexOf(u8, initial, "Event:") == null);
+        app.calendar.scroll = std.math.maxInt(usize);
+        screen.clear();
+        try app.drawCalendarCard(win);
+        const end = try markdownTestScreenText(a, &screen);
+        defer a.free(end);
+        try std.testing.expect(std.mem.indexOf(u8, end, "Final description line") != null);
+        try std.testing.expect(std.mem.indexOf(u8, end, "Project planning") != null);
+        try std.testing.expect(std.mem.indexOf(u8, end, "[q Back]") != null);
+        try std.testing.expect(app.calendar.scroll < 100);
+    }
+    const all_day = try readerInvitationTestValue(app.frame.allocator(), "{\"start\":{\"kind\":\"date\",\"value\":20000},\"end\":{\"kind\":\"date\",\"value\":20003}}");
+    try std.testing.expectEqualStrings("2024-10-04 – 2024-10-06 · all day", try app.calendarCardWhen(all_day, &app.zone));
+    const label = try App.calendarEventLabel(app.frame.allocator(), "09:00", "?", "会議 🧭 Planning", true);
+    try std.testing.expectEqualStrings("09:00 ?  会議 🧭 Planning", label);
+}
+
+test "calendar UI: Join uses the event account and reports actual profile success or failure" {
+    const Capture = struct {
+        request: [8192]u8 = undefined,
+        len: usize = 0,
+        calls: usize = 0,
+        fn call(context: *anyopaque, a: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.request[0..request.len], request);
+            self.len = request.len;
+            self.calls += 1;
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Work Profile\",\"opened\":false}}");
+        }
+    };
+    const a = std.testing.allocator;
+    var capture: Capture = .{};
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    app.client = .{ .ctx = &capture, .callFn = Capture.call };
+    defer app.deinit();
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]"));
+    app.calendar.open = true;
+    app.calendar.page = .detail;
+    try app.calendar.account.set("work@example.test");
+    const event = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"work@example.test\"},\"join_url\":\"https://meet.example.test/planning\"}");
+    try app.calendar.card.replace(a, event);
+    try app.onCalendarKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(@as(usize, 0), capture.calls);
+    try std.testing.expect(app.job.future == null);
+    try app.onCalendarKey(.{ .codepoint = 'o' });
+    app.job.future.?.await(app.io);
+    try app.finish();
+    const request = try readerInvitationTestValue(app.frame.allocator(), capture.request[0..capture.len]);
+    try std.testing.expectEqualStrings("browser.open", text(get(request, "cmd")));
+    try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+    try std.testing.expectEqualStrings("https://meet.example.test/planning", text(get(request, "url")));
+    try std.testing.expectEqualStrings("Join target validated · Work Profile", app.calendar.notice.slice());
+    app.job.calendar_join_open = true;
+    try app.apply(.open, "{\"ok\":false,\"error\":{\"code\":\"ProfileMissing\"}}");
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "Could not open") != null);
+    try std.testing.expectEqualStrings("ProfileMissing", app.calendar.error_code.slice());
+    try app.calendar.account.set("other@example.test");
+    try app.calendarJoin();
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "mismatch") != null);
+}
+
+test "calendar UI: shared searchable help returns to its Calendar origin and preserves Mail help" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.mode = .browse;
+    app.previous_mode = .contacts;
+    app.calendar.open = true;
+    app.calendar.view = .week;
+    app.calendar.scroll = 7;
+    app.calendar.focus = 2;
+    try app.onCalendarKey(.{ .codepoint = '?' });
+    try std.testing.expectEqual(calendar_ui.Page.help, app.calendar.page);
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try app.onCalendarKey(.{ .codepoint = '/', .text = "/" });
+    try app.onCalendarKey(.{ .codepoint = 'c', .text = "cHrOmE" });
+    try app.onCalendarKey(.{ .codepoint = Key.enter });
+    const match = app.help_match orelse return error.MissingHelpMatch;
+    try std.testing.expect(std.mem.indexOf(u8, app.helpRows()[match].action, "Chrome profile") != null);
+    try app.onCalendarKey(.{ .codepoint = 'n' });
+    try app.onCalendarKey(.{ .codepoint = 'N' });
+    try std.testing.expectEqual(match, app.help_match.?);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 32, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const narrow: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = 24, .screen = &screen };
+    for ([_]bool{ false, true }) |mono| {
+        app.mono = mono;
+        screen.clear();
+        try app.helpDraw(narrow);
+        const shown = try helpTestScreenText(a, &screen);
+        defer a.free(shown);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "Calendar · keyboard") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "1/1 matches") != null);
+        try std.testing.expect(std.mem.indexOf(u8, shown, "[q Back]") != null);
+        try std.testing.expect(app.help_match_start >= app.help_scroll);
+        try std.testing.expect(app.help_match_end <= app.help_scroll + app.help_height);
+    }
+    try app.onCalendarKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(calendar_ui.Page.help, app.calendar.page);
+    try app.onCalendarKey(.{ .codepoint = 'q' });
+    try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+    try std.testing.expectEqual(calendar_ui.View.week, app.calendar.view);
+    try std.testing.expectEqual(@as(usize, 7), app.calendar.scroll);
+    try std.testing.expectEqual(@as(?usize, 2), app.calendar.focus);
+    app.calendar.page = .detail;
+    app.calendar.scroll = 13;
+    try app.calendarActivate(9);
+    try app.onCalendarKey(.{ .codepoint = '/', .text = "/" });
+    try app.onCalendarKey(.{ .codepoint = 'q', .text = "q?nN" });
+    try std.testing.expectEqualStrings("q?nN", app.help_query.value());
+    try std.testing.expectEqual(calendar_ui.Page.help, app.calendar.page);
+    try app.onCalendarKey(.{ .codepoint = Key.escape });
+    try app.onCalendarKey(.{ .codepoint = Key.tab });
+    try std.testing.expect(app.calendar.help_focus_back);
+    try app.onCalendarKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(calendar_ui.Page.detail, app.calendar.page);
+    try std.testing.expectEqual(@as(usize, 13), app.calendar.scroll);
+    try app.calendarActivate(9);
+    app.mouse_hits.clear();
+    try app.helpDraw(narrow);
+    var clicked = false;
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .dialog_action and hit.index == 0) {
+        try app.onMouse(.{ .type = .press, .button = .left, .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .mods = .{} });
+        clicked = true;
+        break;
+    };
+    try std.testing.expect(clicked);
+    try std.testing.expectEqual(calendar_ui.Page.detail, app.calendar.page);
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try std.testing.expectEqual(Mode.contacts, app.previous_mode);
+    app.calendar.open = false;
+    try app.openHelp();
+    try std.testing.expectEqual(help_rows.len, app.helpRows().len);
+    try std.testing.expectEqualStrings(help_rows[0].keys, app.helpRows()[0].keys);
+    try app.onHelpKey(.{ .codepoint = 'q' });
+    try std.testing.expectEqual(Mode.browse, app.mode);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "calendar UI: pending results preserve Help search and update its return destination" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"work@example.test\"}]"));
+    try app.calendar.account.set("work@example.test");
+    try app.calendar.calendar_id.set("primary");
+    app.calendar.open = true;
+    const cases = [_]struct { kind: JobKind, response: []const u8, destination: calendar_ui.Page, scroll: usize = 0, focus: ?usize = null }{
+        .{ .kind = .calendar_event, .response = "{\"ok\":true,\"data\":{\"event\":{\"summary\":\"Refreshed meeting\"}}}", .destination = .detail },
+        .{ .kind = .calendar_plan, .response = "{\"ok\":true,\"data\":{\"decision\":\"create\"}}", .destination = .review, .focus = 2 },
+        .{ .kind = .calendar_review, .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"calendarId\":\"primary\",\"operationId\":\"fixture-operation\",\"reviewHash\":\"fixture-hash\"}}", .destination = .detail },
+        .{ .kind = .calendar_event, .response = "{\"ok\":false,\"error\":{\"code\":\"CalendarReadPermissionRequired\"}}", .destination = .permissions, .focus = 2 },
+        .{ .kind = .calendar_list, .response = "{\"ok\":true,\"data\":{\"calendars\":[]}}", .destination = .calendars, .scroll = 7, .focus = 2 },
+    };
+    for (cases) |case| {
+        app.calendar.page = .detail;
+        app.calendar.scroll = 7;
+        app.calendar.focus = 2;
+        try app.calendarActivate(9);
+        try app.onCalendarKey(.{ .codepoint = '/', .text = "/" });
+        try app.onCalendarKey(.{ .codepoint = 'c', .text = "Chrome" });
+        const match = app.help_match;
+        app.help_scroll = 3;
+        app.job.kind = case.kind;
+        app.job.response = case.response;
+        try app.finishCalendar();
+        try std.testing.expectEqual(calendar_ui.Page.help, app.calendar.page);
+        try std.testing.expect(app.help_searching);
+        try std.testing.expectEqualStrings("Chrome", app.help_query.value());
+        try std.testing.expectEqual(match, app.help_match);
+        try std.testing.expectEqual(@as(usize, 3), app.help_scroll);
+        try std.testing.expectEqual(case.destination, app.calendar.help_return);
+        try app.onCalendarKey(.{ .codepoint = Key.escape });
+        try app.onCalendarKey(.{ .codepoint = 'q' });
+        try std.testing.expectEqual(case.destination, app.calendar.page);
+        try std.testing.expectEqual(case.scroll, app.calendar.scroll);
+        try std.testing.expectEqual(case.focus, app.calendar.focus);
+        try std.testing.expect(app.calendar.open);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "invitation UX: themed card pins identity and uncertain outcomes above scrollable details" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    try app.invitation_inspected_account.set(a, "work@example.test");
+    try app.invitation_inspected_id.set(a, "meeting-card");
+    try app.invitation_review.summary.set("Design review 世界");
+    try app.invitation_review.attendee.set("work@example.test");
+    try app.invitation_review.organizer.set("host@example.test");
+    try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), "{\"method\":\"request\",\"canReply\":true,\"startDisplay\":\"2026-10-14 10:00 CEST\",\"durationDisplay\":\"1h\",\"joinUrl\":\"https://meet.example.test/room\",\"confirmedResponse\":\"ACCEPTED\",\"calendarSyncAvailable\":true,\"calendarSync\":{\"state\":\"unknown\",\"calendarId\":\"work@example.test\",\"canRetry\":true}}"));
+    try app.invitation_review.uid.set("protocol-long@example.test");
+    app.invitation_details = true;
+    app.invitation_scroll = 999;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 110, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    var win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 110, .height = 40, .screen = &screen };
+    for ([_]bool{ false, true }) |mono| {
+        app.mono = mono;
+        screen.clear();
+        try app.invitationDraw(win);
+        const shown = try helpTestScreenText(a, &screen);
+        defer a.free(shown);
+        for ([_][]const u8{ "Design review 世", "10:00 CEST", "Account: work@example.test", "Attendee: work@example.test", "Organizer: host@example.test", "Your confirmed RSVP: ACCEPTED", "Calendar outcome unknown", "[C Check status]", "", "[o Join]" }) |expected| {
+            if (std.mem.indexOf(u8, shown, expected) == null) {
+                std.debug.print("\nMissing invitation card text '{s}' (mono={any}):\n{s}\n", .{ expected, mono, shown });
+                return error.MissingInvitationCardText;
+            }
+        }
+        // Screen extraction includes the continuation cell of a wide glyph;
+        // verify the title's actual two-cell graphemes instead of its byte text.
+        var wide_title = false;
+        for (0..screen.height) |row| for (0..screen.width - 2) |col| {
+            const cell = screen.readCell(@intCast(col), @intCast(row)).?;
+            if (same(cell.char.grapheme, "世")) {
+                try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+                const next = screen.readCell(@intCast(col + 2), @intCast(row)).?;
+                try std.testing.expectEqualStrings("界", next.char.grapheme);
+                try std.testing.expectEqual(@as(u8, 2), next.char.width);
+                wide_title = true;
+            }
+        };
+        try std.testing.expect(wide_title);
+        try std.testing.expect(app.invitation_confirm_ready);
+        try std.testing.expectEqual(@as(u8, 0), app.invitationControlMask() & 0b001110);
+        var joins: usize = 0;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .dialog_action and hit.index == 5) {
+            joins += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), joins);
+    }
+    win.width = 30;
+    win.height = 12;
+    try app.invitationDraw(win);
+    try std.testing.expect(!app.invitation_confirm_ready);
+    try std.testing.expectEqual(@as(u8, 1), app.invitationControlMask());
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+fn meetingTestReady(app: *App) !void {
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\",\"capabilities\":[\"mail-read\"]},{\"address\":\"work@example.test\",\"capabilities\":[\"calendar-read\"]}]"));
+    app.meeting_enabled = true;
+    app.meeting_now = 1791962400000;
+    app.meetings.targets[0] = .{ .active = true, .account = 1 };
+    try app.meetings.targets[0].id.set("primary");
+    try app.meetings.targets[0].name.set("Team");
+    app.meetings.records[0] = .{ .key = @splat(1), .target = 0, .start = app.meeting_now + 600000, .end = app.meeting_now + 4200000, .announced = true, .observed_at = app.meeting_now };
+    try app.meetings.records[0].?.title.set("Design review 世界");
+    try app.meetings.records[0].?.join.set("https://meet.example.test/design");
+}
+
+test "meeting notifications: explicit focus gates shortcuts and typing cannot dismiss" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    try meetingTestReady(&app);
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'd' }));
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } }));
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'o' }));
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'm' }));
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'M' }));
+    try std.testing.expect(app.meeting_focused);
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'm', .mods = .{ .shift = true } }));
+    try std.testing.expect(!app.meeting_focused);
+    // Preserve the unadvertised compatibility alias without requiring it.
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = Key.f8 }));
+    try std.testing.expect(app.meeting_focused);
+    try std.testing.expectEqual(@as(usize, 0), app.meeting_control);
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'd' }));
+    try std.testing.expectEqual(@as(usize, 1), app.meetings.count());
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } }));
+    try std.testing.expectEqual(@as(usize, 0), app.meetings.count());
+    app.mode = .compose;
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'd' }));
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = Key.enter }));
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'M', .text = "M" }));
+    try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = Key.f8 }));
+    try std.testing.expectEqual(@as(usize, 0), baseline.provider_calls);
+}
+
+test "meeting notifications: card is themed narrow bounded and hidden in compose with expiry focus guard" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    try meetingTestReady(&app);
+    for ([_]struct { width: u16, height: u16 }{ .{ .width = 132, .height = 28 }, .{ .width = 48, .height = 18 }, .{ .width = 30, .height = 10 } }) |size| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = size.width, .rows = size.height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.width, .height = size.height, .screen = &screen };
+        app.mode = .browse;
+        app.mono = true;
+        app.focusMeeting();
+        try app.drawMeetings(win);
+        const drawn = try markdownTestScreenText(a, &screen);
+        defer a.free(drawn);
+        for ([_][]const u8{ "Starts in 10 min", "Design review 世", "work@example.test", "[Ctrl+D Dismiss]", "[o Join]" }) |expected| {
+            if (std.mem.indexOf(u8, drawn, expected) == null) std.debug.print("missing meeting text {s}:\n{s}\n", .{ expected, drawn });
+            try std.testing.expect(std.mem.indexOf(u8, drawn, expected) != null);
+        }
+        // Text extraction includes continuation cells; verify adjacent CJK
+        // graphemes and their actual terminal width in the screen itself.
+        var wide_title = false;
+        for (0..screen.height) |row| for (0..screen.width - 2) |col| {
+            const cell = screen.readCell(@intCast(col), @intCast(row)).?;
+            if (same(cell.char.grapheme, "世")) {
+                try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+                const following = screen.readCell(@intCast(col + 2), @intCast(row)).?;
+                try std.testing.expectEqualStrings("界", following.char.grapheme);
+                try std.testing.expectEqual(@as(u8, 2), following.char.width);
+                wide_title = true;
+            }
+        };
+        try std.testing.expect(wide_title);
+        try std.testing.expect(app.meeting_rect.?.y + app.meeting_rect.?.height <= size.height - 2);
+        screen.clear();
+        app.mode = .compose;
+        try app.drawMeetings(win);
+        const hidden = try markdownTestScreenText(a, &screen);
+        defer a.free(hidden);
+        try std.testing.expect(std.mem.indexOf(u8, hidden, "Design review") == null);
+        try std.testing.expect(!app.meeting_focused);
+    }
+    app.mode = .browse;
+    app.focusMeeting();
+    app.meetings.expire(app.meetings.records[0].?.end);
+    try std.testing.expect(app.meetingCurrent() == null);
+    // The first key after the focused event expires cannot leak to Mail.
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'd' }));
+    try std.testing.expect(!app.meeting_focused);
+    try std.testing.expectEqual(@as(usize, 0), baseline.provider_calls);
+}
+
+test "meeting notifications: Join binds the reminder account instead of the Mail account" {
+    const Capture = struct {
+        request: [8192]u8 = undefined,
+        len: usize = 0,
+        fn call(context: *anyopaque, a: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.request[0..request.len], request);
+            self.len = request.len;
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Profile 1\",\"opened\":false}}");
+        }
+    };
+    const a = std.testing.allocator;
+    var capture: Capture = .{};
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    app.client = .{ .ctx = &capture, .callFn = Capture.call };
+    defer app.deinit();
+    try meetingTestReady(&app);
+    try std.testing.expectEqual(@as(usize, 0), app.account_index);
+    app.focusMeeting();
+    try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'o' }));
+    app.job.future.?.await(app.io);
+    try app.finish();
+    const request = try readerInvitationTestValue(app.frame.allocator(), capture.request[0..capture.len]);
+    try std.testing.expectEqualStrings("browser.open", text(get(request, "cmd")));
+    try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+    try std.testing.expectEqualStrings("https://meet.example.test/design", text(get(request, "url")));
+    try std.testing.expectEqualStrings("Join target validated · Profile 1", app.meeting_feedback.slice());
+    try std.testing.expect(!app.calendar.open);
+}
+
+test "meeting notifications: passive Ctrl D retains actual reader scrolling and Calendar help advertises available focus" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 28, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    try meetingTestReady(&app);
+    app.focus = .reader;
+    app.reader_lines = 100;
+    app.reader_height = 20;
+    try app.onKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 14), app.reader_scroll);
+    try std.testing.expectEqual(@as(usize, 1), app.meetings.count());
+    try std.testing.expect(!app.meeting_focused);
+    app.calendar.open = true;
+    app.calendar.page = .main;
+    try app.onKey(.{ .codepoint = 'M' });
+    try std.testing.expect(app.meeting_focused);
+    try std.testing.expectEqual(@as(usize, 0), app.meeting_control);
+    var focus_row = false;
+    for (calendar_help_rows) |row| if (same(row.keys, "M · click card")) {
+        focus_row = true;
+        try std.testing.expect(std.mem.indexOf(u8, row.action, "Dismiss") != null);
+    };
+    try std.testing.expect(focus_row);
+    try std.testing.expectEqual(@as(usize, 0), baseline.provider_calls);
+}
+
+test "meeting notifications: uppercase M remains text in compose Mail search and Calendar inputs" {
+    const a = std.testing.allocator;
+    var baseline: CacheTestClient = .{};
+    var app = baseline.app(a);
+    defer app.deinit();
+    try meetingTestReady(&app);
+    const typed_m: Key = .{ .codepoint = 'M', .text = "M" };
+    for ([_]Mode{ .search, .command }) |mode| {
+        app.mode = mode;
+        try app.input.set(a, "");
+        try app.onKey(typed_m);
+        try std.testing.expectEqualStrings("M", app.input.value());
+        try std.testing.expect(!app.meeting_focused);
+    }
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    app.compose.insert_mode = true;
+    try app.onKey(typed_m);
+    try std.testing.expectEqualStrings("M", app.compose.fields[4].value());
+    try std.testing.expect(!app.meeting_focused);
+    app.compose_active = false;
+    app.mode = .browse;
+    app.calendar.open = true;
+    app.calendar.page = .main;
+    app.calendar.searching = true;
+    try app.onKey(typed_m);
+    try std.testing.expectEqualStrings("M", app.calendar_query.value());
+    try std.testing.expect(!app.meeting_focused);
+    app.calendar.searching = false;
+    app.calendar.entering_date = true;
+    try app.onKey(typed_m);
+    try std.testing.expectEqualStrings("M", app.calendar_date.value());
+    try std.testing.expect(!app.meeting_focused);
+    app.calendar.entering_date = false;
+    try app.onKey(typed_m);
+    try std.testing.expect(app.meeting_focused);
+    try app.onKey(typed_m);
+    try std.testing.expect(!app.meeting_focused);
+    try std.testing.expectEqual(@as(usize, 1), app.meetings.count());
+    try std.testing.expectEqual(@as(usize, 0), baseline.provider_calls);
+}
+
+test "meeting notifications: dismissal never transfers held activation to the next occurrence" {
+    const a = std.testing.allocator;
+    for ([_]Key{ .{ .codepoint = Key.enter }, .{ .codepoint = 'd', .mods = .{ .ctrl = true } } }) |activation| {
+        var baseline: CacheTestClient = .{};
+        var app = baseline.app(a);
+        defer app.deinit();
+        try meetingTestReady(&app);
+        app.meetings.records[1] = app.meetings.records[0];
+        app.meetings.records[1].?.key = @splat(2);
+        app.focusMeeting();
+        try std.testing.expect(try app.onMeetingKey(activation));
+        try std.testing.expectEqual(@as(usize, 1), app.meetings.count());
+        try std.testing.expect(!app.meeting_focused);
+        // Even after the new card's display guard expires, the held key is
+        // consumed and its quiet-period guard is extended, never sent to Mail.
+        app.meeting_changed_until = 0;
+        const before = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+        app.meeting_closed_until = before + 300;
+        for (0..20) |_| try std.testing.expect(try app.onMeetingKey(activation));
+        try std.testing.expect(app.meeting_closed_until >= before + 700);
+        try std.testing.expectEqual(@as(usize, 1), app.meetings.count());
+        // A fresh explicit focus, rather than releasing into the next card,
+        // permits deliberate dismissal without waiting on the repeat guard.
+        try std.testing.expect(try app.onMeetingKey(.{ .codepoint = 'M' }));
+        try std.testing.expect(app.meeting_focused);
+        try std.testing.expectEqual(@as(i64, 0), app.meeting_closed_until);
+        try std.testing.expect(try app.onMeetingKey(activation));
+        try std.testing.expectEqual(@as(usize, 0), app.meetings.count());
+        try std.testing.expectEqual(@as(usize, 0), baseline.provider_calls);
+    }
+}
+
+test "meeting notifications: overlay buttons remain clickable over a full reader hit map" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try meetingTestReady(&app);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 132, .rows = 28, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 132, .height = 28, .screen = &screen };
+    for (0..app.mouse_hits.areas.len) |index| app.mouse_hits.add(.{ .x = 0, .y = 0, .width = 132, .height = 28 }, .reader_link, index);
+    try app.drawMeetings(win);
+    try std.testing.expectEqual(app.mouse_hits.areas.len, app.mouse_hits.count);
+    try std.testing.expectEqual(@as(usize, 2), app.meeting_mouse_hits.count);
+    app.meeting_changed_until = 0;
+    const dismiss_hit = for (app.meeting_mouse_hits.areas[0..app.meeting_mouse_hits.count]) |hit| {
+        if (hit.index == 520) break hit;
+    } else return error.MissingDismissButton;
+    try app.onMouse(.{ .col = @intCast(dismiss_hit.rect.x), .row = @intCast(dismiss_hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 0), app.meetings.count());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+const HeldMeetingTestClient = struct {
+    io: Io,
+    entered: Io.Event = .unset,
+    release: Io.Event = .unset,
+    canceled: std.atomic.Value(bool) = .init(false),
+    active: std.atomic.Value(usize) = .init(0),
+    foreground_calls: usize = 0,
+    request: [8192]u8 = undefined,
+    request_len: usize = 0,
+
+    fn provider(context: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const parsed = try std.json.parseFromSlice(Value, allocator, raw, .{});
+        defer parsed.deinit();
+        if (truth(get(parsed.value, "testHold"))) {
+            const cmd = text(get(parsed.value, "cmd"));
+            try std.testing.expect(same(cmd, "calendar.list") or same(cmd, "calendar.agenda"));
+            _ = self.active.fetchAdd(1, .acq_rel);
+            defer _ = self.active.fetchSub(1, .acq_rel);
+            self.entered.set(self.io);
+            self.release.wait(self.io) catch |err| {
+                if (err == error.Canceled) self.canceled.store(true, .release);
+                return err;
+            };
+            return error.UnexpectedRelease;
+        }
+        try std.testing.expectEqual(@as(usize, 0), self.active.load(.acquire));
+        if (raw.len > self.request.len) return error.RequestTooLarge;
+        @memcpy(self.request[0..raw.len], raw);
+        self.request_len = raw.len;
+        self.foreground_calls += 1;
+        return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"TransientFailure\"}}");
+    }
+
+    fn start(self: *@This(), app: *App, kind: JobKind) !void {
+        try app.start(kind, .{ .cmd = if (kind == .meeting_calendars) "calendar.list" else "calendar.agenda", .account = "work@example.test", .testHold = true });
+        app.job.meeting_account = 1;
+        app.job.meeting_target = 0;
+        try self.entered.waitTimeout(self.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } });
+    }
+
+    fn expectCanceled(self: *@This()) !void {
+        try std.testing.expect(self.canceled.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), self.active.load(.acquire));
+    }
+
+    fn foregroundRequest(self: *@This(), app: *App) !Value {
+        try std.testing.expect(app.job.future != null);
+        app.job.future.?.await(app.io);
+        try std.testing.expectEqual(@as(usize, 1), self.foreground_calls);
+        return readerInvitationTestValue(app.frame.allocator(), self.request[0..self.request_len]);
+    }
+};
+
+test "meeting notifications: Ctrl C quits or saves the draft after canceling either background poll" {
+    const a = std.testing.allocator;
+    const Action = enum { quit, save, recovery };
+    for ([_]JobKind{ .meeting_agenda, .meeting_calendars }) |kind| for ([_]Action{ .quit, .save, .recovery }) |action| {
+        var client: HeldMeetingTestClient = .{ .io = std.testing.io };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = HeldMeetingTestClient.provider };
+        try meetingTestReady(&app);
+        if (action != .quit) {
+            app.mode = .compose;
+            app.compose_active = true;
+            try app.compose.id.set(a, "owned-draft");
+            try app.compose.fields[0].set(a, if (action == .recovery) "unfinished recipient <" else "alex@example.test");
+            try app.compose.fields[4].set(a, "Authored text survives the background poll");
+        }
+        try client.start(&app, kind);
+        try app.onKey(.{ .codepoint = 'c', .mods = .{ .ctrl = true } });
+        try client.expectCanceled();
+        try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Operation canceled") == null);
+        if (action == .quit) {
+            try std.testing.expect(app.quit);
+            try std.testing.expect(app.job.future == null);
+            try std.testing.expectEqual(@as(usize, 0), client.foreground_calls);
+        } else {
+            try std.testing.expect(!app.quit);
+            try std.testing.expectEqual(JobKind.save_back, app.job.kind);
+            const request = try client.foregroundRequest(&app);
+            try std.testing.expectEqualStrings(if (action == .recovery) "draft.recovery-save" else "draft.update", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("personal@example.test", text(get(request, "account")));
+            try std.testing.expectEqualStrings("owned-draft", text(get(request, "draftId")));
+            const draft = get(request, "draft");
+            if (action == .recovery) {
+                const fields = items(get(draft, "recoveryFields"));
+                try std.testing.expectEqual(@as(usize, 5), fields.len);
+                try std.testing.expectEqualStrings("unfinished recipient <", text(fields[0]));
+                try std.testing.expectEqualStrings("Authored text survives the background poll", text(fields[4]));
+            } else try std.testing.expectEqualStrings("Authored text survives the background poll", text(get(draft, "bodyText")));
+            try std.testing.expectEqualStrings("Authored text survives the background poll", app.compose.fields[4].value());
+        }
+    };
+}
+
+test "meeting notifications: foreground starts and preemption preserve queued compose identities" {
+    const a = std.testing.allocator;
+    for ([_]JobKind{ .meeting_agenda, .meeting_calendars }) |kind| for ([_]PendingCompose{ .new, .reply_all, .forward }) |intent| for ([_]bool{ false, true }) |through_start| {
+        var client: HeldMeetingTestClient = .{ .io = std.testing.io };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = HeldMeetingTestClient.provider };
+        try meetingTestReady(&app);
+        try client.start(&app, kind);
+        const target: []const u8 = if (intent == .new) "" else "foreground-target";
+        try app.pinComposeTarget(intent, target);
+        app.compose_intent = intent;
+        app.compose_source_mode = .text;
+        if (through_start) {
+            // A source read can start after its reply/forward intent was pinned.
+            app.compose_source_probe = intent != .new;
+            try app.startTarget(.read, .{ .cmd = "mail.read", .account = app.account(), .messageId = "foreground-target" }, null);
+        } else app.preemptReadOnly();
+        try client.expectCanceled();
+        try std.testing.expectEqual(intent, app.pending_compose);
+        try std.testing.expectEqualStrings("personal@example.test", app.pending_compose_account[0..app.pending_compose_account_len]);
+        try std.testing.expectEqualStrings(target, app.pending_compose_id[0..app.pending_compose_id_len]);
+        if (through_start) {
+            try std.testing.expectEqual(intent != .new, app.compose_source_probe);
+            try std.testing.expectEqual(JobKind.read, app.job.kind);
+        } else {
+            try std.testing.expect(app.job.future == null);
+            try app.dispatchConversationCompose();
+            try std.testing.expectEqual(JobKind.compose, app.job.kind);
+        }
+        const request = try client.foregroundRequest(&app);
+        try std.testing.expectEqualStrings("personal@example.test", text(get(request, "account")));
+        const command: []const u8 = if (through_start) "mail.read" else switch (intent) {
+            .new => "draft.create",
+            .reply_all => "mail.reply",
+            .forward => "mail.forward",
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(command, text(get(request, "cmd")));
+        if (through_start or intent != .new) try std.testing.expectEqualStrings("foreground-target", text(get(request, "messageId")));
+        if (!through_start and intent == .reply_all) try std.testing.expect(truth(get(request, "all")));
+    };
+}
+
+test "meeting notifications: Calendar Join and selection cancel held polls and retain their account" {
+    const a = std.testing.allocator;
+    const Action = enum { join_key, join_control, select };
+    for ([_]JobKind{ .meeting_agenda, .meeting_calendars }) |kind| for ([_]Action{ .join_key, .join_control, .select }) |action| {
+        var client: HeldMeetingTestClient = .{ .io = std.testing.io };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var environment = std.process.Environ.Map.init(a);
+        defer environment.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.environ = &environment;
+        app.client = .{ .ctx = &client, .callFn = HeldMeetingTestClient.provider };
+        try meetingTestReady(&app);
+        app.calendar.open = true;
+        try app.calendar.account.set("work@example.test");
+        if (action == .select) {
+            app.calendar.page = .calendars;
+            app.calendar.day = 20000;
+            const calendars = try readerInvitationTestValue(app.frame.allocator(), "{\"calendars\":[{\"canRead\":true,\"calendar\":{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"selected-team\"},\"summary\":\"Team\",\"time_zone\":\"UTC\",\"access\":\"reader\"}}]}");
+            try app.calendar.calendars.replace(a, calendars);
+        } else {
+            const agenda = try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"events\":[{\"target\":{\"account\":\"work@example.test\"},\"join_url\":\"https://meet.example.test/foreground\"}]}}");
+            try app.calendar.agenda.replace(a, agenda);
+        }
+        try client.start(&app, kind);
+        try std.testing.expect(app.foregroundWorkerAvailable());
+        switch (action) {
+            .join_key => try app.onKey(.{ .codepoint = 'o' }),
+            .join_control => try app.calendarActivate(13),
+            .select => try app.onCalendarKey(.{ .codepoint = Key.enter }),
+        }
+        try client.expectCanceled();
+        const request = try client.foregroundRequest(&app);
+        try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+        try std.testing.expectEqual(@as(usize, 0), app.account_index);
+        if (action == .select) {
+            try std.testing.expectEqual(JobKind.calendar_agenda, app.job.kind);
+            try std.testing.expectEqualStrings("calendar.agenda", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("selected-team", text(get(request, "calendarId")));
+            try std.testing.expectEqualStrings("selected-team", app.calendar.calendar_id.slice());
+            try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+        } else {
+            try std.testing.expectEqual(JobKind.open, app.job.kind);
+            try std.testing.expectEqualStrings("browser.open", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("https://meet.example.test/foreground", text(get(request, "url")));
+            try std.testing.expect(app.job.calendar_join_open);
+        }
+    };
+}
+
+test "meeting notifications: custom uppercase M binding works when no reminder exists" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try meetingTestReady(&app);
+    app.meetings.records = @splat(null);
+    var binding: preferences.Binding = .{ .action = .expand };
+    try binding.key.set("M");
+    app.ui_preferences.bindings[0] = binding;
+    try app.onKey(.{ .codepoint = 'M' });
+    try std.testing.expect(app.expanded);
+    try std.testing.expectEqual(Focus.reader, app.focus);
+    try std.testing.expect(!app.meeting_focused);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "meeting notifications: canceled polls retry with a fixed civil clock" {
+    const a = std.testing.allocator;
+    for ([_]JobKind{ .meeting_agenda, .meeting_calendars }) |kind| for ([_]bool{ false, true }) |cancel_all| {
+        var client: HeldMeetingTestClient = .{ .io = std.testing.io };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = HeldMeetingTestClient.provider };
+        try meetingTestReady(&app);
+        app.meetings.records = @splat(null);
+        const civil_now = app.meeting_now;
+        const later = Io.Timestamp.now(app.io, .awake).toMilliseconds() +| 60000;
+        app.meetings.list_after = @splat(later);
+        app.meetings.targets[0].poll_after = later;
+        _ = app.meetingTick(); // Establish the unchanged empty visual state.
+        try client.start(&app, kind);
+        const before = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+        if (cancel_all) app.cancelJob() else try app.onKey(.{ .codepoint = Key.f3 });
+        const after = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+        try client.expectCanceled();
+        try std.testing.expect(app.job.future == null);
+        const deadline = if (kind == .meeting_calendars) &app.meetings.list_after[1] else &app.meetings.targets[0].poll_after;
+        try std.testing.expect(deadline.* >= before + 5000 and deadline.* <= after + 5000);
+        try std.testing.expect(!app.meetingTick());
+        try app.dispatchMeetings();
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 0), client.foreground_calls);
+
+        // Make the elapsed-time deadline due without advancing event time.
+        deadline.* = Io.Timestamp.now(app.io, .awake).toMilliseconds() - 1;
+        try std.testing.expect(app.meetingTick());
+        try app.dispatchMeetings();
+        try std.testing.expectEqual(kind, app.job.kind);
+        const request = try client.foregroundRequest(&app);
+        try std.testing.expectEqualStrings(if (kind == .meeting_calendars) "calendar.list" else "calendar.agenda", text(get(request, "cmd")));
+        try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+        try std.testing.expectEqual(@as(i64, civil_now), app.meeting_now);
+        try std.testing.expect(get(request, "persistCache") == .bool and !truth(get(request, "persistCache")));
+        if (kind == .meeting_agenda) {
+            try std.testing.expectEqualStrings("primary", text(get(request, "calendarId")));
+            const date = try calendar_ui.dayText(app.frame.allocator(), @divFloor(civil_now, 86400000) - 1);
+            try std.testing.expectEqualStrings(date, text(get(request, "date")));
+        }
+        try std.testing.expect(deadline.* > Io.Timestamp.now(app.io, .awake).toMilliseconds());
+    };
+}
+
+// Own the first worker until the test releases or cancels it. Capturing every
+// request makes account/occurrence routing observable across that handoff.
+const MeetingFlowTestClient = struct {
+    io: Io = std.testing.io,
+    hold_first: bool = true,
+    first_response: ?[]const u8 = null,
+    later_response: ?[]const u8 = null,
+    entered: Io.Event = .unset,
+    release: Io.Event = .unset,
+    canceled: std.atomic.Value(bool) = .init(false),
+    active: std.atomic.Value(usize) = .init(0),
+    calls: usize = 0,
+    requests: [4][8192]u8 = undefined,
+    lengths: [4]usize = @splat(0),
+
+    fn provider(context: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(@as(usize, 0), self.active.fetchAdd(1, .acq_rel));
+        defer _ = self.active.fetchSub(1, .acq_rel);
+        if (self.calls >= self.requests.len or raw.len > self.requests[0].len) return error.UnexpectedRequest;
+        const index = self.calls;
+        @memcpy(self.requests[index][0..raw.len], raw);
+        self.lengths[index] = raw.len;
+        self.calls += 1;
+        if (index == 0 and self.hold_first) {
+            self.entered.set(self.io);
+            self.release.wait(self.io) catch |err| {
+                if (err == error.Canceled) self.canceled.store(true, .release);
+                return err;
+            };
+        }
+        const response = (if (index == 0) self.first_response else self.later_response) orelse return error.ConnectionRefused;
+        return allocator.dupe(u8, response);
+    }
+
+    fn waitEntered(self: *@This()) !void {
+        try self.entered.waitTimeout(self.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } });
+    }
+
+    fn request(self: *@This(), app: *App, index: usize) !Value {
+        try std.testing.expect(index < self.calls);
+        return readerInvitationTestValue(app.frame.allocator(), self.requests[index][0..self.lengths[index]]);
+    }
+
+    fn finish(self: *@This(), app: *App) !void {
+        self.release.set(self.io);
+        try std.testing.expect(app.job.future != null);
+        app.job.future.?.await(app.io);
+        try app.finish();
+    }
+};
+
+fn meetingFlowReady(app: *App, client: *MeetingFlowTestClient, loop: *Loop) !void {
+    app.loop = loop;
+    app.client = .{ .ctx = client, .callFn = MeetingFlowTestClient.provider };
+    app.capabilities.updates = false;
+    try meetingTestReady(app);
+    app.meetings.list_after = @splat(std.math.maxInt(i64));
+    app.meetings.targets[0].poll_after = std.math.maxInt(i64);
+}
+
+test "meeting notifications: pending reply and forward sources retain ownership through reminder input" {
+    const a = std.testing.allocator;
+    for ([_]PendingCompose{ .reply, .reply_all, .forward }) |intent| for ([_]bool{ false, true }) |mouse| {
+        var client: MeetingFlowTestClient = .{ .first_response = "{\"ok\":true,\"data\":{\"id\":\"original-source\",\"threadId\":\"original-thread\",\"subject\":\"Original source\",\"bodyText\":\"Pinned source body\",\"attachments\":[]}}" };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.messages = items(try readerInvitationTestValue(app.list_arena.allocator(), "[{\"id\":\"original-source\",\"threadId\":\"original-thread\"}]"));
+        var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 28, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 28, .screen = &screen };
+        try app.drawMeetings(win);
+        const join = for (app.meeting_mouse_hits.areas[0..app.meeting_mouse_hits.count]) |hit| {
+            if (hit.index == 521) break hit;
+        } else return error.MissingJoinButton;
+        app.meeting_changed_until = 0;
+        try app.requestConversationCompose(intent);
+        try client.waitEntered();
+        try std.testing.expect(app.compose_source_probe);
+        if (mouse) {
+            // The click was queued against the previously painted card.
+            try app.onMouse(.{ .col = @intCast(join.rect.x), .row = @intCast(join.rect.y), .type = .press, .button = .left, .mods = .{} });
+        } else {
+            try app.onKey(.{ .codepoint = 'M' });
+            // With no reminder focus, o belongs to Mail, not to meeting Join.
+            try std.testing.expect(!try app.onMeetingKey(.{ .codepoint = 'o' }));
+        }
+        try std.testing.expect(!app.meeting_focused);
+        try std.testing.expectEqual(intent, app.pending_compose);
+        try std.testing.expectEqual(JobKind.read, app.job.kind);
+        try std.testing.expect(!client.canceled.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), client.calls);
+        const source = try client.request(&app, 0);
+        try std.testing.expectEqualStrings("mail.read", text(get(source, "cmd")));
+        try std.testing.expectEqualStrings("personal@example.test", text(get(source, "account")));
+        try std.testing.expectEqualStrings("original-source", text(get(source, "messageId")));
+        screen.clear();
+        try app.drawMeetings(win);
+        const hidden = try markdownTestScreenText(a, &screen);
+        defer a.free(hidden);
+        try std.testing.expect(std.mem.indexOf(u8, hidden, "Starts in") == null);
+        try client.finish(&app);
+        if (app.compose_choice) try app.onKey(.{ .codepoint = 't' });
+        try std.testing.expectEqual(JobKind.compose, app.job.kind);
+        try std.testing.expect(app.job.future != null);
+        app.job.future.?.await(app.io);
+        const compose = try client.request(&app, 1);
+        try std.testing.expectEqualStrings(if (intent == .forward) "mail.forward" else "mail.reply", text(get(compose, "cmd")));
+        try std.testing.expectEqualStrings("personal@example.test", text(get(compose, "account")));
+        try std.testing.expectEqualStrings("original-source", text(get(compose, "messageId")));
+        if (intent != .forward) try std.testing.expectEqual(intent == .reply_all, truth(get(compose, "all")));
+        try app.finish();
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 2), client.calls);
+        try std.testing.expectEqual(@as(usize, 0), client.active.load(.acquire));
+    };
+}
+
+test "meeting notifications: Join only preempts refresh and preserves queued Mail work" {
+    const a = std.testing.allocator;
+    for ([_]JobKind{ .refresh, .read, .thread, .calendar_list }) |kind| {
+        var client: MeetingFlowTestClient = .{ .later_response = "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Profile 1\"}}" };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.messages = items(try readerInvitationTestValue(app.list_arena.allocator(), "[{\"id\":\"queued-source\",\"threadId\":\"queued-thread\"}]"));
+        const command: []const u8 = switch (kind) {
+            .refresh => "mail.refresh",
+            .read => "mail.read",
+            .thread => "mail.thread",
+            .calendar_list => "calendar.list",
+            else => unreachable,
+        };
+        try app.start(kind, .{ .cmd = command, .account = app.account(), .messageId = "queued-source", .threadId = "queued-thread" });
+        try client.waitEntered();
+        if (kind == .refresh) {
+            app.pending_read = true;
+            app.pending_thread = true;
+            try app.queueNextPage();
+        }
+        try app.onKey(.{ .codepoint = 'M' });
+        try app.onKey(.{ .codepoint = 'o' });
+        if (kind == .refresh) {
+            try std.testing.expect(client.canceled.load(.acquire));
+            try std.testing.expectEqual(JobKind.meeting_open, app.job.kind);
+            try std.testing.expect(app.pending_read and app.pending_thread and app.pending_page);
+            try std.testing.expectEqualStrings("queued-source", app.pending_page_boundary.value());
+            app.job.future.?.await(app.io);
+            const join = try client.request(&app, 1);
+            try std.testing.expectEqualStrings("browser.open", text(get(join, "cmd")));
+            try std.testing.expectEqualStrings("work@example.test", text(get(join, "account")));
+            try std.testing.expectEqualStrings("https://meet.example.test/design", text(get(join, "url")));
+            // Completion drains the retained page demand (there is no next
+            // cursor), then starts the original queued full conversation read.
+            client.later_response = null;
+            try app.finish();
+            try std.testing.expectEqual(JobKind.thread, app.job.kind);
+            app.job.future.?.await(app.io);
+            const thread = try client.request(&app, 2);
+            try std.testing.expectEqualStrings("mail.thread", text(get(thread, "cmd")));
+            try std.testing.expectEqualStrings("personal@example.test", text(get(thread, "account")));
+            try std.testing.expectEqualStrings("queued-thread", text(get(thread, "threadId")));
+            try app.finish();
+            try std.testing.expectEqual(@as(usize, 3), client.calls);
+        } else {
+            try std.testing.expectEqual(kind, app.job.kind);
+            try std.testing.expect(!client.canceled.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), client.calls);
+            try std.testing.expect(std.mem.indexOf(u8, app.meeting_feedback.slice(), "Join waits for current mail work") != null);
+            try client.finish(&app);
+            try std.testing.expectEqual(@as(usize, 1), client.calls);
+        }
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 0), client.active.load(.acquire));
+    }
+}
+
+test "meeting notifications: held Join completion remains attached to its original occurrence" {
+    const a = std.testing.allocator;
+    var client: MeetingFlowTestClient = .{ .first_response = "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Profile 1\"}}" };
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    defer app.cancelJob();
+    try meetingFlowReady(&app, &client, loop);
+    app.meetings.records[1] = app.meetings.records[0];
+    app.meetings.records[1].?.key = @splat(2);
+    try app.meetings.records[1].?.title.set("Second occurrence");
+    try app.meetings.records[1].?.join.set("https://meet.example.test/second");
+    try app.onKey(.{ .codepoint = 'M' });
+    try app.onKey(.{ .codepoint = 'o' });
+    try client.waitEntered();
+    try app.onKey(.{ .codepoint = 'n' });
+    app.meeting_changed_until = 0;
+    try app.onKey(.{ .codepoint = 'o' });
+    try std.testing.expectEqualSlices(u8, &app.meetings.records[1].?.key, &app.meeting_feedback_key.?);
+    try std.testing.expect(std.mem.indexOf(u8, app.meeting_feedback.slice(), "Join waits") != null);
+    try std.testing.expectEqual(@as(usize, 1), client.calls);
+    try client.finish(&app);
+    try std.testing.expectEqualSlices(u8, &app.meetings.records[0].?.key, &app.meeting_feedback_key.?);
+    try std.testing.expectEqualSlices(u8, &app.meetings.records[1].?.key, &app.meeting_selected.?);
+    try std.testing.expect(std.mem.indexOf(u8, app.meeting_feedback.slice(), "Join target validated") != null);
+    const request = try client.request(&app, 0);
+    try std.testing.expectEqualStrings("browser.open", text(get(request, "cmd")));
+    try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+    try std.testing.expectEqualStrings("https://meet.example.test/design", text(get(request, "url")));
+    var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 28, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 28, .screen = &screen };
+    try app.drawMeetings(win);
+    const second = try markdownTestScreenText(a, &screen);
+    defer a.free(second);
+    try std.testing.expect(std.mem.indexOf(u8, second, "Second occurrence") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second, "Join target validated") == null);
+    try std.testing.expect(!client.canceled.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), client.calls);
+    try std.testing.expect(app.job.future == null);
+}
+
+test "meeting notifications: an unpaintable card cannot own keys or stale clicks" {
+    const a = std.testing.allocator;
+    for ([_]struct { width: u16, height: u16 }{ .{ .width = 29, .height = 20 }, .{ .width = 80, .height = 9 } }) |size| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        try meetingTestReady(&app);
+        var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 28, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        var win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 28, .screen = &screen };
+        app.focusMeeting();
+        try app.drawMeetings(win);
+        const old_rect = app.meeting_rect.?;
+        win.width = size.width;
+        win.height = size.height;
+        screen.clear();
+        try app.drawMeetings(win);
+        try std.testing.expect(!app.meeting_focused);
+        for ([_]Key{ .{ .codepoint = 'M' }, .{ .codepoint = 'o' }, .{ .codepoint = 'd', .mods = .{ .ctrl = true } }, .{ .codepoint = Key.enter } }) |key|
+            try std.testing.expect(!try app.onMeetingKey(key));
+        try std.testing.expect(!try app.onMeetingMouse(.{ .col = @intCast(old_rect.x), .row = @intCast(old_rect.y), .type = .press, .button = .left, .mods = .{} }));
+        try std.testing.expectEqual(@as(usize, 1), app.meetings.count());
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+        const hidden = try markdownTestScreenText(a, &screen);
+        defer a.free(hidden);
+        try std.testing.expect(std.mem.indexOf(u8, hidden, "Starts in") == null);
+        win.width = 100;
+        win.height = 28;
+        try app.drawMeetings(win);
+        app.meeting_changed_until = 0;
+        try app.onKey(.{ .codepoint = 'M' });
+        try app.onKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });
+        try std.testing.expectEqual(@as(usize, 0), app.meetings.count());
+    }
+}
+
+test "meeting notifications: discovery retries failures promptly but retains authoritative backoff" {
+    const a = std.testing.allocator;
+    const Case = struct { response: ?[]const u8, delay: i64, target_after: ?bool = null };
+    for ([_]Case{
+        .{ .response = null, .delay = 30000 },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":false,\"cached\":\"true\",\"calendars\":[]}}", .delay = 30000 },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":false,\"calendars\":{}}}", .delay = 30000 },
+        .{ .response = "{", .delay = 30000 },
+        .{ .response = "{\"ok\":false,\"error\":{\"code\":\"VaultLocked\"}}", .delay = 30000 },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":false,\"calendars\":[]}}", .delay = 600000 },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":true,\"cached\":true,\"calendars\":[]}}", .delay = 30000 },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":true,\"calendars\":[]}}", .delay = 600000 },
+        .{ .response = "{\"ok\":false,\"error\":{\"code\":\"CalendarReadPermissionRequired\"}}", .delay = 600000, .target_after = false },
+        .{ .response = "{\"ok\":false,\"error\":{\"code\":\"InvalidGrantRegistry\"}}", .delay = 30000, .target_after = true },
+    }) |case| {
+        var client: MeetingFlowTestClient = .{ .hold_first = false, .first_response = case.response };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.meetings.records = @splat(null);
+        if (case.target_after == null) app.meetings.targets = @splat(.{});
+        app.meetings.list_after[1] = 0;
+        const civil_now = app.meeting_now;
+        try app.dispatchMeetings();
+        try std.testing.expectEqual(JobKind.meeting_calendars, app.job.kind);
+        app.job.future.?.await(app.io);
+        const before = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+        try app.finish();
+        const after = Io.Timestamp.now(app.io, .awake).toMilliseconds();
+        try std.testing.expect(app.meetings.list_after[1] >= before + case.delay and app.meetings.list_after[1] <= after + case.delay);
+        if (case.target_after) |target_active| try std.testing.expectEqual(target_active, app.meetings.targets[0].active);
+        try app.dispatchMeetings();
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 1), client.calls);
+        if (case.delay == 30000) {
+            app.meetings.list_after[1] = Io.Timestamp.now(app.io, .awake).toMilliseconds() - 1;
+            try app.dispatchMeetings();
+            try std.testing.expectEqual(JobKind.meeting_calendars, app.job.kind);
+            app.job.future.?.await(app.io);
+            const retry = try client.request(&app, 1);
+            try std.testing.expectEqualStrings("calendar.list", text(get(retry, "cmd")));
+            try std.testing.expectEqualStrings("work@example.test", text(get(retry, "account")));
+            try std.testing.expectEqual(civil_now, app.meeting_now);
+            try app.finish();
+            try std.testing.expect(app.job.future == null);
+        }
+        try std.testing.expectEqual(@as(usize, 0), client.active.load(.acquire));
+    }
+}

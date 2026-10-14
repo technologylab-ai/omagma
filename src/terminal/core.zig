@@ -97,34 +97,74 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     options: t.Options,
     config: Config,
+    access_cache: @import("session_cache.zig").Cache = .{},
     cache_root: []const u8,
     env: *const std.process.Environ.Map,
     meter: ?*@import("capped_allocator.zig").CappedAllocator = null,
     progress_sink: ?t.ProgressSink = null,
+    vault_owner: ?*@import("vault_owner.zig").Owner = null,
+    fn storeAccessOpen(context: *anyopaque, a: std.mem.Allocator, account: []const u8, readonly: bool) anyerror!storage.Store {
+        const self: *Session = @ptrCast(@alignCast(context));
+        return self.openStore(a, account, readonly);
+    }
+    pub fn openStore(s: *Session, a: std.mem.Allocator, account: []const u8, readonly: bool) !storage.Store {
+        if (s.vault_owner) |owner| return storage.Store.openVault(s.io, a, try owner.borrowAccount(account), s.options, readonly);
+        return if (readonly) storage.Store.openCached(s.io, a, s.cache_root, account, s.options) else storage.Store.open(s.io, a, s.cache_root, account, s.options);
+    }
+    fn refreshActive(s: *Session, account: []const u8) !bool {
+        // The daemon serializes all jobs; no plaintext refresh lease exists.
+        if (s.vault_owner != null) return false;
+        return storage.refreshActive(s.io, s.cache_root, account, s.options);
+    }
     pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, options: t.Options) !Session {
-        var s: Session = .{ .io = io, .allocator = a, .options = options, .config = undefined, .cache_root = undefined, .env = env };
+        var s: Session = undefined;
+        try s.initInto(io, a, env, options, null);
+        return s;
+    }
+    /// Initialize a heap-owned Session directly. Debug's return-by-value copies
+    /// of the large inline Config exceed a bounded daemon worker's 1 MiB stack.
+    /// A provided authenticated config bypasses every plaintext config read.
+    pub fn initInto(s: *Session, io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, options: t.Options, provided: ?*const Config) !void {
+        s.io = io;
+        s.allocator = a;
+        s.options = options;
+        s.env = env;
+        s.meter = null;
+        s.progress_sink = null;
+        s.vault_owner = null;
+        s.access_cache = .{};
         const home = env.get("HOME") orelse return error.HomeRequired;
-        try s.config.defaults(home);
-        if (options.fixtures) for (s.config.accounts[0..s.config.count]) |*account| {
-            account.enabled = true;
-        };
         var parse_arena = std.heap.ArenaAllocator.init(a);
         defer parse_arena.deinit();
         const pa = parse_arena.allocator();
-        const cfg = options.config_file orelse if (!options.fixtures) try std.fmt.allocPrint(pa, "{s}/omagma/config.json", .{env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(pa, "{s}/.config", .{home})}) else null;
-        if (cfg) |path| {
-            const buf = try pa.alloc(u8, 16 * 1024);
-            try s.config.load(io, path, pa, buf);
+        // All native entry points must honor activation, including internal
+        // callers which bypass the CLI. Only an authenticated daemon-owned
+        // config or isolated fixtures may bypass this routing guard.
+        if (provided == null and !options.fixtures and try @import("vault_activation.zig").load(io, pa, env) != null) return error.BackendRequired;
+        if (provided) |config| {
+            s.config = config.*;
+        } else {
+            try s.config.defaults(home);
+            if (options.fixtures) for (s.config.accounts[0..s.config.count]) |*account| {
+                account.enabled = true;
+            };
+            const cfg = options.config_file orelse if (!options.fixtures) try std.fmt.allocPrint(pa, "{s}/omagma/config.json", .{env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(pa, "{s}/.config", .{home})}) else null;
+            if (cfg) |path| {
+                const buf = try pa.alloc(u8, 16 * 1024);
+                try s.config.load(io, path, pa, buf);
+            }
         }
         s.cache_root = try a.dupe(u8, options.cache_dir orelse try std.fmt.allocPrint(pa, "{s}/omagma/terminal", .{env.get("XDG_CACHE_HOME") orelse try std.fmt.allocPrint(pa, "{s}/.cache", .{home})}));
+        errdefer a.free(s.cache_root);
         if (options.metadata_limit == 0 or options.metadata_limit > t.Limits.metadata_hard or options.disk_limit < 64 * 1024 or options.disk_limit > t.Limits.disk_hard) return error.InvalidCacheLimit;
         if (options.body_prefetch_limit > 64) return error.InvalidPrefetchLimit;
         if (!std.mem.eql(u8, options.fixture_scenario, "normal") and !options.fixtures) return error.FixtureOptionRequiresFixtures;
         if (options.fixture_root != null and !options.fixtures) return error.FixtureOptionRequiresFixtures;
         if (options.fixtures and std.mem.indexOfScalar(u8, options.fixture_scenario, '/') != null) return error.InvalidFixtureScenario;
-        return s;
     }
     pub fn deinit(s: *Session) void {
+        s.access_cache.clear();
+        s.config.runtime_access_cache = null;
         s.allocator.free(s.cache_root);
     }
     pub fn client(s: *Session) t.Client {
@@ -139,6 +179,7 @@ pub const Session = struct {
         try recipients.validateAddress(account);
         const index = s.config.index(account) orelse return error.UnknownAccount;
         if (!s.config.accounts[index].enabled) return error.AccountDisabled;
+        if (s.vault_owner) |owner| return owner.cacheStamp(account);
         return storage.cacheStamp(s.io, s.cache_root, account, s.options);
     }
     fn callCached(ctx: *anyopaque, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
@@ -155,6 +196,10 @@ pub const Session = struct {
         const worker = try s.allocator.create(Session);
         defer s.allocator.destroy(worker);
         worker.* = s.*;
+        // Only the parent retains access tokens between jobs. The progress
+        // wrapper borrows that cache and wipes its incidental struct copy.
+        worker.access_cache.clear();
+        worker.config.runtime_access_cache = &s.access_cache;
         worker.progress_sink = sink;
         // cache_root/env are borrowed; deinit would free the original root.
         return worker.executeMode(out_allocator, raw, false);
@@ -166,18 +211,19 @@ pub const Session = struct {
         if (s.progress_sink) |sink| sink.row(update);
     }
     pub fn execute(s: *Session, out_allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+        // Attach only at the caller-stable address, after any Config reload.
+        s.config.runtime_access_cache = &s.access_cache;
         return s.executeMode(out_allocator, raw, false);
     }
     fn executeMode(s: *Session, out_allocator: std.mem.Allocator, raw: []const u8, cached_only: bool) ![]const u8 {
         var arena = std.heap.ArenaAllocator.init(s.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const request = if (raw.len > t.Limits.request_bytes or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_always, .max_value_len = t.Limits.request_bytes }) catch null;
+        const request = if (raw.len > t.Limits.request_bytes or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = t.Limits.request_bytes }) catch null;
         if (request == null or request.? != .object) return failure(out_allocator, .null, "", "InvalidRequest", "Expected a bounded JSON object");
         var req = request.?;
         if (cached_only) {
-            const command = j.text(req, "cmd");
-            if (!@import("client_contract.zig").cachedCommand(command)) return error.CacheUnsupported;
+            if (!@import("client_contract.zig").cachedRequest(req)) return error.CacheUnsupported;
             try req.object.put(a, "cacheOnly", .{ .bool = true });
         }
         const account = j.text(req, "account");
@@ -188,13 +234,27 @@ pub const Session = struct {
         if (j.get(req, "boundaryReceivedAt")) |field| if (field != .integer or field.integer < 0) return failure(out_allocator, id, account, "InvalidWindowBoundary", "Expected a nonnegative integer window timestamp");
         if (!s.options.fixtures and j.get(req, "grantFile") == null) try req.object.put(a, "grantFile", .{ .string = s.options.grant_file orelse try std.fmt.allocPrint(a, "{s}/omagma/terminal-grants.json", .{s.env.get("XDG_CONFIG_HOME") orelse try std.fmt.allocPrint(a, "{s}/.config", .{s.env.get("HOME") orelse return error.HomeRequired})}) });
         if ((id != .null and id != .string and id != .integer) or (id == .string and id.string.len > 256)) return failure(out_allocator, .null, account, "InvalidRequest", "id must be a bounded string or integer");
+        // A plaintext CLI/TUI may predate explicit vault activation. Check
+        // its next operation too, before any source/cache/provider access.
+        // Malformed or unsafe markers fail closed with correlated errors.
+        if (!s.options.fixtures and s.vault_owner == null) {
+            const active = @import("vault_activation.zig").load(s.io, a, s.env) catch |err| return failureForError(out_allocator, id, account, err);
+            if (active != null) return failureForError(out_allocator, id, account, error.BackendRequired);
+        }
         const data = s.dispatch(a, req) catch |err| {
             // Internal cached callers own a cancelable lifetime. Keep the
             // cancellation signal out of protocol normalization for that path.
             if (cached_only and err == error.Canceled) return err;
-            return failureForError(out_allocator, id, account, err);
+            return failureForError(out_allocator, id, account, reconciliationFailure(req, err));
         };
-        return successResponse(out_allocator, id, account, j.text(req, "cmd"), s.options.fixtures, data);
+        return successResponse(out_allocator, id, account, j.text(req, "cmd"), !@import("client_contract.zig").readOnlyRequest(req), s.options.fixtures, data);
+    }
+    fn reconciliationFailure(req: Value, err: anyerror) anyerror {
+        if (!std.mem.eql(u8, j.text(req, "cmd"), "invitation.inspect") or @import("client_contract.zig").readOnlyRequest(req)) return err;
+        return switch (err) {
+            error.Canceled, error.Timeout, error.DeadlineExceeded, error.OutOfMemory, error.VaultOperationCanceled => error.UnknownOutcome,
+            else => err,
+        };
     }
     fn failure(a: std.mem.Allocator, id: Value, account: []const u8, code: []const u8, message: []const u8) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = false, .account = account, .@"error" = .{ .code = code, .message = message } }, .{});
@@ -207,9 +267,10 @@ pub const Session = struct {
             return encoding_error;
         };
     }
-    fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, fixtures: bool, data: Value) ![]const u8 {
-        return std.json.Stringify.valueAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
-            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color" }) |mutation| {
+    fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, may_write: bool, fixtures: bool, data: Value) ![]const u8 {
+        return j.encodeAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
+            if (!fixtures and may_write and std.mem.eql(u8, cmd, "invitation.inspect")) return failureForError(a, id, account, error.UnknownOutcome);
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "draft.gmail-save" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -221,6 +282,7 @@ pub const Session = struct {
             error.CredentialStorageAccessDenied => "The OS or sandbox denied access to the configured private credential files",
             error.KeyringUnavailable => "The selected system credential store is unavailable in this process session; use an unlocked session or explicitly migrate to file storage",
             error.UnknownAccount => "Choose an explicitly configured account",
+            error.FollowUpMetadataUnavailableOffline => "Message metadata is no longer cached; reconnect to create this follow-up. Existing reminders remain available offline.",
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
             error.OperationConflict => "This operation identity was already used for different content",
             error.CacheBusy => "Another client is using this account cache; retry later",
@@ -228,8 +290,103 @@ pub const Session = struct {
             else => @errorName(err),
         };
     }
+    fn preferences(s: *Session, a: std.mem.Allocator, req: Value, write: bool) !Value {
+        if (s.config.credential_store != .vault) return error.VaultRequired;
+        const provider = s.config.runtime_provider orelse return error.VaultLocked;
+        if (!write) {
+            var result = j.object(a);
+            const bytes = try provider.read(.preferences, .{}) orelse {
+                try result.object.put(a, "preferences", .null);
+                return result;
+            };
+            try result.object.put(a, "preferences", try std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_if_needed, .max_value_len = @import("../native_identity.zig").max_preferences_bytes }));
+            return result;
+        }
+        const input = j.get(req, "preferences") orelse return error.MissingField;
+        if (input != .object) return error.InvalidField;
+        const bytes = try j.encodeAlloc(a, input, .{});
+        if (bytes.len > @import("../native_identity.zig").max_preferences_bytes) return error.UiPreferencesTooLarge;
+        // The provider validates the complete typed preferences schema before
+        // publication. Avoid a second large Preferences value on this worker.
+        try provider.apply(&.{.{ .kind = .preferences, .value = bytes }});
+        return j.value(a, .{ .saved = true });
+    }
+    fn gmailDraftJob(s: *Session, a: std.mem.Allocator, account: []const u8, req: Value) anyerror!Value {
+        return @import("draft_gmail_commands.zig").run(s, a, account, req);
+    }
+    fn followUpSnapshot(s: *Session, a: std.mem.Allocator, account: []const u8, req: Value) !t.Message {
+        const gmail = @import("gmail.zig");
+        try s.capability(a, account, req, "mail-read");
+        const id = try j.required(req, "messageId");
+        if (s.options.fixtures) {
+            const source = try s.fixture(a, account);
+            try s.fixtureGate(a, source, req);
+            var peer: FixtureRemote = .{ .session = s, .source = source };
+            return gmail.readAuthorizedMetadata(a, account, &.{"mail-read"}, peer.transport(), id);
+        }
+        var network: gmail.NetworkSession = undefined;
+        try network.initWithAllocator(s.io, a, s.allocator, &s.config, account, "mail.read", req);
+        defer network.close();
+        return gmail.readAuthorizedMetadata(a, account, &.{"mail-read"}, network.transport(), id);
+    }
+    fn followUps(s: *Session, a: std.mem.Allocator, account: []const u8, req: Value) !Value {
+        const follow_up = @import("follow_up.zig");
+        const cmd = j.text(req, "cmd");
+        const reading = std.mem.eql(u8, cmd, "reminder.list");
+        if (!reading and !std.mem.eql(u8, cmd, "reminder.set") and !std.mem.eql(u8, cmd, "reminder.done")) return error.UnknownCommand;
+        if (!reading and try j.boolean(req, "cacheOnly", false)) return error.CachedMutationDenied;
+        var store = try s.openStore(a, account, reading);
+        defer store.close();
+        var state = try follow_up.read(&store, a, account);
+        if (reading) {
+            const entries = try follow_up.sorted(a, state);
+            const messages = try a.alloc(Value, entries.len);
+            for (entries, 0..) |entry, i| {
+                const snapshot: t.Message = if (store.find(entry.messageId)) |cached| cached.message else .{ .id = entry.messageId, .threadId = entry.threadId, .subject = entry.subject, .from = .{ .address = "", .name = entry.counterpart } };
+                messages[i] = try j.value(a, snapshot);
+                try messages[i].object.put(a, "followUpDate", .{ .string = entry.dueDate });
+                try messages[i].object.put(a, "followUpVersion", .{ .integer = entry.version });
+            }
+            return j.value(a, .{ .entries = entries, .messages = messages, .revision = state.revision, .local = true, .cached = true });
+        }
+        const message_id = try j.required(req, "messageId");
+        try @import("../bounded.zig").identifier(message_id);
+        const expected = try j.integer(req, "expectedVersion", -1);
+        if (expected < 0) return error.FollowUpVersionRequired;
+        if (std.mem.eql(u8, cmd, "reminder.done")) {
+            try state.done(message_id, expected);
+            try follow_up.write(&store, a, state);
+            return j.value(a, .{ .done = true, .revision = state.revision, .messageId = message_id });
+        }
+        const due = try j.required(req, "dueDate");
+        try follow_up.date(due);
+        const prior = state.find(message_id);
+        if (expected != (if (prior) |entry| entry.version else @as(i64, 0))) return error.FollowUpChanged;
+        if (prior == null and state.entries.len == follow_up.limit) return error.FollowUpLimitReached;
+        var snapshot: ?t.Message = if (store.find(message_id)) |entry| entry.message else for (store.state.outbox) |message| {
+            if (std.mem.eql(u8, message.id, message_id)) break message;
+        } else null;
+        if (prior == null and snapshot == null) {
+            // A provider search/thread can display an older message which a
+            // full metadata quota immediately evicts. Verify its exact account
+            // and ID without requiring it to be retained in the mail cache.
+            // Never accept a client-supplied subject/sender snapshot as proof.
+            store.release();
+            snapshot = @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), followUpSnapshot, .{ s, a, account, req }) catch |err| switch (err) {
+                error.TransientFailure, error.NetworkUnreachable, error.ConnectionRefused, error.ConnectionTimedOut, error.Timeout => return error.FollowUpMetadataUnavailableOffline,
+                else => return err,
+            };
+            try s.reopenBody(a, &store);
+            state = try follow_up.read(&store, a, account);
+            // set rechecks the version/cap after the unlocked provider phase.
+        }
+        const entry = try state.set(a, message_id, due, expected, snapshot);
+        try follow_up.write(&store, a, state);
+        return j.value(a, .{ .entry = entry, .revision = state.revision, .local = true });
+    }
     fn dispatch(s: *Session, a: std.mem.Allocator, req: Value) !Value {
         const cmd = try j.required(req, "cmd");
+        if (std.mem.eql(u8, cmd, "preferences.get") or std.mem.eql(u8, cmd, "preferences.set")) return s.preferences(a, req, std.mem.eql(u8, cmd, "preferences.set"));
         if (j.get(req, "original") != null) {
             _ = try j.boolean(req, "original", false);
             if (!std.mem.eql(u8, cmd, "mail.forward")) return error.OriginalRequiresForward;
@@ -242,10 +399,10 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "accounts.list")) {
             const Account = struct { address: []const u8, enabled: bool, capabilities: []const []const u8, senderName: []const u8 = "", signature: []const u8 = "" };
             var list: std.ArrayList(Account) = .empty;
-            const registry = if (!s.options.fixtures) try @import("auth.zig").load(s.io, a, try j.required(req, "grantFile")) else @import("auth.zig").Registry{};
+            const registry = if (!s.options.fixtures) try @import("auth.zig").loadConfigured(s.io, a, &s.config, if (s.config.credential_store == .vault) "" else try j.required(req, "grantFile")) else @import("auth.zig").Registry{};
             for (s.config.accounts[0..s.config.count]) |*account| {
                 const grant = @import("auth.zig").find(&registry, account.address.slice());
-                try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .senderName = account.sender_name.slice(), .signature = account.signature.slice(), .capabilities = if (s.options.fixtures and !s.scenario("readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp" } else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
+                try list.append(a, .{ .address = account.address.slice(), .enabled = account.enabled, .senderName = account.sender_name.slice(), .signature = account.signature.slice(), .capabilities = if (s.options.fixtures and !s.scenario("readonly")) (if (s.scenario("calendar-readonly")) &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-freebusy" } else &.{ "mail-read", "mail-modify", "mail-send", "contacts-read", "contacts-write", "calendar-rsvp", "calendar-read", "calendar-write-shared", "calendar-freebusy" }) else if (grant) |g| if (g.enabled) g.capabilities else &.{} else &.{"mail-read"} });
             }
             return j.value(a, .{ .accounts = list.items });
         }
@@ -253,15 +410,17 @@ pub const Session = struct {
         const index = s.config.index(address) orelse return error.UnknownAccount;
         if (!s.config.accounts[index].enabled) return error.AccountDisabled;
         try recipients.validateAddress(address);
-        if ((j.text(req, "beforeMessageId").len != 0 or j.text(req, "afterMessageId").len != 0) and !try j.boolean(req, "cacheOnly", false)) return error.CacheWindowRequiresCached;
+        if ((j.text(req, "beforeMessageId").len != 0 or j.text(req, "afterMessageId").len != 0) and !try j.boolean(req, "cacheOnly", false) and !(std.mem.eql(u8, cmd, "mail.thread") and try j.boolean(req, "progressive", false))) return error.CacheWindowRequiresCached;
         if (std.mem.startsWith(u8, cmd, "auth.")) {
             if (s.options.fixtures) {
                 if (!std.mem.eql(u8, cmd, "auth.status")) return error.FixtureOnly;
                 return j.value(a, .{ .configured = true, .fixture = true });
             }
-            return @import("auth.zig").run(s.io, a, &s.config, s.env, req);
+            const result = try @import("auth.zig").run(s.io, a, &s.config, s.env, req);
+            if (!std.mem.eql(u8, cmd, "auth.status")) if (s.config.runtime_access_cache) |cache| cache.invalidateAccount(index);
+            return result;
         }
-        if (std.mem.eql(u8, cmd, "cache.refresh-status")) return j.value(a, .{ .refreshInProgress = try storage.refreshActive(s.io, s.cache_root, address, s.options) });
+        if (std.mem.eql(u8, cmd, "cache.refresh-status")) return j.value(a, .{ .refreshInProgress = try s.refreshActive(address) });
         if (std.mem.eql(u8, cmd, "browser.open")) {
             const target = try @import("../open_target.zig").makeUrl(&s.config.accounts[index], try j.required(req, "url"));
             if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, &s.config.accounts[index], &target);
@@ -274,7 +433,12 @@ pub const Session = struct {
             if (!s.options.fixtures) try @import("../open_target.zig").openSavedAttachment(s.io, a, path);
             return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures });
         }
-        if (std.mem.eql(u8, cmd, "cache.activity") or try j.boolean(req, "cacheOnly", false)) return s.cachedDispatch(a, address, req);
+        if (std.mem.startsWith(u8, cmd, "calendar.")) {
+            return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), calendarJob, .{ s, a, req });
+        }
+        if (std.mem.startsWith(u8, cmd, "reminder.")) return s.followUps(a, address, req);
+        if (std.mem.startsWith(u8, cmd, "draft.gmail-")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), gmailDraftJob, .{ s, a, address, req });
+        if (std.mem.eql(u8, cmd, "cache.activity") or (try j.boolean(req, "cacheOnly", false) and !std.mem.eql(u8, cmd, "invitation.inspect"))) return s.cachedDispatch(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.undo")) return s.batchMail(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.prefetch")) {
             var request = try j.copyObject(a, req);
@@ -286,7 +450,7 @@ pub const Session = struct {
             return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, request });
         }
         if (std.mem.eql(u8, cmd, "mail.refresh")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, req });
-        var store = try storage.Store.open(s.io, a, s.cache_root, address, s.options);
+        var store = try s.openStore(a, address, std.mem.eql(u8, cmd, "invitation.inspect") and try j.boolean(req, "cacheOnly", false));
         defer store.close();
         if (std.mem.eql(u8, cmd, "attachment.import")) return j.value(a, try @import("attachment_blob.zig").importFile(&store, try j.required(req, "path"), j.text(req, "mimeType")));
         if (std.mem.eql(u8, cmd, "attachment.discard")) {
@@ -339,7 +503,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "cache.stats")) return s.cacheStats(a, &store);
         if (std.mem.eql(u8, cmd, "cache.clear")) {
             try store.clearMail();
-            return j.value(a, .{ .cleared = true, .draftsPreserved = true, .operationsPreserved = true });
+            return j.value(a, .{ .cleared = true, .draftsPreserved = true, .operationsPreserved = true, .followUpsPreserved = true });
         }
         if (std.mem.eql(u8, cmd, "operation.list")) return j.value(a, .{ .operations = store.state.operations });
         if (std.mem.eql(u8, cmd, "operation.read")) {
@@ -347,9 +511,9 @@ pub const Session = struct {
             for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) return j.value(a, operation);
             return error.OperationNotFound;
         }
-        if (std.mem.eql(u8, cmd, "draft.list")) return j.value(a, .{ .drafts = store.state.drafts });
+        if (std.mem.eql(u8, cmd, "draft.list")) return j.value(a, .{ .drafts = store.state.drafts, .gmailLinks = store.state.draftLinks });
         if (std.mem.eql(u8, cmd, "draft.queue") or std.mem.startsWith(u8, cmd, "queue.")) return s.queuedSend(a, &store, req);
-        if (std.mem.eql(u8, cmd, "draft.read")) return j.value(a, try store.draft(try j.required(req, "draftId")));
+        if (std.mem.eql(u8, cmd, "draft.read")) return @import("draft_gmail_commands.zig").readResponse(a, &store, try store.draft(try j.required(req, "draftId")));
         if (std.mem.eql(u8, cmd, "draft.open-preview")) {
             try s.capability(a, address, req, "mail-read");
             const draft = try store.draft(try j.required(req, "draftId"));
@@ -358,9 +522,11 @@ pub const Session = struct {
             var header_draft = draft;
             if (header_draft.from == null) header_draft.from = .{ .address = address };
             const preview = @import("preview_file.zig");
-            try store.reserveBytes(try preview.byteSize(prepared, header_draft));
-            try store.save();
-            const written = try preview.writePreview(s.io, a, store.dir, prepared, header_draft);
+            const written = if (store.vault != null) try preview.writePrivateExport(&store, a, s.env, prepared, header_draft) else plain: {
+                try store.reserveBytes(try preview.byteSizeWithStore(&store, prepared, header_draft));
+                try store.save();
+                break :plain try preview.writePreviewWithStore(&store, a, prepared, header_draft);
+            };
             const target = try @import("../open_target.zig").makePreview(&s.config.accounts[index], written.path);
             if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, &s.config.accounts[index], &target);
             return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .path = written.path, .url = target.url.slice(), .profile = target.profile_arg.slice() });
@@ -426,8 +592,9 @@ pub const Session = struct {
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
             const d = try conversation_draft.reply(a, message, .{ .account = address, .aliases = aliases, .all = try j.boolean(req, "all", false), .format = format, .original = original });
             try validateDraft(d, false);
-            if (preserve) _ = try markdown_mail.prepare(a, d);
-            return j.value(a, try store.putDraft(d, null));
+            if (preserve) try conversation_source.validateFormatting(s.allocator, d);
+            if (!store.lockHeld) try s.reopenBody(a, &store);
+            return mail_value.borrowed(a, try store.putDraft(d, null));
         }
         if (std.mem.eql(u8, cmd, "mail.forward")) {
             const format = try requestBodyFormat(req);
@@ -438,11 +605,20 @@ pub const Session = struct {
             }
             const preserve = try j.boolean(req, "preserveFormatting", false);
             if (omit and preserve) return error.InvalidForwardOptions;
-            const message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, !preserve);
+            const source_id = try j.required(req, "messageId");
+            // Older successful bodies could omit empty files. Refresh them
+            // once before claiming that a forward preserves every attachment.
+            const allow_cached = !preserve and (omit or !store.bodyNeedsUpgrade(source_id));
+            const message = s.readMessage(a, &store, source_id, req, allow_cached) catch |err| {
+                if (!allow_cached and !preserve and store.bodyNeedsUpgrade(source_id) and (err == error.NetworkFailure or err == error.LiveProviderNotReady)) return error.CachedAttachmentsNeedRefresh;
+                return err;
+            };
             try conversation_draft.requireBody(message);
+            const prepared = if (omit) message else try s.prepareForwardAttachments(a, &store, req, message, preserve);
             var source: ConversationAttachments = .{ .session = s, .store = &store, .request = req };
-            const draft = try conversation_source.forward(a, message, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit }, source.adapter());
-            return j.value(a, try store.putDraft(draft, null));
+            const draft = try conversation_source.forward(a, prepared, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit, .temporary_allocator = s.allocator }, source.adapter());
+            if (!store.lockHeld) try s.reopenBody(a, &store);
+            return mail_value.borrowed(a, try store.putDraft(draft, null));
         }
         if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) return s.listMail(a, &store, req);
         if (std.mem.eql(u8, cmd, "mail.read")) return mail_value.borrowed(a, try s.read(a, &store, try j.required(req, "messageId"), req));
@@ -466,15 +642,18 @@ pub const Session = struct {
                 store.release();
                 const result = try s.remote(a, address, cmd, req);
                 try s.reopenBody(a, &store);
+                if (try j.boolean(result, "progressive", false)) return s.retainProgressiveThread(a, &store, result, expected);
                 for (try array(result, "messages")) |v| {
                     const message = try j.decode(t.Message, a, v);
-                    if (store.state.generation == expected) try store.put(message, true) else _ = try store.putBody(message);
+                    try store.rememberAttachments(message);
+                    if (store.state.generation == expected) try store.put(message, true) else try retainReadBody(&store, message);
                 }
                 try store.save();
                 return result;
             }
             const thread = try j.required(req, "threadId");
             const source = try s.fixtureProviderSource(a, &store);
+            if (try j.boolean(req, "progressive", false)) if (try s.fixtureProgressiveThread(a, &store, source, req)) |result| return result;
             var messages: std.ArrayList(t.Message) = .empty;
             var thread_total: usize = 0;
             for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "threadId"), thread)) {
@@ -496,6 +675,7 @@ pub const Session = struct {
                 }
                 const retained = try gmail_decode.retainThreadMessage(m, a, &remaining);
                 partial = partial or retained.metadataPartial or retained.decodeWarning.len != 0;
+                try store.rememberAttachments(retained);
                 try store.put(retained, true);
                 try messages.append(a, retained);
                 s.reportProgress(.bodies, messages.items.len, thread_total);
@@ -581,33 +761,277 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "invitation.reply") or std.mem.eql(u8, cmd, "invitation.inspect")) {
             try s.capability(a, address, req, if (std.mem.eql(u8, cmd, "invitation.inspect")) "mail-read" else "calendar-rsvp");
             const message_id = try j.required(req, "messageId");
-            var m = try s.read(a, &store, message_id, req);
+            for ([_][]const u8{ "attendee", "sourceHash" }) |field| if (j.get(req, field)) |value| if (value != .string) return error.InvalidRequest;
+            if (j.get(req, "calendarId")) |value| try @import("calendar_types.zig").text(try j.string(value), 1024, false);
+            const cache_only = try j.boolean(req, "cacheOnly", false);
+            const reconcile = try j.boolean(req, "reconcile", false);
+            if (reconcile and (cache_only or !std.mem.eql(u8, cmd, "invitation.inspect"))) return error.InvalidRequest;
+            var m = if (cache_only) (try store.read(message_id)) orelse return error.CacheMiss else try s.read(a, &store, message_id, req);
             // Repair old metadata-only calendar attachments only when the
             // user explicitly inspects this mail. Cache browsing stays local.
-            if (m.invitation == null) for (m.attachments) |part| {
+            if (!cache_only and m.invitation == null) for (m.attachments) |part| {
                 if (!@import("mime.zig").isCalendarPart(part.mimeType, part.filename)) continue;
                 m = try s.readMessage(a, &store, message_id, req, false);
                 break;
             };
             const ics = m.invitation orelse return error.NotInvitation;
             var invite: invitation.Invitation = .{};
-            const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
-            try invitation.parse(ics, address, aliases, &invite);
+            const inspecting = std.mem.eql(u8, cmd, "invitation.inspect");
+            // Same reviewed operation returns its durable receipt before refreshing
+            // identities or generating a new DTSTAMP. Never repeat an unknown send.
+            if (!inspecting) if (try invitationReceipt(a, &store, ics, req)) |receipt| return s.syncInvitationCalendar(a, &store, ics, req, receipt);
+            var aliases = try cachedAliases(a, &store);
+            if (inspecting) {
+                try invitation.parseDisplay(ics, address, aliases, &invite);
+                if (!cache_only and invite.method == .request and invite.attendee.len == 0 and !invite.response_blocked and invite.additional_events == 0) {
+                    // An explicit inspection may discover verified send-as aliases.
+                    // A network failure still leaves this cached notice readable.
+                    if (s.identities(a, &store, req, false)) |_| {
+                        aliases = try cachedAliases(a, &store);
+                        try invitation.parseDisplay(ics, address, aliases, &invite);
+                    } else |_| {}
+                }
+            } else {
+                _ = try s.identities(a, &store, req, false);
+                aliases = try cachedAliases(a, &store);
+                try invitation.parse(ics, address, aliases, &invite);
+                const expected_attendee = j.text(req, "attendee");
+                if (expected_attendee.len > 0 and !std.ascii.eqlIgnoreCase(expected_attendee, invite.attendee.slice())) return error.InvitationChanged;
+                const expected_source = j.text(req, "sourceHash");
+                if (expected_source.len > 0 and !std.mem.eql(u8, expected_source, &storage.Store.hash(ics))) return error.InvitationChanged;
+            }
             if (std.mem.eql(u8, cmd, "invitation.inspect")) {
                 const timezone = @import("timezone.zig");
                 const local_zone = timezone.load(s.io, a, s.env) catch timezone.Zone{ .unavailable = true };
-                const event_name = invitation.eventTimezone(&invite);
-                const event_zone: ?timezone.Zone = if (event_name.len != 0 and invite.timezones.len == 0) timezone.loadNamed(s.io, a, s.env, event_name) catch null else null;
-                const friendly = try invitation.friendlyWithZone(a, &invite, &local_zone, if (event_zone) |*zone| zone else null);
-                return j.value(a, .{ .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable });
+                const friendly = try invitation.friendlyNative(s.io, a, s.env, &invite, &local_zone);
+                if (reconcile) try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), reconcileInvitation, .{ s, a, &store, ics, req });
+                if (reconcile) try s.resumeInvitationCalendar(a, &store, ics, req);
+                const response_status = try confirmedInvitationResponse(a, &store, ics, address, aliases);
+                return j.value(a, .{ .method = @tagName(invite.method), .cancelled = invite.cancelled, .canReply = invite.canRespond(), .additionalEvents = invite.additional_events, .sourceHash = @as([]const u8, &storage.Store.hash(ics)), .confirmedResponse = response_status.status, .responseOutcome = response_status.outcome, .calendarSync = response_status.calendarSync, .calendarSyncAvailable = s.calendarHost(a).canSyncRsvp(req, address), .calendarSyncTarget = "primary", .dtstamp = invite.stamp.slice(), .recurrenceParameters = invite.recurrence_parameters.slice(), .uid = invite.uid.slice(), .organizer = invite.organizer.slice(), .attendee = invite.attendee.slice(), .attendeeStatus = invite.attendee_status.slice(), .sequence = invite.sequence, .recurrenceId = invite.recurrence_id.slice(), .summary = invite.summary.slice(), .start = invite.start.slice(), .startDisplay = friendly.start, .originalStartDisplay = friendly.original_start, .endDisplay = friendly.end, .durationDisplay = friendly.duration, .location = friendly.location, .joinUrl = friendly.join_url, .recurrenceDisplay = friendly.recurrence, .allDay = friendly.all_day, .timezoneUnavailable = friendly.timezone_unavailable });
             }
+            if (std.mem.eql(u8, (try confirmedInvitationResponse(a, &store, ics, address, aliases)).outcome, "unknown")) return error.UnknownOutcome;
             const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
             const buf = try a.alloc(u8, invitation.max_calendar_bytes);
             const reply = try invitation.reply(&invite, status, try utcStamp(s.io, a), buf);
             const d: t.Draft = .{ .to = &.{.{ .address = invite.organizer.slice() }}, .subject = try std.fmt.allocPrint(a, "{s}: {s}", .{ @tagName(status), m.subject }), .bodyText = try std.fmt.allocPrint(a, "Invitation response: {s}", .{@tagName(status)}) };
-            return s.send(a, &store, req, d, reply, false);
+            var responding = try j.copyObject(a, req);
+            const source_hash = storage.Store.hash(ics);
+            try responding.object.put(a, "_sourceInvitationHash", .{ .string = try a.dupe(u8, &source_hash) });
+            const sent = try s.send(a, &store, responding, d, reply, false);
+            return s.syncInvitationCalendar(a, &store, ics, req, sent);
         }
         return error.UnsupportedCommand;
+    }
+    // A positive Sent match can resolve a lost RSVP receipt. Absence is never
+    // evidence of rejection: indexing may lag, so this path never resubmits.
+    fn reconcileInvitation(s: *Session, a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value) !void {
+        const source_hash = storage.Store.hash(ics);
+        const selected = selected: {
+            var index = store.state.operations.len;
+            while (index > 0) {
+                index -= 1;
+                const operation = store.state.operations[index];
+                if (!std.mem.eql(u8, operation.sourceInvitationHash, &source_hash) or operation.icalendar.len == 0 or std.mem.eql(u8, operation.outcome, "rejected")) continue;
+                if (!std.mem.eql(u8, operation.outcome, "unknown")) return;
+                break :selected operation;
+            }
+            return;
+        };
+        if (selected.rfcMessageId.len == 0) return;
+        try @import("invitation_receipt.zig").validateMessageId(selected.rfcMessageId);
+        var matched: ?[]const u8 = null;
+        if (s.options.fixtures) {
+            store.state.fixtureCalls += 1;
+            for (store.state.outbox) |entry| {
+                if (!std.mem.eql(u8, entry.messageId, selected.rfcMessageId)) continue;
+                const message = (try store.readOutbox(entry.id)) orelse continue;
+                if (@import("invitation_receipt.zig").matches(store.state.account, selected.rfcMessageId, selected.icalendar, message)) {
+                    matched = try a.dupe(u8, message.id);
+                    break;
+                }
+            }
+        } else {
+            store.release();
+            var lookup_scope = std.heap.ArenaAllocator.init(s.allocator);
+            defer lookup_scope.deinit();
+            const temporary = lookup_scope.allocator();
+            var search = try j.copyObject(temporary, req);
+            try search.object.put(temporary, "query", .{ .string = try std.fmt.allocPrint(temporary, "in:sent rfc822msgid:{s}", .{selected.rfcMessageId}) });
+            try search.object.put(temporary, "limit", .{ .integer = 8 });
+            try search.object.put(temporary, "cursor", .{ .string = "" });
+            const result = try s.remote(temporary, store.state.account, "mail.search", search);
+            const candidates = try array(result, "messages");
+            if (candidates.len > 8) return error.InvalidProviderResponse;
+            for (candidates) |candidate| {
+                try s.io.checkCancel();
+                var message_scope = std.heap.ArenaAllocator.init(s.allocator);
+                defer message_scope.deinit();
+                const scratch = message_scope.allocator();
+                var read_request = try j.copyObject(scratch, req);
+                try read_request.object.put(scratch, "messageId", .{ .string = try j.required(candidate, "id") });
+                const value = s.remote(scratch, store.state.account, "mail.read", read_request) catch |err| {
+                    if (err == error.MessageNotFound) continue;
+                    return err;
+                };
+                const message = try j.decode(t.Message, scratch, value);
+                if (@import("invitation_receipt.zig").matches(store.state.account, selected.rfcMessageId, selected.icalendar, message)) {
+                    matched = try a.dupe(u8, message.id);
+                    break;
+                }
+            }
+            try s.reopenBody(a, store);
+        }
+        if (matched) |message_id| {
+            for (store.state.operations) |*operation| {
+                if (!std.mem.eql(u8, operation.id, selected.id)) continue;
+                if (!std.mem.eql(u8, operation.hash, selected.hash) or !std.mem.eql(u8, operation.sourceInvitationHash, &source_hash) or !std.mem.eql(u8, operation.rfcMessageId, selected.rfcMessageId) or !std.mem.eql(u8, operation.icalendar, selected.icalendar)) return error.OperationConflict;
+                if (!std.mem.eql(u8, operation.outcome, "unknown")) return;
+                operation.outcome = "applied";
+                operation.messageId = message_id;
+                operation.errorCode = "";
+                try store.save();
+                return;
+            }
+            return error.OperationNotFound;
+        }
+    }
+    fn cachedAliases(a: std.mem.Allocator, store: *const storage.Store) ![]const []const u8 {
+        const result = try a.alloc([]const u8, store.state.identities.len);
+        for (store.state.identities, result) |identity, *address| address.* = identity.address;
+        return result;
+    }
+    fn invitationReceipt(a: std.mem.Allocator, store: *const storage.Store, ics: []const u8, req: Value) !?Value {
+        const id = try j.required(req, "operationId");
+        const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
+        const hash = storage.Store.hash(ics);
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, id)) {
+            if (!std.mem.eql(u8, operation.sourceInvitationHash, &hash)) return error.OperationConflict;
+            if (!std.mem.eql(u8, operation.invitationCalendarId, j.text(req, "calendarId"))) return error.OperationConflict;
+            var previous: invitation.Invitation = .{};
+            invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return error.OperationConflict;
+            if (previous.method != .reply or !std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), @tagName(status))) return error.OperationConflict;
+            const expected_attendee = j.text(req, "attendee");
+            if (expected_attendee.len > 0 and !std.ascii.eqlIgnoreCase(expected_attendee, previous.attendee.slice())) return error.OperationConflict;
+            const expected_source = j.text(req, "sourceHash");
+            if (expected_source.len > 0 and !std.mem.eql(u8, expected_source, &hash)) return error.OperationConflict;
+            return try j.value(a, operation);
+        };
+        return null;
+    }
+    const ConfirmedInvitationResponse = struct { status: []const u8 = "", outcome: []const u8 = "", calendarSync: ?@import("calendar_rsvp.zig").Result = null };
+    fn confirmedInvitationResponse(a: std.mem.Allocator, store: *const storage.Store, ics: []const u8, account: []const u8, aliases: []const []const u8) !ConfirmedInvitationResponse {
+        const source_hash = storage.Store.hash(ics);
+        var index = store.state.operations.len;
+        while (index > 0) {
+            index -= 1;
+            const operation = store.state.operations[index];
+            if (!std.mem.eql(u8, operation.sourceInvitationHash, &source_hash) or operation.icalendar.len == 0 or std.mem.eql(u8, operation.outcome, "rejected")) continue;
+            if (!std.mem.eql(u8, operation.outcome, "applied")) return .{ .outcome = "unknown" };
+            var sent: invitation.Invitation = .{};
+            invitation.parseDisplay(operation.icalendar, account, &.{}, &sent) catch continue;
+            var original: invitation.Invitation = .{};
+            invitation.parseDisplay(ics, account, aliases, &original) catch continue;
+            if (sent.method != .reply or !std.mem.eql(u8, sent.uid.slice(), original.uid.slice()) or !std.mem.eql(u8, sent.recurrence_id.slice(), original.recurrence_id.slice()) or !std.mem.eql(u8, sent.recurrence_parameters.slice(), original.recurrence_parameters.slice())) continue;
+            return .{ .outcome = "applied", .status = try a.dupe(u8, sent.attendee_status.slice()), .calendarSync = operation.calendarSync };
+        }
+        return .{};
+    }
+    fn calendarJob(s: *Session, a: std.mem.Allocator, req: Value) !Value {
+        return s.calendarHost(a).run(req);
+    }
+    fn calendarHost(s: *Session, a: std.mem.Allocator) @import("calendar_host.zig").Host {
+        return .{ .io = s.io, .allocator = a, .backing_allocator = s.allocator, .env = s.env, .config = &s.config, .options = s.options, .cache_root = s.cache_root, .source_context = s, .loadSourceFn = calendarSource, .access = .{ .context = s, .openFn = storeAccessOpen } };
+    }
+    fn syncInvitationCalendar(s: *Session, a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value, receipt: Value) !Value {
+        const sync = @import("calendar_rsvp.zig");
+        var result = try j.copyObject(a, receipt);
+        if (!std.mem.eql(u8, j.text(receipt, "outcome"), "applied")) {
+            try result.object.put(a, "calendarSync", try j.value(a, sync.Result{ .errorCode = "MailReplyNotConfirmed" }));
+            return result;
+        }
+        const status = std.meta.stringToEnum(invitation.Status, j.text(req, "status")) orelse return error.InvalidInvitationStatus;
+        if (j.get(receipt, "calendarSync")) |saved| if (saved != .null and !std.mem.eql(u8, j.text(saved, "state"), "unknown")) {
+            if (!try j.boolean(req, "reconcile", false) or !std.mem.eql(u8, j.text(saved, "state"), "skipped")) return result;
+        };
+        var outcome: sync.Result = .{ .errorCode = "DeclinedReplyOnly" };
+        if (status != .declined) {
+            const aliases = try cachedAliases(a, store);
+            // Persist the continuation before opening Calendar. A crash after
+            // its write cannot leave a completed-mail receipt that looks final
+            // or conceal Calendar's separately durable unknown journal claim.
+            for (store.state.operations) |*operation| if (std.mem.eql(u8, operation.id, j.text(receipt, "id"))) {
+                if (operation.calendarSync == null or operation.calendarSync.?.state != .unknown) operation.calendarSync = .{ .state = .unknown, .errorCode = "CalendarSyncPending", .canRetry = true };
+                store.save() catch {
+                    try result.object.put(a, "calendarSync", try j.value(a, sync.Result{ .errorCode = "CalendarReceiptPersistenceFailed" }));
+                    return result;
+                };
+                break;
+            };
+            store.release();
+            outcome = s.calendarHost(a).syncRsvp(req, .{ .source = ics, .verified_aliases = aliases }, if (status == .accepted) .accepted else .tentative) catch |err| sync.failed(err);
+            if (j.get(receipt, "calendarSync")) |saved| if (saved != .null and std.mem.eql(u8, j.text(saved, "state"), "unknown") and outcome.state == .skipped) {
+                outcome.state = .unknown;
+                outcome.canRetry = true;
+                outcome.calendarId = j.text(saved, "calendarId");
+                outcome.operationId = j.text(saved, "operationId");
+            };
+            s.reopenBody(a, store) catch {
+                try result.object.put(a, "calendarSync", try j.value(a, sync.Result{ .state = .unknown, .errorCode = "CalendarReceiptPersistenceFailed", .canRetry = true }));
+                return result;
+            };
+        }
+        const operation_id = j.text(receipt, "id");
+        for (store.state.operations) |*operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+            operation.calendarSync = outcome;
+            store.save() catch {
+                outcome.state = .unknown;
+                outcome.canRetry = true;
+                outcome.errorCode = "CalendarReceiptPersistenceFailed";
+            };
+            break;
+        };
+        try result.object.put(a, "calendarSync", try j.value(a, outcome));
+        return result;
+    }
+    fn resumeInvitationCalendar(s: *Session, a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value) !void {
+        const hash = storage.Store.hash(ics);
+        var index = store.state.operations.len;
+        while (index > 0) {
+            index -= 1;
+            const operation = store.state.operations[index];
+            if (!std.mem.eql(u8, operation.sourceInvitationHash, &hash) or operation.icalendar.len == 0 or std.mem.eql(u8, operation.outcome, "rejected")) continue;
+            if (!std.mem.eql(u8, operation.outcome, "applied")) return;
+            var previous: invitation.Invitation = .{};
+            invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return;
+            var request = try j.copyObject(a, req);
+            try request.object.put(a, "operationId", .{ .string = operation.id });
+            try request.object.put(a, "status", .{ .string = if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "ACCEPTED")) "accepted" else if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "TENTATIVE")) "tentative" else "declined" });
+            if (operation.invitationCalendarId.len != 0) try request.object.put(a, "calendarId", .{ .string = operation.invitationCalendarId });
+            _ = try s.syncInvitationCalendar(a, store, ics, request, try j.value(a, operation));
+            return;
+        }
+    }
+    fn calendarSource(context: *anyopaque, a: std.mem.Allocator, account: []const u8, request: Value) anyerror!@import("calendar_commands.zig").InvitationInput {
+        const s: *Session = @ptrCast(@alignCast(context));
+        try s.capability(a, account, request, "mail-read");
+        const message_id = try j.required(request, "messageId");
+        try @import("../bounded.zig").identifier(message_id);
+        var aliases: []const []const u8 = &.{};
+        const source = blk: {
+            var store = try s.openStore(a, account, false);
+            defer store.close();
+            var message = try s.read(a, &store, message_id, request);
+            if (message.invitation == null) for (message.attachments) |part| {
+                if (!@import("mime.zig").isCalendarPart(part.mimeType, part.filename)) continue;
+                message = try s.readMessage(a, &store, message_id, request, false);
+                break;
+            };
+            aliases = try cachedAliases(a, &store);
+            break :blk message.invitation orelse return error.NotInvitation;
+        };
+        // Verified aliases retained with this account make local inspection
+        // available offline. Calendar writes independently enforce their grant.
+        return .{ .source = source, .verified_aliases = aliases };
     }
     fn loadLabels(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, cached: bool) !Value {
         try s.capability(a, store.state.account, req, "mail-read");
@@ -651,7 +1075,7 @@ pub const Session = struct {
             const cached = if (uncertain) null else store.find(id);
             const memberships: []const []const u8 = if (cached) |entry| entry.message.labels else missing: {
                 if (!s.options.fixtures and !opened) {
-                    try network.init(s.io, a, &s.config, store.state.account, "mail.labels", req);
+                    try network.initWithAllocator(s.io, a, s.allocator, &s.config, store.state.account, "mail.labels", req);
                     remote_state.transport = network.transport();
                     opened = true;
                 }
@@ -838,7 +1262,7 @@ pub const Session = struct {
     }
     fn identities(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, cached: bool) !Value {
         try s.capability(a, store.state.account, req, "mail-read");
-        const configured = s.config.accounts[s.config.index(store.state.account) orelse return error.UnknownAccount];
+        const configured = &s.config.accounts[s.config.index(store.state.account) orelse return error.UnknownAccount];
         const primary: storage.Identity = .{ .address = configured.address.slice(), .name = configured.sender_name.slice(), .signature = configured.signature.slice(), .isDefault = true };
         if (!cached) {
             if (!s.options.fixtures) {
@@ -919,17 +1343,17 @@ pub const Session = struct {
         }
         var batch_remote: BatchRemote = .{ .session = s, .source = try j.value(a, .{ .account = address }) };
         if (s.options.fixtures) {
-            var store = try storage.Store.open(s.io, a, s.cache_root, address, s.options);
+            var store = try s.openStore(a, address, false);
             defer store.close();
             batch_remote.source = try s.fixtureProviderSource(a, &store);
         }
         var network: @import("gmail.zig").NetworkSession = undefined;
         if (!s.options.fixtures) {
-            try network.init(s.io, a, &s.config, address, "mail.modify-labels", req);
+            try network.initWithAllocator(s.io, a, s.allocator, &s.config, address, "mail.modify-labels", req);
             batch_remote.transport = network.transport();
         }
         defer if (!s.options.fixtures) network.close();
-        const context: batch.Context = .{ .io = s.io, .allocator = s.allocator, .root = s.cache_root, .account = address, .options = s.options, .provider = .{ .context = &batch_remote, .labelsFn = BatchRemote.labelsFn, .modifyFn = BatchRemote.modifyFn, .fixtureCheckpoint = if (s.options.fixtures) fixtureCheckpoint(batch_remote.source) else null } };
+        const context: batch.Context = .{ .io = s.io, .allocator = s.allocator, .root = s.cache_root, .account = address, .options = s.options, .access = .{ .context = s, .openFn = storeAccessOpen }, .provider = .{ .context = &batch_remote, .labelsFn = BatchRemote.labelsFn, .modifyFn = BatchRemote.modifyFn, .fixtureCheckpoint = if (s.options.fixtures) fixtureCheckpoint(batch_remote.source) else null } };
         if (undoing) return batch.undo(context, a, req);
         // Resolve names before recording the inverse: receipts must contain
         // provider IDs, so renamed labels do not change what undo restores.
@@ -948,22 +1372,23 @@ pub const Session = struct {
         store.close();
         // Keep defer close safe even if reopening fails after releasing the lock.
         store.lockHeld = false;
-        store.* = try storage.Store.open(s.io, a, s.cache_root, account, s.options);
+        store.* = try s.openStore(a, account, false);
         if (store.state.generation != expected) return error.CacheChanged;
     }
     fn reopenBody(s: *Session, a: std.mem.Allocator, store: *storage.Store) !void {
         const account = store.state.account;
         store.close();
-        store.* = try storage.Store.open(s.io, a, s.cache_root, account, s.options);
+        store.* = try s.openStore(a, account, false);
     }
     fn cacheStats(s: *Session, a: std.mem.Allocator, store: *storage.Store) !Value {
         const meter = if (s.meter) |m| m.snapshot() else null;
-        return j.value(a, .{ .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .allocatorReservationBytes = if (meter) |m| m.allocatorReservationBytes else null, .backingRejectedAllocations = if (meter) |m| m.backingRejectedAllocations else null, .lastRejectedAllocationBytes = if (meter) |m| m.lastRejectedAllocationBytes else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try storage.refreshActive(s.io, s.cache_root, store.state.account, s.options), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
+        const blobs = try store.blobStats();
+        return j.value(a, .{ .blobCount = blobs.count, .blobBytes = blobs.bytes, .blobBytesAreCiphertext = store.vault != null, .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .allocatorReservationBytes = if (meter) |m| m.allocatorReservationBytes else null, .backingRejectedAllocations = if (meter) |m| m.backingRejectedAllocations else null, .lastRejectedAllocationBytes = if (meter) |m| m.lastRejectedAllocationBytes else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try s.refreshActive(store.state.account), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
     }
     fn cachedDispatch(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
         const cmd = j.text(req, "cmd");
         if (std.mem.eql(u8, cmd, "mail.recipients")) try s.capability(a, address, req, "mail-read");
-        var store = try storage.Store.openCached(s.io, a, s.cache_root, address, s.options);
+        var store = try s.openStore(a, address, true);
         defer store.close();
         if (std.mem.eql(u8, cmd, "mail.recipients")) {
             var known = @import("recipient_cache.zig").Builder.init(a, address);
@@ -1018,6 +1443,7 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "mail.thread")) {
             const thread = try j.required(req, "threadId");
+            if (try j.boolean(req, "progressive", false)) if (try s.cachedProgressiveThread(a, &store, req)) |result| return result;
             var messages: std.ArrayList(t.Message) = .empty;
             var remaining: usize = t.Limits.thread_bytes;
             for (store.state.entries) |entry| if (std.mem.eql(u8, entry.message.threadId, thread)) {
@@ -1046,7 +1472,7 @@ pub const Session = struct {
         const query = j.text(req, "query");
         const label = j.text(req, "label");
         if (query.len > 4096 or label.len > 256) return error.InvalidQuery;
-        const plan = try cache_query.compile(query);
+        const plan = try (try cache_query.compile(query)).prepared(a);
         const timezone = @import("timezone.zig");
         var empty_env = std.process.Environ.Map.init(a);
         defer empty_env.deinit();
@@ -1104,20 +1530,22 @@ pub const Session = struct {
             try candidates.append(a, message);
             var field: []const u8 = "metadata";
             var source: []const u8 = message.subject;
-            if (cache_query.find(full.bodyText, term) != null) {
+            if (plan.findRange(full.bodyText, term) != null) {
                 field = "body";
                 source = full.bodyText;
-            } else if (cache_query.find(message.subject, term) == null) {
+            } else if (plan.findRange(message.subject, term) == null) {
                 source = message.snippet;
-                if (cache_query.find(source, term) == null) source = if (cache_query.find(message.from.name, term) != null) message.from.name else message.from.address;
+                if (plan.findRange(source, term) == null) source = if (plan.findRange(message.from.name, term) != null) message.from.name else message.from.address;
             }
-            const offset = cache_query.find(source, term) orelse 0;
+            const matched = plan.findRange(source, term);
+            const offset = if (matched) |range| range.start else 0;
             // A bounded UTF-8 excerpt starts at a codepoint boundary and never
             // exposes raw HTML/base64 or a second copy of the complete body.
             var start = offset -| 48;
             while (start < source.len and !std.unicode.utf8ValidateSlice(source[start..])) start += 1;
             const excerpt = utf8Prefix(source[start..], 192);
-            try highlights.append(a, .{ .messageId = message.id, .field = field, .offset = offset - start, .length = if (cache_query.find(source, term) != null) @min(term.len, excerpt.len -| (offset - start)) else 0, .excerpt = try a.dupe(u8, excerpt) });
+            const matched_length = if (matched) |range| range.end - range.start else 0;
+            try highlights.append(a, .{ .messageId = message.id, .field = field, .offset = offset - start, .length = @min(matched_length, excerpt.len -| (offset - start)), .excerpt = try a.dupe(u8, excerpt) });
         }
         var offset: usize = 0;
         const cursor = j.text(req, "cursor");
@@ -1271,7 +1699,9 @@ pub const Session = struct {
                 const tail = url[pos + 13 ..];
                 const end = std.mem.indexOfScalar(u8, tail, '?') orelse tail.len;
                 const id = try decodeUrlValue(a, tail[0..end]);
-                return j.get(j.get(self.source, "externalBodies") orelse return error.AttachmentNotFound, id) orelse error.AttachmentNotFound;
+                // Match Gmail's 404 mapping, including the shared one-time
+                // metadata retry for a verified but expired opaque token.
+                return j.get(j.get(self.source, "externalBodies") orelse return error.MessageNotFound, id) orelse error.MessageNotFound;
             }
             if (std.mem.indexOf(u8, url, "/messages/")) |pos| {
                 const tail = url[pos + 10 ..];
@@ -1391,8 +1821,9 @@ pub const Session = struct {
             try request.object.put(a, "barGrantOnly", .{ .bool = true });
         }
         try s.capability(a, address, request, "mail-read");
-        var lease = (try storage.RefreshLease.acquire(s.io, s.cache_root, address, s.options)) orelse {
-            var snapshot = try storage.Store.openCached(s.io, a, s.cache_root, address, s.options);
+        var lease: ?storage.RefreshLease = null;
+        if (s.vault_owner == null) lease = (try storage.RefreshLease.acquire(s.io, s.cache_root, address, s.options)) orelse {
+            var snapshot = try s.openStore(a, address, true);
             defer snapshot.close();
             var result = try cachedList(a, &snapshot, request);
             try result.object.put(a, "coalesced", .{ .bool = true });
@@ -1400,12 +1831,12 @@ pub const Session = struct {
             try result.object.put(a, "refreshed", .{ .bool = false });
             return result;
         };
-        defer lease.release();
+        defer if (lease) |*held| held.release();
         if (automatic) {
             var freshness_phase = std.heap.ArenaAllocator.init(s.allocator);
             defer freshness_phase.deinit();
             const fa = freshness_phase.allocator();
-            var snapshot = try storage.Store.openCached(s.io, fa, s.cache_root, address, s.options);
+            var snapshot = try s.openStore(fa, address, true);
             defer snapshot.close();
             if (try automaticFresh(fa, &snapshot, request, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), interval)) {
                 var result = try j.value(a, try cachedList(fa, &snapshot, request));
@@ -1439,7 +1870,8 @@ pub const Session = struct {
         for (store.state.entries) |entry| {
             if (!hasLabel(entry.message, "INBOX")) continue;
             if (entry.bytes == 0 and entry.bodyError.len == 0) return false;
-            if (entry.bytes != 0) {
+            if (entry.bytes != 0 and store.vault != null and !try store.bodyAvailable(entry.message.id)) return false;
+            if (entry.bytes != 0 and store.vault == null) {
                 const stat = store.dir.statFile(store.io, try store.fileName("mail", entry.message.id), .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) return false else return err;
                 if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0 or stat.size != entry.bytes) return false;
             }
@@ -1459,13 +1891,13 @@ pub const Session = struct {
         {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
-            var trim = try storage.Store.open(s.io, phase.allocator(), s.cache_root, address, s.options);
+            var trim = try s.openStore(phase.allocator(), address, false);
             defer trim.close();
         }
         {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
-            var snapshot = try storage.Store.openCached(s.io, phase.allocator(), s.cache_root, address, s.options);
+            var snapshot = try s.openStore(phase.allocator(), address, true);
             defer snapshot.close();
             expected = snapshot.state.generation;
             const key = try storage.Store.viewKey(a, address, j.text(req, "query"), j.text(req, "label"));
@@ -1490,7 +1922,7 @@ pub const Session = struct {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
             const pa = phase.allocator();
-            var provider_store = try storage.Store.open(s.io, pa, s.cache_root, address, s.options);
+            var provider_store = try s.openStore(pa, address, false);
             defer provider_store.close();
             if (provider_store.state.generation != expected) return error.CacheChanged;
             if (try reconcileFixtureSource(pa, &provider_store, raw_source)) {
@@ -1505,7 +1937,7 @@ pub const Session = struct {
             fixture_remote = .{ .session = s, .source = source };
             break :fixture_transport fixture_remote.transport();
         } else live_transport: {
-            try live.init(s.io, a, &s.config, address, "mail.refresh", req);
+            try live.initWithAllocator(s.io, a, s.allocator, &s.config, address, "mail.refresh", req);
             break :live_transport live.transport();
         };
         transport.progress_sink = s.progress_sink;
@@ -1518,7 +1950,7 @@ pub const Session = struct {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
             const ca = phase.allocator();
-            var commit = try storage.Store.open(s.io, ca, s.cache_root, address, s.options);
+            var commit = try s.openStore(ca, address, false);
             defer commit.close();
             if (commit.state.generation != expected) return error.CacheChanged;
             if (plan.resync) {
@@ -1577,7 +2009,7 @@ pub const Session = struct {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
             const sa = phase.allocator();
-            var snapshot = try storage.Store.openCached(s.io, sa, s.cache_root, address, s.options);
+            var snapshot = try s.openStore(sa, address, true);
             defer snapshot.close();
             // The authoritative scoped metadata is committed before body
             // prefetch. Publish only this view, never the global retention
@@ -1614,7 +2046,7 @@ pub const Session = struct {
             {
                 var check_phase = std.heap.ArenaAllocator.init(s.allocator);
                 defer check_phase.deinit();
-                var snapshot = try storage.Store.openCached(s.io, check_phase.allocator(), s.cache_root, address, s.options);
+                var snapshot = try s.openStore(check_phase.allocator(), address, true);
                 defer snapshot.close();
                 if (snapshot.state.generation != expected) return error.CacheChanged;
                 const entry = snapshot.find(id) orelse {
@@ -1645,7 +2077,7 @@ pub const Session = struct {
                 }
                 return err;
             };
-            var commit = try storage.Store.open(s.io, ma, s.cache_root, address, s.options);
+            var commit = try s.openStore(ma, address, false);
             defer commit.close();
             if (commit.state.generation != expected) return error.CacheChanged;
             if (body_result) |message| {
@@ -1670,7 +2102,7 @@ pub const Session = struct {
         var final_phase = std.heap.ArenaAllocator.init(s.allocator);
         defer final_phase.deinit();
         const fa = final_phase.allocator();
-        var commit = try storage.Store.open(s.io, fa, s.cache_root, address, s.options);
+        var commit = try s.openStore(fa, address, false);
         defer commit.close();
         if (commit.state.generation != expected) return error.CacheChanged;
         // This final synced index is the only checkpoint advancement. Failed or
@@ -1709,7 +2141,7 @@ pub const Session = struct {
             if (s.scenario("readonly") and !std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
             return;
         }
-        const registry = try @import("auth.zig").load(s.io, a, try j.required(req, "grantFile"));
+        const registry = try @import("auth.zig").loadConfigured(s.io, a, &s.config, if (s.config.credential_store == .vault) "" else try j.required(req, "grantFile"));
         if (@import("auth.zig").find(&registry, address)) |grant| {
             if (!grant.permits(name)) return error.PermissionDenied;
         } else if (!std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
@@ -1721,11 +2153,29 @@ pub const Session = struct {
         if (!s.options.fixtures) return error.LiveProviderNotReady;
         if (s.options.fixture_root) |root| {
             const key = if (std.mem.eql(u8, address, "personal@example.com")) "personal" else if (std.mem.eql(u8, address, "work@example.com")) "work" else if (std.mem.eql(u8, address, "optional@example.com")) "optional" else return error.FixtureAccountRequired;
-            const path = try std.fmt.allocPrint(a, "{s}/accounts/{s}.json", .{ root, key });
-            const raw = try std.Io.Dir.cwd().readFileAlloc(s.io, path, a, .limited(16 * 1024 * 1024));
+            const directory = try std.Io.Dir.cwd().openDir(s.io, root, .{});
+            defer directory.close(s.io);
+            var path_bytes: [64]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_bytes, "accounts/{s}.json", .{key});
+            const file = try directory.openFile(s.io, path, .{ .allow_directory = false });
+            defer file.close(s.io);
+            const stat = try file.stat(s.io);
+            if (stat.kind != .file or stat.size > 16 * 1024 * 1024) return error.StreamTooLong;
+            // A regular fixture file has a known bound. Growing an EOF reader
+            // inside an arena retains earlier buffers and can speculatively
+            // request far more memory than the complete provider envelope.
+            const raw = try a.alloc(u8, @intCast(stat.size));
+            var offset: usize = 0;
+            while (offset < raw.len) {
+                const count = try file.readPositional(s.io, &.{raw[offset..]}, offset);
+                if (count == 0) return error.UnexpectedEndOfInput;
+                offset += count;
+            }
+            var extra: [1]u8 = undefined;
+            if (try file.readPositional(s.io, &.{&extra}, offset) != 0) return error.StreamTooLong;
             // The immutable input and parsed tree share this allocator's
             // lifetime; only escaped strings need another owned allocation.
-            const source = try std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = t.Limits.request_bytes });
+            const source = try @import("fixture_json.zig").parse(a, raw);
             if (!std.mem.eql(u8, j.text(source, "account"), address)) return error.FixtureIdentityMismatch;
             return source;
         }
@@ -1831,7 +2281,7 @@ pub const Session = struct {
             }
             changed = true;
             if (deleted) {
-                try store.setFixtureRecord(record.id, &.{}, checkpoint, true);
+                try store.setFixtureRecord(record.id, &.{}, try store.allocator.dupe(u8, checkpoint), true);
                 try store.invalidate(record.id);
                 i += 1;
             } else {
@@ -1876,8 +2326,10 @@ pub const Session = struct {
     }
     fn fixtureProviderSource(s: *Session, a: std.mem.Allocator, store: *storage.Store) !Value {
         const source = try s.fixture(a, store.state.account);
-        try s.ensureFixtureLabels(a, store, source);
-        if (try reconcileFixtureSource(a, store, source)) {
+        // Provider bytes may live in a per-download arena. Any reconciled
+        // labels/checkpoints outlive that response with the open cache state.
+        try s.ensureFixtureLabels(store.allocator, store, source);
+        if (try reconcileFixtureSource(store.allocator, store, source)) {
             store.state.generation += 1;
             for (store.state.views) |*view| view.stale = true;
             try store.save();
@@ -1885,6 +2337,120 @@ pub const Session = struct {
         return overlayFixtureSource(a, store, source);
     }
 
+    fn cachedProgressiveThread(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !?Value {
+        const windows = @import("thread_window.zig");
+        const thread = try j.required(req, "threadId");
+        var members: std.ArrayList(windows.Member) = .empty;
+        for (store.state.entries, 0..) |entry, index| if (std.mem.eql(u8, entry.message.threadId, thread)) {
+            if (members.items.len == windows.maximum) return error.ThreadTooLarge;
+            try members.append(a, .{ .id = entry.message.id, .received_at = entry.message.receivedAt, .source_index = index });
+        };
+        if (members.items.len <= windows.limit and j.text(req, "beforeMessageId").len == 0 and j.text(req, "afterMessageId").len == 0 and j.text(req, "windowStartMessageId").len == 0 and j.text(req, "windowEndMessageId").len == 0) return null;
+        std.sort.heap(windows.Member, members.items, {}, windows.older);
+        const window = windows.choose(members.items, req) catch |err| return if (err == error.ThreadWindowChanged or err == error.MessageNotFound) error.CacheMiss else err;
+        const messages = try a.alloc(t.Message, window.end - window.start);
+        var remaining: usize = t.Limits.thread_bytes;
+        const focused = window.focus - window.start;
+        for (0..messages.len) |order| {
+            // Reserve the selected body before retained neighbors. The wire
+            // remains chronological regardless of this allocation order.
+            const index = if (order == 0) focused else if (order <= focused) order - 1 else order;
+            const member = members.items[window.start + index];
+            var scope: std.heap.ArenaAllocator = .init(s.allocator);
+            defer scope.deinit();
+            const metadata = store.state.entries[member.source_index].message;
+            var message = metadata;
+            message.bodyCached = false;
+            if (try store.readWithAllocator(scope.allocator(), member.id)) |cached| {
+                message = cached;
+                copyMembership(&message, metadata);
+                message.bodyCached = message.bodyCacheError.len == 0;
+            }
+            messages[index] = try gmail_decode.retainThreadMessage(message, a, &remaining);
+        }
+        var response = windows.response(messages, members.items.len, window);
+        response.cached = true;
+        response.partial = true; // Cache metadata cannot certify provider completeness.
+        return try mail_value.borrowed(a, response);
+    }
+    fn retainProgressiveThread(s: *Session, a: std.mem.Allocator, store: *storage.Store, result: Value, expected: u64) !Value {
+        const windows = @import("thread_window.zig");
+        var response = try j.decode(windows.Response, a, result);
+        const messages = try a.dupe(t.Message, response.messages);
+        var remaining: usize = t.Limits.thread_bytes;
+        response.deferredMessages = 0;
+        response.partial = response.olderMessages > 0 or response.newerMessages > 0;
+        const focused = for (messages, 0..) |message, index| {
+            if (std.mem.eql(u8, message.id, response.focusMessageId)) break index;
+        } else return error.ThreadWindowChanged;
+        for (0..messages.len) |order| {
+            const index = if (order == 0) focused else if (order <= focused) order - 1 else order;
+            const message = &messages[index];
+            var scope: std.heap.ArenaAllocator = .init(s.allocator);
+            defer scope.deinit();
+            if (!message.bodyCached and message.bodyCacheError.len == 0) {
+                if ((try store.readWithAllocator(scope.allocator(), message.id))) |cached| {
+                    var retained = cached;
+                    copyMembership(&retained, message.*);
+                    retained.bodyCached = retained.bodyCacheError.len == 0;
+                    message.* = retained;
+                }
+            }
+            message.* = try gmail_decode.retainThreadMessage(message.*, a, &remaining);
+            const full = message.bodyCached or message.bodyCacheError.len > 0;
+            if (full) try store.rememberAttachments(message.*);
+            if (store.state.generation == expected) try store.put(message.*, full) else if (full) try retainReadBody(store, message.*);
+            response.deferredMessages += @intFromBool(!message.bodyCached and message.bodyCacheError.len == 0);
+            response.partial = response.partial or message.metadataPartial or message.bodyCacheError.len > 0;
+        }
+        response.partial = response.partial or response.deferredMessages > 0;
+        response.messages = messages;
+        try store.save();
+        return mail_value.borrowed(a, response);
+    }
+    fn fixtureProgressiveThread(s: *Session, a: std.mem.Allocator, store: *storage.Store, source: Value, req: Value) !?Value {
+        const windows = @import("thread_window.zig");
+        const thread = try j.required(req, "threadId");
+        const raw = try array(source, "messages");
+        var members: std.ArrayList(windows.Member) = .empty;
+        for (raw, 0..) |value, index| if (std.mem.eql(u8, j.text(value, "threadId"), thread)) {
+            if (members.items.len == windows.maximum) return error.ThreadTooLarge;
+            const id = try j.required(value, "id");
+            try @import("../bounded.zig").identifier(id);
+            for (members.items) |previous| if (std.mem.eql(u8, previous.id, id)) return error.DuplicateMessage;
+            const received = if (j.get(value, "internalDate")) |date| @import("../bounded.zig").integer(date) catch 0 else 0;
+            try members.append(a, .{ .id = id, .received_at = received, .source_index = index });
+        };
+        for (store.state.outbox, 0..) |entry, index| if (std.mem.eql(u8, entry.threadId, thread)) {
+            if (members.items.len == windows.maximum) return error.ThreadTooLarge;
+            for (members.items) |previous| if (std.mem.eql(u8, previous.id, entry.id)) return error.DuplicateMessage;
+            try members.append(a, .{ .id = entry.id, .received_at = entry.receivedAt, .source_index = raw.len + index });
+        };
+        if (members.items.len <= windows.limit and j.text(req, "beforeMessageId").len == 0 and j.text(req, "afterMessageId").len == 0 and j.text(req, "windowStartMessageId").len == 0 and j.text(req, "windowEndMessageId").len == 0) return null;
+        std.sort.heap(windows.Member, members.items, {}, windows.older);
+        const window = try windows.choose(members.items, req);
+        var messages: std.ArrayList(t.Message) = .empty;
+        var remaining: usize = t.Limits.thread_bytes;
+        for (members.items[window.start..window.end], window.start..) |member, index| {
+            try s.io.checkCancel();
+            var scope: std.heap.ArenaAllocator = .init(s.allocator);
+            defer scope.deinit();
+            const temp = scope.allocator();
+            var message = if (member.source_index < raw.len) (if (index == window.focus) try s.normalize(temp, source, raw[member.source_index]) else metadata: {
+                // The fixture source contains full MIME. Match the provider's
+                // metadata projection before decoding an unopened card.
+                const original = raw[member.source_index];
+                const payload = j.get(original, "payload") orelse return error.InvalidProviderResponse;
+                const projected = try j.value(temp, .{ .id = member.id, .threadId = thread, .internalDate = j.text(original, "internalDate"), .labelIds = j.get(original, "labelIds") orelse .null, .snippet = j.text(original, "snippet"), .payload = .{ .mimeType = j.text(payload, "mimeType"), .headers = j.get(payload, "headers") orelse .null } });
+                break :metadata try gmail_decode.normalizeMetadata(projected, temp);
+            }) else store.state.outbox[member.source_index - raw.len];
+            if (index == window.focus and member.source_index >= raw.len) message = (try store.readOutboxWithAllocator(temp, member.id)) orelse return error.MessageNotFound;
+            message.bodyCached = index == window.focus and message.bodyCacheError.len == 0;
+            try messages.append(a, try gmail_decode.retainThreadMessage(message, a, &remaining));
+        }
+        const result = try mail_value.borrowed(a, windows.response(messages.items, members.items.len, window));
+        return try s.retainProgressiveThread(a, store, result, store.state.generation);
+    }
     fn normalize(_: *Session, a: std.mem.Allocator, source: Value, v: Value) !t.Message {
         return @import("gmail_decode.zig").normalize(v, a, j.get(source, "externalBodies"));
     }
@@ -1906,61 +2472,269 @@ pub const Session = struct {
         }
     };
     fn captureOriginal(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, message: t.Message) !t.Original {
+        const plan = try @import("original_mail.zig").resourcePlanWithLimit(message.bodyHtml orelse return error.OriginalHtmlUnavailable, message.attachments, t.Limits.attachment_bytes);
+        var selected = message;
+        const resources = try a.alloc(t.Attachment, plan.count);
+        for (plan.indices[0..plan.count], resources) |index, *resource| resource.* = message.attachments[index];
+        selected.attachments = resources;
+        const prepared = try s.prepareForwardAttachments(a, store, req, selected, true);
         var source: ConversationAttachments = .{ .session = s, .store = store, .request = req };
-        return conversation_source.captureOriginal(a, message, source.adapter());
+        return conversation_source.captureOriginal(a, prepared, source.adapter());
+    }
+    fn prepareForwardAttachments(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, message: t.Message, preserve: bool) !t.Message {
+        if (message.attachments.len > (if (preserve) t.Limits.attachments + t.Limits.related_resources else t.Limits.attachments)) return error.TooManyAttachments;
+        var total: usize = 0;
+        var embedded: usize = 0;
+        for (message.attachments) |attachment| {
+            total = std.math.add(usize, total, attachment.size) catch return error.AttachmentsTooLarge;
+            if (attachment.blobId == null) embedded = std.math.add(usize, embedded, attachment.size) catch return error.AttachmentsTooLarge;
+        }
+        if (total > t.Limits.attachment_bytes) return error.AttachmentsTooLarge;
+        if (preserve) {
+            if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
+            _ = try @import("original_mail.zig").resourcePlanWithLimit(message.bodyHtml orelse return error.OriginalHtmlUnavailable, message.attachments, t.Limits.attachment_bytes);
+        }
+        if (embedded <= t.Limits.body_bytes) return message;
+        var prepared = message;
+        const attachments = try a.dupe(t.Attachment, message.attachments);
+        // Both file categories keep exact identity metadata. Spill their
+        // bytes together when the aggregate embedded tier is exceeded.
+        for (attachments) |*attachment| if (attachment.blobId == null and attachment.size != 0) {
+            var request = try j.copyObject(a, req);
+            try request.object.put(a, "attachmentId", .{ .string = attachment.id });
+            attachment.* = try s.spillAttachment(a, store, request, message.id, attachment.*, false);
+        };
+        prepared.attachments = attachments;
+        return prepared;
+    }
+    fn reserveIncoming(s: *Session, a: std.mem.Allocator, store: *storage.Store, size: usize) !@import("attachment_blob.zig").Incoming {
+        const account = store.state.account;
+        store.release();
+        var phase = std.heap.ArenaAllocator.init(s.allocator);
+        defer phase.deinit();
+        var latest = try s.openStore(phase.allocator(), account, false);
+        defer latest.close();
+        var incoming = try @import("attachment_blob.zig").Incoming.create(&latest, size);
+        errdefer incoming.close();
+        // The lease owns its file/directory handles; only its tiny name needs
+        // to escape the temporary index arena across the unlocked download.
+        incoming.name = try a.dupe(u8, incoming.name);
+        return incoming;
+    }
+    fn commitIncoming(s: *Session, a: std.mem.Allocator, store: *storage.Store, incoming: *@import("attachment_blob.zig").Incoming, attachment: t.Attachment, reopen_after: bool) !t.Attachment {
+        store.release();
+        const result = blk: {
+            var phase = std.heap.ArenaAllocator.init(s.allocator);
+            defer phase.deinit();
+            var latest = try s.openStore(phase.allocator(), store.state.account, false);
+            defer latest.close();
+            break :blk try @import("gmail.zig").retainAttachment(a, try incoming.commit(&latest, attachment));
+        };
+        if (reopen_after) try s.reopenBody(a, store);
+        return result;
+    }
+    fn spillAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, message_id: []const u8, attachment: t.Attachment, reopen_after: bool) !t.Attachment {
+        var incoming = try s.reserveIncoming(a, store, attachment.size);
+        defer incoming.close();
+        const downloaded = blk: {
+            var phase = std.heap.ArenaAllocator.init(s.allocator);
+            defer phase.deinit();
+            var buffer: [64 * 1024]u8 = undefined;
+            var writer = incoming.writer(&buffer);
+            const value = if (attachment.data.len > 0 or attachment.size == 0) inline_data: {
+                try @import("gmail.zig").writeAttachmentData(&writer.interface, attachment);
+                break :inline_data attachment;
+            } else if (s.options.fixtures) fixture: {
+                var peer: FixtureRemote = .{ .session = s, .source = try s.fixture(phase.allocator(), store.state.account) };
+                break :fixture try @import("gmail.zig").attachmentAuthorizedToWriter(phase.allocator(), store.state.account, &.{"mail-read"}, peer.transport(), message_id, attachment, &writer.interface);
+            } else try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeAttachmentToWriterWithAllocator, .{ s.io, phase.allocator(), s.allocator, &s.config, store.state.account, req, attachment, &writer.interface });
+            try writer.flush();
+            var metadata = value;
+            metadata.data = "";
+            break :blk try @import("gmail.zig").retainAttachment(a, metadata);
+        };
+        try incoming.finish(downloaded.size);
+        return s.commitIncoming(a, store, &incoming, downloaded, reopen_after);
     }
     fn forwardRaw(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, format: t.BodyFormat) !Value {
         try s.capability(a, store.state.account, req, "mail-read");
         const id = try j.required(req, "messageId");
-        const raw = if (s.options.fixtures) blk: {
-            const source = try s.fixtureProviderSource(a, store);
-            for (try array(source, "messages")) |message| if (std.mem.eql(u8, j.text(message, "id"), id)) {
-                const bytes = try @import("gmail.zig").decodeRawMessage(a, message, id);
-                store.state.fixtureCalls += 1;
-                break :blk bytes;
-            };
-            return error.MessageNotFound;
-        } else blk: {
-            const account = store.state.account;
-            store.release();
-            const bytes = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeRawMessage, .{ s.io, a, &s.config, account, req, s.progress_sink });
-            try s.reopenBody(a, store);
+        var incoming = try s.reserveIncoming(a, store, t.Limits.attachment_bytes);
+        defer incoming.close();
+        const size = blk: {
+            var phase = std.heap.ArenaAllocator.init(s.allocator);
+            defer phase.deinit();
+            var buffer: [64 * 1024]u8 = undefined;
+            var writer = incoming.writer(&buffer);
+            const bytes = if (s.options.fixtures) fixture: {
+                const source = try s.fixture(phase.allocator(), store.state.account);
+                for (try array(source, "messages")) |message| if (std.mem.eql(u8, j.text(message, "id"), id)) {
+                    var decoder = try @import("attachment_json.zig").Decoder.initRaw(&writer.interface, id);
+                    std.json.Stringify.value(.{ .id = j.text(message, "id"), .raw = try j.required(message, "raw") }, .{}, &decoder.writer) catch |err| return decoder.failure orelse err;
+                    try decoder.finish();
+                    break :fixture decoder.bytes;
+                };
+                return error.MessageNotFound;
+            } else try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeRawMessageToWriter, .{ s.io, s.allocator, &s.config, store.state.account, req, &writer.interface });
+            try writer.flush();
             break :blk bytes;
         };
-        const draft = try conversation_source.forwardRaw(a, raw, format);
-        return j.value(a, try store.putDraft(draft, null));
+        try incoming.finish(size);
+        if (incoming.sealed != null) try s.reopenBody(a, store);
+        const draft = if (size <= t.Limits.body_bytes) small: {
+            // Keep the portable representation for small originals; the
+            // download/decode phase has already been reclaimed before this.
+            const raw = try a.alloc(u8, size);
+            var source = try incoming.reader();
+            defer source.close();
+            var offset: usize = 0;
+            while (offset < raw.len) {
+                const count = try @import("attachment_blob.zig").Incoming.Reader.read(&source, raw[offset..]);
+                if (count == 0) return error.BodySizeMismatch;
+                offset += count;
+            }
+            var extra: [1]u8 = undefined;
+            if (try @import("attachment_blob.zig").Incoming.Reader.read(&source, &extra) != 0) return error.BodySizeMismatch;
+            break :small try conversation_source.forwardRaw(a, raw, format);
+        } else large: {
+            const source = source: {
+                var reader = try incoming.reader();
+                defer reader.close();
+                break :source try @import("mime.zig").originalSourceStream(a, .{ .ctx = &reader, .readFn = @import("attachment_blob.zig").Incoming.Reader.read }, size);
+            };
+            const attachments = try a.alloc(t.Attachment, 1);
+            attachments[0] = try s.commitIncoming(a, store, &incoming, source.attachment, false);
+            const large_draft: t.Draft = .{
+                .subject = if (std.ascii.startsWithIgnoreCase(source.subject, "Fwd:")) source.subject else try std.fmt.allocPrint(a, "Fwd: {s}", .{source.subject}),
+                .bodyFormat = format,
+                .attachments = attachments,
+            };
+            try validateDraft(large_draft, false);
+            break :large large_draft;
+        };
+        if (!store.lockHeld) try s.reopenBody(a, store);
+        if (s.options.fixtures) store.state.fixtureCalls += 1;
+        return mail_value.borrowed(a, try store.putDraft(draft, null));
+    }
+    fn exactAttachment(attachments: []const t.Attachment, id: []const u8) !?t.Attachment {
+        var selected: ?t.Attachment = null;
+        for (attachments) |attachment| if (std.mem.eql(u8, attachment.id, id)) {
+            if (selected != null) return error.AmbiguousAttachment;
+            selected = attachment;
+        };
+        return selected;
+    }
+    const AttachmentSnapshot = struct { thread_id: []const u8, attachment: t.Attachment };
+    fn pinAttachment(store: *storage.Store, message_id: []const u8, attachment_id: []const u8) !?AttachmentSnapshot {
+        const receipt = try @import("attachment_receipts.zig").find(store.state.attachmentReceipts, message_id, attachment_id);
+        if (store.find(message_id)) |entry| if (try exactAttachment(entry.message.attachments, attachment_id)) |attachment| {
+            if (receipt) |verified| if (!std.mem.eql(u8, verified.threadId, entry.message.threadId) or !sameAttachmentIdentity(verified.attachment, attachment)) return error.AmbiguousAttachment;
+            return .{ .thread_id = entry.message.threadId, .attachment = attachment };
+        };
+        if (receipt) |verified| return .{ .thread_id = verified.threadId, .attachment = verified.attachment };
+        return null;
+    }
+    fn knownAttachment(message: t.Message, attachment_id: []const u8, snapshot: ?AttachmentSnapshot) !t.Attachment {
+        if (try exactAttachment(message.attachments, attachment_id)) |attachment| return attachment;
+        // A FULL thread response can issue new opaque attachment tokens while
+        // the immutable cached body retains its earlier descriptors. Its
+        // verified metadata still records the exact token shown in the thread.
+        // Pin it before reading: an evicted/refused body requires a fresh FULL
+        // read, which may replace that metadata with yet another provider token.
+        // Resolve only that same message's exact ID, never a filename or a
+        // neighbor's attachment. The bounded receipt table retains previously
+        // displayed versions across later reads; never-observed IDs still fail.
+        const selected = snapshot orelse return error.AttachmentNotFound;
+        if (!std.mem.eql(u8, selected.thread_id, message.threadId)) return error.MessageIdentityMismatch;
+        return selected.attachment;
+    }
+    fn retainReadBody(store: *storage.Store, message: t.Message) !void {
+        const retained = store.find(message.id) orelse return;
+        if (!std.mem.eql(u8, retained.message.threadId, message.threadId)) return error.MessageIdentityMismatch;
+        _ = try store.putBody(message);
+        if (message.bodyCacheError.len != 0 or message.metadataPartial) return;
+        // A concurrent refresh owns current labels and ordering. A FULL read
+        // can still verify new opaque attachment tokens for the retained ID,
+        // even when putBody keeps an older immutable body. Never resurrect an
+        // evicted message or overwrite another message/thread's descriptors.
+        const entry = store.find(message.id) orelse return;
+        if (!std.mem.eql(u8, entry.message.threadId, message.threadId)) return error.MessageIdentityMismatch;
+        const metadata = @constCast(try draft_summary.attachmentMetadata(store.allocator, message.attachments));
+        for (metadata) |*attachment| {
+            if (attachment.blobId != null) continue;
+            const previous = (try exactAttachment(entry.message.attachments, attachment.id)) orelse continue;
+            if (previous.blobId != null and sameAttachmentIdentity(previous, attachment.*)) attachment.blobId = previous.blobId;
+        }
+        entry.message.attachments = metadata;
+    }
+    fn sameAttachmentIdentity(left: t.Attachment, right: t.Attachment) bool {
+        if (left.size != right.size) return false;
+        inline for (.{ "id", "filename", "mimeType" }) |field| {
+            if (!std.mem.eql(u8, @field(left, field), @field(right, field))) return false;
+        }
+        inline for (.{ "contentId", "disposition", "contentLocation" }) |field| {
+            const old = @field(left, field);
+            const current = @field(right, field);
+            if ((old == null) != (current == null)) return false;
+            if (old) |value| if (!std.mem.eql(u8, value, current.?)) return false;
+        }
+        return true;
     }
     fn fetchKnownAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, known_message: ?t.Message) !t.Attachment {
         try s.capability(a, store.state.account, req, "mail-read");
         const message_id = try j.required(req, "messageId");
         const attachment_id = try j.required(req, "attachmentId");
+        const snapshot = try pinAttachment(store, message_id, attachment_id);
         const message = known_message orelse try s.read(a, store, message_id, req);
         if (!std.mem.eql(u8, message.id, message_id)) return error.MessageIdentityMismatch;
-        for (message.attachments) |selected| if (std.mem.eql(u8, selected.id, attachment_id)) {
-            if (selected.blobId != null) return selected;
-            if (selected.data.len > 0 or selected.size == 0) return selected;
-            if (s.options.fixtures) {
-                var fixture_peer: FixtureRemote = .{ .session = s, .source = try s.fixtureProviderSource(a, store) };
-                return @import("gmail.zig").attachmentAuthorized(a, store.state.account, &.{"mail-read"}, fixture_peer.transport(), message_id, selected);
-            }
-            const account = store.state.account;
-            if (selected.size > t.Limits.body_bytes) {
-                var incoming = try @import("attachment_blob.zig").Incoming.create(store, selected.size);
-                defer incoming.close();
-                var buffer: [64 * 1024]u8 = undefined;
-                var writer = incoming.file.writer(s.io, &buffer);
-                store.release();
-                const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, selected, &writer.interface });
-                try writer.flush();
-                try s.reopenBody(a, store);
-                return incoming.commit(store, downloaded);
-            }
-            store.release();
-            const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachment, .{ s.io, a, &s.config, account, req, selected, s.progress_sink });
-            try s.reopenBody(a, store);
-            return downloaded;
-        };
-        return error.AttachmentNotFound;
+        const selected = try knownAttachment(message, attachment_id, snapshot);
+        return s.fetchSelectedAttachment(a, store, req, message_id, selected, known_message == null);
+    }
+    fn verifyAttachmentBacking(s: *Session, store: *storage.Store, selected: t.Attachment) !void {
+        // Downloading earlier parts releases the caller's transaction. Its
+        // encrypted object map also predates any newly committed blob. Borrow
+        // one current transaction for verification, then reclaim its index
+        // before hydrating the next part or reopening the draft transaction.
+        if (store.vault != null and !store.lockHeld) {
+            var phase: std.heap.ArenaAllocator = .init(s.allocator);
+            defer phase.deinit();
+            var current = try s.openStore(phase.allocator(), store.state.account, true);
+            defer current.close();
+            var stream = try @import("attachment_blob.zig").Stream.init(&current, selected);
+            stream.close();
+            return;
+        }
+        var stream = try @import("attachment_blob.zig").Stream.init(store, selected);
+        stream.close();
+    }
+    fn fetchSelectedAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, message_id: []const u8, selected: t.Attachment, reopen_after: bool) !t.Attachment {
+        if (selected.blobId != null) {
+            s.verifyAttachmentBacking(store, selected) catch |err| {
+                if (err != error.AttachmentHandleNotFound) return err;
+                // A local cache miss does not invalidate the same message's
+                // verified provider descriptor. Corruption is never retried.
+                var remote_attachment = selected;
+                remote_attachment.blobId = null;
+                return s.spillAttachment(a, store, req, message_id, remote_attachment, reopen_after);
+            };
+            return selected;
+        }
+        if (selected.data.len > 0 or selected.size == 0) return selected;
+        if (selected.size > t.Limits.body_bytes) return s.spillAttachment(a, store, req, message_id, selected, reopen_after);
+        if (s.options.fixtures) {
+            var phase = std.heap.ArenaAllocator.init(s.allocator);
+            defer phase.deinit();
+            var fixture_peer: FixtureRemote = .{ .session = s, .source = try s.fixture(phase.allocator(), store.state.account) };
+            const downloaded = try @import("gmail.zig").attachmentAuthorized(phase.allocator(), store.state.account, &.{"mail-read"}, fixture_peer.transport(), message_id, selected);
+            return @import("gmail.zig").retainAttachment(a, downloaded);
+        }
+        const account = store.state.account;
+        store.release();
+        const downloaded = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeAttachmentWithAllocator, .{ s.io, a, s.allocator, &s.config, account, req, selected, s.progress_sink });
+        // Conversation capture needs current cache state only when saving the
+        // completed draft; per-file snapshots belong to short arenas above.
+        if (reopen_after) try s.reopenBody(a, store);
+        return downloaded;
     }
     fn saveKnownAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
         try s.capability(a, store.state.account, req, "mail-read");
@@ -1970,13 +2744,10 @@ pub const Session = struct {
         if (path.len == 0 or path.len > 4096 or !@import("file_dialog.zig").validText(path)) return error.InvalidAttachmentPath;
         const leaf = std.fs.path.basename(path);
         if (leaf.len == 0 or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return error.InvalidAttachmentPath;
+        const snapshot = try pinAttachment(store, message_id, attachment_id);
         const message = try s.read(a, store, message_id, req);
-        var selected: ?t.Attachment = null;
-        for (message.attachments) |attachment| if (std.mem.eql(u8, attachment.id, attachment_id)) {
-            selected = attachment;
-            break;
-        };
-        const attachment = selected orelse return error.AttachmentNotFound;
+        if (!std.mem.eql(u8, message.id, message_id)) return error.MessageIdentityMismatch;
+        const attachment = try knownAttachment(message, attachment_id, snapshot);
         if (attachment.size > t.Limits.incoming_attachment_bytes) return error.AttachmentsTooLarge;
         var directory = try @import("path_completion.zig").openDirectory(s.io, std.fs.path.dirname(path) orelse ".", false);
         defer directory.close(s.io);
@@ -1984,29 +2755,27 @@ pub const Session = struct {
         defer destination.deinit(s.io);
         var buffer: [64 * 1024]u8 = undefined;
         var writer = destination.file.writer(s.io, &buffer);
-        if (attachment.blobId != null) {
-            var source = try @import("attachment_blob.zig").Stream.init(store, attachment);
+        var local: ?@import("attachment_blob.zig").Stream = if (attachment.blobId != null) @import("attachment_blob.zig").Stream.init(store, attachment) catch |err| if (err == error.AttachmentHandleNotFound) null else return err else null;
+        if (local) |*source| {
             defer source.close();
             var chunk: [64 * 1024]u8 = undefined;
             while (true) {
-                const count = try @import("attachment_blob.zig").Stream.read(&source, &chunk);
+                const count = try @import("attachment_blob.zig").Stream.read(source, &chunk);
                 if (count == 0) break;
                 try writer.interface.writeAll(chunk[0..count]);
             }
         } else if (attachment.data.len > 0 or attachment.size == 0) {
-            const decoded = try @import("mime.zig").decodeBase64Url(attachment.data, a);
-            if (decoded.len != attachment.size) return error.BodySizeMismatch;
-            try writer.interface.writeAll(decoded);
+            try @import("gmail.zig").writeAttachmentData(&writer.interface, attachment);
         } else {
             if (s.options.fixtures) {
-                const fetched = try s.fetchKnownAttachment(a, store, req, message);
-                const decoded = try @import("mime.zig").decodeBase64Url(fetched.data, a);
-                if (decoded.len != attachment.size) return error.BodySizeMismatch;
-                try writer.interface.writeAll(decoded);
+                var phase = std.heap.ArenaAllocator.init(s.allocator);
+                defer phase.deinit();
+                var peer: FixtureRemote = .{ .session = s, .source = try s.fixture(phase.allocator(), store.state.account) };
+                _ = try @import("gmail.zig").attachmentAuthorizedToWriter(phase.allocator(), store.state.account, &.{"mail-read"}, peer.transport(), message_id, attachment, &writer.interface);
             } else {
                 const account = store.state.account;
                 store.release();
-                _ = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeAttachmentToWriter, .{ s.io, a, &s.config, account, req, attachment, &writer.interface });
+                _ = try @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("../attachment_limits.zig").download_seconds), @import("gmail.zig").executeAttachmentToWriterWithAllocator, .{ s.io, a, s.allocator, &s.config, account, req, attachment, &writer.interface });
             }
         }
         try writer.flush();
@@ -2035,9 +2804,10 @@ pub const Session = struct {
             store.release();
             var m = try j.decode(t.Message, a, try s.remote(a, account, "mail.read", req));
             try s.reopenBody(a, store);
+            try store.rememberAttachments(m);
             if (!allow_cached) _ = try store.upgradeInvitation(m);
             if (store.state.generation == expected) try store.put(m, true) else {
-                _ = try store.putBody(m);
+                try retainReadBody(store, m);
                 if (store.find(m.id)) |entry| {
                     copyMembership(&m, entry.message);
                 }
@@ -2056,6 +2826,7 @@ pub const Session = struct {
                 copyMembership(&m, existing.message);
             }
             store.state.fixtureCalls += 1;
+            try store.rememberAttachments(m);
             if (!allow_cached) _ = try store.upgradeInvitation(m);
             try store.put(m, true);
             try store.save();
@@ -2283,6 +3054,7 @@ pub const Session = struct {
             try validateDraft(draft, true);
             _ = try markdown_mail.prepare(a, draft);
             const digest = storage.Store.hash(try operationPayload(a, draft, store.state.account, null));
+            try @import("draft_gmail_commands.zig").permitSend(store, a, req, draft, &digest);
             const entry = try send_queue.stage(store, draft.id, try j.required(req, "operationId"), &digest, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), try send_queue.delay(req));
             return send_queue.receipt(a, store, entry.*);
         }
@@ -2299,7 +3071,7 @@ pub const Session = struct {
         if (send_now and wait_for_due) return error.WaitRequiresQueueProcess;
         try s.capability(a, store.state.account, req, "mail-send");
         var entry = try send_queue.find(store, id);
-        if (entry.state != .queued) return send_queue.receipt(a, store, entry.*);
+        if (entry.state != .queued or (entry.resumeRequired and !send_now)) return send_queue.receipt(a, store, entry.*);
         const remaining = entry.dueAtMs - std.Io.Timestamp.now(s.io, .real).toMilliseconds();
         // Send now claims the same reviewed intent through the normal durable
         // submission path. It skips only the countdown, never the draft hash,
@@ -2311,7 +3083,7 @@ pub const Session = struct {
             try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(remaining) }).sleep(s.io);
             try s.reopenBody(a, store);
             entry = try send_queue.find(store, id);
-            if (entry.state != .queued) return send_queue.receipt(a, store, entry.*);
+            if (entry.state != .queued or entry.resumeRequired) return send_queue.receipt(a, store, entry.*);
             if (entry.dueAtMs > std.Io.Timestamp.now(s.io, .real).toMilliseconds()) return error.QueueNotDue;
         }
         const draft = try store.draft(entry.draftId);
@@ -2324,6 +3096,7 @@ pub const Session = struct {
         }
         // The durable claim precedes any send code. After a crash, submitting
         // remains fenced even if the operation journal was not written yet.
+        entry.resumeRequired = false;
         entry.state = .submitting;
         try store.save();
         var request = try j.copyObject(a, req);
@@ -2347,6 +3120,15 @@ pub const Session = struct {
         store.save() catch return error.UnknownOutcome;
         return send_queue.receipt(a, store, entry.*);
     }
+    fn reopenSendOperation(s: *Session, a: std.mem.Allocator, store: *storage.Store, previous: *storage.Operation) !*storage.Operation {
+        if (store.vault == null or store.lockHeld) return previous;
+        try s.reopenBody(a, store);
+        for (store.state.operations) |*current| if (std.mem.eql(u8, current.id, previous.id)) {
+            if (!std.mem.eql(u8, current.hash, previous.hash)) return error.UnknownOutcome;
+            return current;
+        };
+        return error.UnknownOutcome;
+    }
     fn send(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, draft: t.Draft, calendar: ?[]const u8, claimed_queue: bool) !Value {
         try s.capability(a, store.state.account, req, if (calendar != null) "calendar-rsvp" else "mail-send");
         try validateDraft(draft, true);
@@ -2355,6 +3137,7 @@ pub const Session = struct {
         try recipients.validateHeader(operation_id);
         const payload = try operationPayload(a, draft, store.state.account, calendar);
         const digest = storage.Store.hash(payload);
+        try @import("draft_gmail_commands.zig").permitSend(store, a, req, draft, &digest);
         for (store.state.sendQueue) |entry| {
             const same_operation = std.mem.eql(u8, entry.operationId, operation_id);
             const same_content = std.mem.eql(u8, entry.hash, &digest);
@@ -2403,32 +3186,50 @@ pub const Session = struct {
                 try target.append(mailbox);
             };
             const mime = @import("mime.zig");
-            var compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = if (s.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(s.io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references };
-            if (@import("send_spool.zig").required(draft.attachments)) {
-                spool = try @import("send_spool.zig").create(store, compose, draft.attachments);
+            var compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = if (s.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(s.io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references };
+            if (@import("send_spool.zig").required(draft.attachments) or @import("send_spool.zig").required(prepared.resources)) {
+                spool = try @import("send_spool.zig").create(store, compose, draft.attachments, prepared.resources);
             } else {
+                compose.related = try mime.composeAttachments(prepared.resources, a);
                 compose.attachments = try mime.composeAttachments(draft.attachments, a);
-                const wire = try a.alloc(u8, mime.max_raw_bytes);
-                const raw = mime.encode(compose, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
-                // Legacy small drafts retain the bounded JSON send wire.
-                if (std.base64.url_safe_no_pad.Encoder.calcSize(raw.len) > t.Limits.request_bytes - 1024) return error.FormTooLarge;
-                if (s.options.fixtures) {
-                    const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
-                    fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+                // MIME base64 and the JSON transport's outer base64 both grow
+                // inline files. Measure the actual wire before choosing the
+                // transport, including preserved images and generated HTML.
+                // A normal attachment must not hit the small JSON frame cap.
+                var count_buffer: [16 * 1024]u8 = undefined;
+                var counting = std.Io.Writer.Discarding.init(&count_buffer);
+                try mime.encodeTo(compose, &counting.writer);
+                const raw_size: usize = @intCast(counting.fullCount());
+                if (raw_size > mime.max_raw_bytes or std.base64.url_safe_no_pad.Encoder.calcSize(raw_size) > t.Limits.request_bytes - 1024) {
+                    spool = try @import("send_spool.zig").create(store, compose, draft.attachments, prepared.resources);
+                } else {
+                    const wire = try a.alloc(u8, raw_size);
+                    const raw = mime.encode(compose, wire) catch |err| return if (err == error.WriteFailed) error.FormTooLarge else err;
+                    if (s.options.fixtures) {
+                        const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
+                        fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+                    }
                 }
             }
         }
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
         const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
-        try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "" });
+        try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "", .sourceInvitationHash = if (calendar != null) j.text(req, "_sourceInvitationHash") else "", .invitationCalendarId = if (calendar != null) j.text(req, "calendarId") else "" });
         store.state.operations = operations.items;
         try store.save();
-        const operation = &store.state.operations[store.state.operations.len - 1];
+        var operation = &store.state.operations[store.state.operations.len - 1];
         if (!s.options.fixtures) {
             var request = try j.copyObject(a, req);
             try request.object.put(a, "draft", try j.value(a, draft));
             if (calendar) |ics| try request.object.put(a, "preparedCalendar", .{ .string = ics });
+            if (store.vault != null) store.release();
             const result = (if (spool) |*file| @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeSpool, .{ s.io, a, &s.config, store.state.account, request, draft, file, operation.rfcMessageId }) else s.remote(a, store.state.account, if (calendar != null) "invitation.reply" else "mail.send", request)) catch |err| {
+                operation = s.reopenSendOperation(a, store, operation) catch |reopen_error| {
+                    operation.errorCode = @errorName(reopen_error);
+                    operation.outcome = "unknown";
+                    return j.value(a, operation.*);
+                };
+                if (!std.mem.eql(u8, operation.outcome, "unknown")) return j.value(a, operation.*);
                 operation.errorCode = @errorName(err);
                 operation.outcome = if (@import("send_outcome.zig").rejected(err)) "rejected" else "unknown";
                 store.save() catch {
@@ -2436,6 +3237,12 @@ pub const Session = struct {
                 };
                 return j.value(a, operation.*);
             };
+            operation = s.reopenSendOperation(a, store, operation) catch |reopen_error| {
+                operation.errorCode = @errorName(reopen_error);
+                operation.outcome = "unknown";
+                return j.value(a, operation.*);
+            };
+            if (!std.mem.eql(u8, operation.outcome, "unknown")) return j.value(a, operation.*);
             const outcome = j.text(result, "outcome");
             operation.outcome = if (std.mem.eql(u8, outcome, "applied")) "applied" else if (std.mem.eql(u8, outcome, "rejected")) "rejected" else "unknown";
             operation.messageId = j.text(result, "messageId");
@@ -2453,6 +3260,10 @@ pub const Session = struct {
             var sent_attachments: std.ArrayList(t.Attachment) = .empty;
             try sent_attachments.appendSlice(a, prepared.resources);
             try sent_attachments.appendSlice(a, draft.attachments);
+            // Outgoing files may have no provider retrieval ID (RAW forwards
+            // are one example). A synthetic Sent message, like a provider
+            // response, owns a new message-scoped identity for every part.
+            for (sent_attachments.items, 0..) |*attachment, index| attachment.id = try std.fmt.allocPrint(a, "{s}-part-{d}", .{ operation.messageId, index });
             const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(prepared.plain, 240), .bodyText = prepared.plain, .bodyHtml = prepared.html, .bodySource = .plain, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = sent_attachments.items, .invitation = calendar, .fixtureRaw = fixture_raw };
             // Copy the receipt first: put() can grow the entries slice, never operations.
             store.putOutbox(sent) catch {
@@ -2703,14 +3514,24 @@ test "mail response memory: native and cached reads preserve two MiB HTML within
 }
 
 test "post-dispatch allocation failure preserves live mutation ambiguity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const inspecting = try j.value(arena.allocator(), .{ .cmd = "invitation.inspect" });
+    const reconciling = try j.value(arena.allocator(), .{ .cmd = "invitation.inspect", .reconcile = true });
+    for ([_]anyerror{ error.Canceled, error.Timeout, error.OutOfMemory }) |err| {
+        try std.testing.expectEqual(err, Session.reconciliationFailure(inspecting, err));
+        try std.testing.expectEqual(error.UnknownOutcome, Session.reconciliationFailure(reconciling, err));
+    }
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const a = failing.allocator();
     const receipt: Value = .{ .string = "applied-provider-receipt" };
     for ([_][]const u8{ "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply" }) |cmd| {
-        try std.testing.expectError(error.UnknownOutcome, Session.successResponse(a, .null, "self@example.test", cmd, false, receipt));
+        try std.testing.expectError(error.UnknownOutcome, Session.successResponse(a, .null, "self@example.test", cmd, true, false, receipt));
     }
-    try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "mail.read", false, receipt));
-    try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "contacts.upsert", true, receipt));
+    try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "mail.read", false, false, receipt));
+    try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "invitation.inspect", false, false, receipt));
+    try std.testing.expectError(error.UnknownOutcome, Session.successResponse(a, .null, "self@example.test", "invitation.inspect", true, false, receipt));
+    try std.testing.expectError(error.OutOfMemory, Session.successResponse(a, .null, "self@example.test", "contacts.upsert", true, true, receipt));
     try std.testing.expectError(error.UnknownOutcome, Session.failureForError(a, .null, "self@example.test", error.UnknownOutcome));
     try std.testing.expect(failing.has_induced_failure);
 }
@@ -3334,6 +4155,535 @@ test "UX backend: formatted forward preserves 32 CID resources and an ordinary P
     try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
 }
 
+test "legacy bodies: plain forward refreshes an old empty-file omission once and retains it after restart" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture_root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const root = try std.fmt.allocPrint(a, "{s}/cache", .{fixture_root});
+    try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
+    const account = "personal@example.com";
+    const raw =
+        \\{"account":"personal@example.com","messages":[{"id":"legacy-source","threadId":"thread","internalDate":"9000000","labelIds":["SENT"],"payload":{"mimeType":"multipart/mixed","headers":[{"name":"From","value":"personal@example.com"},{"name":"To","value":"peer@example.test"},{"name":"Subject","value":"Original empty file"}],"parts":[{"partId":"0","mimeType":"text/plain","body":{"size":2,"data":"SGk"}},{"partId":"1","mimeType":"application/octet-stream","filename":"empty.bin","body":{"size":0,"data":""}}]}}]}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = raw });
+    const options: t.Options = .{ .fixtures = true, .fixture_root = fixture_root, .cache_dir = root };
+    {
+        var old = try storage.Store.open(std.testing.io, a, root, account, options);
+        defer old.close();
+        try old.put(.{ .id = "legacy-source", .threadId = "thread", .from = .{ .address = account }, .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Hi", .labels = &.{"SENT"} }, true);
+        old.find("legacy-source").?.bodyDecoderRevision = 0;
+        try old.save();
+    }
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    const request = try j.value(a, .{ .cmd = "mail.forward", .account = account, .messageId = "legacy-source" });
+    const first = try decodeDraft(a, try session.dispatch(a, request));
+    try std.testing.expectEqual(@as(usize, 1), first.attachments.len);
+    try std.testing.expectEqualStrings("empty.bin", first.attachments[0].filename);
+    try std.testing.expectEqual(@as(usize, 0), first.attachments[0].size);
+    session.deinit();
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    // A fresh provider read would now fail. The migrated immutable body is
+    // sufficient, and another forward must neither refetch nor lose the file.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = "{\"account\":\"personal@example.com\",\"messages\":[]}" });
+    const second = try decodeDraft(a, try session.dispatch(a, request));
+    try std.testing.expectEqual(@as(usize, 1), second.attachments.len);
+    try std.testing.expectEqualStrings("empty.bin", second.attachments[0].filename);
+    var stored = try storage.Store.open(std.testing.io, a, root, account, options);
+    defer stored.close();
+    try std.testing.expect(!stored.bodyNeedsUpgrade("legacy-source"));
+    try std.testing.expectEqual(@as(u64, 1), stored.state.fixtureCalls);
+}
+
+test "related originals: Gmail resource downloads spill aggregate and individual large images through cold drafts preview and MIME" {
+    const Oracle = struct {
+        const html = "<p>Unchanged source fragment.</p><img src=\"cid:photo-0\"><img src=\"https://example.test/photo-1.png\"><img src=\"cid:photo-2\">";
+        fn write(a: std.mem.Allocator, dir: std.Io.Dir, sent: bool, files: []const t.Attachment, downloads: bool) !void {
+            var parts: Value = .{ .array = .init(a) };
+            const encoded_html = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(html.len));
+            _ = std.base64.url_safe_no_pad.Encoder.encode(encoded_html, html);
+            try parts.array.append(try j.value(a, .{ .partId = "plain", .mimeType = "text/plain", .body = .{ .size = 2, .data = "SGk" } }));
+            try parts.array.append(try j.value(a, .{ .partId = "html", .mimeType = "text/html", .body = .{ .size = html.len, .data = encoded_html } }));
+            var external = j.object(a);
+            for (files) |attachment| {
+                var headers: Value = .{ .array = .init(a) };
+                if (attachment.contentId) |cid| try headers.array.append(try j.value(a, .{ .name = "Content-ID", .value = try std.fmt.allocPrint(a, "<{s}>", .{cid}) }));
+                if (attachment.contentLocation) |location| try headers.array.append(try j.value(a, .{ .name = "Content-Location", .value = location }));
+                try headers.array.append(try j.value(a, .{ .name = "Content-Disposition", .value = attachment.disposition orelse "attachment" }));
+                try parts.array.append(try j.value(a, .{ .partId = attachment.id, .filename = attachment.filename, .mimeType = attachment.mimeType, .headers = headers, .body = .{ .size = attachment.size, .attachmentId = attachment.id } }));
+                if (downloads) try external.object.put(a, attachment.id, try j.value(a, .{ .size = attachment.size, .data = attachment.data }));
+            }
+            const message = try j.value(a, .{ .id = "source", .threadId = "source-thread", .internalDate = "9000000", .labelIds = [_][]const u8{if (sent) "SENT" else "INBOX"}, .payload = .{ .mimeType = "multipart/mixed", .headers = .{ .{ .name = "From", .value = if (sent) "personal@example.com" else "peer@example.test" }, .{ .name = "To", .value = if (sent) "peer@example.test" else "personal@example.com" }, .{ .name = "Message-ID", .value = "<source@example.test>" }, .{ .name = "Subject", .value = "Large inline source" } }, .parts = parts } });
+            var source = try j.value(a, .{ .account = "personal@example.com", .messages = [_]Value{message} });
+            if (downloads) try source.object.put(a, "externalBodies", external);
+            try dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = try std.json.Stringify.valueAlloc(a, source, .{}) });
+        }
+        fn mimePart(a: std.mem.Allocator, raw: []const u8, marker: []const u8) ![]const u8 {
+            const at = std.mem.indexOf(u8, raw, marker) orelse return error.MissingExpectedPart;
+            const start = at + (std.mem.indexOf(u8, raw[at..], "\r\n\r\n") orelse return error.MissingExpectedPart) + 4;
+            const end = start + (std.mem.indexOf(u8, raw[start..], "\r\n--") orelse return error.MissingExpectedPart);
+            var compact: std.ArrayList(u8) = .empty;
+            for (raw[start..end]) |byte| if (byte != '\r' and byte != '\n') try compact.append(a, byte);
+            const decoded = try a.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(compact.items));
+            try std.base64.standard.Decoder.decode(decoded, compact.items);
+            return decoded;
+        }
+    };
+    for ([_]bool{ false, true }) |sent| for ([_]usize{ 900_000, 2_200_000 }) |first_size| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var setup = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer setup.deinit();
+        const setup_a = setup.allocator();
+        const fixture_root = try std.fmt.allocPrint(setup_a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        const root = try std.fmt.allocPrint(setup_a, "{s}/cache", .{fixture_root});
+        try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
+        var files: [4]t.Attachment = undefined;
+        var bytes: [4][]u8 = undefined;
+        for (&files, &bytes, 0..) |*attachment, *content, index| {
+            const size: usize = if (index == 0) first_size else if (index == 3) 128 else 900_000;
+            content.* = try setup_a.alloc(u8, size);
+            @memset(content.*, @as(u8, @intCast(index)) + 'A');
+            if (index < 3) @memcpy(content.*[0..8], "\x89PNG\r\n\x1a\n") else @memcpy(content.*[0..9], "%PDF-1.7\n");
+            const encoded = try setup_a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(size));
+            _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, content.*);
+            attachment.* = .{ .id = try std.fmt.allocPrint(setup_a, "part-{d}", .{index}), .filename = try std.fmt.allocPrint(setup_a, "source-{d}.{s}", .{ index, if (index < 3) @as([]const u8, "png") else "pdf" }), .mimeType = if (index < 3) "image/png" else "application/pdf", .size = size, .data = encoded, .contentId = if (index == 0 or index == 2) try std.fmt.allocPrint(setup_a, "photo-{d}", .{index}) else null, .contentLocation = if (index == 1) "https://example.test/photo-1.png" else null, .disposition = if (index == 2 or index == 3) "attachment" else "inline" };
+        }
+        const account = "personal@example.com";
+        const options: t.Options = .{ .fixtures = true, .fixture_root = fixture_root, .cache_dir = root };
+        {
+            var seed = try storage.Store.open(std.testing.io, setup_a, root, account, options);
+            defer seed.close();
+            for (0..2000) |index| try seed.put(.{ .id = try std.fmt.allocPrint(setup_a, "retained-{d}", .{index}), .threadId = "retained-thread", .receivedAt = @intCast(index), .subject = "Ordinary cache entry", .snippet = "A retained synthetic preview" }, false);
+            try seed.save();
+        }
+        var env = std.process.Environ.Map.init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/tmp/synthetic-omagma-home");
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+        defer session.deinit();
+        const reservation = try std.testing.allocator.alloc(u8, 72 * 1024 * 1024);
+        defer std.testing.allocator.free(reservation);
+        var heap = @import("../fixed_heap.zig").Heap.init(reservation);
+        var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = 64 * 1024 * 1024, .reservation_bytes = reservation.len };
+        session.allocator = cap.allocator();
+        defer session.allocator = std.testing.allocator;
+        var draft_id: []const u8 = undefined;
+        {
+            var command = std.heap.ArenaAllocator.init(cap.allocator());
+            defer command.deinit();
+            const a = command.allocator();
+            try Oracle.write(setup_a, tmp.dir, sent, &files, false);
+            const req = try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "source" });
+            const message = try j.decode(t.Message, a, try session.dispatch(a, req));
+            for (message.attachments) |attachment| try std.testing.expect(attachment.data.len == 0 and attachment.blobId == null);
+            // FULL capture precedes the external download map, as it does on
+            // Gmail; no eager fixture decoding can bypass the native fetch.
+            try Oracle.write(setup_a, tmp.dir, sent, &files, true);
+            var store = try storage.Store.open(std.testing.io, a, root, account, options);
+            defer store.close();
+            const prepared = try session.prepareForwardAttachments(a, &store, req, message, true);
+            var adapter: Session.ConversationAttachments = .{ .session = session, .store = &store, .request = req };
+            var draft = try conversation_source.forward(a, prepared, .{ .preserve_formatting = true, .temporary_allocator = cap.allocator() }, adapter.adapter());
+            draft.to = &.{.{ .address = "recipient@example.test" }};
+            if (!store.lockHeld) try session.reopenBody(a, &store);
+            const saved = try store.putDraft(draft, null);
+            draft_id = try setup_a.dupe(u8, saved.id);
+            try std.testing.expectEqual(@as(usize, 2000), store.state.entries.len);
+        }
+        {
+            var command = std.heap.ArenaAllocator.init(cap.allocator());
+            defer command.deinit();
+            const a = command.allocator();
+            var store = try storage.Store.open(std.testing.io, a, root, account, options);
+            defer store.close();
+            const draft = try store.draft(draft_id);
+            try std.testing.expectEqualStrings(Oracle.html, draft.original.?.bodyHtml);
+            try std.testing.expectEqual(@as(usize, 3), draft.original.?.resources.len);
+            try std.testing.expectEqual(@as(usize, 1), draft.attachments.len);
+            for (draft.original.?.resources, 0..) |resource, index| {
+                try std.testing.expect(resource.blobId != null and resource.data.len == 0);
+                try std.testing.expectEqualStrings(&storage.Store.hash(bytes[index]), resource.blobId.?);
+                try std.testing.expectEqualDeep(files[index].contentId, resource.contentId);
+                try std.testing.expectEqualDeep(files[index].contentLocation, resource.contentLocation);
+                try std.testing.expectError(error.AttachmentInUse, @import("attachment_blob.zig").discard(&store, resource.blobId.?));
+            }
+            const prepared = try markdown_mail.prepare(a, draft);
+            const preview = @import("preview_file.zig");
+            const preview_size = try preview.byteSizeWithStore(&store, prepared, draft);
+            try store.reserveBytes(preview_size);
+            const written = try preview.writePreviewWithStore(&store, a, prepared, draft);
+            _ = written;
+            const rendered = try store.dir.readFileAlloc(std.testing.io, preview.filename, setup_a, .limited(preview.max_file_bytes));
+            try std.testing.expectEqual(preview_size, rendered.len);
+            for (bytes[0..3]) |expected| {
+                const encoded = try setup_a.alloc(u8, std.base64.standard.Encoder.calcSize(expected.len));
+                _ = std.base64.standard.Encoder.encode(encoded, expected);
+                try std.testing.expect(std.mem.indexOf(u8, rendered, encoded) != null);
+            }
+            try std.testing.expect(std.mem.indexOf(u8, rendered, "https://example.test/photo-1.png") == null);
+            var sender: recipients.Mailbox = .{};
+            try sender.address.set(account);
+            var envelope: recipients.Envelope = .{};
+            try recipients.parse("recipient@example.test", &envelope.to);
+            const mime = @import("mime.zig");
+            var spool = try @import("send_spool.zig").create(&store, mime.Compose{ .from = sender, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = true, .logo_offset = prepared.logoOffset, .message_id = "<large-related@example.test>", .date = "Tue, 13 Oct 2026 12:00:00 +0000" }, draft.attachments, prepared.resources);
+            defer spool.close();
+            const wire = try setup_a.alloc(u8, spool.size);
+            var offset: usize = 0;
+            while (offset < wire.len) {
+                const count = try spool.file.?.readPositional(std.testing.io, &.{wire[offset..]}, offset);
+                if (count == 0) return error.UnexpectedEndOfInput;
+                offset += count;
+            }
+            for (bytes[0..3], 0..) |expected, index| {
+                const marker = if (index == 1) "Content-Location: https://example.test/photo-1.png\r\n" else try std.fmt.allocPrint(setup_a, "Content-ID: <photo-{d}>\r\n", .{index});
+                try std.testing.expectEqualSlices(u8, expected, try Oracle.mimePart(setup_a, wire, marker));
+            }
+            try std.testing.expectEqualSlices(u8, bytes[3], try Oracle.mimePart(setup_a, wire, "filename*0*=UTF-8''source-3.pdf\r\n"));
+            try std.testing.expect(std.mem.indexOf(u8, try Oracle.mimePart(setup_a, wire, "Content-Type: text/html; charset=UTF-8\r\n"), Oracle.html) != null);
+            if (sent and first_size == 2_200_000) {
+                // Exercise the backend's spool decision with related blobs
+                // alone; an ordinary file must not be needed to select it.
+                var images_only = draft;
+                images_only.attachments = &.{};
+                images_only = try store.putDraft(images_only, null);
+                const send_request = try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = images_only.id, .operationId = "synthetic-related-only-send" });
+                const receipt = try session.send(a, &store, send_request, images_only, null, false);
+                try std.testing.expectEqualStrings("applied", j.text(receipt, "outcome"));
+                try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+                try std.testing.expectEqual(@as(usize, 3), (try store.readOutbox(j.text(receipt, "messageId"))).?.attachments.len);
+            }
+            // A foreign account cannot resolve this draft's local images.
+            var foreign = try storage.Store.open(std.testing.io, a, root, "neighbor@example.test", options);
+            defer foreign.close();
+            try std.testing.expectError(error.AttachmentHandleNotFound, preview.writePreviewWithStore(&foreign, a, prepared, draft));
+            try std.testing.expectError(error.FileNotFound, foreign.dir.access(std.testing.io, preview.filename, .{}));
+            // Hash mismatch refuses both saving and preview publication, even
+            // when size, MIME identity and private filesystem mode still match.
+            const changed = try store.dir.createFile(std.testing.io, try @import("attachment_blob.zig").filename(a, draft.original.?.resources[0].blobId.?), .{ .read = true, .truncate = false });
+            try changed.writeStreamingAll(std.testing.io, "X");
+            changed.close(std.testing.io);
+            try std.testing.expectError(error.AttachmentChanged, store.putDraft(draft, draft.id));
+            try std.testing.expectError(error.AttachmentChanged, preview.writePreviewWithStore(&store, a, prepared, draft));
+            try std.testing.expectEqualStrings(&storage.Store.hash(rendered), &storage.Store.hash(try store.dir.readFileAlloc(std.testing.io, preview.filename, setup_a, .limited(preview.max_file_bytes))));
+        }
+        try std.testing.expectEqual(@as(usize, 0), cap.snapshot().allocatorUsedBytes);
+        try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+    };
+}
+
+test "forward memory: a large fixture RAW envelope uses one bounded file allocation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var setup = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer setup.deinit();
+    const root = try std.fmt.allocPrint(setup.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
+    {
+        const file = try tmp.dir.createFile(std.testing.io, "accounts/personal.json", .{ .permissions = .fromMode(0o600) });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "{\"account\":\"personal@example.com\",\"messages\":[{\"id\":\"source\",\"raw\":\"");
+        var block: [4096]u8 = undefined;
+        @memset(&block, 'A');
+        for (0..3072) |_| try file.writeStreamingAll(std.testing.io, &block);
+        try file.writeStreamingAll(std.testing.io, "\"}]}");
+    }
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .fixture_root = root, .cache_dir = root });
+    defer session.deinit();
+    const reservation = try std.testing.allocator.alloc(u8, 40 * 1024 * 1024);
+    defer std.testing.allocator.free(reservation);
+    var heap = @import("../fixed_heap.zig").Heap.init(reservation);
+    var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = 32 * 1024 * 1024, .reservation_bytes = reservation.len };
+    {
+        var phase = std.heap.ArenaAllocator.init(cap.allocator());
+        defer phase.deinit();
+        const value = try session.fixture(phase.allocator(), "personal@example.com");
+        const messages = try array(value, "messages");
+        try std.testing.expectEqual(@as(usize, 12 * 1024 * 1024), j.text(messages[0], "raw").len);
+    }
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().allocatorUsedBytes);
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+    try std.testing.expect(cap.snapshot().allocatorPeakBytes < 24 * 1024 * 1024);
+}
+
+test "forward memory: large blob reservations release each 2000-entry cache snapshot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var setup = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer setup.deinit();
+    const root = try std.fmt.allocPrint(setup.allocator(), ".zig-cache/tmp/{s}/large-forward", .{tmp.sub_path});
+    const account = "personal@example.com";
+    {
+        var seed = try storage.Store.open(std.testing.io, setup.allocator(), root, account, .{ .fixtures = true });
+        defer seed.close();
+        for (0..2000) |index| try seed.put(.{
+            .id = try std.fmt.allocPrint(setup.allocator(), "cached-{d}", .{index}),
+            .threadId = "ordinary-thread",
+            .receivedAt = @intCast(index),
+            .subject = "An ordinary cached conversation with enough metadata to represent a populated account",
+            .snippet = "A retained message preview with synthetic participants and ordinary folder metadata.",
+            .to = &.{.{ .address = "peer@example.test", .name = "Fictional Correspondent" }},
+            .labels = &.{"INBOX"},
+        }, false);
+        try seed.save();
+    }
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root });
+    defer session.deinit();
+    const reservation = try std.testing.allocator.alloc(u8, 72 * 1024 * 1024);
+    defer std.testing.allocator.free(reservation);
+    var heap = @import("../fixed_heap.zig").Heap.init(reservation);
+    var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = 64 * 1024 * 1024, .reservation_bytes = reservation.len };
+    session.allocator = cap.allocator();
+    defer session.allocator = std.testing.allocator;
+    {
+        var command = std.heap.ArenaAllocator.init(cap.allocator());
+        defer command.deinit();
+        const a = command.allocator();
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        var attachments: [8]t.Attachment = undefined;
+        var block: [64 * 1024]u8 = undefined;
+        for (&attachments, 0..) |*attachment, index| {
+            const size = 2_200_000;
+            var incoming = try session.reserveIncoming(a, &store, size);
+            defer incoming.close();
+            @memset(&block, @intCast(index + 1));
+            var written: usize = 0;
+            while (written < size) {
+                const count = @min(block.len, size - written);
+                try incoming.file.?.writeStreamingAll(std.testing.io, block[0..count]);
+                written += count;
+            }
+            attachment.* = try session.commitIncoming(a, &store, &incoming, .{ .id = try std.fmt.allocPrint(a, "large-{d}", .{index}), .filename = "large.pdf", .mimeType = "application/pdf", .size = size }, false);
+            try std.testing.expect(attachment.blobId != null and attachment.data.len == 0);
+            try std.testing.expect(!store.lockHeld);
+        }
+        try session.reopenBody(a, &store);
+        const draft = try store.putDraft(.{ .subject = "Eight ordinary large files", .attachments = &attachments }, null);
+        try validateDraft(draft, false);
+        try std.testing.expectEqual(@as(usize, 2000), store.state.entries.len);
+        store.close();
+        var check = std.heap.ArenaAllocator.init(cap.allocator());
+        defer check.deinit();
+        var reopened = try storage.Store.open(std.testing.io, check.allocator(), root, account, session.options);
+        defer reopened.close();
+        const retained = try reopened.draft(draft.id);
+        try std.testing.expectEqual(@as(usize, 8), retained.attachments.len);
+        for (retained.attachments, 0..) |attachment, index| {
+            var stream = try @import("attachment_blob.zig").Stream.init(&reopened, attachment);
+            defer stream.close();
+            var size: usize = 0;
+            while (true) {
+                const count = try @import("attachment_blob.zig").Stream.read(&stream, &block);
+                if (count == 0) break;
+                for (block[0..count]) |byte| try std.testing.expectEqual(@as(u8, @intCast(index + 1)), byte);
+                size += count;
+            }
+            try std.testing.expectEqual(@as(usize, 2_200_000), size);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().allocatorUsedBytes);
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+    try std.testing.expect(cap.snapshot().allocatorPeakBytes < 32 * 1024 * 1024);
+}
+
+test "attachment identity: fresh thread tokens resolve against the same message despite an older cached body" {
+    const Oracle = struct {
+        const pdf = "%PDF-1.7\nFinal report.\n%%EOF\n";
+        fn write(a: std.mem.Allocator, dir: std.Io.Dir, token: []const u8, bodies: bool) !void {
+            var messages: Value = .{ .array = .init(a) };
+            var external = j.object(a);
+            for (0..4) |i| {
+                const attachment_id = if (i == 3) token else try std.fmt.allocPrint(a, "neighbor-token-{d}", .{i});
+                const bytes = if (i == 3) pdf else "%PDF-1.7\nOther report.\n%%EOF\n";
+                const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(bytes.len));
+                _ = std.base64.url_safe_no_pad.Encoder.encode(encoded, bytes);
+                if (bodies) try external.object.put(a, attachment_id, try j.value(a, .{ .size = bytes.len, .data = encoded }));
+                try messages.array.append(try j.value(a, .{
+                    .id = try std.fmt.allocPrint(a, "thread-message-{d}", .{i + 1}),
+                    .threadId = "attachment-thread",
+                    .internalDate = try std.fmt.allocPrint(a, "{d}", .{(i + 1) * 1000}),
+                    .labelIds = [_][]const u8{if (i == 3) "SENT" else "INBOX"},
+                    .payload = .{
+                        .mimeType = "multipart/mixed",
+                        .headers = .{
+                            .{ .name = "From", .value = if (i == 3) "personal@example.com" else "peer@example.test" },
+                            .{ .name = "To", .value = if (i == 3) "peer@example.test" else "personal@example.com" },
+                            .{ .name = "Subject", .value = "Fictional report" },
+                        },
+                        .parts = .{
+                            .{ .partId = "0", .mimeType = "text/plain", .body = .{ .size = 2, .data = "SGk" } },
+                            .{ .partId = "1", .mimeType = "application/pdf", .filename = "report.pdf", .body = .{ .size = bytes.len, .attachmentId = attachment_id } },
+                        },
+                    },
+                }));
+            }
+            var source = try j.value(a, .{ .account = "personal@example.com" });
+            try source.object.put(a, "messages", messages);
+            if (bodies) try source.object.put(a, "externalBodies", external);
+            try dir.writeFile(std.testing.io, .{ .sub_path = "accounts/personal.json", .data = try std.json.Stringify.valueAlloc(a, source, .{}) });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture_root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const root = try std.fmt.allocPrint(a, "{s}/attachment-cache", .{fixture_root});
+    try tmp.dir.createDir(std.testing.io, "accounts", .fromMode(0o700));
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .fixture_root = fixture_root, .cache_dir = root });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const message_id = "thread-message-4";
+    // No fixture bytes during reads: these are actual unloaded Gmail parts,
+    // not eagerly decoded test data that bypasses the attachment provider.
+    try Oracle.write(a, tmp.dir, "cached-token-A", false);
+    const cached = try j.decode(t.Message, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = message_id })));
+    try std.testing.expectEqualStrings("cached-token-A", cached.attachments[0].id);
+    try std.testing.expectEqual(@as(usize, 0), cached.attachments[0].data.len);
+    try Oracle.write(a, tmp.dir, "thread-token-B", false);
+    const thread = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.thread", .account = account, .threadId = "attachment-thread" }));
+    const messages = try array(thread, "messages");
+    try std.testing.expectEqual(@as(usize, 4), messages.len);
+    const selected = try j.decode(t.Message, a, messages[3]);
+    try std.testing.expectEqualStrings(message_id, selected.id);
+    try std.testing.expectEqualStrings("SENT", selected.labels[0]);
+    try std.testing.expectEqualStrings("thread-token-B", selected.attachments[0].id);
+    try std.testing.expectEqual(@as(usize, 0), selected.attachments[0].data.len);
+    {
+        var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+        defer store.close();
+        try std.testing.expectEqualStrings("cached-token-A", (try store.read(message_id)).?.attachments[0].id);
+        try std.testing.expectEqualStrings("thread-token-B", store.find(message_id).?.message.attachments[0].id);
+    }
+    try Oracle.write(a, tmp.dir, "thread-token-B", true);
+    const downloaded = try j.decode(t.Attachment, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment", .account = account, .messageId = selected.id, .attachmentId = selected.attachments[0].id })));
+    try std.testing.expectEqualSlices(u8, Oracle.pdf, try @import("mime.zig").decodeBase64Url(downloaded.data, a));
+    const output = try std.fmt.allocPrint(a, "{s}/saved.pdf", .{fixture_root});
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = selected.id, .attachmentId = selected.attachments[0].id, .path = output }));
+    try std.testing.expectEqualSlices(u8, Oracle.pdf, try tmp.dir.readFileAlloc(std.testing.io, "saved.pdf", a, .limited(1024)));
+    try std.testing.expectError(error.PathAlreadyExists, session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = selected.id, .attachmentId = selected.attachments[0].id, .path = output })));
+    try std.testing.expectEqualSlices(u8, Oracle.pdf, try tmp.dir.readFileAlloc(std.testing.io, "saved.pdf", a, .limited(1024)));
+    const refused = try std.fmt.allocPrint(a, "{s}/refused.pdf", .{fixture_root});
+    // Same name, MIME type and size in a neighboring message do not authorize
+    // its token for this message (or this message's token for that neighbor).
+    for ([_][]const u8{ "neighbor-token-0", "unknown-token" }) |id| {
+        try std.testing.expectError(error.AttachmentNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = message_id, .attachmentId = id, .path = refused })));
+    }
+    try std.testing.expectError(error.AttachmentNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment", .account = account, .messageId = "thread-message-1", .attachmentId = "thread-token-B" })));
+    // Another reader publishes C while the picker still holds its verified B.
+    // The bounded receipt retains that binding across operations/restarts.
+    try Oracle.write(a, tmp.dir, "thread-token-C", false);
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.thread", .account = account, .threadId = "attachment-thread" }));
+    try Oracle.write(a, tmp.dir, "thread-token-C", true);
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment-save", .account = account, .messageId = selected.id, .attachmentId = selected.attachments[0].id, .path = refused }));
+    const recovered = try j.decode(t.Attachment, a, try session.dispatch(a, try j.value(a, .{ .cmd = "mail.attachment", .account = account, .messageId = selected.id, .attachmentId = selected.attachments[0].id })));
+    try std.testing.expectEqualSlices(u8, Oracle.pdf, try @import("mime.zig").decodeBase64Url(recovered.data, a));
+    try std.testing.expectEqualSlices(u8, Oracle.pdf, try tmp.dir.readFileAlloc(std.testing.io, "refused.pdf", a, .limited(1024)));
+    // A quota-refused/evicted body forces save's own FULL read. Pin B before
+    // that read replaces the index with C, then exercise Gmail's shared 404
+    // retry from B to the unique verified C descriptor and exact PDF bytes.
+    for ([_][]const u8{ "mail.attachment", "mail.attachment-save" }) |command| {
+        try Oracle.write(a, tmp.dir, "thread-token-B", false);
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.thread", .account = account, .threadId = "attachment-thread" }));
+        {
+            var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
+            defer store.close();
+            const entry = store.find(message_id).?;
+            entry.bytes = 0;
+            entry.bodyHash = "";
+            store.options.disk_limit = 1;
+            try std.testing.expect(!try store.putBody(selected));
+            try std.testing.expectEqualStrings("DiskQuotaExceeded", store.find(message_id).?.bodyError);
+            try std.testing.expectEqualStrings("thread-token-B", store.find(message_id).?.message.attachments[0].id);
+            // Restore room for the metadata transaction itself; the refused
+            // body and its B descriptor remain the state the next read sees.
+            store.options.disk_limit = session.options.disk_limit;
+            store.state.quotaDiskLimit = session.options.disk_limit;
+            try store.save();
+        }
+        try Oracle.write(a, tmp.dir, "thread-token-C", true);
+        const quota_path = try std.fmt.allocPrint(a, "{s}/quota-saved.pdf", .{fixture_root});
+        const result = try session.dispatch(a, try j.value(a, .{ .cmd = command, .account = account, .messageId = message_id, .attachmentId = "thread-token-B", .path = quota_path }));
+        if (std.mem.eql(u8, command, "mail.attachment")) {
+            try std.testing.expectEqualStrings("thread-token-C", j.text(result, "id"));
+            try std.testing.expectEqualSlices(u8, Oracle.pdf, try @import("mime.zig").decodeBase64Url(j.text(result, "data"), a));
+        } else try std.testing.expectEqualSlices(u8, Oracle.pdf, try tmp.dir.readFileAlloc(std.testing.io, "quota-saved.pdf", a, .limited(1024)));
+    }
+}
+
+test "attachment identity: a concurrent refresh retains fresh tokens without changing membership or resurrecting mail" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/attachment-generation", .{tmp.sub_path});
+    var store = try storage.Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    const old: t.Message = .{ .id = "retained", .threadId = "retained-thread", .bodyText = "Immutable original", .receivedAt = 1000, .labels = &.{"INBOX"}, .unread = true, .attachments = &.{.{ .id = "token-A", .filename = "report.pdf", .size = 2 }} };
+    try store.put(old, true);
+    const current = store.find(old.id).?;
+    current.message.labels = &.{"STARRED"};
+    current.message.unread = false;
+    current.message.receivedAt = 2000;
+    store.state.generation += 1;
+    const generation = store.state.generation;
+    var fresh = old;
+    fresh.attachments = &.{.{ .id = "token-B", .filename = "report.pdf", .size = 2, .data = "AP8" }};
+    try Session.retainReadBody(&store, fresh);
+    try std.testing.expectEqualStrings("token-A", (try store.read(old.id)).?.attachments[0].id);
+    const metadata = store.find(old.id).?.message;
+    try std.testing.expectEqualStrings("token-B", metadata.attachments[0].id);
+    try std.testing.expectEqualStrings("", metadata.attachments[0].data);
+    try std.testing.expectEqualStrings("STARRED", metadata.labels[0]);
+    try std.testing.expect(!metadata.unread);
+    try std.testing.expectEqual(@as(i64, 2000), metadata.receivedAt);
+    try std.testing.expectEqual(generation, store.state.generation);
+    fresh.id = "evicted";
+    try Session.retainReadBody(&store, fresh);
+    try std.testing.expect(store.find(fresh.id) == null);
+    fresh.id = old.id;
+    fresh.threadId = "wrong-thread";
+    try std.testing.expectError(error.MessageIdentityMismatch, Session.retainReadBody(&store, fresh));
+    try std.testing.expectEqualStrings("token-B", store.find(old.id).?.message.attachments[0].id);
+}
+
+test "attachment identity: duplicate exact descriptors are ambiguous" {
+    const one: t.Attachment = .{ .id = "same-id", .filename = "one.pdf", .size = 2, .data = "AP8" };
+    const another: t.Attachment = .{ .id = "same-id", .filename = "another.pdf", .size = 2, .data = "_wA" };
+    try std.testing.expectEqualDeep(one, (try Session.exactAttachment(&.{one}, "same-id")).?);
+    try std.testing.expect((try Session.exactAttachment(&.{one}, "unknown")) == null);
+    try std.testing.expectError(error.AmbiguousAttachment, Session.exactAttachment(&.{ one, another }, "same-id"));
+}
+
 test "UX backend: large immutable attachments forward save send and reject wrong accounts or corruption" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3364,10 +4714,20 @@ test "UX backend: large immutable attachments forward save send and reject wrong
     {
         var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
         defer store.close();
-        const original: t.Message = .{ .id = "large-original", .threadId = "original-thread", .from = .{ .address = "peer@example.test" }, .subject = "Large report", .bodyText = "Report attached.", .attachments = &.{imported} };
+        const original: t.Message = .{ .id = "large-original", .threadId = "original-thread", .from = .{ .address = account }, .to = &.{.{ .address = "peer@example.test" }}, .labels = &.{"SENT"}, .subject = "Large report", .bodyText = "Report attached.", .attachments = &.{imported} };
         try store.put(original, true);
-        try store.put(.{ .id = original.id, .threadId = original.threadId, .subject = original.subject, .labels = &.{"INBOX"} }, false);
+        try store.put(.{ .id = original.id, .threadId = original.threadId, .subject = original.subject, .labels = &.{"SENT"} }, false);
         try std.testing.expectEqualStrings(imported.blobId.?, store.find(original.id).?.message.attachments[0].blobId.?);
+        // A concurrent FULL read omits local blob handles. Exact-ID metadata
+        // refresh must preserve the existing backing file across saving and
+        // reopening, so the following forward/save/send lifecycle still works.
+        var provider_attachment = imported;
+        provider_attachment.blobId = null;
+        var refreshed = original;
+        refreshed.attachments = &.{provider_attachment};
+        try Session.retainReadBody(&store, refreshed);
+        try std.testing.expectEqualStrings(imported.blobId.?, store.find(original.id).?.message.attachments[0].blobId.?);
+        try std.testing.expect(store.blobReferenced(imported.blobId.?));
         try store.save();
     }
     const forwarded = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.forward", .account = account, .messageId = "large-original" }));
@@ -3618,6 +4978,93 @@ test "fetch progress: fixture metadata bodies then cache hits and wrapper owners
     try std.testing.expectEqual(@as(usize, 0), recorder.count);
 }
 
+test "follow-ups: evicted provider metadata creates exact account reminder without retention" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/follow-up-quota", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    try Session.initInto(session, std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root, .metadata_limit = 1 }, null);
+    defer session.deinit();
+    const account = "personal@example.com";
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "demo-96" }));
+    const displayed = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "demo-1" }));
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try std.testing.expect(store.find("demo-1") == null);
+        try std.testing.expect(store.find("demo-96") != null);
+    }
+    const saved = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-1", .dueDate = "2026-10-14", .expectedVersion = 0, .snapshot = .{ .subject = "Untrusted client text", .threadId = "wrong-thread" } }));
+    const entry = j.get(saved, "entry").?;
+    try std.testing.expectEqualStrings(j.text(displayed, "subject"), j.text(entry, "subject"));
+    try std.testing.expectEqualStrings(j.text(displayed, "threadId"), j.text(entry, "threadId"));
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try std.testing.expectEqual(@as(usize, 1), store.state.entries.len);
+        try std.testing.expect(store.find("demo-1") == null);
+        try std.testing.expect(store.find("demo-96") != null);
+    }
+    // The same provider ID in another account resolves its own trusted header.
+    const other = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = "work@example.com", .messageId = "demo-1", .dueDate = "2026-10-15", .expectedVersion = 0 }));
+    try std.testing.expect(std.mem.startsWith(u8, j.text(j.get(other, "entry").?, "subject"), "work@example.com:"));
+    try std.testing.expectError(error.MessageNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "missing-provider-message", .dueDate = "2026-10-14", .expectedVersion = 0, .snapshot = .{ .subject = "Untrusted" } })));
+    session.options.fixture_scenario = "offline-refresh";
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-1", .dueDate = "2026-10-15", .expectedVersion = try j.integer(entry, "version", 0) }));
+    try std.testing.expectError(error.FollowUpMetadataUnavailableOffline, session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-2", .dueDate = "2026-10-14", .expectedVersion = 0 })));
+    try std.testing.expectError(error.FollowUpChanged, session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-2", .dueDate = "2026-10-14", .expectedVersion = 1 })));
+    try std.testing.expectEqual(@as(usize, 1), (try array(try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.list", .account = account })), "entries")).len);
+}
+
+test "follow-ups: local account reminders survive cache clear restart and stale edits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/follow-up-cache", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    try Session.initInto(session, std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root }, null);
+    defer session.deinit();
+    const account = "personal@example.com";
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "mail.read", .account = account, .messageId = "demo-1" }));
+    const saved = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-1", .dueDate = "2026-10-14", .expectedVersion = 0 }));
+    const first = try j.integer(j.get(saved, "entry").?, "version", 0);
+    try std.testing.expect(first > 0);
+    try std.testing.expectError(error.FollowUpChanged, session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-1", .dueDate = "2026-10-15", .expectedVersion = 0 })));
+    _ = try session.dispatch(a, try j.value(a, .{ .cmd = "cache.clear", .account = account }));
+    const listed = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.list", .account = account, .cacheOnly = true }));
+    try std.testing.expectEqual(@as(usize, 1), (try array(listed, "entries")).len);
+    try std.testing.expectEqualStrings("demo-1", j.text((try array(listed, "messages"))[0], "id"));
+    try std.testing.expectEqual(@as(usize, 0), (try array(try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.list", .account = "work@example.com" })), "entries")).len);
+    const edited = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-1", .dueDate = "2026-10-15", .expectedVersion = first }));
+    const second = try j.integer(j.get(edited, "entry").?, "version", 0);
+    // A second Session reads the private document without requiring mail data.
+    const reopened = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(reopened);
+    try Session.initInto(reopened, std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root }, null);
+    defer reopened.deinit();
+    const persisted = try reopened.dispatch(a, try j.value(a, .{ .cmd = "reminder.list", .account = account }));
+    try std.testing.expectEqualStrings("2026-10-15", j.text((try array(persisted, "entries"))[0], "dueDate"));
+    try std.testing.expectError(error.FollowUpChanged, reopened.dispatch(a, try j.value(a, .{ .cmd = "reminder.done", .account = account, .messageId = "demo-1", .expectedVersion = first })));
+    _ = try reopened.dispatch(a, try j.value(a, .{ .cmd = "reminder.done", .account = account, .messageId = "demo-1", .expectedVersion = second }));
+    const completed = try session.dispatch(a, try j.value(a, .{ .cmd = "reminder.list", .account = account }));
+    try std.testing.expectEqual(@as(usize, 0), (try array(completed, "entries")).len);
+    session.options.fixture_scenario = "offline-refresh";
+    try std.testing.expectError(error.FollowUpMetadataUnavailableOffline, session.dispatch(a, try j.value(a, .{ .cmd = "reminder.set", .account = account, .messageId = "demo-1", .dueDate = "2026-10-15", .expectedVersion = 0 })));
+}
+
 test "cache windows: adjacent IDs survive generation changes and bounded eviction" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3645,4 +5092,164 @@ test "cache windows: adjacent IDs survive generation changes and bounded evictio
     result = try Session.cacheSearch(a, &store, after, std.testing.allocator);
     try std.testing.expectEqualStrings("m2", j.text((try array(result, "messages"))[0], "id"));
     try std.testing.expectEqualStrings("m1", j.text((try array(result, "messages"))[1], "id"));
+}
+
+test "invitation offline: cached identity and exact confirmed source survive inspection without provider calls" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("TZ", "UTC");
+    const session = try a.create(Session);
+    session.* = try Session.init(io, a, &env, .{ .fixtures = true, .cache_dir = try std.fmt.allocPrint(a, "{s}/cache", .{root}) });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:offline@example.test\r\nDTSTAMP:20261013T100000Z\r\nSEQUENCE:3\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:alias@example.test\r\nDTSTART:20261014T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    var invite: invitation.Invitation = .{};
+    try invitation.parse(ics, account, &.{"alias@example.test"}, &invite);
+    const wire = try a.alloc(u8, invitation.max_calendar_bytes);
+    const response = try invitation.reply(&invite, .accepted, "20261013T110000Z", wire);
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try store.put(.{ .id = "offline-invitation", .threadId = "offline-thread", .bodyText = "Planning", .invitation = ics }, true);
+        // Confirmed receipts do not depend on a still-populated send-as cache.
+        const hash = storage.Store.hash(ics);
+        store.state.operations = try a.dupe(storage.Operation, &.{.{ .id = "accepted", .hash = "synthetic", .outcome = "applied", .icalendar = response, .sourceInvitationHash = try a.dupe(u8, &hash) }});
+        try store.save();
+    }
+    const result = try session.dispatch(a, try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "offline-invitation", .cacheOnly = true }));
+    try std.testing.expectEqualStrings("ACCEPTED", j.text(result, "confirmedResponse"));
+    try std.testing.expectEqualStrings("", j.text(result, "attendee"));
+    try std.testing.expect(!try j.boolean(result, "canReply", false));
+    var store = try session.openStore(a, account, false);
+    defer store.close();
+    try std.testing.expectEqual(@as(u64, 0), store.state.fixtureCalls);
+    try std.testing.expectEqualStrings("", (try Session.confirmedInvitationResponse(a, &store, "changed source", account, &.{"alias@example.test"})).status);
+    const repeated = try j.value(a, .{ .operationId = "accepted", .status = "accepted" });
+    try std.testing.expectEqualStrings("applied", j.text((try Session.invitationReceipt(a, &store, ics, repeated)).?, "outcome"));
+    try std.testing.expectError(error.OperationConflict, Session.invitationReceipt(a, &store, "other source", repeated));
+    try std.testing.expectError(error.OperationConflict, Session.invitationReceipt(a, &store, ics, try j.value(a, .{ .operationId = "accepted", .status = "declined" })));
+    store.state.operations[0].outcome = "unknown";
+    try std.testing.expectEqualStrings("unknown", (try Session.confirmedInvitationResponse(a, &store, ics, account, &.{"alias@example.test"})).outcome);
+    try std.testing.expectEqualStrings("unknown", j.text((try Session.invitationReceipt(a, &store, ics, repeated)).?, "outcome"));
+}
+
+test "calendar RSVP: mail receipt survives calendar failures and reply replay never resends" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("TZ", "UTC");
+    const account = "personal@example.com";
+    const cases = [_]struct { scenario: []const u8, status: []const u8, mail: []const u8, sync: []const u8, writes: i64 }{
+        .{ .scenario = "", .status = "accepted", .mail = "applied", .sync = "applied", .writes = 1 },
+        .{ .scenario = "", .status = "tentative", .mail = "applied", .sync = "applied", .writes = 1 },
+        .{ .scenario = "", .status = "declined", .mail = "applied", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-no-grant", .status = "accepted", .mail = "applied", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-readonly", .status = "accepted", .mail = "applied", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-offline", .status = "accepted", .mail = "applied", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-lost-response", .status = "accepted", .mail = "applied", .sync = "unknown", .writes = 1 },
+        .{ .scenario = "unknown-send", .status = "accepted", .mail = "unknown", .sync = "skipped", .writes = 0 },
+    };
+    for (cases, 0..) |case, index| {
+        const session = try a.create(Session);
+        session.* = try Session.init(io, a, &env, .{ .fixtures = true, .fixture_scenario = case.scenario, .cache_dir = try std.fmt.allocPrint(a, "{s}/case-{d}", .{ root, index }) });
+        defer session.deinit();
+        const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:auto-rsvp@example.test\r\nDTSTAMP:20261013T100000Z\r\nSEQUENCE:3\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z\r\nSUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        {
+            var store = try session.openStore(a, account, false);
+            defer store.close();
+            try store.put(.{ .id = "auto-invitation", .threadId = "auto-thread", .bodyText = "Planning", .invitation = ics }, true);
+            try store.save();
+        }
+        const request = try j.value(a, .{ .cmd = "invitation.reply", .account = account, .messageId = "auto-invitation", .status = case.status, .operationId = "mail-reply" });
+        const receipt = try session.dispatch(a, request);
+        if (!std.mem.eql(u8, case.sync, j.text(j.get(receipt, "calendarSync").?, "state"))) std.debug.print("Calendar RSVP fixture case {d}: {s}\n", .{ index, j.text(j.get(receipt, "calendarSync").?, "errorCode") });
+        try std.testing.expectEqualStrings(case.mail, j.text(receipt, "outcome"));
+        try std.testing.expectEqualStrings(case.sync, j.text(j.get(receipt, "calendarSync").?, "state"));
+        if (std.mem.eql(u8, case.scenario, "calendar-lost-response")) {
+            session.options.fixture_scenario = "calendar-offline";
+            const unavailable = try session.dispatch(a, request);
+            try std.testing.expectEqualStrings("unknown", j.text(j.get(unavailable, "calendarSync").?, "state"));
+        }
+        session.options.fixture_scenario = "";
+        const again = try session.dispatch(a, request);
+        try std.testing.expectEqualStrings(case.mail, j.text(again, "outcome"));
+        if (std.mem.eql(u8, case.sync, "unknown")) try std.testing.expectEqualStrings("applied", j.text(j.get(again, "calendarSync").?, "state"));
+        var changed_target = try j.copyObject(a, request);
+        try changed_target.object.put(a, "calendarId", .{ .string = "fixture-shared-team" });
+        try std.testing.expectError(error.OperationConflict, session.dispatch(a, changed_target));
+        const inspected = try session.dispatch(a, try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "auto-invitation", .cacheOnly = true }));
+        if (std.mem.eql(u8, case.mail, "applied")) {
+            try std.testing.expectEqualStrings("applied", j.text(inspected, "responseOutcome"));
+            try std.testing.expectEqualStrings(j.text(j.get(again, "calendarSync").?, "state"), j.text(j.get(inspected, "calendarSync").?, "state"));
+        }
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try std.testing.expectEqual(@as(u64, if (std.mem.eql(u8, case.mail, "applied")) 1 else 0), store.state.fixtureSends);
+        const calendar_state = try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes);
+        const writes = if (calendar_state) |raw| try j.integer(try std.json.parseFromSliceLeaky(Value, a, raw, .{}), "writes", -1) else 0;
+        try std.testing.expectEqual(case.writes, writes);
+    }
+}
+
+test "calendar RSVP: Check Sent resumes calendar only after confirming the reply" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("TZ", "UTC");
+    const session = try a.create(Session);
+    session.* = try Session.init(io, a, &env, .{ .fixtures = true, .fixture_scenario = "applied-lost", .cache_dir = try std.fmt.allocPrint(a, "{s}/cache", .{root}) });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:reconcile-rsvp@example.test\r\nDTSTAMP:20261013T100000Z\r\nSEQUENCE:3\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z\r\nSUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try store.put(.{ .id = "reconcile-invitation", .threadId = "reconcile-thread", .bodyText = "Planning", .invitation = ics }, true);
+        try store.save();
+    }
+    const request = try j.value(a, .{ .cmd = "invitation.reply", .account = account, .messageId = "reconcile-invitation", .status = "accepted", .operationId = "mail-reconcile" });
+    const lost = try session.dispatch(a, request);
+    try std.testing.expectEqualStrings("unknown", j.text(lost, "outcome"));
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try std.testing.expect(try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes) == null);
+    }
+    session.options.fixture_scenario = "calendar-offline";
+    const check = try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "reconcile-invitation", .reconcile = true });
+    const offline = try session.dispatch(a, check);
+    try std.testing.expectEqualStrings("applied", j.text(offline, "responseOutcome"));
+    try std.testing.expectEqualStrings("skipped", j.text(j.get(offline, "calendarSync").?, "state"));
+    session.options.fixture_scenario = "";
+    const resolved = try session.dispatch(a, check);
+    try std.testing.expectEqualStrings("applied", j.text(resolved, "responseOutcome"));
+    try std.testing.expectEqualStrings("applied", j.text(j.get(resolved, "calendarSync").?, "state"));
+    _ = try session.dispatch(a, check);
+    var store = try session.openStore(a, account, false);
+    defer store.close();
+    try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+    const state = try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes) orelse return error.MissingCalendarFixture;
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(try std.json.parseFromSliceLeaky(Value, a, state, .{}), "writes", -1));
 }

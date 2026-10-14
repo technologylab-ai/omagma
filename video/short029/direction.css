@@ -1,0 +1,39 @@
+/* Editorial motion has its own visual language; native terminal pixels stay intact. */
+.spotlight{border:0!important;border-radius:50%;filter:blur(18px);box-shadow:0 0 0 2400px rgba(3,9,16,.58)!important}
+#direction{position:absolute;inset:0;pointer-events:none;color:#f5f6f2}
+.dir-kicker{font:700 20px "JetBrainsMono Nerd Font",monospace;letter-spacing:.15em;color:#82dce9;text-transform:uppercase}
+.destination{position:absolute;left:1010px;width:700px}
+.destination .name{font-size:76px;line-height:1.1;letter-spacing:-.04em;font-weight:800;margin-top:12px}
+.destination .detail{font-size:30px;line-height:1.3;color:#b3c0ce;margin-top:16px}
+.destination .ordinal{position:absolute;left:-70px;top:45px;font:500 27px "JetBrainsMono Nerd Font",monospace;color:#82dce9}
+.destination .icon{position:absolute;width:46px;height:46px;left:-82px;top:51px;color:#82dce9}
+.destination.inactive{color:#687685}.destination.inactive .detail{color:#657283}
+.direction-line{fill:none;stroke:#e5f7f8;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.press{position:absolute;display:flex;align-items:center;gap:24px;filter:drop-shadow(0 12px 24px #0007)}
+.press .key{display:flex;align-items:center;justify-content:center;min-width:88px;height:88px;padding:0 22px;border-radius:22px;background:#f2f4ee;color:#0b1017;font:800 44px "JetBrainsMono Nerd Font",monospace;box-shadow:0 8px 0 #839698;transform-origin:50% 80%}
+.press .label{font-size:32px;font-weight:650;line-height:1.2;white-space:pre-line;color:#f5f6f2}
+.direction-check{fill:none;stroke:#97ebc8;stroke-width:8;stroke-linecap:round;stroke-linejoin:round}
+.result-pair{position:absolute;left:310px;top:830px;display:flex;gap:120px}
+.result-item{display:flex;align-items:center;gap:22px;font-size:38px;font-weight:700;letter-spacing:-.02em}
+.result-item svg{width:62px;height:62px}
+.profile-story{position:absolute;left:1040px;top:338px;width:650px}
+.profile-story .profile-icon{width:114px;height:114px;border-radius:50%;background:#153442;display:flex;justify-content:center;align-items:center;color:#a3eff0;font-size:52px;font-weight:750;margin:24px 0}
+.profile-story h2{font-size:66px;line-height:1.07;letter-spacing:-.035em;margin:20px 0}
+.profile-story p{font-size:30px;color:#b3c0ce;line-height:1.35;margin:16px 0}
+.profile-story .identity{font:500 28px "JetBrainsMono Nerd Font",monospace;color:#82dce9}
+.dir-ribbon{position:absolute;left:200px;top:883px;display:flex;align-items:center;gap:28px;font-size:32px;font-weight:650}
+.dir-ribbon .route{width:250px;height:2px;background:#45586a;position:relative}
+.dir-ribbon .route:after{content:"";position:absolute;right:0;top:-5px;width:10px;height:10px;border-right:2px solid #bceef0;border-top:2px solid #bceef0;transform:rotate(45deg)}
+.dir-ribbon .end{color:#a3eff0}
+.chapter-word{position:absolute;left:1030px;top:413px;width:710px;font-size:76px;line-height:1.08;font-weight:800;letter-spacing:-.035em}
+.chapter-word p{font-size:30px;color:#b3c0ce;font-weight:500;letter-spacing:0;line-height:1.35;margin:20px 0}
+.chapter-word .big-date{font:700 23px "JetBrainsMono Nerd Font",monospace;letter-spacing:.12em;color:#82dce9;margin-bottom:22px}
+.completion{position:absolute;left:1060px;top:420px;width:630px}
+.completion h2{font-size:65px;font-weight:800;letter-spacing:-.03em;line-height:1.08;margin:22px 0}
+.completion p{font-size:29px;color:#b3c0ce;line-height:1.4}
+.completion svg{width:94px;height:94px}
+.picture{box-shadow:0 20px 64px #0005,0 0 0 1px #283746}
+
+.draft-route{position:absolute;left:200px;top:715px;width:1520px;height:310px}.draft-end{position:absolute;top:0;width:300px;text-align:center}.draft-end.source{left:0}.draft-end.target{right:0}.draft-icon{margin:0 auto;width:86px;height:86px;border-radius:50%;background:#153442;color:#a3eff0;display:flex;align-items:center;justify-content:center;font-size:55px}.draft-icon svg{width:58px;height:58px}.draft-end h2{font-size:38px;letter-spacing:-.02em;margin:20px 0 8px}.draft-end p{font-size:27px;color:#b3c0ce;margin:0}.draft-path{position:absolute;left:350px;top:0;width:820px;height:150px}
+
+#direction-carry{position:absolute;inset:0;pointer-events:none}.typed-command{width:365px;color:#a3eff0;font:500 38px "JetBrainsMono Nerd Font",monospace;border-bottom:2px solid #415469;padding:22px 0}

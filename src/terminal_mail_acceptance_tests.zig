@@ -123,17 +123,28 @@ fn seed(root: []const u8, account: []const u8, wire: []const u8) ![64]u8 {
 // Use the actual cache-only client consumed by the TUI. It has production cache
 // namespacing and two configured fictional accounts, without a network session,
 // desktop environment, credentials, or a fixture-mode branch.
-fn newCachedSession(a: std.mem.Allocator, root: []const u8, env: *const std.process.Environ.Map) !*core.Session {
+fn newCachedSession(a: std.mem.Allocator, root: []const u8, env: *std.process.Environ.Map) !*core.Session {
+    // The production dispatch path checks explicit vault activation before
+    // cache access. Give it an isolated absolute home/config root instead of
+    // an empty environment, while retaining the real non-fixture cache path.
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", sa);
+    const absolute_root = try std.fs.path.resolve(sa, &.{ cwd, root });
+    try env.put("HOME", try std.fmt.allocPrint(sa, "{s}/acceptance-home", .{absolute_root}));
+    try env.put("XDG_CONFIG_HOME", try std.fmt.allocPrint(sa, "{s}/acceptance-config", .{absolute_root}));
     const session = try a.create(core.Session);
     errdefer a.destroy(session);
     session.* = .{ .io = std.testing.io, .allocator = a, .options = .{ .grant_file = "unused-acceptance-grants.json" }, .config = .{}, .cache_root = try a.dupe(u8, root), .env = env };
     errdefer session.deinit();
-    try session.config.defaults("/unused-acceptance-home");
+    try session.config.defaults(env.get("HOME").?);
     return session;
 }
 fn cached(a: std.mem.Allocator, session: *core.Session, account: []const u8, command: []const u8) !j.Value {
     const request = try std.json.Stringify.valueAlloc(a, .{ .id = "acceptance", .cmd = command, .account = account, .messageId = "same-message", .threadId = "same-thread" }, .{});
     const response = try std.json.parseFromSliceLeaky(j.Value, a, try session.client().callCached(a, request), .{});
+    if (!try j.boolean(response, "ok", false)) std.debug.print("mail acceptance cached action failed: {s}\n", .{j.text(j.get(response, "error").?, "code")});
     try std.testing.expect(try j.boolean(response, "ok", false));
     try std.testing.expectEqualStrings(account, j.text(response, "account"));
     try std.testing.expectEqualStrings("acceptance", j.text(response, "id"));
@@ -683,11 +694,15 @@ test "mail acceptance: external inline photos leave mail readable and refuse ove
         defer arena.deinit();
         const a = arena.allocator();
         var wire = try std.json.parseFromSliceLeaky(j.Value, a, literal, .{});
+        // Native formatting now streams resources larger than the portable
+        // 2 MiB tier. Refuse just beyond the actual 25 MiB native ceiling,
+        // once with one image and once with individually admissible images.
+        const photo_bytes: usize = if (variant == 0) 25 * 1024 * 1024 + 1 else 25 * 1024 * 1024 / 2 + 1;
+        const parts = wire.object.getPtr("payload").?.object.getPtr("parts").?;
+        try parts.array.items[2].object.getPtr("body").?.object.put(a, "size", .{ .integer = @intCast(photo_bytes) });
         if (variant == 1) {
-            const parts = wire.object.getPtr("payload").?.object.getPtr("parts").?;
-            try parts.array.items[2].object.getPtr("body").?.object.put(a, "size", .{ .integer = 1310720 });
             try parts.array.items[1].object.put(a, "body", try std.json.parseFromSliceLeaky(j.Value, a, "{\"size\":78,\"data\":\"PHA-SGk8L3A-PGltZyBzcmM9ImNpZDpwaG90b0BleGFtcGxlLnRlc3QiPjxpbWcgc3JjPSJjaWQ6c2Vjb25kQGV4YW1wbGUudGVzdCI-\"}", .{}));
-            try parts.array.append(try std.json.parseFromSliceLeaky(j.Value, a, "{\"mimeType\":\"image/png\",\"filename\":\"second.png\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"},{\"name\":\"Content-ID\",\"value\":\"<second@example.test>\"}],\"body\":{\"size\":1310720,\"attachmentId\":\"second-photo-token\"}}", .{}));
+            try parts.array.append(try std.json.parseFromSliceLeaky(j.Value, a, "{\"mimeType\":\"image/png\",\"filename\":\"second.png\",\"headers\":[{\"name\":\"Content-Disposition\",\"value\":\"inline\"},{\"name\":\"Content-ID\",\"value\":\"<second@example.test>\"}],\"body\":{\"size\":13107201,\"attachmentId\":\"second-photo-token\"}}", .{}));
         }
         const wire_text = try std.json.Stringify.valueAlloc(a, wire, .{});
         var peer: Peer = .{ .steps = &.{.{ .url = full_url, .response = wire_text }} };
@@ -698,14 +713,27 @@ test "mail acceptance: external inline photos leave mail readable and refuse ove
         try std.testing.expectEqual(@as(usize, 2 + variant), message.attachments.len);
         try std.testing.expectEqualStrings("photo-token", message.attachments[0].id);
         try std.testing.expectEqualStrings("attachment", message.attachments[0].filename);
-        try std.testing.expectEqual(@as(usize, if (variant == 0) 5242880 else 1310720), message.attachments[0].size);
+        try std.testing.expectEqual(photo_bytes, message.attachments[0].size);
         try std.testing.expectEqualStrings("", message.attachments[0].data);
         try std.testing.expectEqualStrings("photo@example.test", message.attachments[0].contentId.?);
         try std.testing.expectEqualStrings("inline", message.attachments[0].disposition.?);
         try std.testing.expectEqualStrings("agenda.pdf", message.attachments[1].filename);
         try std.testing.expectEqualStrings("JVBERi0", message.attachments[1].data);
         try peer.complete(0); // Reading has no image download or write.
+        // Preserve the former 5 MiB / 2.5 MiB cases as explicit portable-tier
+        // refusals and native-tier plans; those sizes now have native support.
+        const portable_attachments = try a.dupe(t.Attachment, message.attachments);
+        portable_attachments[0].size = if (variant == 0) 5242880 else 1310720;
+        if (variant == 1) portable_attachments[2].size = 1310720;
+        try std.testing.expectError(error.AttachmentsTooLarge, @import("terminal/original_mail.zig").resourcePlan(message.bodyHtml.?, portable_attachments));
+        const native_plan = try @import("terminal/original_mail.zig").resourcePlanWithLimit(message.bodyHtml.?, portable_attachments, t.Limits.attachment_bytes);
+        try std.testing.expectEqual(@as(usize, if (variant == 0) 5242880 else 2621440), native_plan.bytes);
         try std.testing.expectError(error.AttachmentsTooLarge, @import("terminal/original_mail.zig").resourcePlan(message.bodyHtml.?, message.attachments));
+        try std.testing.expectError(error.AttachmentsTooLarge, @import("terminal/original_mail.zig").resourcePlanWithLimit(message.bodyHtml.?, message.attachments, t.Limits.attachment_bytes));
+        if (variant == 1) {
+            try std.testing.expect(message.attachments[0].size <= t.Limits.attachment_bytes);
+            try std.testing.expect(message.attachments[2].size <= t.Limits.attachment_bytes);
+        }
 
         const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
         const cache_root = try std.fmt.allocPrint(a, "{s}/inline-cache", .{root});
@@ -733,9 +761,8 @@ test "mail acceptance: external inline photos leave mail readable and refuse ove
         var document: [16]u8 = undefined;
         try std.testing.expectEqualStrings("%PDF-", try tmp.dir.readFile(std.testing.io, "agenda.pdf", &document));
 
-        // No externalBodies map exists. In the aggregate case each image is
-        // individually fetchable by the small fixture transport, so an eager
-        // fetch would fail AttachmentNotFound instead of this resource limit.
+        // No externalBodies map exists. An eager image download would fail
+        // MessageNotFound instead of the required pre-hydration size refusal.
         for ([_]struct { command: []const u8, all: bool = false }{
             .{ .command = "mail.reply" },
             .{ .command = "mail.reply", .all = true },
@@ -766,12 +793,13 @@ test "mail acceptance: external inline photos leave mail readable and refuse ove
             var received = message;
             received.id = "verified-photo";
             const attachments = try a.dupe(t.Attachment, message.attachments);
+            attachments[0].size = 5 * 1024 * 1024;
             {
                 var store = try storage.Store.open(std.testing.io, a, cache_root, account, session.options);
                 defer store.close();
                 var incoming = try blob.Incoming.create(&store, attachments[0].size);
                 defer incoming.close();
-                for (0..attachments[0].size / block.len) |_| try incoming.file.writeStreamingAll(std.testing.io, &block);
+                for (0..attachments[0].size / block.len) |_| try incoming.write(&block);
                 attachments[0] = try incoming.commit(&store, attachments[0]);
                 received.attachments = attachments;
                 try store.putOutbox(received);
