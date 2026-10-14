@@ -11,6 +11,13 @@ const wakeup = @import("../signal_wake.zig");
 var signal_fd: std.atomic.Value(i32) = .init(-1);
 pub const reservation_bytes = @sizeOf(@TypeOf(signal_fd));
 
+const LaneTestGate = if (builtin.is_test) struct {
+    once: std.atomic.Value(bool) = .init(true),
+    entered: std.Io.Event = .unset,
+    acquired: std.Io.Event = .unset,
+    release_wait: std.Io.Event = .unset,
+} else void;
+
 pub fn disableCoreDumps() !void {
     try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 });
     if (builtin.os.tag == .linux) {
@@ -29,6 +36,7 @@ const Server = struct {
     network_lane: std.atomic.Value(bool) = .init(false),
     control_locking: std.atomic.Value(bool) = .init(false),
     cancel_execution: std.Io.Event = .unset,
+    lane_test_gate: if (builtin.is_test) ?*LaneTestGate else void = if (builtin.is_test) null else {},
 
     fn worker(self: *Server) std.Io.Cancelable!void {
         while (!self.stopped.isSet()) {
@@ -51,16 +59,19 @@ const Server = struct {
             };
             var frame = received.?;
             const lane = frame.kind == .execute;
+            // deadline joins its operation even when timeout/cancel wins.
+            // Retain acquisition ownership outside its discarded result.
+            var acquired_lane = false;
+            defer if (acquired_lane) self.network_lane.store(false, .release);
             if (lane and self.control_locking.load(.acquire)) {
                 self.sendError(stream, &frame, error.VaultLocked) catch |err| if (err == error.Canceled) return error.Canceled;
                 continue;
             }
-            if (lane) platform.deadline(self.io, platform.seconds(5), acquireLane, .{self}) catch |err| {
+            if (lane) platform.deadline(self.io, platform.seconds(5), acquireLane, .{ self, &acquired_lane }) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 self.sendError(stream, &frame, if (err == error.Timeout) error.VaultBusy else err) catch |send_err| if (send_err == error.Canceled) return error.Canceled;
                 continue;
             };
-            defer if (lane) self.network_lane.store(false, .release);
             if (lane) self.cancel_execution.reset();
             if (lane and self.control_locking.load(.acquire)) {
                 self.sendError(stream, &frame, error.VaultLocked) catch |err| if (err == error.Canceled) return error.Canceled;
@@ -185,10 +196,21 @@ const Server = struct {
         while (self.network_lane.load(.acquire)) try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(self.io);
         try self.owner.lock();
     }
-    fn acquireLane(self: *Server) !void {
+    fn acquireLane(self: *Server, acquired: *bool) !void {
+        const gate = if (builtin.is_test) (if (self.lane_test_gate) |g| (if (g.once.swap(false, .acq_rel)) g else null) else null) else {};
+        if (builtin.is_test) if (gate) |g| g.entered.set(self.io);
         while (true) {
             if (self.control_locking.load(.acquire)) return error.VaultLocked;
-            if (self.network_lane.cmpxchgStrong(false, true, .acquire, .monotonic) == null) return;
+            if (self.network_lane.cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
+                acquired.* = true; // No cancellation point between CAS and ownership publication.
+                if (builtin.is_test) if (gate) |g| {
+                    // Model descheduling after the swap but before Select can
+                    // publish success. A timeout/cancel then discards success.
+                    g.acquired.set(self.io);
+                    g.release_wait.wait(self.io) catch |err| if (err != error.Canceled) return err;
+                };
+                return;
+            }
             // A preceding client's response may be received before its secure
             // cleanup completes. Bound this admission wait instead of leaking
             // a spurious Busy into ordinary sequential CLI/TUI calls.
@@ -542,4 +564,105 @@ test "vault daemon: interrupted invitation reconciliation keeps unknown outcome"
     try std.testing.expectEqual(error.Timeout, mutationFailure("{\"cmd\":\"invitation.inspect\"}", error.Timeout));
     try std.testing.expectEqual(error.Timeout, mutationFailure("{\"cmd\":\"invitation.inspect\",\"reconcile\":false}", error.Timeout));
     for ([_]anyerror{ error.Timeout, error.OutOfMemory, error.VaultOperationCanceled }) |err| try std.testing.expectEqual(error.UnknownOutcome, mutationFailure("{\"cmd\":\"invitation.inspect\",\"reconcile\":true}", err));
+}
+
+test "vault daemon: timed out and canceled lane acquisition retain exact ownership" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const PendingRequest = struct {
+        client: *transport.Client,
+        response: ?[]const u8 = null,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.response = self.client.request(std.testing.allocator, .execute, "{\"cmd\":\"accounts.list\"}") catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+    var random: [8]u8 = undefined;
+    try io.randomSecure(&random);
+    const root = try std.fmt.allocPrint(a, "{s}/omagma-lane-test-{s}", .{ @import("vault_paths.zig").temporary_root, std.fmt.bytesToHex(random, .lower) });
+    defer a.free(root);
+    const directory = try @import("../keyring_file.zig").directory(io, root, true);
+    directory.close(io);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const path = try std.fmt.allocPrint(a, "{s}/vault", .{root});
+    defer a.free(path);
+    const socket = try std.fmt.allocPrint(a, "{s}/ipc/sock", .{root});
+    defer a.free(socket);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const owner = try a.create(Owner);
+    defer a.destroy(owner);
+    owner.* = try Owner.init(io, a, &env, path, .{ .fixtures = true });
+    defer owner.deinit();
+    var recovery: vt.RecoveryKey = .{ .bytes = @splat(0x39) };
+    defer recovery.wipe();
+    const password = "Synthetic lane ownership password";
+    try owner.create(password, &recovery);
+    const Scenario = enum { timeout, cancel_acquired, cancel_waiter };
+    for ([_]Scenario{ .timeout, .cancel_acquired, .cancel_waiter }, 0..) |scenario, index| {
+        if (index != 0) try owner.unlock(password);
+        var listener = try transport.Listener.init(io, socket);
+        defer listener.deinit();
+        var gate: LaneTestGate = .{};
+        var server: Server = .{ .io = io, .a = a, .listener = &listener, .owner = owner, .lane_test_gate = &gate };
+        // This lane belongs to a different request. Canceling a waiter must
+        // leave it alone, unlike canceling an acquisition that actually won.
+        if (scenario == .cancel_waiter) server.network_lane.store(true, .release);
+        var worker = try io.concurrent(Server.worker, .{&server});
+        defer {
+            server.stopped.set(io);
+            worker.cancel(io) catch {};
+        }
+        var client: transport.Client = .{ .io = io, .socket_path = socket };
+        var pending: PendingRequest = .{ .client = &client };
+        defer if (pending.response) |bytes| {
+            std.crypto.secureZero(u8, @constCast(bytes));
+            a.free(bytes);
+        };
+        var request = try io.concurrent(PendingRequest.run, .{&pending});
+        defer request.cancel(io);
+        try platform.deadline(io, platform.seconds(3), std.Io.Event.wait, .{ &gate.entered, io });
+        if (scenario != .cancel_waiter) try platform.deadline(io, platform.seconds(3), std.Io.Event.wait, .{ &gate.acquired, io });
+        if (scenario != .timeout) {
+            // Match serve teardown: stop admission before joining workers.
+            server.stopped.set(io);
+            worker.cancel(io) catch {};
+        }
+        request.await(io);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        if (scenario == .timeout) {
+            try std.testing.expect(pending.failure == null);
+            try std.testing.expect(std.mem.indexOf(u8, pending.response.?, "VaultBusy") != null);
+            // A second round trip through this sole worker proves the failed
+            // request's cleanup finished before inspecting lane ownership.
+            _ = try client.request(arena.allocator(), .status, "");
+        } else if (scenario == .cancel_waiter and pending.failure == null) {
+            // Cancellation may race the bounded Busy response; neither may
+            // release the other request's lane or execute this request.
+            const denied = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), pending.response.?, .{});
+            try std.testing.expect(!denied.object.get("ok").?.bool);
+            try std.testing.expectEqualStrings("VaultBusy", denied.object.get("error").?.object.get("code").?.string);
+        } else {
+            try std.testing.expect(pending.failure != null);
+        }
+        try std.testing.expectEqual(scenario == .cancel_waiter, server.network_lane.load(.acquire));
+        if (scenario == .cancel_waiter) server.network_lane.store(false, .release);
+        if (scenario != .timeout) {
+            server.stopped.reset();
+            worker = try io.concurrent(Server.worker, .{&server});
+        }
+        const response = try client.request(arena.allocator(), .execute, "{\"cmd\":\"accounts.list\"}");
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), response, .{});
+        try std.testing.expect(parsed.object.get("ok").?.bool);
+        _ = try client.request(arena.allocator(), .lock, "");
+        try std.testing.expect(!owner.unlocked());
+        _ = try client.request(arena.allocator(), .stop, "");
+        try worker.await(io);
+        try std.testing.expect(!server.network_lane.load(.acquire));
+    }
 }
