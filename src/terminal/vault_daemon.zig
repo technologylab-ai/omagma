@@ -641,9 +641,10 @@ test "vault daemon: timed out and canceled lane acquisition retain exact ownersh
             // A second round trip through this sole worker proves the failed
             // request's cleanup finished before inspecting lane ownership.
             _ = try client.request(arena.allocator(), .status, "");
-        } else if (scenario == .cancel_waiter and pending.failure == null) {
+        } else if (pending.failure == null) {
             // Cancellation may race the bounded Busy response; neither may
-            // release the other request's lane or execute this request.
+            // execute this request. An acquired lane must still be released,
+            // while the other request's lane must remain owned.
             const denied = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), pending.response.?, .{});
             try std.testing.expect(!denied.object.get("ok").?.bool);
             try std.testing.expectEqualStrings("VaultBusy", denied.object.get("error").?.object.get("code").?.string);
