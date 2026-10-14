@@ -91,6 +91,7 @@ def sender_completion_undo(binary, directory, capture_dir=None):
         wait_ux_dialog(terminal, "Choose sender", "[Use]", "alias@example.test")
         capture(terminal, capture_dir, "ux-sender-chooser")
         terminal.send(b"\x0e")  # Ctrl+N chooses the alias; Filter j stays data.
+        terminal.until(lambda: focused(terminal, "alias@example.test"))
         activate_button(terminal, "[Use]")
         terminal.until(lambda: "From: alias@example.test" in terminal.text() and "Subject:" in terminal.text())
         # Paste is one observable edit. Undo/redo changes only the note and

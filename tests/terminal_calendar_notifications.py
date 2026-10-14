@@ -427,6 +427,14 @@ def focused_expiry(binary, directory):
     fixture.publish()
     terminal = fixture.start()
     try:
+        terminal.until(lambda: settled(terminal) and "of 2" in terminal.text()
+                       and any(name in terminal.text() for name in names))
+        if names[0] not in terminal.text():
+            terminal.gap(.65)
+            click(terminal, *point(terminal, "Next"))
+            wait_notice(terminal, names[0])
+            terminal.send(b"\x1b")
+            terminal.until(lambda: visible(terminal, names[0]) and "keys here" not in terminal.text())
         wait_notice(terminal, names[0])
         terminal.send(b"M")
         terminal.gap(.7)
@@ -987,7 +995,10 @@ def repeated_dismissal(binary, directory):
         fixture.publish()
         terminal = fixture.start()
         try:
-            wait_notice(terminal, names[0])
+            terminal.until(lambda: settled(terminal) and "of 2" in terminal.text()
+                           and any(name in terminal.text() for name in names))
+            first = next(name for name in names if name in terminal.text())
+            second = next(name for name in names if name != first)
             terminal.send(b"M")
             terminal.until(lambda: settled(terminal) and "keys here" in terminal.text())
             terminal.gap(.8)
@@ -995,14 +1006,14 @@ def repeated_dismissal(binary, directory):
             while time.monotonic() < deadline:
                 terminal.send(key)
                 terminal.gap(.05)
-            require(names[1] in terminal.text(), label + " repeats dismissed the next meeting")
-            require(names[0] not in terminal.text(), label + " failed to dismiss the first meeting")
+            require(second in terminal.text(), label + " repeats dismissed the next meeting")
+            require(first not in terminal.text(), label + " failed to dismiss the first meeting")
             require("keys here" not in terminal.text(), "next reminder inherited keyboard focus")
             require("j/k Mail" in terminal.text(), label + " repeats opened the selected email")
             # A deliberate new M permits the next action even while the trailing
             # repeat guard would otherwise still be active.
             terminal.send(b"M" + key)
-            terminal.until(lambda: settled(terminal) and names[1] not in terminal.text())
+            terminal.until(lambda: settled(terminal) and second not in terminal.text())
             fixture.clock(fixture.noon + 6 * MINUTE)
             absent_for(terminal, names, seconds=2.2)
             terminal.finish()
@@ -1465,12 +1476,49 @@ def notification_account(terminal):
     return next((account for account in ACCOUNTS if account in row), None)
 
 
+def observe_notification_accounts(terminal, title, accounts, selected=None):
+    """Verify each card's account without assuming which agenda arrived first."""
+    expected = set(accounts)
+    deadline = time.monotonic() + 12
+
+    def ready():
+        header = frame_title(terminal.screen, "Upcoming meeting") or frame_title(terminal.screen, "Meeting now")
+        return (settled(terminal) and header is not None and title in terminal.text()
+                and re.search(r"\bof " + str(len(expected)) + r"\b",
+                              "".join(terminal.screen.cells[header["row"]])) is not None)
+
+    terminal.until(ready, seconds=max(0, deadline - time.monotonic()))
+    observed = set()
+    for _ in range(2 * len(expected)):
+        current = notification_account(terminal)
+        require(current in expected, "reminder card has an unexpected or missing account")
+        observed.add(current)
+        if observed == expected and (selected is None or current == selected):
+            break
+        # Respect the existing occurrence-change guard before one deliberate
+        # Next click; discovery and the whole account cycle share the 12s limit.
+        terminal.gap(.65)
+        terminal.until(ready, seconds=max(0, deadline - time.monotonic()))
+        require(time.monotonic() < deadline, "reminder account discovery exceeded 12s")
+        click(terminal, *point(terminal, "Next"))
+        terminal.until(lambda: ready() and notification_account(terminal) != current,
+                       seconds=max(0, deadline - time.monotonic()))
+    else:
+        raise AssertionError("reminder cycle did not recover every account and requested selection")
+    require(time.monotonic() < deadline, "reminder account discovery exceeded 12s")
+    if "keys here" in terminal.text():
+        terminal.send(b"\x1b")
+        terminal.until(lambda: ready() and "keys here" not in terminal.text(),
+                       seconds=max(0, deadline - time.monotonic()))
+    return observed
+
+
 def vault_lock_reminder(binary, directory):
     owner = OwnedNotificationVault(binary, directory, minute=-5)
     try:
         terminal = owner.start_terminal(account=ACCOUNTS[1])
         wait_notice(terminal, "Project planning", 5)
-        terminal.until(lambda: settled(terminal) and notification_account(terminal) == ACCOUNTS[0], seconds=12)
+        observe_notification_accounts(terminal, "Project planning", ACCOUNTS, selected=ACCOUNTS[0])
         terminal.send(b"M")
         terminal.until(lambda: settled(terminal) and "keys here" in terminal.text())
         terminal.gap(.7)
@@ -1544,10 +1592,7 @@ def vault_restart_compose(binary, directory):
         terminal.send(b"q")
         terminal.until(lambda: settled(terminal) and "Compose" not in terminal.text() and "Mail ·" in terminal.text())
         wait_notice(terminal, "Project planning", 5)
-        terminal.until(lambda: settled(terminal) and re.search(r"\bof 3\b", terminal.text()) is not None,
-                       seconds=12)
-        require(notification_account(terminal) == ACCOUNTS[0],
-                "daemon restart lost the first account's reminder discovery")
+        observe_notification_accounts(terminal, "Project planning", ACCOUNTS)
         require("Vault password:" not in terminal.text(), "restarted owner prompted inside the composer")
         owner.finish()
         require(authored_body(owner.request("draft.read", draftId=retained["id"])) == expected,

@@ -112,6 +112,7 @@ jobs:
           node tests/ui_model.mjs
           python3 tests/terminal_fixture_check.py
           python3 tests/terminal_screen.py
+          python3 tests/terminal_ux_focus.py
           python3 tests/terminal_cache_fixture_check.py
           python3 tests/terminal_status_screen.py
           python3 tests/terminal_reader.py
@@ -362,6 +363,7 @@ jobs:
           python3 tests/terminal_fixture_check.py
           python3 tests/terminal_cache_fixture_check.py
           python3 tests/terminal_screen.py
+          python3 tests/terminal_ux_focus.py
           python3 tests/terminal_status_screen.py
           python3 tests/terminal_reader.py
           python3 tests/terminal_html_screen.py

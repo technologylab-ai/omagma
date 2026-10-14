@@ -19,7 +19,7 @@ from terminal_dialog_controls import filter_label_picker, wait_label_picker
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_ux_batch_support import (TAB, BACKTAB, ENTER, ESC, activate_button,
     capture, command, diagnose, focus_button, no_writes, read_mail, run_cases, start,
-    wait_ux_dialog)
+    wait_ux_dialog, wait_ux_filter)
 
 MARKER = "Owned UX current message 096."
 TOKEN = "needleUX"
@@ -95,14 +95,15 @@ def palette(binary, directory, capture_dir=None):
         terminal.resize(40, 12)
         wait_ux_dialog(terminal, "Actions", "[Run]")
         capture(terminal, capture_dir, "ux-palette-40x12")
-        activate_button(terminal, "[Back]")
+        # Empty list/disabled Run have no visible focus; go Filter -> Back.
+        activate_button(terminal, "[Back]", backwards=True)
         terminal.until(lambda: "Actions" not in terminal.text())
         terminal.resize(160, 40)
         terminal.until(lambda: MARKER in terminal.text())
         command(terminal, "actions")
         wait_ux_dialog(terminal, "Actions", "[Run]")
         terminal.send(b"theme")
-        terminal.until(lambda: "theme" in terminal.text().lower() and "[Run]" in terminal.text())
+        wait_ux_filter(terminal, "theme", "[Run]")
         focus_button(terminal, "[Run]")
         focus_button(terminal, "[Back]", backwards=True)
         focus_button(terminal, "[Run]")
@@ -129,7 +130,7 @@ def palette_mono(binary, directory, capture_dir=None):
         terminal.until(lambda: "qjk2" in terminal.text())
         terminal.resize(40, 12)
         wait_ux_dialog(terminal, "Actions", "[Run]")
-        focus_button(terminal, "[Back]")
+        focus_button(terminal, "[Back]", backwards=True)
         position = terminal.screen.locate("[Back]")
         require(terminal.screen.reverse_cells[position["row"]][position["column"]],
                 "NO_COLOR palette focus has no visible reverse-video state")
@@ -261,7 +262,8 @@ def history(binary, directory, capture_dir=None):
         command(terminal, "search-history")
         wait_ux_dialog(terminal, "Search history", "[Open]", "No matching actions or entries")
         require("subject:personal" not in terminal.text(), "search history leaked another account's queries")
-        activate_button(terminal, "[Back]")
+        # The empty chooser has no visible list/disabled Open focus.
+        activate_button(terminal, "[Back]", backwards=True)
         no_writes(binary, directory, source.options())
         terminal.finish()
     except Exception:

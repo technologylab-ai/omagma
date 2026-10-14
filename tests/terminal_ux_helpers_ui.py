@@ -16,8 +16,8 @@ from terminal_integration import ACCOUNTS, FIXTURES, Client, require
 from terminal_mouse import MouseTerminal
 from terminal_ux_batch_navigation import MARKER, fixtures
 from terminal_ux_batch_support import (TAB, ENTER, ESC, FocusScreen,
-    activate_button, capture, command, diagnose, no_writes, read_draft,
-    run_cases, start, wait_send_review, wait_ux_dialog)
+    activate_button, capture, command, diagnose, focused, no_writes, read_draft,
+    run_cases, start, wait_send_review, wait_ux_dialog, wait_ux_filter)
 
 
 def search(terminal, query, scope):
@@ -44,7 +44,7 @@ def reopen_search(terminal, name, query, scope, account):
     wait_ux_dialog(terminal, "Saved searches", "[Open]", name)
     terminal.send(name.encode())  # Filter leaves exactly the named entry.
     title = "Cache" if scope == "cache" else "Gmail"
-    terminal.until(lambda: f"{title} · {query}" in terminal.text())
+    wait_ux_filter(terminal, name, f"› {name}", f"{title} · {query}")
     activate_button(terminal, "[Open]")
     terminal.until(lambda: "Saved searches" not in terminal.text()
                    and f"{title} search" in terminal.screen.lines()[0]
@@ -87,7 +87,8 @@ def saved_searches(binary, directory, capture_dir=None):
         wait_ux_dialog(terminal, "Saved searches", "[Open]", "No matching actions or entries")
         require(cache_name not in terminal.text() and gmail_name not in terminal.text(),
                 "another account displayed the personal saved searches")
-        activate_button(terminal, "[Back]")
+        # Filter -> Back avoids the empty list and disabled Open focus slots.
+        activate_button(terminal, "[Back]", backwards=True)
         search(terminal, work_query, "cache")
         command(terminal, f"save-search {cache_name}")
         terminal.until(lambda: "Search saved for this account" in terminal.text())
@@ -171,6 +172,9 @@ def contact_second_address(binary, directory, capture_dir=None):
         terminal.send(ENTER)
         wait_ux_dialog(terminal, "Choose contact address", "[Use]", first, second)
         terminal.send(b"\x0e")  # Ctrl+N explicitly chooses the second address.
+        # The highlighted Contacts row behind this chooser contains both
+        # addresses. Only the exact selected modal row acknowledges Ctrl+N.
+        terminal.until(lambda: focused(terminal, f"› {formatted}"))
         capture(terminal, capture_dir, "ux-contact-second-address")
         activate_button(terminal, "[Use]")
         terminal.until(lambda: f"Cc: {formatted}" in terminal.text() and "Subject:" in terminal.text())

@@ -109,6 +109,13 @@ def wait_ux_dialog(terminal, title, primary, *content, cancel="[Back]", filtered
     terminal.until(lambda: all(value in terminal.text() for value in expected))
 
 
+def wait_ux_filter(terminal, query, *content):
+    # A matching row/detail may already exist before the newly typed filter.
+    # Observe the complete input before Tab can be confused with a relayout.
+    terminal.until(lambda: f"Filter: {query}▏" in terminal.text()
+                   and all(value in terminal.text() for value in content))
+
+
 def wait_send_review(terminal):
     terminal.until(lambda: "Review send" in terminal.text()
                    and "[Back]" in terminal.text() and "[y Send]" in terminal.text()
@@ -124,14 +131,26 @@ def focused(terminal, label):
             or terminal.screen.reverse_cells[y][x])
 
 
+def focus_positions(terminal):
+    # Text and clocks can redraw without acknowledging a Tab. Compare only
+    # the visible focus cells, in both color and NO_COLOR terminals.
+    return frozenset((y, x)
+                     for y, row in enumerate(terminal.screen.styles)
+                     for x, style in enumerate(row)
+                     if style[1] == SELECTED or terminal.screen.reverse_cells[y][x])
+
+
 def focus_button(terminal, label, backwards=False, limit=32):
     # Observe each focus transition, retaining the selected list row. No mouse
-    # or application internals are used to reach any action.
+    # or application internals are used to reach any action. Never queue a
+    # second Tab while the first one's focus change is still being rendered.
+    terminal.until(lambda: True)
     for _ in range(limit):
         if focused(terminal, label):
             return
+        previous = focus_positions(terminal)
         terminal.send(BACKTAB if backwards else TAB)
-        terminal.gap(.04)
+        terminal.until(lambda: focus_positions(terminal) != previous)
     require(False, f"action is not reachable with Tab/Shift+Tab: {label}")
 
 
@@ -140,6 +159,8 @@ def activate_button(terminal, label, backwards=False):
     # This is a deliberate activation after reviewing the focused control,
     # separate from held-key/repeat guards at a newly opened write surface.
     terminal.gap(.26)
+    terminal.until(lambda: True)
+    require(focused(terminal, label), f"action focus changed before Enter: {label}")
     terminal.send(ENTER)
 
 
