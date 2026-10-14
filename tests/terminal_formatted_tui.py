@@ -22,6 +22,7 @@ from terminal_formatted_original import (
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, point, start
 from terminal_polish_compose import panel_text
+from terminal_pty import saved_compose_frame
 
 
 CASES = ("chooser", "lifecycle", "modes", "queued")
@@ -185,7 +186,7 @@ def lifecycle_one(binary, directory, forward):
         stage = "external editor sees only note"
         terminal.send(b"e")
         terminal.until(lambda: (directory / "editor-note-input.txt").is_file()
-                       and "Compose" in terminal.text()
+                       and saved_compose_frame(terminal, int(forward))
                        and "Editor personal note." in panel_text(terminal, "Compose"))
         require((directory / "editor-note-input.txt").read_text() == NOTE, "external editor received original HTML/text/resources")
         stage = "ordinary attachment edits preserve embedded resources"
@@ -194,7 +195,11 @@ def lifecycle_one(binary, directory, forward):
         terminal.send(b"A")
         terminal.until(lambda: "Attach file · local draft" in terminal.text())
         terminal.send(str(extra_file).encode() + b"\r")
-        terminal.until(lambda: "note-extra.txt" in terminal.text() and "Attach file · local draft" not in terminal.text())
+        # Import paints the new file before its separate explicit save is
+        # acknowledged. Review is available after that write finishes, as the
+        # saved composer state reports; a filename alone is not readiness.
+        terminal.until(lambda: "note-extra.txt" in terminal.text()
+                       and saved_compose_frame(terminal, int(forward) + 1))
         terminal.send(b"\x13")
         terminal.until(lambda: "Review send" in terminal.text())
         with_extra = single_draft(binary, directory, fixture)
@@ -233,6 +238,10 @@ def lifecycle_one(binary, directory, forward):
         terminal.until(lambda: "Drafts" in terminal.screen.lines()[0] and "Synthetic formatted original" in terminal.text())
         terminal.send(b"\r")
         wait_compose(terminal)
+        # Reopening first paints a protected draft while its submission and
+        # queue receipts are inspected. Preview becomes available only after
+        # that protection clears for this saved draft.
+        terminal.until(lambda: saved_compose_frame(terminal, int(forward)))
         terminal.send(b"p")
         terminal.until(lambda: "Original message · saved snapshot" in terminal.text()
                        and "Original layout" in panel_text(terminal, "Original message"))

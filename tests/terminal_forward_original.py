@@ -193,7 +193,8 @@ def main():
     binary = args.binary.resolve()
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="omagma-original-fixtures-") as temporary:
-        exercise(binary, Path(temporary))
+        # Darwin's /var is a symlink; attachment saves require a canonical parent.
+        exercise(binary, Path(temporary).resolve())
     require(hashlib.sha256(binary.read_bytes()).hexdigest() == digest, "tested binary changed")
     receipt = {"schemaVersion": 1, "suite": "terminal-forward-original", "status": "passed", "synthetic": True, "liveProviderWrites": 0, "binarySha256": digest, **read_build_info(binary, None)}
     if args.receipt:

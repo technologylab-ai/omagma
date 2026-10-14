@@ -27,7 +27,7 @@ from build_info import read_build_info
 from terminal_calendar import Invitations
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_mouse import MouseTerminal, click, point
-from terminal_pty import compose_fixture, open_composer
+from terminal_pty import compose_fixture, open_composer, saved_compose_frame
 from terminal_reader import frame_title
 from terminal_reader_editor import ReaderScreen
 
@@ -793,7 +793,8 @@ finally:
         clock_inside_editor(start + 5 * MINUTE)
         authored = "Literal M o d editor text"
         save_editor(authored)
-        terminal.until(lambda: settled(terminal) and "Editor returned" in terminal.text()
+        terminal.until(lambda: settled(terminal) and saved_compose_frame(terminal, 0)
+                       and "Editor returned" in terminal.text()
                        and authored in terminal.text())
         terminal.send(b"q")
         terminal.until(lambda: settled(terminal) and "Compose" not in terminal.text()
