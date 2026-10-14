@@ -19,6 +19,7 @@ from terminal_cache import cached, metrics
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import MouseTerminal
 from terminal_mouse_screen import MouseScreen
+from terminal_pty import saved_compose_frame
 from terminal_scroll_progress import fixture, contains
 
 
@@ -77,7 +78,11 @@ def run(binary, directory, action):
             drafts = client.request("draft.list")["drafts"]
             require(len(drafts) == int(action != "open"), "foreground request duplicated or lost its draft")
         if action != "open":
-            terminal.send(b"\x03")  # Idle compose saves and returns on Ctrl+C.
+            # A saved compose can still be loading recipients or identities.
+            # Ctrl+C cancels that worker; normal-mode Back saves and leaves.
+            terminal.until(lambda: saved_compose_frame(terminal)
+                           and "q Back" in "".join(terminal.screen.cells[-2]))
+            terminal.send(b"q")
             terminal.until(lambda: terminal.screen.locate("Mail ·") is not None)
         terminal.finish()
         return {"target": "shared-msg-094", "prefetchBodies": 1,

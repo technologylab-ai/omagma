@@ -31,7 +31,7 @@ const Server = struct {
     cancel_execution: std.Io.Event = .unset,
 
     fn worker(self: *Server) std.Io.Cancelable!void {
-        while (true) {
+        while (!self.stopped.isSet()) {
             const stream = self.listener.server.accept(self.io) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.ConnectionAborted => continue,
@@ -52,18 +52,18 @@ const Server = struct {
             var frame = received.?;
             const lane = frame.kind == .execute;
             if (lane and self.control_locking.load(.acquire)) {
-                self.sendError(stream, &frame, error.VaultLocked) catch {};
+                self.sendError(stream, &frame, error.VaultLocked) catch |err| if (err == error.Canceled) return error.Canceled;
                 continue;
             }
             if (lane) platform.deadline(self.io, platform.seconds(5), acquireLane, .{self}) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
-                self.sendError(stream, &frame, if (err == error.Timeout) error.VaultBusy else err) catch {};
+                self.sendError(stream, &frame, if (err == error.Timeout) error.VaultBusy else err) catch |send_err| if (send_err == error.Canceled) return error.Canceled;
                 continue;
             };
             defer if (lane) self.network_lane.store(false, .release);
             if (lane) self.cancel_execution.reset();
             if (lane and self.control_locking.load(.acquire)) {
-                self.sendError(stream, &frame, error.VaultLocked) catch {};
+                self.sendError(stream, &frame, error.VaultLocked) catch |err| if (err == error.Canceled) return error.Canceled;
                 continue;
             }
             var response: ?[]const u8 = null;
@@ -74,13 +74,16 @@ const Server = struct {
             self.dispatch(&frame, &response, stream) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 const report = if (frame.kind == .execute and (err == error.Timeout or err == error.OutOfMemory or err == error.VaultOperationCanceled)) mutationFailure(frame.body, err) else err;
-                self.sendError(stream, &frame, report) catch {};
+                self.sendError(stream, &frame, report) catch |send_err| if (send_err == error.Canceled) return error.Canceled;
                 continue;
             };
             platform.deadline(self.io, platform.seconds(5), transport.writeFrame, .{ self.io, stream, .response, response.?, transport.response_limit }) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
             };
-            if (frame.kind == .stop) self.stopped.set(self.io);
+            if (frame.kind == .stop) {
+                self.stopped.set(self.io);
+                return;
+            }
         }
     }
     fn dispatch(self: *Server, frame: *transport.Frame, response: *?[]const u8, stream: std.Io.net.Stream) !void {
@@ -244,9 +247,17 @@ pub fn serve(io: std.Io, a: std.mem.Allocator, owner: *Owner, socket_path: []con
         for (signals, 0..) |signal, index| std.posix.sigaction(signal, &previous[index], null);
     }
     var signal_task = try io.concurrent(waitSignal, .{ io, wake.read, &server.stopped });
-    defer signal_task.cancel(io);
+    defer {
+        wakeup.notify(wake.write_fd);
+        signal_task.cancel(io);
+    }
     var workers: std.Io.Group = .init;
-    defer workers.cancel(io); // Joins cancellation before owner/key destruction.
+    defer {
+        // Every exit stops admission before joining workers. Cancellation is
+        // one-shot: an acknowledged request must never enter another accept.
+        server.stopped.set(io);
+        workers.cancel(io);
+    }
     // Leave room in the fixed 16-worker runtime for Core/HTTP's bounded
     // deadline tasks even when the other connection stalls while writing.
     for (0..2) |_| try workers.concurrent(io, Server.worker, .{&server});

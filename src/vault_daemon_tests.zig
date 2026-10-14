@@ -200,3 +200,59 @@ test "vault daemon: caller retains and wipes a completed allocation during deadl
     }
     try std.testing.expectEqualStrings("synthetic-secret-completed-at-timeout", race.output.?);
 }
+
+test "vault daemon: repeated stop signal and cancellation join workers before listener reuse" {
+    var random: [8]u8 = undefined;
+    try io.randomSecure(&random);
+    const root = try std.fmt.allocPrint(a, "{s}/omagma-stop-test-{s}", .{ @import("terminal/vault_paths.zig").temporary_root, std.fmt.bytesToHex(random, .lower) });
+    defer a.free(root);
+    const directory = try @import("keyring_file.zig").directory(io, root, true);
+    directory.close(io);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const path = try std.fmt.allocPrint(a, "{s}/vault", .{root});
+    defer a.free(path);
+    const socket = try std.fmt.allocPrint(a, "{s}/ipc/sock", .{root});
+    defer a.free(socket);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const owner = try a.create(owner_module.Owner);
+    defer a.destroy(owner);
+    owner.* = try owner_module.Owner.init(io, a, &env, path, .{ .fixtures = true });
+    defer owner.deinit();
+    var client: transport.Client = .{ .io = io, .socket_path = socket };
+    // The stop response can reach its caller before the worker has unwound
+    // its deadline tasks. Reuse the exact socket to check joined teardown.
+    for (0..96) |iteration| {
+        var service = try io.concurrent(daemon.serve, .{ io, a, owner, socket });
+        defer service.cancel(io) catch {};
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var connected = false;
+        for (0..200) |_| {
+            _ = client.request(arena.allocator(), .status, "") catch {
+                try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(io);
+                continue;
+            };
+            connected = true;
+            break;
+        }
+        try std.testing.expect(connected);
+        switch (iteration % 3) {
+            0 => {
+                const stopped = try client.request(arena.allocator(), .stop, "");
+                try std.testing.expect(std.mem.indexOf(u8, stopped, "\"unlocked\":false") != null);
+                try service.await(io);
+            },
+            1 => {
+                const pid: i32 = if (@import("builtin").os.tag == .linux) @intCast(std.os.linux.getpid()) else std.c.getpid();
+                try std.posix.kill(pid, .TERM);
+                try service.await(io);
+            },
+            2 => try std.testing.expectError(error.Canceled, service.cancel(io)),
+            else => unreachable,
+        }
+        try std.testing.expect(!owner.unlocked());
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, socket, .{ .follow_symlinks = false }));
+    }
+}

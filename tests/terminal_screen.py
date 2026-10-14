@@ -18,6 +18,7 @@ class Screen:
         self.anchor = None
         self.join_next = False
         self.wide_right_edge = 0
+        self.frame_open = False
 
     def feed(self, data):
         for char in self.decoder.decode(data):
@@ -154,6 +155,7 @@ class Screen:
         elif final in {"h", "l"} and private:
             for mode in values:
                 if mode == 7: self.wrap = final == "h"
+                if mode == 2026: self.frame_open = final == "h"
                 if mode in {47, 1047, 1049}:
                     if final == "h" and self.main is None:
                         self.main = (self.cells, self.x, self.y)
@@ -222,5 +224,57 @@ if __name__ == "__main__":
             screen = Screen(20, 3)
             screen.feed(b"old\x1b[2J\x1b[1;1Hnew")
             self.assertEqual(screen.text(), "new\n\n")
+
+        def test_synchronized_frame_tracks_fragmented_and_compound_modes(self):
+            screen = Screen(20, 3)
+            screen.feed(b"\x1b[?202")
+            self.assertFalse(screen.frame_open)
+            screen.feed(b"6;25hTitle")
+            self.assertTrue(screen.frame_open)
+            screen.feed(b"\x1b[2;1HFooter\x1b[?2026")
+            self.assertTrue(screen.frame_open)
+            screen.feed(b"l")
+            self.assertFalse(screen.frame_open)
+            self.assertIn("Footer", screen.text())
+
+        def test_until_does_not_accept_title_from_partial_pty_frame(self):
+            from terminal_pty import Terminal
+            from types import SimpleNamespace
+
+            # Model separate reads from the owned PTY. A heading alone used to
+            # end until(), leaving assertions to inspect an unfinished frame.
+            terminal = object.__new__(Terminal)
+            terminal.screen = Screen(40, 4)
+            terminal.process = SimpleNamespace(poll=lambda: None)
+            chunks = [b"\x1b[?2026hCalendar notice",
+                      b"\x1b[3;1H[Esc Close]", b"\x1b[?2026l"]
+            observed = []
+
+            def pump():
+                self.assertTrue(chunks, "wait read past the completed frame")
+                terminal.screen.feed(chunks.pop(0))
+
+            def title_visible():
+                observed.append(terminal.text())
+                return "Calendar notice" in terminal.text()
+
+            terminal.pump = pump
+            terminal.until(title_visible)
+            self.assertEqual(chunks, [])
+            self.assertEqual(len(observed), 2)  # Initial blank and complete frame.
+            self.assertIn("[Esc Close]", observed[-1])
+            self.assertFalse(terminal.screen.frame_open)
+
+        def test_until_keeps_deadline_and_accepts_unframed_editor_output(self):
+            from terminal_pty import Terminal
+
+            terminal = object.__new__(Terminal)
+            terminal.screen = Screen(40, 4)
+            terminal.screen.feed(b"\x1b[?2026hUnfinished frame")
+            with self.assertRaisesRegex(AssertionError, "isolated PTY condition timed out"):
+                terminal.until(lambda: True, seconds=0)
+            terminal.screen.feed(b"\x1b[?2026l\r\x1b[KOWNED EDITOR:")
+            # No new synchronized frame is required for an ordinary editor.
+            terminal.until(lambda: "OWNED EDITOR:" in terminal.text(), seconds=0)
 
     unittest.main()

@@ -141,7 +141,9 @@ class Terminal:
 
     def until(self, predicate, seconds=10):
         deadline = time.monotonic() + seconds
-        while not predicate():
+        # A PTY read may end anywhere in a synchronized render. Evaluate the
+        # caller's readiness condition only against a complete visible frame.
+        while self.screen.frame_open or not predicate():
             require(time.monotonic() < deadline, "isolated PTY condition timed out")
             require(self.process.poll() is None, "TUI exited before expected state")
             self.pump()

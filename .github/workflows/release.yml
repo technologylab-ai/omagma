@@ -99,7 +99,7 @@ jobs:
       - name: Debug correctness checks
         run: |
           zig version
-          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug
+          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug --test-timeout 120s
           zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-debug
           python3 tests/integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/zig017-debug-integration.json
           python3 tests/probes/transport_check.py --binary .verification-debug/bin/omagma --build-mode debug --https --output tests/results/zig017-debug-transport.json
@@ -164,11 +164,11 @@ jobs:
         run: python3 tests/terminal_html_compatibility.py --binary .verification-debug/bin/omagma --browser "$(command -v google-chrome)" --receipt tests/results/terminal-debug-html-compatibility.json
       - name: Shared mail, contacts and browser adapter correctness
         run: |
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s
       - name: Safe correctness and standalone probes
         run: |
-          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe
+          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe --test-timeout 120s
           .verification-safe/bin/auth_probe launch
           .verification-safe/bin/auth_probe callback
           .verification-safe/bin/callback_budget
@@ -355,7 +355,7 @@ jobs:
       - name: Debug native correctness and synthetic fixtures
         run: |
           zig version
-          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug
+          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug --test-timeout 120s
           zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-macos-debug
           .verification-macos-debug/bin/omagma build-info
           shasum -a 256 .verification-macos-debug/bin/omagma
@@ -410,11 +410,11 @@ jobs:
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode debug
       - name: Shared mail, contacts and browser adapter correctness
         run: |
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s
       - name: Safe native correctness and standalone probes
         run: |
-          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe
+          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe --test-timeout 120s
           .verification-macos-safe/bin/auth_probe keyring
           .verification-macos-safe/bin/auth_probe launch
           .verification-macos-safe/bin/auth_probe callback
