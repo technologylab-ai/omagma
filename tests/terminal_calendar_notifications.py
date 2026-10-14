@@ -466,18 +466,23 @@ def focused_provider_changes(binary, directory):
                        and "keys here" in terminal.text(), seconds=12)
 
     try:
-        wait_notice(terminal, canceled["value"]["summary"])
         # Account agendas arrive independently. Observe every occurrence before
         # testing which one survives a focused cancellation/reschedule: a card
         # selected before another account arrives intentionally stays selected.
         expected_accounts = {canceled["value"]["summary"]: account,
                              moved["value"]["summary"]: account,
                              survivor: ACCOUNTS[1]}
-        terminal.until(lambda: settled(terminal) and "of 3" in terminal.text(), seconds=12)
-        current = canceled["value"]["summary"]
+        terminal.until(lambda: settled(terminal) and "of 3" in terminal.text()
+                       and any(title in terminal.text() for title in expected_accounts), seconds=12)
+        current = next(title for title in expected_accounts if title in terminal.text())
         observed = {current}
-        require(notification_account(terminal) == account, "initial focused occurrence has the wrong account")
-        for _ in range(3):
+        require(notification_account(terminal) == expected_accounts[current],
+                "initial focused occurrence has the wrong account")
+        # Start from whichever account arrived first, then deliberately select
+        # the cancellation target after checking every occurrence and account.
+        for _ in range(5):
+            if observed == set(expected_accounts) and current == canceled["value"]["summary"]:
+                break
             terminal.gap(.65)
             click(terminal, *point(terminal, "Next"))
             terminal.until(lambda: settled(terminal) and any(
@@ -487,7 +492,7 @@ def focused_provider_changes(binary, directory):
                     "initial reminder cycle mixed occurrence and account")
             observed.add(current)
         require(observed == set(expected_accounts) and current == canceled["value"]["summary"],
-                "initial reminder cycle did not observe all occurrences and restore the first")
+                "initial reminder cycle did not observe all occurrences and select the cancellation target")
         terminal.send(b"\x1b")
         terminal.until(lambda: visible(terminal, current) and "keys here" not in terminal.text())
         terminal.send(b"M")
