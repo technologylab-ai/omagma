@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Strip debug information from native and browser binaries") orelse false;
     const macos_sdk = if (target.result.os.tag == .macos) b.option([]const u8, "macos-sdk", "Path to the macOS SDK for explicit deployment targets") orelse if (builtin.os.tag == .macos) std.mem.trim(u8, b.run(&.{ "/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path" }), " \r\n\t") else @panic("macOS targets require -Dmacos-sdk=/absolute/SDK/path") else null;
+    const test_watchdog = b.option(bool, "test-watchdog", "Supervise native test timeout cleanup (requires Python 3)") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Run only correctness tests containing this text");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
     const tui_enabled = b.option(bool, "tui", "Include the libvaxis terminal client") orelse true;
@@ -67,20 +68,20 @@ pub fn build(b: *std.Build) void {
     b.step("browser-export", "Build the offline private browser connection exporter").dependOn(&b.addInstallArtifact(browser_export, .{}).step);
     const browser_export_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_export_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(browser_export_tests.root_module, sdk);
-    b.step("test-browser-export", "Check private browser export with synthetic file credentials").dependOn(&b.addRunArtifact(browser_export_tests).step);
+    b.step("test-browser-export", "Check private browser export with synthetic file credentials").dependOn(&guardedTestRun(b, browser_export_tests, test_watchdog).step);
     const browser_server_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_server_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
-    b.step("test-browser-server", "Check bounded browser static HTTP handling").dependOn(&b.addRunArtifact(browser_server_tests).step);
+    b.step("test-browser-server", "Check bounded browser static HTTP handling").dependOn(&guardedTestRun(b, browser_server_tests, test_watchdog).step);
     const browser_cache_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_cache_tests.zig"), .target = target, .optimize = optimize }) });
-    b.step("test-browser-cache", "Check bounded account-scoped browser snapshots").dependOn(&b.addRunArtifact(browser_cache_tests).step);
+    b.step("test-browser-cache", "Check bounded account-scoped browser snapshots").dependOn(&guardedTestRun(b, browser_cache_tests, test_watchdog).step);
     const browser_provider_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_provider_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(browser_provider_tests.root_module, sdk);
-    b.step("test-browser-provider", "Check browser Client isolation and uncertain-send contracts").dependOn(&b.addRunArtifact(browser_provider_tests).step);
+    b.step("test-browser-provider", "Check browser Client isolation and uncertain-send contracts").dependOn(&guardedTestRun(b, browser_provider_tests, test_watchdog).step);
     const contact_isolation_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/contact_isolation_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(contact_isolation_tests.root_module, sdk);
-    b.step("test-contacts", "Check shared contact-page refusal isolation").dependOn(&b.addRunArtifact(contact_isolation_tests).step);
+    b.step("test-contacts", "Check shared contact-page refusal isolation").dependOn(&guardedTestRun(b, contact_isolation_tests, test_watchdog).step);
     const mailbox_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/browser_mail_actions_tests.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
     if (macos_sdk) |sdk| linkNativeKeychain(mailbox_tests.root_module, sdk);
-    b.step("test-browser-mail-actions", "Check shared browser mailbox mutations and per-item undo").dependOn(&b.addRunArtifact(mailbox_tests).step);
+    b.step("test-browser-mail-actions", "Check shared browser mailbox mutations and per-item undo").dependOn(&guardedTestRun(b, mailbox_tests, test_watchdog).step);
     if (vaxis) |v| m.addImport("vaxis", v.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "omagma", .root_module = m, .linkage = if (target.result.os.tag == .linux) .static else null, .use_llvm = if (vaxis != null) true else null });
     b.installArtifact(exe);
@@ -89,12 +90,12 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run omagma").dependOn(&run.step);
     const t = b.addTest(.{ .root_module = m, .filters = test_filters, .use_llvm = if (vaxis != null) true else null });
     const correctness = b.step("test", "Run correctness tests");
-    correctness.dependOn(&b.addRunArtifact(t).step);
+    correctness.dependOn(&guardedTestRun(b, t, test_watchdog).step);
     for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig", "src/terminal_mail_acceptance_tests.zig", "src/terminal_ux_backend_tests.zig", "src/terminal_ux_helper_tests.zig", "src/platform_tests.zig", "src/updates_tests.zig", "src/calendar_tests.zig", "src/calendar_service_tests.zig", "src/calendar_native_tests.zig", "src/calendar_commands_tests.zig", "src/calendar_embedded_tests.zig", "src/calendar_duration_tests.zig", "src/calendar_fixture_tests.zig", "src/calendar_store_tests.zig", "src/calendar_vault_grants_tests.zig", "src/vault_crypto_tests.zig", "src/vault_storage_tests.zig", "src/vault_catalog_tests.zig", "src/vault_store_tests.zig", "src/vault_mail_tests.zig", "src/vault_daemon_tests.zig", "src/vault_identity_tests.zig", "src/vault_activation_tests.zig", "src/vault_migration_tests.zig", "src/vault_migration_store_tests.zig", "src/session_cache_integration_tests.zig", "src/draft_continuity_tests.zig" }) |path| {
         const terminal_test = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
         terminal_test.root_module.addOptions("build_options", options);
         if (macos_sdk) |sdk| linkNativeKeychain(terminal_test.root_module, sdk);
-        correctness.dependOn(&b.addRunArtifact(terminal_test).step);
+        correctness.dependOn(&guardedTestRun(b, terminal_test, test_watchdog).step);
     }
 
     const probes = b.step("probes", "Compile all standalone transport/auth/budget probes");
@@ -110,6 +111,24 @@ pub fn build(b: *std.Build) void {
         if (macos_sdk) |sdk| linkNativeKeychain(probe.root_module, sdk);
         probes.dependOn(&b.addInstallArtifact(probe, .{}).step);
     }
+}
+
+/// Keep Maker's per-test protocol/timer; bound its TERM-based child cleanup.
+/// Public so the tiny test-tooling oracle exercises this exact build wiring.
+pub fn guardedTestRun(b: *std.Build, artifact: *std.Build.Step.Compile, enabled: bool) *std.Build.Step.Run {
+    const run = b.addRunArtifact(artifact);
+    if (enabled) {
+        switch (run.stdio) {
+            .zig_test => {},
+            else => @panic("test-watchdog requires native server-mode Zig tests"),
+        }
+        const original = run.argv.toOwnedSlice(b.allocator) catch @panic("OOM");
+        run.addArg("python3");
+        run.addFileArg(b.path("tests/zig_test_guard.py"));
+        run.addArg("--");
+        run.argv.appendSlice(b.allocator, original) catch @panic("OOM");
+    }
+    return run;
 }
 
 fn embeddedAssetSource(enabled: bool) []const u8 {
