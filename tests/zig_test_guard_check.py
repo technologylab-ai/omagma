@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -204,6 +206,94 @@ class GuardTests(unittest.TestCase):
             self.assertIn("-Dtest-watchdog=true", command)
 
 
+    def test_maker_timeout_preserves_phase_markers_and_partial_output(self):
+        failure = subprocess.TimeoutExpired(["synthetic-maker"], 180,
+                                            output=b"partial protocol output\n")
+
+        class Child:
+            pid = 23456
+            returncode = None
+
+            def communicate(self, timeout):
+                if timeout == 180:
+                    raise failure
+                self.returncode = -signal.SIGTERM
+                return b"partial protocol output\ncleanup output\n", None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "entered-healthy-0").write_text("yes")
+            output = io.StringIO()
+            child = Child()
+            before_cleanup = []
+            with patch.object(subprocess, "Popen", return_value=child), \
+                    patch.object(os, "killpg", side_effect=lambda *_: before_cleanup.append(output.getvalue())) as killpg, \
+                    contextlib.redirect_stdout(output):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    run_maker_phase(["synthetic-maker"], directory, "healthy", 180)
+            self.assertIs(caught.exception, failure)
+            killpg.assert_called_once_with(child.pid, signal.SIGTERM)
+            self.assertEqual(len(before_cleanup), 1)
+            text = before_cleanup[0]
+            self.assertIn('"event": "start"', text)
+            self.assertIn('"event": "error"', text)
+            self.assertIn('"phase": "healthy"', text)
+            self.assertIn('"enteredTests": ["entered-healthy-0"]', text)
+            self.assertIn('"error": "TimeoutExpired"', text)
+            self.assertIn("partial output before cleanup:\npartial protocol output", text)
+            self.assertNotIn("cleanup output", text)
+
+
+def entered_tests(directory):
+    return sorted(path.name for path in directory.glob("entered-*"))
+
+
+def run_maker_phase(argv, directory, phase, budget):
+    started = time.monotonic()
+
+    def receipt(event, **details):
+        print(json.dumps({"makerPhase": {"phase": phase, "event": event,
+              "budgetSeconds": budget, "elapsedSeconds": round(time.monotonic() - started, 3),
+              "enteredTests": entered_tests(directory), **details}}), flush=True)
+
+    def captured_output(label, output):
+        text = output.decode(errors="replace") if isinstance(output, bytes) else output or ""
+        print(f"Maker oracle {phase} {label}:\n{text}", flush=True)
+
+    receipt("start", argv=argv)
+    child = subprocess.Popen(argv, cwd=directory, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        out, _ = child.communicate(timeout=budget)
+    except BaseException as error:
+        # Preserve the phase and partial diagnostics before cleanup can fail.
+        receipt("error", error=type(error).__name__)
+        captured_output("partial output before cleanup", getattr(error, "output", None))
+        if child.returncode is None:
+            # Let the guard clean its separate session before forcing the
+            # Maker group down. Every failure-path pipe drain stays bounded.
+            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                out, _ = child.communicate(timeout=5)
+                captured_output("output after cleanup", out)
+            except subprocess.TimeoutExpired as cleanup_error:
+                captured_output("partial output during cleanup", cleanup_error.output)
+                if child.returncode is None:
+                    os.killpg(child.pid, signal.SIGKILL)
+                try:
+                    out, _ = child.communicate(timeout=2)
+                    captured_output("output after forced cleanup", out)
+                except subprocess.TimeoutExpired as forced_error:
+                    captured_output("partial output after forced cleanup", forced_error.output)
+                    child.stdout.close()
+                    child.wait(timeout=2)
+        raise
+    text = out.decode(errors="replace")
+    captured_output("output", text)
+    receipt("complete", exitCode=child.returncode)
+    return child.returncode, text
+
+
 def maker_oracle(zig):
     """Compile only tiny synthetic roots; local callers hold the host lock."""
     if subprocess.check_output([zig, "version"], text=True, timeout=10).strip() != "0.17.0":
@@ -217,17 +307,21 @@ def maker_oracle(zig):
         (directory / "build.zig").write_text('''const std = @import("std");
 const project = @import("project_build.zig");
 pub fn build(b: *std.Build) void {
+    const prepare = b.step("prepare", "Compile both oracle roots without running tests");
     for ([_][]const u8{ "healthy", "timeout" }) |name| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("{s}.zig", .{name})),
             .target = b.graph.host, .optimize = .Debug, .link_libc = true,
         }) });
+        prepare.dependOn(&t.step);
         b.step(name, name).dependOn(&project.guardedTestRun(b, t, true).step);
     }
 }
 ''')
         (directory / "healthy.zig").write_text('const std = @import("std");\n' + "\n".join(
-            f'test "healthy {index}" {{ try (std.Io.Clock.Duration{{ .clock = .awake, '
+            f'test "healthy {index}" {{ try std.Io.Dir.cwd().writeFile(std.testing.io, '
+            f'.{{ .sub_path = "entered-healthy-{index}", .data = "yes" }}); '
+            'try (std.Io.Clock.Duration{ .clock = .awake, '
             '.raw = .fromMilliseconds(600) }).sleep(std.testing.io); }' for index in range(4)))
         (directory / "timeout.zig").write_text('''const std = @import("std");
 fn ignore(_: std.posix.SIG) callconv(.c) void {}
@@ -235,45 +329,35 @@ test "guard caught TERM must time out" {
     const action: std.posix.Sigaction = .{ .handler = .{ .handler = ignore },
         .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.TERM, &action, null);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "entered-timeout", .data = "yes" });
     while (true) try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromSeconds(1) }).sleep(std.testing.io);
 }
 test "guard following test still runs" {
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "entered-following", .data = "yes" });
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "following-ran", .data = "yes" });
 }
 ''')
+        # Cold compiler/toolchain setup has its own budget. Neither compile
+        # step may execute a test; cached Maker runs keep the short deadline.
+        prepare_argv = [zig, "build", "prepare", "-j2", "--summary", "all"]
+        code, text = run_maker_phase(prepare_argv, directory, "prepare", 900)
+        assert code == 0, text
+        assert entered_tests(directory) == [], "prepare must compile without running tests"
+        assert not (directory / "following-ran").exists()
         results = []
         for name, timeout in (("healthy", "2s"), ("timeout", "1s")):
             argv = [zig, "build", name, "-j2", "--summary", "all", "--test-timeout", timeout]
-            child = subprocess.Popen(argv, cwd=directory, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                out, _ = child.communicate(timeout=180)
-            except BaseException:
-                if child.returncode is None:
-                    # Let the guard clean its separate session before forcing
-                    # the Maker group down. Even failure-path pipe drains are
-                    # bounded if a broken guard leaves an inherited pipe open.
-                    os.killpg(child.pid, signal.SIGTERM)
-                    try:
-                        child.communicate(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        if child.returncode is None:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        try:
-                            child.communicate(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            child.stdout.close()
-                            child.wait(timeout=2)
-                raise
-            text = out.decode(errors="replace")
-            print(f"Maker oracle {name}:\n{text}", flush=True)
-            results.append({"case": name, "exitCode": child.returncode})
+            code, text = run_maker_phase(argv, directory, name, 180)
+            results.append({"case": name, "exitCode": code})
+            healthy_markers = [f"entered-healthy-{index}" for index in range(4)]
             if name == "healthy":
-                assert child.returncode == 0 and "4/4 tests passed" in text, text
+                assert code == 0 and "4/4 tests passed" in text, text
+                assert entered_tests(directory) == healthy_markers
             else:
-                assert child.returncode != 0, text
+                assert code != 0, text
                 assert "guard caught TERM must time out" in text and "timed out after" in text, text
                 assert "1/2 tests passed" in text and "1 timed out" in text, text
+                assert entered_tests(directory) == sorted([*healthy_markers, "entered-timeout", "entered-following"])
                 assert (directory / "following-ran").read_text() == "yes"
         return results
 
