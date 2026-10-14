@@ -14,6 +14,8 @@ import re
 import tempfile
 import unittest
 
+from publication_check import example_domain, reviewed_binary_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/terminal"
 
@@ -253,14 +255,18 @@ class FixtureCheck(unittest.TestCase):
             if not path.is_file() or "__pycache__" in path.parts:
                 continue
             data = path.read_bytes()
-            data.decode("utf-8")
+            # Some byte-exact attachment oracles deliberately contain invalid
+            # UTF-8. Only the publication audit's exact path/hash list permits
+            # those binary fixtures; all other fixture text must decode.
+            if not reviewed_binary_fixture(path.relative_to(ROOT).as_posix(), data):
+                data.decode("utf-8")
             self.assertNotIn(b"/home/", data, str(path.relative_to(ROOT)))
             self.assertNotIn(b"BEGIN PRIVATE KEY", data)
-            # The HTML compatibility corpus uses the explicitly reserved
-            # example.test domain, also accepted by the publication audit.
-            # Keep this an exact allowlist; unrelated .test addresses fail.
-            self.assertTrue(all(domain.lower() in {b"example.com", b"example.org", b"example.net", b"example.test"}
-                                for domain in address.findall(data)), str(path.relative_to(ROOT)))
+            # Share the publication audit's reserved fictional namespaces,
+            # including pressure.example.test CID domains. Unrelated .test
+            # addresses still fail this check.
+            self.assertTrue(all(example_domain(domain) for domain in address.findall(data)),
+                            str(path.relative_to(ROOT)))
 
 
 if __name__ == "__main__":

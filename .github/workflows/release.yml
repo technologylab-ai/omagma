@@ -291,7 +291,13 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verification-linux-${{ matrix.arch }}
-          path: tests/results/*.json
+          path: |
+            tests/results/*.json
+            tests/results/browser-safe-server/server-acceptance.json
+            tests/results/browser-safe-server/demo-browser/browser-acceptance.json
+            tests/results/browser-safe-server/demo-browser/rendering-acceptance.json
+            tests/results/browser-safe-server/native-connect-browser/native-connect-acceptance.json
+            tests/results/browser-safe-server/connect-browser/connect-acceptance.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -516,7 +522,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verification-macos-${{ matrix.arch }}
-          path: tests/results/*.json
+          path: |
+            tests/results/*.json
+            tests/results/browser-safe-server/server-acceptance.json
           if-no-files-found: warn
           retention-days: 30
 

@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from build_info import build_mode, read_build_info
 from terminal_integration import (
     ACCOUNTS, Client, FIXTURES, MANIFEST, MAX_FRAME, ROOT, addresses,
-    no_core_dump, one_shot_cached_server_search, require,
+    no_core_dump, one_shot_cached_server_search, read_saved_draft, require,
 )
 from terminal_invitations import (
     InvitationFixture, check_conflicting_attachment, check_conflicting_mail,
@@ -56,7 +56,8 @@ def one_shot(client, family, verb, arguments=(), account=ACCOUNTS[0], stdin=b"",
     require(len(lines) == 1, "one-shot stdout was not exactly one protocol frame")
     reply = json.loads(lines[0])
     require(reply.get("version") == 1 and reply.get("ok") is (error is None),
-            "one-shot response omitted protocol version or disagreed with expected outcome")
+            f"one-shot {family} {verb} returned version={reply.get('version')}, ok={reply.get('ok')}, "
+            f"error={reply.get('error', {}).get('code')}; expected {error or 'success'}")
     require((result.returncode == 0) is (error is None), "one-shot exit status disagreed with outcome")
     if account is not None:
         require(reply.get("account") == account, "one-shot response lost selected account")
@@ -161,18 +162,30 @@ def uncertainty(binary, directory):
             first = one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"])
             require(first["outcome"] == "unknown", "one-shot lost-response scenario claimed certainty")
             reply_identity(first, "named-octet", ACCOUNTS[0], "tentative", "uncertain-one-shot")
+            require(first["calendarSync"] == {"state": "skipped", "calendarId": "", "eventId": "",
+                                            "operationId": "", "errorCode": "MailReplyNotConfirmed", "canRetry": False},
+                    "uncertain mail RSVP allowed a Calendar continuation")
+            journal = client.request("operation.list")["operations"]
+            # The response explains why Calendar cannot run; no continuation
+            # is persisted until mail delivery is confirmed. All mail receipt
+            # fields and the complete journal must remain unchanged on retry.
+            require(journal == [{key: value for key, value in first.items() if key != "calendarSync"}],
+                    "unknown RSVP lost its durable mail receipt")
             before = client.request("cache.stats")
-            for operation_id in ("uncertain-one-shot", "changed-id-one-shot"):
-                require(one_shot(client, "invitations", "reply", [*flags, "--operation-id", operation_id]) == first,
-                        "one-shot retry redispatched uncertain RSVP")
+            require(one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"]) == first,
+                    "same-ID one-shot retry changed the uncertain RSVP receipt")
+            one_shot(client, "invitations", "reply", [*flags, "--operation-id", "changed-id-one-shot"], error="UnknownOutcome")
             client.restart()
             require(client.request("invitation.reply", messageId="invite-named-octet", status="tentative",
-                                   operationId="changed-id-jsonl") == first,
-                    "restart/mixed-interface retry duplicated uncertain RSVP")
+                                   operationId="uncertain-one-shot") == first,
+                    "restart/mixed-interface retry changed the uncertain RSVP receipt")
+            require(client.request("invitation.reply", messageId="invite-named-octet", status="tentative",
+                                   operationId="changed-id-jsonl", ok=False)["code"] == "UnknownOutcome",
+                    "restart/mixed-interface retry bypassed the uncertain RSVP guard")
             after = client.request("cache.stats")
             require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == sends,
                     "unknown RSVP retry reached provider")
-            require(client.request("operation.list")["operations"] == [first], "unknown RSVP duplicated journal entry")
+            require(client.request("operation.list")["operations"] == journal, "unknown RSVP changed or duplicated journal entry")
         finished(client)
 
 
@@ -281,7 +294,7 @@ def attachments(binary, directory):
         draft = one_shot(client, "mail", "compose", flags, stdin=raw_body.encode())
         require(draft["bodyText"] == raw_body and addresses(draft["to"]) == ["recipient@example.test"],
                 "one-shot compose changed recipients/body")
-        require(client.request("draft.read", draftId=draft["id"]) == draft, "one-shot multi-file draft was not JSONL-readable")
+        read_saved_draft(client, draft)
         require(len(draft["attachments"]) == 2, "repeatable attach-file omitted a selected file")
         for attachment, (path, contents) in zip(draft["attachments"], files):
             require(attachment["filename"] == path.name and attachment["mimeType"] == "application/octet-stream"
@@ -289,8 +302,16 @@ def attachments(binary, directory):
         sent = one_shot(client, "draft", "send", ["--draft-id", draft["id"], "--operation-id", "one-shot-multi-file"])
         require(sent["outcome"] == "applied", "fixture multi-file draft did not send")
         outbox = client.request("mail.read", messageId=sent["messageId"], cacheOnly=True)
-        require(outbox["attachments"] == draft["attachments"] and outbox["bodyText"] == raw_body,
-                "shared send path lost multi-file bytes or changed display-only text")
+        require(outbox["bodyText"] == raw_body and len(outbox["attachments"]) == len(draft["attachments"]),
+                "shared send path lost a selected file or changed display-only text")
+        received_ids = [item["id"] for item in outbox["attachments"]]
+        require(all(received_ids) and len(set(received_ids)) == len(received_ids),
+                "sent files did not receive distinct provider retrieval identities")
+        for received, authored in zip(outbox["attachments"], draft["attachments"]):
+            require(received["id"] != authored["id"], "sent file retained its local draft identity")
+            require({key: value for key, value in received.items() if key != "id"} ==
+                    {key: value for key, value in authored.items() if key != "id"},
+                    "shared send path changed file metadata or full encoded bytes")
         one_shot(client, "mail", "attachment", ["--message-id", "shared-msg-003", "--attachment-id", attachment_id,
                  "--output-file", str(directory / "invented.txt")], error="UnknownOption")
         require(not (directory / "invented.txt").exists(), "invented output-file flag wrote a file")

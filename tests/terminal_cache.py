@@ -14,10 +14,10 @@ import time
 
 from build_info import build_mode, read_build_info
 from probes.cache_refresh_fixture import ACCOUNTS, FIXTURES, RETAINED_COUNT, corpus
-from terminal_integration import Client, require
+from terminal_integration import Client, read_saved_draft, require
 from terminal_pty import Terminal
 from terminal_status_screen import StatusScreen
-from terminal_reader import reader_contains
+from terminal_reader import frame_title, reader_contains
 
 BODY_IDS = ("shared-msg-057", "shared-msg-091", "shared-msg-092", "shared-msg-093", "shared-msg-094", "shared-msg-095", "shared-msg-096")
 FETCH_COLOR = ("rgb", 92, 177, 255)
@@ -286,6 +286,7 @@ def cli_case(binary, directory, fixture, name):
             require([m["id"] for m in pages(client)] == before_ids, "narrow view replaced global newest-mail retention")
             require({m["id"] for m in pages(client, label="STARRED")} == {"shared-msg-093"}, "folder labels leaked another query/account")
             draft = client.request("draft.create", draft={"to": ["recipient@example.org"], "subject": "Preserve local draft across resync", "bodyText": "Synthetic unsent content."})
+            saved_draft = read_saved_draft(client, draft)
             retained_body_digest = digests(directory)["shared-msg-093"]
             fixture.stage(ACCOUNTS[0], "expired")
             before = metrics(client)
@@ -302,7 +303,7 @@ def cli_case(binary, directory, fixture, name):
                     "scoped resync prefetched bodies outside retained newest head")
             require(digests(directory)["shared-msg-093"] == retained_body_digest,
                     "expired resync rewrote unchanged retained body")
-            require(client.request("draft.read", draftId=draft["id"]) == draft, "expired resync discarded local draft")
+            require(client.request("draft.read", draftId=draft["id"]) == saved_draft, "expired resync discarded local draft")
             for account in ACCOUNTS[1:]:
                 require([m["id"] for m in pages(client, account)] == fixture.data[account]["expected"]["baselineIds"],
                         "expired scoped resync replaced another account's global cache")
@@ -331,7 +332,7 @@ def cli_case(binary, directory, fixture, name):
                     "legacy narrow bootstrap failed authoritative bounded projection")
             require(digests(directory)["shared-msg-093"] == retained_body_digest,
                     "legacy bootstrap rewrote unchanged retained body")
-            require(restarted.request("draft.read", draftId=draft["id"]) == draft, "legacy bootstrap discarded local draft")
+            require(restarted.request("draft.read", draftId=draft["id"]) == saved_draft, "legacy bootstrap discarded local draft")
         clean(restarted)
         receipt.update(accountsIsolated=3, cursorContextsRejected=3, narrowViewPreservesGlobalCache=True,
                        expiredNarrowRefreshPreservesGlobalHead=True, missingHistoryNarrowBootstrapPreservesGlobalHead=True,
@@ -387,13 +388,31 @@ def tui_case(binary, directory, fixture, name):
     try:
         if name == "tui-cold-fetching":
             fixture.wait_entered(terminal.process, pump=terminal.pump)
+            def cold_placeholders():
+                title = frame_title(terminal.screen, "Mail · Loading")
+                metadata = terminal.screen.locate("Fetching metadata…")
+                if title is None or metadata is None:
+                    return False
+                border = terminal.screen.cells[title["row"]]
+                right = next((column for column in range(title["column"], terminal.columns)
+                              if border[column] in {"╮", "┐", "╗"}), None)
+                return (right is not None and metadata["row"] == title["row"] + 1
+                        and title["column"] <= metadata["column"] < right
+                        and reader_contains(terminal.screen, "Fetching mail · cached bodies appear here"))
+
+            # Status paints before the panes. Wait for current-cell loading
+            # placeholders in both panes, including the complete reader border.
+            terminal.until(cold_placeholders)
             color = status_color(terminal, "Fetching mail", FETCH_COLOR)
-            require("Fetching mail…" in terminal.text(), "cold startup lacks explicit fetching placeholder")
+            require("Synthetic personal thread" not in terminal.text() and not contains_body(terminal, 96)
+                    and "No matching messages" not in terminal.text(),
+                    "held cold startup showed mail rows or an empty-result state before loading")
             require(fixture.is_held(), "cold status was checked after remote completed")
             fixture.release()
             status_color(terminal, "Up to date", CURRENT_COLOR)
             terminal.until(lambda: "Synthetic personal thread 031" in terminal.text())
-            return {**terminal.finish(), "coldFetchingColor": color, "freshRowsVisibleAfterRelease": True}
+            return {**terminal.finish(), "coldFetchingColor": color, "loadingListAndReaderPlaceholders": True,
+                    "noCachedRowsBeforeRelease": True, "freshRowsVisibleAfterRelease": True}
         label = "Offline cached mail" if name == "tui-offline-cache" else "Refreshing cached mail"
         if name != "tui-offline-cache":
             fixture.wait_entered(terminal.process, pump=terminal.pump)
@@ -420,10 +439,34 @@ def tui_case(binary, directory, fixture, name):
             require(name == "tui-offline-cache" or fixture.is_held(), "remote completed before earlier cached card reading")
         require(name == "tui-offline-cache" or fixture.is_held(), "remote completed before cached thread reading")
         if name == "tui-no-color-owner-exit":
+            # Enter already joined the startup refresh. Re-establish live
+            # held work so SIGTERM must cancel an actual provider request.
+            with Client(binary, directory, extra=fixture.options()) as client:
+                require(not cached(client, "cache.refresh-status")["refreshInProgress"],
+                        "explicit reader open left its background refresh running")
+                before_ids = [message["id"] for message in pages(client)]
+            before_bodies = digests(directory)
+            fixture.stage(ACCOUNTS[0], "delta", held=True)
+            terminal.send(b"\x12")  # Ctrl+R
+            fixture.wait_entered(terminal.process, pump=terminal.pump)
+            status_color(terminal, "Refreshing cached mail", None)
+            with Client(binary, directory, extra=fixture.options()) as client:
+                require(cached(client, "cache.refresh-status")["refreshInProgress"],
+                        "owner exit had no live held refresh to cancel")
+                require([message["id"] for message in pages(client)] == before_ids,
+                        "held refresh changed cached metadata before owner exit")
             started = time.monotonic()
             result = terminal.finish(signal_mode=signal.SIGTERM)
+            exit_seconds = round(time.monotonic() - started, 4)
             require(fixture.is_held(), "owner exit test accidentally released remote")
-            result.update(noColorStatusText=True, heldRefreshCancelled=True, exitSeconds=round(time.monotonic() - started, 4))
+            with Client(binary, directory, extra=fixture.options()) as client:
+                require(not cached(client, "cache.refresh-status")["refreshInProgress"],
+                        "owner exit left its refresh ownership active")
+                require([message["id"] for message in pages(client)] == before_ids,
+                        "owner exit changed retained cached metadata")
+            require(digests(directory) == before_bodies, "owner exit changed retained cached bodies")
+            result.update(noColorStatusText=True, liveRefreshObservedBeforeExit=True,
+                          heldRefreshCancelled=True, cachedStatePreserved=True, exitSeconds=exit_seconds)
             return result
         if name == "tui-offline-cache":
             return {**terminal.finish(), "offlineStatusColor": color, "cachedReadAndThreadUsable": True}
@@ -434,6 +477,17 @@ def tui_case(binary, directory, fixture, name):
         terminal.send(b"\x1b[H")
         terminal.until(lambda: contains_body(terminal, 96))
         require(fixture.is_held(), "selection chosen after remote completed")
+        # Explicit Enter joined the previous background refresh to give the
+        # reader priority. Start a fresh held refresh before testing its merge;
+        # removing a fixture marker cannot restart a cancelled worker.
+        with Client(binary, directory, extra=fixture.options()) as client:
+            require(not cached(client, "cache.refresh-status")["refreshInProgress"],
+                    "explicit reader open left its background refresh running")
+        fixture.stage(ACCOUNTS[0], "delta", held=True)
+        terminal.send(b"\x12")  # Ctrl+R
+        fixture.wait_entered(terminal.process, pump=terminal.pump)
+        status_color(terminal, "Refreshing cached mail", FETCH_COLOR)
+        require(contains_body(terminal, 96), "starting refresh changed the selected message")
         fixture.release()
         status_color(terminal, "Up to date", CURRENT_COLOR)
         terminal.until(lambda: "Synthetic personal delta 098" in terminal.text())

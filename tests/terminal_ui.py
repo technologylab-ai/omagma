@@ -99,10 +99,11 @@ def preference(path, expected):
             "saved reader layout disagrees with rendered layout/schema")
     # Private working-context persistence now deliberately remembers account
     # and message IDs. It must remain bounded UI state, not mail or credentials.
-    require(set(data) == {"schema", "theme", "readerLayout", "listWidthPercent", "listHeightPercent",
+    require(set(data) == {"schema", "theme", "readerLayout", "density", "listWidthPercent", "listHeightPercent",
                           "lastAccount", "contexts", "bindings", "sendGraceSeconds",
                           "searchHistory", "savedSearches"}, "UI preferences contain undocumented fields")
     require(data["theme"] in {"follow_omarchy", "omagma"}, "unknown private theme choice")
+    require(data["density"] in {"comfortable", "compact"}, "unknown private density choice")
     require(type(data["sendGraceSeconds"]) is int and 0 <= data["sendGraceSeconds"] <= 30,
             "send grace exceeded its explicit zero-to-thirty-second bound")
     require(info.st_size <= 256 * 1024, "private UI preferences exceeded their byte bound")
@@ -167,15 +168,15 @@ def theme_path(directory, home_fallback=False):
     return path
 
 
-def title_bold(terminal, text):
-    position = terminal.screen.locate(text)
-    return position is not None and terminal.screen.styles[position["row"]][position["column"]][2]
+def reader_focused(terminal):
+    footer = terminal.screen.lines()[-2]
+    return pane_coordinates(terminal)[1] is not None and "j/k Scroll" in footer and "q Back" in footer
 
 
 def quit_key(terminal):
-    terminal.until(lambda: mailbox_visible(terminal) and any(
-        hint in terminal.text().splitlines()[-2] for hint in ("q Quit", "q List")))
-    if "q List" in terminal.text().splitlines()[-2]:
+    terminal.until(lambda: mailbox_visible(terminal) and (
+        "q Quit" in terminal.screen.lines()[-2] or reader_focused(terminal)))
+    if reader_focused(terminal):
         terminal.send(b"q")
         terminal.until(lambda: "q Quit" in terminal.text().splitlines()[-2])
         require(terminal.process.poll() is None, "reader q skipped the restored list")
@@ -203,7 +204,7 @@ def search(terminal, source, query):
 
 
 def search_back(terminal):
-    if "q List" in terminal.text().splitlines()[-2]:
+    if reader_focused(terminal):
         terminal.send(b"q")
         terminal.until(lambda: "q Clear" in terminal.text().splitlines()[-2])
         require(terminal.process.poll() is None, "reader Back exited instead of returning to the search list")
@@ -354,7 +355,7 @@ def run_case(binary, directory, name):
             fixture.wait_entered(terminal.process, pump=terminal.pump)
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.send(b"l")
-            terminal.gap()
+            terminal.until(lambda: reader_focused(terminal))
             terminal.send(b"J")
             terminal.ui_stage = "reader-next-body-95"
             terminal.until(lambda: contains_body(terminal, 95))
@@ -379,14 +380,24 @@ def run_case(binary, directory, name):
             terminal.send(b"K")
             terminal.ui_stage = "reader-expanded-previous-body-96"
             terminal.until(lambda: contains_body(terminal, 96))
+            # Reader brackets navigate conversation windows. Return through
+            # both Back levels before checking mailbox pagination in the list.
+            terminal.send(b"q")
+            terminal.ui_stage = "reader-expanded-back-to-split"
+            layout(terminal, "right")
+            terminal.until(lambda: reader_focused(terminal) and contains_body(terminal, 96))
+            terminal.send(b"q")
+            terminal.ui_stage = "reader-back-before-mailbox-paging"
+            terminal.until(lambda: "q Quit" in terminal.screen.lines()[-2] and contains_body(terminal, 96))
+            require(terminal.process.poll() is None, "expanded reader Back skipped the list")
             terminal.send(b"]")
             terminal.ui_stage = "reader-cached-next-page-body-64"
             terminal.until(lambda: contains_body(terminal, 64))
             terminal.send(b"[")
             terminal.ui_stage = "reader-cached-previous-page-body-96"
             terminal.until(lambda: contains_body(terminal, 96))
-            terminal.send(b"z")
-            layout(terminal, "right")
+            terminal.send(b"l")
+            terminal.until(lambda: reader_focused(terminal))
             terminal.send(b"a")
             terminal.ui_stage = "reader-cached-contacts"
             terminal.until(lambda: "Contacts" in terminal.text() and contact_name in terminal.text())
@@ -408,13 +419,14 @@ def run_case(binary, directory, name):
             require(terminal.process.poll() is None, "q quit rather than returning from active search")
             require(fixture.is_held(), "cached next/previous/page test completed after remote")
             terminal.ui_stage = "reader-restored-focus-body-96"
-            terminal.until(lambda: "q List" in terminal.text().splitlines()[-2] and contains_body(terminal, 96))
+            terminal.until(lambda: reader_focused(terminal) and contains_body(terminal, 96))
             terminal.send(b"q")
             terminal.ui_stage = "reader-back-to-list"
             terminal.until(lambda: "q Quit" in terminal.text())
             require(terminal.process.poll() is None, "q from restored reader skipped the list")
             result.update(nextPreviousBodiesBeforeRemote=True, lowercaseScrollPreservedMessage=True,
-                          expandedNextPrevious=True, existingPageKeysPreserved=True, deliveredHeadersPreviewed=96,
+                          expandedNextPrevious=True, expandedBackRetainedReaderFocus=True,
+                          existingPageKeysPreserved=True, mailboxPagesFromList=True, deliveredHeadersPreviewed=96,
                           contactsOpenedBeforeRemote=True, contactsHelpAndEscapeUsable=True, queryQReturnedToInbox=True,
                           searchRestoredReaderFocus=True, readerQReturnedToList=True)
             terminal.ui_stage = "reader-default-inbox-quit"
@@ -491,16 +503,17 @@ def run_case(binary, directory, name):
             terminal.until(lambda: contains_body(terminal, 96))
             terminal.ui_stage = "reader-focus"
             terminal.send(b"l")
-            terminal.until(lambda: title_bold(terminal, "Thread / full body") or title_bold(terminal, "Message ·"))
+            terminal.until(lambda: reader_focused(terminal))
             terminal.send(b"q")
-            terminal.until(lambda: title_bold(terminal, "Mail ·"))
+            terminal.until(lambda: "q Quit" in terminal.screen.lines()[-2])
             require(terminal.process.poll() is None and fixture.is_held(), "reader Back quit or awaited remote")
             terminal.send(b"l")
-            terminal.gap()
+            terminal.until(lambda: reader_focused(terminal))
             terminal.send(b"z")
             terminal.until(lambda: pane_coordinates(terminal)[0] is None)
             terminal.send(b"q")
             layout(terminal, "right")
+            terminal.until(lambda: reader_focused(terminal))
             require(terminal.process.poll() is None, "expanded reader Back quit")
             terminal.ui_stage = "cache-search"
             search(terminal, "cache", "subject:Synthetic personal")

@@ -214,6 +214,7 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "AccessDenied", .label = "Cannot access this folder or file" },
         .{ .code = "NotRegularFile", .label = "Choose a regular file" },
         .{ .code = "AttachmentNotFound", .label = "An attachment could not be retrieved" },
+        .{ .code = "MessageNotFound", .label = "Message or attachment could not be retrieved" },
         .{ .code = "AttachmentsTooLarge", .label = "Attached files exceed the supported size" },
         .{ .code = "TooManyAttachments", .label = "Too many attached files for this draft" },
         .{ .code = "InvalidAttachment", .label = "An attachment could not be prepared" },
@@ -17561,28 +17562,37 @@ test "forward UX: error code is visible in status and above help content" {
     var factory: CacheTestClient = .{};
     var app = factory.app(a);
     defer app.deinit();
-    app.sayError("AttachmentNotFound");
-    try std.testing.expectEqualStrings("An attachment could not be retrieved · AttachmentNotFound", app.status[0..app.status_len]);
-    try app.onKey(.{ .codepoint = '?' });
-    try std.testing.expectEqual(Mode.help, app.mode);
-    app.clearObsoleteStatus();
-    try std.testing.expectEqualStrings("AttachmentNotFound", app.status_error_code[0..app.status_error_len]);
-    var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
-    defer screen.deinit(a);
-    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 30, .screen = &screen };
-    try app.helpDraw(win);
-    var code_row: ?usize = null;
-    var help_row: ?usize = null;
-    for (0..screen.height) |row| {
-        var row_text: std.ArrayList(u8) = .empty;
-        defer row_text.deinit(a);
-        for (0..screen.width) |col| try row_text.appendSlice(a, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
-        if (std.mem.indexOf(u8, row_text.items, "Diagnostic: AttachmentNotFound") != null) code_row = row;
-        if (std.mem.indexOf(u8, row_text.items, help_rows[0].keys) != null) help_row = row;
+    for ([_]struct { code: []const u8, label: []const u8 }{
+        .{ .code = "AttachmentNotFound", .label = "An attachment could not be retrieved" },
+        .{ .code = "MessageNotFound", .label = "Message or attachment could not be retrieved" },
+    }) |case| {
+        app.sayError(case.code);
+        const expected = try std.fmt.allocPrint(a, "{s} · {s}", .{ case.label, case.code });
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, app.status[0..app.status_len]);
+        try app.onKey(.{ .codepoint = '?' });
+        try std.testing.expectEqual(Mode.help, app.mode);
+        app.clearObsoleteStatus();
+        try std.testing.expectEqualStrings(case.code, app.status_error_code[0..app.status_error_len]);
+        var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 30, .screen = &screen };
+        try app.helpDraw(win);
+        const diagnostic = try std.fmt.allocPrint(a, "Diagnostic: {s}", .{case.code});
+        defer a.free(diagnostic);
+        var code_row: ?usize = null;
+        var help_row: ?usize = null;
+        for (0..screen.height) |row| {
+            var row_text: std.ArrayList(u8) = .empty;
+            defer row_text.deinit(a);
+            for (0..screen.width) |col| try row_text.appendSlice(a, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+            if (std.mem.indexOf(u8, row_text.items, diagnostic) != null) code_row = row;
+            if (std.mem.indexOf(u8, row_text.items, help_rows[0].keys) != null) help_row = row;
+        }
+        try std.testing.expect(code_row != null and help_row != null and code_row.? < help_row.?);
+        try app.onKey(.{ .codepoint = Key.escape });
+        try std.testing.expectEqual(Mode.browse, app.mode);
     }
-    try std.testing.expect(code_row != null and help_row != null and code_row.? < help_row.?);
-    try app.onKey(.{ .codepoint = Key.escape });
-    try std.testing.expectEqual(Mode.browse, app.mode);
     app.sayError("UnmappedForwardError");
     try std.testing.expectEqualStrings("Operation failed · UnmappedForwardError", app.status[0..app.status_len]);
     app.sayError("bad\x1b[2Jcode");

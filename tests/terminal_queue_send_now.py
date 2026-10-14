@@ -15,12 +15,13 @@ import time
 
 from build_info import build_mode, read_build_info
 from terminal_cli_parity import one_shot
-from terminal_integration import Client, require
+from terminal_integration import Client, read_saved_draft, require
 
 
 def draft(client, subject):
-    return client.request("draft.create", draft={"to": ["recipient@example.test"],
-                          "subject": subject, "bodyText": "Only this reviewed fixture note is sent."})
+    saved = client.request("draft.create", draft={"to": ["recipient@example.test"],
+                           "subject": subject, "bodyText": "Only this reviewed fixture note is sent."})
+    return read_saved_draft(client, saved)
 
 
 def stage(client, source, operation):

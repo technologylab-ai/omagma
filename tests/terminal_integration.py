@@ -37,6 +37,21 @@ def addresses(values):
     return [value if isinstance(value, str) else value["address"] for value in values]
 
 
+def read_saved_draft(client, draft, account=ACCOUNTS[0]):
+    """Check saved fields and retain the complete read response for later checks."""
+    saved = client.request("draft.read", account, draftId=draft["id"])
+    # Reads expose the Gmail handoff digest in addition to the saved Draft.
+    # Exclude only that documented derived field when comparing with a save;
+    # callers retain it in full read-to-read lifecycle comparisons.
+    digest = saved.get("contentDigest")
+    require(isinstance(digest, str) and len(digest) == 64 and
+            all(character in "0123456789abcdef" for character in digest),
+            "saved draft is missing its bounded content digest")
+    require({key: value for key, value in saved.items() if key != "contentDigest"} == draft,
+            "reading the saved draft changed its content")
+    return saved
+
+
 def no_core_dump():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
@@ -685,19 +700,47 @@ def mime_refusal_preserves_valid_cache(client):
     root = client.directory / "invalid-mime-fixture"
     (root / "accounts").mkdir(parents=True)
     client.extra = ("--fixture-root", str(root))
-    errors = {"declaredBodyOver2MiB": "BodyTooLarge", "sizeMismatch": "BodySizeMismatch",
-              "unsupportedCharset": "UnsupportedCharset", "depth33": "MimeTooDeep", "parts513": "TooManyMimeParts"}
-    for name, payload in json.loads((FIXTURES / "mime-limits.json").read_text())["cases"].items():
+    cases = json.loads((FIXTURES / "mime-limits.json").read_text())["cases"]
+
+    def nested_payload(depth):
+        payload = {"partId": "leaf", "mimeType": "text/plain", "filename": "", "headers": [],
+                   "body": {"size": 4, "data": "dGV4dA"}}
+        for index in range(depth):
+            payload = {"partId": f"nested-{index}", "mimeType": "multipart/mixed", "filename": "",
+                       "headers": [], "body": {"size": 0}, "parts": [payload]}
+        return payload
+
+    def read_payload(name, payload, ok=True):
         target["id"] = "refused-" + name
         target["payload"] = {**payload, "headers": headers + payload["headers"]}
         (root / "accounts/personal.json").write_text(json.dumps(source))
         client.restart()
-        rejected = client.request("mail.read", messageId=target["id"])
-        require(rejected["bodyCacheError"] == errors[name] and rejected["metadataPartial"],
-                f"malformed MIME {name} omitted its bounded refusal")
-        require(not rejected["bodyText"], "refused MIME invented body content")
+        return client.request("mail.read", messageId=target["id"], ok=ok)
+
+    # Check both sides of the documented MIME depth boundary without first
+    # exhausting the fixture envelope's independent JSON nesting limit.
+    accepted = read_payload("depth16", nested_payload(16))
+    require(accepted["bodyText"] == "text" and not accepted["bodyCacheError"] and not accepted["metadataPartial"],
+            "MIME at the documented nesting boundary was refused or changed")
+    cases["depth17"] = nested_payload(17)
+    errors = {"declaredBodyOver2MiB": "BodyTooLarge", "sizeMismatch": "BodySizeMismatch",
+              "unsupportedCharset": "UnsupportedCharset", "depth17": "MimeTooDeep", "parts513": "TooManyMimeParts"}
+    for name, payload in cases.items():
+        if name == "depth33":
+            # The original 33 nested parts exceed 64 JSON envelope levels, so
+            # the provider fixture fails before MIME metadata can be returned.
+            refused = read_payload(name, payload, ok=False)
+            require(refused["code"] == "JsonTooDeep", "overdeep fixture JSON lost its structural refusal")
+        else:
+            rejected = read_payload(name, payload)
+            require(rejected["bodyCacheError"] == errors[name] and rejected["metadataPartial"],
+                    f"malformed MIME {name} omitted its bounded refusal")
+            require(not rejected["bodyText"], "refused MIME invented body content")
         require(client.request("mail.read", messageId=cached["id"]) == cached,
                 "malformed MIME corrupted another cached message")
+    client.evidence = {"acceptedMimeDepth": 16, "refusedMimeDepth": 17,
+                       "fixtureJsonRefusedMimeDepth": 33, "mimeRefusalCases": len(errors),
+                       "validCachedMessagePreserved": True}
 
 
 def optional_field_type_rejection(client):
@@ -813,7 +856,7 @@ def one_shot_commands(client):
                                    "--subject", "Synthetic one-shot", "--body-stdin"], text.encode())
     require(draft["bodyText"] == text and addresses(draft["to"]) == ["recipient@example.org"],
             "one-shot compose lost stdin body or quoted recipient grammar")
-    require(client.request("draft.read", draftId=draft["id"]) == draft, "one-shot draft was not persisted in shared cache")
+    read_saved_draft(client, draft)
     require(run("mail", "list", [], success=False)["code"] == "MissingField", "one-shot command implicitly chose an account")
 
 
@@ -904,9 +947,21 @@ def draft_attachment_bounds(client):
                 "invalid attachment changed the retained draft")
     operation = client.request("draft.send", draftId=draft["id"], operationId="fixture-attachment-send")
     require(operation["outcome"] == "applied", "bounded attachment send was not applied")
-    recovered = client.request("mail.attachment", messageId=operation["messageId"], attachmentId=attachment["id"])
+    sent = client.request("mail.read", messageId=operation["messageId"])
+    require(len(sent["attachments"]) == 1, "sent provider response omitted or duplicated the reviewed attachment")
+    provider_attachment = sent["attachments"][0]
+    for key in ("filename", "mimeType", "size", "contentId", "disposition", "contentLocation"):
+        require(provider_attachment.get(key) == attachment.get(key), "sent provider changed reviewed attachment metadata")
+    require(provider_attachment["id"] and provider_attachment["id"] != attachment["id"],
+            "fixture provider did not assign a separate Sent attachment identity")
+    refused = client.request("mail.attachment", messageId=operation["messageId"], attachmentId=attachment["id"], ok=False)
+    require(refused["code"] == "AttachmentNotFound", "unobserved draft ID was accepted as a Sent provider attachment")
+    recovered = client.request("mail.attachment", messageId=operation["messageId"], attachmentId=provider_attachment["id"])
+    require(recovered["id"] == provider_attachment["id"], "attachment download lost its observed provider identity")
     data = base64.b64decode(recovered["data"] + "=" * (-len(recovered["data"]) % 4), altchars=b"-_", validate=True)
     require(hashlib.sha256(data).hexdigest() == MANIFEST["attachmentExpected"]["sha256"], "submitted attachment lost binary integrity")
+    client.evidence = {"providerAssignedAttachmentId": True, "unobservedDraftIdRefused": True,
+                       "sentMetadataPreserved": True, "independentAttachmentDigestMatched": True}
 
 
 def labels_and_trash(client):
@@ -1215,6 +1270,7 @@ def atomic_replacement_quota(client):
     client.restart()
     draft = client.request("draft.create", draft={"to": ["recipient@example.org"], "subject": "Synthetic atomic quota",
                                                   "bodyText": "x" * 70000})
+    saved = read_saved_draft(client, draft)
     root = client.directory / "cache"
     stop = threading.Event()
     observed = {"peak": 0, "samples": 0, "error": None}
@@ -1244,7 +1300,7 @@ def atomic_replacement_quota(client):
         # so replacing one retained70KB draft with another must fail at131072B.
         error = client.request("draft.update", draftId=draft["id"], draft={**draft, "bodyText": "y" * 70000}, ok=False)
         require(error["code"] == "DiskQuotaExceeded", "atomic replacement ignored the retained old file's logical bytes")
-        require(client.request("draft.read", draftId=draft["id"]) == draft, "rejected atomic replacement changed the retained draft")
+        require(client.request("draft.read", draftId=draft["id"]) == saved, "rejected atomic replacement changed the retained draft")
         for index in range(12):
             updated = client.request("draft.update", draftId=draft["id"], draft={**draft, "bodyText": str(index) * 10000})
             require(updated["bodyText"] == str(index) * 10000, "allowed bounded atomic replacement changed draft content")

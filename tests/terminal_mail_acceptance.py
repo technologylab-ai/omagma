@@ -30,8 +30,9 @@ ACCOUNT = ACCOUNTS[0]
 GOOD = "provider-bom-contract"
 INVALID = "provider-truncated-text"
 LARGE_IMAGE_BYTES = 5 * 1024 * 1024
+OVERSIZED_IMAGE_BYTES = 25 * 1024 * 1024 + 1
 LARGE_IMAGE_NAME = "contract-photo.png"
-LARGE_IMAGE_REASON = "Embedded images exceed 2 MiB · choose Text quote"
+LARGE_IMAGE_REASON = "Embedded images exceed this platform's limit · choose Text quote"
 COUNTERS = ("fixtureCalls", "syncCalls", "syncMetadataGets", "syncListCalls",
             "syncHistoryPages", "syncBodyGets")
 
@@ -140,8 +141,8 @@ class ProviderFixture:
 
 
 class LargeInlineFixture:
-    """A literal unloaded 5 MiB descriptor; never manufacture giant JSON data."""
-    def __init__(self, directory):
+    """An unloaded image descriptor; never manufacture giant JSON data."""
+    def __init__(self, directory, image_bytes=LARGE_IMAGE_BYTES):
         self.root = directory / "provider"
         shutil.copytree(FIXTURE / "accounts", self.root / "accounts")
         path = self.root / "accounts/personal.json"
@@ -152,7 +153,7 @@ class LargeInlineFixture:
         alternative, _, image = message["payload"]["parts"]
         alternative["parts"] = [alternative["parts"][1]]
         image["filename"] = LARGE_IMAGE_NAME
-        image["body"] = {"size": 5242880, "attachmentId": "provider-large-photo"}
+        image["body"] = {"size": image_bytes, "attachmentId": "provider-large-photo"}
         image["headers"] = [
             {"name": "Content-Type", "value": "image/png"},
             {"name": "Content-Disposition", "value": 'inline; filename="contract-photo.png"'},
@@ -319,10 +320,12 @@ class AcceptanceFailure(Exception):
         self.diagnostics = diagnostics
 
 
-def run_large_images(binary, directory, terminal_type=Terminal):
+def run_large_images(binary, directory, terminal_type=Terminal, *, oversized=False):
     manifest, _, _ = validate_fixture()
     directory.mkdir(mode=0o700, parents=True)
-    source = LargeInlineFixture(directory)
+    image_bytes = OVERSIZED_IMAGE_BYTES if oversized else LARGE_IMAGE_BYTES
+    size_label = "26.2 MB" if oversized else "5.2 MB"
+    source = LargeInlineFixture(directory, image_bytes)
     terminal = terminal_type(binary, directory, extra=source.options(), columns=160, rows=42,
                              screen_type=AcceptanceScreen,
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor", "TZ": "UTC0"})
@@ -335,12 +338,12 @@ def run_large_images(binary, directory, terminal_type=Terminal):
         with Client(binary, directory, extra=source.options()) as client:
             message = client.request("mail.read", messageId=GOOD, cacheOnly=True)
             photo = next(item for item in message["attachments"] if item["filename"] == LARGE_IMAGE_NAME)
-            require(message["bodySource"] == "html" and photo["size"] == LARGE_IMAGE_BYTES and photo["data"] == "",
+            require(message["bodySource"] == "html" and photo["size"] == image_bytes and photo["data"] == "",
                     "ordinary reading refused or eagerly hydrated the large inline image")
         stage = "large-inline-drawer"
         terminal.send(b"B")
         terminal.until(lambda: not terminal.screen.frame_open and all(label in terminal.text() for label in
-                                  ("Received attachments", LARGE_IMAGE_NAME, "5.2 MB")))
+                                  ("Received attachments", LARGE_IMAGE_NAME, size_label)))
         terminal.send(b"\x1b")
         terminal.until(lambda: "Received attachments" not in terminal.text() and accepted_reader(terminal, manifest))
 
@@ -352,46 +355,61 @@ def run_large_images(binary, directory, terminal_type=Terminal):
         def no_new_draft():
             with Client(binary, directory, extra=source.options()) as client:
                 require({item["id"] for item in client.request("draft.list")["drafts"]} == {item["id"] for item in saved},
-                        "disabled format action created a local draft")
+                        "format-picker navigation or refusal created a local draft")
                 require(client.request("cache.stats")["fixtureSends"] == 0
                         and not client.request("operation.list")["operations"], "large-image picker queued or sent mail")
 
         for action, key in (("reply", b"r"), ("reply-all", b"R"), ("forward", b"f")):
             stage = "large-inline-" + action
             terminal.send(key)
-            terminal.until(lambda: not terminal.screen.frame_open and "[Keep formatting k]" in terminal.text()
-                           and LARGE_IMAGE_REASON in terminal.text())
-            selected = button_background("[Text quote t]")
-            require(selected != button_background("[Keep formatting k]"), "unavailable formatting retained default focus")
-            terminal.send(b"k")
-            terminal.gap(.08)
-            no_new_draft()
+            terminal.until(lambda: not terminal.screen.frame_open and "[Keep formatting k]" in terminal.text())
+            text_choice = "[Text quote · omit files t]" if oversized and action == "forward" else "[Text quote t]"
             require(terminal.screen.mouse_tracking_mode in (1000, 1002, 1003)
                     and 1006 in terminal.screen.mouse_modes, "owned PTY has no active cell mouse reporting")
-            found = terminal.screen.locate("[Keep formatting k]")
-            terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}M".encode())
-            terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}m".encode())
-            terminal.gap(.08)
-            no_new_draft()
-            frame = terminal.screen.completed_frames
-            terminal.send(b"\x1b[Z")
-            terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
-                           and button_background("[Back Esc/q]") == selected)
+            if oversized:
+                require(LARGE_IMAGE_REASON in terminal.text(), "oversized resources lost the precise format refusal")
+                selected = button_background(text_choice)
+                require(selected != button_background("[Keep formatting k]"), "unavailable formatting retained default focus")
+                terminal.send(b"k")
+                terminal.gap(.08)
+                no_new_draft()
+                found = terminal.screen.locate("[Keep formatting k]")
+                terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}M".encode())
+                terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}m".encode())
+                terminal.gap(.08)
+                no_new_draft()
+                frame = terminal.screen.completed_frames
+                terminal.send(b"\x1b[Z")
+                terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
+                               and button_background("[Back Esc/q]") == selected)
+            else:
+                # Native streaming permits this descriptor above the portable
+                # 2 MiB tier. It remains unloaded until a format is chosen.
+                require("HTML · 1 embedded resources" in terminal.text() and LARGE_IMAGE_REASON not in terminal.text(),
+                        "native formatting incorrectly rejected the supported 5 MiB image")
+                selected = button_background("[Keep formatting k]")
+                require(selected != button_background(text_choice), "supported formatting lost default focus")
             frame = terminal.screen.completed_frames
             terminal.send(b"\t")
             terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
-                           and button_background("[Text quote t]") == selected)
+                           and button_background(text_choice) == selected)
             if action == "forward":
-                require(button_background("[Attach original .eml e]") != selected,
-                        "definitely oversized original email retained an enabled action")
-                terminal.send(b"e")
-                terminal.until(lambda: "Original email exceeds 2 MiB · choose Text quote" in terminal.text())
+                if oversized:
+                    require(button_background("[Attach original .eml e]") != selected,
+                            "definitely oversized original email retained an enabled action")
+                    terminal.send(b"e")
+                    terminal.until(lambda: "Original email exceeds this platform's limit · choose Text quote" in terminal.text())
+                else:
+                    frame = terminal.screen.completed_frames
+                    terminal.send(b"\t")
+                    terminal.until(lambda: terminal.screen.completed_frames > frame and not terminal.screen.frame_open
+                                   and button_background("[Attach original .eml e]") == selected)
                 no_new_draft()
                 terminal.send(b"\x1b")
                 terminal.until(lambda: "[Keep formatting k]" not in terminal.text() and accepted_reader(terminal, manifest))
                 continue
             if action == "reply-all":
-                found = terminal.screen.locate("[Text quote t]")
+                found = terminal.screen.locate(text_choice)
                 terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}M".encode())
                 terminal.send(f"\x1b[<0;{found['column'] + 1};{found['row'] + 1}m".encode())
             else:
@@ -422,9 +440,11 @@ def run_large_images(binary, directory, terminal_type=Terminal):
                 saved.append(value)
             no_new_draft()
         result = terminal.finish()
-        result.update(largeInlineBytes=LARGE_IMAGE_BYTES, descriptorOnly=True, actualImagePlaceholder=True,
-                      attachmentDrawerHumanSize="5.2 MB", disabledFormattingActions=["reply", "reply-all", "forward"],
-                      disabledOriginalEmail=True, textQuoteNotesSaved=["reply", "reply-all"], forwardedPickerCancelled=True,
+        result.update(largeInlineBytes=image_bytes, descriptorOnly=True, actualImagePlaceholder=True,
+                      attachmentDrawerHumanSize=size_label,
+                      disabledFormattingActions=["reply", "reply-all", "forward"] if oversized else [],
+                      enabledFormattingActions=[] if oversized else ["reply", "reply-all", "forward"],
+                      disabledOriginalEmail=oversized, textQuoteNotesSaved=["reply", "reply-all"], forwardedPickerCancelled=True,
                       enabledTextQuoteMouseActivated=True, fixtureSends=0, operations=0)
         return result
     except Exception as failure:
@@ -652,7 +672,8 @@ def main():
             if args.case in ("all", "legacy"):
                 receipt["result"] = run_case(binary, root / "owned", terminal_type)
             if args.case in ("all", "large-images"):
-                receipt["largeInlineImages"] = run_large_images(binary, root / "owned-large", terminal_type)
+                receipt["largeInlineImagesWithinLimit"] = run_large_images(binary, root / "owned-large", terminal_type)
+                receipt["largeInlineImages"] = run_large_images(binary, root / "owned-oversized", terminal_type, oversized=True)
         require(hashlib.sha256(binary.read_bytes()).hexdigest() == digest, "tested binary changed during acceptance")
         receipt["passed"] = True
     except Exception as failure:

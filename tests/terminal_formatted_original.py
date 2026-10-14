@@ -26,7 +26,7 @@ from build_info import read_build_info
 from probes.cache_refresh_fixture import repage
 from terminal_cache import ProviderFixture
 from terminal_cli_parity import one_shot
-from terminal_integration import ACCOUNTS, Client, ROOT, addresses, require
+from terminal_integration import ACCOUNTS, Client, ROOT, addresses, read_saved_draft, require
 from terminal_invitations import finished
 
 
@@ -346,6 +346,7 @@ def lifecycle(binary, directory):
                 check_preview(preview, account)
                 require(one_shot(client, "draft", "preview", ["--draft-id", draft["id"]], account=account) == preview,
                         "persisted one-shot preview differs from JSONL review")
+                draft = read_saved_draft(client, draft, account)
                 drafts.append((account, forward, draft, preview))
 
         # Source deletion and cache eviction must not affect saved drafts.
@@ -428,13 +429,22 @@ def refusals(binary, directory):
         source["messages"].append(message)
     fixture.save()
     with Client(binary, directory / "client", extra=fixture.options()) as client:
+        # A malformed external body is isolated during MIME decoding, before
+        # formatted capture. Preserve the precise decoder diagnostic while
+        # requiring reply/forward to refuse that unavailable source uniformly.
+        for cache_only in (False, True):
+            refused = client.request("mail.read", messageId="wrong-size", cacheOnly=cache_only)
+            require(refused["bodyCacheError"] == "BodySizeMismatch" and refused["metadataPartial"]
+                    and not refused["bodyCached"] and not refused["bodyText"]
+                    and not refused.get("bodyHtml") and not refused["attachments"],
+                    "wrong-size source lost its exact refusal or exposed rejected body bytes")
         for command in ("mail.reply", "mail.forward"):
             for message_id, expected in (("plain-only", "OriginalHtmlUnavailable"), ("duplicate-cid", "AmbiguousContentId"),
-                                         ("multiple-html", "AmbiguousOriginalHtml"), ("missing-image", None), ("wrong-size", "BodySizeMismatch")):
+                                         ("multiple-html", "AmbiguousOriginalHtml"), ("missing-image", "MessageNotFound"),
+                                         ("wrong-size", "MessageBodyUnavailable")):
                 before = client.request("draft.list")["drafts"]
                 error = client.request(command, messageId=message_id, preserveFormatting=True, ok=False)
-                if expected:
-                    require(error["code"] == expected, f"{command} {message_id} gave {error['code']} instead of {expected}")
+                require(error["code"] == expected, f"{command} {message_id} gave {error['code']} instead of {expected}")
                 require(client.request("draft.list")["drafts"] == before, "refused capture created a partial draft")
         for params, expected in (({"preserveFormatting": "true"}, "InvalidRequest"),
                                  ({"preserveFormatting": True, "original": True}, "ConflictingForwardModes")):
@@ -479,12 +489,13 @@ def unknown(binary, directory):
             draft = client.request("mail.forward", messageId=SOURCE_ID, preserveFormatting=True, bodyFormat="markdown")
             draft.update(to=[{"address": "recipient@example.test"}], bodyText=NOTE)
             draft = client.request("draft.update", draftId=draft["id"], draft=draft)
+            saved = read_saved_draft(client, draft)
             receipt = client.request("draft.send", draftId=draft["id"], operationId="formatted-unknown")
             require(receipt["outcome"] == "unknown", "lost fixture response became definite")
             before = client.request("cache.stats")
             client.request("cache.clear")
             client.restart()
-            require(client.request("draft.read", draftId=draft["id"]) == draft, "unknown draft lost frozen original after restart/cache clear")
+            require(client.request("draft.read", draftId=draft["id"]) == saved, "unknown draft lost frozen original after restart/cache clear")
             for field, value in (("bodyText", "Changed note"), ("original", None)):
                 changed = {**draft, field: value}
                 require(client.request("draft.update", draftId=draft["id"], draft=changed, ok=False)["code"] == "UnknownOutcome",

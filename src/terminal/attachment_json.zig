@@ -255,4 +255,27 @@ test "attachment streaming: raw originals exceed the embedded tier without alloc
     limited.expected = 2;
     try std.testing.expectError(error.WriteFailed, limited.writer.writeAll("{\"id\":\"raw-source\",\"raw\":\"QUJD\"}"));
     try std.testing.expectEqual(error.AttachmentsTooLarge, limited.failure.?);
+
+    // Exercise the real native boundary with a fixed block and a discard
+    // sink: exact 25 MiB succeeds, and its first excess byte is never written.
+    for ([_]bool{ false, true }) |excess| {
+        var boundary_buffer: [4096]u8 = undefined;
+        var boundary_sink: std.Io.Writer.Discarding = .init(&boundary_buffer);
+        var boundary = try Decoder.initRaw(&boundary_sink.writer, "raw-boundary");
+        try std.testing.expectEqual(@as(usize, 25 * 1024 * 1024), boundary.expected);
+        try boundary.writer.writeAll("{\"id\":\"raw-boundary\",\"raw\":\"");
+        const groups = boundary.expected / 3;
+        for (0..groups / (encoded.len / 4)) |_| try boundary.writer.writeAll(&encoded);
+        try boundary.writer.writeAll(encoded[0 .. (groups % (encoded.len / 4)) * 4]);
+        try std.testing.expectEqual(@as(usize, 1), boundary.expected % 3);
+        if (excess) {
+            try std.testing.expectError(error.WriteFailed, boundary.writer.writeAll("QUI"));
+            try std.testing.expectEqual(error.AttachmentsTooLarge, boundary.failure.?);
+        } else {
+            try boundary.writer.writeAll("QQ\"}");
+            try boundary.finish();
+        }
+        try std.testing.expectEqual(boundary.expected, boundary.bytes);
+        try std.testing.expectEqual(@as(u64, boundary.expected), boundary_sink.fullCount());
+    }
 }

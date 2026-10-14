@@ -713,28 +713,58 @@ def exercise(terminal, action):
         gmail_search(terminal, "subject:Synthetic personal thread 002")
         terminal.until(lambda: "I · Respond" in terminal.text() and "Ready" in terminal.text())
         terminal.send(b"I")
-        terminal.until(lambda: "Review RSVP" in terminal.text() and "Attendee:" in terminal.text())
+
+        def invitation_card_lines():
+            # Read only the visible card: the surrounding Mail pane must not
+            # satisfy an identity check, and a long UID can wrap inside it.
+            heading = terminal.screen.locate("Meeting · review reply")
+            if heading is None:
+                return []
+            top = terminal.screen.cells[heading["row"]]
+            left_edges = [column for column in range(heading["column"]) if top[column] == "╭"]
+            if not left_edges:
+                return []
+            left = left_edges[-1]
+            try:
+                right = top.index("╮", heading["column"])
+            except ValueError:
+                return []
+            lines = []
+            for row in terminal.screen.cells[heading["row"] + 1:]:
+                if row[left] == "╰" and row[right] == "╯":
+                    return lines
+                if row[left] != "│" or row[right] != "│":
+                    return []
+                lines.append("".join(row[left + 1:right]).strip())
+            return []
+
+        terminal.until(lambda: "[v Details]" in "\n".join(invitation_card_lines()))
 
         def identities_visible():
-            current = terminal.text()
-            require("Account:" in current and "Attendee:" in current and "Organizer:" in current,
-                    "RSVP review did not keep labelled account, attendee and organizer visible")
-            require("personal@example.com" in current and "organizer@example.org" in current,
-                    "long RSVP detail obscured the actual reply identity or destination")
-            require("Accept" in current and "Tentative" in current and "Decline" in current and "Cancel" in current,
-                    "long RSVP detail clipped response/cancellation controls")
+            current = "\n".join(invitation_card_lines())
+            for identity in ("Account: personal@example.com", "Attendee: personal@example.com",
+                             "Organizer: organizer@example.org"):
+                require(identity in current, "long RSVP detail obscured a labelled reply identity or destination")
+            for control in ("[a Accept]", "[t Tentative]", "[d Decline]", "[Esc Cancel]"):
+                require(control in current, "long RSVP detail clipped response/cancellation controls")
 
         identities_visible()
         terminal.send(b"v")
-        terminal.until(lambda: "[v Less]" in terminal.text())
-        terminal.send(b"G")
-        terminal.until(lambda: "UID-END@example.org" in terminal.text())
+        terminal.until(lambda: "[v Less]" in "\n".join(invitation_card_lines()))
         identities_visible()
-        require("20261107T100000Z" in terminal.text(), "scrolled RSVP review omitted its recurring instance")
+        require("UID-END@example.org" not in "".join(invitation_card_lines()),
+                "long RSVP fixture no longer requires detail scrolling")
+        terminal.send(b"G")
+        terminal.until(lambda: "UID-END@example.org" in "".join(invitation_card_lines()))
+        identities_visible()
+        current = "\n".join(invitation_card_lines())
+        require("Recurrence ID: 20261107T100000Z" in current, "scrolled RSVP review omitted its recurring instance")
+        require("↑ Earlier details" in current, "RSVP detail scroll did not reach its visible end")
         terminal.send(b"\x1b")
         terminal.gap()
         result = terminal.finish()
-        result.update(longInvitationIdentityAlwaysVisible=True, recurringDetailScrolled=True, rsvpSubmitted=False)
+        result.update(longInvitationIdentityAlwaysVisible=True, recurringDetailScrolled=True,
+                      wrappedUidTailVisible=True, rsvpSubmitted=False)
         return result
     if action == "account-page-navigation":
         terminal.until(lambda: "Ready" in terminal.text() and "Synthetic personal thread 031" in terminal.text())

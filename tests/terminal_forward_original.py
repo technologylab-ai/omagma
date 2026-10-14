@@ -16,7 +16,7 @@ import tempfile
 
 from build_info import read_build_info
 from terminal_cli_parity import one_shot
-from terminal_integration import ACCOUNTS, Client, FIXTURES, require
+from terminal_integration import ACCOUNTS, Client, FIXTURES, read_saved_draft, require
 from terminal_invitations import finished
 
 
@@ -49,6 +49,7 @@ ORIGINAL = (
     b"AAH/gA0K\r\n"
     b"--omagma-v1-part--\r\n\r\n"
 )
+LARGE_ORIGINAL = b"Subject: Large streamed original\r\n\r\n" + b"x" * (2 * 1024**2)
 
 
 def encoded(data: bytes) -> str:
@@ -69,7 +70,7 @@ class RawFixture:
                     "raw-original": ORIGINAL,
                     "raw-utf8": ORIGINAL.replace(b"Subject: Original HTML and embedded image", "Subject: UTF-8 original 🌋".encode()),
                     "raw-binary": ORIGINAL + b"\x00\xff",
-                    "raw-oversize": b"Subject: Too large\r\n\r\n" + b"x" * (2 * 1024**2),
+                    "raw-large": LARGE_ORIGINAL,
                     "raw-invalid-headers": b"No header boundary here",
                 }
                 for message_id, raw in cases.items():
@@ -134,8 +135,32 @@ def exercise(binary: Path, directory: Path):
         require(exact_attachment(utf8, utf8_bytes)["mimeType"] == "message/global", "UTF-8 headers lost message/global classification")
         binary_draft = client.request("mail.forward", messageId="raw-binary", original=True)
         require(exact_attachment(binary_draft, ORIGINAL + b"\x00\xff")["mimeType"] == "application/octet-stream", "binary original was not preserved through safe transport")
+        # Native originals stream beyond the portable 2 MiB embedded tier.
+        # Keep the complete save/restart/send/retrieve bytes oracle here; the
+        # bounded RAW decoder unit test covers the exact 25 MiB upper limit.
+        large = client.request("mail.forward", messageId="raw-large", original=True)
+        require(len(large["attachments"]) == 1, "large original duplicated its encapsulated file")
+        part = large["attachments"][0]
+        require(part["filename"].endswith(".eml") and part["size"] == len(LARGE_ORIGINAL)
+                and part.get("blobId") and not part["data"], "large original did not use a bounded private file")
+        retained = read_saved_draft(client, large)
+        client.restart()
+        require(client.request("draft.read", draftId=large["id"]) == retained,
+                "large original changed after a cold restart")
+        large.update(to=[{"address": "recipient@example.test"}], bodyText="Large original note")
+        client.request("draft.update", draftId=large["id"], draft=large)
+        large_receipt = client.request("draft.send", draftId=large["id"], operationId="large-original-send")
+        require(large_receipt["outcome"] == "applied", "large original fixture send did not apply")
+        sent = client.request("mail.read", messageId=large_receipt["messageId"], cacheOnly=True)
+        require(len(sent["attachments"]) == 1 and all(sent["attachments"][0][key] == part[key]
+                for key in ("filename", "mimeType", "size")), "sent large original changed its file identity metadata")
+        destination = directory / "large-original.eml"
+        downloaded = client.request("mail.attachment-save", messageId=sent["id"], attachmentId=sent["attachments"][0]["id"],
+                                    path=str(destination))
+        require(downloaded["saved"] and downloaded["size"] == len(LARGE_ORIGINAL)
+                and destination.read_bytes() == LARGE_ORIGINAL, "large original lifecycle changed exact source bytes")
         prior_drafts = client.request("draft.list")["drafts"]
-        for message_id, expected in (("raw-oversize", "BodyTooLarge"), ("raw-invalid-base64", "InvalidBase64"), ("raw-missing", "MissingField"), ("raw-invalid-headers", "MissingHeaderBoundary")):
+        for message_id, expected in (("raw-invalid-base64", "InvalidBase64"), ("raw-missing", "MissingField"), ("raw-invalid-headers", "MissingHeaderBoundary")):
             require(client.request("mail.forward", messageId=message_id, original=True, ok=False)["code"] == expected, f"incorrect refusal for {message_id}")
             require(client.request("draft.list")["drafts"] == prior_drafts, "failed original forward created partial draft")
         require(client.request("mail.forward", messageId="raw-original", original="true", ok=False)["code"] == "InvalidRequest", "wrong original field type was accepted")

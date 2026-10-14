@@ -25,6 +25,7 @@ HINT = b"Try omagma --help for available commands and options."
 CANARY = "fictional-private-argument-canary"
 LEGACY_MODES = ("daemon", "auth", "status")
 FAMILIES = {
+    "calendar": ("list", "agenda", "event", "freebusy", "invitation-plan", "review", "apply", "import", "update", "cancel", "reconcile"),
     "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
              "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
              "drafts", "compose", "labels", "identities", "open-link", "open-attachment"),
@@ -66,14 +67,18 @@ class Runner:
         self.invalid_config.chmod(0o600)
         self.calls = 0
 
-    def run(self, arguments, stdin=b"", without_home=False):
+    def run(self, arguments, stdin=b"", without_home=False, catalogue=False):
         environment = dict(self.environment)
         if without_home:
             environment.pop("HOME", None)
         result = subprocess.run([str(self.binary), *arguments], input=stdin, capture_output=True,
                                 cwd=self.directory, env=environment, timeout=8, preexec_fn=no_core_dump)
         self.calls += 1
-        require(len(result.stdout) <= 256 * 1024 and len(result.stderr) <= 16 * 1024,
+        # The complete 83-command catalogue now exceeds 256KiB; match the
+        # discovery metadata's finite 512KiB bound only for full disclosure.
+        # Ordinary command help and protocol diagnostics keep their old cap.
+        stdout_limit = (512 if catalogue else 256) * 1024
+        require(len(result.stdout) <= stdout_limit and len(result.stderr) <= 16 * 1024,
                 "CLI usage output exceeded its finite diagnostic bound")
         require(b"\x1b" not in result.stdout + result.stderr and b"\x00" not in result.stdout + result.stderr,
                 "CLI usage output emitted raw terminal controls")
@@ -223,14 +228,18 @@ cache.stats cache.clear cache.activity cache.refresh-status
 browser.open auth.status auth.authorize auth.revoke
 draft.list draft.read draft.create draft.update draft.recovery-save draft.preview draft.open-preview
 draft.discard draft.send draft.queue
+draft.gmail-info draft.gmail-save draft.gmail-status draft.gmail-take-back draft.gmail-import
 queue.list queue.read queue.cancel queue.resume queue.process queue.send-now
 attachment.import attachment.discard attachment.open
 invitation.inspect invitation.reply operation.list operation.read
+reminder.list reminder.set reminder.done
+calendar.list calendar.agenda calendar.event calendar.freebusy calendar.invitation-plan
+calendar.review calendar.apply calendar.import calendar.update calendar.cancel calendar.reconcile
 """.split())
 
 
 def discovery(runner):
-    result = runner.run(["cli", "--schema"], without_home=True)
+    result = runner.run(["cli", "--schema"], without_home=True, catalogue=True)
     require(result.returncode == 0 and not result.stderr, "schema discovery required account setup")
     catalogue = json.loads(result.stdout)
     commands = {s["properties"]["cmd"]["const"]: s for s in catalogue["oneOf"]}
@@ -249,7 +258,8 @@ def discovery(runner):
         elif isinstance(value, list):
             for child in value: references(child, definitions)
     references(catalogue, catalogue["$defs"])
-    for command in ("mail.read", "mail.list", "mail.send", "draft.update", "contacts.upsert", "invitation.reply"):
+    for command in ("mail.read", "mail.list", "mail.send", "draft.update", "contacts.upsert", "invitation.reply",
+                    "calendar.agenda", "calendar.review", "draft.gmail-save", "reminder.set"):
         result = runner.run(["cli", "--config", str(runner.invalid_config), "--schema", command], without_home=True)
         require(result.returncode == 0 and not result.stderr, "command schema loaded private configuration")
         selected = json.loads(result.stdout)
@@ -272,7 +282,7 @@ def discovery(runner):
     family = runner.run(["cli", "--help", "mail"], without_home=True)
     require(family.returncode == 0 and b"mail.read" in family.stdout and b"contacts.upsert" not in family.stdout,
             "JSONL namespace help did not narrow the catalogue")
-    expanded = runner.run(["cli", "--help-all"], without_home=True)
+    expanded = runner.run(["cli", "--help-all"], without_home=True, catalogue=True)
     require(expanded.returncode == 0 and b"$defs" in expanded.stdout
             and all(c.encode() in expanded.stdout for c in PUBLIC_JSONL),
             "offline full reference omitted commands or shared object fields")

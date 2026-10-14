@@ -92,13 +92,16 @@ jobs:
         run: |
           set -e
           for kind in cli tui; do
-            python3 tests/terminal_measure_macos.py --binary .verification-macos-safe/bin/omagma --kind "$kind" --cycles 1000 --warmup 100 --idle-seconds 60 --output "$RUNNER_TEMP/macos-$kind-safe.json"
+            python3 tests/terminal_measure_macos.py --binary .verification-macos-safe/bin/omagma --kind "$kind" --cycles 1000 --warmup 100 --idle-seconds 60 --output "tests/results/macos-$kind-safe.json"
           done
       - name: Preserve synthetic workflow receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: workflows-${{ matrix.runner }}
-          path: tests/results/workflows-*.json
+          path: |
+            tests/results/workflows-*.json
+            tests/results/macos-cli-safe.json
+            tests/results/macos-tui-safe.json
           if-no-files-found: warn
           retention-days: 30

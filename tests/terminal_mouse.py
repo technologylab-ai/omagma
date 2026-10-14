@@ -180,7 +180,10 @@ def run_case(binary,directory,name):
             rect=reader_rectangle(terminal.screen);require(rect is not None,'reader wheel target absent')
             click(terminal,rect['right']-2,rect['top']+2)
             terminal.mouse_stage='reader-wheel-focus'
-            terminal.until(lambda:'q List' in terminal.screen.lines()[-2] and contains(terminal,ACCOUNTS[0],96))
+            # The focused reader's context footer advertises q Back. Keep its
+            # scroll hint and exact message identity as the mouse-focus oracle.
+            terminal.until(lambda:'j/k Scroll' in terminal.screen.lines()[-2]
+                and 'q Back' in terminal.screen.lines()[-2] and contains(terminal,ACCOUNTS[0],96))
             before=[text for _,text in reader_rows(terminal.screen)]
             terminal.mouse_stage='reader-wheel-down'
             report(terminal,rect['right']-2,rect['top']+2,65)
