@@ -411,7 +411,7 @@ Gmail draft or message, and pending/unknown submissions remain protected.
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
 
-In the development build, **Accept** and **Tentative** also save supported
+**Accept** and **Tentative** also save supported
 invitations and your response to the same account's primary calendar when
 Calendar write access is enabled. The RSVP review shows this before confirmation.
 An existing event is matched by its invitation identity to avoid duplicates.
@@ -530,7 +530,7 @@ duration, location and stated response remain available. UTC and supported
 TZID times use local zoneinfo. An embedded/custom timezone converts only when its rules agree with a known zone for the event; unresolved rules keep their stated wall time and label. All-day end dates are explicitly
 exclusive, and ambiguous/nonexistent local times stay labeled.
 
-In the development build, cancellation, publication and RSVP notices also open
+Cancellation, publication and RSVP notices also open
 in the invitation drawer, with response controls disabled. Cancelled events do
 not offer Join. Inspection uses retained verified aliases and cached invitation
 data without a provider call when available. A response confirmed by Omagma is

@@ -183,8 +183,20 @@ test "rendered mouse areas exclude borders gaps clipped rows and stale layouts" 
     hits.add(.{ .x = 2, .y = 12, .width = 76, .height = 10 }, .reader, 0);
     try std.testing.expect(hits.at(29, 4) == null);
     try std.testing.expectEqual(HitKind.reader, hits.at(29, 20).?.kind);
-    for (0..200) |index| hits.add(.{ .width = 1, .height = 1 }, .mail, index);
-    try std.testing.expectEqual(@as(usize, 128), hits.count);
+    // Calendar Week can paint hundreds of distinct mouse targets. Saturate
+    // the expanded map and prove overflow preserves every accepted target.
+    for (0..2048) |index| hits.add(.{ .width = 1, .height = 1 }, .mail, index);
+    try std.testing.expectEqual(@as(usize, 1024), hits.count);
+    try std.testing.expectEqual(@as(usize, 1022), hits.at(0, 0).?.index);
+    try std.testing.expectEqual(HitKind.reader, hits.at(29, 20).?.kind);
+    hits.add(.{ .x = 100, .width = 1, .height = 1 }, .mail, 9999);
+    try std.testing.expect(hits.at(100, 0) == null);
+    try std.testing.expectEqual(@as(usize, 1024), hits.count);
+    hits.clear();
+    try std.testing.expectEqual(@as(usize, 0), hits.count);
+    try std.testing.expect(hits.at(0, 0) == null and hits.at(29, 20) == null);
+    hits.add(.{ .x = 7, .y = 8, .width = 1, .height = 1 }, .mail, 77);
+    try std.testing.expectEqual(@as(usize, 77), hits.at(7, 8).?.index);
 }
 
 test "local reader: configured split ratios preserve usable bounded panes" {

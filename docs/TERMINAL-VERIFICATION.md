@@ -128,6 +128,7 @@ python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --
   --output tests/results/workflows-reader-debug.json
 python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
   --suite terminal_calendar --suite terminal_calendar_tui --suite terminal_calendar_compose \
+  --suite terminal_calendar_slots \
   --suite terminal_calendar_review_stale \
   --suite terminal_calendar_notifications \
   --suite terminal_invitation_notices --suite terminal_invitation_reconcile \
@@ -139,7 +140,7 @@ python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --
   --suite vault_migration --suite vault_daemon --output tests/results/workflows-vault-debug.json
 ```
 
-Omit `--suite` for all 19 suites. The release workflow requires the full runner
+Omit `--suite` for all 20 suites. The release workflow requires the full runner
 once in Debug and once against the packaged Safe executable on native Linux
 x86_64/arm64 and macOS x86_64/arm64. The native macOS pull-request workflow also
 runs it in both modes on Linux x86_64 and both Mac architectures. Existing

@@ -114,8 +114,13 @@ The command table below is the backend contract. One-shot commands
 cover common operations; JSONL supplies arrays and structured fields for richer
 requests. Drafts are local in both interfaces, with optional explicit
 [Gmail draft handoff](TERMINAL.md#continue-a-draft-in-gmail).
-Both native interfaces support [Calendar reads and reviewed imports](CALENDAR-PERMISSIONS.md);
-the TUI also provides agenda, day and week views.
+Both native interfaces support [Calendar reads and reviewed imports](CALENDAR-PERMISSIONS.md),
+plus reviewed ordinary timed/all-day event creation, editing and rescheduling,
+generated Google Meet details and pasted HTTPS meeting links. Uncertain saves
+survive restart and support read-only checks, explicitly confirmed
+identical-request retry and uncertainty archival. The TUI adds agenda/day/week
+views and a guest picker using the destination account's Contacts; CLI callers
+supply guest emails. See the [Calendar event guide](CALENDAR-EVENTS.md).
 Permanent mail deletion and contact deletion remain unavailable. Label support
 includes listing, assigning/removing existing labels and creating, renaming,
 coloring or deleting custom definitions. Shared target resolution and membership

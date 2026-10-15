@@ -82,6 +82,12 @@ bar UI together; Chrome and unrelated widgets are excluded. See
   Optional Calendar permissions enable agenda, day and week views, reviewed
   invitation saving, meeting reminders and Join in the account's Chrome profile.
   Mail replies and Calendar write outcomes remain separately visible.
+- Review ordinary timed/all-day event creation, editing and rescheduling before
+  saving, with generated Google Meet details or a pasted HTTPS meeting link.
+  Choose guests from the destination account's Contacts or enter emails manually.
+  Uncertain saves survive restart, with read-only checks, explicitly confirmed
+  identical-request retry and uncertainty archival. The native CLI shares the
+  review, apply and recovery workflow. [Calendar event guide](CALENDAR-EVENTS.md).
 - Save local follow-up reminders and browse due messages, including offline.
 - Explicitly continue a draft in Gmail while preserving its local copy and
   pausing local editing/sending; check status or import supported content into
