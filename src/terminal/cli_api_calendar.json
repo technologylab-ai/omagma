@@ -133,7 +133,8 @@
         "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
         "Returns calendar and event, including original occurrence identity, description, safe join/html links, exact ETag and explicit DATE/instant times. A recurring event can be inspected even though recurring invitation writes remain unsupported.",
         "The returned event ID must match the requested event. CalendarNotFound remains a Calendar-specific result; it does not authorize an absent import.",
-        "Cached reads still validate the current local account grant. Cached calendar permissions cannot authorize writes or assert availability. Transient connection failures may return retained data with refreshError; revoked authorization is never hidden by that fallback."
+        "Cached reads still validate the current local account grant. Cached calendar permissions cannot authorize writes or assert availability. Transient connection failures may return retained data with refreshError; revoked authorization is never hidden by that fallback.",
+        "eventDraft is best effort: canEdit:false and draftError explain an unavailable editor without hiding the event. canEditReason distinguishes calendar_read_only, not_organizer, recurring_series, special_event and other restrictions."
       ],
       "examples": [
         {
@@ -522,6 +523,320 @@
           "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       ]
+    },
+    {
+      "cmd": "calendar.event-review",
+      "summary": "Prepare and durably save one ordinary organizer event creation or conditional edit for review.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "eventId": {
+          "$ref": "#/$defs/CalendarEventId"
+        },
+        "expectedEtag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Required for editing: exact event.etag from calendar.event. Omit eventId and expectedEtag for a new event."
+        },
+        "event": {
+          "$ref": "#/$defs/CalendarEventDraft"
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "none",
+            "all"
+          ],
+          "description": "Explicit reviewed guest notification choice. all is mandatory when adding guests; use all when rescheduling a meeting so participants receive updates."
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "event",
+        "sendUpdates"
+      ],
+      "notes": [
+        "No provider mutation occurs during review. Inspect the returned account, calendarName/calendarId, action, event, resolved time points, previous event and sendUpdates before applying its exact reviewHash.",
+        "Uses existing Calendar event-write OAuth permissions and calendar ACLs. Organizer-owned normal events and exact recurring occurrences can be edited. Attendee copies, locked/private copies and recurring series are refused.",
+        "Create uses a stable client event ID and the durable journal. Pending unknown creates block new creates in the same target calendar until reconciled; edit uses fresh ETag and If-Match.",
+        "DST gaps are refused. DST folds require explicit endpoint offsets or offset-bearing RFC3339 matching the named zone. All-day end is exclusive.",
+        "Meet creation requires supports_meet from calendar.list. Calendar save can succeed while conference_status is pending or failure: refresh calendar.event to inspect the generated join_url without recreating the event.",
+        "Attendee and conference arrays remain untouched when omitted. Adding guests requires sendUpdates all. Existing attendees retain their provider attributes/RSVP states. No third-party meeting API or extra OAuth scope is needed for a pasted join URL.",
+        "For edits, omitted or null description/location preserve existing exact values; explicit empty strings clear them. Omitted or null attendees preserve the complete list. Existing HTML notes remain byte-exact and read-only."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-review",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "event-review-1",
+          "event": {
+            "summary": "Project planning",
+            "start": "2026-10-22T10:00",
+            "end": "2026-10-22T11:00",
+            "timeZone": "Europe/Vienna",
+            "attendees": [
+              "colleague@example.com"
+            ],
+            "conference": "google_meet"
+          },
+          "sendUpdates": "all"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.event-apply",
+      "summary": "Apply one exact saved ordinary-event review, dispatching at most once.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "Use the exact saved calendar.event-review result. Caller-supplied draft, request or ETag overrides are refused. Invitation-import reviews cannot be applied through this command.",
+        "After a durable unknown claim, the provider write is dispatched once with no automatic retries. Inspect state applied/rejected/unknown even if the outer result envelope is ok.",
+        "Unknown results must use calendar.event-reconcile; do not retry under another operationId. Read-only reconciliation never resends invitations."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-apply",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "event-review-1",
+          "reviewHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.event-reconcile",
+      "summary": "Resolve an unknown ordinary-event write by reading its exact provider event ID without resending it.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "$ref": "#/$defs/CalendarOperationId"
+        },
+        "reviewHash": {
+          "$ref": "#/$defs/CalendarReviewHash"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "Loads the exact saved ordinary-event review and durable journal. Applied proof requires the bound account/calendar/event ID and immutable private operation/source markers, even after later content changes or cancellation. A missing event remains unknown and can offer explicit identical-request retry; an unchanged edit ETag also remains uncertain.",
+        "Performs only reads. Never creates a second event, repeats a Meet request or resends attendee notifications."
+      ]
+    },
+    {
+      "cmd": "calendar.open",
+      "summary": "Open Google Calendar in this account\u2019s configured Chrome profile.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [],
+      "notes": [
+        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account\u2019s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
+      ]
+    },
+    {
+      "cmd": "calendar.event-open",
+      "summary": "Open an exact Calendar event in this account\u2019s configured Chrome profile.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "eventId": {
+          "$ref": "#/$defs/CalendarEventId"
+        },
+        "cacheOnly": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "calendarId",
+        "eventId"
+      ],
+      "notes": [
+        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account\u2019s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
+      ]
+    },
+    {
+      "cmd": "calendar.event-retry",
+      "summary": "Explicitly retry an uncertain identical saved ordinary-event request once for this attempt token.",
+      "capabilities": [
+        "mail-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "reviewHash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "nextAttempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash",
+        "nextAttempt"
+      ],
+      "notes": [
+        "Read event-reconcile first; retry only when retryPossible is true and the user confirms the identical request. Returned nextAttempt is a durable single-use send token; duplicate tokens cannot dispatch again.",
+        "Uses the original deterministic event ID, exact request body, Meet request ID and conditional edit ETag. No automatic retry. 404 and unchanged ETag remain uncertain.",
+        "An uncertain prior dispatch may still complete. Result state is applied, rejected, unknown or archived. When a previous dispatch is uncertain, later refusals alone cannot prove rejection."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-retry",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "event-planning-1",
+          "reviewHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "nextAttempt": 1
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.event-abandon",
+      "summary": "Explicitly archive an uncertain ordinary-event outcome locally.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "reviewHash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "calendarId",
+        "operationId",
+        "reviewHash"
+      ],
+      "notes": [
+        "Requires explicit user confirmation. Returns state archived, releases the pending guard and never sends any provider request.",
+        "The event may still appear in Calendar. Archived does not mean unsent or rejected. The saved form cannot be applied again.",
+        "The current local grant must retain mail-read and one of the Calendar capability alternatives; this check reads grant metadata without opening credentials."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-abandon",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com",
+          "operationId": "event-planning-1",
+          "reviewHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    },
+    {
+      "cmd": "calendar.event-pending",
+      "summary": "Resume a saved uncertain ordinary-event operation after restart without provider traffic.",
+      "capabilities": [
+        "mail-read",
+        "calendar-read",
+        "calendar-write-owned",
+        "calendar-write-shared"
+      ],
+      "properties": {
+        "calendarId": {
+          "$ref": "#/$defs/CalendarId"
+        },
+        "eventId": {
+          "type": "string",
+          "description": "Omit for pending creation; provide exact provider event ID for a pending edit."
+        }
+      },
+      "required": [
+        "calendarId"
+      ],
+      "notes": [
+        "Returns pending:null or {pending:{review,state,attempt,nextAttempt,retryPossible,recoveryReason}}. Review is the complete event-review result.",
+        "Read-only private local state; no provider request or credentials. Exact selected account/calendar binding is checked.",
+        "The current local grant must retain mail-read and one of the Calendar capability alternatives; this check reads grant metadata without opening credentials."
+      ],
+      "examples": [
+        {
+          "cmd": "calendar.event-pending",
+          "account": "personal@example.com",
+          "calendarId": "personal@example.com"
+        }
+      ]
     }
   ],
   "$defs": {
@@ -563,6 +878,84 @@
       "maxLength": 512,
       "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9/_+.-]+$",
       "description": "IANA zone name such as Europe/Vienna or UTC. Runtime bound: 512 UTF-8 bytes; absolute paths and '..' are refused. No silent machine-zone fallback."
+    },
+    "CalendarEventDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "start": {
+          "type": "string",
+          "description": "All-day YYYY-MM-DD, or local YYYY-MM-DDTHH:MM[:SS[.mmm]]. Offset-bearing RFC3339 is accepted if its offset matches timeZone."
+        },
+        "end": {
+          "type": "string",
+          "description": "Exclusive endpoint, later than start. An all-day single-date event ends on the following civil date."
+        },
+        "timeZone": {
+          "$ref": "#/$defs/CalendarZone"
+        },
+        "allDay": {
+          "type": "boolean",
+          "default": false
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "attendees": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "email"
+          },
+          "description": "Explicit guest emails; omit or null preserves all existing attendees and their RSVP metadata. New guests require sendUpdates all. Removing existing guests is not supported."
+        },
+        "conference": {
+          "type": "string",
+          "enum": [
+            "none",
+            "google_meet",
+            "link"
+          ],
+          "default": "none",
+          "description": "none preserves an existing conference during edit; google_meet requests a unique Google Meet if calendar.supports_meet; link appends the provided joinUrl. Existing conference replacement is refused."
+        },
+        "joinUrl": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Safe HTTPS URL required only for conference link. Paste a meeting URL from any provider; Omagma does not create third-party conferences."
+        },
+        "startOffset": {
+          "type": "string",
+          "pattern": "^[+-][0-9]{2}:[0-9]{2}$",
+          "description": "Explicit UTC offset for an ambiguous local start, e.g. +02:00 or +01:00. Must match IANA rules for the selected instant."
+        },
+        "endOffset": {
+          "type": "string",
+          "pattern": "^[+-][0-9]{2}:[0-9]{2}$",
+          "description": "Explicit UTC offset for an ambiguous local end. Nonexistent local times are refused even with an offset."
+        }
+      },
+      "required": [
+        "summary",
+        "start",
+        "end",
+        "timeZone"
+      ]
     }
   }
 }

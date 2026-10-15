@@ -25,6 +25,7 @@ const mail_notice = @import("mail_notice.zig");
 const selection = @import("selection.zig");
 const cache_query = @import("cache_query.zig");
 const preferences = @import("preferences.zig");
+const calendar_sources = @import("calendar_sources.zig");
 const reader_tools = @import("reader_tools.zig");
 const text_layout = @import("text_layout.zig");
 const html_view = @import("html_view.zig");
@@ -39,6 +40,10 @@ const file_dialog = @import("file_dialog.zig");
 const mail_display = @import("mail_display.zig");
 const invitation = @import("invitation.zig");
 const calendar_ui = @import("calendar_ui.zig");
+const calendar_slot = @import("calendar_slot.zig");
+const calendar_week_rows = @import("calendar_week_rows.zig");
+const calendar_composer = @import("calendar_composer.zig");
+const calendar_guest_picker = @import("calendar_guest_picker.zig");
 const calendar_notifications = @import("calendar_notifications.zig");
 const action_palette = @import("actions.zig");
 const edit_history = @import("edit_history.zig");
@@ -70,7 +75,7 @@ const LabelManagerPage = enum { list, create, rename, delete };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
-const JobKind = enum { meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
+const JobKind = enum { calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -383,6 +388,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "A / :calendar-import", .action = "Review Add / Update / Cancel in the selected calendar; I remains RSVP", .requires = .native },
     .{ .keys = "j / k · arrows", .action = "Move through the focused pane" },
     .{ .keys = "h / l · Tab", .action = "Change pane; Shift+Tab goes back" },
+    .{ .keys = "Up / Down in sidebar", .action = "Choose accounts, mailboxes, Contacts, Calendar, Follow-ups and Labels in their visible order; Enter opens", .requires = .native },
     .{ .keys = "Enter", .action = "Open mail or choose the focused item" },
     .{ .keys = ":", .action = "Open the command prompt; Enter runs, Esc cancels" },
     .{ .keys = "gg", .action = "First mail in the entire cached mailbox; expanded reader starts at top" },
@@ -519,15 +525,25 @@ const calendar_help_rows = [_]HelpRow{
     .{ .keys = "h / l · left / right", .action = "Previous or next period" },
     .{ .keys = "t · Ctrl+G", .action = "Today · jump to a date (YYYY-MM-DD)" },
     .{ .keys = "j / k · arrows", .action = "Choose an event; scroll an open event or review" },
+    .{ .keys = "Space / click +N in Week", .action = "List the events sharing visible hour rows; Enter selects and reveals, Esc returns without changing selection" },
+    .{ .keys = "g then p", .action = "Set one optional Priority calendar; it changes Week display order, not visibility or reminders" },
+    .{ .action = "Week favors non-declined events, starts in this hour, then Priority. +N means more events in this hour row, not necessarily overlapping times." },
     .{ .keys = "Enter", .action = "Open the selected event or activate the focused control" },
-    .{ .keys = "g", .action = "Choose an account-bound calendar" },
+    .{ .keys = "g", .action = "Choose calendars to show together; Space selects, Enter applies, Esc cancels" },
+    .{ .keys = "a / c / o in calendar picker", .action = "Switch account/all-account scope / change source color / open only this calendar" },
     .{ .keys = "/", .action = "Search events in the loaded calendar window" },
     .{ .keys = "Ctrl+R", .action = "Refresh the selected calendar" },
     .{ .keys = "Ctrl+P", .action = "Open Calendar actions" },
     .{ .keys = "Tab / Shift+Tab", .action = "Move between controls; Enter activates" },
     .{ .keys = "q / Esc", .action = "Return to Calendar; from its main view, return to Mail" },
     .{ .section = "EVENTS & MEETINGS" },
+    .{ .keys = "n / e", .action = "New event / edit the selected event; timed or all day, optional guests and video link" },
+    .{ .keys = "Tab / Shift+Tab in event editor", .action = "Move fields and controls; Enter toggles All day, Video and guest notifications" },
+    .{ .keys = "Ctrl+Space / Contacts in event editor", .action = "Choose a guest address from the destination account's contacts; additions are reviewed before invitations are sent" },
+    .{ .keys = "Ctrl+S in event editor", .action = "Review the exact account, calendar, times, guests and notification policy before saving" },
+    .{ .keys = "Esc in event editor", .action = "Cancel; modified events ask before discarding. q remains text in all fields" },
     .{ .keys = "o ·   Join", .action = "Open a meeting link in this account's configured Chrome profile" },
+    .{ .keys = "O / b", .action = "Open Google Calendar / the selected event in its own account's Chrome profile" },
     .{ .keys = "? · ~ · ×", .action = "Needs reply · Tentative · Declined" },
     .{ .keys = "Ctrl+D / Ctrl+U", .action = "Scroll event details or a review by half a page" },
     .{ .keys = "Ctrl+G / G · Home/End", .action = "Start or end of event details or a review" },
@@ -967,6 +983,7 @@ const Compose = struct {
 };
 
 const Job = struct {
+    calendar_compose_generation: u64 = 0,
     update_snapshot: updates.Snapshot = .{},
     kind: JobKind = .list,
     request: []const u8 = "",
@@ -982,6 +999,7 @@ const Job = struct {
     preferences_revision: u64 = 0,
     saved_attachment_open: bool = false,
     calendar_join_open: bool = false,
+    calendar_browser_open: bool = false,
     meeting_account: u8 = 0,
     meeting_target: u8 = 0,
     meeting_key: ?calendar_notifications.Key = null,
@@ -1021,6 +1039,54 @@ const App = struct {
     mouse_hits: layout.HitMap = .{},
     dialog_focus: dialog_controls.Focus = .{},
     calendar: calendar_ui.State = .{},
+    calendar_slots: calendar_slot.Snapshot = .{},
+    calendar_slots_selected: usize = 0,
+    calendar_slots_top: usize = 0,
+    calendar_slots_focus: ?usize = null,
+    calendar_slots_return_focus: ?usize = null,
+    calendar_slots_drawn: ?calendar_slot.Identity = null,
+    calendar_slots_title: @import("../bounded.zig").Text(128) = .{},
+    calendar_week_viewport: ?calendar_slot.Viewport = null,
+    calendar_week_related: usize = 0,
+    calendar_week_reveal_bucket: ?calendar_slot.Bucket = null,
+    calendar_slots_bucket: ?calendar_slot.Bucket = null,
+    calendar_week_title_hits: [686]struct { index: usize, bucket: calendar_slot.Bucket } = undefined,
+    calendar_week_title_count: usize = 0,
+    calendar_form: calendar_composer.Model = .{},
+    calendar_form_fields: [calendar_composer.field_count]Field = @splat(.{}),
+    calendar_form_generation: u64 = 0,
+    calendar_form_focus: usize = 0,
+    calendar_form_top: usize = 0,
+    calendar_form_error: @import("../bounded.zig").Text(256) = .{},
+    calendar_form_review: calendar_ui.Document = .{},
+    calendar_form_review_ready: bool = false,
+    calendar_form_unknown: bool = false,
+    calendar_form_retry_possible: bool = false,
+    calendar_form_next_attempt: u32 = 0,
+    calendar_form_recovery: enum { none, retry, archive } = .none,
+    calendar_form_outcome: @import("../bounded.zig").Text(32) = .{},
+    calendar_form_operation: @import("../bounded.zig").Text(128) = .{},
+    calendar_form_hash: @import("../bounded.zig").Text(64) = .{},
+    calendar_form_offsets: bool = false,
+    calendar_form_discard: bool = false,
+    calendar_form_discard_focus: usize = 19,
+    calendar_form_dirty: bool = false,
+    calendar_form_edit_after_read: bool = false,
+    calendar_form_notify_chosen: bool = false,
+    calendar_form_pick_target: bool = false,
+    calendar_form_target_index: usize = 0,
+    calendar_guests_open: bool = false,
+    calendar_guests_query: Field = .{},
+    calendar_guests_account: @import("../bounded.zig").Text(254) = .{},
+    calendar_guests_contacts: calendar_ui.Document = .{},
+    calendar_guests_selected: usize = 0,
+    calendar_guests_focus: usize = 0,
+    calendar_guests_return_focus: usize = 8,
+    calendar_guests_return_top: usize = 0,
+    calendar_guests_error: @import("../bounded.zig").Text(256) = .{},
+    calendar_guests_choice_error: bool = false,
+    calendar_guests_cached: bool = false,
+    calendar_guests_drawn_address: @import("../bounded.zig").Text(254) = .{},
     meetings: calendar_notifications.State = .{},
     meeting_enabled: bool = false,
     meeting_wake: std.atomic.Value(bool) = .init(false),
@@ -1491,9 +1557,14 @@ const App = struct {
         self.gmail_content_digest.deinit(self.allocator);
         self.follow_up_account.deinit(self.allocator);
         self.follow_up_subject.deinit(self.allocator);
+        self.calendar_slots.deinit();
         self.calendar.deinit(self.allocator);
         self.calendar_query.deinit(self.allocator);
         self.calendar_date.deinit(self.allocator);
+        for (&self.calendar_form_fields) |*field| field.deinit(self.allocator);
+        self.calendar_form_review.deinit();
+        self.calendar_guests_contacts.deinit();
+        self.calendar_guests_query.deinit(self.allocator);
         self.clearContactComposeIntent();
         self.reader_copy.deinit(self.allocator);
         self.reader_copy_test_value.deinit(self.allocator);
@@ -5173,7 +5244,7 @@ const App = struct {
             return;
         }
         _ = self.job_arena.reset(.retain_capacity);
-        self.job = .{ .kind = kind, .update_snapshot = self.update_snapshot, .generation = self.generation, .selection_generation = self.selection_generation, .account_index = self.account_index, .contacts_generation = self.contacts_generation, .requested_at = Io.Timestamp.now(self.io, .real).toMilliseconds() };
+        self.job = .{ .kind = kind, .update_snapshot = self.update_snapshot, .generation = self.generation, .selection_generation = self.selection_generation, .calendar_compose_generation = self.calendar_form_generation, .account_index = self.account_index, .contacts_generation = self.contacts_generation, .requested_at = Io.Timestamp.now(self.io, .real).toMilliseconds() };
         if (kind == .send or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
         if (unread_target) |target| try self.job.unread_target.set(target);
         self.job.request = try std.json.Stringify.valueAlloc(self.job_arena.allocator(), request_value, .{});
@@ -5551,6 +5622,8 @@ const App = struct {
             };
         } else if (self.job.kind == .preferences_save) {
             self.finishRemotePreferences();
+        } else if (calendarComposeJob(self.job.kind)) {
+            try self.finishCalendarCompose();
         } else if (calendarJob(self.job.kind)) {
             try self.finishCalendar();
         } else if (self.job.kind == .send) {
@@ -5671,6 +5744,7 @@ const App = struct {
                 if (self.job.kind == .list) self.syncFailed(self.job.account_index, @errorName(err));
                 if (self.job.kind == .contacts) self.contacts_state = if (err == error.PermissionDenied) .denied else .failed;
                 if (self.job.kind == .open and self.job.calendar_join_open) self.calendarJoinFailed(@errorName(err));
+                if (self.job.kind == .open and self.job.calendar_browser_open) self.calendarBrowserFailed(@errorName(err));
                 if (self.job.kind == .attachment_save) self.fileDialogFailure(err) else if (self.job.kind == .open and self.job.saved_attachment_open) self.attachmentOpenFailed(@errorName(err)) else self.sayError(@errorName(err));
             }
         } else if (self.job.response) |response| {
@@ -5757,7 +5831,10 @@ const App = struct {
         return true;
     }
     fn dispatchPending(self: *App) !void {
-        if (self.calendar.open) return self.dispatchMeetings();
+        if (self.calendar.open) {
+            if (try self.dispatchCalendarPending()) return;
+            return self.dispatchMeetings();
+        }
         if (self.gmail_reload_pending and self.compose_active and self.job.future == null) {
             self.gmail_reload_pending = false;
             try self.requestGmailDraftInfo();
@@ -5860,6 +5937,7 @@ const App = struct {
                 if (kind == .attachment_import) self.pending_file_count = 0;
                 if (kind == .attachment_save) try self.file_browser_error.set(self.allocator, humanError(self.status_error_code[0..self.status_error_len]));
                 if (kind == .open and self.job.calendar_join_open) self.calendarJoinFailed(self.status_error_code[0..self.status_error_len]);
+                if (kind == .open and self.job.calendar_browser_open) self.calendarBrowserFailed(self.status_error_code[0..self.status_error_len]);
                 if (kind == .open and self.job.saved_attachment_open) {
                     var code_buffer: [64]u8 = undefined;
                     const code = self.status_error_code[0..self.status_error_len];
@@ -5889,7 +5967,7 @@ const App = struct {
                 self.say(false, "{s} · Gmail is unchanged", .{if (completed) @as([]const u8, "Follow-up done · local reminder removed") else "Local follow-up saved"});
             },
             .preferences_save => return error.InvalidPreferencesResponse,
-            .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_apply, .calendar_reconcile => return error.InvalidCalendarResponse,
+            .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_apply, .calendar_reconcile, .calendar_event_edit, .calendar_event_review, .calendar_event_apply, .calendar_event_reconcile, .calendar_event_pending, .calendar_event_retry, .calendar_event_abandon, .calendar_guest_contacts => return error.InvalidCalendarResponse,
             .updates_load, .updates_check, .meeting_calendars, .meeting_agenda, .meeting_open => return error.InvalidUpdateResponse,
             .labels_list => {
                 try self.replaceLabels(response);
@@ -6345,6 +6423,11 @@ const App = struct {
             },
             .open => {
                 self.action_notice = false;
+                if (self.job.calendar_browser_open) {
+                    const result = try self.data(self.job_arena.allocator(), response);
+                    try self.calendar.notice.set(if (truth(get(result, "fixture"))) "Google Calendar target validated · correct account Chrome profile" else "Opened Google Calendar in the event account's Chrome profile");
+                    self.calendar.error_code = .{};
+                }
                 if (self.job.calendar_join_open) {
                     const result = try self.data(self.job_arena.allocator(), response);
                     const raw_profile = text(get(result, "profile"));
@@ -8259,7 +8342,7 @@ const App = struct {
     }
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
-            .follow_up_list, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
+            .follow_up_list, .calendar_guest_contacts, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_event_edit, .calendar_event_review, .calendar_event_pending, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
             .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
             else => false,
         };
@@ -8269,6 +8352,14 @@ const App = struct {
         if (self.job.future == null or !readOnlyJob(self.job.kind)) return;
         const index = self.job.account_index;
         const refresh = self.job.kind == .refresh;
+        if (self.calendar.open and self.job.kind == .calendar_agenda and self.calendar.source_loading) {
+            self.calendar.resume_sources = true;
+            self.calendar.source_cursor -|= 1;
+        }
+        if (self.calendar.open and self.job.kind == .calendar_list) {
+            self.calendar.resume_lists = true;
+            if (self.calendar.listing_all) self.calendar.list_cursor -|= 1;
+        }
         self.cancelJob();
         if (refresh) {
             self.sync[index].state = if (self.sync[index].cache_ready) .cached else .failed;
@@ -8382,15 +8473,21 @@ const App = struct {
         const moved = if (down) self.selected -| selected_before else selected_before -| self.selected;
         self.top = if (down) @min(top_before +| moved, self.messages.len -| self.mail_page_size) else top_before -| moved;
     }
+    fn sidebarNavigation(self: *App) layout.Sidebar {
+        return .{ .accounts = self.accounts.len, .folders = folders.len, .labels = self.capabilities.mail_changes, .user_labels = self.userLabelCount(), .native = !browser_target };
+    }
     fn calendarNavigationIndex(self: *App) usize {
-        return self.accounts.len + folders.len + 1 + (if (self.capabilities.mail_changes) 1 + self.userLabelCount() else 0);
+        return self.sidebarNavigation().calendar();
+    }
+    fn focusMailPane(self: *App, focus: Focus) void {
+        self.focus = focus;
+        if (focus == .navigation) self.navigation = self.sidebarNavigation().clamp(self.navigation);
     }
     fn move(self: *App, down: bool, amount: usize) !void {
         if (self.focus == .reader) {
             self.scrollReader(down, amount);
         } else if (self.focus == .navigation) {
-            const total = self.calendarNavigationIndex() + @as(usize, if (browser_target) 0 else 2);
-            self.navigation = if (down) @min(self.navigation +| amount, total - 1) else self.navigation -| amount;
+            self.navigation = self.sidebarNavigation().step(self.navigation, down, amount);
         } else {
             if (self.pageLoadCurrent()) {
                 if (down == self.page_loading_forward) return;
@@ -8431,6 +8528,8 @@ const App = struct {
     }
     fn enter(self: *App) !void {
         if (self.focus == .navigation) {
+            const sidebar = self.sidebarNavigation();
+            self.navigation = sidebar.clamp(self.navigation);
             if (!browser_target and self.navigation == self.calendarNavigationIndex()) return self.openCalendar(false);
             if (!browser_target and self.navigation == self.calendarNavigationIndex() + 1) return self.openFollowUps();
             if (self.navigation < self.accounts.len) try self.chooseAccount(self.navigation) else if (self.navigation < self.accounts.len + folders.len) {
@@ -8447,10 +8546,10 @@ const App = struct {
             } else if (self.navigation == self.accounts.len + folders.len) {
                 self.picker = false;
                 try self.loadContacts("");
-            } else if (self.navigation == self.accounts.len + folders.len + 1) {
+            } else if (sidebar.labels and self.navigation == sidebar.labelsHeader()) {
                 try self.openLabelManager();
-            } else if (self.userLabelIndex(self.navigation - self.accounts.len - folders.len - 2)) |index| {
-                try self.chooseCustomLabel(index);
+            } else if (sidebar.labels and self.navigation >= sidebar.labelsStart()) {
+                if (self.userLabelIndex(self.navigation - sidebar.labelsStart())) |index| try self.chooseCustomLabel(index);
             }
         } else if (self.focus == .reader and self.reader_card < self.thread.len and self.retryableReaderBody()) {
             const id = text(get(self.thread[self.reader_card], "id"));
@@ -8590,6 +8689,7 @@ const App = struct {
             else => return,
         };
         if (self.calendar.open) {
+            if (self.calendar_guests_open) return self.onCalendarGuestsMouse(mouse, wheel);
             if (self.calendarHelpVisible()) {
                 if (wheel) |down| self.help_scroll = if (down) @min(self.help_scroll +| 3, self.help_lines -| self.help_height) else self.help_scroll -| 3 else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
                     if (hit.kind == .dialog_action and hit.index == 0) self.closeHelp();
@@ -8601,28 +8701,32 @@ const App = struct {
             } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
                 if (hit.kind == .dialog_action) {
                     try self.calendarActivate(hit.index);
+                } else if (hit.kind == .calendar_week_event and self.calendar.page == .main) {
+                    if (hit.index >= self.calendar_week_title_count) return;
+                    const target = self.calendar_week_title_hits[hit.index];
+                    self.calendar.selected = target.index;
+                    self.calendar.week_reveal_selected = true;
+                    self.calendar_week_reveal_bucket = target.bucket;
+                    try self.calendarActivate(10);
                 } else if (hit.kind == .contact) {
                     if (self.calendar.page == .calendars) {
                         self.calendar.picker = hit.index;
-                        try self.selectCalendar(hit.index);
+                        if (self.calendar.source_message.len == 0) try self.calendarToggleSource() else try self.selectCalendar(hit.index);
+                    } else if (self.calendar.page == .overlaps) {
+                        if (hit.index >= self.calendar_slots.events.len) return;
+                        self.calendar_slots_selected = hit.index;
+                        self.calendar_slots_drawn = try calendar_slot.Identity.init(self.calendar_slots.events[hit.index]);
+                        try self.calendarSlotsChoose();
                     } else {
                         self.calendar.selected = hit.index;
+                        self.calendar.week_reveal_selected = true;
+                        self.calendar_week_reveal_bucket = null;
                         try self.calendarActivate(10);
                     }
                 }
             }
             return;
         }
-        if (self.mode == .browse and self.ux_overlay == .none and wheel == null) if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
-            if (hit.kind == .dialog_action and hit.index == 100) {
-                try self.openCalendar(false);
-                return;
-            }
-            if (hit.kind == .dialog_action and hit.index == 101) {
-                try self.openFollowUps();
-                return;
-            }
-        };
         if (self.ux_overlay != .none) {
             if (wheel) |down| {
                 const was_list = self.ux_focus == 1;
@@ -8783,26 +8887,38 @@ const App = struct {
             else => {},
         };
         switch (hit.kind) {
+            .calendar_week_event => return, // Native Calendar handles these above.
             .mail_scroll => {},
             .file_row, .file_mark, .file_parent, .file_home, .file_hidden, .file_location, .file_confirm, .file_cancel => {},
             .label_choice, .label_add, .label_remove, .label_filter, .label_back, .dialog_action, .label_manager_choice, .label_manager_filter, .label_manager_name, .label_manager_action => {},
             .theme_choice, .theme_action => {},
             .custom_label => {
-                if (self.mode == .browse and wheel == null) try self.chooseCustomLabel(hit.index);
+                if (self.mode == .browse and wheel == null) {
+                    var selected: usize = 0;
+                    while (self.userLabelIndex(selected)) |index| : (selected += 1) if (index == hit.index) {
+                        self.navigation = self.sidebarNavigation().labelsStart() + selected;
+                        break;
+                    };
+                    try self.chooseCustomLabel(hit.index);
+                }
             },
             .reader_thread, .reader_link, .reader_attachment, .reader_invitation, .reader_picker, .reader_picker_save, .reader_picker_open, .reader_picker_activate, .reader_picker_back => {
                 if (wheel == null) _ = try self.onReaderHit(hit);
             },
             .labels_header => {
-                if (self.mode == .browse and wheel == null) try self.openLabelManager();
+                if (self.mode == .browse and wheel == null) {
+                    self.navigation = self.sidebarNavigation().labelsHeader();
+                    try self.openLabelManager();
+                }
             },
-            .account, .folder, .contacts => {
+            .account, .folder, .contacts, .sidebar => {
                 if (self.mode != .browse or wheel != null) return;
                 self.focus = .navigation;
                 self.navigation = switch (hit.kind) {
                     .account => hit.index,
                     .folder => self.accounts.len + hit.index,
                     .contacts => self.accounts.len + folders.len,
+                    .sidebar => hit.index,
                     else => unreachable,
                 };
                 try self.enter();
@@ -9480,19 +9596,19 @@ const App = struct {
             return;
         }
         self.g_pending = false;
-        if (key.matches('j', .{}) or key.matches(Key.down, .{})) try self.move(true, 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) try self.move(false, 1) else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) try self.movePage(true, key.mods.ctrl) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) try self.movePage(false, key.mods.ctrl) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) self.focus = switch (self.focus) {
+        if (key.matches('j', .{}) or key.matches(Key.down, .{})) try self.move(true, 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{})) try self.move(false, 1) else if (key.matches('d', .{ .ctrl = true }) or key.matches(Key.page_down, .{})) try self.movePage(true, key.mods.ctrl) else if (key.matches('u', .{ .ctrl = true }) or key.matches(Key.page_up, .{})) try self.movePage(false, key.mods.ctrl) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) self.focusMailPane(switch (self.focus) {
             .navigation => .navigation,
             .list => .navigation,
             .reader => .list,
-        } else if (key.matches(Key.tab, .{ .shift = true })) self.focus = switch (self.focus) {
+        }) else if (key.matches(Key.tab, .{ .shift = true })) self.focusMailPane(switch (self.focus) {
             .navigation => .reader,
             .list => .navigation,
             .reader => .list,
-        } else if (key.matches('l', .{}) or key.matches(Key.right, .{}) or key.matches(Key.tab, .{})) self.focus = switch (self.focus) {
+        }) else if (key.matches('l', .{}) or key.matches(Key.right, .{}) or key.matches(Key.tab, .{})) self.focusMailPane(switch (self.focus) {
             .navigation => .list,
             .list => .reader,
             .reader => .navigation,
-        } else if (key.matches(Key.enter, .{})) try self.enter() else if (key.matches('G', .{}) or key.matches('g', .{ .shift = true }) or key.matches(Key.end, .{})) {
+        }) else if (key.matches(Key.enter, .{})) try self.enter() else if (key.matches('G', .{}) or key.matches('g', .{ .shift = true }) or key.matches(Key.end, .{})) {
             if (self.focus == .reader) self.reader_scroll = readerEnd(self.reader_lines, self.reader_height) else {
                 self.selected = self.messages.len -| 1;
                 self.selection_generation +%= 1;
@@ -9660,66 +9776,73 @@ const App = struct {
         }
         return result;
     }
+    fn navigationLine(self: *App, win: vaxis.Window, offset: usize, row: usize, value: []const u8, tone: Tone, kind: ?layout.HitKind, index: usize) !void {
+        if (row < offset or row - offset >= win.height) return;
+        try self.line(win, row - offset, value, tone);
+        if (kind) |hit_kind| self.mouseRows(win, row - offset, 1, hit_kind, index);
+    }
     fn navigationDraw(self: *App, win: vaxis.Window) !void {
-        const navigation_hit_start = self.mouse_hits.count;
-        try self.line(win, 0, "ACCOUNTS", .muted);
+        if (win.width <= 2 or win.height == 0) return;
+        const sidebar = self.sidebarNavigation();
+        if (self.focus == .navigation) self.navigation = sidebar.clamp(self.navigation);
+        const account_width = win.child(.{ .width = win.width - 2 });
         var row: usize = 1;
+        var selected_row: usize = 0;
         for (self.accounts, 0..) |account_value, index| {
-            if (row >= win.height or win.width <= 2) break;
             const address = try safe(self.frame.allocator(), text(get(account_value, "address")), false);
+            if (self.navigation == index) selected_row = row;
+            row += positionAfter(account_width, address).row + 1;
+        }
+        const mailbox_row = row + 1;
+        const folders_row = mailbox_row + 1;
+        const contacts_row = folders_row + folders.len + 1;
+        const labels_row = contacts_row + 2 + @as(usize, if (browser_target) 0 else 2);
+        if (self.navigation >= self.accounts.len and self.navigation < sidebar.contacts()) selected_row = folders_row + self.navigation - self.accounts.len;
+        if (self.navigation == sidebar.contacts()) selected_row = contacts_row;
+        if (!browser_target and self.navigation == sidebar.calendar()) selected_row = contacts_row + 1;
+        if (!browser_target and self.navigation == sidebar.followUps()) selected_row = contacts_row + 2;
+        if (sidebar.labels and self.navigation >= sidebar.labelsHeader()) selected_row = labels_row + self.navigation - sidebar.labelsHeader();
+        // Scroll the same sidebar, rather than replacing it with Labels. Its
+        // selected destination and matching mouse target remain visible even
+        // with wrapped accounts or a short laptop terminal.
+        const offset = if (self.focus == .navigation and selected_row >= win.height) selected_row - win.height + 1 else 0;
+        try self.navigationLine(win, offset, 0, "ACCOUNTS", .muted, null, 0);
+        row = 1;
+        for (self.accounts, 0..) |account_value, index| {
+            const address = try safe(self.frame.allocator(), text(get(account_value, "address")), false);
+            const actual_rows = positionAfter(account_width, address).row + 1;
+            defer row += actual_rows;
+            if (row + actual_rows <= offset or row >= offset + win.height) continue;
+            const skip = offset -| row;
+            const visible_start = @max(row, offset) - offset;
+            const visible_rows: u16 = @intCast(@min(actual_rows - skip, win.height - visible_start));
+            const account_win = win.child(.{ .y_off = @intCast(visible_start), .height = visible_rows });
+            const address_win = account_win.child(.{ .x_off = 2, .width = win.width - 2 });
             const tone: Tone = if (self.focus == .navigation and self.navigation == index) .selected else if (index == self.account_index) .accent else .text;
-            const address_win = win.child(.{ .x_off = 2, .y_off = @intCast(row), .width = win.width - 2 });
-            // Continuation lines align with the address, leaving its selection
-            // marker on the first line. A full final line occupies one row;
-            // the print cursor's next-row position is not an extra blank row.
-            const actual_rows = positionAfter(address_win, address).row + 1;
-            const visible_rows: u16 = @intCast(@min(actual_rows, win.height - row));
-            const account_win = win.child(.{ .y_off = @intCast(row), .height = visible_rows });
             if (tone == .selected) account_win.fill(.{ .style = self.style(tone) });
-            try self.line(account_win, 0, if (index == self.account_index) "> " else "  ", tone);
-            _ = try self.flowTone(address_win.child(.{ .height = visible_rows }), address, 0, 0, tone);
-            self.mouseRows(win, row, visible_rows, .account, index);
-            row += actual_rows;
+            if (skip == 0) try self.line(account_win, 0, if (index == self.account_index) "> " else "  ", tone);
+            _ = try self.flowTone(address_win, address, skip, 0, tone);
+            self.mouseRows(win, visible_start, visible_rows, .account, index);
         }
-        row += 1;
-        try self.line(win, row, "MAILBOXES", .muted);
-        row += 1;
+        try self.navigationLine(win, offset, mailbox_row, "MAILBOXES", .muted, null, 0);
         for (folders, 0..) |name, index| {
-            const value_in = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (index == self.folder) "> " else "  ", name });
-            try self.line(win, row + index, value_in, if (self.focus == .navigation and self.navigation == self.accounts.len + index) .selected else if (index == self.folder) .accent else .text);
-            self.mouseRows(win, row + index, 1, .folder, index);
+            const value = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (index == self.folder) "> " else "  ", name });
+            try self.navigationLine(win, offset, folders_row + index, value, if (self.focus == .navigation and self.navigation == self.accounts.len + index) .selected else if (index == self.folder) .accent else .text, .folder, index);
         }
-        try self.line(win, row + folders.len + 1, "Contacts", if (self.focus == .navigation and self.navigation == self.accounts.len + folders.len) .selected else .text);
-        self.mouseRows(win, row + folders.len + 1, 1, .contacts, 0);
+        try self.navigationLine(win, offset, contacts_row, "Contacts", if (self.focus == .navigation and self.navigation == sidebar.contacts()) .selected else .text, .contacts, 0);
         if (!browser_target) {
-            try self.line(win, row + folders.len + 2, "Calendar · C", if (self.focus == .navigation and self.navigation == self.calendarNavigationIndex()) .selected else .text);
-            self.mouseRows(win, row + folders.len + 2, 1, .dialog_action, 100);
+            try self.navigationLine(win, offset, contacts_row + 1, "Calendar · C", if (self.focus == .navigation and self.navigation == sidebar.calendar()) .selected else .text, .sidebar, sidebar.calendar());
             const due = self.followUpDueCount();
             const label = if (due > 0) try std.fmt.allocPrint(self.frame.allocator(), "Follow-ups · {d} due", .{due}) else "Follow-ups";
-            try self.line(win, row + folders.len + 3, label, if (self.focus == .navigation and self.navigation == self.calendarNavigationIndex() + 1) .selected else if (due > 0) .accent else .text);
-            self.mouseRows(win, row + folders.len + 3, 1, .dialog_action, 101);
+            try self.navigationLine(win, offset, contacts_row + 2, label, if (self.focus == .navigation and self.navigation == sidebar.followUps()) .selected else if (due > 0) .accent else .text, .sidebar, sidebar.followUps());
         }
-        if (!self.capabilities.mail_changes) return;
-        var label_row = row + folders.len + 5;
-        if (label_row + 2 >= win.height and self.focus == .navigation and self.navigation > self.accounts.len + folders.len) {
-            win.fill(.{ .style = self.style(.text) });
-            self.mouse_hits.count = navigation_hit_start;
-            label_row = 0;
-        }
-        if (label_row < win.height) {
-            try self.line(win, label_row, "LABELS ›", if (self.focus == .navigation and self.navigation == self.accounts.len + folders.len + 1) .selected else .accent);
-            self.mouseRows(win, label_row, 1, .labels_header, 0);
-            const visible: usize = win.height - label_row - 1;
-            const navigation_start = self.accounts.len + folders.len + 2;
-            const focused_label = self.navigation -| navigation_start;
-            const first = if (focused_label >= visible and visible > 0) focused_label - visible + 1 else 0;
-            for (first..@min(first + visible, self.userLabelCount())) |choice| {
-                const index = self.userLabelIndex(choice) orelse continue;
-                const label_value = self.labels[index];
-                const label_active = same(self.custom_label.value(), text(get(label_value, "id")));
-                try self.line(win, label_row + 1 + choice - first, try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (label_active) "> " else "  ", text(get(label_value, "name")) }), if (self.focus == .navigation and self.navigation == navigation_start + choice) .selected else if (label_active) .accent else .text);
-                self.mouseRows(win, label_row + 1 + choice - first, 1, .custom_label, index);
-            }
+        if (!sidebar.labels) return;
+        try self.navigationLine(win, offset, labels_row, "LABELS ›", if (self.focus == .navigation and self.navigation == sidebar.labelsHeader()) .selected else .accent, .labels_header, 0);
+        for (0..self.userLabelCount()) |choice| {
+            const index = self.userLabelIndex(choice) orelse continue;
+            const label_value = self.labels[index];
+            const label_active = same(self.custom_label.value(), text(get(label_value, "id")));
+            try self.navigationLine(win, offset, labels_row + 1 + choice, try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (label_active) "> " else "  ", text(get(label_value, "name")) }), if (self.focus == .navigation and self.navigation == sidebar.labelsStart() + choice) .selected else if (label_active) .accent else .text, .custom_label, index);
         }
     }
     fn navigationWidth(self: *App, win: vaxis.Window) !u16 {
@@ -12352,12 +12475,992 @@ const App = struct {
         const address = text(get(self.accounts[account_index], "address"));
         if (self.job.kind == .meeting_calendars) {
             const result = get(envelope, "data");
-            try self.meetings.calendars(account_index, address, result);
+            _ = try calendar_notifications.validateCalendars(address, result);
+            var selected_result = try @import("json.zig").copyObject(self.frame.allocator(), result);
+            var selected_entries: Value = .{ .array = .init(self.frame.allocator()) };
+            for (items(get(result, "calendars"))) |entry| {
+                var selected_entry = try @import("json.zig").copyObject(self.frame.allocator(), entry);
+                var selected_calendar = try @import("json.zig").copyObject(self.frame.allocator(), get(entry, "calendar"));
+                const shown = self.ui_preferences.calendar.selected(selected_calendar);
+                try selected_calendar.object.put(self.frame.allocator(), "primary", .{ .bool = false });
+                try selected_calendar.object.put(self.frame.allocator(), "selected", .{ .bool = shown });
+                try selected_entry.object.put(self.frame.allocator(), "calendar", selected_calendar);
+                try selected_entries.array.append(selected_entry);
+            }
+            try selected_result.object.put(self.frame.allocator(), "calendars", selected_entries);
+            try self.meetings.calendars(account_index, address, selected_result);
             // A fresh bounded list may legitimately be incomplete on every
             // request; retrying it rapidly cannot repair that limit.
             if (get(result, "complete") == .bool and !truth(get(result, "cached")) and !truth(get(result, "stale")))
                 self.meetings.list_after[account_index] = Io.Timestamp.now(self.io, .awake).toMilliseconds() +| 10 * 60000;
         } else try self.meetings.ingest(self.job.meeting_target, address, get(envelope, "data"), self.meeting_now);
+    }
+    fn calendarComposeJob(kind: JobKind) bool {
+        return switch (kind) {
+            .calendar_guest_contacts, .calendar_event_edit, .calendar_event_review, .calendar_event_apply, .calendar_event_reconcile, .calendar_event_pending, .calendar_event_retry, .calendar_event_abandon => true,
+            else => false,
+        };
+    }
+    fn calendarComposeWriting(self: *const App) bool {
+        return self.job.future != null and (self.job.kind == .calendar_event_apply or self.job.kind == .calendar_event_retry);
+    }
+    fn calendarComposeLoadFields(self: *App) !void {
+        self.calendar_form_generation +%= 1;
+        for (&self.calendar_form_fields, 0..) |*field, index| try field.set(self.allocator, self.calendar_form.get(@fromBackingInt(@intCast(index))));
+        self.calendar_form_focus = 0;
+        self.calendar_form_top = 0;
+        self.calendar_form_error = .{};
+        self.calendar_form_unknown = false;
+        self.calendar_form_retry_possible = false;
+        self.calendar_form_next_attempt = 0;
+        self.calendar_form_recovery = .none;
+        self.calendar_form_outcome = .{};
+        self.calendar_form_operation = .{};
+        self.calendar_form_hash = .{};
+        self.calendar_form_review.deinit();
+        self.calendar_form_review_ready = false;
+        self.calendar_form_discard = false;
+        self.calendar_form_dirty = false;
+        self.calendar_form_offsets = false;
+        self.calendar_form_notify_chosen = !self.calendar_form.editing or self.calendar_form.existingGuestCount() == 0;
+        self.calendar_form_pick_target = false;
+        self.calendar_guests_open = false;
+        self.calendar_guests_contacts.deinit();
+        self.calendar.page = .compose;
+        self.calendar.focus = null;
+    }
+    fn calendarComposeInit(self: *App, entry: Value) !calendar_composer.Init {
+        const value = get(entry, "calendar");
+        const target = get(value, "target");
+        return .{
+            .target = .{ .account = text(get(target, "account")), .calendar_id = text(get(target, "calendar_id")) },
+            .day = self.calendar.day,
+            .now_ms = Io.Timestamp.now(self.io, .real).toMilliseconds(),
+            .zone_name = if (self.calendar.zone_name.len > 0) self.calendar.zone_name.slice() else text(get(value, "time_zone")),
+            .zone = &self.calendar.zone,
+            .writable = truth(get(entry, "canWrite")),
+            .supports_meet = truth(get(value, "supports_meet")),
+        };
+    }
+    fn calendarComposeNew(self: *App) !void {
+        if (browser_target) return error.NativeOnly;
+        if (self.calendarEntries().len == 0 and ((self.job.future != null and self.job.kind == .calendar_list) or self.calendar.resume_lists)) {
+            try self.calendar.notice.set("Calendars still loading · try New event after discovery finishes");
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        var picked: ?Value = null;
+        for (self.calendarEntries()) |entry| {
+            const target = get(get(entry, "calendar"), "target");
+            if (!truth(get(entry, "canWrite"))) continue;
+            if (picked == null or (same(text(get(target, "account")), self.calendar.account.slice()) and same(text(get(target, "calendar_id")), self.calendar.calendar_id.slice()))) picked = entry;
+        }
+        const entry = picked orelse {
+            for (self.calendarEntries(), 0..) |candidate, index| {
+                const value = get(candidate, "calendar");
+                const access = text(get(value, "access"));
+                if (!same(access, "owner") and !same(access, "writer") and !same(access, "writer_without_private")) continue;
+                const target = get(value, "target");
+                try self.calendar.account.set(text(get(target, "account")));
+                try self.calendar.calendar_id.set(text(get(target, "calendar_id")));
+                try self.calendar.calendar_name.set(text(get(value, "summary")));
+                self.calendar.picker = index;
+                self.calendar.page = .permissions;
+                self.calendar.scroll = 0;
+                self.calendar.focus = null;
+                try self.calendar.error_code.set("CalendarWritePermissionRequired");
+                try self.calendar.notice.set("Creating events needs Calendar write access · copy the authorization command below");
+                return;
+            }
+            try self.calendar.notice.set("No writable calendar · g Calendars · authorize Calendar write access to create events");
+            self.say(true, "No writable calendar · Calendar write permission is required", .{});
+            return;
+        };
+        self.calendar_form = try calendar_composer.Model.init(self.frame.allocator(), try self.calendarComposeInit(entry));
+        try self.calendarComposeLoadFields();
+        try self.calendarComposePending();
+    }
+    fn calendarComposePending(self: *App) !void {
+        if (self.job.future != null) return;
+        try self.start(.calendar_event_pending, .{
+            .cmd = "calendar.event-pending",
+            .account = self.calendar_form.account.slice(),
+            .calendarId = self.calendar_form.calendar_id.slice(),
+            .eventId = if (self.calendar_form.editing) self.calendar_form.event_id.slice() else null,
+        });
+    }
+    fn calendarComposeEdit(self: *App) !void {
+        if (browser_target) return error.NativeOnly;
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        const event = if (self.calendar.page == .detail) self.calendar.card.value else self.calendarEventAt(self.calendar.selected) orelse return;
+        const target = get(event, "target");
+        self.calendar_form_generation +%= 1;
+        try self.start(.calendar_event_edit, .{ .cmd = "calendar.event", .account = text(get(target, "account")), .calendarId = text(get(target, "calendar_id")), .eventId = text(get(event, "id")) });
+        self.calendar_form_edit_after_read = true;
+        try self.calendar.notice.set("Checking the latest event before editing…");
+    }
+    fn calendarComposeError(self: *App, code: []const u8) !void {
+        if (std.mem.indexOf(u8, code, "Ambiguous") != null or same(code, "CalendarTimezoneMismatch")) self.calendar_form_offsets = true;
+        const label: []const u8 = if (same(code, "AmbiguousLocalTime")) "This time occurs twice. Choose explicit start/end UTC offsets below." else if (same(code, "CalendarTimezoneMismatch")) "The UTC offset differs from this date and time zone. Check the DST occurrence choices." else if (same(code, "NonexistentLocalTime")) "This time is skipped by daylight saving. Choose another local time." else if (same(code, "CalendarEndBeforeStart")) "End must be after start. Check both dates and times." else if (same(code, "CalendarWritePermissionRequired")) "Calendar write access is required for this destination." else if (same(code, "CalendarReviewStale") or same(code, "CalendarConflict")) "Event changed elsewhere. Go back and reopen it before editing." else if (same(code, "CalendarMeetUnsupported") or same(code, "CalendarMeetUnavailable")) "This calendar cannot create Google Meet links. Choose None or Paste link." else if (same(code, "InvalidCalendarJoinUrl")) "Paste a complete safe https:// meeting link." else if (same(code, "InvalidAddress") or same(code, "DuplicateCalendarAttendee")) "Check guest email addresses; separate them with commas and remove duplicates." else if (same(code, "CalendarReadOnly")) "This calendar is read-only. Choose a writable destination." else "Could not prepare this event. Check the highlighted details.";
+        try self.calendar_form_error.set(try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ label, code }));
+        self.sayFailure(label, code);
+    }
+    fn calendarComposeReview(self: *App) !void {
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        // Copy offsets first: changing wall time or zone then clears an
+        // offset inherited from a different daylight-saving date.
+        defer self.calendarComposeSyncOffsets() catch {};
+        for ([_]usize{ 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }) |index| self.calendar_form.set(@fromBackingInt(@intCast(index)), self.calendar_form_fields[index].value()) catch |err| {
+            try self.calendar_form_error.set(calendar_composer.errorMessage(err));
+            self.sayFailure(calendar_composer.errorMessage(err), @errorName(err));
+            return;
+        };
+        const added_guests = self.calendar_form.addedGuestCount() catch |err| {
+            try self.calendar_form_error.set(calendar_composer.errorMessage(err));
+            self.sayFailure(calendar_composer.errorMessage(err), @errorName(err));
+            return;
+        };
+        if (added_guests > 0) {
+            self.calendar_form.send_updates = .all;
+            self.calendar_form_notify_chosen = true;
+        } else if (!self.calendar_form.editing) self.calendar_form.send_updates = .none;
+        if (!self.calendar_form_notify_chosen) {
+            try self.calendar_form_error.set("Choose whether to email existing guests before reviewing this change.");
+            self.calendar_form_focus = 15;
+            return;
+        }
+        const operation = try self.operationId(self.frame.allocator());
+        const request = self.calendar_form.reviewRequest(self.frame.allocator(), operation) catch |err| {
+            try self.calendar_form_error.set(calendar_composer.errorMessage(err));
+            self.sayFailure(calendar_composer.errorMessage(err), @errorName(err));
+            return;
+        };
+        self.calendar_form_error = .{};
+        try self.start(.calendar_event_review, request);
+    }
+    fn calendarComposeApply(self: *App) !void {
+        _ = self.cancelMeetingRead();
+        if (self.job.future != null or self.calendar_form_hash.len != 64 or self.calendar_form_outcome.len > 0) return;
+        if (!self.calendar_form_unknown and !self.calendar_form_review_ready) return;
+        const reconcile = self.calendar_form_unknown;
+        try self.start(if (reconcile) .calendar_event_reconcile else .calendar_event_apply, .{
+            .cmd = if (reconcile) @as([]const u8, "calendar.event-reconcile") else "calendar.event-apply",
+            .account = self.calendar_form.account.slice(),
+            .calendarId = self.calendar_form.calendar_id.slice(),
+            .operationId = self.calendar_form_operation.slice(),
+            .reviewHash = self.calendar_form_hash.slice(),
+        });
+        self.calendar_form_review_ready = false;
+    }
+    fn calendarComposeRecovery(self: *App, archive: bool) !void {
+        if (self.job.future != null or !self.calendar_form_unknown) return;
+        if (!archive and !self.calendar_form_retry_possible) return;
+        self.calendar_form_recovery = if (archive) .archive else .retry;
+        self.calendar_form_focus = 16;
+        self.calendar_form_review_ready = false;
+        self.calendar.scroll = 0;
+    }
+    fn calendarComposeRecoverConfirm(self: *App) !void {
+        if (self.job.future != null or !self.calendar_form_unknown or !self.calendar_form_review_ready) return;
+        const archive = self.calendar_form_recovery == .archive;
+        if (self.calendar_form_recovery == .none or (!archive and !self.calendar_form_retry_possible)) return;
+        const request = try @import("json.zig").value(self.frame.allocator(), .{
+            .cmd = if (archive) @as([]const u8, "calendar.event-abandon") else "calendar.event-retry",
+            .account = self.calendar_form.account.slice(),
+            .calendarId = self.calendar_form.calendar_id.slice(),
+            .operationId = self.calendar_form_operation.slice(),
+            .reviewHash = self.calendar_form_hash.slice(),
+            .nextAttempt = if (archive) null else @as(?u32, self.calendar_form_next_attempt),
+        });
+        try self.start(if (archive) .calendar_event_abandon else .calendar_event_retry, request);
+        self.calendar_form_retry_possible = false;
+        self.calendar_form_recovery = .none;
+        self.calendar_form_review_ready = false;
+    }
+    fn finishCalendarCompose(self: *App) !void {
+        if (!self.calendar.open) return;
+        if (self.job.calendar_compose_generation != self.calendar_form_generation) return;
+        if (self.job.kind == .calendar_guest_contacts) return self.finishCalendarGuests();
+        if (self.job.kind == .calendar_event_review and (self.calendar.page != .compose or self.calendar_form_discard)) return;
+        if (self.job.kind == .calendar_event_edit and self.calendar.page != .main and self.calendar.page != .detail) return;
+        const writing = self.job.kind == .calendar_event_apply or self.job.kind == .calendar_event_reconcile or self.job.kind == .calendar_event_retry or self.job.kind == .calendar_event_abandon;
+        const envelope = if (self.job.response) |response| std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{}) catch |err| blk: {
+            self.job.failure = err;
+            break :blk @as(Value, .null);
+        } else @as(Value, .null);
+        if (self.job.failure != null or !truth(get(envelope, "ok"))) {
+            const code = if (self.job.failure) |err| @errorName(err) else text(get(get(envelope, "error"), "code"));
+            if (same(code, "CalendarOperationPending") and !self.calendar_form_unknown and (self.job.kind == .calendar_event_review or self.job.kind == .calendar_event_apply)) return self.calendarComposePending();
+            if (writing and (self.job.failure != null or self.job.response == null or code.len == 0 or same(code, "UnknownOutcome") or self.calendar_form_unknown)) {
+                self.calendar_form_unknown = true;
+                self.calendar.page = .event_review;
+                try self.calendar_form_error.set(if (self.job.kind == .calendar_event_reconcile) @as([]const u8, "Status check failed · the saved outcome is still unknown; nothing was resent.") else if (self.job.kind == .calendar_event_retry) "Retry outcome unknown · Check status before another decision." else if (self.job.kind == .calendar_event_abandon) "Archive not confirmed · Check status; no event request was sent by this action." else "Outcome unknown · Check status only reads Calendar; it never resends invitations.");
+            } else {
+                try self.calendarComposeError(code);
+                if (self.job.kind == .calendar_event_edit) {
+                    self.calendar_form_edit_after_read = false;
+                    try self.calendar.notice.set(self.calendar_form_error.slice());
+                }
+            }
+            return;
+        }
+        const result = get(envelope, "data");
+        if (self.job.kind == .calendar_event_pending) {
+            const pending = get(result, "pending");
+            if (pending == .null) return;
+            const review = get(pending, "review");
+            if (!same(text(get(review, "account")), self.calendar_form.account.slice()) or !same(text(get(review, "calendarId")), self.calendar_form.calendar_id.slice())) return error.CalendarAccountMismatch;
+            var chosen: Value = .null;
+            for (self.calendarEntries()) |entry| {
+                const target = get(get(entry, "calendar"), "target");
+                if (same(text(get(target, "account")), self.calendar_form.account.slice()) and same(text(get(target, "calendar_id")), self.calendar_form.calendar_id.slice())) {
+                    chosen = entry;
+                    break;
+                }
+            }
+            const restore_options: calendar_composer.Init = if (chosen != .null) try self.calendarComposeInit(chosen) else .{ .target = .{ .account = self.calendar_form.account.slice(), .calendar_id = self.calendar_form.calendar_id.slice() }, .day = self.calendar.day, .now_ms = 0, .zone_name = text(get(get(review, "event"), "timeZone")), .zone = &self.calendar.zone, .writable = false, .supports_meet = false };
+            self.calendar_form = try calendar_composer.Model.initReview(self.frame.allocator(), restore_options, review);
+            try self.calendarComposeLoadFields();
+            try self.calendar_form_review.replace(self.allocator, review);
+            try self.calendar_form_operation.set(text(get(review, "operationId")));
+            try self.calendar_form_hash.set(text(get(review, "reviewHash")));
+            self.calendar_form_unknown = true;
+            self.calendar_form_retry_possible = false;
+            self.calendar.page = .event_review;
+            self.calendar_form_focus = 16;
+            self.calendar.scroll = 0;
+            try self.calendar_form_error.set("Resumed an uncertain save · Check status before deciding what to do.");
+            return;
+        }
+        if (self.job.kind == .calendar_event_edit) {
+            self.calendar_form_edit_after_read = false;
+            if (!truth(get(result, "canEdit"))) {
+                const reason = text(get(result, "canEditReason"));
+                if (same(reason, "calendar_write_permission")) {
+                    const target = get(get(result, "event"), "target");
+                    try self.calendar.account.set(text(get(target, "account")));
+                    try self.calendar.calendar_id.set(text(get(target, "calendar_id")));
+                    try self.calendar.calendar_name.set(text(get(get(result, "calendar"), "summary")));
+                    self.calendar.page = .permissions;
+                    self.calendar.scroll = 0;
+                    self.calendar.focus = null;
+                    try self.calendar.error_code.set("CalendarWritePermissionRequired");
+                    try self.calendar.notice.set("Editing needs Calendar write access · copy the authorization command below");
+                    return;
+                }
+                const label: []const u8 = if (same(reason, "not_organizer")) "Only the organizer can change this meeting · b opens it in your browser" else if (same(reason, "calendar_read_only")) "This calendar is read-only · b opens the event in your browser" else if (same(reason, "recurring_series")) "Choose an occurrence to edit · b opens the whole series in your browser" else if (same(reason, "invalid_etag") or same(reason, "no_etag")) "Event version unavailable · refresh the event before editing" else if (same(reason, "special_event")) "This special Calendar event is edited in the browser · b Open" else if (same(reason, "private_copy")) "This is a saved invitation copy · b opens it in Calendar" else "This event cannot be edited here · b opens it in your browser";
+                try self.calendar.notice.set(label);
+                return;
+            }
+            const event = get(result, "event");
+            const target = get(event, "target");
+            var chosen: Value = .null;
+            for (self.calendarEntries()) |entry| {
+                const candidate = get(get(entry, "calendar"), "target");
+                if (same(text(get(target, "account")), text(get(candidate, "account"))) and same(text(get(target, "calendar_id")), text(get(candidate, "calendar_id")))) {
+                    chosen = entry;
+                    break;
+                }
+            }
+            if (chosen == .null) return error.CalendarNotFound;
+            self.calendar_form = try calendar_composer.Model.initEdit(self.frame.allocator(), try self.calendarComposeInit(chosen), result);
+            try self.calendarComposeLoadFields();
+            try self.calendarComposePending();
+            return;
+        }
+        if (self.job.kind == .calendar_event_review) {
+            if (!same(text(get(result, "account")), self.calendar_form.account.slice()) or !same(text(get(result, "calendarId")), self.calendar_form.calendar_id.slice())) return error.CalendarAccountMismatch;
+            try self.calendar_form_review.replace(self.allocator, result);
+            try self.calendar_form_operation.set(text(get(result, "operationId")));
+            try self.calendar_form_hash.set(text(get(result, "reviewHash")));
+            self.calendar_form_unknown = false;
+            self.calendar_form_outcome = .{};
+            self.calendar_form_review_ready = false;
+            self.calendar_form_focus = 16;
+            self.calendar.scroll = 0;
+            self.calendar.page = .event_review;
+            return;
+        }
+        const state = text(get(result, "state"));
+        self.calendar_form_unknown = !same(state, "applied") and !same(state, "rejected") and !same(state, "archived");
+        self.calendar_form_recovery = .none;
+        self.calendar_form_retry_possible = self.calendar_form_unknown and truth(get(result, "retryPossible"));
+        self.calendar_form_next_attempt = @intCast(@max(0, integer(get(result, "nextAttempt"))));
+        if (!self.calendar_form_unknown) try self.calendar_form_outcome.set(state);
+        if (self.calendar_form_unknown) {
+            const raw_reason = text(get(result, "recoveryReason"));
+            const reason: []const u8 = if (same(raw_reason, "CalendarNotFound")) "No saved event found · Check Calendar before deciding" else if (same(raw_reason, "ProviderOutcomeUnknown")) "Calendar has not confirmed the save · Check status" else if (same(raw_reason, "SavedVersionStillCurrent")) "The saved event version is still current · an identical retry is available" else if (same(raw_reason, "EventDeletedWithoutReceipt")) "The event was deleted; its earlier save is unconfirmed" else if (same(raw_reason, "EventChangedWithoutReceipt")) "The event changed elsewhere; its earlier save is unconfirmed" else raw_reason;
+            try self.calendar_form_error.set(if (reason.len > 0 and reason.len <= 220) try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown · {s}", .{reason}) else "Outcome unknown · Check status only reads Calendar; it never resends invitations.");
+        } else if (same(state, "archived")) {
+            self.calendar_form_dirty = false;
+            try self.calendar_form_error.set("Uncertainty archived · the event or invitations may still appear in Calendar.");
+        } else if (same(state, "applied")) {
+            self.calendar_form_error = .{};
+            self.calendar_form_dirty = false;
+            try self.calendar.card.replace(self.allocator, get(result, "event"));
+            self.calendar.stale = true;
+            self.meeting_wake.store(true, .release);
+            try self.calendar.notice.set(if (same(text(get(get(result, "event"), "conference_status")), "pending")) "Event saved · Meet link is being generated; reopen the event to refresh" else "Event saved in Calendar");
+        } else try self.calendar_form_error.set(try std.fmt.allocPrint(self.frame.allocator(), "Not saved · {s}", .{text(get(result, "errorCode"))}));
+    }
+    fn calendarGuestsData(a: Allocator, raw: []const u8) !Value {
+        if (raw.len > response_limit) return error.ResponseTooLarge;
+        const envelope = try std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_always });
+        if (get(envelope, "ok") != .bool) return error.InvalidContactsResponse;
+        if (!truth(get(envelope, "ok"))) {
+            if (same(text(get(get(envelope, "error"), "code")), "PermissionDenied")) return error.PermissionDenied;
+            return error.InvalidContactsResponse;
+        }
+        const result = get(envelope, "data");
+        if (result != .object) return error.InvalidContactsResponse;
+        return result;
+    }
+    fn calendarGuestsClearChoiceError(self: *App) void {
+        if (!self.calendar_guests_choice_error) return;
+        self.calendar_guests_error = .{};
+        self.calendar_guests_choice_error = false;
+    }
+    fn calendarGuestsError(self: *App, code: []const u8) !void {
+        self.calendar_guests_choice_error = false;
+        try self.calendar_guests_error.set(if (same(code, "PermissionDenied")) "Contacts-read permission is required for this account. You can still type guest emails." else "Ctrl+R Retry · Contacts could not be loaded. Your event is unchanged.");
+    }
+    fn calendarGuestsMatches(self: *App) ![]const calendar_guest_picker.Candidate {
+        if (self.calendar_guests_contacts.value == .null) return &.{};
+        return calendar_guest_picker.collect(self.frame.allocator(), self.calendar_guests_contacts.value, self.calendar_guests_query.value());
+    }
+    fn calendarGuestsClose(self: *App) void {
+        if (self.job.future != null and self.job.kind == .calendar_guest_contacts) self.preemptReadOnly();
+        self.calendar_form_generation +%= 1;
+        self.calendar_guests_open = false;
+        self.calendar_form_focus = self.calendar_guests_return_focus;
+        self.calendar_form_top = self.calendar_guests_return_top;
+    }
+    fn calendarGuestsReplace(self: *App, result: Value, cached_view: bool) !void {
+        _ = try calendar_guest_picker.collect(self.frame.allocator(), result, "");
+        try self.calendar_guests_contacts.replace(self.allocator, result);
+        self.calendar_guests_cached = cached_view;
+        self.calendar_guests_selected = 0;
+        self.calendar_guests_error = .{};
+    }
+    fn calendarGuestsRefresh(self: *App) !void {
+        self.calendar_guests_choice_error = false;
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        self.calendar_guests_error = .{};
+        try self.start(.calendar_guest_contacts, .{ .cmd = "contacts.list", .account = self.calendar_guests_account.slice() });
+    }
+    fn calendarGuestsOpen(self: *App) !void {
+        if (browser_target) return error.NativeOnly;
+        if (self.calendar.page != .compose) return;
+        if (!self.calendar_form.editable(.attendees)) {
+            try self.calendar_form_error.set("Guests cannot be changed for this event.");
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return;
+        self.calendar_form_generation +%= 1;
+        self.calendar_guests_open = true;
+        self.calendar_guests_choice_error = false;
+        self.calendar_guests_return_focus = self.calendar_form_focus;
+        self.calendar_guests_return_top = self.calendar_form_top;
+        self.calendar_guests_contacts.deinit();
+        self.calendar_guests_error = .{};
+        self.calendar_guests_focus = 0;
+        self.calendar_guests_selected = 0;
+        self.calendar_guests_cached = false;
+        self.calendar_guests_drawn_address = .{};
+        try self.calendar_guests_query.set(self.allocator, "");
+        try self.calendar_guests_account.set(self.calendar_form.account.slice());
+        // Keep a usable cached snapshot stable while choosing. Refresh is an
+        // explicit action, so no background list replacement changes a target.
+        const cached_response = self.cached(self.frame.allocator(), .{ .cmd = "contacts.list", .account = self.calendar_guests_account.slice() }) catch |err| {
+            try self.calendarGuestsError(@errorName(err));
+            return;
+        };
+        if (cached_response) |raw| {
+            const result = calendarGuestsData(self.frame.allocator(), raw) catch |err| {
+                try self.calendarGuestsError(@errorName(err));
+                return;
+            };
+            if (truth(get(result, "cacheReady")) or items(get(result, "contacts")).len > 0) {
+                self.calendarGuestsReplace(result, true) catch |err| try self.calendarGuestsError(@errorName(err));
+                return;
+            }
+        }
+        try self.calendarGuestsRefresh();
+    }
+    fn finishCalendarGuests(self: *App) !void {
+        if (!self.calendar_guests_open or self.calendar.page != .compose or !same(self.calendar_guests_account.slice(), self.calendar_form.account.slice())) return;
+        const request = try std.json.parseFromSliceLeaky(Value, self.frame.allocator(), self.job.request, .{});
+        if (!same(text(get(request, "account")), self.calendar_guests_account.slice())) return;
+        if (self.job.failure) |err| return self.calendarGuestsError(@errorName(err));
+        const result = calendarGuestsData(self.frame.allocator(), self.job.response orelse return self.calendarGuestsError("MissingResponse")) catch |err| {
+            try self.calendarGuestsError(@errorName(err));
+            return;
+        };
+        self.calendarGuestsReplace(result, false) catch |err| try self.calendarGuestsError(@errorName(err));
+    }
+    fn calendarGuestsAdd(self: *App) !void {
+        if ((self.job.future != null and self.job.kind == .calendar_guest_contacts) or !same(self.calendar_guests_account.slice(), self.calendar_form.account.slice()) or !self.calendar_form.editable(.attendees)) return;
+        const matches = try self.calendarGuestsMatches();
+        if (self.calendar_guests_selected >= matches.len) return;
+        const address = matches[self.calendar_guests_selected].address;
+        if (!same(address, self.calendar_guests_drawn_address.slice())) return;
+        const updated = calendar_guest_picker.append(self.frame.allocator(), self.calendar_form_fields[8].value(), address) catch |err| {
+            self.calendar_guests_choice_error = true;
+            try self.calendar_guests_error.set(calendar_composer.errorMessage(err));
+            return;
+        };
+        if (updated) |value| {
+            try self.calendar_form_fields[8].set(self.allocator, value);
+            self.calendar_form_dirty = true;
+            self.calendar_form_error = .{};
+            // Guest notification policy is chosen only during the exact review.
+            self.calendarGuestsClose();
+            self.calendar_form_focus = 8;
+        } else {
+            self.calendar_guests_choice_error = true;
+            try self.calendar_guests_error.set("This address is already a guest. Choose another address or go Back.");
+        }
+    }
+    fn calendarGuestsActivate(self: *App, index: usize) !void {
+        if (index == 272) return self.calendarGuestsClose();
+        if (index == 270) {
+            self.calendar_guests_focus = 0;
+            return;
+        }
+        if (self.job.future != null and self.job.kind == .calendar_guest_contacts) return;
+        if (index == 271) return self.calendarGuestsAdd();
+        if (index >= 300) {
+            const matches = try self.calendarGuestsMatches();
+            if (index - 300 < matches.len) {
+                self.calendarGuestsClearChoiceError();
+                self.calendar_guests_selected = index - 300;
+                self.calendar_guests_focus = 1;
+            }
+        }
+    }
+    fn onCalendarGuestsKey(self: *App, key: Key) !void {
+        if (!self.paste and key.matches(Key.escape, .{})) return self.calendarGuestsClose();
+        if (!self.paste and tabDirection(key) != null) {
+            self.calendar_guests_focus = (self.calendar_guests_focus + if (tabDirection(key).?) @as(usize, 3) else 1) % 4;
+            return;
+        }
+        if (!self.paste and key.matches('r', .{ .ctrl = true })) return self.calendarGuestsRefresh();
+        if (!self.paste and key.matches(Key.enter, .{}) and self.calendar_guests_focus == 3) return self.calendarGuestsClose();
+        if (self.job.future != null and self.job.kind == .calendar_guest_contacts) return;
+        const matches = try self.calendarGuestsMatches();
+        if (!self.paste and (key.matches(Key.down, .{}) or key.matches('n', .{ .ctrl = true }))) {
+            self.calendarGuestsClearChoiceError();
+            self.calendar_guests_selected = @min(self.calendar_guests_selected +| 1, matches.len -| 1);
+            self.calendar_guests_focus = 1;
+        } else if (!self.paste and (key.matches(Key.up, .{}) or key.matches('p', .{ .ctrl = true }))) {
+            self.calendarGuestsClearChoiceError();
+            self.calendar_guests_selected -|= 1;
+            self.calendar_guests_focus = 1;
+        } else if (!self.paste and key.matches(Key.enter, .{})) {
+            if (self.calendar_guests_focus == 3) self.calendarGuestsClose() else try self.calendarGuestsAdd();
+        } else if (!self.paste and self.calendar_guests_focus == 1 and (key.matches('j', .{}) or key.matches('k', .{}))) {
+            self.calendarGuestsClearChoiceError();
+            self.calendar_guests_selected = if (key.matches('j', .{})) @min(self.calendar_guests_selected +| 1, matches.len -| 1) else self.calendar_guests_selected -| 1;
+        } else if (self.calendar_guests_focus < 2) {
+            self.calendarGuestsClearChoiceError();
+            self.calendar_guests_focus = 0;
+            if (self.paste) try self.pasteInto(&self.calendar_guests_query, key, false, 256) else try self.calendar_guests_query.handleKey(self.allocator, key, false, 256);
+            self.calendar_guests_selected = 0;
+        }
+    }
+    fn onCalendarGuestsMouse(self: *App, mouse: vaxis.Mouse, wheel: ?bool) !void {
+        if (wheel) |down| {
+            self.calendarGuestsClearChoiceError();
+            const matches = try self.calendarGuestsMatches();
+            self.calendar_guests_selected = if (down) @min(self.calendar_guests_selected +| 1, matches.len -| 1) else self.calendar_guests_selected -| 1;
+            self.calendar_guests_focus = 1;
+        } else if (self.mouse_hits.at(mouse.col, mouse.row)) |hit| {
+            if (hit.kind == .dialog_action) try self.calendarGuestsActivate(hit.index);
+        }
+    }
+    fn drawCalendarGuests(self: *App, win: vaxis.Window) !void {
+        self.calendar_guests_drawn_address = .{};
+        const width = @min(win.width -| 2, 76);
+        const height = @min(win.height, 25);
+        if (width < 28 or height < 16) {
+            try self.line(win, 1, "Guest contacts · enlarge terminal", .warning);
+            _ = try self.actionButton(win, win.height -| 1, 0, "[Esc Back]", true, true, .dialog_action, 272);
+            return;
+        }
+        const outer = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - height) / 2, .width = width, .height = height });
+        const bordered = outer.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } });
+        const inner = bordered.child(.{ .x_off = 1, .y_off = 1, .width = bordered.width -| 2, .height = bordered.height -| 2 });
+        try self.line(inner, 0, "Add a guest from Contacts", .subject);
+        try self.line(inner, 1, try self.fitLine(inner, self.calendar_guests_account.slice(), inner.width), .sender);
+        try self.editLine(inner, 3, "Search", &self.calendar_guests_query, self.calendar_guests_focus == 0, if (self.calendar_guests_focus == 0) .selected else .text);
+        self.mouseRows(inner, 3, 1, .dialog_action, 270);
+        const matches = try self.calendarGuestsMatches();
+        self.calendar_guests_selected = @min(self.calendar_guests_selected, matches.len -| 1);
+        const loading_contacts = self.job.future != null and self.job.kind == .calendar_guest_contacts;
+        const status = if (self.calendar_guests_error.len > 0) self.calendar_guests_error.slice() else if (loading_contacts) @as([]const u8, "Loading this account's contacts…") else if (matches.len == 0) "No matching contacts. Type guest emails in the event." else if (self.calendar_guests_cached) "Saved contacts · Ctrl+R Refresh" else "Choose an email address · existing guests are kept";
+        try self.line(inner, 4, try self.fitLine(inner, status, inner.width), if (self.calendar_guests_error.len > 0) .warning else .muted);
+        const list_height = inner.height -| 10;
+        const visible = @max(list_height / 2, 1);
+        const first = self.calendar_guests_selected -| (visible - 1);
+        for (matches, 0..) |candidate, index| {
+            if (index < first or index >= first + visible) continue;
+            const row = 6 + (index - first) * 2;
+            const selected = index == self.calendar_guests_selected;
+            const already = calendar_guest_picker.contains(self.calendar_form_fields[8].value(), candidate.address);
+            const area = inner.child(.{ .y_off = @intCast(row), .height = 2 });
+            area.fill(.{ .style = self.style(if (selected) .selected else .text) });
+            const label = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s}", .{ if (selected) @as([]const u8, "> ") else "  ", if (candidate.name.len > 0) candidate.name else candidate.address, if (already) @as([]const u8, " · already added") else "" });
+            try self.line(area, 0, try self.fitLine(area, label, area.width), if (selected) .selected else .text);
+            try self.line(area, 1, try self.fitLine(area, candidate.address, area.width), if (selected) .selected else .sender);
+            self.mouseRows(inner, row, 2, .dialog_action, 300 + index);
+            if (selected) try self.calendar_guests_drawn_address.set(candidate.address);
+        }
+        const can_add = !loading_contacts and self.calendar_guests_selected < matches.len and !calendar_guest_picker.contains(self.calendar_form_fields[8].value(), matches[self.calendar_guests_selected].address);
+        try self.line(inner, inner.height -| 3, "Or type email addresses in Guests.", .muted);
+        const x = try self.actionButton(inner, inner.height -| 2, 0, "[Enter Add guest]", self.calendar_guests_focus == 2, can_add, .dialog_action, 271);
+        _ = try self.actionButton(inner, inner.height -| 2, x, "[Esc Back]", self.calendar_guests_focus == 3, true, .dialog_action, 272);
+        try self.line(inner, inner.height -| 1, try self.fitLine(inner, "Tab Controls · ↑/↓ Choose · no invitations sent", inner.width), .muted);
+    }
+    fn calendarComposeControlList(self: *const App, buffer: *[19]usize) []const usize {
+        const order = [_]usize{ 0, 12, 13, 1, 2, 3, 4, 5, 14, 9, 8, 23, 15, 6, 7, 10, 11, 16, 17 };
+        var count: usize = 0;
+        for (order) |control| {
+            if (control == 23 and !self.calendar_form.editable(.attendees)) continue;
+            if (control == 12 and self.calendar_form.editing) continue;
+            if (control == 15 and (!self.calendar_form.editing or self.calendar_form.existingGuestCount() == 0)) continue;
+            if (control == 5 and self.calendar_form.all_day) continue;
+            if (control < calendar_composer.field_count) {
+                const field: calendar_composer.Field = @fromBackingInt(@intCast(control));
+                if (!self.calendar_form.visible(field)) continue;
+                if ((control == 10 or control == 11) and !self.calendar_form_offsets) continue;
+            }
+            buffer[count] = control;
+            count += 1;
+        }
+        return buffer[0..count];
+    }
+    fn calendarComposeCancel(self: *App) !void {
+        if (self.calendarComposeWriting()) return;
+        self.preemptReadOnly();
+        // Leaving a local form must not wait for an unrelated write (such as
+        // saving preferences). Only this form's provider writes block Back.
+        self.calendar_form_generation +%= 1;
+        self.calendar_guests_open = false;
+        if (self.calendar_form_recovery != .none) {
+            self.calendar_form_recovery = .none;
+            self.calendar_form_review_ready = false;
+            return;
+        }
+        if (self.calendar.page == .event_review and !same(self.calendar_form_outcome.slice(), "applied") and !same(self.calendar_form_outcome.slice(), "archived") and !self.calendar_form_unknown) {
+            self.calendar.page = .compose;
+            self.calendar_form_review_ready = false;
+            self.calendar_form_outcome = .{};
+            return;
+        }
+        if (self.calendar_form_dirty and self.calendar.page == .compose and !self.calendar_form_discard) {
+            self.calendar_form_discard = true;
+            self.calendar_form_discard_focus = 19;
+            return;
+        }
+        self.calendar_form_discard = false;
+        self.calendar_form_dirty = false;
+        self.calendar.page = .main;
+        self.calendar.focus = null;
+        if (same(self.calendar_form_outcome.slice(), "applied") and self.job.future == null) try self.loadCalendarAgenda(false);
+    }
+    fn calendarComposeControl(self: *App, control: usize) !void {
+        if (self.calendarComposeWriting()) return;
+        if (control == 21) return self.calendarComposeRecovery(false);
+        if (control == 22) return self.calendarComposeRecovery(true);
+        if (self.calendar_form_discard) {
+            if (control == 18) {
+                self.calendar_form_dirty = false;
+                try self.calendarComposeCancel();
+            } else if (control == 19) self.calendar_form_discard = false;
+            return;
+        }
+        if (control == 16) return self.calendarComposeCancel();
+        if (self.job.future != null) return;
+        self.calendar_form_focus = control;
+        if (control == 23) return self.calendarGuestsOpen();
+        if (control == 17) return if (self.calendar_form_recovery != .none) self.calendarComposeRecoverConfirm() else if (self.calendar.page == .event_review) self.calendarComposeApply() else self.calendarComposeReview();
+        if (self.calendar.page != .compose) return;
+        if (control == 10 or control == 11) return self.calendarComposeChooseOffset(control);
+        if (control == 12 and !self.calendar_form.editing) {
+            self.calendar_form_pick_target = true;
+            for (self.calendarEntries(), 0..) |entry, index| {
+                const target = get(get(entry, "calendar"), "target");
+                if (same(text(get(target, "account")), self.calendar_form.account.slice()) and same(text(get(target, "calendar_id")), self.calendar_form.calendar_id.slice())) self.calendar_form_target_index = index;
+            }
+            return;
+        } else if (control == 13) {
+            self.calendar_form.all_day = !self.calendar_form.all_day;
+        } else if (control == 14) {
+            if (self.calendar_form.existing_join) {
+                try self.calendar_form_error.set("This event's existing video link is preserved.");
+                return;
+            }
+            self.calendar_form.conference = switch (self.calendar_form.conference) {
+                .none => if (self.calendar_form.supports_meet) .google_meet else .link,
+                .google_meet => .link,
+                .link => .none,
+            };
+        } else if (control == 15) {
+            self.calendar_form.send_updates = if (self.calendar_form.send_updates == .none) .all else .none;
+            self.calendar_form_notify_chosen = true;
+        }
+        if (control >= 12) self.calendar_form_dirty = true;
+    }
+    fn calendarComposeCandidates(self: *App, endpoint: usize) !timezone.LocalCandidates {
+        const a = self.frame.allocator();
+        const date_index: usize = if (endpoint == 10) 1 else 3;
+        const clock_index: usize = if (endpoint == 10) 2 else 4;
+        var civil = try timezone.parseDate(self.calendar_form_fields[date_index].value());
+        const clock = self.calendar_form_fields[clock_index].value();
+        if (clock.len < 5 or clock[2] != ':') return error.InvalidCalendarTime;
+        civil.hour = try std.fmt.parseInt(u8, clock[0..2], 10);
+        civil.minute = try std.fmt.parseInt(u8, clock[3..5], 10);
+        civil.second = if (clock.len >= 8 and clock[5] == ':') try std.fmt.parseInt(u8, clock[6..8], 10) else 0;
+        var zone = try timezone.loadNamed(self.io, a, self.environ, self.calendar_form_fields[5].value());
+        defer zone.deinit(a);
+        return zone.localCandidates(civil);
+    }
+    fn calendarComposeOffsetText(a: Allocator, seconds: i32) ![]const u8 {
+        if (@mod(seconds, 60) != 0) return error.CalendarHistoricalOffsetUnsupported;
+        const absolute: u32 = @intCast(if (seconds < 0) -seconds else seconds);
+        return std.fmt.allocPrint(a, "{c}{d:0>2}:{d:0>2}", .{ if (seconds < 0) @as(u8, '-') else '+', absolute / 3600, absolute % 3600 / 60 });
+    }
+    fn calendarComposeChooseOffset(self: *App, endpoint: usize) !void {
+        defer self.calendarComposeSyncOffsets() catch {};
+        const a = self.frame.allocator();
+        const candidates = self.calendarComposeCandidates(endpoint) catch |err| {
+            try self.calendarComposeError(@errorName(err));
+            return;
+        };
+        if (candidates.count != 2) {
+            try self.calendar_form_error.set(if (candidates.count == 0) "This wall time is skipped by daylight saving. Choose another time." else "This time has only one occurrence; no DST choice is needed.");
+            return;
+        }
+        const first = try calendarComposeOffsetText(a, candidates.values[0].offset_seconds);
+        const next = if (same(self.calendar_form_fields[endpoint].value(), first)) @as(usize, 1) else 0;
+        // Synchronize changed wall-time fields before attaching the explicit
+        // occurrence choice to them; inherited offsets are never reused.
+        for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }) |index| try self.calendar_form.set(@fromBackingInt(@intCast(index)), self.calendar_form_fields[index].value());
+        const chosen = try calendarComposeOffsetText(a, candidates.values[next].offset_seconds);
+        try self.calendar_form_fields[endpoint].set(self.allocator, chosen);
+        try self.calendar_form.set(@fromBackingInt(@intCast(endpoint)), chosen);
+        self.calendar_form_dirty = true;
+        self.calendar_form_error = .{};
+    }
+    fn calendarComposeSyncOffsets(self: *App) !void {
+        for ([_]usize{ 10, 11 }) |index| try self.calendar_form_fields[index].set(self.allocator, self.calendar_form.get(@fromBackingInt(@intCast(index))));
+    }
+    fn calendarComposeOffsetLabel(self: *App, endpoint: usize) ![]const u8 {
+        const a = self.frame.allocator();
+        const candidates = self.calendarComposeCandidates(endpoint) catch return "DST occurrence · check date, time and zone";
+        if (candidates.count != 2) return if (endpoint == 10) "Start time · one occurrence" else "End time · one occurrence";
+        const selected_offset = self.calendar_form_fields[endpoint].value();
+        const first = try calendarComposeOffsetText(a, candidates.values[0].offset_seconds);
+        const second = try calendarComposeOffsetText(a, candidates.values[1].offset_seconds);
+        return std.fmt.allocPrint(a, "{s} occurrence: {s} · first {s} / second {s} · Enter chooses", .{ if (endpoint == 10) @as([]const u8, "Start") else "End", if (same(selected_offset, first)) @as([]const u8, "first") else if (same(selected_offset, second)) "second" else "choose", first, second });
+    }
+    fn calendarComposeChooseTarget(self: *App, index: usize) !void {
+        if (index >= self.calendarEntries().len) return;
+        const entry = self.calendarEntries()[index];
+        if (!truth(get(entry, "canWrite"))) {
+            try self.calendar_form_error.set("This destination needs Calendar write access; choose a writable calendar.");
+            return;
+        }
+        const value = get(entry, "calendar");
+        const target = get(value, "target");
+        try self.calendar_form.setTarget(.{ .account = text(get(target, "account")), .calendar_id = text(get(target, "calendar_id")) }, true, truth(get(value, "supports_meet")));
+        self.calendar_form_pick_target = false;
+        self.calendar_form_dirty = true;
+        self.calendar_form_error = .{};
+    }
+    fn calendarComposeTargetName(self: *App) []const u8 {
+        for (self.calendarEntries()) |entry| {
+            const value = get(entry, "calendar");
+            const target = get(value, "target");
+            if (same(text(get(target, "account")), self.calendar_form.account.slice()) and same(text(get(target, "calendar_id")), self.calendar_form.calendar_id.slice())) return text(get(value, "summary"));
+        }
+        return "Selected calendar";
+    }
+    fn drawCalendarComposeTargets(self: *App, win: vaxis.Window) !void {
+        self.mouse_hits.clear();
+        const a = self.frame.allocator();
+        win.fill(.{ .style = self.style(.text) });
+        try self.line(win, 0, "Choose destination calendar", .subject);
+        try self.line(win, 1, "Events are saved in the selected account and calendar.", .muted);
+        if (self.calendar_form_error.len > 0) try self.line(win, 2, try self.fitLine(win, self.calendar_form_error.slice(), win.width), .warning);
+        const capacity = @max((win.height -| 5) / 2, 1);
+        const first = self.calendar_form_target_index -| (capacity - 1);
+        for (self.calendarEntries(), 0..) |entry, index| {
+            if (index < first or index >= first + capacity) continue;
+            const value = get(entry, "calendar");
+            const target = get(value, "target");
+            const row = 3 + (index - first) * 2;
+            try self.line(win, row, try self.fitLine(win, try std.fmt.allocPrint(a, "{s}{s} · {s}", .{ if (index == self.calendar_form_target_index) @as([]const u8, "> ") else "  ", text(get(value, "summary")), if (truth(get(entry, "canWrite"))) @as([]const u8, "read/write") else "needs write access" }), win.width), if (index == self.calendar_form_target_index) .selected else if (truth(get(entry, "canWrite"))) .text else .muted);
+            try self.line(win, row + 1, try self.fitLine(win, text(get(target, "account")), win.width), .sender);
+            self.mouseRows(win, row, 2, .dialog_action, 200 + index);
+        }
+        _ = try self.actionButton(win, win.height -| 1, 0, "[Esc Back]", false, true, .dialog_action, 119);
+        _ = try self.actionButton(win, win.height -| 1, 13, "[Enter Choose]", true, true, .dialog_action, 120);
+    }
+    fn calendarComposeConfirmLabel(self: *App) ![]const u8 {
+        if (self.calendar_form_recovery == .retry) return "[y Retry the saved request]";
+        if (self.calendar_form_recovery == .archive) return "[y Archive uncertainty]";
+        const review = self.calendar_form_review.value;
+        const guests = items(get(get(review, "event"), "attendees"));
+        const previous = get(review, "previous");
+        const previous_count: usize = @intCast(@max(0, integer(get(previous, "attendee_count"))));
+        const count = if (guests.len > 0) guests.len else @max(previous_count, items(get(previous, "attendees")).len);
+        if (same(text(get(review, "sendUpdates")), "all") and count > 0) return std.fmt.allocPrint(self.frame.allocator(), "[y {s} & email {d} guest{s}]", .{ if (self.calendar_form.editing) @as([]const u8, "Save") else "Create", count, if (count == 1) @as([]const u8, "") else "s" });
+        return if (self.calendar_form.editing) "[y Save · no guest emails]" else "[y Create event]";
+    }
+    fn onCalendarComposeKey(self: *App, key: Key) !void {
+        if (self.calendarComposeWriting()) return;
+        if (self.calendar_guests_open) return self.onCalendarGuestsKey(key);
+        if (!self.paste and key.matches(Key.escape, .{}) and !self.calendar_form_pick_target and !self.calendar_form_discard) return self.calendarComposeCancel();
+        if (self.calendar_form_pick_target) {
+            if (self.paste) return;
+            if (key.matches(Key.escape, .{})) self.calendar_form_pick_target = false else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches(Key.tab, .{})) self.calendar_form_target_index = @min(self.calendar_form_target_index +| 1, self.calendarEntries().len -| 1) else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches(Key.tab, .{ .shift = true })) self.calendar_form_target_index -|= 1 else if (key.matches(Key.enter, .{})) try self.calendarComposeChooseTarget(self.calendar_form_target_index);
+            return;
+        }
+        if (self.calendar_form_discard) {
+            if (key.matches(Key.escape, .{}) or key.matches('k', .{ .ctrl = true })) {
+                self.calendar_form_discard = false;
+            } else if (tabDirection(key) != null) {
+                self.calendar_form_discard_focus = if (self.calendar_form_discard_focus == 18) 19 else 18;
+            } else if (key.matches(Key.enter, .{})) {
+                try self.calendarComposeControl(self.calendar_form_discard_focus);
+            } else if (key.matches('d', .{ .ctrl = true })) {
+                self.calendar_form_dirty = false;
+                try self.calendarComposeCancel();
+            }
+            return;
+        }
+        if (self.job.future != null) return;
+        if (self.calendar.page == .event_review) {
+            if (self.paste) return;
+            if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.calendarComposeCancel();
+            if (self.calendar_form_unknown and self.calendar_form_recovery == .none) {
+                if (key.matches('r', .{ .ctrl = true })) return self.calendarComposeRecovery(false);
+                if (key.matches('d', .{ .ctrl = true })) return self.calendarComposeRecovery(true);
+            }
+            if (key.matches('y', .{}) and self.calendar_form_recovery != .none) return self.calendarComposeRecoverConfirm();
+            if (tabDirection(key)) |back| {
+                const controls: []const usize = if (self.calendar_form_unknown and self.calendar_form_recovery == .none) (if (self.calendar_form_retry_possible) &.{ 16, 17, 21, 22 } else &.{ 16, 17, 22 }) else if (self.calendar_form_outcome.len > 0) &.{16} else &.{ 16, 17 };
+                var current: usize = 0;
+                for (controls, 0..) |control, index| if (control == self.calendar_form_focus) {
+                    current = index;
+                };
+                self.calendar_form_focus = controls[(current + if (back) controls.len - 1 else 1) % controls.len];
+            } else if (key.matches(Key.enter, .{})) try self.calendarComposeControl(self.calendar_form_focus) else if (key.matches('y', .{}) and !self.calendar_form_unknown) {
+                if (!self.calendar_form_review_ready) try self.calendar_form_error.set("Read the complete review before confirming · j/k scroll.");
+                try self.calendarComposeApply();
+            } else if (key.matches('r', .{}) and self.calendar_form_unknown and self.calendar_form_recovery == .none) try self.calendarComposeApply() else if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.calendar.scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.calendar.scroll -|= 1 else if (key.matches('d', .{ .ctrl = true })) self.calendar.scroll +|= @max(self.vx.window().height / 2, 1) else if (key.matches('u', .{ .ctrl = true })) self.calendar.scroll -|= @max(self.vx.window().height / 2, 1);
+            return;
+        }
+        const index = self.calendar_form_focus;
+        if (self.paste) {
+            if (index < 10 and self.calendar_form.editable(@fromBackingInt(@intCast(index)))) {
+                const before = std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+                try self.pasteInto(&self.calendar_form_fields[index], key, index == 7, (@as(calendar_composer.Field, @fromBackingInt(@intCast(index)))).limit());
+                self.calendar_form_dirty = self.calendar_form_dirty or before != std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+            }
+            return;
+        }
+        if (key.matches(Key.escape, .{})) return self.calendarComposeCancel();
+        if (key.matches('s', .{ .ctrl = true })) return self.calendarComposeReview();
+        if ((index == 8 or index == 23) and (key.matches(' ', .{ .ctrl = true }) or key.matches('@', .{ .ctrl = true }))) return self.calendarGuestsOpen();
+        if (tabDirection(key)) |back| {
+            var buffer: [19]usize = undefined;
+            const controls = self.calendarComposeControlList(&buffer);
+            var position: usize = 0;
+            for (controls, 0..) |control, at| if (control == index) {
+                position = at;
+            };
+            self.calendar_form_focus = controls[(position + if (back) controls.len - 1 else 1) % controls.len];
+            return;
+        }
+        if (index >= calendar_composer.field_count) {
+            if (key.matches(Key.enter, .{}) or key.matches(' ', .{})) try self.calendarComposeControl(index);
+        } else if (index == 10 or index == 11) {
+            if (key.matches(Key.enter, .{}) or key.matches(' ', .{})) try self.calendarComposeChooseOffset(index);
+        } else {
+            const field: calendar_composer.Field = @fromBackingInt(@intCast(index));
+            if (key.matches(Key.enter, .{}) and (field != .description or !self.calendar_form.editable(field))) {
+                try self.onCalendarComposeKey(.{ .codepoint = Key.tab });
+                return;
+            }
+            if (!self.calendar_form.editable(field)) return;
+            const before = std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+            try self.calendar_form_fields[index].handleKey(self.allocator, key, field == .description, field.limit());
+            self.calendar_form_dirty = self.calendar_form_dirty or before != std.hash.Wyhash.hash(0, self.calendar_form_fields[index].value());
+        }
+    }
+    fn calendarComposeEditLine(self: *App, win: vaxis.Window, row: usize, field_kind: calendar_composer.Field, label_width: u16, focused: bool) !void {
+        if (row >= win.height) return;
+        const editable = self.calendar_form.editable(field_kind);
+        const index = @backingInt(field_kind);
+        const field = &self.calendar_form_fields[index];
+        const area = win.child(.{ .y_off = @intCast(row), .height = 1 });
+        const label = area.child(.{ .width = @min(label_width, area.width) });
+        try self.line(label, 0, try std.fmt.allocPrint(self.frame.allocator(), "{s}:", .{self.calendar_form.label(field_kind)}), .muted);
+        const value = area.child(.{ .x_off = label.width, .width = area.width - label.width });
+        if (value.width == 0) return;
+        const tone: Tone = if (focused) .selected else if (!editable) .muted else if (field_kind == .summary) .subject else .text;
+        if (focused) value.fill(.{ .style = self.style(.selected) });
+        if (focused and editable) {
+            const before = try safe(self.frame.allocator(), field.value()[0..field.cursor], false);
+            const after = try safe(self.frame.allocator(), field.value()[field.cursor..], false);
+            const horizontal_start = horizontalStart(value, before, value.width -| 1);
+            const content = try std.fmt.allocPrint(self.frame.allocator(), "{s}▏{s}", .{ before[horizontal_start..], after });
+            _ = value.printSegment(.{ .text = content, .style = self.style(tone) }, .{ .wrap = .none });
+        } else try self.line(value, 0, try self.fitLine(value, if (field.value().len == 0 and (field_kind == .attendees or field_kind == .location or field_kind == .description)) @as([]const u8, "(optional)") else field.value(), value.width), tone);
+    }
+    fn drawCalendarComposer(self: *App, win: vaxis.Window) !void {
+        const a = self.frame.allocator();
+        self.mouse_hits.clear();
+        if (self.calendar_guests_open) return self.drawCalendarGuests(win);
+        const width: u16 = @min(win.width -| 2, 90);
+        var layout_controls: [19]usize = undefined;
+        const desired_height: u16 = if (self.calendar.page == .event_review) 27 else @intCast(self.calendarComposeControlList(&layout_controls).len + 9);
+        const height: u16 = @min(win.height, desired_height);
+        if (width < 30 or height < 12) {
+            try self.line(win, 2, "Event editor · enlarge terminal", .warning);
+            _ = try self.actionButton(win, win.height -| 2, 0, "[Esc Back]", true, true, .dialog_action, 116);
+            return;
+        }
+        const outer = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - height) / 2, .width = width, .height = height });
+        const bordered = outer.child(.{ .border = .{ .where = .all, .style = self.style(.muted) } });
+        const pad: u16 = if (width >= 64) 2 else 1;
+        const inner = bordered.child(.{ .x_off = pad, .y_off = 1, .width = bordered.width -| (pad * 2), .height = bordered.height -| 2 });
+        try self.line(inner, 0, if (self.calendar.page == .event_review) (if (same(self.calendar_form_outcome.slice(), "applied")) @as([]const u8, "Event saved") else if (same(self.calendar_form_outcome.slice(), "archived")) "Uncertainty archived" else if (self.calendar_form_unknown) "Check Calendar outcome" else if (self.calendar_form.editing) "Review event changes" else "Review new event") else if (self.calendar_form.editing) "Edit event" else "New event", .subject);
+        try self.line(inner, 1, try self.fitLine(inner, try std.fmt.allocPrint(a, "{s} · {s}", .{ self.calendarComposeTargetName(), self.calendar_form.account.slice() }), inner.width), .sender);
+        const recovery_menu = self.calendar_form_unknown and self.calendar_form_recovery == .none;
+        const footer_lines: u16 = if (recovery_menu) 6 else 4;
+        const viewport = inner.child(.{ .y_off = 3, .height = inner.height -| (3 + footer_lines) });
+        if (self.calendar.page == .event_review) {
+            try self.drawCalendarComposeReview(viewport);
+        } else {
+            var buffer: [19]usize = undefined;
+            const controls = self.calendarComposeControlList(&buffer);
+            var label_width: usize = 0;
+            for (controls) |control| if (control < 10) {
+                label_width = @max(label_width, self.calendar_form.label(@fromBackingInt(@intCast(control))).len + 2);
+            };
+            var at: usize = 0;
+            for (controls, 0..) |control, position| if (control == self.calendar_form_focus) {
+                at = position;
+            };
+            if (self.calendar_form_focus < 16 or self.calendar_form_focus == 23) {
+                if (at < self.calendar_form_top) self.calendar_form_top = at;
+                if (at >= self.calendar_form_top + viewport.height) self.calendar_form_top = at -| (viewport.height -| 1);
+            }
+            var row: usize = 0;
+            for (controls, 0..) |control, position| {
+                if (position < self.calendar_form_top or control == 16 or control == 17) continue;
+                if (row >= viewport.height) break;
+                const focused = !self.calendar_form_discard and self.calendar_form_focus == control;
+                if (control < calendar_composer.field_count) {
+                    const field: calendar_composer.Field = @fromBackingInt(@intCast(control));
+                    if (control == 10 or control == 11) {
+                        _ = try self.actionButton(viewport, row, 0, try self.calendarComposeOffsetLabel(control), focused, true, .dialog_action, 100 + control);
+                    } else if (field == .description and self.calendar_form.notes_read_only) try self.line(viewport, row, "Notes: formatted notes kept unchanged", .muted) else try self.calendarComposeEditLine(viewport, row, field, @intCast(label_width), focused);
+                    self.mouseRows(viewport, row, 1, .dialog_action, 100 + control);
+                } else {
+                    const label = switch (control) {
+                        12 => try std.fmt.allocPrint(a, "[Calendar: {s} · Enter to choose]", .{self.calendarComposeTargetName()}),
+                        13 => if (self.calendar_form.all_day) @as([]const u8, "[x] All day · end date is inclusive") else "[ ] All day",
+                        14 => switch (self.calendar_form.conference) {
+                            .none => if (self.calendar_form.existing_join) @as([]const u8, "Video: Keep existing meeting link") else "Video: None",
+                            .google_meet => "Video: Generate Google Meet link",
+                            .link => "Video: Paste meeting link",
+                        },
+                        23 => "[Ctrl+Space Contacts]",
+                        15 => if (!self.calendar_form_notify_chosen) @as([]const u8, "Notify guests: choose Email / No email · Enter") else if (self.calendar_form.send_updates == .all) "[x] Email guests about these changes" else "[ ] No guest update emails requested",
+                        else => "",
+                    };
+                    try self.line(viewport, row, try self.fitLine(viewport, label, viewport.width), if (focused) .selected else .text);
+                    self.mouseRows(viewport, row, 1, .dialog_action, 100 + control);
+                }
+                row += 1;
+            }
+        }
+        const error_row = inner.height -| footer_lines;
+        if (self.calendar_form_error.len > 0) try self.line(inner, error_row, try self.fitLine(inner, self.calendar_form_error.slice(), inner.width), .warning) else if (self.calendar.page != .event_review) try self.line(inner, error_row, try self.fitLine(inner, if (inner.width < 60) @as([]const u8, "Nothing is sent until you confirm.") else if (self.calendar_form.editing) "This occurrence · existing guests and meeting details are preserved." else "Nothing is saved or sent until you review and confirm.", inner.width), .muted);
+        const busy = self.job.future != null;
+        if (recovery_menu) {
+            _ = try self.actionButton(inner, inner.height -| 5, 0, "[Back to Calendar]", self.calendar_form_focus == 16, !self.calendarComposeWriting(), .dialog_action, 116);
+            _ = try self.actionButton(inner, inner.height -| 4, 0, "[r Check status · reads only]", self.calendar_form_focus == 17, !busy, .dialog_action, 117);
+            _ = try self.actionButton(inner, inner.height -| 3, 0, "[Ctrl+R Review an identical retry]", self.calendar_form_focus == 21, !busy and self.calendar_form_retry_possible, .dialog_action, 121);
+            _ = try self.actionButton(inner, inner.height -| 2, 0, "[Ctrl+D Review archiving uncertainty]", self.calendar_form_focus == 22, !busy, .dialog_action, 122);
+        } else {
+            const back_label = if (self.calendar_form_recovery != .none) @as([]const u8, "[Esc Back]") else if (self.calendar.page == .event_review and (self.calendar_form_unknown or same(self.calendar_form_outcome.slice(), "applied") or same(self.calendar_form_outcome.slice(), "archived"))) @as([]const u8, "[Esc Back to Calendar]") else if (self.calendar.page == .event_review) "[Esc Back to editing]" else "[Esc Cancel]";
+            const primary_label = if (busy) @as([]const u8, "[Working…]") else if (self.calendar.page != .event_review) "[Ctrl+S Review]" else try self.calendarComposeConfirmLabel();
+            const primary_visible = self.calendar_form_outcome.len == 0;
+            const stacked = primary_visible and back_label.len + primary_label.len + 2 > inner.width;
+            var x = try self.actionButton(inner, inner.height -| @as(u16, if (stacked) 3 else 2), 0, back_label, !self.calendar_form_discard and self.calendar_form_focus == 16, !self.calendar_form_discard and !self.calendarComposeWriting(), .dialog_action, 116);
+            if (stacked) x = 0;
+            if (primary_visible) _ = try self.actionButton(inner, inner.height -| 2, x, primary_label, !self.calendar_form_discard and self.calendar_form_focus == 17, !self.calendar_form_discard and !busy and (self.calendar.page != .event_review or self.calendar_form_review_ready), .dialog_action, 117);
+        }
+        const key_hint: []const u8 = if (self.calendar_form_discard) "Tab Choose · Enter Activate" else if (self.calendar.page == .event_review) (if (inner.width < 60) @as([]const u8, "Tab Controls · Enter Activate · j/k Scroll") else "Tab Controls · Enter Activate · j/k Scroll · Esc Back") else if (inner.width < 60) "Tab Next · Shift+Tab Back" else if (self.calendar_form_focus == 7 and !self.calendar_form.notes_read_only) "Tab Next · Shift+Tab Back · Enter New line · Ctrl+S Review" else if (self.calendar_form_focus < 10) "Tab Next · Shift+Tab Back · Enter Next field · Ctrl+S Review" else "Tab Next · Shift+Tab Back · Enter Change · Ctrl+S Review";
+        try self.line(inner, inner.height -| 1, try self.fitLine(inner, key_hint, inner.width), .muted);
+        if (self.calendar_form_discard) {
+            self.mouse_hits.clear();
+            const discard_area = inner.child(.{ .y_off = inner.height / 2 -| 2, .height = 5 });
+            discard_area.fill(.{ .style = self.style(.text) });
+            try self.line(discard_area, 0, "Discard your unsaved event?", .subject);
+            _ = try self.actionButton(discard_area, 2, 0, "[Ctrl+D Discard]", self.calendar_form_discard_focus == 18, true, .dialog_action, 118);
+            _ = try self.actionButton(discard_area, 3, 0, "[Esc Keep editing]", self.calendar_form_discard_focus == 19, true, .dialog_action, 119);
+        }
+        if (self.calendar_form_pick_target) try self.drawCalendarComposeTargets(inner);
+    }
+    fn drawCalendarComposeReview(self: *App, win: vaxis.Window) !void {
+        const a = self.frame.allocator();
+        const review = self.calendar_form_review.value;
+        const event = get(review, "event");
+        const resolved = get(review, "resolved");
+        var zone = timezone.loadNamed(self.io, a, self.environ, text(get(event, "timeZone"))) catch timezone.Zone{ .unavailable = true };
+        defer zone.deinit(a);
+        var blocks: std.ArrayList(CardBlock) = .empty;
+        if (self.calendar_form_recovery == .retry) {
+            try blocks.append(a, .{ .text = "Retry this saved Calendar request?", .tone = .subject });
+            try blocks.append(a, .{ .text = if (same(text(get(review, "sendUpdates")), "all")) @as([]const u8, "The previous result is uncertain. This sends the identical reviewed request with the same event ID and version guard. It can save the event and email guests if the first attempt did not arrive.\n") else "The previous result is uncertain. This sends the identical reviewed request with the same event ID and version guard. It can save the event if the first attempt did not arrive. No guest update emails are requested.\n", .tone = .offline });
+        } else if (self.calendar_form_recovery == .archive) {
+            try blocks.append(a, .{ .text = "Archive this uncertain outcome?", .tone = .subject });
+            try blocks.append(a, .{ .text = "This sends nothing and permits a new operation. It does not undo the earlier request: the event or guest invitations may still appear. Check Calendar before creating a replacement.\n", .tone = .offline });
+        }
+        try blocks.append(a, .{ .text = text(get(event, "summary")), .tone = .subject });
+        try blocks.append(a, .{ .text = try self.calendarCardWhen(resolved, &zone), .tone = .accent });
+        try blocks.append(a, .{ .text = if (truth(get(event, "allDay"))) @as([]const u8, "All-day dates · kept as civil dates, without a time-zone shift") else try std.fmt.allocPrint(a, "Time zone · {s}", .{text(get(event, "timeZone"))}), .tone = .muted });
+        try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar · {s}\nAccount · {s}", .{ text(get(review, "calendarName")), text(get(review, "account")) }), .tone = .sender });
+        const guests = items(get(event, "attendees"));
+        if (guests.len > 0) {
+            try blocks.append(a, .{ .text = "\nGUESTS", .tone = .muted });
+            for (guests) |guest| try blocks.append(a, .{ .text = text(guest) });
+        } else if (self.calendar_form.editing) try blocks.append(a, .{ .text = "\nExisting guests are preserved.", .tone = .muted });
+        try blocks.append(a, .{ .text = if (same(text(get(review, "sendUpdates")), "all")) @as([]const u8, "Guests will receive invitation/update emails.") else "No guest update emails requested; their Calendar may still update.", .tone = if (same(text(get(review, "sendUpdates")), "all")) .offline else .muted });
+        if (same(text(get(review, "conference")), "google_meet")) try blocks.append(a, .{ .text = "\nGoogle Meet · a new video link will be generated.", .tone = .sender }) else if (same(text(get(review, "conference")), "link")) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "\nMeeting link · {s}", .{text(get(event, "joinUrl"))}), .tone = .sender }) else if (self.calendar_form.existing_join) try blocks.append(a, .{ .text = "\nExisting meeting link is preserved.", .tone = .sender });
+        const previous = get(review, "previous");
+        if (previous != .null) {
+            try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "\nPreviously · {s}", .{try self.calendarCardWhen(previous, &zone)}), .tone = .muted });
+            if (text(get(previous, "recurring_event_id")).len > 0) try blocks.append(a, .{ .text = "This occurrence only · other dates in the series stay unchanged.", .tone = .warning });
+        }
+        if (text(get(event, "location")).len > 0) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "\nWhere · {s}", .{text(get(event, "location"))}) });
+        if (text(get(event, "description")).len > 0) try blocks.append(a, .{ .text = if (self.calendar_form.notes_read_only) @as([]const u8, "\nNotes · formatted notes kept unchanged") else try std.fmt.allocPrint(a, "\nNotes · {s}", .{text(get(event, "description"))}) });
+        if (self.calendar_form_outcome.len > 0) try blocks.append(a, .{ .text = if (same(self.calendar_form_outcome.slice(), "applied")) @as([]const u8, "\nSaved in Calendar.") else if (same(self.calendar_form_outcome.slice(), "archived")) "\nUncertainty archived. The earlier event or invitations may still appear." else "\nCalendar rejected this change.", .tone = if (same(self.calendar_form_outcome.slice(), "applied")) .current else .offline });
+        const total = try self.measureCardBlocks(win, blocks.items);
+        self.calendar.scroll = @min(self.calendar.scroll, total -| win.height);
+        try self.drawCardBlocks(win, blocks.items, self.calendar.scroll);
+        if (win.height > 0 and self.calendar.scroll + win.height >= total and (!self.calendar_form_unknown or self.calendar_form_recovery != .none)) self.calendar_form_review_ready = true;
     }
     fn calendarJob(kind: JobKind) bool {
         return switch (kind) {
@@ -12386,6 +13489,200 @@ const App = struct {
         };
         return count;
     }
+    fn calendarSourceVisible(self: *const App, entry: Value) bool {
+        const calendar = get(entry, "calendar");
+        if (!truth(get(entry, "canRead"))) return false;
+        const target = calendar_sources.jsonTarget(calendar) catch return false;
+        if (self.calendar.single_source) return same(target.account, self.calendar.account.slice()) and same(target.calendar_id, self.calendar.calendar_id.slice());
+        return self.ui_preferences.calendar.selected(calendar);
+    }
+    fn calendarSelection(self: *const App) *const calendar_sources.Selection {
+        if (self.calendar.pending_selection) |*pending| return pending;
+        return &self.ui_preferences.calendar;
+    }
+    fn calendarRebuildCatalogue(self: *App) !void {
+        if (self.calendar.pending_selection) |*pending| pending.pruneConfiguredAccounts(self.accounts) else self.ui_preferences.calendar.pruneConfiguredAccounts(self.accounts);
+        var values: [3]Value = undefined;
+        var count: usize = 0;
+        for (&self.calendar.source_lists) |*document| if (document.value != .null) {
+            if (self.calendar.pending_selection) |*pending| pending.pruneDiscovered(document.value) else self.ui_preferences.calendar.pruneDiscovered(document.value);
+            values[count] = document.value;
+            count += 1;
+        };
+        const result = try calendar_sources.catalogue(self.frame.allocator(), self.calendarSelection(), values[0..count], self.calendar.account.slice());
+        const next_entries = items(get(result, "calendars"));
+        const previous_entries = self.calendarEntries();
+        var changed = next_entries.len != previous_entries.len;
+        if (!changed) for (next_entries, previous_entries) |next, previous| {
+            if (!(try calendar_sources.jsonTarget(get(next, "calendar"))).eql(try calendar_sources.jsonTarget(get(previous, "calendar")))) changed = true;
+        };
+        if (changed) {
+            for (&self.calendar.source_snapshots) |*document| document.deinit();
+            self.calendar.request_window = null;
+        }
+        try self.calendar.calendars.replace(self.allocator, result);
+        self.calendar.picker = @min(self.calendar.picker, self.calendarEntries().len -| 1);
+    }
+    fn calendarNextAccount(self: *App) !bool {
+        if (!self.calendar.listing_all) return false;
+        while (self.calendar.list_cursor < self.accounts.len) {
+            const index = self.calendar.list_cursor;
+            self.calendar.list_cursor += 1;
+            const account_value = self.accounts[index];
+            if (get(account_value, "enabled") != .null and !truth(get(account_value, "enabled"))) continue;
+            try self.start(.calendar_list, .{ .cmd = "calendar.list", .account = text(get(self.accounts[index], "address")) });
+            return true;
+        }
+        return false;
+    }
+    fn calendarAccountSlot(self: *const App, address: []const u8) ?usize {
+        for (self.accounts, 0..) |account_value, index| if (std.ascii.eqlIgnoreCase(address, text(get(account_value, "address")))) return index;
+        return null;
+    }
+    fn calendarBeginDiscovery(self: *App) !void {
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        self.calendar.resume_lists = false;
+        self.calendar.resume_sources = false;
+        self.calendar.list_cursor = 0;
+        self.calendar.listing_all = self.calendar.source_message.len == 0 and self.calendarSelection().scope == .all_accounts;
+        self.calendar.list_for_picker = self.calendar.page == .calendars and self.calendar.source_message.len == 0;
+        self.calendar.list_errors = @splat(.{});
+        if (!try self.calendarNextAccount()) try self.start(.calendar_list, .{ .cmd = "calendar.list", .account = self.calendar.account.slice() });
+        try self.calendar.notice.set("Loading account calendars…");
+    }
+    fn calendarMergeSnapshots(self: *App) !void {
+        const window = self.calendar.request_window orelse return;
+        var selected_identity: ?calendar_slot.Identity = null;
+        if (self.calendarEventAt(self.calendar.selected)) |event| {
+            if (calendar_slot.Identity.init(event)) |identity| selected_identity = try identity.copy(self.frame.allocator()) else |_| {}
+        }
+        var inputs: [calendar_sources.max_sources]calendar_sources.Input = undefined;
+        var count: usize = 0;
+        for (self.calendarEntries(), 0..) |entry, index| {
+            if (!self.calendarSourceVisible(entry)) continue;
+            const calendar = get(entry, "calendar");
+            const document = &self.calendar.source_snapshots[index];
+            inputs[count] = .{ .calendar = calendar, .snapshot = if (document.value == .null) null else get(document.value, "snapshot"), .refresh_error = self.calendar.source_errors[index].slice(), .catalogue_stale = truth(get(entry, "source_stale")) or truth(get(document.value, "cached")), .color = self.ui_preferences.calendar.color(try calendar_sources.jsonTarget(calendar)) };
+            count += 1;
+        }
+        const merged = try calendar_sources.merge(self.frame.allocator(), inputs[0..count], window, &self.calendar.zone);
+        try self.calendar.agenda.replace(self.allocator, merged);
+        self.calendar.ready = true;
+        var retained_selection = false;
+        var selection_index: usize = 0;
+        for (self.calendarEvents()) |event| {
+            if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
+            defer selection_index += 1;
+            if (selected_identity == null) continue;
+            const identity = calendar_slot.Identity.init(event) catch continue;
+            if (identity.eql(selected_identity.?)) {
+                self.calendar.selected = selection_index;
+                retained_selection = true;
+                break;
+            }
+        }
+        if (!retained_selection) self.calendar.week_reveal_selected = false;
+        if (!retained_selection and !self.calendar.selection_initialized and self.calendarEvents().len > 0) {
+            const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
+            const today = self.calendar.zone.localDay(now) catch 0;
+            self.calendar.selected = self.calendarEventCount() -| 1;
+            selection_index = 0;
+            for (self.calendarEvents()) |event| {
+                if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
+                defer selection_index += 1;
+                const end = try @import("json.zig").decode(@import("calendar_time.zig").Point, self.frame.allocator(), get(event, "end"));
+                if (end.value > (if (end.kind == .date) today else now)) {
+                    self.calendar.selected = selection_index;
+                    break;
+                }
+            }
+            self.calendar.selection_initialized = true;
+        }
+        self.calendar.selected = @min(self.calendar.selected, self.calendarEventCount() -| 1);
+        self.calendar.stale = truth(get(get(merged, "snapshot"), "stale"));
+        self.calendar.complete = truth(get(get(merged, "snapshot"), "complete"));
+        if (get(self.calendar.calendars.value, "complete") == .bool and !truth(get(self.calendar.calendars.value, "complete"))) self.calendar.complete = false;
+        for (self.calendar.list_errors, 0..) |failure, index| if (failure.len > 0) {
+            if (self.ui_preferences.calendar.scope == .account and index < self.accounts.len and !same(text(get(self.accounts[index], "address")), self.calendar.account.slice())) continue;
+            self.calendar.complete = false;
+        };
+        const failed = integer(get(merged, "failedSources"));
+        const stale = integer(get(merged, "staleSources"));
+        try self.calendar.notice.set(if (self.calendar.source_loading) try std.fmt.allocPrint(self.frame.allocator(), "Loading selected calendars… · {d} events", .{self.calendarEvents().len}) else if (count == 0) "No calendars selected · g Calendars · Space to select" else if (failed > 0 or stale > 0) try std.fmt.allocPrint(self.frame.allocator(), "Saved calendars · {d} calendar{s} · {d} unavailable · {d} stale · availability unknown", .{ count, if (count == 1) @as([]const u8, "") else "s", failed, stale }) else if (!self.calendar.complete) "Partial calendar window · g shows selected sources · availability unknown" else try std.fmt.allocPrint(self.frame.allocator(), "Up to date · {d} calendar{s} · / searches loaded events", .{ count, if (count == 1) @as([]const u8, "") else "s" }));
+    }
+    fn calendarNextSource(self: *App) !bool {
+        const entries = self.calendarEntries();
+        while (self.calendar.source_cursor < entries.len) {
+            const index = self.calendar.source_cursor;
+            self.calendar.source_cursor += 1;
+            if (!self.calendarSourceVisible(entries[index])) continue;
+            const target = try calendar_sources.jsonTarget(get(entries[index], "calendar"));
+            const date = try calendar_ui.dayText(self.frame.allocator(), self.calendar.day);
+            try self.start(.calendar_agenda, .{ .cmd = "calendar.agenda", .account = target.account, .calendarId = target.calendar_id, .date = date, .view = if (self.calendar.view == .day) @as([]const u8, "day") else "week", .timeZone = self.calendar.zone_name.slice(), .cacheOnly = self.calendar.sources_cache_only });
+            return true;
+        }
+        self.calendar.source_loading = false;
+        return false;
+    }
+    fn calendarSourceFailed(self: *App, code: []const u8) !bool {
+        if (self.job.kind == .calendar_list and self.calendar.listing_all) {
+            const request = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), self.job.request, .{});
+            if (self.calendarAccountSlot(text(get(request, "account")))) |index| {
+                try self.calendar.list_errors[index].set(code[0..@min(code.len, 128)]);
+                // Rejected authorization is not an offline-cache fallback.
+                if (std.mem.indexOf(u8, code, "Permission") != null or std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null) self.calendar.source_lists[index].deinit();
+            }
+            if (try self.calendarNextAccount()) return true;
+            try self.calendarRebuildCatalogue();
+            if (self.calendarEntries().len > 0) {
+                if (self.calendar.list_for_picker) {
+                    try self.calendar.notice.set("Some accounts unavailable · Space selects readable calendars · Enter Apply");
+                    return true;
+                }
+                try self.calendarDefaultSource();
+                return true;
+            }
+        }
+        if (self.job.kind == .calendar_agenda and self.calendar.source_loading) {
+            const index = self.calendar.source_cursor -| 1;
+            try self.calendar.source_errors[index].set(code[0..@min(code.len, 128)]);
+            if (std.mem.indexOf(u8, code, "Permission") != null or std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null) self.calendar.source_snapshots[index].deinit();
+            const more = try self.calendarNextSource();
+            try self.calendarMergeSnapshots();
+            _ = more;
+            return true;
+        }
+        return false;
+    }
+    fn calendarDefaultSource(self: *App) !void {
+        var chosen: ?usize = null;
+        for (self.calendarEntries(), 0..) |entry, index| if (truth(get(entry, "canRead"))) {
+            if (chosen == null) chosen = index;
+            if (truth(get(get(entry, "calendar"), "primary")) and same(text(get(get(get(entry, "calendar"), "target"), "account")), self.calendar.account.slice())) {
+                chosen = index;
+                break;
+            }
+        };
+        const index = chosen orelse {
+            self.calendar.page = .calendars;
+            try self.calendar.notice.set("No readable calendars · choose a source to see its permissions");
+            return;
+        };
+        const calendar = get(self.calendarEntries()[index], "calendar");
+        try self.calendar.account.set(text(get(get(calendar, "target"), "account")));
+        try self.calendar.calendar_id.set(text(get(get(calendar, "target"), "calendar_id")));
+        try self.calendar.calendar_name.set(text(get(calendar, "summary")));
+        self.calendar.picker = index;
+        // A combined view follows the user's display zone, not the last source
+        // that happened to finish. Source zones remain on each event card.
+        if (self.calendar.zone_name.len == 0) try self.calendar.zone_name.set(text(get(calendar, "time_zone")));
+        if (self.calendar.zone_name.len == 0) try self.calendar.zone_name.set("UTC");
+        self.calendar.zone.deinit(self.allocator);
+        self.calendar.zone = timezone.loadNamed(self.io, self.allocator, self.environ, self.calendar.zone_name.slice()) catch .{ .unavailable = true };
+        self.calendar.single_source = false;
+        try self.loadCalendarAgenda(false);
+    }
     fn openCalendar(self: *App, from_mail: bool) !void {
         if (browser_target) {
             self.say(true, "Calendar is available in the native TUI · use omagma tui", .{});
@@ -12395,6 +13692,7 @@ const App = struct {
         if (self.job.future != null) return error.OperationPending;
         const source = if (!from_mail) "" else if (self.mode == .invitation) self.invitation_inspected_id.value() else self.readerReplyId();
         if (from_mail and source.len == 0) return error.MessageRequired;
+        self.calendar_slots.deinit();
         self.calendar.deinit(self.allocator);
         try self.calendar_query.set(self.allocator, "");
         try self.calendar.account.set(self.account());
@@ -12403,15 +13701,17 @@ const App = struct {
         self.calendar.page = if (from_mail) .calendars else .main;
         self.mode = .browse;
         self.calendar.day = self.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch @divFloor(Io.Timestamp.now(self.io, .real).toMilliseconds(), 86400000);
-        try self.start(.calendar_list, .{ .cmd = "calendar.list", .account = self.calendar.account.slice() });
-        try self.calendar.notice.set("Loading calendars…");
+        try self.calendarBeginDiscovery();
     }
     fn closeCalendar(self: *App) void {
-        if (self.job.future != null and (self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile)) {
+        if (self.calendarComposeWriting() or (self.job.future != null and (self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile))) {
             self.say(true, "Calendar operation pending · wait for its outcome", .{});
             return;
         }
         self.preemptReadOnly();
+        self.calendar.resume_lists = false;
+        self.calendar.resume_sources = false;
+        self.calendar.pending_card = false;
         self.calendar.open = false;
         self.mode = .browse;
         self.say(false, "Mail · C Calendar · I Review RSVP · A Calendar action", .{});
@@ -12422,19 +13722,28 @@ const App = struct {
         if (index >= self.calendarEntries().len or self.job.future != null) return;
         const entry = self.calendarEntries()[index];
         const value = get(entry, "calendar");
-        if (!same(text(get(get(value, "target"), "account")), self.calendar.account.slice())) return error.CalendarAccountMismatch;
+        const target = try calendar_sources.jsonTarget(value);
+        if (self.calendarAccountSlot(target.account) == null) return error.CalendarAccountMismatch;
+        if (self.calendar.source_message.len > 0 and !same(target.account, self.calendar.account.slice())) return error.CalendarAccountMismatch;
         const access = text(get(value, "access"));
         if (self.calendar.source_message.len > 0 and !same(access, "owner") and !same(access, "writer") and !same(access, "writer_without_private")) {
             try self.calendar.notice.set("This calendar is read-only · choose a calendar you can change");
             return;
         }
         self.calendar.picker = index;
+        if (self.calendar.source_message.len == 0) {
+            self.calendar.pending_selection = null;
+            self.calendar.selection_dirty = false;
+            try self.calendar.account.set(target.account);
+            self.calendar.single_source = true;
+        }
         try self.calendar.calendar_id.set(text(get(get(value, "target"), "calendar_id")));
         try self.calendar.calendar_name.set(text(get(value, "summary")));
         try self.calendar.zone_name.set(text(get(value, "time_zone")));
         self.calendar.zone.deinit(self.allocator);
         self.calendar.zone = timezone.loadNamed(self.io, self.allocator, self.environ, self.calendar.zone_name.slice()) catch .{ .unavailable = true };
         self.calendar.selected = 0;
+        self.calendar.week_reveal_selected = false;
         self.calendar.top = 0;
         self.calendar.scroll = 0;
         self.calendar.focus = null;
@@ -12463,12 +13772,51 @@ const App = struct {
         if (self.calendar.calendar_id.len == 0) return;
         self.preemptReadOnly();
         if (self.job.future != null) return error.OperationPending;
+        self.calendar.resume_sources = false;
         const date = try calendar_ui.dayText(self.frame.allocator(), self.calendar.day);
-        self.calendar.selected = 0;
+        const end_date = try calendar_ui.dayText(self.frame.allocator(), self.calendar.day + if (self.calendar.view == .day) @as(i64, 1) else 7);
+        const window: @import("calendar_types.zig").Window = .{ .start_ms = try @import("calendar_service.zig").firstInstantOfDay(&self.calendar.zone, try timezone.parseDate(date)), .end_ms = try @import("calendar_service.zig").firstInstantOfDay(&self.calendar.zone, try timezone.parseDate(end_date)), .time_zone = self.calendar.zone_name.slice() };
+        // A new window never displays an older period as if it were current.
+        const previous = self.calendar.request_window;
+        if (previous == null or previous.?.start_ms != window.start_ms or previous.?.end_ms != window.end_ms or !same(previous.?.time_zone, window.time_zone)) {
+            for (&self.calendar.source_snapshots) |*document| document.deinit();
+            self.calendar.agenda.deinit();
+            self.calendar.ready = false;
+            self.calendar.selection_initialized = false;
+            self.calendar.selected = 0;
+            self.calendar.week_reveal_selected = false;
+        }
+        self.calendar.request_window = window;
+        self.calendar.source_errors = @splat(.{});
+        self.calendar.source_cursor = 0;
+        self.calendar.sources_cache_only = cache_only;
+        self.calendar.source_loading = true;
         self.calendar.top = 0;
         self.calendar.page = .main;
-        try self.start(.calendar_agenda, .{ .cmd = "calendar.agenda", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .date = date, .view = if (self.calendar.view == .day) @as([]const u8, "day") else "week", .timeZone = self.calendar.zone_name.slice(), .cacheOnly = cache_only });
-        try self.calendar.notice.set(if (cache_only) "Loading saved calendar window…" else "Refreshing calendar…");
+        _ = try self.calendarNextSource();
+        try self.calendarMergeSnapshots();
+    }
+    fn dispatchCalendarPending(self: *App) !bool {
+        if (self.job.future != null or !self.calendar.open) return false;
+        if (self.calendar.pending_card and self.calendar.page == .detail) {
+            const event = self.calendar.card.value;
+            const target = try calendar_sources.jsonTarget(event);
+            self.calendar.pending_card = false;
+            try self.start(.calendar_event, .{ .cmd = "calendar.event", .account = target.account, .calendarId = target.calendar_id, .eventId = text(get(event, "id")) });
+            return true;
+        }
+        if (self.calendar.resume_lists and (self.calendar.page == .main or self.calendar.page == .detail or self.calendar.page == .calendars)) {
+            self.calendar.resume_lists = false;
+            if (!try self.calendarNextAccount()) try self.start(.calendar_list, .{ .cmd = "calendar.list", .account = self.calendar.account.slice() });
+            return true;
+        }
+        if (self.calendar.page != .main and self.calendar.page != .detail) return false;
+        if (self.calendar.resume_sources) {
+            self.calendar.resume_sources = false;
+            if (try self.calendarNextSource()) return true;
+            try self.calendarMergeSnapshots();
+        }
+        return false;
     }
     fn calendarPreclaimFailure(code: []const u8) bool {
         // Stale is raised only after earlier operation checks and before a new
@@ -12505,7 +13853,7 @@ const App = struct {
         self.sayFailure(self.calendar.notice.slice(), code);
     }
     fn finishCalendar(self: *App) !void {
-        if (!self.calendar.open or !same(self.account(), self.calendar.account.slice())) return;
+        if (!self.calendar.open) return;
         // A read may finish while the user is searching Help. Apply its result
         // to the saved underlying page, including auto-selection after list,
         // then keep Help visible until the user chooses Back.
@@ -12522,68 +13870,94 @@ const App = struct {
             self.calendar.page = .help;
         };
         if (self.job.failure) |err| {
+            if (try self.calendarSourceFailed(@errorName(err))) return;
             try self.calendarFailure(@errorName(err));
             return;
         }
         const response = self.job.response orelse return error.InvalidProviderResponse;
         const envelope = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{});
         if (!truth(get(envelope, "ok"))) {
-            try self.calendarFailure(text(get(get(envelope, "error"), "code")));
+            const code = text(get(get(envelope, "error"), "code"));
+            if (try self.calendarSourceFailed(code)) return;
+            try self.calendarFailure(code);
             return;
         }
         const result = get(envelope, "data");
         self.calendar.error_code = .{};
         switch (self.job.kind) {
             .calendar_list => {
-                try self.calendar.calendars.replace(self.allocator, result);
+                const source_account = text(get(result, "account"));
+                if (source_account.len > 0) {
+                    const slot = self.calendarAccountSlot(source_account) orelse return error.CalendarAccountMismatch;
+                    try self.calendar.source_lists[slot].replace(self.allocator, result);
+                    if (try self.calendarNextAccount()) return;
+                    try self.calendarRebuildCatalogue();
+                } else if (items(get(result, "calendars")).len == 0) {
+                    // A zero-row legacy response has no source identity to use.
+                    try self.calendar.calendars.replace(self.allocator, result);
+                } else return error.InvalidCalendarResponse;
                 self.calendar.stale = truth(get(result, "stale")) or truth(get(result, "cached"));
                 if (self.calendarEntries().len == 0) {
                     self.calendar.page = .calendars;
                     try self.calendar.notice.set("No readable calendars returned · availability is unknown");
+                } else if (self.calendar.list_for_picker) {
+                    if (self.calendar.page == .calendars) try self.calendar.notice.set("Space Show/hide · p Priority · Enter Apply · o Only this · a Scope · c Color · Esc Cancel");
                 } else if (self.calendar.source_message.len == 0) {
-                    var chosen: usize = 0;
-                    for (self.calendarEntries(), 0..) |entry, index| if (truth(get(get(entry, "calendar"), "primary")) and truth(get(entry, "canRead"))) {
-                        chosen = index;
-                        break;
-                    };
-                    try self.selectCalendar(chosen);
+                    try self.calendarDefaultSource();
                 } else try self.calendar.notice.set("Choose the exact destination calendar · Enter Review invitation");
             },
             .calendar_agenda => {
                 const snap = get(result, "snapshot");
-                if (!same(text(get(get(snap, "target"), "account")), self.calendar.account.slice()) or !same(text(get(get(snap, "target"), "calendar_id")), self.calendar.calendar_id.slice())) return error.CalendarAccountMismatch;
-                try self.calendar.agenda.replace(self.allocator, result);
-                self.calendar.ready = true;
-                self.calendar.stale = truth(get(snap, "stale")) or truth(get(result, "cached"));
-                self.calendar.complete = truth(get(snap, "complete"));
-                const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
-                const today = self.calendar.zone.localDay(now) catch 0;
-                self.calendar.selected = self.calendarEventCount() -| 1;
-                var upcoming: usize = 0;
-                for (self.calendarEvents()) |event| {
-                    if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
-                    defer upcoming += 1;
-                    const ends = get(event, "end");
-                    if (ends == .null) continue;
-                    const end = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.job_arena.allocator(), ends, .{});
-                    if (end.value > (if (end.kind == .date) today else now)) {
-                        self.calendar.selected = upcoming;
-                        break;
-                    }
+                const index = self.calendar.source_cursor -| 1;
+                if (index >= self.calendarEntries().len) return error.InvalidCalendarResponse;
+                const requested_window = self.calendar.request_window orelse return error.CalendarWindowMismatch;
+                calendar_sources.validateSnapshot(self.frame.allocator(), .{ .calendar = get(self.calendarEntries()[index], "calendar"), .snapshot = snap }, requested_window) catch |err| {
+                    if (!try self.calendarSourceFailed(@errorName(err))) try self.calendarFailure(@errorName(err));
+                    return;
+                };
+                // Header snapshots stay compact while the provider cache keeps
+                // complete details. Opening a card performs an exact source read.
+                var compact = try @import("json.zig").copyObject(self.frame.allocator(), result);
+                var compact_snapshot = try @import("json.zig").copyObject(self.frame.allocator(), snap);
+                var compact_events: Value = .{ .array = .init(self.frame.allocator()) };
+                for (items(get(snap, "events"))) |event| {
+                    var summary = try @import("json.zig").copyObject(self.frame.allocator(), event);
+                    try summary.object.put(self.frame.allocator(), "description", .{ .string = "" });
+                    try compact_events.array.append(summary);
                 }
-                const code = text(get(result, "refreshError"));
+                try compact_snapshot.object.put(self.frame.allocator(), "events", compact_events);
+                try compact.object.put(self.frame.allocator(), "snapshot", compact_snapshot);
+                var retained_bytes: usize = 0;
+                for (&self.calendar.source_snapshots, 0..) |*document, other| if (other != index) {
+                    retained_bytes += document.bytes;
+                };
+                const compact_bytes = try std.json.Stringify.valueAlloc(self.frame.allocator(), compact, .{});
+                if (compact_bytes.len + retained_bytes > 8 * 1024 * 1024) {
+                    try self.calendar.source_errors[index].set("CalendarDisplayLimit");
+                } else {
+                    try self.calendar.source_snapshots[index].replace(self.allocator, compact);
+                    const code = text(get(result, "refreshError"));
+                    try self.calendar.source_errors[index].set(code[0..@min(code.len, 128)]);
+                }
                 const cache_error = text(get(result, "cacheError"));
-                try self.calendar.error_code.set(if (code.len > 0) code else cache_error);
-                try self.calendar.notice.set(if (self.calendar.stale) "Saved calendar · stale · availability is unknown" else if (!self.calendar.complete) "Partial calendar window · availability is unknown" else if (cache_error.len > 0) "Up to date · cache could not be saved" else "Up to date · / searches only the loaded window");
+                if (cache_error.len > 0) try self.calendar.error_code.set(cache_error[0..@min(cache_error.len, 128)]);
+                _ = try self.calendarNextSource();
+                try self.calendarMergeSnapshots();
             },
             .calendar_event => {
+                const previous = try calendar_sources.jsonTarget(self.calendar.card.value);
+                if (!(try calendar_sources.jsonTarget(get(result, "event"))).eql(previous) or !same(text(get(get(result, "event"), "id")), text(get(self.calendar.card.value, "id")))) return error.CalendarAccountMismatch;
                 try self.calendar.card.replace(self.allocator, get(result, "event"));
                 try self.calendarLoadCardZone();
-                self.calendar.page = .detail;
-                self.calendar.scroll = 0;
-                self.calendar.focus = null;
                 self.calendar.card_stale = truth(get(result, "cached"));
-                try self.calendar.notice.set(if (self.calendar.card_stale) "Saved event · refresh unavailable" else "Event is already in this calendar");
+                // The full read enriches the pinned card even if the user
+                // has meanwhile opened actions, a picker or an input field.
+                // Keep that newer interaction and its contextual guidance.
+                if (self.calendar.page == .detail and !self.calendar.searching and !self.calendar.entering_date) {
+                    self.calendar.scroll = 0;
+                    self.calendar.focus = null;
+                    try self.calendar.notice.set(if (self.calendar.card_stale) "Saved event · refresh unavailable" else "Event is already in this calendar");
+                }
             },
             .calendar_plan => {
                 try self.calendar.review.replace(self.allocator, result);
@@ -12726,8 +14100,134 @@ const App = struct {
         try self.start(if (reconcile) .calendar_reconcile else .calendar_apply, .{ .cmd = if (reconcile) @as([]const u8, "calendar.reconcile") else "calendar.apply", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .operationId = self.calendar.operation.slice(), .reviewHash = self.calendar.hash.slice() });
         try self.calendar.notice.set(if (reconcile) "Reconciling saved operation…" else "Applying the explicitly confirmed Calendar action…");
     }
+    fn calendarSlotsOpen(self: *App, bucket: ?calendar_slot.Bucket) !void {
+        if (self.calendar.page != .main or self.calendar.view != .week or !self.calendar.ready) return;
+        const viewport = self.calendar_week_viewport orelse return;
+        const selected = self.calendarEventAt(self.calendar.selected) orelse return;
+        const origin = try calendar_slot.Identity.init(selected);
+        const query: calendar_slot.Query = if (bucket) |value| .{ .bucket = value } else .{ .selected = .{ .identity = origin, .viewport = viewport } };
+        var snapshot = try calendar_slot.Snapshot.init(self.allocator, self.calendarEvents(), query, self.calendar_query.value(), &self.calendar.zone, origin);
+        errdefer snapshot.deinit();
+        if (snapshot.events.len == 0) return snapshot.deinit();
+        // Finish every allocation/validation before transferring the arena.
+        // A later display failure must never leave an App-owned dangling copy.
+        var initial: usize = 0;
+        for (snapshot.events, 0..) |event, index| if ((try calendar_slot.Identity.init(event)).eql(origin)) {
+            initial = index;
+            break;
+        };
+        const title = if (bucket) |value| try std.fmt.allocPrint(self.frame.allocator(), "{s} · {s}", .{ try calendar_ui.dayText(self.frame.allocator(), value.day), if (value.hour) |hour| try std.fmt.allocPrint(self.frame.allocator(), "{d:0>2}:00–{d:0>2}:00", .{ hour, hour + 1 }) else @as([]const u8, "All day") }) else try std.fmt.allocPrint(self.frame.allocator(), "Shared visible rows · {s}", .{try self.calendarCardWhen(selected, &self.calendar.zone)});
+        var title_end = @min(title.len, 128);
+        while (title_end > 0 and !std.unicode.utf8ValidateSlice(title[0..title_end])) title_end -= 1;
+        var bounded_title: @import("../bounded.zig").Text(128) = .{};
+        try bounded_title.set(title[0..title_end]);
+        try self.calendar.notice.set("Choose an event to reveal in Week · no event is opened or changed");
+        self.preemptReadOnly();
+        self.calendar_slots_drawn = null;
+        self.calendar_slots.deinit();
+        self.calendar_slots = snapshot;
+        self.calendar_slots_selected = initial;
+        self.calendar_slots_top = 0;
+        self.calendar_slots_return_focus = self.calendar.focus;
+        self.calendar_slots_focus = null;
+        self.calendar_slots_title = bounded_title;
+        self.calendar_slots_bucket = bucket;
+        self.calendar.page = .overlaps;
+    }
+
+    fn calendarSlotsClose(self: *App) void {
+        self.calendar.page = .main;
+        self.calendar.focus = self.calendar_slots_return_focus;
+        self.calendar_slots_focus = null;
+        self.calendar_slots_drawn = null;
+        self.calendar_slots.deinit();
+        self.calendar.notice.set("Week · Space Show all events here · +N lists the other events in that hour") catch {};
+        _ = self.dispatchCalendarPending() catch |err| {
+            self.sayFailure("Calendar refresh paused", @errorName(err));
+            return;
+        };
+    }
+    fn calendarSlotsChoose(self: *App) !void {
+        if (self.calendar_slots_selected >= self.calendar_slots.events.len) return;
+        const identity = try calendar_slot.Identity.init(self.calendar_slots.events[self.calendar_slots_selected]);
+        if (self.calendar_slots_drawn == null or !self.calendar_slots_drawn.?.eql(identity)) return;
+        const index = try calendar_slot.findVisible(self.calendarEvents(), identity, self.calendar_query.value()) orelse {
+            try self.calendar.notice.set("That event is no longer in this window · Esc Back, then refresh");
+            return;
+        };
+        self.calendar.selected = index;
+        self.calendar.week_reveal_selected = true;
+        self.calendar_week_reveal_bucket = self.calendar_slots_bucket;
+        self.calendarSlotsClose();
+        self.calendar.focus = null;
+    }
+    fn onCalendarSlotsKey(self: *App, key: Key) !void {
+        if (self.paste) return;
+        if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.calendarSlotsClose();
+        if (tabDirection(key)) |back| {
+            const current: usize = if (self.calendar_slots_focus) |value| value + 1 else 0;
+            const next = (current + @as(usize, if (back) 2 else 1)) % 3;
+            self.calendar_slots_focus = if (next == 0) null else next - 1;
+        } else if (key.matches(Key.enter, .{})) {
+            if (self.calendar_slots_focus == 0) return self.calendarSlotsClose();
+            try self.calendarSlotsChoose();
+        } else if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
+            self.calendar_slots_selected = @min(self.calendar_slots_selected +| 1, self.calendar_slots.events.len -| 1);
+            self.calendar_slots_focus = null;
+        } else if (key.matches('k', .{}) or key.matches(Key.up, .{})) {
+            self.calendar_slots_selected -|= 1;
+            self.calendar_slots_focus = null;
+        }
+    }
+    fn drawCalendarSlots(self: *App, win: vaxis.Window) !void {
+        self.calendar_slots_drawn = null;
+        const a = self.frame.allocator();
+        if (win.height < 12 or win.width < 30) {
+            try self.line(win, 0, "Events here · enlarge terminal to choose", .muted);
+            _ = try self.actionButton(win, win.height -| 1, 0, "[Esc Back]", true, true, .dialog_action, 0);
+            return;
+        }
+        try self.line(win, 0, "Events here", .subject);
+        try self.line(win, 1, try self.fitLine(win, self.calendar_slots_title.slice(), win.width), .accent);
+        try self.line(win, 3, try self.fitLine(win, try std.fmt.allocPrint(a, "Time zone: {s}", .{self.calendar.zone_name.slice()}), win.width), .muted);
+        const capacity = @max((@as(usize, win.height) -| 7) / 5, 1);
+        if (self.calendar_slots_selected < self.calendar_slots_top) self.calendar_slots_top = self.calendar_slots_selected;
+        if (self.calendar_slots_selected >= self.calendar_slots_top + capacity) self.calendar_slots_top = self.calendar_slots_selected - capacity + 1;
+        const count_line = if (self.calendar_slots_top > 0) try std.fmt.allocPrint(a, "{d} events · ↑ {d} earlier · k", .{ self.calendar_slots.events.len, self.calendar_slots_top }) else try std.fmt.allocPrint(a, "{d} event{s} · exact times below", .{ self.calendar_slots.events.len, if (self.calendar_slots.events.len == 1) @as([]const u8, "") else "s" });
+        try self.line(win, 2, count_line, .muted);
+        for (self.calendar_slots.events, 0..) |event, index| {
+            if (index < self.calendar_slots_top or index >= self.calendar_slots_top + capacity) continue;
+            const row = 4 + (index - self.calendar_slots_top) * 5;
+            if (row + 3 >= win.height -| 2) break;
+            const target = try calendar_sources.jsonTarget(event);
+            const selected = index == self.calendar_slots_selected;
+            const label = try std.fmt.allocPrint(a, "{s}{s} {s}", .{ try self.calendarSourceLabel(event), if (self.ui_preferences.calendar.isPreferred(target)) @as([]const u8, "*") else "", try calendarEventLabel(a, "", calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), calendar_ui.canJoin(event)) });
+            try self.calendarColoredLine(win, row, try self.fitLine(win, label, win.width), event, if (selected) .selected else .text);
+            const first_point = (try calendar_slot.Identity.init(event)).start;
+            const end = try @import("json.zig").decode(@import("calendar_time.zig").Point, a, get(event, "end"));
+            if (first_point.kind == .date) {
+                try self.line(win, row + 1, try self.fitLine(win, try self.calendarCardWhen(event, &self.calendar.zone), win.width), if (selected) .selected else .muted);
+            } else {
+                try self.line(win, row + 1, try self.fitLine(win, try std.fmt.allocPrint(a, "Starts: {s}", .{try self.calendar.zone.format(a, first_point.value)}), win.width), if (selected) .selected else .muted);
+                try self.line(win, row + 2, try self.fitLine(win, try std.fmt.allocPrint(a, "Ends:   {s}", .{try self.calendar.zone.format(a, end.value)}), win.width), if (selected) .selected else .muted);
+            }
+            try self.line(win, row + 3, try self.fitLine(win, try std.fmt.allocPrint(a, "{s} · {s}", .{ self.calendarSourceName(target), target.account }), win.width), if (selected) .selected else .muted);
+            self.mouseRows(win, row, 4, .contact, index);
+            if (selected) self.calendar_slots_drawn = try calendar_slot.Identity.init(event);
+        }
+        const remaining = self.calendar_slots.events.len -| (self.calendar_slots_top + capacity);
+        if (remaining > 0) try self.line(win, win.height -| 3, try std.fmt.allocPrint(a, "↓ {d} more · j to continue", .{remaining}), .muted);
+        var x = try self.actionButton(win, win.height -| 1, 0, "[Esc Back]", self.calendar_slots_focus == 0, true, .dialog_action, 0);
+        x = try self.actionButton(win, win.height -| 1, x, "[Enter Select]", self.calendar_slots_focus == 1, self.calendar_slots_drawn != null, .dialog_action, 24);
+    }
     fn calendarBack(self: *App) void {
         if (self.calendarHelpVisible()) return self.closeHelp();
+        if (self.calendar.page == .overlaps) return self.calendarSlotsClose();
+        if (self.calendar.page == .actions and self.calendar.actions_return == .detail) {
+            self.calendar.page = .detail;
+            self.calendar.focus = null;
+            return;
+        }
         if (self.calendar.page == .main or (self.calendar.page == .calendars and self.calendar.source_message.len > 0)) {
             self.closeCalendar();
         } else {
@@ -12755,26 +14255,221 @@ const App = struct {
         self.calendar.notice.set("Could not open Join link · check the configured Chrome profile") catch {};
         self.calendar.error_code.set(code[0..@min(code.len, 128)]) catch {};
     }
+    fn calendarBrowserFailed(self: *App, code: []const u8) void {
+        self.calendar.notice.set("Could not open Google Calendar · check account access and Chrome profile") catch {};
+        self.calendar.error_code.set(code[0..@min(code.len, 128)]) catch {};
+    }
     fn calendarJoin(self: *App) !void {
-        _ = self.cancelMeetingRead();
+        self.preemptReadOnly();
         if (self.job.future != null) return;
         const event = if (self.calendar.page == .detail) self.calendar.card.value else self.calendarEventAt(self.calendar.selected) orelse return;
         if (!calendar_ui.canJoin(event)) {
             try self.calendar.notice.set("Selected event has no Join link · Enter opens details");
             return;
         }
-        if (!std.ascii.eqlIgnoreCase(text(get(get(event, "target"), "account")), self.calendar.account.slice())) {
+        const event_account = text(get(get(event, "target"), "account"));
+        if (self.calendarAccountSlot(event_account) == null) {
             try self.calendar.notice.set("Event account mismatch · Join link not opened");
             return;
         }
-        try self.start(.open, .{ .cmd = "browser.open", .account = self.calendar.account.slice(), .url = text(get(event, "join_url")) });
+        try self.start(.open, .{ .cmd = "browser.open", .account = event_account, .url = text(get(event, "join_url")) });
         self.job.calendar_join_open = true;
         self.calendar.error_code = .{};
         try self.calendar.notice.set("Opening Join link in this account's Chrome profile…");
     }
+    fn calendarBrowser(self: *App, selected_event: bool) !void {
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        if (selected_event) {
+            const event = if (self.calendar.page == .detail) self.calendar.card.value else self.calendarEventAt(self.calendar.selected) orelse return;
+            const target = try calendar_sources.jsonTarget(event);
+            if (self.calendarAccountSlot(target.account) == null) return error.CalendarAccountMismatch;
+            try self.start(.open, .{ .cmd = "calendar.event-open", .account = target.account, .calendarId = target.calendar_id, .eventId = text(get(event, "id")) });
+        } else {
+            const event: ?Value = if (self.calendar.page == .detail) self.calendar.card.value else self.calendarEventAt(self.calendar.selected);
+            const address = if (event) |value| text(get(get(value, "target"), "account")) else self.calendar.account.slice();
+            if (self.calendarAccountSlot(address) == null) return error.CalendarAccountMismatch;
+            try self.start(.open, .{ .cmd = "calendar.open", .account = address });
+        }
+        self.job.calendar_browser_open = true;
+        try self.calendar.notice.set("Opening Google Calendar in the event account's Chrome profile…");
+    }
+    fn calendarPickerDiscovering(self: *const App) bool {
+        return self.calendar.resume_lists or (self.job.future != null and self.job.kind == .calendar_list);
+    }
+    fn calendarPickerCanApply(self: *const App) bool {
+        return !self.calendarPickerDiscovering() and (self.job.future == null or readOnlyJob(self.job.kind));
+    }
+    fn calendarShowSelected(self: *App) !void {
+        if (self.calendarPickerDiscovering()) {
+            try self.calendar.notice.set("Loading account calendars · Apply is available when discovery finishes");
+            _ = try self.dispatchCalendarPending();
+            return;
+        }
+        if (self.job.future != null and !readOnlyJob(self.job.kind)) {
+            try self.calendar.notice.set("Current operation pending · selection stays staged · Esc cancels");
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        if (self.calendar.pending_selection) |*pending| {
+            var any = false;
+            for (self.calendarEntries()) |entry| if (truth(get(entry, "canRead")) and pending.selected(get(entry, "calendar"))) {
+                any = true;
+            };
+            if (!any) {
+                try self.calendar.notice.set("Choose at least one readable calendar · Space selects");
+                return;
+            }
+            const saved = self.ui_preferences.calendar;
+            self.ui_preferences.calendar = pending.*;
+            self.saveUiPreferences();
+            if (self.preferences_warning) {
+                self.ui_preferences.calendar = saved;
+                try self.calendar.notice.set("Calendar selection could not be saved · Esc cancels");
+                return;
+            }
+            self.calendar.pending_selection = null;
+            self.meetings.list_after = @splat(0);
+            try self.calendarRebuildCatalogue();
+        }
+        self.calendar.single_source = false;
+        self.calendar.selection_dirty = false;
+        self.calendar.resume_lists = false;
+        self.calendar.list_for_picker = false;
+        self.calendar.listing_all = false;
+        self.calendar.focus = null;
+        try self.loadCalendarAgenda(false);
+    }
+    fn calendarToggleSource(self: *App) !void {
+        if (self.calendar.source_message.len > 0 or self.calendar.picker >= self.calendarEntries().len) return;
+        const entry = self.calendarEntries()[self.calendar.picker];
+        const calendar = get(entry, "calendar");
+        const selected = self.calendarSelection().selected(calendar);
+        const readable = truth(get(entry, "canRead"));
+        const restore_applied = self.ui_preferences.calendar.selected(calendar);
+        if (!selected and !readable and !restore_applied) {
+            try self.calendar.notice.set("No read access · this saved hidden source stays unchecked");
+            return;
+        }
+        const target = try calendar_sources.jsonTarget(calendar);
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        const pending = &self.calendar.pending_selection.?;
+        const old = pending.find(target);
+        const old_color = if (old) |choice| choice.color else null;
+        try pending.set(target, !selected, old_color);
+        self.calendar.selection_dirty = true;
+        try self.calendarRebuildCatalogue();
+        try self.calendar.notice.set(if (!selected and !readable) "Selection restored · no read access; this calendar is not shown" else "Space Show/hide · Enter Apply · Esc cancels unsaved selection");
+    }
+    fn calendarCycleColor(self: *App) !void {
+        if (self.calendar.source_message.len > 0 or self.calendar.picker >= self.calendarEntries().len) return;
+        const calendar = get(self.calendarEntries()[self.calendar.picker], "calendar");
+        const target = try calendar_sources.jsonTarget(calendar);
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        const pending = &self.calendar.pending_selection.?;
+        const next: calendar_sources.Color = @fromBackingInt(@as(u3, @intCast((@as(usize, @backingInt(pending.color(target))) + 1) % 8)));
+        try pending.set(target, pending.selected(calendar), next);
+        self.calendar.selection_dirty = true;
+        try self.calendarRebuildCatalogue();
+        try self.calendar.notice.set("c changes color · Enter Apply · Esc cancels unsaved selection");
+    }
+    fn calendarPriority(self: *App) !void {
+        if (self.calendar.source_message.len > 0 or self.calendar.picker >= self.calendarEntries().len) return;
+        const entry = self.calendarEntries()[self.calendar.picker];
+        const calendar = get(entry, "calendar");
+        const source = try calendar_sources.jsonTarget(calendar);
+        const clear = self.calendarSelection().isPreferred(source);
+        if (!clear and !truth(get(entry, "canRead"))) {
+            try self.calendar.notice.set("No read access · cannot be Priority");
+            return;
+        }
+        const hidden = !self.calendarSelection().selected(calendar);
+        const previous = self.calendarSelection().preferred;
+        var previous_listed = previous == null;
+        if (previous) |key| for (self.calendarEntries()) |candidate| {
+            if (key.target().eql(try calendar_sources.jsonTarget(get(candidate, "calendar")))) previous_listed = true;
+        };
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        const pending = &self.calendar.pending_selection.?;
+        if (clear) pending.clearPreferred() else try pending.setPreferred(source);
+        self.calendar.selection_dirty = true;
+        try self.calendarRebuildCatalogue();
+        if (clear) {
+            try self.calendar.notice.set("Priority cleared · Enter Apply · Esc cancels");
+        } else if (hidden) {
+            try self.calendar.notice.set("Priority · hidden until shown · Space shows it");
+        } else if (!previous_listed) {
+            self.calendar.notice.display(try std.fmt.allocPrint(self.frame.allocator(), "Priority moved from {s} · Enter Apply · Esc cancels", .{previous.?.account.slice()}));
+        } else try self.calendar.notice.set("Priority calendar staged · Enter Apply · Esc cancels");
+    }
+    fn calendarToggleScope(self: *App) !void {
+        if (self.calendar.source_message.len > 0) return;
+        if (self.job.future != null and !readOnlyJob(self.job.kind)) {
+            try self.calendar.notice.set("Account scope waits for the current operation · Esc cancels");
+            return;
+        }
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        const pending = &self.calendar.pending_selection.?;
+        pending.scope = if (pending.scope == .account) .all_accounts else .account;
+        self.calendar.single_source = false;
+        self.calendar.selection_dirty = true;
+        self.calendar.page = .calendars;
+        try self.calendarBeginDiscovery();
+    }
+    fn calendarCancelSelection(self: *App) !void {
+        self.preemptReadOnly();
+        self.calendar.resume_lists = false;
+        self.calendar.list_for_picker = false;
+        self.calendar.listing_all = false;
+        self.calendar.pending_selection = null;
+        self.calendar.selection_dirty = false;
+        try self.calendarRebuildCatalogue();
+        self.calendar.focus = null;
+        self.calendar.page = .main;
+        // A local rollback never cancels or waits for durable work. Its
+        // existing agenda already represents the restored applied selection.
+        if (self.job.future != null) {
+            try self.calendar.notice.set("Selection cancelled · current operation continues");
+        } else if (self.calendar.calendar_id.len > 0) try self.loadCalendarAgenda(false);
+    }
     fn calendarActivate(self: *App, index: usize) !void {
+        if (self.calendar.page == .overlaps) {
+            if (index == 0) self.calendarSlotsClose() else if (index == 24) try self.calendarSlotsChoose();
+            return;
+        }
+        if (self.calendar.page == .main and index >= 400 and index < 575) {
+            const viewport = self.calendar_week_viewport orelse return;
+            const encoded = index - 400;
+            const column = encoded / 25;
+            const slot = encoded % 25;
+            if (column >= viewport.days or (slot != 24 and slot >= viewport.hours)) return;
+            return self.calendarSlotsOpen(.{ .day = viewport.first_day + @as(i64, @intCast(column)), .hour = if (slot == 24) null else @as(u8, @intCast(@as(usize, viewport.first_hour) + slot)) });
+        }
+        if (self.calendar.page == .main and index == 24) return self.calendarSlotsOpen(null);
+        if (self.calendar.page == .compose or self.calendar.page == .event_review) {
+            if (self.calendar_guests_open) return self.calendarGuestsActivate(index);
+            if (index == 116) return self.calendarComposeControl(16);
+            if (self.calendar_form_discard and (index == 118 or index == 119)) return self.calendarComposeControl(index - 100);
+            if (self.calendar_form_pick_target) {
+                if (index >= 200) try self.calendarComposeChooseTarget(index - 200) else if (index == 119) self.calendar_form_pick_target = false else if (index == 120) try self.calendarComposeChooseTarget(self.calendar_form_target_index);
+                return;
+            }
+            if (self.job.future != null) return;
+            if (index >= 100 and index <= 123) try self.calendarComposeControl(index - 100);
+            return;
+        }
+        if (self.calendar.page == .actions and self.calendar.actions_return == .detail and
+            (index == 10 or index == 13 or index == 14 or index == 15 or index == 18 or index == 101))
+        {
+            self.calendar.page = .detail;
+            self.calendar.focus = null;
+            if (index == 10) return; // Open returns to the already pinned card.
+        }
+        if (index == 100) return self.calendarComposeNew();
+        if (index == 101) return self.calendarComposeEdit();
         switch (index) {
-            0 => self.calendarBack(),
+            0 => if (self.calendar.page == .calendars and self.calendar.source_message.len == 0 and self.calendar.pending_selection != null) try self.calendarCancelSelection() else self.calendarBack(),
             1, 2, 3 => {
                 self.calendar.view = @fromBackingInt(@intCast(index - 1));
                 try self.loadCalendarAgenda(false);
@@ -12789,9 +14484,15 @@ const App = struct {
             },
             7 => {
                 self.calendar.page = .calendars;
+                self.calendar.list_for_picker = self.calendar.source_message.len == 0;
                 self.calendar.focus = null;
                 self.calendar.scroll = 0;
-                try self.calendar.notice.set("Choose a calendar · j/k Move · Enter Select · q Back");
+                if (self.calendar.source_message.len == 0) {
+                    self.calendar.pending_selection = self.ui_preferences.calendar;
+                    self.calendar.selection_dirty = false;
+                }
+                try self.calendar.notice.set(if (self.calendar.source_message.len > 0) "Choose a destination · Enter Review invitation" else "Space Show/hide · p Priority · Enter Apply · o Only this · a Account scope · c Color");
+                _ = try self.dispatchCalendarPending();
             },
             8 => try self.loadCalendarAgenda(false),
             9 => {
@@ -12805,7 +14506,10 @@ const App = struct {
                 try self.resetHelp();
             },
             10 => {
-                if (self.calendar.page == .calendars) return self.selectCalendar(self.calendar.picker);
+                if (self.calendar.page == .calendars) {
+                    if (self.calendar.source_message.len == 0 and self.calendar.pending_selection != null) return self.calendarShowSelected();
+                    return self.selectCalendar(self.calendar.picker);
+                }
                 if (self.calendar.page == .permissions) {
                     try self.emitReaderCopy(try self.calendarGrantCommand());
                     try self.calendar.notice.set("Authorization command copied · run it explicitly in your terminal");
@@ -12827,9 +14531,22 @@ const App = struct {
                 self.calendar.card_stale = self.calendar.stale;
                 try self.calendar.notice.set("Loading event…");
                 // The loaded card remains useful if fetching details fails.
-                try self.start(.calendar_event, .{ .cmd = "calendar.event", .account = self.calendar.account.slice(), .calendarId = self.calendar.calendar_id.slice(), .eventId = text(get(event, "id")) });
+                const target = try calendar_sources.jsonTarget(event);
+                if (self.calendarAccountSlot(target.account) == null) return error.CalendarAccountMismatch;
+                self.calendar.pending_card = true;
+                self.preemptReadOnly();
+                _ = try self.dispatchCalendarPending();
             },
             13 => try self.calendarJoin(),
+            14 => try self.calendarBrowser(false),
+            15 => try self.calendarBrowser(true),
+            16 => try self.calendarShowSelected(),
+            17 => try self.calendarActivate(100),
+            18 => try self.calendarActivate(101),
+            19 => try self.calendarToggleSource(),
+            20 => try self.calendarToggleScope(),
+            21 => try self.calendarCycleColor(),
+            22 => try self.calendarPriority(),
             12 => {
                 self.calendar.page = .main;
                 self.calendar.entering_date = true;
@@ -12844,12 +14561,18 @@ const App = struct {
         }
     }
     fn calendarControls(self: *const App) usize {
-        if (self.calendar.page == .actions) return 14;
-        if (self.calendar.page == .main) return if (calendar_ui.canJoin(self.calendarEventAt(self.calendar.selected) orelse .null)) 14 else 13;
+        if (self.calendar.page == .actions) return 19;
+        if (self.calendar.page == .main) return 19;
         if (self.calendar.page == .detail) return if (calendar_ui.canJoin(self.calendar.card.value)) 2 else 1;
         return 2;
     }
     fn onCalendarKey(self: *App, key: Key) !void {
+        if (self.calendar.page == .overlaps) return self.onCalendarSlotsKey(key);
+        if (self.calendar.page == .compose or self.calendar.page == .event_review) return self.onCalendarComposeKey(key);
+        if (!self.paste and !self.calendar.searching and !self.calendar.entering_date and (self.calendar.page == .main or self.calendar.page == .detail)) {
+            if (key.matches('n', .{}) and self.calendar.page == .main) return self.calendarComposeNew();
+            if (key.matches('e', .{})) return self.calendarComposeEdit();
+        }
         if (self.calendarHelpVisible()) {
             if (!self.paste and !self.help_searching) {
                 if (tabDirection(key) != null) {
@@ -12891,26 +14614,65 @@ const App = struct {
                 self.calendar.searching = false;
             } else if (key.matches(Key.enter, .{})) self.calendar.searching = false else try self.calendar_query.handleKey(self.allocator, key, false, 256);
             self.calendar.selected = 0;
+            self.calendar.week_reveal_selected = false;
             self.calendar.top = 0;
             return;
         }
-        if (self.job.future != null and (self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile)) {
+        if (self.calendar.page == .main and self.calendar.view == .week and key.matches(' ', .{})) return self.calendarSlotsOpen(null);
+        const local_source_picker_key = self.calendar.page == .calendars and self.calendar.source_message.len == 0 and
+            (key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches(' ', .{}) or
+                key.matches('p', .{}) or key.matches('c', .{}) or key.matches('a', .{}) or
+                key.matches('v', .{}) or key.matches('o', .{}) or key.matches(Key.enter, .{}) or
+                key.matches('j', .{}) or key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches(Key.down, .{}) or
+                tabDirection(key) != null);
+        if (self.job.future != null and (self.job.kind == .calendar_apply or self.job.kind == .calendar_reconcile) and !local_source_picker_key) {
             self.say(false, "Calendar operation pending · waiting for its durable outcome", .{});
             return;
         }
         if (key.matches(Key.escape, .{}) or key.matches('q', .{})) {
+            if (self.calendar.page == .calendars and self.calendar.source_message.len == 0 and self.calendar.pending_selection != null) return self.calendarCancelSelection();
             self.calendarBack();
             return;
         }
         if (key.matches('p', .{ .ctrl = true })) {
+            if (self.calendar.page != .actions) self.calendar.actions_return = self.calendar.page;
             self.calendar.page = .actions;
             self.calendar.focus = 0;
             return;
         }
+        if ((self.calendar.page == .main or self.calendar.page == .detail) and (key.matches('O', .{}) or key.matches('o', .{ .shift = true }))) return self.calendarBrowser(false);
+        if ((self.calendar.page == .main or self.calendar.page == .detail) and key.matches('b', .{})) return self.calendarBrowser(true);
+        if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) {
+            if (key.matches(' ', .{})) return self.calendarToggleSource();
+            if (key.matches('v', .{})) return self.calendarShowSelected();
+            if (key.matches('a', .{})) return self.calendarToggleScope();
+            if (key.matches('c', .{})) return self.calendarCycleColor();
+            if (key.matches('p', .{})) return self.calendarPriority();
+            if (key.matches('o', .{})) return self.selectCalendar(self.calendar.picker);
+        }
         if (tabDirection(key)) |back| {
+            if (self.calendar.page == .detail or self.calendar.page == .calendars) {
+                const controls: []const usize = if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) &.{ 0, 10, 15, 18 } else &.{ 0, 15, 18 }) else if (self.calendar.source_message.len > 0) &.{ 0, 10 } else &.{ 0, 19, 20, 21, 22, 10 };
+                var current: usize = 0;
+                for (controls, 0..) |value, i| if (self.calendar.focus == value) {
+                    current = i;
+                };
+                self.calendar.focus = if (self.calendar.focus != null) controls[(current + if (back) controls.len - 1 else 1) % controls.len] else if (back) controls[controls.len - 1] else controls[0];
+                return;
+            }
             if (self.calendar.page == .main and self.vx.window().width < 60) {
                 const event = self.calendarEventAt(self.calendar.selected) orelse .null;
-                const controls: []const usize = if (calendar_ui.canJoin(event)) &.{ 0, 10, 13 } else &.{ 0, 10 };
+                const controls: []const usize = if (event == .null) &.{ 0, 17 } else if (calendar_ui.canJoin(event)) &.{ 0, 17, 10, 18, 13, 15 } else &.{ 0, 17, 10, 18, 15 };
+                var current: usize = 0;
+                for (controls, 0..) |value, i| if (self.calendar.focus == value) {
+                    current = i;
+                };
+                self.calendar.focus = if (self.calendar.focus != null) controls[(current + if (back) controls.len - 1 else 1) % controls.len] else if (back) controls[controls.len - 1] else controls[0];
+                return;
+            }
+            if (self.calendar.page == .main) {
+                const event = self.calendarEventAt(self.calendar.selected) orelse .null;
+                const controls: []const usize = if (self.calendar.view == .week and self.calendar_week_related > 1) (if (calendar_ui.canJoin(event)) &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 17, 10, 18, 13, 15, 24 } else &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 17, 10, 18, 15, 24 }) else if (event == .null) &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 17 } else if (calendar_ui.canJoin(event)) &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 17, 10, 18, 13, 15 } else &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 17, 10, 18, 15 };
                 var current: usize = 0;
                 for (controls, 0..) |value, i| if (self.calendar.focus == value) {
                     current = i;
@@ -12945,13 +14707,21 @@ const App = struct {
             return;
         }
         if (key.matches('j', .{}) or key.matches(Key.down, .{})) {
-            if (self.calendar.page == .calendars) self.calendar.picker = @min(self.calendar.picker +| 1, self.calendarEntries().len -| 1) else if (self.calendar.page == .actions) self.calendar.focus = @min((self.calendar.focus orelse 0) +| 1, 13) else self.calendar.selected = @min(self.calendar.selected +| 1, self.calendarEventCount() -| 1);
+            if (self.calendar.page == .calendars) self.calendar.picker = @min(self.calendar.picker +| 1, self.calendarEntries().len -| 1) else if (self.calendar.page == .actions) self.calendar.focus = @min((self.calendar.focus orelse 0) +| 1, 18) else {
+                self.calendar.selected = @min(self.calendar.selected +| 1, self.calendarEventCount() -| 1);
+                self.calendar.week_reveal_selected = true;
+                self.calendar_week_reveal_bucket = null;
+            }
             if (self.calendar.page != .actions) self.calendar.focus = null;
         } else if (key.matches('k', .{}) or key.matches(Key.up, .{})) {
-            if (self.calendar.page == .calendars) self.calendar.picker -|= 1 else if (self.calendar.page == .actions) self.calendar.focus = (self.calendar.focus orelse 0) -| 1 else self.calendar.selected -|= 1;
+            if (self.calendar.page == .calendars) self.calendar.picker -|= 1 else if (self.calendar.page == .actions) self.calendar.focus = (self.calendar.focus orelse 0) -| 1 else {
+                self.calendar.selected -|= 1;
+                self.calendar.week_reveal_selected = true;
+                self.calendar_week_reveal_bucket = null;
+            }
             if (self.calendar.page != .actions) self.calendar.focus = null;
         } else if (self.calendar.page == .main) {
-            if (key.matches('o', .{})) try self.calendarJoin() else if (key.matches('1', .{})) try self.calendarActivate(1) else if (key.matches('2', .{})) try self.calendarActivate(2) else if (key.matches('3', .{})) try self.calendarActivate(3) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) try self.calendarActivate(4) else if (key.matches('l', .{}) or key.matches(Key.right, .{})) try self.calendarActivate(5) else if (key.matches('t', .{})) try self.calendarActivate(6) else if (key.matches('g', .{})) try self.calendarActivate(7) else if (key.matches('r', .{ .ctrl = true })) try self.calendarActivate(8) else if (key.matches('/', .{})) try self.calendarActivate(11) else if (key.matches('g', .{ .ctrl = true })) try self.calendarActivate(12) else if (key.matches('c', .{ .ctrl = true })) self.closeCalendar();
+            if (key.matches('o', .{})) try self.calendarJoin() else if (key.matches('1', .{})) try self.calendarActivate(1) else if (key.matches('2', .{})) try self.calendarActivate(2) else if (key.matches('3', .{})) try self.calendarActivate(3) else if (key.matches('h', .{}) or key.matches(Key.left, .{})) try self.calendarActivate(4) else if (key.matches('l', .{}) or key.matches(Key.right, .{})) try self.calendarActivate(5) else if (key.matches('t', .{})) try self.calendarActivate(6) else if (key.matches('g', .{})) try self.calendarActivate(7) else if (key.matches('v', .{})) try self.calendarShowSelected() else if (key.matches('r', .{ .ctrl = true })) try self.calendarActivate(8) else if (key.matches('/', .{})) try self.calendarActivate(11) else if (key.matches('g', .{ .ctrl = true })) try self.calendarActivate(12) else if (key.matches('c', .{ .ctrl = true })) self.closeCalendar();
         }
     }
     fn calendarEventLine(self: *App, event: Value, include_date: bool) ![]const u8 {
@@ -12995,6 +14765,98 @@ const App = struct {
         const duration = if (minutes < 60) try std.fmt.allocPrint(a, "{d}m", .{minutes}) else if (@mod(minutes, 60) == 0) try std.fmt.allocPrint(a, "{d}h", .{@divFloor(minutes, 60)}) else try std.fmt.allocPrint(a, "{d}h {d}m", .{ @divFloor(minutes, 60), @mod(minutes, 60) });
         return std.fmt.allocPrint(a, "{s} · {s}", .{ interval, duration });
     }
+    fn calendarSourceName(self: *const App, target: @import("calendar_types.zig").Target) []const u8 {
+        for (self.calendarEntries()) |entry| {
+            const calendar = get(entry, "calendar");
+            const source = calendar_sources.jsonTarget(calendar) catch continue;
+            if (source.eql(target)) return text(get(calendar, "summary"));
+        }
+        return target.calendar_id;
+    }
+    fn calendarSourceLabel(self: *App, event: Value) ![]const u8 {
+        const target = calendar_sources.jsonTarget(event) catch return "?";
+        for (self.calendarEntries(), 0..) |entry, index| {
+            const source = calendar_sources.jsonTarget(get(entry, "calendar")) catch continue;
+            if (!source.eql(target)) continue;
+            if (index < 26) return self.frame.allocator().dupe(u8, &.{@as(u8, @intCast('A' + index))});
+            return self.frame.allocator().dupe(u8, &.{ @as(u8, @intCast('A' + index / 26 - 1)), @as(u8, @intCast('A' + index % 26)) });
+        }
+        return "?";
+    }
+    fn calendarEventPrefix(self: *App, event: Value, raw: []const u8) ![]const u8 {
+        if (items(get(self.calendar.agenda.value, "sources")).len < 2) return raw;
+        return std.fmt.allocPrint(self.frame.allocator(), "{s} {s}", .{ try self.calendarSourceLabel(event), raw });
+    }
+    fn calendarColoredLine(self: *App, win: vaxis.Window, row: usize, raw: []const u8, event: Value, tone: Tone) !void {
+        try self.line(win, row, raw, tone);
+        if (row >= win.height or win.width == 0) return;
+        if (items(get(self.calendar.agenda.value, "sources")).len < 2) return;
+        const target = calendar_sources.jsonTarget(event) catch return;
+        const label = try self.calendarSourceLabel(event);
+        const child = win.child(.{ .y_off = @intCast(row), .height = 1 });
+        var style_value = self.style(tone);
+        if (!self.mono and tone != .muted) style_value.fg = .{ .rgb = calendar_sources.readableRgb(self.ui_preferences.calendar.color(target), self.palette) };
+        style_value.bold = true;
+        _ = child.printSegment(.{ .text = label, .style = style_value }, .{ .wrap = .none });
+    }
+    fn calendarLegend(self: *App, win: vaxis.Window, row: usize) !void {
+        if (row >= win.height or self.calendar.single_source) return;
+        var x: u16 = 0;
+        var expanded_width: usize = 0;
+        var groups: usize = 0;
+        var letters_width: usize = 0;
+        var previous_account: []const u8 = "";
+        for (self.calendarEntries()) |entry| {
+            if (!self.calendarSourceVisible(entry)) continue;
+            const calendar = get(entry, "calendar");
+            const target = try calendar_sources.jsonTarget(calendar);
+            if (!same(previous_account, target.account)) {
+                expanded_width += win.gwidth(self.calendarAccountLabel(target.account)) + 3;
+                groups += 1;
+                previous_account = target.account;
+            }
+            const priority_width: usize = @intFromBool(self.ui_preferences.calendar.isPreferred(target));
+            expanded_width += win.gwidth(try self.fitLine(win, text(get(calendar, "summary")), 8)) + 4 + priority_width;
+            letters_width += win.gwidth(try self.calendarSourceLabel(calendar)) + 1 + priority_width;
+        }
+        const compact = expanded_width > win.width;
+        const label_width: u16 = @intCast(if (compact) @max((@as(usize, win.width) -| (letters_width + groups * 3)) / @max(groups, 1), 3) else 24);
+        previous_account = "";
+        for (self.calendarEntries()) |entry| {
+            if (!self.calendarSourceVisible(entry)) continue;
+            const calendar = get(entry, "calendar");
+            const target = try calendar_sources.jsonTarget(calendar);
+            const label = try self.calendarSourceLabel(calendar);
+            if (!same(previous_account, target.account)) {
+                const account_label = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} ", .{ if (x > 0) @as([]const u8, "│ ") else "", try self.fitLine(win, self.calendarAccountLabel(target.account), label_width) });
+                const account_width = win.gwidth(account_label);
+                if (account_width > win.width -| x) break;
+                try self.line(win.child(.{ .x_off = x, .y_off = @intCast(row), .height = 1 }), 0, account_label, .muted);
+                x += @intCast(account_width);
+                previous_account = target.account;
+            }
+            const short_name = try self.fitLine(win, text(get(calendar, "summary")), 8);
+            const mark: []const u8 = if (self.ui_preferences.calendar.isPreferred(target)) "*" else "";
+            const value = if (compact) try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} ", .{ label, mark }) else try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} {s}  ", .{ label, mark, short_name });
+            const width = win.gwidth(value);
+            if (width > win.width -| x) break;
+            const cell = win.child(.{ .x_off = x, .y_off = @intCast(row), .height = 1, .width = @intCast(width) });
+            var style_value = self.style(.text);
+            if (!self.mono) style_value.fg = .{ .rgb = calendar_sources.readableRgb(self.ui_preferences.calendar.color(target), self.palette) };
+            _ = cell.printSegment(.{ .text = value, .style = style_value }, .{ .wrap = .none });
+            x += @intCast(width);
+        }
+    }
+    fn calendarAccountLabel(self: *const App, address: []const u8) []const u8 {
+        const local_part = address[0 .. std.mem.indexOfScalar(u8, address, '@') orelse address.len];
+        for (self.accounts) |account_value| {
+            const candidate = text(get(account_value, "address"));
+            if (same(candidate, address)) continue;
+            const candidate_local = candidate[0 .. std.mem.indexOfScalar(u8, candidate, '@') orelse candidate.len];
+            if (std.ascii.eqlIgnoreCase(local_part, candidate_local)) return address;
+        }
+        return local_part;
+    }
     fn drawCalendarCard(self: *App, body: vaxis.Window) !void {
         const a = self.frame.allocator();
         const event = self.calendar.card.value;
@@ -13016,12 +14878,14 @@ const App = struct {
         const when = try self.calendarCardWhen(event, &self.zone);
         const response = calendar_ui.responseLabel(text(get(event, "response")));
         const cancelled = truth(get(event, "cancelled"));
-        const identity = try std.fmt.allocPrint(a, "{s} · {s}", .{ self.calendar.calendar_name.slice(), self.calendar.account.slice() });
+        const source = calendar_sources.jsonTarget(event) catch @import("calendar_types.zig").Target{ .account = self.calendar.account.slice(), .calendar_id = self.calendar.calendar_id.slice() };
+        const source_name = self.calendarSourceName(source);
+        const identity = try std.fmt.allocPrint(a, "{s} · {s}", .{ source_name, source.account });
         const title_width = inner.width -| @as(u16, if (joinable) 12 else 0);
         try self.line(inner.child(.{ .width = title_width }), 0, try self.fitLine(inner, if (title.len > 0) title else "Untitled event", title_width), .subject);
         if (joinable) {
             const button_x = inner.width -| 8;
-            _ = try self.actionButton(inner, 0, button_x, "[o Join]", self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+            _ = try self.actionButton(inner, 0, button_x, "[o Join]", self.calendar.focus == 10 or self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
             if (button_x >= 3) try self.drawJoinCamera(inner, button_x - 3, 0);
         }
         var row = try self.flowTone(inner, when, 0, 1, .accent);
@@ -13031,7 +14895,7 @@ const App = struct {
         var viewport = inner.child(.{ .y_off = @intCast(row), .height = @intCast(footer -| row -| 1) });
         var blocks: std.ArrayList(CardBlock) = .empty;
         if (body.width < 60 or positionAfter(inner, try safe(a, identity, false)).row > 0) try blocks.append(a, .{ .text = identity, .tone = .sender });
-        try blocks.append(a, .{ .text = if (cancelled) "Cancelled by organizer" else try std.fmt.allocPrint(a, "In {s}{s}{s}", .{ self.calendar.calendar_name.slice(), if (self.calendar.card_stale) @as([]const u8, " · saved copy") else "", if (text(get(event, "source_marker")).len > 0) @as([]const u8, " · linked to an invitation") else "" }), .tone = if (cancelled) .warning else if (self.calendar.card_stale) .offline else .current });
+        try blocks.append(a, .{ .text = if (cancelled) "Cancelled by organizer" else try std.fmt.allocPrint(a, "In {s}{s}{s}", .{ source_name, if (self.calendar.card_stale) @as([]const u8, " · saved copy") else "", if (text(get(event, "source_marker")).len > 0) @as([]const u8, " · linked to an invitation") else "" }), .tone = if (cancelled) .warning else if (self.calendar.card_stale) .offline else .current });
         if (truth(get(event, "private_copy"))) try blocks.append(a, .{ .text = "Private copy · organizer updates arrive by email; Mail A reviews updates", .tone = .muted });
         if (response.len > 0) try blocks.append(a, .{ .text = try std.fmt.allocPrint(a, "Your response · {s}", .{response}), .tone = if (same(response, "Accepted")) .current else if (same(response, "Declined")) .muted else .offline });
         const calendar_when = try self.calendarCardWhen(event, &self.calendar.zone);
@@ -13068,7 +14932,9 @@ const App = struct {
         try self.drawCardBlocks(viewport, blocks.items, self.calendar.scroll);
         if (self.calendar.scroll > 0 or self.calendar.scroll + viewport.height < total) try self.line(inner, footer -| 1, try std.fmt.allocPrint(a, "{s}{s} · j/k Scroll · Ctrl+D/U Page", .{ if (self.calendar.scroll > 0) @as([]const u8, "↑ ") else "", if (self.calendar.scroll + viewport.height < total) @as([]const u8, "↓ More") else "End" }), .muted);
         var x = try self.actionButton(inner, footer, 0, "[q Back]", self.calendar.focus == 0, true, .dialog_action, 0);
-        if (joinable) x = try self.actionButton(inner, footer, x, "[o Join]", self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+        if (joinable) x = try self.actionButton(inner, footer, x, "[o Join]", self.calendar.focus == 10 or self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+        x = try self.actionButton(inner, footer, x, "[b Google Calendar]", self.calendar.focus == 15, self.foregroundWorkerAvailable(), .dialog_action, 15);
+        _ = try self.actionButton(inner, footer, x, "[e Edit event]", self.calendar.focus == 18, self.foregroundWorkerAvailable(), .dialog_action, 18);
     }
     fn calendarFirstDay(self: *App, width: u16) !i64 {
         var first = self.calendar.day;
@@ -13079,7 +14945,13 @@ const App = struct {
         if (self.calendar.view == .week and calendar_ui.gridDays(width) == 3) if (self.calendarEventAt(self.calendar.selected)) |event| {
             if (get(event, "start") != .null) {
                 const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), get(event, "start"), .{});
-                const selected_day = try calendar_ui.pointDay(point, &self.calendar.zone);
+                var selected_day = try calendar_ui.pointDay(point, &self.calendar.zone);
+                if (self.calendar.week_reveal_selected) if (self.calendar_week_reveal_bucket) |requested| {
+                    const entry: calendar_slot.Projection = .{ .event = event, .identity = try calendar_slot.Identity.init(event), .end = try @import("json.zig").decode(@import("calendar_time.zig").Point, self.frame.allocator(), get(event, "end")), .visible_index = self.calendar.selected };
+                    const full: calendar_slot.Viewport = .{ .first_day = first, .days = 7, .first_hour = 0, .hours = 24 };
+                    const valid = try calendar_slot.revealBucket(entry, full, &self.calendar.zone, requested);
+                    if (valid != null and valid.?.eql(requested)) selected_day = requested.day;
+                };
                 if (selected_day >= first + 3) first = @min(selected_day, first + 4);
             }
         };
@@ -13129,9 +15001,11 @@ const App = struct {
                 const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, self.frame.allocator(), ends, .{});
                 past = point.value <= (if (point.kind == .date) try self.calendar.zone.localDay(now) else now);
             }
-            const tone: Tone = if (index == self.calendar.selected) .selected else if (past or self.calendar.stale or !self.calendar.complete or same(text(get(event, "response")), "declined")) .muted else .text;
-            const label = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (index == self.calendar.selected) @as([]const u8, "> ") else "  ", try self.calendarEventLine(event, false) });
-            try self.line(win, row, try self.fitLine(win, label, win.width), tone);
+            const tone: Tone = if (index == self.calendar.selected) .selected else if (past or truth(get(event, "source_stale")) or same(text(get(event, "response")), "declined")) .muted else .text;
+            const target: ?@import("calendar_types.zig").Target = calendar_sources.jsonTarget(event) catch null;
+            const source = if (target) |identity| try std.fmt.allocPrint(self.frame.allocator(), " · {s} · {s}", .{ self.calendarSourceName(identity), identity.account }) else "";
+            const label = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ try self.calendarEventPrefix(event, try self.calendarEventLine(event, false)), if (win.width >= 80 and items(get(self.calendar.agenda.value, "sources")).len > 1) source else @as([]const u8, "") });
+            try self.calendarColoredLine(win, row, try self.fitLine(win, label, win.width), event, tone);
             self.mouseRows(win, row, 1, .contact, index);
             row += 1;
             displayed += 1;
@@ -13139,31 +15013,59 @@ const App = struct {
         const remaining = count - self.calendar.top - displayed;
         if (remaining > 0) try self.line(win, end_row, try std.fmt.allocPrint(self.frame.allocator(), "↓ {d} more event{s} · j to continue", .{ remaining, if (remaining == 1) @as([]const u8, "") else "s" }), .muted);
     }
+    fn calendarWeekTitleHit(self: *App, win: vaxis.Window, row: usize, index: usize, bucket: calendar_slot.Bucket) void {
+        if (self.calendar_week_title_count == self.calendar_week_title_hits.len) return;
+        const position = self.calendar_week_title_count;
+        self.calendar_week_title_hits[position] = .{ .index = index, .bucket = bucket };
+        self.calendar_week_title_count += 1;
+        self.mouseRows(win, row, 1, .calendar_week_event, position);
+    }
+    fn calendarSlotBadge(self: *App, win: vaxis.Window, row: usize, label: []const u8, action: usize) !void {
+        const width: u16 = @intCast(@min(label.len, win.width));
+        const x = win.width - width;
+        var appearance = self.style(.accent);
+        appearance.bold = true;
+        appearance.ul_style = .single;
+        const badge = win.child(.{ .x_off = x, .y_off = @intCast(row), .width = width, .height = 1 });
+        _ = badge.printSegment(.{ .text = label, .style = appearance }, .{ .wrap = .none });
+        self.mouseRows(badge, 0, 1, .dialog_action, action);
+    }
     fn drawCalendarWeek(self: *App, win: vaxis.Window) !void {
+        self.calendar_week_viewport = null;
+        self.calendar_week_related = 0;
+        self.calendar_week_title_count = 0;
         const days = calendar_ui.gridDays(win.width);
-        if (days == 0) return self.drawCalendarAgenda(win);
-        if (!self.calendar.ready) return self.drawCalendarAgenda(win);
+        if (days == 0 or !self.calendar.ready) return self.drawCalendarAgenda(win);
         const a = self.frame.allocator();
         const width: u16 = @intCast((win.width - 6) / days);
         const today = self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch -1;
-        // Follow j/k selection into the three-day compact window.
         const first = try self.calendarFirstDay(win.width);
-        try self.line(win, 1, "all", .muted);
-        try self.line(win, 2, "day", .muted);
         const slots = @min(@as(usize, 24), win.height -| 6);
         if (slots == 0) return self.drawCalendarAgenda(win);
-        const slot_rows: usize = @max((win.height -| 6) / slots, 1);
-        var start_hour: i64 = @min(8, 24 - @as(i64, @intCast(slots)));
-        if (self.calendarEventAt(self.calendar.selected)) |event| if (get(event, "start") != .null) {
-            const point = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
+        const projected = try calendar_slot.project(a, self.calendarEvents(), self.calendar_query.value());
+        var start_hour: usize = @min(8, 24 - slots);
+        if (self.calendar.selected < projected.len) {
+            const point = projected[self.calendar.selected].identity.start;
             if (point.kind == .instant) {
                 const seconds = @divFloor(point.value, 1000);
-                const hour = @divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600);
+                var hour: usize = if (try calendar_ui.pointDay(point, &self.calendar.zone) < first) 0 else @intCast(@divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600));
+                if (self.calendar.week_reveal_selected) if (self.calendar_week_reveal_bucket) |requested| {
+                    const full: calendar_slot.Viewport = .{ .first_day = first, .days = days, .first_hour = 0, .hours = 24 };
+                    const valid = try calendar_slot.revealBucket(projected[self.calendar.selected], full, &self.calendar.zone, requested);
+                    if (valid != null and valid.?.eql(requested) and requested.hour != null) hour = requested.hour.?;
+                };
                 if (hour < start_hour) start_hour = hour;
-                if (hour >= start_hour + @as(i64, @intCast(slots))) start_hour = @max(hour - @as(i64, @intCast(slots)) + 1, 0);
+                if (hour >= start_hour + slots) start_hour = hour - slots + 1;
             }
-        };
-        for (0..slots) |slot| try self.line(win, 5 + slot * slot_rows, try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + @as(i64, @intCast(slot))))}), .muted);
+        }
+        const viewport: calendar_slot.Viewport = .{ .first_day = first, .days = days, .first_hour = @intCast(start_hour), .hours = slots };
+        self.calendar_week_viewport = viewport;
+        const grid = try calendar_slot.Grid.init(projected, viewport, &self.calendar.zone, if (self.calendar.week_reveal_selected and self.calendar.selected < projected.len) .{ .index = self.calendar.selected, .bucket = self.calendar_week_reveal_bucket } else null, &self.ui_preferences.calendar);
+        const plan = calendar_week_rows.allocate(win.height -| 6, grid.needs);
+        try self.line(win, 1, "all", .muted);
+        try self.line(win, 2, "day", .muted);
+        for (0..slots) |slot| try self.line(win, 5 + plan.offsets[slot], try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + slot))}), .muted);
+        var actually_shown: [calendar_sources.max_events]bool = @splat(false);
         for (0..days) |column| {
             const day = first + @as(i64, @intCast(column));
             const cell = win.child(.{ .x_off = @intCast(6 + column * width), .width = width - 1 });
@@ -13174,97 +15076,105 @@ const App = struct {
             const date = try calendar_ui.dayText(a, day);
             const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
             try self.line(cell, 0, try std.fmt.allocPrint(a, "{s} {s}", .{ names[@intCast(@mod(day + 3, 7))], if (date.len == 10) date[5..] else date }), if (day == today) .current else .accent);
-            var row: usize = 1;
-            var all_day_count: usize = 0;
-            var visible_index: usize = 0;
-            for (self.calendarEvents()) |event| {
-                if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
-                defer visible_index += 1;
-                if (get(event, "start") == .null or get(event, "end") == .null) continue;
-                const starts = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
-                const end = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "end"), .{});
-                if (starts.kind != .date or !try calendar_ui.touchesDay(starts, end, day, &self.calendar.zone)) continue;
-                all_day_count += 1;
-                if (row > 2) continue;
-                const selected = visible_index == self.calendar.selected;
-                try self.line(cell, row, try self.fitLine(cell, try calendarEventLabel(a, "", calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), cell.gwidth("") <= 2 and calendar_ui.canJoin(event)), cell.width), if (selected) .selected else .sender);
-                self.mouseRows(cell, row, 1, .contact, visible_index);
-                row += 1;
+            const dates = grid.all_day[column].shown(2);
+            for (dates.indices[0..dates.count], 0..) |index, subrow| {
+                const event = projected[index].event;
+                const label = try self.calendarEventPrefix(event, try calendarEventLabel(a, "", calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), cell.gwidth("") <= 2 and calendar_ui.canJoin(event)));
+                try self.calendarColoredLine(cell, 1 + subrow, try self.fitLine(cell, label, cell.width), event, if (index == self.calendar.selected) .selected else if (truth(get(event, "source_stale")) or same(text(get(event, "response")), "declined")) .muted else .text);
+                self.calendarWeekTitleHit(cell, 1 + subrow, projected[index].visible_index, .{ .day = day });
+                actually_shown[index] = true;
             }
-            if (all_day_count > 2) try self.line(cell, 3, try std.fmt.allocPrint(a, "+{d} all-day", .{all_day_count - 2}), .muted);
-            var occupied: [24]usize = @splat(0);
-            var chosen: [24]?usize = @splat(null);
-            var continuations: [24]bool = @splat(false);
-            var earlier: usize = 0;
-            var later: usize = 0;
-            visible_index = 0;
-            for (self.calendarEvents()) |event| {
-                if (!calendar_ui.matches(event, self.calendar_query.value())) continue;
-                defer visible_index += 1;
-                if (get(event, "start") == .null or get(event, "end") == .null) continue;
-                const starts = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
-                const end = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "end"), .{});
-                const coverage = (try calendar_ui.coverage(starts, end, day, &self.calendar.zone)) orelse continue;
-                const first_hour = coverage.first / 60;
-                const end_hour = (coverage.end + 59) / 60;
-                if (first_hour < start_hour) earlier += 1;
-                if (end_hour > start_hour + @as(i64, @intCast(slots))) later += 1;
-                for (0..slots) |slot| {
-                    const hour = start_hour + @as(i64, @intCast(slot));
-                    if (hour < first_hour or hour >= end_hour) continue;
-                    occupied[slot] += 1;
-                    if (chosen[slot] == null or visible_index == self.calendar.selected) {
-                        chosen[slot] = visible_index;
-                        continuations[slot] = hour > first_hour or try calendar_ui.pointDay(starts, &self.calendar.zone) < day;
-                    }
-                }
-            }
-            if (earlier > 0 or later > 0) {
-                const hidden = if (earlier > 0 and later > 0) try std.fmt.allocPrint(a, "↑{d} ↓{d} · j/k", .{ earlier, later }) else if (earlier > 0) try std.fmt.allocPrint(a, "↑{d} earlier · k", .{earlier}) else try std.fmt.allocPrint(a, "↓{d} later · j", .{later});
+            if (dates.hidden > 0) try self.calendarSlotBadge(cell, 3, try std.fmt.allocPrint(a, "+{d} all-day", .{dates.hidden}), 400 + column * 25 + 24);
+            if (grid.earlier[column] > 0 or grid.later[column] > 0) {
+                const hidden = if (grid.earlier[column] > 0 and grid.later[column] > 0) try std.fmt.allocPrint(a, "↑{d} ↓{d} · j/k", .{ grid.earlier[column], grid.later[column] }) else if (grid.earlier[column] > 0) try std.fmt.allocPrint(a, "↑{d} earlier · k", .{grid.earlier[column]}) else try std.fmt.allocPrint(a, "↓{d} later · j", .{grid.later[column]});
                 try self.line(cell, 4, try self.fitLine(cell, hidden, cell.width), .muted);
             }
             for (0..slots) |slot| {
-                const index = chosen[slot] orelse continue;
-                const event = self.calendarEventAt(index).?;
-                const starts = try std.json.parseFromValueLeaky(@import("calendar_time.zig").Point, a, get(event, "start"), .{});
-                const selected = index == self.calendar.selected;
-                const tone: Tone = if (selected) .selected else if (self.calendar.stale or !self.calendar.complete or same(text(get(event, "response")), "declined")) .muted else .sender;
-                const camera = !continuations[slot] and cell.gwidth("") <= 2 and calendar_ui.canJoin(event);
-                const compact_overlap = camera and cell.width < 16 and occupied[slot] > 1;
-                const label = if (compact_overlap) try std.fmt.allocPrint(a, "{s}  {s}", .{ try calendar_ui.clock(a, starts, &self.calendar.zone), text(get(event, "summary")) }) else try calendarEventLabel(a, if (continuations[slot]) @as([]const u8, "│") else try calendar_ui.clock(a, starts, &self.calendar.zone), if (cell.width < 16 and calendar_ui.canJoin(event)) @as([]const u8, "") else calendar_ui.responseMark(text(get(event, "response"))), text(get(event, "summary")), camera);
-                const more = if (occupied[slot] > 1) try std.fmt.allocPrint(a, "{s}+{d}", .{ if (compact_overlap) @as([]const u8, "") else " ", occupied[slot] - 1 }) else "";
-                const available: u16 = @intCast(cell.width -| more.len);
-                row = 5 + slot * slot_rows;
-                try self.line(cell, row, try std.fmt.allocPrint(a, "{s}{s}", .{ try self.fitLine(cell, label, available), more }), tone);
-                if (slot_rows > 1) try self.line(cell, row + 1, if (more.len > 0) "│ overlapping" else "│", tone);
-                self.mouseRows(cell, row, @intCast(slot_rows), .contact, index);
+                const shown = grid.hours[column][slot].shown(plan.lines[slot]);
+                const row = 5 + plan.offsets[slot];
+                const more = if (shown.hidden > 0) try std.fmt.allocPrint(a, "+{d}", .{shown.hidden}) else "";
+                for (0..plan.lines[slot]) |subrow| {
+                    const last = subrow + 1 == plan.lines[slot];
+                    const available: u16 = if (last and more.len > 0) cell.width -| @as(u16, @intCast(more.len + 1)) else cell.width;
+                    if (subrow < shown.count) {
+                        const index = shown.indices[subrow];
+                        const entry = projected[index];
+                        const event = entry.event;
+                        const start_day = try calendar_ui.pointDay(entry.identity.start, &self.calendar.zone);
+                        const continuation = start_day < day or start_hour + slot != try calendar_slot.startHour(entry.identity.start, &self.calendar.zone);
+                        const full_clock = try calendar_ui.clock(a, entry.identity.start, &self.calendar.zone);
+                        // At narrow seven-day widths the hour is already in
+                        // the gutter. Retain the minute, source, camera and a
+                        // readable title instead of spending twice on the hour.
+                        const compact = cell.width < 16;
+                        const stamp = if (continuation) @as([]const u8, "│") else if (compact and full_clock.len == 5 and !same(full_clock[3..], "00")) full_clock[2..] else full_clock;
+                        const camera = !continuation and cell.gwidth("") <= 2 and calendar_ui.canJoin(event);
+                        const mark = std.mem.trim(u8, calendar_ui.responseMark(text(get(event, "response"))), " ");
+                        const raw_label = if (compact and camera) try std.fmt.allocPrint(a, "{s} {s}{s}{s}", .{ stamp, mark, if (mark.len > 0) @as([]const u8, " ") else "", text(get(event, "summary")) }) else try calendarEventLabel(a, stamp, mark, text(get(event, "summary")), camera);
+                        const label = try self.calendarEventPrefix(event, raw_label);
+                        const tone: Tone = if (index == self.calendar.selected) .selected else if (truth(get(event, "source_stale")) or same(text(get(event, "response")), "declined")) .muted else .text;
+                        try self.calendarColoredLine(cell, row + subrow, try self.fitLine(cell, label, available), event, tone);
+                        // The title and badge are disjoint; a filler row is not
+                        // a pretend event target. Later badge hits take priority.
+                        self.calendarWeekTitleHit(cell.child(.{ .width = available }), row + subrow, entry.visible_index, .{ .day = day, .hour = @intCast(start_hour + slot) });
+                        actually_shown[index] = true;
+                    } else if (shown.count > 0) {
+                        try self.line(cell, row + subrow, "│", .muted);
+                    }
+                    if (last and more.len > 0) try self.calendarSlotBadge(cell, row + subrow, more, 400 + column * 25 + slot);
+                }
             }
             if (day == today) {
                 const now = Io.Timestamp.now(self.io, .real).toMilliseconds();
                 const seconds = @divFloor(now, 1000);
-                const hour = @divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600);
-                if (hour >= start_hour and hour < start_hour + @as(i64, @intCast(slots))) {
-                    const slot: usize = @intCast(hour - start_hour);
-                    if (occupied[slot] == 0) try self.line(cell, 5 + slot * slot_rows, "— now —", .accent);
+                const hour: usize = @intCast(@divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600));
+                if (hour >= start_hour and hour < start_hour + slots) {
+                    const slot = hour - start_hour;
+                    if (grid.hours[column][slot].count == 0) try self.line(cell, 5 + plan.offsets[slot], "— now —", .accent);
                 }
             }
         }
-        if (self.calendarEventAt(self.calendar.selected)) |event| try self.line(win, win.height -| 1, try self.fitLine(win, try self.calendarEventLine(event, true), win.width), .selected);
+        const related = try calendar_slot.related(a, projected, self.calendar.selected, viewport, &self.calendar.zone);
+        self.calendar_week_related = related.len;
+        if (related.len > 1) {
+            const hidden_info = calendar_slot.secondary(projected, related, actually_shown[0..projected.len], self.calendar.selected, &self.ui_preferences.calendar);
+            const action = try std.fmt.allocPrint(a, "[Space Show all {d}]", .{related.len});
+            const action_width: u16 = @intCast(@min(action.len, win.width));
+            const x = win.width - action_width;
+            if (hidden_info.index) |index| {
+                const event = projected[index].event;
+                const label = try std.fmt.allocPrint(a, "{s}: {s} {s}{s}", .{ if (hidden_info.hidden > 0) @as([]const u8, "Hidden here") else "Also here", try self.calendar_uiClockPrefix(event), try self.calendarEventPrefix(event, text(get(event, "summary"))), if (hidden_info.hidden > 1) try std.fmt.allocPrint(a, " · +{d} hidden", .{hidden_info.hidden - 1}) else @as([]const u8, "") });
+                try self.line(win.child(.{ .width = x -| 1 }), win.height -| 1, try self.fitLine(win, label, x -| 1), .accent);
+            }
+            _ = try self.actionButton(win, win.height -| 1, x, action, self.calendar.focus == 24, true, .dialog_action, 24);
+        }
+    }
+    fn calendar_uiClockPrefix(self: *App, event: Value) ![]const u8 {
+        const point = (try calendar_slot.Identity.init(event)).start;
+        return if (point.kind == .date) "All-day" else calendar_ui.clock(self.frame.allocator(), point, &self.calendar.zone);
     }
     fn calendarGrantCommand(self: *App) ![]const u8 {
         var caps: std.ArrayList(u8) = .empty;
         const a = self.frame.allocator();
-        if (self.account_index < self.accounts.len) for (items(get(self.accounts[self.account_index], "capabilities"))) |cap| {
+        const account_slot = self.calendarAccountSlot(self.calendar.account.slice());
+        const existing = if (account_slot) |index| items(get(self.accounts[index], "capabilities")) else &.{};
+        var has_read = false;
+        var has_owned = false;
+        var has_shared = false;
+        for (existing) |cap| {
             if (caps.items.len > 0) try caps.append(a, ',');
             try caps.appendSlice(a, text(cap));
-        };
+            has_read = has_read or same(text(cap), "calendar-read");
+            has_owned = has_owned or same(text(cap), "calendar-write-owned");
+            has_shared = has_shared or same(text(cap), "calendar-write-shared");
+        }
         if (caps.items.len == 0) try caps.appendSlice(a, "mail-read");
-        if (!self.hasCapability("calendar-read")) try caps.appendSlice(a, ",calendar-read");
+        if (!has_read) try caps.appendSlice(a, ",calendar-read");
         if (same(self.calendar.error_code.slice(), "CalendarWritePermissionRequired")) {
             const entry = if (self.calendar.picker < self.calendarEntries().len) self.calendarEntries()[self.calendar.picker] else @as(Value, .null);
             const owned = truth(get(get(entry, "calendar"), "owned_scope_verified"));
             const capability = if (owned) "calendar-write-owned" else "calendar-write-shared";
-            if (!self.hasCapability(capability) and !self.hasCapability("calendar-write-shared")) {
+            if (!has_shared and !(owned and has_owned)) {
                 try caps.append(a, ',');
                 try caps.appendSlice(a, capability);
             }
@@ -13280,14 +15190,19 @@ const App = struct {
     fn drawCalendar(self: *App, win: vaxis.Window) !void {
         const a = self.frame.allocator();
         self.mouse_hits.clear();
-        try self.line(win, 0, try self.fitLine(win, try std.fmt.allocPrint(a, " omagma | Calendar · {s} | {s}", .{ if (self.calendar.page == .main) calendar_ui.viewName(self.calendar.view) else if (self.calendar.page == .review) (if (self.calendar.outcome.len > 0) @as([]const u8, "Result") else "Review") else if (self.calendar.page == .detail) "Event" else if (self.calendar.page == .calendars) "Calendars" else if (self.calendar.page == .permissions) "Permissions" else if (self.calendar.page == .help) "Help" else "Actions", self.calendar.account.slice() }), win.width), switch (self.account_index) {
+        if (self.calendar.page == .compose or self.calendar.page == .event_review) return self.drawCalendarComposer(win);
+        try self.line(win, 0, try self.fitLine(win, try std.fmt.allocPrint(a, " omagma | Calendar · {s} | {s}", .{ if (self.calendar.page == .main) calendar_ui.viewName(self.calendar.view) else if (self.calendar.page == .review) (if (self.calendar.outcome.len > 0) @as([]const u8, "Result") else "Review") else if (self.calendar.page == .detail) "Event" else if (self.calendar.page == .calendars) "Calendars" else if (self.calendar.page == .permissions) "Permissions" else if (self.calendar.page == .help) "Help" else if (self.calendar.page == .overlaps) "Events here" else "Actions", if (!self.calendar.single_source and self.calendarSelection().scope == .all_accounts and self.calendar.source_message.len == 0) @as([]const u8, "All accounts") else self.calendar.account.slice() }), win.width), switch (self.account_index) {
             1 => .sender,
             2 => .current,
             else => .accent,
         });
         const refreshed = integer(get(get(self.calendar.agenda.value, "snapshot"), "fetched_at_ms"));
         const freshness = if (refreshed > 0) try std.fmt.allocPrint(a, " · Synced {s}", .{try self.calendar.zone.format(a, refreshed)}) else "";
-        try self.line(win, 1, try self.fitLine(win, if (self.calendar.calendar_id.len == 0) " Choose an account-bound calendar" else try std.fmt.allocPrint(a, " {s} · {s}{s}{s}", .{ self.calendar.calendar_name.slice(), self.calendar.zone_name.slice(), if (self.calendar.stale) @as([]const u8, " · STALE / availability unknown") else if (self.calendar.ready and !self.calendar.complete) " · PARTIAL / availability unknown" else "", freshness }), win.width), if (self.calendar.stale) .warning else .muted);
+        var checked: usize = 0;
+        if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) for (self.calendarEntries()) |entry| {
+            if (self.calendarSelection().selected(get(entry, "calendar"))) checked += 1;
+        };
+        try self.line(win, 1, try self.fitLine(win, if (self.calendar.page == .calendars and self.calendar.source_message.len == 0) try std.fmt.allocPrint(a, " Showing {d} · {d} checked · {s}", .{ items(get(self.calendar.agenda.value, "sources")).len, checked, if (self.calendarPickerDiscovering()) @as([]const u8, "Loading calendars…") else "Enter applies · Esc cancels" }) else if (self.calendar.calendar_id.len == 0) " Choose an account-bound calendar" else try std.fmt.allocPrint(a, " {s} · {s}{s}{s}", .{ if (self.calendar.single_source) self.calendar.calendar_name.slice() else try std.fmt.allocPrint(a, "{d} selected calendars", .{items(get(self.calendar.agenda.value, "sources")).len}), self.calendar.zone_name.slice(), if (self.calendar.stale) @as([]const u8, " · some saved results / availability unknown") else if (self.calendar.ready and !self.calendar.complete) " · PARTIAL / availability unknown" else "", freshness }), win.width), if (self.calendar.stale) .offline else .muted);
         if (self.calendarHelpVisible()) {
             try self.helpDraw(win);
             return;
@@ -13295,12 +15210,13 @@ const App = struct {
         const body = win.child(.{ .y_off = 2, .height = win.height -| 4 });
         if (body.height < 3) return;
         if (self.calendar.page == .main) {
-            const labels = [_][]const u8{ "[q Mail]", "[1 Agenda]", "[2 Day]", "[3 Week]", "[h Prev]", "[l Next]", "[t Today]", "[g Calendars]", "[Ctrl+R Refresh]", "[? Help]", "[Enter Open]", "[/ Find]", "[Ctrl+G Date]", "[o Join]" };
+            const labels = [_][]const u8{ "[q Mail]", "[1 Agenda]", "[2 Day]", "[3 Week]", "[h Prev]", "[l Next]", "[t Today]", "[g Calendars]", "[Ctrl+R Refresh]", "[? Help]", "[Enter Open]", "[/ Find]", "[Ctrl+G Date]", "[o Join]", "[O Calendar web]", "[b Event web]", "[v Selected calendars]", "[n New event]", "[e Edit event]" };
             var x: u16 = 0;
             var row: usize = 0;
             for (labels, 0..) |label, index| {
+                if (index == 10 or index == 11 or index == 12 or index == 13 or index == 15 or index == 16 or index == 18) continue;
                 if (index == 13 and !calendar_ui.canJoin(self.calendarEventAt(self.calendar.selected) orelse .null)) continue;
-                if (body.width < 60 and index != 0 and index != 10 and index != 13) continue;
+                if (body.width < 60 and index != 0 and index != 10 and index != 13 and index != 17) continue;
                 if (x > 0 and @as(usize, x) + label.len > body.width) {
                     row += 1;
                     x = 0;
@@ -13315,29 +15231,70 @@ const App = struct {
             const title = try std.fmt.allocPrint(a, "{s}{s}{s}{s}{s}", .{ date, if (period > 1) try std.fmt.allocPrint(a, " – {s}", .{try calendar_ui.dayText(a, first_day + period - 1)}) else @as([]const u8, ""), if (self.calendar.view == .week and win.width < 104) @as([]const u8, " · Week needs 104 cols") else "", if (self.calendar_query.value().len > 0) @as([]const u8, " · Filter: ") else "", self.calendar_query.value() });
             row += 1;
             try self.line(body, row, title, .accent);
-            row += 2;
+            row += 1;
+            try self.calendarLegend(body, row);
+            row += 1;
             if (row < body.height) {
-                const content = body.child(.{ .y_off = @intCast(row), .height = @intCast(body.height - row) });
+                const content = body.child(.{ .y_off = @intCast(row), .height = @intCast(body.height -| row -| 2) });
                 if (self.calendar.view == .week) try self.drawCalendarWeek(content) else try self.drawCalendarAgenda(content);
             }
+            if (self.calendarEventAt(self.calendar.selected)) |event| {
+                const target = try calendar_sources.jsonTarget(event);
+                try self.line(body, body.height -| 2, try self.fitLine(body, try std.fmt.allocPrint(a, "{s} · {s} · {s}", .{ try self.calendarEventLine(event, true), self.calendarSourceName(target), target.account }), body.width), .selected);
+                var button_x = try self.actionButton(body, body.height -| 1, 0, "[Enter Open]", self.calendar.focus == 10, self.foregroundWorkerAvailable(), .dialog_action, 10);
+                button_x = try self.actionButton(body, body.height -| 1, button_x, "[e Edit]", self.calendar.focus == 18, self.foregroundWorkerAvailable(), .dialog_action, 18);
+                if (calendar_ui.canJoin(event)) button_x = try self.actionButton(body, body.height -| 1, button_x, "[o Join]", self.calendar.focus == 13, self.foregroundWorkerAvailable(), .dialog_action, 13);
+                _ = try self.actionButton(body, body.height -| 1, button_x, "[b Google Calendar]", self.calendar.focus == 15, self.foregroundWorkerAvailable(), .dialog_action, 15);
+            }
+        } else if (self.calendar.page == .overlaps) {
+            try self.drawCalendarSlots(body);
         } else if (self.calendar.page == .calendars) {
-            try self.line(body, 0, "Choose calendar", .accent);
-            const capacity = @max((@as(usize, body.height) -| 3) / 3, 1);
+            const invitation_destination = self.calendar.source_message.len > 0;
+            try self.line(body, 0, if (invitation_destination) "Choose destination calendar" else if (self.calendarSelection().scope == .all_accounts) "Show calendars · all accounts" else "Show calendars · this account · a switches to all accounts", .accent);
+            const footer_rows: usize = if (invitation_destination) 1 else 3;
+            const footer_start = @as(usize, body.height) -| footer_rows;
+            const capacity = @max((@as(usize, body.height) -| (footer_rows + 2)) / 3, 1);
             const first = self.calendar.picker -| (capacity - 1);
             for (self.calendarEntries(), 0..) |entry, index| {
                 if (index < first or index >= first + capacity) continue;
                 const value = get(entry, "calendar");
                 const row = 2 + (index - first) * 3;
-                try self.line(body, row, try self.fitLine(body, try std.fmt.allocPrint(a, "{s}{s}{s} · {s}", .{ if (index == self.calendar.picker) @as([]const u8, "> ") else "  ", text(get(value, "summary")), if (same(text(get(get(value, "target"), "calendar_id")), self.calendar.calendar_id.slice())) @as([]const u8, " (current)") else "", if (truth(get(entry, "canWrite"))) @as([]const u8, "read/write") else if (truth(get(entry, "canRead"))) "read-only" else "permission required" }), body.width), if (index == self.calendar.picker) .selected else .text);
-                try self.line(body, row + 1, try self.fitLine(body, try std.fmt.allocPrint(a, "  {s} · {s}", .{ text(get(get(value, "target"), "calendar_id")), text(get(value, "time_zone")) }), body.width), .muted);
-                self.mouseRows(body, row, @intCast(@min(@as(usize, 2), body.height -| row)), .contact, index);
+                if (row >= footer_start) continue;
+                const source_label = try self.calendarSourceLabel(value);
+                const source_target = try calendar_sources.jsonTarget(value);
+                const unavailable = !truth(get(entry, "canRead"));
+                const preferred = !invitation_destination and self.calendarSelection().isPreferred(source_target);
+                const hidden = !self.calendarSelection().selected(value);
+                const access_label: []const u8 = if (unavailable) (if (invitation_destination) "permission required" else if (row + 2 >= footer_start) "no read access" else "") else if (truth(get(entry, "canWrite"))) "read/write" else "read-only";
+                const priority_suffix: []const u8 = if (!preferred) "" else if (hidden) " · * Priority (hidden)" else " · * Priority";
+                const prefix = try std.fmt.allocPrint(a, "{s}{s} ", .{ if (invitation_destination) @as([]const u8, "") else if (hidden) "[ ] " else "[x] ", source_label });
+                const suffix = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ if (access_label.len > 0) @as([]const u8, " · ") else "", access_label, priority_suffix });
+                const summary = text(get(value, "summary"));
+                const name = if (preferred and row + 2 >= footer_start) try self.fitLine(body, summary, @intCast(@as(usize, body.width) -| body.gwidth(prefix) -| body.gwidth(suffix))) else summary;
+                const label = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ prefix, name, suffix });
+                try self.line(body, row, try self.fitLine(body, label, body.width), if (index == self.calendar.picker) .selected else .text);
+                var swatch_style = self.style(if (index == self.calendar.picker) .selected else .text);
+                if (!self.mono) swatch_style.fg = .{ .rgb = calendar_sources.readableRgb(self.calendarSelection().color(source_target), self.palette) };
+                const swatch = body.child(.{ .x_off = if (invitation_destination) 0 else 4, .y_off = @intCast(row), .height = 1, .width = 2 });
+                _ = swatch.printSegment(.{ .text = source_label, .style = swatch_style }, .{ .wrap = .none });
+                if (row + 1 < footer_start) try self.line(body, row + 1, try self.fitLine(body, try std.fmt.allocPrint(a, "    {s} · {s}{s}", .{ source_target.account, text(get(value, "time_zone")), if (truth(get(entry, "source_stale"))) @as([]const u8, " · saved discovery") else "" }), body.width), .muted);
+                const extra_status: []const u8 = if (unavailable and !invitation_destination) (if (preferred) (if (hidden) "    * Priority (hidden) · no read access" else "    * Priority · not shown · no read access") else "    Not shown · no read access") else if (preferred and body.gwidth(label) > body.width) (if (hidden) "    * Priority (hidden)" else "    * Priority") else "";
+                if (extra_status.len > 0 and row + 2 < footer_start) try self.line(body, row + 2, try self.fitLine(body, extra_status, body.width), if (preferred) .accent else .muted);
+                self.mouseRows(body, row, @intCast(@min(@as(usize, if (extra_status.len > 0) 3 else 2), footer_start -| row)), .contact, index);
             }
-            const next_x = try self.actionButton(body, body.height - 1, 0, "[q Back]", self.calendar.focus == 0, true, .dialog_action, 0);
-            _ = try self.actionButton(body, body.height - 1, next_x, "[Enter Select]", self.calendar.focus == 1, self.foregroundWorkerAvailable(), .dialog_action, 10);
+            if (!invitation_destination) {
+                var top_x = try self.actionButton(body, body.height -| 3, 0, "[Space Show/hide]", self.calendar.focus == 19, true, .dialog_action, 19);
+                top_x = try self.actionButton(body, body.height -| 3, top_x, "[a Account scope]", self.calendar.focus == 20, true, .dialog_action, 20);
+                const color_x = try self.actionButton(body, body.height -| 2, 0, "[c Color]", self.calendar.focus == 21, true, .dialog_action, 21);
+                const priority_here = self.calendar.picker < self.calendarEntries().len and self.calendarSelection().isPreferred(try calendar_sources.jsonTarget(get(self.calendarEntries()[self.calendar.picker], "calendar")));
+                _ = try self.actionButton(body, body.height -| 2, color_x, if (priority_here) @as([]const u8, "[p Clear priority]") else "[p Priority]", self.calendar.focus == 22, self.calendar.picker < self.calendarEntries().len, .dialog_action, 22);
+            }
+            const next_x = try self.actionButton(body, body.height - 1, 0, if (invitation_destination) @as([]const u8, "[q Back]") else "[Esc Cancel]", self.calendar.focus == 0, true, .dialog_action, 0);
+            _ = try self.actionButton(body, body.height - 1, next_x, if (invitation_destination) @as([]const u8, "[Enter Select]") else if (self.calendarPickerDiscovering()) "[Loading calendars…]" else "[Enter Apply]", self.calendar.focus == 10 or self.calendar.focus == 1 or self.calendar.focus == 16, if (invitation_destination) self.foregroundWorkerAvailable() else self.calendarPickerCanApply(), .dialog_action, 10);
         } else if (self.calendar.page == .detail) {
             try self.drawCalendarCard(body);
         } else if (self.calendar.page == .actions) {
-            const labels = [_][]const u8{ "Back to Mail", "Agenda", "Day", "Week", "Previous period", "Next period", "Today", "Choose calendars", "Refresh calendar", "Calendar help", "Open selected event", "Search loaded events", "Jump to date · Ctrl+G", "Join selected event · o" };
+            const labels = [_][]const u8{ "Back to Mail", "Agenda", "Day", "Week", "Previous period", "Next period", "Today", "Choose calendars", "Refresh calendar", "Calendar help", "Open selected event", "Search loaded events", "Jump to date · Ctrl+G", "Join selected event · o", "Open Calendar in Chrome · O", "Open event in Chrome · b", "Show selected calendars · v", "New event · n", "Edit event · e" };
             for (labels, 0..) |label, index| {
                 try self.line(body, index, label, if (self.calendar.focus == index) .selected else .text);
                 self.mouseRows(body, index, 1, .dialog_action, index);
@@ -13361,13 +15318,20 @@ const App = struct {
             const enabled = self.foregroundWorkerAvailable() and if (self.calendar.page == .review) (self.calendar.unknown or (self.calendar.source_message.len > 0 and (!self.calendar.confirmed_review or self.calendar.review_ready))) else if (self.calendar.page == .detail) std.mem.startsWith(u8, text(get(self.calendar.card.value, "join_url")), "https://") else self.calendar.page == .permissions;
             if (label.len > 0) x = try self.actionButton(body, body.height - 1, x, label, self.calendar.focus == 1, enabled, .dialog_action, 10);
         }
-        if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Date YYYY-MM-DD · Enter Go · Esc Cancel:", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Loaded events /", &self.calendar_query, true, .selected) else try self.line(win, win.height - 2, try self.fitLine(win, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) "j More · Confirm unlocks at end · q Back" else "y Confirm · Tab Controls · q Back") else "j/k Scroll · Enter Review action · Tab Controls · q Back") else if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) @as([]const u8, "j/k Scroll · o Join · Tab Controls · q Back") else "j/k Scroll · q Back") else if (self.calendar.page == .calendars) "j/k Calendar · Enter Select · Tab Controls · q Back" else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · g Calendars · ? Help · q Mail", win.width), .muted);
+        if (self.calendar.entering_date) try self.editLine(win, win.height - 2, "Date YYYY-MM-DD · Enter Go · Esc Cancel:", &self.calendar_date, true, .selected) else if (self.calendar.searching) try self.editLine(win, win.height - 2, "Loaded events /", &self.calendar_query, true, .selected) else try self.line(win, win.height - 2, try self.fitLine(win, if (self.calendar.page == .review) (if (self.calendar.unknown) "j/k Scroll · r Check Calendar · Tab Controls · q Back" else if (self.calendar.outcome.len > 0) "j/k Scroll · q Back" else if (self.calendar.confirmed_review) (if (!self.calendar.review_ready) "j More · Confirm unlocks at end · q Back" else "y Confirm · Tab Controls · q Back") else "j/k Scroll · Enter Review action · Tab Controls · q Back") else if (self.calendar.page == .overlaps) "j/k Event · Enter Select · Tab Controls · Esc Back" else if (self.calendar.page == .detail) (if (calendar_ui.canJoin(self.calendar.card.value)) @as([]const u8, "j/k Scroll · o Join · Tab Controls · q Back") else "j/k Scroll · q Back") else if (self.calendar.page == .calendars) (if (self.calendar.source_message.len > 0) @as([]const u8, "j/k Calendar · Enter Select · Tab Controls · q Back") else "Space Toggle · Enter Apply · Esc/q Cancel · Tab Controls") else if (self.calendar.page == .permissions or self.calendar.page == .help) "j/k Scroll · Ctrl+D/U Page · Tab Controls · q Back" else if (win.width < 60) "j/k Move · Enter Open · Tab Controls · q Mail" else "j/k Event · Enter Open · h/l Period · 1/2/3 View · g Calendars · ? Help · q Mail", win.width), .muted);
         const calendar_diagnostic = if (self.calendar.page == .permissions) @as([]const u8, "") else self.calendar.error_code.slice();
         const notice = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ self.calendar.notice.slice(), if (calendar_diagnostic.len > 0) @as([]const u8, " · ") else "", calendar_diagnostic });
         try self.line(win, win.height - 1, try self.fitLine(win, notice, win.width), if (self.calendar.error_code.len > 0 or self.calendar.unknown) .warning else .muted);
     }
 
     fn draw(self: *App) !void {
+        // A global resize fallback must also invalidate a picker target that
+        // was visible in the preceding full-sized frame.
+        self.calendar_guests_drawn_address = .{};
+        self.calendar_slots_drawn = null;
+        self.calendar_week_viewport = null;
+        self.calendar_week_related = 0;
+        self.calendar_week_title_count = 0;
         try self.ensureLoadingAnimation();
         _ = self.frame.reset(.retain_capacity);
         self.clearObsoleteStatus();
@@ -15513,6 +17477,88 @@ test "local UI: exact width and wrapped account identities occupy only their vis
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+test "sidebar navigation: arrows follow visible destinations and Tab preserves the Calendar and Follow-ups selection" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"},{\"address\":\"optional@example.test\"}]"));
+    app.labels = items(try readerInvitationTestValue(app.frame.allocator(), "[{\"id\":\"INBOX\",\"type\":\"system\"},{\"id\":\"one\",\"name\":\"Projects\",\"type\":\"user\"},{\"id\":\"two\",\"name\":\"Travel\",\"type\":\"user\"}]"));
+    app.capabilities.mail_changes = true;
+    const sidebar = app.sidebarNavigation();
+    app.focus = .navigation;
+    app.navigation = sidebar.contacts();
+    try app.onKey(.{ .codepoint = 'j' });
+    try std.testing.expectEqual(sidebar.calendar(), app.navigation);
+    try app.onKey(.{ .codepoint = 'k' });
+    try std.testing.expectEqual(sidebar.contacts(), app.navigation);
+    try app.onKey(.{ .codepoint = Key.down });
+    try std.testing.expectEqual(sidebar.calendar(), app.navigation);
+    try app.onKey(.{ .codepoint = Key.down });
+    try std.testing.expectEqual(sidebar.followUps(), app.navigation);
+    try app.onKey(.{ .codepoint = Key.down });
+    try std.testing.expectEqual(sidebar.labelsHeader(), app.navigation);
+    try app.onKey(.{ .codepoint = Key.down });
+    try std.testing.expectEqual(sidebar.labelsStart(), app.navigation);
+    for ([_]usize{ sidebar.labelsHeader(), sidebar.followUps(), sidebar.calendar(), sidebar.contacts() }) |expected| {
+        try app.onKey(.{ .codepoint = Key.up });
+        try std.testing.expectEqual(expected, app.navigation);
+    }
+    for ([_]usize{ sidebar.calendar(), sidebar.followUps() }) |destination| {
+        app.navigation = destination;
+        try app.onKey(.{ .codepoint = Key.tab });
+        try std.testing.expectEqual(Focus.list, app.focus);
+        try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(Focus.navigation, app.focus);
+        try std.testing.expectEqual(destination, app.navigation);
+        try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(Focus.reader, app.focus);
+        try app.onKey(.{ .codepoint = Key.tab });
+        try std.testing.expectEqual(Focus.navigation, app.focus);
+        try std.testing.expectEqual(destination, app.navigation);
+    }
+    app.capabilities.mail_changes = false;
+    app.navigation = 999;
+    app.focus = .list;
+    try app.onKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(app.sidebarNavigation().followUps(), app.navigation);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "sidebar navigation: focused native destinations remain visible with exact mouse hits in short and narrow panes" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"alex.demo@long-company.example\"},{\"address\":\"morgan.example@long-company-exampl.example\"},{\"address\":\"optional@example.test\"}]"));
+    app.labels = items(try readerInvitationTestValue(app.frame.allocator(), "[{\"id\":\"system\",\"type\":\"system\"},{\"id\":\"one\",\"name\":\"Projects\",\"type\":\"user\"}]"));
+    app.capabilities.mail_changes = true;
+    app.focus = .navigation;
+    const sidebar = app.sidebarNavigation();
+    for ([_]struct { columns: u16, rows: u16 }{ .{ .columns = 26, .rows = 12 }, .{ .columns = 48, .rows = 16 }, .{ .columns = 36, .rows = 32 } }) |size| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = size.columns, .rows = size.rows, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = size.columns, .height = size.rows, .screen = &screen };
+        for ([_]struct { index: usize, label: []const u8 }{ .{ .index = sidebar.calendar(), .label = "Calendar" }, .{ .index = sidebar.followUps(), .label = "Follow-ups" }, .{ .index = sidebar.labelsHeader(), .label = "LABELS" }, .{ .index = sidebar.labelsStart(), .label = "Projects" } }) |destination| {
+            screen.clear();
+            app.mouse_hits.clear();
+            app.navigation = destination.index;
+            try app.navigationDraw(win);
+            const rendered = try markdownTestScreenText(a, &screen);
+            defer a.free(rendered);
+            try std.testing.expect(std.mem.indexOf(u8, rendered, destination.label) != null);
+            if (destination.index == sidebar.calendar() or destination.index == sidebar.followUps()) {
+                const hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |candidate| {
+                    if (candidate.kind == .sidebar and candidate.index == destination.index) break candidate;
+                } else return error.MissingFocusedSidebarDestination;
+                try std.testing.expectEqual(app.style(.selected).bg, screen.readCell(hit.rect.x, hit.rect.y).?.style.bg);
+                try std.testing.expectEqual(layout.HitKind.sidebar, app.mouse_hits.at(@intCast(hit.rect.x), @intCast(hit.rect.y)).?.kind);
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
 test "compose attachments: compact list shows file sizes and scrolls to all sixteen removal targets" {
     const allocator = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -15881,6 +17927,8 @@ test "local UI: help search matches actions keys and sections and cycles without
     try std.testing.expect(!app.help_searching);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("c Color in Manage labels", help_rows[app.help_match.?].keys);
+    try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
+    try std.testing.expectEqualStrings("Up / Down in sidebar", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
     try std.testing.expectEqualStrings("m", help_rows[app.help_match.?].keys);
     try app.onHelpKey(.{ .codepoint = 'n', .text = "n" });
@@ -19254,11 +21302,11 @@ test "calendar UI: Join uses the event account and reports actual profile succes
     app.loop = loop;
     app.client = .{ .ctx = &capture, .callFn = Capture.call };
     defer app.deinit();
-    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]"));
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
     app.calendar.open = true;
     app.calendar.page = .detail;
-    try app.calendar.account.set("work@example.test");
-    const event = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"work@example.test\"},\"join_url\":\"https://meet.example.test/planning\"}");
+    try app.calendar.account.set("personal@example.test");
+    const event = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"primary\"},\"id\":\"work-meeting\",\"join_url\":\"https://meet.example.test/planning\"}");
     try app.calendar.card.replace(a, event);
     try app.onCalendarKey(.{ .codepoint = Key.enter });
     try std.testing.expectEqual(@as(usize, 0), capture.calls);
@@ -19275,7 +21323,8 @@ test "calendar UI: Join uses the event account and reports actual profile succes
     try app.apply(.open, "{\"ok\":false,\"error\":{\"code\":\"ProfileMissing\"}}");
     try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "Could not open") != null);
     try std.testing.expectEqualStrings("ProfileMissing", app.calendar.error_code.slice());
-    try app.calendar.account.set("other@example.test");
+    const foreign = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"other@example.test\",\"calendar_id\":\"primary\"},\"id\":\"foreign-meeting\",\"join_url\":\"https://meet.example.test/foreign\"}");
+    try app.calendar.card.replace(a, foreign);
     try app.calendarJoin();
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "mismatch") != null);
@@ -19300,7 +21349,12 @@ test "calendar UI: shared searchable help returns to its Calendar origin and pre
     try app.onCalendarKey(.{ .codepoint = Key.enter });
     const match = app.help_match orelse return error.MissingHelpMatch;
     try std.testing.expect(std.mem.indexOf(u8, app.helpRows()[match].action, "Chrome profile") != null);
+    var matching_rows: usize = 0;
+    for (app.helpRows()) |row| matching_rows += @intFromBool(app.helpMatches(row));
+    try std.testing.expect(matching_rows >= 2); // Join and Calendar/event browser actions.
     try app.onCalendarKey(.{ .codepoint = 'n' });
+    try std.testing.expect(app.help_match.? != match);
+    try std.testing.expect(app.helpMatches(app.helpRows()[app.help_match.?]));
     try app.onCalendarKey(.{ .codepoint = 'N' });
     try std.testing.expectEqual(match, app.help_match.?);
     var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 32, .x_pixel = 0, .y_pixel = 0 });
@@ -19313,7 +21367,8 @@ test "calendar UI: shared searchable help returns to its Calendar origin and pre
         const shown = try helpTestScreenText(a, &screen);
         defer a.free(shown);
         try std.testing.expect(std.mem.indexOf(u8, shown, "Calendar · keyboard") != null);
-        try std.testing.expect(std.mem.indexOf(u8, shown, "1/1 matches") != null);
+        const match_summary = try std.fmt.allocPrint(app.frame.allocator(), "1/{d} matches", .{matching_rows});
+        try std.testing.expect(std.mem.indexOf(u8, shown, match_summary) != null);
         try std.testing.expect(std.mem.indexOf(u8, shown, "[q Back]") != null);
         try std.testing.expect(app.help_match_start >= app.help_scroll);
         try std.testing.expect(app.help_match_end <= app.help_scroll + app.help_height);
@@ -19360,6 +21415,104 @@ test "calendar UI: shared searchable help returns to its Calendar origin and pre
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+test "calendar composer: discarded and superseded forms ignore late review and edit responses" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .compose;
+    app.calendar_form_generation = 4;
+    app.calendar_form_dirty = true;
+    app.job.calendar_compose_generation = 4;
+    try app.calendarComposeCancel();
+    try std.testing.expect(app.calendar_form_discard);
+    try app.calendarComposeControl(18);
+    try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+    for ([_]JobKind{ .calendar_event_review, .calendar_event_edit, .calendar_event_pending }) |kind| {
+        app.job.kind = kind;
+        app.job.response = "{\"ok\":true,\"data\":{}}";
+        try app.finishCalendarCompose();
+        try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+        try std.testing.expectEqual(@as(u16, 0), app.calendar_form_hash.len);
+    }
+    try app.onCalendarKey(.{ .codepoint = 'y' });
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+    try std.testing.expect(app.job.future == null);
+}
+
+test "calendar composer: preclaim errors stay editable while uncertain writes retain read-only recovery" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .event_review;
+    for ([_][]const u8{ "CalendarStoreFull", "CalendarReviewStale", "CalendarWritePermissionRequired", "NetworkUnavailable" }) |code| {
+        app.job.kind = .calendar_event_apply;
+        app.job.response = try std.fmt.allocPrint(app.job_arena.allocator(), "{{\"ok\":false,\"error\":{{\"code\":\"{s}\"}}}}", .{code});
+        try app.finishCalendarCompose();
+        try std.testing.expect(!app.calendar_form_unknown);
+        try std.testing.expect(app.calendar_form_error.len > 0);
+    }
+    app.job.response = "{\"ok\":false,\"error\":{\"code\":\"UnknownOutcome\"}}";
+    try app.finishCalendarCompose();
+    try std.testing.expect(app.calendar_form_unknown);
+    app.job.kind = .calendar_event_reconcile;
+    app.job.response = "{\"ok\":false,\"error\":{\"code\":\"NetworkUnavailable\"}}";
+    try app.finishCalendarCompose();
+    try std.testing.expect(app.calendar_form_unknown);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar_form_error.slice(), "nothing was resent") != null);
+    for ([_]JobKind{ .calendar_event_apply, .calendar_event_retry }) |kind| {
+        app.calendar_form_unknown = false;
+        app.job.kind = kind;
+        app.job.response = null;
+        app.job.failure = error.ConnectionResetByPeer;
+        try app.finishCalendarCompose();
+        try std.testing.expect(app.calendar_form_unknown);
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar_form_error.slice(), "nothing was resent") == null);
+        app.calendar_form_unknown = false;
+        app.job.failure = null;
+        app.job.response = "truncated backend frame";
+        try app.finishCalendarCompose();
+        try std.testing.expect(app.calendar_form_unknown);
+        for ([_][]const u8{ "{\"ok\":false}", "[]" }) |response| {
+            app.calendar_form_unknown = false;
+            app.job.failure = null;
+            app.job.response = response;
+            try app.finishCalendarCompose();
+            try std.testing.expect(app.calendar_form_unknown);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
+test "calendar composer: uncertain recovery requires its own complete review and defaults to Back" {
+    const a = std.testing.allocator;
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .event_review;
+    app.calendar_form_unknown = true;
+    app.calendar_form_retry_possible = true;
+    app.calendar_form_review_ready = true;
+    try app.onCalendarComposeKey(.{ .codepoint = 'r', .mods = .{ .ctrl = true } });
+    try std.testing.expect(app.calendar_form_recovery == .retry);
+    try std.testing.expectEqual(@as(usize, 16), app.calendar_form_focus);
+    try std.testing.expect(!app.calendar_form_review_ready);
+    try app.onCalendarComposeKey(.{ .codepoint = 'y' });
+    try std.testing.expect(app.job.future == null);
+    try app.onCalendarComposeKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(app.calendar_form_recovery == .none);
+    try app.onCalendarComposeKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });
+    try std.testing.expect(app.calendar_form_recovery == .archive);
+    try std.testing.expect(!app.calendar_form_review_ready);
+    try app.onCalendarComposeKey(.{ .codepoint = 'y' });
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
+}
+
 test "calendar UI: pending results preserve Help search and update its return destination" {
     const a = std.testing.allocator;
     var client: CacheTestClient = .{};
@@ -19369,8 +21522,9 @@ test "calendar UI: pending results preserve Help search and update its return de
     try app.calendar.account.set("work@example.test");
     try app.calendar.calendar_id.set("primary");
     app.calendar.open = true;
+    try app.calendar.card.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"primary\"},\"id\":\"refreshed-meeting\",\"summary\":\"Before refresh\"}"));
     const cases = [_]struct { kind: JobKind, response: []const u8, destination: calendar_ui.Page, scroll: usize = 0, focus: ?usize = null }{
-        .{ .kind = .calendar_event, .response = "{\"ok\":true,\"data\":{\"event\":{\"summary\":\"Refreshed meeting\"}}}", .destination = .detail },
+        .{ .kind = .calendar_event, .response = "{\"ok\":true,\"data\":{\"event\":{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"primary\"},\"id\":\"refreshed-meeting\",\"summary\":\"Refreshed meeting\"}}}", .destination = .detail },
         .{ .kind = .calendar_plan, .response = "{\"ok\":true,\"data\":{\"decision\":\"create\"}}", .destination = .review, .focus = 2 },
         .{ .kind = .calendar_review, .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"calendarId\":\"primary\",\"operationId\":\"fixture-operation\",\"reviewHash\":\"fixture-hash\"}}", .destination = .detail },
         .{ .kind = .calendar_event, .response = "{\"ok\":false,\"error\":{\"code\":\"CalendarReadPermissionRequired\"}}", .destination = .permissions, .focus = 2 },
@@ -20207,6 +22361,888 @@ test "meeting notifications: Join only preempts refresh and preserves queued Mai
     }
 }
 
+test "calendar composer: omitted 201 guests require a visible explicit notification choice in the App" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const response = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"canEdit":true,"event":{"id":"company-update","etag":"v1","attendees":[],"attendees_omitted":true,"attendee_count":201},"eventDraft":{"summary":"Company update","start":"2026-10-24T10:00","end":"2026-10-24T11:00","timeZone":"UTC","allDay":false,"attendees":null}}
+    );
+    const zone: @import("timezone.zig").Zone = .{};
+    app.calendar_form = try calendar_composer.Model.initEdit(app.frame.allocator(), .{ .target = .{ .account = "work@example.test", .calendar_id = "primary" }, .day = 0, .now_ms = 1000, .zone_name = "UTC", .zone = &zone }, response);
+    try app.calendarComposeLoadFields();
+    try std.testing.expectEqual(@as(usize, 201), app.calendar_form.existingGuestCount());
+    try std.testing.expect(!app.calendar_form_notify_chosen);
+    try std.testing.expect(!app.calendar_form.editable(.attendees));
+    var controls: [19]usize = undefined;
+    try std.testing.expect(std.mem.indexOfScalar(usize, app.calendarComposeControlList(&controls), 15) != null);
+    try app.onCalendarComposeKey(.{ .codepoint = 's', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(usize, 15), app.calendar_form_focus);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar_form_error.slice(), "Choose whether to email existing guests") != null);
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 104, .rows = 33, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 104, .height = 33, .screen = &screen };
+    try app.drawCalendarComposer(win);
+    const rendered = try markdownTestScreenText(a, &screen);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Notify guests: choose Email / No email") != null);
+    try app.onCalendarComposeKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(app.calendar_form_notify_chosen and app.calendar_form.send_updates == .all);
+    try app.onCalendarComposeKey(.{ .codepoint = Key.enter });
+    try std.testing.expect(app.calendar_form_notify_chosen and app.calendar_form.send_updates == .none);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar sources: progressive merge pins exact account calendar event and occurrence despite earlier arrivals" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.source_loading = true;
+    app.calendar.request_window = .{ .start_ms = 0, .end_ms = 86400000, .time_zone = "UTC" };
+    const catalogue = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"primary"},"summary":"Personal","selected":true}},{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"summary":"Work","selected":true}}]}
+    );
+    try app.calendar.calendars.replace(a, catalogue);
+    const work = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"stale":false,"events":[{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"same-event","summary":"Work occurrence","start":{"kind":"instant","value":10000},"end":{"kind":"instant","value":20000}}]}}
+    );
+    try app.calendar.source_snapshots[1].replace(a, work);
+    try app.calendarMergeSnapshots();
+    try std.testing.expectEqualStrings("work@example.test", text(get(get(app.calendarEventAt(app.calendar.selected).?, "target"), "account")));
+    const personal = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"snapshot":{"target":{"account":"personal@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"stale":false,"events":[{"target":{"account":"personal@example.test","calendar_id":"primary"},"id":"same-event","summary":"Earlier personal occurrence","start":{"kind":"instant","value":1000},"end":{"kind":"instant","value":2000}}]}}
+    );
+    try app.calendar.source_snapshots[0].replace(a, personal);
+    app.calendar.source_loading = false;
+    try app.calendarMergeSnapshots();
+    try std.testing.expectEqual(@as(usize, 1), app.calendar.selected);
+    try std.testing.expectEqualStrings("Work occurrence", text(get(app.calendarEventAt(app.calendar.selected).?, "summary")));
+    try std.testing.expect(app.calendar.complete and !app.calendar.stale);
+    app.mono = true;
+    try std.testing.expectEqualStrings("A", try app.calendarSourceLabel(app.calendarEventAt(0).?));
+    try std.testing.expectEqualStrings("B", try app.calendarSourceLabel(app.calendarEventAt(1).?));
+    try app.calendar.source_errors[0].set("ConnectionRefused");
+    try app.calendarMergeSnapshots();
+    try std.testing.expectEqualStrings("Work occurrence", text(get(app.calendarEventAt(app.calendar.selected).?, "summary")));
+    try std.testing.expect(app.calendar.stale);
+    try std.testing.expect(!truth(get(app.calendarEventAt(1).?, "source_stale")));
+}
+
+test "calendar sources: picker edits a pending copy and Esc rollback leaves persisted account visibility untouched" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .calendars;
+    try app.calendar.account.set("personal@example.test");
+    const list = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"canWrite":false,"calendar":{"target":{"account":"personal@example.test","calendar_id":"holidays"},"summary":"Holidays","selected":true,"time_zone":"UTC","access":"reader"}}]}
+    );
+    try app.calendar.source_lists[0].replace(a, list);
+    try app.calendarRebuildCatalogue();
+    app.calendar.pending_selection = app.ui_preferences.calendar;
+    try app.calendarToggleSource();
+    const calendar = get(app.calendarEntries()[0], "calendar");
+    try std.testing.expect(app.ui_preferences.calendar.selected(calendar));
+    try std.testing.expect(!app.calendarSelection().selected(calendar));
+    try app.calendarCancelSelection();
+    try std.testing.expect(app.calendar.pending_selection == null);
+    try std.testing.expect(app.ui_preferences.calendar.selected(get(app.calendarEntries()[0], "calendar")));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar sources: discovery disables Apply consistently and Cancel cannot reopen the picker" {
+    const a = std.testing.allocator;
+    const Action = enum { keyboard, mouse, cancel, open_during_main };
+    const work_list =
+        \\{"ok":true,"data":{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"summary":"Work","selected":true,"time_zone":"UTC"}}]}}
+    ;
+    const personal_agenda =
+        \\{"ok":true,"data":{"snapshot":{"target":{"account":"personal@example.test","calendar_id":"primary"},"window":{"start_ms":86400000,"end_ms":691200000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"events":[]}}}
+    ;
+    const work_agenda =
+        \\{"ok":true,"data":{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":86400000,"end_ms":691200000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"events":[]}}}
+    ;
+    for ([_]Action{ .keyboard, .mouse, .cancel, .open_during_main }) |action| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(directory);
+        // std.testing.tmpDir uses ordinary directory permissions. Preferences
+        // deliberately refuse that as a private settings destination.
+        _ = try temporary.dir.createDirPathStatus(std.testing.io, "private-ui", .fromMode(0o700));
+        const filename = try std.fs.path.join(a, &.{ directory, "private-ui", "ui.json" });
+        defer a.free(filename);
+        var client: MeetingFlowTestClient = .{ .first_response = work_list, .later_response = personal_agenda };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
+        try app.preferences_file.set(a, filename);
+        app.calendar.open = true;
+        app.calendar.day = 1;
+        app.calendar.page = if (action == .open_during_main) .main else .calendars;
+        app.calendar.list_for_picker = action != .open_during_main;
+        app.calendar.listing_all = true;
+        app.calendar.list_cursor = 2;
+        const initial_scope: calendar_sources.Scope = if (action == .open_during_main) .all_accounts else .account;
+        app.ui_preferences.calendar.scope = initial_scope;
+        try app.calendar.account.set("personal@example.test");
+        try app.calendar.calendar_id.set("primary");
+        try app.calendar.zone_name.set("UTC");
+        try app.calendar.source_lists[0].replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"primary"},"summary":"Personal","selected":true,"time_zone":"UTC"}}]}
+        ));
+        try app.calendarRebuildCatalogue();
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.pending_selection.?.scope = .all_accounts;
+        try app.start(.calendar_list, .{ .cmd = "calendar.list", .account = "work@example.test" });
+        try client.waitEntered();
+        if (action == .open_during_main) try app.calendarActivate(7);
+        try std.testing.expect(app.calendarPickerDiscovering());
+        try std.testing.expect(!app.calendarPickerCanApply());
+        var screen = try vaxis.Screen.init(a, .{ .cols = 104, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 104, .height = 30, .screen = &screen };
+        try app.drawCalendar(win);
+        const loading_screen = try markdownTestScreenText(a, &screen);
+        defer a.free(loading_screen);
+        try std.testing.expect(std.mem.indexOf(u8, loading_screen, "[Loading calendars…]") != null);
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.kind != .dialog_action or hit.index != 10);
+        if (action == .cancel) {
+            try app.onCalendarKey(.{ .codepoint = Key.escape });
+            try std.testing.expect(client.canceled.load(.acquire));
+            try std.testing.expect(app.calendar.pending_selection == null);
+            try std.testing.expect(!app.calendar.resume_lists and !app.calendar.list_for_picker);
+            try std.testing.expectEqual(calendar_sources.Scope.account, app.ui_preferences.calendar.scope);
+            app.job.future.?.await(app.io);
+            try app.finish();
+            try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+            try std.testing.expect(app.job.future == null);
+            try std.testing.expectEqual(@as(usize, 2), client.calls);
+            continue;
+        }
+        if (action == .mouse) {
+            // The visibly disabled button has no hit target; clicking its
+            // actual screen position must not trigger another control.
+            try app.onMouse(.{ .col = 15, .row = 27, .type = .press, .button = .left, .mods = .{} });
+        } else try app.onCalendarKey(.{ .codepoint = Key.enter });
+        try std.testing.expect(!client.canceled.load(.acquire));
+        try std.testing.expectEqual(JobKind.calendar_list, app.job.kind);
+        try std.testing.expectEqual(calendar_ui.Page.calendars, app.calendar.page);
+        try std.testing.expect(app.calendar.pending_selection != null);
+        try std.testing.expectEqual(initial_scope, app.ui_preferences.calendar.scope);
+        try client.finish(&app);
+        try std.testing.expectEqual(calendar_ui.Page.calendars, app.calendar.page);
+        try std.testing.expect(!app.calendarPickerDiscovering() and app.calendarPickerCanApply());
+        client.later_response = personal_agenda;
+        try app.onCalendarKey(.{ .codepoint = Key.enter });
+        try std.testing.expect(!app.preferences_warning);
+        try std.testing.expectEqual(calendar_sources.Scope.all_accounts, app.ui_preferences.calendar.scope);
+        try std.testing.expectEqual(calendar_sources.Scope.all_accounts, (try preferences.load(app.io, a, filename)).calendar.scope);
+        app.job.future.?.await(app.io);
+        client.later_response = work_agenda;
+        try app.finish();
+        app.job.future.?.await(app.io);
+        try app.finish();
+        try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+        try std.testing.expect(!app.calendar.resume_lists and !app.calendar.list_for_picker);
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 3), client.calls);
+    }
+}
+
+test "calendar sources: unreadable desired sources can be hidden without changing the same calendar in another account" {
+    const a = std.testing.allocator;
+    for ([_]u16{ 104, 48 }) |width| for ([_]u16{ 30, 10 }) |height| for ([_]bool{ true, false }) |initially_selected| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
+        app.ui_preferences.calendar.scope = .all_accounts;
+        app.calendar.open = true;
+        app.calendar.page = .calendars;
+        try app.calendar.account.set("personal@example.test");
+        const imported = try readerInvitationTestValue(app.frame.allocator(),
+            \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":false,"canWrite":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"shared-calendar"},"summary":"Imported copy","selected":true,"time_zone":"UTC"}}]}
+        );
+        const owned = try readerInvitationTestValue(app.frame.allocator(),
+            \\{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"canWrite":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"shared-calendar"},"summary":"Own calendar","selected":true,"time_zone":"UTC"}}]}
+        );
+        const imported_target: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "shared-calendar" };
+        try app.ui_preferences.calendar.set(imported_target, initially_selected, .orange);
+        try app.calendar.source_lists[0].replace(a, imported);
+        try app.calendar.source_lists[1].replace(a, owned);
+        try app.calendarRebuildCatalogue();
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"sources\":[{}]}"));
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        try app.drawCalendar(win);
+        const before = try markdownTestScreenText(a, &screen);
+        defer a.free(before);
+        try std.testing.expect(std.mem.indexOf(u8, before, if (initially_selected) "[x] A Imported copy" else "[ ] A Imported copy") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, if (initially_selected) "Showing 1 · 2 checked" else "Showing 1 · 1 checked") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, if (height == 30) "Not shown · no read access" else "no read access") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "[Esc Cancel]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "[Enter Apply]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, before, "[-]") == null);
+        const hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |candidate| {
+            if (candidate.kind == .contact and candidate.index == 0) break candidate;
+        } else return error.MissingCalendarSourceCheckbox;
+        try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+        try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[0], "calendar")));
+        try std.testing.expect(app.calendarSelection().selected(get(app.calendarEntries()[1], "calendar")));
+        try std.testing.expectEqual(initially_selected, app.calendar.selection_dirty);
+        try std.testing.expectEqual(calendar_sources.Color.orange, app.calendarSelection().color(imported_target));
+        if (initially_selected) {
+            // Undoing an in-session uncheck restores the applied preference,
+            // without showing the calendar or changing its access rights.
+            try app.onCalendarKey(.{ .codepoint = ' ' });
+            try std.testing.expect(app.calendarSelection().selected(get(app.calendarEntries()[0], "calendar")));
+            try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "Selection restored") != null);
+            try std.testing.expect(!app.calendarSourceVisible(app.calendarEntries()[0]));
+            try app.onCalendarKey(.{ .codepoint = ' ' });
+            try app.calendarCancelSelection();
+            try std.testing.expect(app.ui_preferences.calendar.selected(get(app.calendarEntries()[0], "calendar")));
+            try app.calendarActivate(7);
+            try app.onCalendarKey(.{ .codepoint = ' ' });
+        }
+        if (!initially_selected) {
+            const dirty_before = app.calendar.selection_dirty;
+            try app.onCalendarKey(.{ .codepoint = ' ' });
+            try std.testing.expectEqual(dirty_before, app.calendar.selection_dirty);
+            try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "stays unchecked") != null);
+        }
+        try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[0], "calendar")));
+        // Persist the exact pending choice through the existing preference
+        // codec. A later successful grant/provider-selected=true cannot undo
+        // the explicit false or hide the same ID in its owning account.
+        app.ui_preferences.calendar = app.calendar.pending_selection.?;
+        app.calendar.pending_selection = null;
+        const encoded = try preferences.encode(a, &app.ui_preferences);
+        defer a.free(encoded);
+        app.ui_preferences = try preferences.parse(a, encoded);
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.selection_dirty = false;
+        try app.onCalendarKey(.{ .codepoint = ' ' });
+        try std.testing.expect(!app.calendar.selection_dirty);
+        try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[0], "calendar")));
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "stays unchecked") != null);
+        app.calendar.pending_selection = null;
+        var restored = try @import("json.zig").copyObject(app.frame.allocator(), imported);
+        var restored_entry = try @import("json.zig").copyObject(app.frame.allocator(), items(get(imported, "calendars"))[0]);
+        try restored_entry.object.put(app.frame.allocator(), "canRead", .{ .bool = true });
+        try restored.object.put(app.frame.allocator(), "calendars", try @import("json.zig").value(app.frame.allocator(), .{restored_entry}));
+        try app.calendar.source_lists[0].replace(a, restored);
+        try app.calendarRebuildCatalogue();
+        try std.testing.expect(!app.calendarSourceVisible(app.calendarEntries()[0]));
+        try std.testing.expect(app.calendarSourceVisible(app.calendarEntries()[1]));
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    };
+}
+
+test "calendar sources: Priority stages exact source intent with keyboard mouse Cancel and accessible labels" {
+    const a = std.testing.allocator;
+    const target_a: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "shared" };
+    const hidden_target: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "hidden" };
+    const blocked_target: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "blocked" };
+    const other_target: @import("calendar_types.zig").Target = .{ .account = "work@example.test", .calendar_id = "shared" };
+    for ([_]u16{ 104, 48 }) |width| for ([_]u16{ 30, 10 }) |height| for ([_]bool{ false, true }) |mono| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.mono = mono;
+        app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
+        app.ui_preferences.calendar.scope = .all_accounts;
+        try app.ui_preferences.calendar.set(hidden_target, false, .green);
+        app.calendar.open = true;
+        app.calendar.page = .calendars;
+        try app.calendar.account.set("personal@example.test");
+        try app.calendar.source_lists[0].replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"shared"},"summary":"Long calendar 名称 with enough characters to clip its Priority suffix","selected":true,"time_zone":"UTC"}},{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"hidden"},"summary":"Hidden","selected":true,"time_zone":"UTC"}},{"canRead":false,"calendar":{"target":{"account":"personal@example.test","calendar_id":"blocked"},"summary":"Unavailable","selected":true,"time_zone":"UTC"}}]}
+        ));
+        try app.calendar.source_lists[1].replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"shared"},"summary":"Other account","selected":true,"time_zone":"UTC"}}]}
+        ));
+        try app.calendarRebuildCatalogue();
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try std.testing.expect(app.calendarSelection().isPreferred(target_a));
+        try std.testing.expect(!app.calendarSelection().isPreferred(other_target));
+        try std.testing.expect(app.ui_preferences.calendar.preferred == null);
+        try std.testing.expectEqual(calendar_sources.Scope.all_accounts, app.calendarSelection().scope);
+        try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[1], "calendar")));
+        try std.testing.expectEqual(calendar_sources.Color.green, app.calendarSelection().color(hidden_target));
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+        try app.drawCalendar(win);
+        const rendered = try markdownTestScreenText(a, &screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "* Priority") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "[p Clear priority]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "�") == null);
+        // p is an ordinary Tab-reachable button, including reverse traversal.
+        for ([_]usize{ 0, 19, 20, 21, 22, 10 }) |expected| {
+            try app.onCalendarKey(.{ .codepoint = Key.tab });
+            try std.testing.expectEqual(@as(?usize, expected), app.calendar.focus);
+        }
+        try app.onCalendarKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(@as(?usize, 22), app.calendar.focus);
+        try app.onCalendarKey(.{ .codepoint = Key.enter });
+        try std.testing.expect(app.calendarSelection().preferred == null);
+        screen.clear();
+        try app.drawCalendar(win);
+        const hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |candidate| {
+            if (candidate.kind == .dialog_action and candidate.index == 22) break candidate;
+        } else return error.MissingPriorityButton;
+        try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+        try std.testing.expect(app.calendarSelection().isPreferred(target_a));
+        try app.onCalendarKey(.{ .codepoint = Key.escape });
+        try std.testing.expect(app.calendar.pending_selection == null and app.ui_preferences.calendar.preferred == null);
+        try app.calendarActivate(7);
+        app.calendar.picker = 1;
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try std.testing.expect(app.calendarSelection().isPreferred(hidden_target));
+        try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[1], "calendar")));
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "hidden until shown") != null);
+        try std.testing.expectEqual(calendar_sources.Color.green, app.calendarSelection().color(hidden_target));
+        // A new unreadable Priority is refused without creating dirty state;
+        // clearing an applied Priority after access loss is always possible.
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.selection_dirty = false;
+        app.calendar.picker = 2;
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try std.testing.expect(!app.calendar.selection_dirty and app.calendarSelection().preferred == null);
+        try std.testing.expectEqualStrings("No read access · cannot be Priority", app.calendar.notice.slice());
+        try app.ui_preferences.calendar.setPreferred(blocked_target);
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try std.testing.expect(app.calendarSelection().preferred == null and app.ui_preferences.calendar.isPreferred(blocked_target));
+        // Failure to persist must leave the applied Priority unchanged.
+        app.calendar.picker = 0;
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try app.calendarShowSelected();
+        try std.testing.expect(app.preferences_warning);
+        try std.testing.expect(app.ui_preferences.calendar.isPreferred(blocked_target));
+        try std.testing.expect(app.calendarSelection().isPreferred(target_a));
+        try std.testing.expect(app.job.future == null);
+        // Applied legends mark only the exact visible source, in NO_COLOR too.
+        app.calendar.pending_selection = null;
+        try app.ui_preferences.calendar.setPreferred(target_a);
+        screen.clear();
+        try app.calendarLegend(win, 0);
+        const legend = try markdownTestScreenText(a, &screen);
+        defer a.free(legend);
+        try std.testing.expect(std.mem.indexOf(u8, legend, "A*") != null);
+        try std.testing.expect(std.mem.indexOf(u8, legend, "D*") == null);
+        try app.ui_preferences.calendar.set(target_a, false, null);
+        screen.clear();
+        try app.calendarLegend(win, 0);
+        const hidden_legend = try markdownTestScreenText(a, &screen);
+        defer a.free(hidden_legend);
+        try std.testing.expect(std.mem.indexOf(u8, hidden_legend, "A*") == null);
+        // Invitation destinations never expose a display-ranking control.
+        try app.calendar.source_message.set("invitation-source");
+        app.calendar.page = .calendars;
+        app.calendar.picker = 0;
+        app.calendar.focus = null;
+        screen.clear();
+        try app.drawCalendar(win);
+        const invitation_picker = try markdownTestScreenText(a, &screen);
+        defer a.free(invitation_picker);
+        try std.testing.expect(std.mem.indexOf(u8, invitation_picker, "[p ") == null);
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try std.testing.expect(app.ui_preferences.calendar.isPreferred(target_a));
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    };
+}
+
+test "calendar sources: local picker staging and Cancel stay usable without touching unrelated durable work" {
+    const a = std.testing.allocator;
+    for ([_]JobKind{ .calendar_apply, .calendar_reconcile, .preferences_save }) |kind| for ([_]bool{ false, true }) |mouse| {
+        var client: MeetingFlowTestClient = .{};
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = MeetingFlowTestClient.provider };
+        app.calendar.open = true;
+        app.calendar.page = .calendars;
+        try app.calendar.account.set("personal@example.test");
+        try app.calendar.calendar_id.set("primary");
+        try app.calendar.source_lists[0].replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"primary"},"summary":"Personal","selected":true,"time_zone":"UTC"}},{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"other"},"summary":"Other","selected":true,"time_zone":"UTC"}}]}
+        ));
+        const original: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "primary" };
+        const replacement: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "other" };
+        try app.ui_preferences.calendar.setPreferred(original);
+        try app.calendarRebuildCatalogue();
+        app.calendar.pending_selection = app.ui_preferences.calendar;
+        try app.start(kind, .{ .cmd = "synthetic-held-durable-operation", .account = "personal@example.test" });
+        try client.waitEntered();
+        try app.onCalendarKey(.{ .codepoint = Key.down });
+        try std.testing.expectEqual(@as(usize, 1), app.calendar.picker);
+        try app.onCalendarKey(.{ .codepoint = 'p' });
+        try app.onCalendarKey(.{ .codepoint = ' ' });
+        try app.onCalendarKey(.{ .codepoint = 'c' });
+        try std.testing.expect(app.calendarSelection().isPreferred(replacement));
+        try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[1], "calendar")));
+        try std.testing.expect(app.ui_preferences.calendar.isPreferred(original));
+        try std.testing.expect(app.ui_preferences.calendar.selected(get(app.calendarEntries()[1], "calendar")));
+        for ([_]usize{ 0, 19, 20, 21, 22, 10 }) |expected| {
+            try app.onCalendarKey(.{ .codepoint = Key.tab });
+            try std.testing.expectEqual(@as(?usize, expected), app.calendar.focus);
+        }
+        try app.onCalendarKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expectEqual(@as(?usize, 22), app.calendar.focus);
+        // Direct Apply and scope changes are not local-only: they must leave
+        // preferences and the held future untouched, for mouse and keyboard.
+        const staged_scope = app.calendarSelection().scope;
+        try app.onCalendarKey(.{ .codepoint = 'a' });
+        try std.testing.expectEqual(staged_scope, app.calendarSelection().scope);
+        app.calendar.focus = 10;
+        try app.onCalendarKey(.{ .codepoint = Key.enter });
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "selection stays staged") != null);
+        try app.calendarActivate(10);
+        try app.calendarActivate(20);
+        try std.testing.expect(app.calendar.pending_selection != null and !app.preferences_warning);
+        try std.testing.expect(app.ui_preferences.calendar.isPreferred(original));
+        var screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = 24, .screen = &screen };
+        try app.drawCalendar(win);
+        const rendered = try markdownTestScreenText(a, &screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "[Esc Cancel]") != null);
+        // Mouse staging follows exactly the same local path as p.
+        if (mouse) {
+            const priority_hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                if (hit.kind == .dialog_action and hit.index == 22) break hit;
+            } else return error.MissingPriorityButton;
+            try app.onMouse(.{ .col = @intCast(priority_hit.rect.x), .row = @intCast(priority_hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+            try std.testing.expect(app.calendarSelection().preferred == null);
+            const cancel_hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                if (hit.kind == .dialog_action and hit.index == 0) break hit;
+            } else return error.MissingPickerCancel;
+            try app.onMouse(.{ .col = @intCast(cancel_hit.rect.x), .row = @intCast(cancel_hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+        } else try app.onCalendarKey(.{ .codepoint = Key.escape });
+        try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+        try std.testing.expect(app.calendar.pending_selection == null and !app.calendar.selection_dirty);
+        try std.testing.expect(app.ui_preferences.calendar.isPreferred(original));
+        try std.testing.expect(app.ui_preferences.calendar.selected(get(app.calendarEntries()[1], "calendar")));
+        try std.testing.expect(app.job.future != null and app.job.kind == kind);
+        try std.testing.expect(!client.canceled.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), client.calls);
+    };
+}
+
+test "calendar sources: picker mouse toggles pending boxes and renders applied versus checked counts" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.calendar.open = true;
+    app.calendar.page = .calendars;
+    try app.calendar.account.set("personal@example.test");
+    const list = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"holidays"},"summary":"Holidays","selected":true,"time_zone":"UTC"}}]}
+    );
+    try app.calendar.source_lists[0].replace(a, list);
+    try app.calendarRebuildCatalogue();
+    app.calendar.pending_selection = app.ui_preferences.calendar;
+    try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"sources\":[{}]}"));
+    var screen = try vaxis.Screen.init(a, .{ .cols = 104, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 104, .height = 30, .screen = &screen };
+    try app.drawCalendar(win);
+    const hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |candidate| {
+        if (candidate.kind == .contact and candidate.index == 0) break candidate;
+    } else return error.MissingCalendarSourceCheckbox;
+    try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+    try std.testing.expectEqual(calendar_ui.Page.calendars, app.calendar.page);
+    const calendar = get(app.calendarEntries()[0], "calendar");
+    try std.testing.expect(app.ui_preferences.calendar.selected(calendar));
+    try std.testing.expect(!app.calendarSelection().selected(calendar));
+    screen.clear();
+    try app.drawCalendar(win);
+    const rendered = try markdownTestScreenText(a, &screen);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Showing 1 · 0 checked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Enter Select") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Enter Apply") != null);
+    try app.onCalendarKey(.{ .codepoint = Key.escape });
+    try std.testing.expect(app.calendar.pending_selection == null);
+    try std.testing.expect(app.ui_preferences.calendar.selected(get(app.calendarEntries()[0], "calendar")));
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar sources: actual event and legend rendering avoid theme error aliases and preserve monochrome identity" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const values = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"primary"},"summary":"Personal","selected":true}},{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"summary":"Work","selected":true}}]}
+    );
+    try app.calendar.calendars.replace(a, values);
+    try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"sources\":[{},{}]}"));
+    const event = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"personal@example.test\",\"calendar_id\":\"primary\"}}");
+    try app.ui_preferences.calendar.set(try calendar_sources.jsonTarget(event), true, .magenta);
+    app.palette.magenta = app.palette.red;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 3, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 3, .screen = &screen };
+    for ([_]bool{ false, true }) |mono| {
+        screen.clear();
+        app.mono = mono;
+        try app.calendarColoredLine(win, 0, "A 09:00 Example", event, .selected);
+        try app.calendarLegend(win, 1);
+        const cell = screen.readCell(0, 0).?;
+        const legend = screen.readCell(9, 1).?;
+        try std.testing.expectEqualStrings("A", cell.char.grapheme);
+        try std.testing.expectEqualStrings("A", legend.char.grapheme);
+        if (mono) {
+            try std.testing.expect(cell.style.reverse);
+            try std.testing.expectEqual(app.style(.selected).fg, cell.style.fg);
+        } else {
+            try std.testing.expect(!std.meta.eql(vaxis.Color{ .rgb = app.palette.red }, cell.style.fg));
+            try std.testing.expectEqual(vaxis.Color{ .rgb = app.palette.selection }, cell.style.bg);
+            try std.testing.expectEqual(cell.style.fg, legend.style.fg);
+        }
+    }
+}
+
+test "calendar sources: foreground browser and detail actions resume the exact canceled source" {
+    const a = std.testing.allocator;
+    const catalogue =
+        \\{"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"summary":"Work","selected":true}}],"complete":true}
+    ;
+    const agenda_response =
+        \\{"ok":true,"data":{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"stale":false,"events":[{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"selected-event","summary":"A meeting","join_url":"https://meet.example.test/work","start":{"kind":"instant","value":1000},"end":{"kind":"instant","value":2000}}]}}}
+    ;
+    for ([_]u8{ 0, 1, 2, 3 }) |action| {
+        var client: MeetingFlowTestClient = .{ .later_response = if (action == 2)
+            \\{"ok":true,"data":{"event":{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"selected-event","summary":"A meeting","description":"Full event notes","start":{"kind":"instant","value":1000},"end":{"kind":"instant","value":2000}}}}
+        else
+            "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Profile 2\"}}" };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.calendar.open = true;
+        try app.calendar.account.set("work@example.test");
+        try app.calendar.calendar_id.set("primary");
+        try app.calendar.zone_name.set("UTC");
+        app.calendar.request_window = .{ .start_ms = 0, .end_ms = 86400000, .time_zone = "UTC" };
+        try app.calendar.calendars.replace(a, try readerInvitationTestValue(app.frame.allocator(), catalogue));
+        try app.calendar.agenda.replace(a, get(try readerInvitationTestValue(app.frame.allocator(), agenda_response), "data"));
+        app.calendar.source_loading = true;
+        app.calendar.source_cursor = 1;
+        try app.start(.calendar_agenda, .{ .cmd = "calendar.agenda", .account = "work@example.test", .calendarId = "primary" });
+        try client.waitEntered();
+        if (action == 2) try app.calendarActivate(10) else if (action == 3) try app.calendarJoin() else try app.calendarBrowser(action == 1);
+        try std.testing.expect(client.canceled.load(.acquire));
+        try std.testing.expect(app.calendar.resume_sources);
+        try std.testing.expectEqual(@as(usize, 0), app.calendar.source_cursor);
+        app.job.future.?.await(app.io);
+        const foreground = try client.request(&app, 1);
+        try std.testing.expectEqualStrings(if (action == 2) @as([]const u8, "calendar.event") else if (action == 3) "browser.open" else if (action == 1) "calendar.event-open" else "calendar.open", text(get(foreground, "cmd")));
+        if (action == 3) try std.testing.expectEqualStrings("https://meet.example.test/work", text(get(foreground, "url")));
+        client.later_response = agenda_response;
+        try app.finish();
+        try std.testing.expectEqual(JobKind.calendar_agenda, app.job.kind);
+        app.job.future.?.await(app.io);
+        const resumed = try client.request(&app, 2);
+        try std.testing.expectEqualStrings("work@example.test", text(get(resumed, "account")));
+        try std.testing.expectEqualStrings("primary", text(get(resumed, "calendarId")));
+        try app.finish();
+        try std.testing.expect(app.calendar.complete and !app.calendar.source_loading and !app.calendar.resume_sources);
+        try std.testing.expect(app.job.future == null);
+        if (action == 2) try std.testing.expectEqualStrings("Full event notes", text(get(app.calendar.card.value, "description")));
+    }
+}
+
+test "calendar sources: New during first discovery leaves the request running and says calendars are loading" {
+    const a = std.testing.allocator;
+    var client: MeetingFlowTestClient = .{};
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    defer app.cancelJob();
+    try meetingFlowReady(&app, &client, loop);
+    app.calendar.open = true;
+    try app.start(.calendar_list, .{ .cmd = "calendar.list", .account = "work@example.test" });
+    try client.waitEntered();
+    try app.onCalendarKey(.{ .codepoint = 'n' });
+    try std.testing.expect(!client.canceled.load(.acquire));
+    try std.testing.expect(app.job.future != null);
+    try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "loading") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "No writable") == null);
+}
+
+test "calendar sources: catalogue reordering invalidates source-position snapshots before another period fetch" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try app.calendar.account.set("personal@example.test");
+    const before = try readerInvitationTestValue(app.frame.allocator(),
+        \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"a"},"summary":"A","selected":true}},{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"b"},"summary":"B","selected":true}}]}
+    );
+    try app.calendar.source_lists[0].replace(a, before);
+    try app.calendarRebuildCatalogue();
+    try app.calendar.source_snapshots[0].replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"source\":\"a\"}}"));
+    try app.calendar.source_snapshots[1].replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"source\":\"b\"}}"));
+    app.calendar.request_window = .{ .start_ms = 0, .end_ms = 86400000, .time_zone = "UTC" };
+    const after = try @import("json.zig").copyObject(app.frame.allocator(), before);
+    var reordered = after;
+    const entries = items(get(before, "calendars"));
+    try reordered.object.put(app.frame.allocator(), "calendars", try @import("json.zig").value(app.frame.allocator(), .{ entries[1], entries[0] }));
+    try app.calendar.source_lists[0].replace(a, reordered);
+    try app.calendarRebuildCatalogue();
+    try std.testing.expect(app.calendar.request_window == null);
+    try std.testing.expect(app.calendar.source_snapshots[0].value == .null);
+    try std.testing.expect(app.calendar.source_snapshots[1].value == .null);
+    try std.testing.expectEqualStrings("b", text(get(get(get(app.calendarEntries()[0], "calendar"), "target"), "calendar_id")));
+}
+
+test "calendar sources: malformed raw agenda events retain the old source and continue healthy neighbors" {
+    const a = std.testing.allocator;
+    const healthy_response =
+        \\{"ok":true,"data":{"snapshot":{"target":{"account":"personal@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":200,"complete":true,"events":[{"target":{"account":"personal@example.test","calendar_id":"primary"},"id":"healthy-neighbor","summary":"Healthy event","start":{"kind":"instant","value":3000},"end":{"kind":"instant","value":4000}}]}}}
+    ;
+    for ([_]u8{ 0, 1, 2 }) |shape| {
+        var client: MeetingFlowTestClient = .{ .hold_first = false, .first_response = healthy_response };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.calendar.open = true;
+        try app.calendar.account.set("work@example.test");
+        try app.calendar.zone_name.set("UTC");
+        app.calendar.request_window = .{ .start_ms = 0, .end_ms = 86400000, .time_zone = "UTC" };
+        try app.calendar.calendars.replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"summary":"Work","selected":true}},{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"primary"},"summary":"Personal","selected":true}}]}
+        ));
+        const old = try readerInvitationTestValue(app.frame.allocator(),
+            \\{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"events":[{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"retained-event","summary":"Retained event","start":{"kind":"instant","value":1000},"end":{"kind":"instant","value":2000}}]}}
+        );
+        try app.calendar.source_snapshots[0].replace(a, old);
+        var malformed = try @import("json.zig").copyObject(app.frame.allocator(), get(old, "snapshot"));
+        if (shape == 0) {
+            _ = malformed.object.swapRemove("events");
+        } else try malformed.object.put(app.frame.allocator(), "events", if (shape == 1) .null else .{ .string = "not-an-event-array" });
+        app.calendar.source_loading = true;
+        app.calendar.source_cursor = 1;
+        app.job.kind = .calendar_agenda;
+        app.job.response = try std.json.Stringify.valueAlloc(app.job_arena.allocator(), .{ .ok = true, .data = .{ .snapshot = malformed } }, .{});
+        try app.finishCalendar();
+        try std.testing.expect(app.calendar.source_errors[0].len > 0);
+        try std.testing.expectEqual(JobKind.calendar_agenda, app.job.kind);
+        try std.testing.expect(app.job.future != null);
+        app.job.future.?.await(app.io);
+        const next = try client.request(&app, 0);
+        try std.testing.expectEqualStrings("personal@example.test", text(get(next, "account")));
+        try app.finish();
+        // The retained source is a complete older snapshot; freshness is a
+        // separate flag. It must stay visibly stale, never an authoritative
+        // empty current result, while the healthy neighbor finishes.
+        try std.testing.expect(!app.calendar.source_loading and app.calendar.complete and app.calendar.stale);
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "Saved calendars") != null);
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "availability unknown") != null);
+        try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "Up to date") == null);
+        try std.testing.expectEqual(@as(usize, 2), app.calendarEvents().len);
+        try std.testing.expectEqualStrings("retained-event", text(get(app.calendarEvents()[0], "id")));
+        try std.testing.expect(truth(get(app.calendarEvents()[0], "source_stale")));
+        try std.testing.expectEqualStrings("healthy-neighbor", text(get(app.calendarEvents()[1], "id")));
+        try std.testing.expect(!truth(get(app.calendarEvents()[1], "source_stale")));
+    }
+}
+
+test "calendar sources: held full card reads preserve newer actions pickers search and date input" {
+    const a = std.testing.allocator;
+    const Context = enum { actions, calendars, search, detail_search, date };
+    for ([_]Context{ .actions, .calendars, .search, .detail_search, .date }) |context| {
+        var client: MeetingFlowTestClient = .{ .first_response =
+            \\{"ok":true,"data":{"event":{"target":{"account":"work@example.test","calendar_id":"work-shared"},"id":"pinned-event","summary":"Loaded full details","description":"Full notes"}}}
+        };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.calendar.open = true;
+        app.calendar.page = .detail;
+        try app.calendar.card.replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"target":{"account":"work@example.test","calendar_id":"work-shared"},"id":"pinned-event","summary":"Compact header"}
+        ));
+        try app.start(.calendar_event, .{ .cmd = "calendar.event", .account = "work@example.test", .calendarId = "work-shared", .eventId = "pinned-event" });
+        try client.waitEntered();
+        if (context != .detail_search) try app.onCalendarKey(.{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+        switch (context) {
+            .actions => {},
+            .calendars => try app.calendarActivate(7),
+            .search, .detail_search => {
+                try app.calendarActivate(11);
+                try app.calendar_query.set(a, "my in-progress search");
+            },
+            .date => {
+                try app.calendarActivate(12);
+                try app.calendar_date.set(a, "2026-11-03");
+            },
+        }
+        app.calendar.scroll = 7;
+        app.calendar.focus = 3;
+        try app.calendar.notice.set("Current interaction guidance");
+        const page = app.calendar.page;
+        try client.finish(&app);
+        try std.testing.expectEqual(page, app.calendar.page);
+        try std.testing.expectEqual(@as(usize, 7), app.calendar.scroll);
+        try std.testing.expectEqual(@as(?usize, 3), app.calendar.focus);
+        try std.testing.expectEqualStrings("Current interaction guidance", app.calendar.notice.slice());
+        try std.testing.expectEqualStrings("Loaded full details", text(get(app.calendar.card.value, "summary")));
+        try std.testing.expectEqualStrings("work@example.test", text(get(get(app.calendar.card.value, "target"), "account")));
+        if (context == .search or context == .detail_search) {
+            try std.testing.expect(app.calendar.searching);
+            try std.testing.expectEqualStrings("my in-progress search", app.calendar_query.value());
+        }
+        if (context == .date) {
+            try std.testing.expect(app.calendar.entering_date);
+            try std.testing.expectEqualStrings("2026-11-03", app.calendar_date.value());
+        }
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 1), client.calls);
+    }
+}
+
+test "calendar sources: browser detail and Join use selected event source instead of the Mail account" {
+    const Capture = struct {
+        request: @import("../bounded.zig").Text(8192) = .{},
+        fn call(context: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try self.request.set(raw);
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Profile 2\"}}");
+        }
+    };
+    const a = std.testing.allocator;
+    const Action = enum { calendar_browser, calendar_browser_detail, palette_calendar, palette_event, palette_join, palette_edit, palette_open, palette_back, event_browser, detail, join };
+    for ([_]Action{ .calendar_browser, .calendar_browser_detail, .palette_calendar, .palette_event, .palette_join, .palette_edit, .palette_open, .palette_back, .event_browser, .detail, .join }) |action| {
+        var capture: Capture = .{};
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var environment = std.process.Environ.Map.init(a);
+        defer environment.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.environ = &environment;
+        app.loop = loop;
+        app.client = .{ .ctx = &capture, .callFn = Capture.call };
+        app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
+        app.calendar.open = true;
+        try app.calendar.account.set("personal@example.test");
+        try app.calendar.calendar_id.set("personal-calendar");
+        try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"events\":[{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"work-shared\"},\"id\":\"same-id\",\"join_url\":\"https://meet.example.test/work\"}]}}"));
+        if (action == .calendar_browser_detail or action == .palette_calendar or action == .palette_event or action == .palette_join or action == .palette_edit or action == .palette_open or action == .palette_back) {
+            try app.calendar.card.replace(a, app.calendarEventAt(0).?);
+            app.calendar.page = .detail;
+            // A progressive refresh can remove the pinned work event from
+            // the agenda while the detail card stays visible.
+            try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"events\":[{\"target\":{\"account\":\"personal@example.test\",\"calendar_id\":\"personal-calendar\"},\"id\":\"replacement-event\"}]}}"));
+        }
+        switch (action) {
+            .calendar_browser, .calendar_browser_detail => try app.calendarBrowser(false),
+            .palette_calendar, .palette_event, .palette_join, .palette_edit, .palette_open, .palette_back => {
+                try app.onCalendarKey(.{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+                try app.onCalendarKey(.{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+                try std.testing.expectEqual(calendar_ui.Page.detail, app.calendar.actions_return);
+                if (action == .palette_back) try app.onCalendarKey(.{ .codepoint = Key.escape }) else try app.calendarActivate(if (action == .palette_calendar) 14 else if (action == .palette_event) 15 else if (action == .palette_edit) 18 else if (action == .palette_open) 10 else 13);
+            },
+            .event_browser => try app.calendarBrowser(true),
+            .detail => try app.calendarActivate(10),
+            .join => try app.calendarJoin(),
+        }
+        if (action == .palette_open or action == .palette_back) {
+            try std.testing.expect(app.job.future == null);
+            try std.testing.expectEqual(calendar_ui.Page.detail, app.calendar.page);
+            try std.testing.expectEqualStrings("work@example.test", text(get(get(app.calendar.card.value, "target"), "account")));
+            continue;
+        }
+        app.job.future.?.await(app.io);
+        const request = try readerInvitationTestValue(app.frame.allocator(), capture.request.slice());
+        try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+        try std.testing.expectEqual(@as(usize, 0), app.account_index);
+        try std.testing.expectEqualStrings("personal@example.test", app.calendar.account.slice());
+        try std.testing.expectEqualStrings(switch (action) {
+            .calendar_browser, .calendar_browser_detail, .palette_calendar => "calendar.open",
+            .event_browser, .palette_event => "calendar.event-open",
+            .detail, .palette_edit => "calendar.event",
+            .join, .palette_join => "browser.open",
+            .palette_open, .palette_back => unreachable,
+        }, text(get(request, "cmd")));
+        if (action == .event_browser or action == .palette_event or action == .palette_edit or action == .detail) {
+            try std.testing.expectEqualStrings("work-shared", text(get(request, "calendarId")));
+            try std.testing.expectEqualStrings("same-id", text(get(request, "eventId")));
+        }
+    }
+}
+
 test "meeting notifications: held Join completion remains attached to its original occurrence" {
     const a = std.testing.allocator;
     var client: MeetingFlowTestClient = .{ .first_response = "{\"ok\":true,\"data\":{\"fixture\":true,\"profile\":\"--profile-directory=Profile 1\"}}" };
@@ -20298,6 +23334,8 @@ test "meeting notifications: discovery retries failures promptly but retains aut
         .{ .response = null, .delay = 30000 },
         .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":false,\"cached\":\"true\",\"calendars\":[]}}", .delay = 30000 },
         .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":false,\"calendars\":{}}}", .delay = 30000 },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":true,\"calendars\":[{\"canRead\":true,\"calendar\":{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"primary\"},\"primary\":\"true\"}}]}}", .delay = 30000, .target_after = true },
+        .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":true,\"calendars\":[{\"canRead\":true,\"calendar\":{\"target\":{\"account\":\"work@example.test\",\"calendar_id\":\"primary\"},\"selected\":\"true\"}}]}}", .delay = 30000, .target_after = true },
         .{ .response = "{", .delay = 30000 },
         .{ .response = "{\"ok\":false,\"error\":{\"code\":\"VaultLocked\"}}", .delay = 30000 },
         .{ .response = "{\"ok\":true,\"data\":{\"account\":\"work@example.test\",\"complete\":false,\"calendars\":[]}}", .delay = 600000 },
@@ -20347,4 +23385,612 @@ test "meeting notifications: discovery retries failures promptly but retains aut
         }
         try std.testing.expectEqual(@as(usize, 0), client.active.load(.acquire));
     }
+}
+
+fn calendarGuestsTestForm(app: *App, account: []const u8) !void {
+    if (app.accounts.len == 0) app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
+    app.calendar.open = true;
+    const zone: timezone.Zone = .{};
+    app.calendar_form = try calendar_composer.Model.init(app.frame.allocator(), .{ .target = .{ .account = account, .calendar_id = "primary" }, .day = 0, .now_ms = 0, .zone_name = "UTC", .zone = &zone });
+    try app.calendarComposeLoadFields();
+}
+
+test "calendar composer: local Cancel escapes held reads and preferences while event writes stay protected" {
+    const a = std.testing.allocator;
+    for ([_]JobKind{ .calendar_event_pending, .preferences_save, .calendar_event_reconcile, .calendar_event_abandon, .calendar_event_apply, .calendar_event_retry }) |kind| for ([_]bool{ false, true }) |mouse| {
+        var client: MeetingFlowTestClient = .{};
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = MeetingFlowTestClient.provider };
+        try calendarGuestsTestForm(&app, "personal@example.test");
+        try app.start(kind, .{ .cmd = "synthetic-held-operation", .account = app.account() });
+        try client.waitEntered();
+        const generation = app.calendar_form_generation;
+        if (mouse) try app.calendarActivate(116) else try app.onKey(.{ .codepoint = Key.escape });
+        if (kind == .calendar_event_apply or kind == .calendar_event_retry) {
+            try std.testing.expect(app.calendar.page == .compose and app.job.future != null);
+            try std.testing.expectEqual(generation, app.calendar_form_generation);
+        } else {
+            try std.testing.expect(app.calendar.page == .main);
+            try std.testing.expect(app.calendar_form_generation != generation);
+            try std.testing.expectEqual(kind == .calendar_event_pending, client.canceled.load(.acquire));
+            try std.testing.expectEqual(kind != .calendar_event_pending, app.job.future != null);
+        }
+    };
+}
+
+test "calendar composer: discard is modal and stale underlying Cancel clicks cannot discard" {
+    const a = std.testing.allocator;
+    for ([_]u16{ 48, 132 }) |width| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        try calendarGuestsTestForm(&app, "personal@example.test");
+        try app.calendar_form_fields[0].set(a, "Keep this typed event");
+        app.calendar_form_dirty = true;
+        var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 24, .screen = &screen };
+        try app.drawCalendarComposer(win);
+        const old_cancel = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+            if (hit.index == 116) break hit;
+        } else return error.MissingCancel;
+        try app.onMouse(.{ .col = @intCast(old_cancel.rect.x), .row = @intCast(old_cancel.rect.y), .type = .press, .button = .left, .mods = .{} });
+        try std.testing.expect(app.calendar_form_discard);
+        screen.clear();
+        try app.drawCalendarComposer(win);
+        const text_screen = try markdownTestScreenText(a, &screen);
+        defer a.free(text_screen);
+        try std.testing.expect(std.mem.indexOf(u8, text_screen, "Discard your unsaved event?") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text_screen, "Tab Choose · Enter Activate") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text_screen, "▏") == null);
+        try std.testing.expect(vaxis.Color.eql(app.style(.muted).fg, screen.readCell(@intCast(old_cancel.rect.x), @intCast(old_cancel.rect.y)).?.style.fg));
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.index == 118 or hit.index == 119);
+        try app.onMouse(.{ .col = @intCast(old_cancel.rect.x), .row = @intCast(old_cancel.rect.y), .type = .press, .button = .left, .mods = .{} });
+        try std.testing.expect(app.calendar_form_discard and app.calendar.page == .compose);
+        try app.onKey(.{ .codepoint = Key.escape });
+        try std.testing.expect(!app.calendar_form_discard and app.calendar_form_dirty);
+        try std.testing.expectEqualStrings("Keep this typed event", app.calendar_form_fields[0].value());
+        try app.onKey(.{ .codepoint = Key.escape });
+        try app.onKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });
+        try std.testing.expect(app.calendar.page == .main and !app.calendar_form_dirty);
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    }
+}
+
+const CalendarGuestsTestClient = struct {
+    account: @import("../bounded.zig").Text(254) = .{},
+    denied: bool = false,
+    fn cached(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const request = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+        try std.testing.expectEqualStrings("contacts.list", text(get(request, "cmd")));
+        try self.account.set(text(get(request, "account")));
+        if (self.denied) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"PermissionDenied\"}}");
+        return a.dupe(u8,
+            \\{"ok":true,"data":{"cacheReady":true,"contacts":[{"name":"Alex Work","emails":[{"address":"alex@example.test"},{"address":"alex.work@example.test"}]}]}}
+        );
+    }
+};
+
+test "calendar composer: guest picker uses destination contacts and preserves local form and notification choices" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |denied| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var client: CalendarGuestsTestClient = .{ .denied = denied };
+        app.client = .{ .ctx = &client, .callFn = CalendarGuestsTestClient.cached, .cachedFn = CalendarGuestsTestClient.cached };
+        try calendarGuestsTestForm(&app, "work@example.test");
+        try app.calendar_form_fields[8].set(a, "typed@example.test");
+        app.calendar_form_focus = 23;
+        app.calendar_form_dirty = false;
+        app.calendar_form.send_updates = .none;
+        app.calendar_form_notify_chosen = false;
+        try app.calendarComposeControl(23);
+        try std.testing.expect(app.calendar_guests_open);
+        try std.testing.expectEqualStrings("work@example.test", client.account.slice());
+        try std.testing.expectEqualStrings("personal@example.test", app.account());
+        try std.testing.expect(!app.compose_active and !app.picker);
+        if (denied) try std.testing.expect(std.mem.indexOf(u8, app.calendar_guests_error.slice(), "Contacts-read") != null);
+        try app.onCalendarGuestsKey(.{ .codepoint = Key.escape });
+        try std.testing.expect(app.calendar.page == .compose and !app.calendar_guests_open);
+        try std.testing.expectEqual(@as(usize, 23), app.calendar_form_focus);
+        try std.testing.expectEqualStrings("typed@example.test", app.calendar_form_fields[8].value());
+        try std.testing.expect(!app.calendar_form_dirty and !app.calendar_form_notify_chosen and app.calendar_form.send_updates == .none);
+        if (!denied) {
+            app.calendar_form_focus = 8;
+            try app.onCalendarComposeKey(.{ .codepoint = '@', .mods = .{ .ctrl = true } });
+            try std.testing.expect(app.calendar_guests_open);
+            app.calendar_guests_selected = 1;
+            try app.calendar_guests_drawn_address.set("alex.work@example.test");
+            try app.onCalendarGuestsKey(.{ .codepoint = Key.enter });
+            try std.testing.expect(!app.calendar_guests_open and app.calendar_form_dirty);
+            try std.testing.expectEqualStrings("typed@example.test, alex.work@example.test", app.calendar_form_fields[8].value());
+            try std.testing.expect(!app.calendar_form_notify_chosen and app.calendar_form.send_updates == .none);
+        }
+        try std.testing.expect(!app.compose_active and app.job.future == null);
+    }
+}
+
+test "calendar composer: guest loading Back remains keyboard accessible and late replies cannot reopen it" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |mouse| {
+        var client: MeetingFlowTestClient = .{};
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        app.loop = loop;
+        app.client = .{ .ctx = &client, .callFn = MeetingFlowTestClient.provider };
+        try calendarGuestsTestForm(&app, "personal@example.test");
+        app.calendar_guests_open = true;
+        app.calendar_guests_focus = 0;
+        app.calendar_guests_return_focus = 23;
+        try app.calendar_guests_account.set(app.calendar_form.account.slice());
+        try app.start(.calendar_guest_contacts, .{ .cmd = "contacts.list", .account = app.calendar_form.account.slice() });
+        try client.waitEntered();
+        const old_generation = app.calendar_form_generation;
+        if (mouse) try app.calendarGuestsActivate(272) else {
+            for (0..3) |_| try app.onCalendarGuestsKey(.{ .codepoint = Key.tab });
+            try std.testing.expectEqual(@as(usize, 3), app.calendar_guests_focus);
+            try app.onCalendarGuestsKey(.{ .codepoint = Key.enter });
+        }
+        try std.testing.expect(!app.calendar_guests_open and app.calendar.page == .compose and app.job.future == null);
+        try std.testing.expect(client.canceled.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 23), app.calendar_form_focus);
+        try std.testing.expect(!app.calendar_form_dirty);
+        app.job.calendar_compose_generation = old_generation;
+        try app.finishCalendarCompose();
+        try std.testing.expect(!app.calendar_guests_open and app.calendar.page == .compose);
+    }
+}
+
+test "calendar composer: short guest picker cannot add an unseen address" {
+    const a = std.testing.allocator;
+    for ([_]u16{ 12, 13, 20 }) |height| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var client: CalendarGuestsTestClient = .{};
+        app.client = .{ .ctx = &client, .callFn = CalendarGuestsTestClient.cached, .cachedFn = CalendarGuestsTestClient.cached };
+        try calendarGuestsTestForm(&app, "work@example.test");
+        try app.calendarGuestsOpen();
+        var screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = height, .screen = &screen };
+        try app.drawCalendarComposer(win);
+        const visible = try markdownTestScreenText(a, &screen);
+        defer a.free(visible);
+        if (height < 16) {
+            try std.testing.expect(std.mem.indexOf(u8, visible, "enlarge terminal") != null);
+            for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.index != 271);
+        } else try std.testing.expect(std.mem.indexOf(u8, visible, "alex@example.test") != null);
+        try app.onCalendarGuestsKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(height >= 16, app.calendar_form_dirty);
+        try std.testing.expectEqualStrings(if (height >= 16) "alex@example.test" else "", app.calendar_form_fields[8].value());
+    }
+}
+
+test "calendar composer: guest choice warnings clear without hiding permission errors or blocking local edits" {
+    const a = std.testing.allocator;
+    var client: MeetingFlowTestClient = .{};
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    defer app.cancelJob();
+    app.loop = loop;
+    app.client = .{ .ctx = &client, .callFn = MeetingFlowTestClient.provider };
+    try calendarGuestsTestForm(&app, "work@example.test");
+    app.calendar_guests_open = true;
+    try app.calendar_guests_account.set("work@example.test");
+    try app.calendarGuestsReplace(try readerInvitationTestValue(app.frame.allocator(), "{\"contacts\":[{\"name\":\"Alex\",\"emails\":[{\"address\":\"alex@example.test\"},{\"address\":\"second@example.test\"}]}]}"), true);
+    try app.calendar_form_fields[8].set(a, "alex@example.test");
+    try app.calendar_guests_drawn_address.set("alex@example.test");
+    try app.calendarGuestsAdd();
+    try std.testing.expect(app.calendar_guests_choice_error and app.calendar_guests_error.len > 0);
+    try app.start(.preferences_save, .{ .cmd = "synthetic-preferences", .account = app.account() });
+    try client.waitEntered();
+    try app.onCalendarGuestsKey(.{ .codepoint = Key.down });
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_guests_selected);
+    try std.testing.expect(app.calendar_guests_error.len == 0);
+    try app.calendar_guests_drawn_address.set("second@example.test");
+    try app.calendarGuestsAdd();
+    try std.testing.expectEqualStrings("alex@example.test, second@example.test", app.calendar_form_fields[8].value());
+    try std.testing.expect(!client.canceled.load(.acquire) and app.job.future != null);
+    try app.calendarGuestsError("PermissionDenied");
+    app.calendar_guests_open = true;
+    app.calendar_guests_focus = 0;
+    try app.onCalendarGuestsKey(.{ .codepoint = 'x' });
+    try std.testing.expect(app.calendar_guests_error.len > 0 and !app.calendar_guests_choice_error);
+}
+
+fn calendarSlotsTestAgenda(app: *App) !void {
+    const raw = try std.Io.Dir.cwd().readFileAlloc(app.io, "tests/fixtures/terminal/calendar/week-overlaps.json", app.frame.allocator(), .limited(4 * 1024 * 1024));
+    const fixture = try readerInvitationTestValue(app.frame.allocator(), raw);
+    try app.calendar.agenda.replace(app.allocator, try @import("json.zig").value(app.frame.allocator(), .{ .snapshot = .{ .events = items(get(fixture, "events")), .complete = true }, .sources = .{ .{}, .{} } }));
+    app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.com\"},{\"address\":\"work@example.com\"}]"));
+    try app.calendar.account.set("personal@example.com");
+    try app.calendar.zone_name.set("UTC");
+    app.calendar.open = true;
+    app.calendar.ready = true;
+    app.calendar.complete = true;
+    app.calendar.view = .week;
+    app.calendar.day = try timezone.dateDay(text(get(fixture, "day")));
+}
+
+test "calendar slots: real week badges are styled disjoint exact-hour controls and chooser only reveals" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarSlotsTestAgenda(&app);
+    var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 30, .screen = &screen };
+    app.calendar.focus = 24;
+    try app.drawCalendarWeek(win);
+    try std.testing.expectEqual(@as(usize, 4), app.calendar_week_related);
+    const badge = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+        if (hit.kind == .dialog_action and hit.index == 410) break hit;
+    } else return error.MissingHourBadge;
+    const appearance = screen.readCell(badge.rect.x, badge.rect.y).?.style;
+    try std.testing.expect(appearance.bold and appearance.ul_style == .single);
+    const title_hit = app.mouse_hits.at(@intCast(badge.rect.x - 2), @intCast(badge.rect.y)).?;
+    try std.testing.expectEqual(layout.HitKind.calendar_week_event, title_hit.kind);
+    try std.testing.expectEqual(layout.HitKind.dialog_action, app.mouse_hits.at(@intCast(badge.rect.x), @intCast(badge.rect.y)).?.kind);
+    const before_account = app.account();
+    try app.calendarActivate(410);
+    try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+    try std.testing.expectEqual(@as(usize, 3), app.calendar_slots.events.len);
+    try std.testing.expectEqualStrings("2026-10-19 · 10:00–11:00", app.calendar_slots_title.slice());
+    // An unseen row cannot be selected before the chooser has actually drawn.
+    app.calendar_slots_selected = 2;
+    try app.calendarSlotsChoose();
+    try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+    screen.clear();
+    try app.drawCalendarSlots(win);
+    const chosen = (try calendar_slot.findVisible(app.calendarEvents(), try calendar_slot.Identity.init(app.calendar_slots.events[2]), "")).?;
+    try app.onCalendarSlotsKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+    try std.testing.expectEqual(chosen, app.calendar.selected);
+    try std.testing.expect(app.calendar.focus == null);
+    try std.testing.expectEqualStrings(before_account, app.account());
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    // Escape preserves the exact selected event, query, date, list top and focus.
+    const before_selected = app.calendar.selected;
+    app.calendar.top = 7;
+    app.calendar.focus = 24;
+    try app.calendarSlotsOpen(null);
+    try app.onCalendarSlotsKey(.{ .codepoint = 'k' });
+    try app.onCalendarSlotsKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(?usize, 1), app.calendar_slots_focus);
+    try app.onCalendarSlotsKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(before_selected, app.calendar.selected);
+    try std.testing.expectEqual(@as(usize, 7), app.calendar.top);
+    try std.testing.expectEqual(@as(?usize, 24), app.calendar.focus);
+}
+
+test "calendar slots: short chooser cannot commit an unseen address and moved occurrences are never substituted" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarSlotsTestAgenda(&app);
+    app.calendar_week_viewport = .{ .first_day = app.calendar.day, .days = 7, .first_hour = 0, .hours = 24 };
+    try app.calendarSlotsOpen(.{ .day = app.calendar.day, .hour = 10 });
+    var screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    var win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = 20, .screen = &screen };
+    try app.drawCalendarSlots(win);
+    try std.testing.expect(app.calendar_slots_drawn != null);
+    win.height = 8;
+    screen.clear();
+    app.mouse_hits.clear();
+    try app.drawCalendarSlots(win);
+    try std.testing.expect(app.calendar_slots_drawn == null);
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.index == 0);
+    try app.onCalendarSlotsKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+    win.height = 20;
+    screen.clear();
+    try app.drawCalendarSlots(win);
+    const pinned = app.calendar_slots.events[app.calendar_slots_selected];
+    var moved = try @import("json.zig").copyObject(app.frame.allocator(), pinned);
+    const identity = try calendar_slot.Identity.init(pinned);
+    try moved.object.put(app.frame.allocator(), "start", try @import("json.zig").value(app.frame.allocator(), .{ .kind = "instant", .value = identity.start.value + 3600000 }));
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .snapshot = .{ .events = .{moved} } }));
+    try app.calendarSlotsChoose();
+    try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+    try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "no longer") != null);
+    try app.onCalendarSlotsKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar slots: all seven crowded days retain last-hour title and badge mouse targets beyond 128 hits" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const scratch = app.frame.allocator();
+    var events: std.ArrayList(Value) = .empty;
+    const first = try timezone.dateDay("2026-10-19");
+    for (0..7) |column| for (0..24) |hour| for (0..5) |index| {
+        const instant = (first + @as(i64, @intCast(column))) * 86400000 + @as(i64, @intCast(hour)) * 3600000;
+        try events.append(scratch, try @import("json.zig").value(scratch, .{ .target = .{ .account = "personal@example.com", .calendar_id = "primary" }, .id = try std.fmt.allocPrint(scratch, "event-{d}-{d}-{d}", .{ column, hour, index }), .summary = "Busy", .start = .{ .kind = "instant", .value = instant }, .end = .{ .kind = "instant", .value = instant + 1800000 } }));
+    };
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(scratch, .{ .snapshot = .{ .events = events.items } }));
+    app.calendar.ready = true;
+    app.calendar.view = .week;
+    app.calendar.day = first;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 146, .rows = 106, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 146, .height = 106, .screen = &screen };
+    for ([_]bool{ false, true }) |mono| {
+        app.mono = mono;
+        app.mouse_hits.clear();
+        screen.clear();
+        try app.drawCalendarWeek(win);
+        try std.testing.expect(app.mouse_hits.count > 800 and app.mouse_hits.count < app.mouse_hits.areas.len);
+        const badge = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+            if (hit.kind == .dialog_action and hit.index == 573) break hit;
+        } else return error.MissingLastHourBadge;
+        const cell = screen.readCell(badge.rect.x, badge.rect.y).?;
+        try std.testing.expect(cell.style.bold and cell.style.ul_style == .single);
+        const title = app.mouse_hits.at(@intCast(badge.rect.x - 2), @intCast(badge.rect.y)).?;
+        try std.testing.expectEqual(layout.HitKind.calendar_week_event, title.kind);
+        try std.testing.expectEqual(@as(usize, 838), app.calendar_week_title_hits[title.index].index);
+        try std.testing.expectEqual(@as(usize, 573), app.mouse_hits.at(@intCast(badge.rect.x), @intCast(badge.rect.y)).?.index);
+    }
+}
+
+test "calendar slots: chooser pauses a held exact source and resumes after both Escape and reveal" {
+    const a = std.testing.allocator;
+    const response =
+        \\{"ok":true,"data":{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"stale":false,"events":[{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"selected-event","summary":"A meeting","start":{"kind":"instant","value":1000},"end":{"kind":"instant","value":2000}}]}}}
+    ;
+    for ([_]bool{ false, true }) |choose| {
+        var client: MeetingFlowTestClient = .{ .later_response = response };
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        defer app.cancelJob();
+        try meetingFlowReady(&app, &client, loop);
+        app.calendar.open = true;
+        app.calendar.ready = true;
+        app.calendar.view = .week;
+        try app.calendar.account.set("work@example.test");
+        try app.calendar.calendar_id.set("primary");
+        try app.calendar.zone_name.set("UTC");
+        app.calendar.request_window = .{ .start_ms = 0, .end_ms = 86400000, .time_zone = "UTC" };
+        app.calendar_week_viewport = .{ .first_day = 0, .days = 1, .first_hour = 0, .hours = 24 };
+        try app.calendar.calendars.replace(a, try readerInvitationTestValue(app.frame.allocator(),
+            \\{"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"summary":"Work","selected":true}}],"complete":true}
+        ));
+        try app.calendar.agenda.replace(a, get(try readerInvitationTestValue(app.frame.allocator(), response), "data"));
+        app.calendar.source_loading = true;
+        app.calendar.source_cursor = 1;
+        try app.start(.calendar_agenda, .{ .cmd = "calendar.agenda", .account = "work@example.test", .calendarId = "primary" });
+        try client.waitEntered();
+        try app.calendarSlotsOpen(null);
+        try std.testing.expect(client.canceled.load(.acquire));
+        try std.testing.expect(app.calendar.resume_sources and app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 0), app.calendar.source_cursor);
+        try std.testing.expect(!try app.dispatchCalendarPending());
+        try std.testing.expectEqual(@as(usize, 1), client.calls);
+        if (choose) {
+            var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+            defer screen.deinit(a);
+            try app.drawCalendarSlots(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 30, .screen = &screen });
+            try app.onCalendarSlotsKey(.{ .codepoint = Key.enter });
+        } else try app.onCalendarSlotsKey(.{ .codepoint = Key.escape });
+        try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+        try std.testing.expect(app.job.future != null and app.job.kind == .calendar_agenda);
+        app.job.future.?.await(app.io);
+        const resumed = try client.request(&app, 1);
+        try std.testing.expectEqualStrings("calendar.agenda", text(get(resumed, "cmd")));
+        try std.testing.expectEqualStrings("work@example.test", text(get(resumed, "account")));
+        try std.testing.expectEqualStrings("primary", text(get(resumed, "calendarId")));
+        try app.finish();
+        try std.testing.expectEqualStrings("selected-event", text(get(app.calendarEventAt(app.calendar.selected).?, "id")));
+        try std.testing.expect(app.calendar.complete and !app.calendar.source_loading and !app.calendar.resume_sources);
+        try std.testing.expect(app.job.future == null);
+    }
+}
+
+test "calendar slots: long valid zone headings transfer owned snapshots safely and retain exact endpoints" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarSlotsTestAgenda(&app);
+    app.calendar.zone = try timezone.Zone.fromPosix("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0");
+    app.calendar.selected = 4; // Cross-midnight event, whose full heading exceeds128 bytes.
+    app.calendar_week_viewport = .{ .first_day = app.calendar.day, .days = 7, .first_hour = 0, .hours = 24 };
+    for (0..2) |_| {
+        try app.calendarSlotsOpen(null);
+        try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+        const full_heading = try std.fmt.allocPrint(app.frame.allocator(), "Shared visible rows · {s}", .{try app.calendarCardWhen(app.calendarEventAt(4).?, &app.calendar.zone)});
+        try std.testing.expect(full_heading.len > 128);
+        try std.testing.expect(app.calendar_slots_title.len >= 125 and app.calendar_slots_title.len <= 128);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(app.calendar_slots_title.slice()));
+        try std.testing.expectEqualStrings("Overnight handover", text(get(app.calendar_slots.events[0], "summary")));
+        app.calendarSlotsClose();
+    }
+}
+
+test "calendar slots: local chooser and Escape remain available while unrelated durable work keeps running" {
+    const a = std.testing.allocator;
+    var client: MeetingFlowTestClient = .{};
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    defer app.cancelJob();
+    try meetingFlowReady(&app, &client, loop);
+    try calendarSlotsTestAgenda(&app);
+    app.calendar_week_viewport = .{ .first_day = app.calendar.day, .days = 7, .first_hour = 0, .hours = 24 };
+    try app.start(.preferences_save, .{ .cmd = "preferences.save", .account = app.account() });
+    try client.waitEntered();
+    try app.calendarSlotsOpen(null);
+    try std.testing.expectEqual(calendar_ui.Page.overlaps, app.calendar.page);
+    try std.testing.expect(app.job.future != null and !client.canceled.load(.acquire));
+    try std.testing.expect(!try app.dispatchCalendarPending());
+    try app.onCalendarSlotsKey(.{ .codepoint = Key.escape });
+    try std.testing.expectEqual(calendar_ui.Page.main, app.calendar.page);
+    try std.testing.expect(app.job.future != null and !client.canceled.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), client.calls);
+}
+
+test "calendar slots: an overnight event from before the first visible date is revealed at midnight in a compact grid" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const first = try timezone.dateDay("2026-10-19");
+    const event = try @import("json.zig").value(app.frame.allocator(), .{ .target = .{ .account = "personal@example.com", .calendar_id = "primary" }, .id = "overnight-before-window", .summary = "Overnight handover", .start = .{ .kind = "instant", .value = first * 86400000 - 1800000 }, .end = .{ .kind = "instant", .value = first * 86400000 + 2700000 } });
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .snapshot = .{ .events = .{event} } }));
+    app.calendar.ready = true;
+    app.calendar.view = .week;
+    app.calendar.day = first;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 20, .screen = &screen };
+    try app.drawCalendarWeek(win);
+    try std.testing.expectEqual(@as(u8, 0), app.calendar_week_viewport.?.first_hour);
+    const rendered = try markdownTestScreenText(a, &screen);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "00:00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Overnight") != null);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_related);
+}
+
+test "calendar slots: passive initial selection leaves starts and Priority visible until an explicit reveal" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarSlotsTestAgenda(&app);
+    try app.ui_preferences.calendar.setPreferred(.{ .account = "work@example.com", .calendar_id = "work@example.com" });
+    var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 30, .screen = &screen };
+    try app.drawCalendarWeek(win);
+    try std.testing.expectEqual(@as(usize, 0), app.calendar.selected);
+    try std.testing.expect(!app.calendar.week_reveal_selected);
+    // The automatically pinned09:00 routine remains the rail target, but it
+    // cannot overwrite the new10:30 start from the explicitly preferred source.
+    const initial = app.mouse_hits.at(6, 15).?;
+    try std.testing.expectEqual(layout.HitKind.calendar_week_event, initial.kind);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[initial.index].index);
+    try app.onCalendarKey(.{ .codepoint = 'k' });
+    try std.testing.expect(app.calendar.week_reveal_selected);
+    screen.clear();
+    app.mouse_hits.clear();
+    try app.drawCalendarWeek(win);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, 15).?.index].index);
+    // More space preserves the preferred first title while explicitly selected
+    // routine takes the last actual line; changing selection never changes rows.
+    var large = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 33, .x_pixel = 0, .y_pixel = 0 });
+    defer large.deinit(a);
+    const larger: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 33, .screen = &large };
+    app.mouse_hits.clear();
+    try app.drawCalendarWeek(larger);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, 15).?.index].index);
+    // Revealing the routine from11:00 only pins that hour. It must not cover
+    // the preferred new start at10:00, even though the routine spans both.
+    try app.calendarSlotsOpen(.{ .day = app.calendar.day, .hour = 11 });
+    app.calendar_slots_selected = 0;
+    screen.clear();
+    try app.drawCalendarSlots(win);
+    try app.calendarSlotsChoose();
+    try std.testing.expect(app.calendar_week_reveal_bucket.?.eql(.{ .day = app.calendar.day, .hour = 11 }));
+    app.mouse_hits.clear();
+    screen.clear();
+    try app.drawCalendarWeek(win);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, 15).?.index].index);
+    try std.testing.expectEqual(@as(usize, 0), app.calendar_week_title_hits[app.mouse_hits.at(6, 16).?.index].index);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "calendar slots: compact camera and resize keep the exact chosen civil bucket of a long event" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    const first = try timezone.dateDay("2026-10-19");
+    const event = try @import("json.zig").value(app.frame.allocator(), .{ .target = .{ .account = "personal@example.com", .calendar_id = "primary" }, .id = "long-before-window", .summary = "Long handover", .start = .{ .kind = "instant", .value = first * 86400000 - 1800000 }, .end = .{ .kind = "instant", .value = first * 86400000 + 23 * 3600000 } });
+    try app.calendar.agenda.replace(a, try @import("json.zig").value(app.frame.allocator(), .{ .snapshot = .{ .events = .{event} } }));
+    app.calendar.ready = true;
+    app.calendar.view = .week;
+    app.calendar.day = first;
+    app.calendar.week_reveal_selected = true;
+    app.calendar_week_reveal_bucket = .{ .day = first, .hour = 18 };
+    for ([_]u16{ 20, 14, 40 }) |height| {
+        var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = height, .screen = &screen };
+        app.mouse_hits.clear();
+        try app.drawCalendarWeek(win);
+        const viewport = app.calendar_week_viewport.?;
+        try std.testing.expect(viewport.first_hour <= 18 and @as(usize, viewport.first_hour) + viewport.hours > 18);
+        try std.testing.expect(app.calendar_week_reveal_bucket.?.eql(.{ .day = first, .hour = 18 }));
+        const target = for (app.calendar_week_title_hits[0..app.calendar_week_title_count]) |hit| {
+            if (hit.bucket.eql(.{ .day = first, .hour = 18 })) break hit;
+        } else return error.ChosenHourNotRendered;
+        try std.testing.expectEqual(@as(usize, 0), target.index);
+    }
+}
+
+test "calendar slots: scrolled chooser writes its earlier hint once with no stale trailing text" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try calendarSlotsTestAgenda(&app);
+    app.calendar_week_viewport = .{ .first_day = app.calendar.day, .days = 7, .first_hour = 0, .hours = 24 };
+    try app.calendarSlotsOpen(.{ .day = app.calendar.day, .hour = 10 });
+    app.calendar_slots_selected = 2;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 48, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 48, .height = 20, .screen = &screen };
+    try app.drawCalendarSlots(win);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_slots_top);
+    const expected = "3 events · ↑ 1 earlier · k";
+    const end = win.gwidth(expected);
+    try std.testing.expectEqualStrings("k", screen.readCell(@intCast(end - 1), 2).?.char.grapheme);
+    for (end..win.width) |column| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(column), 2).?.char.grapheme);
 }

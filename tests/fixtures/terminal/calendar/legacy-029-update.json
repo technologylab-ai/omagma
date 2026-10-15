@@ -1,0 +1,607 @@
+{
+  "account": "personal@example.com",
+  "confirmation": {
+    "calendarId": "personal@example.com",
+    "operationId": "legacy-029-unknown-update",
+    "reviewHash": "2afbeee8a949370b45df8b3fffeeafeb25da6bb8f6916a51bbe7e3ad21b90025"
+  },
+  "state": {
+    "schema": 1,
+    "account": "personal@example.com",
+    "entries": [
+      {
+        "identity": {
+          "target": {
+            "account": "personal@example.com",
+            "calendar_id": "personal@example.com"
+          },
+          "uid": "cli-planning@example.test",
+          "recurrence_key": ""
+        },
+        "state": {
+          "tracked": {
+            "identity": {
+              "target": {
+                "account": "personal@example.com",
+                "calendar_id": "personal@example.com"
+              },
+              "uid": "cli-planning@example.test",
+              "recurrence_key": ""
+            },
+            "event_id": "fixture-imported-1",
+            "version": {
+              "sequence": 4,
+              "dtstamp_ms": 1791878400000
+            },
+            "source_hash": [
+              243,
+              238,
+              32,
+              61,
+              115,
+              156,
+              200,
+              191,
+              237,
+              130,
+              129,
+              192,
+              194,
+              150,
+              67,
+              23,
+              228,
+              68,
+              101,
+              100,
+              190,
+              22,
+              154,
+              90,
+              212,
+              164,
+              89,
+              44,
+              174,
+              116,
+              254,
+              212
+            ]
+          },
+          "operation": {
+            "intent": {
+              "operation_id": "legacy-029-unknown-update",
+              "identity": {
+                "target": {
+                  "account": "personal@example.com",
+                  "calendar_id": "personal@example.com"
+                },
+                "uid": "cli-planning@example.test",
+                "recurrence_key": ""
+              },
+              "version": {
+                "sequence": 5,
+                "dtstamp_ms": 1791878400000
+              },
+              "kind": "update_event",
+              "source_hash": [
+                17,
+                54,
+                41,
+                243,
+                91,
+                90,
+                235,
+                87,
+                141,
+                30,
+                68,
+                199,
+                37,
+                14,
+                13,
+                74,
+                160,
+                214,
+                30,
+                83,
+                167,
+                55,
+                194,
+                142,
+                20,
+                27,
+                35,
+                19,
+                94,
+                98,
+                192,
+                214
+              ],
+              "payload_hash": [
+                2,
+                162,
+                106,
+                121,
+                2,
+                32,
+                153,
+                89,
+                195,
+                60,
+                240,
+                97,
+                69,
+                214,
+                180,
+                190,
+                237,
+                11,
+                168,
+                85,
+                254,
+                91,
+                39,
+                248,
+                149,
+                248,
+                4,
+                1,
+                238,
+                96,
+                155,
+                235
+              ],
+              "event_id": "fixture-imported-1",
+              "expected_etag": "\"fixture-version-1\""
+            },
+            "state": "unknown",
+            "provider_id": "",
+            "error_code": ""
+          }
+        },
+        "review": {
+          "calendar": {
+            "target": {
+              "account": "personal@example.com",
+              "calendar_id": "personal@example.com"
+            },
+            "summary": "Personal",
+            "time_zone": "UTC",
+            "access": "owner",
+            "data_owner": "",
+            "primary": true,
+            "selected": true,
+            "owned_scope_verified": true
+          },
+          "source": {
+            "account": "personal@example.com",
+            "source": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:cli-planning@example.test\r\nDTSTAMP:20261013T080000Z\r\nSEQUENCE:5\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261025T090000Z\r\nDTEND:20261025T100000Z\r\nSUMMARY:Planning version 5\r\nLOCATION:Studio\r\nCONFERENCE:https://meet.example.test/planning\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            "unfolded": "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:cli-planning@example.test\nDTSTAMP:20261013T080000Z\nSEQUENCE:5\nORGANIZER:mailto:host@example.test\nATTENDEE:mailto:personal@example.com\nDTSTART:20261025T090000Z\nDTEND:20261025T100000Z\nSUMMARY:Planning version 5\nLOCATION:Studio\nCONFERENCE:https://meet.example.test/planning\nEND:VEVENT\nEND:VCALENDAR\n",
+            "source_hash": [
+              17,
+              54,
+              41,
+              243,
+              91,
+              90,
+              235,
+              87,
+              141,
+              30,
+              68,
+              199,
+              37,
+              14,
+              13,
+              74,
+              160,
+              214,
+              30,
+              83,
+              167,
+              55,
+              194,
+              142,
+              20,
+              27,
+              35,
+              19,
+              94,
+              98,
+              192,
+              214
+            ],
+            "method": "request",
+            "uid": "cli-planning@example.test",
+            "organizer": "host@example.test",
+            "attendee": "personal@example.com",
+            "version": {
+              "sequence": 5,
+              "dtstamp_ms": 1791878400000
+            },
+            "summary": "Planning version 5",
+            "description": "",
+            "location": "Studio",
+            "url": "",
+            "join_url": "https://meet.example.test/planning",
+            "start": {
+              "raw": "20261025T090000Z",
+              "parameters": "",
+              "civil": {
+                "year": 2026,
+                "month": 10,
+                "day": 25,
+                "hour": 9,
+                "minute": 0,
+                "second": 0
+              },
+              "kind": "utc",
+              "zone": ""
+            },
+            "end": {
+              "raw": "20261025T100000Z",
+              "parameters": "",
+              "civil": {
+                "year": 2026,
+                "month": 10,
+                "day": 25,
+                "hour": 10,
+                "minute": 0,
+                "second": 0
+              },
+              "kind": "utc",
+              "zone": ""
+            },
+            "duration": null,
+            "recurrence_id": null,
+            "recurrence_range": "",
+            "recurrence": [],
+            "has_timezones": false,
+            "cancelled": false,
+            "transparent": false,
+            "private": false
+          },
+          "span": {
+            "start": {
+              "kind": "instant",
+              "value": 1792918800000,
+              "zone": "UTC"
+            },
+            "end": {
+              "kind": "instant",
+              "value": 1792922400000,
+              "zone": "UTC"
+            }
+          },
+          "intent": {
+            "operation_id": "legacy-029-unknown-update",
+            "identity": {
+              "target": {
+                "account": "personal@example.com",
+                "calendar_id": "personal@example.com"
+              },
+              "uid": "cli-planning@example.test",
+              "recurrence_key": ""
+            },
+            "version": {
+              "sequence": 5,
+              "dtstamp_ms": 1791878400000
+            },
+            "kind": "update_event",
+            "source_hash": [
+              17,
+              54,
+              41,
+              243,
+              91,
+              90,
+              235,
+              87,
+              141,
+              30,
+              68,
+              199,
+              37,
+              14,
+              13,
+              74,
+              160,
+              214,
+              30,
+              83,
+              167,
+              55,
+              194,
+              142,
+              20,
+              27,
+              35,
+              19,
+              94,
+              98,
+              192,
+              214
+            ],
+            "payload_hash": [
+              2,
+              162,
+              106,
+              121,
+              2,
+              32,
+              153,
+              89,
+              195,
+              60,
+              240,
+              97,
+              69,
+              214,
+              180,
+              190,
+              237,
+              11,
+              168,
+              85,
+              254,
+              91,
+              39,
+              248,
+              149,
+              248,
+              4,
+              1,
+              238,
+              96,
+              155,
+              235
+            ],
+            "event_id": "fixture-imported-1",
+            "expected_etag": "\"fixture-version-1\""
+          },
+          "request": {
+            "target": {
+              "account": "personal@example.com",
+              "calendar_id": "personal@example.com"
+            },
+            "kind": "update_event",
+            "method": "PATCH",
+            "url": "https://www.googleapis.com/calendar/v3/calendars/personal%40example.com/events/fixture-imported-1?sendUpdates=none",
+            "body": "{\"summary\":\"Planning version 5\",\"description\":\"\\n\\nJoin: https://meet.example.test/planning\",\"location\":\"Studio\",\"start\":{\"dateTime\":\"2026-10-25T09:00:00.000Z\",\"timeZone\":\"UTC\"},\"end\":{\"dateTime\":\"2026-10-25T10:00:00.000Z\",\"timeZone\":\"UTC\"},\"sequence\":5,\"extendedProperties\":{\"private\":{\"omagmaOperation\":\"legacy-029-unknown-update\",\"omagmaSource\":\"113629f35b5aeb578d1e44c7250e0d4aa0d61e53a737c28e141b23135e62c0d6\"}}}",
+            "if_match": "\"fixture-version-1\""
+          },
+          "review_hash": [
+            42,
+            251,
+            238,
+            232,
+            169,
+            73,
+            55,
+            11,
+            69,
+            223,
+            139,
+            63,
+            255,
+            238,
+            175,
+            235,
+            37,
+            218,
+            107,
+            184,
+            246,
+            145,
+            106,
+            81,
+            187,
+            231,
+            227,
+            173,
+            33,
+            185,
+            0,
+            37
+          ],
+          "previous": {
+            "target": {
+              "account": "personal@example.com",
+              "calendar_id": "personal@example.com"
+            },
+            "id": "fixture-imported-1",
+            "uid": "cli-planning@example.test",
+            "etag": "\"fixture-version-1\"",
+            "organizer": "host@example.test",
+            "summary": "Planning version 4",
+            "description": "\n\nJoin: https://meet.example.test/planning",
+            "location": "Studio",
+            "join_url": "https://meet.example.test/planning",
+            "html_url": "https://calendar.example.test/event/fixture-imported-1",
+            "start": {
+              "kind": "instant",
+              "value": 1792918800000,
+              "zone": "UTC"
+            },
+            "end": {
+              "kind": "instant",
+              "value": 1792922400000,
+              "zone": "UTC"
+            },
+            "original_start": null,
+            "recurring_event_id": "",
+            "sequence": 4,
+            "cancelled": false,
+            "transparent": false,
+            "locked": false,
+            "private_copy": true,
+            "response": "unknown",
+            "operation_marker": "legacy-029-initial-update",
+            "source_marker": "f3ee203d739cc8bfed8281c0c2964317e4446564be169a5ad4a4592cae74fed4"
+          },
+          "rsvp_response": null,
+          "response_only": false
+        }
+      }
+    ]
+  },
+  "provider": {
+    "schema": 1,
+    "account": "personal@example.com",
+    "generation": 2,
+    "writes": 2,
+    "events": [
+      {
+        "calendar_id": "personal@example.com",
+        "value": {
+          "id": "fixture-planning",
+          "iCalUID": "fixture-planning@example.test",
+          "etag": "\"fixture-seed-1\"",
+          "status": "confirmed",
+          "organizer": {
+            "email": "host@example.test"
+          },
+          "summary": "Project planning",
+          "description": "Synthetic Calendar acceptance event.",
+          "location": "Meeting room",
+          "start": {
+            "dateTime": "2026-10-15T09:00:00.000Z"
+          },
+          "end": {
+            "dateTime": "2026-10-15T10:00:00.000Z"
+          },
+          "sequence": 0,
+          "htmlLink": "https://calendar.example.test/event/fixture-planning",
+          "hangoutLink": "https://meet.example.test/fixture",
+          "extendedProperties": {
+            "private": {
+              "fixtureProperty": "preserved"
+            }
+          }
+        }
+      },
+      {
+        "calendar_id": "fixture-shared-team",
+        "value": {
+          "id": "fixture-team",
+          "iCalUID": "fixture-team@example.test",
+          "etag": "\"fixture-seed-1\"",
+          "status": "confirmed",
+          "organizer": {
+            "email": "host@example.test"
+          },
+          "summary": "Team check-in",
+          "description": "Synthetic Calendar acceptance event.",
+          "location": "Meeting room",
+          "start": {
+            "dateTime": "2026-10-15T14:00:00.000Z"
+          },
+          "end": {
+            "dateTime": "2026-10-15T15:00:00.000Z"
+          },
+          "sequence": 0,
+          "htmlLink": "https://calendar.example.test/event/fixture-team",
+          "hangoutLink": "https://meet.example.test/fixture",
+          "extendedProperties": {
+            "private": {
+              "fixtureProperty": "preserved"
+            }
+          }
+        }
+      },
+      {
+        "calendar_id": "fixture-readonly",
+        "value": {
+          "id": "fixture-day",
+          "iCalUID": "fixture-day@example.test",
+          "etag": "\"fixture-seed-1\"",
+          "status": "confirmed",
+          "organizer": {
+            "email": "calendar-owner@example.test"
+          },
+          "summary": "Company day",
+          "start": {
+            "date": "2026-10-15"
+          },
+          "end": {
+            "date": "2026-10-16"
+          },
+          "sequence": 0
+        }
+      },
+      {
+        "calendar_id": "personal@example.com",
+        "value": {
+          "id": "fixture-daily",
+          "iCalUID": "fixture-daily@example.test",
+          "etag": "\"fixture-seed-1\"",
+          "status": "confirmed",
+          "organizer": {
+            "email": "host@example.test"
+          },
+          "summary": "Daily review",
+          "description": "Synthetic Calendar acceptance event.",
+          "location": "Meeting room",
+          "start": {
+            "dateTime": "2026-10-15T16:00:00.000Z"
+          },
+          "end": {
+            "dateTime": "2026-10-15T16:30:00.000Z"
+          },
+          "sequence": 0,
+          "htmlLink": "https://calendar.example.test/event/fixture-daily",
+          "hangoutLink": "https://meet.example.test/fixture",
+          "extendedProperties": {
+            "private": {
+              "fixtureProperty": "preserved"
+            }
+          },
+          "recurrence": [
+            "RRULE:FREQ=DAILY"
+          ]
+        }
+      },
+      {
+        "calendar_id": "personal@example.com",
+        "value": {
+          "iCalUID": "cli-planning@example.test",
+          "organizer": {
+            "email": "host@example.test"
+          },
+          "summary": "Planning version 5",
+          "description": "\n\nJoin: https://meet.example.test/planning",
+          "location": "Studio",
+          "start": {
+            "dateTime": "2026-10-25T09:00:00.000Z",
+            "timeZone": "UTC"
+          },
+          "end": {
+            "dateTime": "2026-10-25T10:00:00.000Z",
+            "timeZone": "UTC"
+          },
+          "sequence": 5,
+          "attendees": [
+            {
+              "email": "personal@example.com",
+              "responseStatus": "needsAction"
+            }
+          ],
+          "transparency": "opaque",
+          "visibility": "default",
+          "extendedProperties": {
+            "private": {
+              "omagmaOperation": "legacy-029-unknown-update",
+              "omagmaSource": "113629f35b5aeb578d1e44c7250e0d4aa0d61e53a737c28e141b23135e62c0d6"
+            }
+          },
+          "id": "fixture-imported-1",
+          "etag": "\"fixture-version-2\"",
+          "status": "confirmed",
+          "privateCopy": true,
+          "htmlLink": "https://calendar.example.test/event/fixture-imported-1"
+        }
+      }
+    ]
+  }
+}

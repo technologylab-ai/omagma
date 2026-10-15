@@ -34,6 +34,15 @@ pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInpu
     std.crypto.hash.sha2.Sha256.hash(digest_input, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
     const operation_id = try std.fmt.allocPrint(instance.a, "rsvp-{s}", .{hex});
+    if (host.loadReceiptFn) |load_receipt| if (try load_receipt(host.context, instance.a, calendar.target, operation_id)) |receipt| {
+        const operation = receipt.operation;
+        if (receipt.ordinary or !operation.intent.identity.target.eql(calendar.target) or !std.mem.eql(u8, operation.intent.operation_id, operation_id) or (operation.intent.kind != .import_event and operation.intent.kind != .update_event)) return error.CalendarReviewMismatch;
+        return .{ .state = switch (operation.state) {
+            .applied => .applied,
+            .rejected => .rejected,
+            .unknown, .archived => return error.CalendarReviewMismatch,
+        }, .calendarId = calendar.target.calendar_id, .eventId = operation.provider_id, .operationId = operation_id, .errorCode = operation.error_code };
+    };
     const load = host.loadReviewFn orelse return error.CalendarPersistenceRequired;
     const saved: ?service.Review = load(host.context, instance.a, calendar.target, operation_id) catch |err| switch (err) {
         error.CalendarReviewNotFound => null,
@@ -61,6 +70,7 @@ pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInpu
         .applied => .applied,
         .rejected => .rejected,
         .unknown => .unknown,
+        .archived => return error.CalendarReviewMismatch,
     }, .calendarId = calendar.target.calendar_id, .eventId = applied.operation.provider_id, .operationId = operation_id, .errorCode = if (applied.failure) |failure| @errorName(service.failureError(failure)) else applied.operation.error_code, .canRetry = applied.operation.state == .unknown };
 }
 

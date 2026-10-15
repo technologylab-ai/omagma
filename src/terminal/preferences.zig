@@ -3,6 +3,7 @@ const files = @import("files.zig");
 const layout = @import("layout.zig");
 const theme = @import("theme.zig");
 const b = @import("../bounded.zig");
+const calendar_sources = @import("calendar_sources.zig");
 
 pub const Action = enum { down, up, left, right, next_mail, previous_mail, compose, reply, reply_all, contacts, calendar, follow_up, cache_search, server_search, layout, expand, help, thread_next, thread_previous, thread_fold, quote_fold, signature_fold, links, attachments };
 pub const Context = struct { account: b.Text(254) = .{}, folder: u8 = 0, label: b.Text(256) = .{}, message: b.Text(256) = .{}, selected: u32 = 0, readerScroll: u32 = 0 };
@@ -23,12 +24,13 @@ pub const Preferences = struct {
     bindings: [24]?Binding = @splat(null),
     searchHistory: [24]?Search = @splat(null),
     savedSearches: [24]?Search = @splat(null),
+    calendar: calendar_sources.Selection = .{},
 };
 const max_bytes = 256 * 1024;
 const ContextWire = struct { account: []const u8, folder: u8 = 0, label: []const u8 = "", message: []const u8 = "", selected: u32 = 0, readerScroll: u32 = 0 };
 const BindingWire = struct { key: []const u8, action: Action };
 const SearchWire = struct { account: []const u8, name: []const u8 = "", query: []const u8, mode: SearchMode = .cache };
-const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, sendGraceSeconds: u8 = 10, readerLayout: layout.ReaderLayout = .right, density: Density = .comfortable, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{}, searchHistory: []const SearchWire = &.{}, savedSearches: []const SearchWire = &.{} };
+const Wire = struct { schema: u8 = 1, theme: theme.Mode = .follow_omarchy, sendGraceSeconds: u8 = 10, readerLayout: layout.ReaderLayout = .right, density: Density = .comfortable, listWidthPercent: u8 = 55, listHeightPercent: u8 = 40, lastAccount: []const u8 = "", contexts: []const ContextWire = &.{}, bindings: []const BindingWire = &.{}, searchHistory: []const SearchWire = &.{}, savedSearches: []const SearchWire = &.{}, calendar: ?calendar_sources.Wire = null };
 
 pub fn rememberSearch(value: *Preferences, account: []const u8, query: []const u8, mode: SearchMode, name: ?[]const u8) !void {
     try b.address(account);
@@ -95,7 +97,7 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Preferences {
 /// heap-owned output directly instead of copying the large query arrays.
 pub fn parseInto(result: *Preferences, allocator: std.mem.Allocator, bytes: []const u8) !void {
     if (bytes.len > max_bytes) return error.UiPreferencesTooLarge;
-    const parsed = try std.json.parseFromSlice(Wire, allocator, bytes, .{ .max_value_len = max_bytes });
+    const parsed = try std.json.parseFromSlice(Wire, allocator, bytes, .{ .max_value_len = max_bytes, .ignore_unknown_fields = true });
     defer parsed.deinit();
     if (parsed.value.schema != 1) return error.UnsupportedUiPreferences;
     const wire = parsed.value;
@@ -110,6 +112,7 @@ pub fn parseInto(result: *Preferences, allocator: std.mem.Allocator, bytes: []co
     result.density = wire.density;
     result.listWidthPercent = wire.listWidthPercent;
     result.listHeightPercent = wire.listHeightPercent;
+    result.calendar = try calendar_sources.fromWire(wire.calendar orelse .{});
     try parseSearches(wire.searchHistory, &result.searchHistory, false);
     try parseSearches(wire.savedSearches, &result.savedSearches, true);
     if (wire.lastAccount.len > 0) try b.address(wire.lastAccount);
@@ -158,7 +161,77 @@ pub fn encode(allocator: std.mem.Allocator, value: *const Preferences) ![]const 
         saved[saved_count] = .{ .account = entry.account.slice(), .name = entry.name.slice(), .query = entry.query.slice(), .mode = entry.mode };
         saved_count += 1;
     };
-    return std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count] }, .{});
+    var calendar_storage: [calendar_sources.max_sources]calendar_sources.ChoiceWire = undefined;
+    const calendar_wire = calendar_sources.toWire(&value.calendar, &calendar_storage);
+    return std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count], .calendar = if (calendar_wire.scope == .account and calendar_wire.sources.len == 0 and calendar_wire.preferred == null) null else calendar_wire }, .{ .emit_null_optional_fields = false });
+}
+
+test "calendar sources: preferences retain scope source visibility and color without changing old settings" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(calendar_sources.Scope.account, (try parse(a, "{\"schema\":1}")).calendar.scope);
+    var value = try parse(a, "{\"calendar\":{\"scope\":\"all_accounts\",\"sources\":[{\"account\":\"work@example.test\",\"calendarId\":\"holidays\",\"visible\":false,\"color\":\"green\"}]}}");
+    const encoded = try encode(a, &value);
+    defer a.free(encoded);
+    const restored = try parse(a, encoded);
+    try std.testing.expectEqual(calendar_sources.Scope.all_accounts, restored.calendar.scope);
+    const choice = restored.calendar.find(.{ .account = "work@example.test", .calendar_id = "holidays" }).?;
+    try std.testing.expect(!choice.visible);
+    try std.testing.expectEqual(calendar_sources.Color.green, choice.color.?);
+    try std.testing.expectError(error.DuplicateCalendarSource, parse(a, "{\"calendar\":{\"sources\":[{\"account\":\"work@example.test\",\"calendarId\":\"same\"},{\"account\":\"WORK@example.test\",\"calendarId\":\"same\"}]}}"));
+}
+test "calendar sources: default preferences omit calendar for older binaries and future keys preserve known settings" {
+    const a = std.testing.allocator;
+    const value = try parse(a, "{\"schema\":1,\"listWidthPercent\":63,\"futureSetting\":{\"anything\":true}}");
+    const encoded = try encode(a, &value);
+    defer a.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"calendar\"") == null);
+    try std.testing.expectEqual(@as(u8, 63), (try parse(a, encoded)).listWidthPercent);
+}
+
+test "calendar sources: priority-only preferences survive private and daemon parsing without changing old settings" {
+    const a = std.testing.allocator;
+    var value = try parse(a, "{\"schema\":1,\"readerLayout\":\"below\",\"listWidthPercent\":63}");
+    try std.testing.expect(value.calendar.preferred == null);
+    try std.testing.expect((try parse(a, "{\"calendar\":{\"scope\":\"all_accounts\",\"sources\":[]}}")).calendar.preferred == null);
+    const source: @import("calendar_types.zig").Target = .{ .account = "work@example.test", .calendar_id = "team/会議" };
+    try value.calendar.setPreferred(source);
+    const encoded = try encode(a, &value);
+    defer a.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"calendar\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"preferred\"") != null);
+    // The daemon validates remote/encrypted preferences through parseInto.
+    // Its heap-owned output must keep the key after request bytes disappear.
+    const decoded = try a.create(Preferences);
+    defer a.destroy(decoded);
+    const request_bytes = try a.dupe(u8, encoded);
+    defer a.free(request_bytes);
+    try parseInto(decoded, a, request_bytes);
+    @memset(request_bytes, 0);
+    try std.testing.expect(decoded.calendar.isPreferred(source));
+    try std.testing.expectEqual(@as(u8, 63), decoded.listWidthPercent);
+    try std.testing.expectEqual(layout.ReaderLayout.below, decoded.readerLayout);
+    try std.testing.expectEqual(calendar_sources.Scope.account, decoded.calendar.scope);
+    for (decoded.calendar.choices) |choice| try std.testing.expect(choice == null);
+    const remote_roundtrip = try encode(a, decoded);
+    defer a.free(remote_roundtrip);
+    try std.testing.expect((try parse(a, remote_roundtrip)).calendar.isPreferred(source));
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    _ = try temporary.dir.createDirPathStatus(std.testing.io, "private", .fromMode(0o700));
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    const filename = try std.fs.path.join(a, &.{ directory, "private", "ui.json" });
+    defer a.free(filename);
+    try save(std.testing.io, a, filename, decoded.*);
+    const loaded = try load(std.testing.io, a, filename);
+    try std.testing.expect(loaded.calendar.isPreferred(source));
+    try std.testing.expect(!loaded.calendar.isPreferred(.{ .account = "personal@example.test", .calendar_id = source.calendar_id }));
+    decoded.calendar.clearPreferred();
+    const cleared = try encode(a, decoded);
+    defer a.free(cleared);
+    try std.testing.expect(std.mem.indexOf(u8, cleared, "\"calendar\"") == null);
+    try std.testing.expectError(error.InvalidAddress, parse(a, "{\"calendar\":{\"preferred\":{\"account\":\"invalid\",\"calendarId\":\"primary\"}}}"));
+    try std.testing.expectError(error.InvalidCalendarField, parse(a, "{\"calendar\":{\"preferred\":{\"account\":\"work@example.test\",\"calendarId\":\"\"}}}"));
 }
 
 pub fn path(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map, explicit: ?[]const u8) ![]const u8 {
@@ -219,7 +292,7 @@ test "reader preferences roundtrip only schema and validated layout" {
     try std.testing.expectEqual(layout.ReaderLayout.below, (try parse(allocator, encoded)).readerLayout);
     try std.testing.expectError(error.UnsupportedUiPreferences, parse(allocator, "{\"schema\":2}"));
     try std.testing.expectError(error.InvalidEnumTag, parse(allocator, "{\"readerLayout\":\"overlay\"}"));
-    try std.testing.expectError(error.UnknownField, parse(allocator, "{\"account\":\"personal@example.com\"}"));
+    _ = try parse(allocator, "{\"futureSetting\":true}");
 }
 
 test "local UI: theme choice survives private preference encoding and old settings follow Omarchy" {

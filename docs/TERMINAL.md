@@ -423,8 +423,13 @@ recurring changes or ambiguous times remain explicit rather than guessed.
 
 The native Calendar view requires optional per-account Calendar access.
 Press `C`, choose Calendar in the sidebar, or use the
-action palette. `1`/`2`/`3` switch Agenda/Day/Week; `g` chooses a calendar in the
-current account, `h`/`l` move the date range, `Ctrl+G` jumps to a date, and `t` returns to today. `j`/`k`
+action palette. `1`/`2`/`3` switch Agenda/Day/Week; `g` chooses which calendars to
+show, including read-only holiday calendars. Space toggles a source, `a` switches
+between the current account and all configured accounts, and Enter applies the
+selection. Esc cancels pending changes; `o` shows only the focused calendar and
+`c` changes its theme color. Source letters and names remain visible without
+color. The selection persists across restarts. `h`/`l` move the date range,
+`Ctrl+G` jumps to a date, and `t` returns to today. `j`/`k`
 select an event and Enter opens its details. `/` searches only the loaded date
 range. Buttons also support Tab/Shift+Tab, Enter and mouse clicks. Narrow
 terminals use a compact presentation, with all-day dates kept separate from
@@ -432,6 +437,33 @@ timed appointments. `?` opens the same searchable help presentation as Mail:
 `/` finds keys, actions and sections; `n`/`N` visits matches. Esc clears a search
 first, then returns to the Calendar page you opened it from. The Back control
 also supports mouse, Tab and Enter.
+
+In Week, extra height reveals up to four event titles per hour. `+N` lists the
+other events in that exact hour; **Space · Show all** lists events sharing the
+selected event's visible rows. The chooser shows exact dates, time zones,
+calendar and account; Enter selects and reveals, then ordinary Enter opens the
+chosen event. Esc returns to the same context. The optional `g`, then `p`
+Priority calendar influences the display order after non-declined events and
+starts in the current hour. Source letters and `*` remain readable without
+colour. A deliberate reveal pins only its chosen hour or all-day date, so a long
+routine cannot hide new starts in other hours.
+
+Press `n` to create a timed or all-day event, or `e` to edit the selected event.
+The editor names the destination account/calendar and time zone. Its all-day
+last date is inclusive; the provider's exclusive end is handled automatically.
+Choose Google Meet to generate a video link, or paste an HTTPS link from another
+meeting service. Added guests receive invitations only after the explicit
+review and confirmation; changes to existing guests require a notification
+choice. `Ctrl+S` opens the review, and `y` confirms after its complete contents
+have been read. Recurring edits affect the selected occurrence. Skipped DST
+times are refused; repeated times offer an explicit first/second occurrence.
+See [creating and editing events](CALENDAR-EVENTS.md) for permissions,
+supported edits and recovery after an uncertain save.
+
+`O` opens Google Calendar and `b` opens the selected event in its owning
+account's configured Chrome profile. Opening an event uses Google's returned
+event link and fixes the account selector; it does not guess an event ID from
+an invitation.
 
 Events with a usable meeting link have a camera marker. Press **o** on the
 selected event, or use **Join** in its event card, to open the meeting in that

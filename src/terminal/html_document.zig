@@ -295,6 +295,8 @@ const Context = struct {
     cell_count: usize = 0,
     link_count: usize = 0,
     pending_space: bool = false,
+    pending_style: Style = .{},
+    pending_link: ?[]const u8 = null,
     table_depth: usize = 0,
     table: ?TableBuilder = null,
     next_list_group: u32 = 1,
@@ -357,16 +359,35 @@ const Context = struct {
         self.buffer_link = self.state.link;
         try self.text_buffer.appendSlice(self.a, bytes);
     }
+    fn flushPendingSpace(self: *Context) !void {
+        if (!self.pending_space) return;
+        self.pending_space = false;
+        if (self.text_buffer.items.len == 0 and self.spans.items.len == 0) return;
+        // Collapsed whitespace belongs to the text that supplied it, even if
+        // an opening or closing inline tag changed state before the next rune.
+        const current_style = self.state.style;
+        const current_link = self.state.link;
+        defer {
+            self.state.style = current_style;
+            self.state.link = current_link;
+        }
+        self.state.style = self.pending_style;
+        self.state.link = self.pending_link;
+        try self.append(" ");
+    }
     fn rune(self: *Context, raw: u21) !void {
         var cp = raw;
         if (cp == 13) cp = 10;
         if ((cp < 32 and cp != 10 and cp != 9) or (cp >= 127 and cp <= 159) or cp == 0x061c or cp == 0x200e or cp == 0x200f or (cp >= 0x202a and cp <= 0x202e) or (cp >= 0x2066 and cp <= 0x2069) or cp == 0xad) return;
         if (!self.state.pre and (cp == 10 or cp == 9 or cp == 32 or cp == 160)) {
+            if (!self.pending_space) {
+                self.pending_style = self.state.style;
+                self.pending_link = self.state.link;
+            }
             self.pending_space = true;
             return;
         }
-        if (self.pending_space and (self.text_buffer.items.len != 0 or self.spans.items.len != 0)) try self.append(" ");
-        self.pending_space = false;
+        try self.flushPendingSpace();
         var encoded: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &encoded) catch return error.InvalidUtf8;
         try self.append(encoded[0..n]);
@@ -447,12 +468,9 @@ const Context = struct {
         var is_data = false;
         var next_ordinal: u32 = 1;
         if (!self.state.skip) {
-            // Keep deferred prose whitespace outside the new anchor, so it
-            // cannot turn into an underlined blank before the link label.
-            if (tag.is("a") and self.pending_space and (self.text_buffer.items.len != 0 or self.spans.items.len != 0)) {
-                self.pending_space = false;
-                try self.append(" ");
-            }
+            // Finish any outer separator before entering the anchor. Then a
+            // pending space at its closing edge was supplied inside this link.
+            if (tag.is("a")) try self.flushPendingSpace();
             if (tag.is("b") or tag.is("strong")) self.state.style.bold = true;
             if (tag.is("i") or tag.is("em")) self.state.style.italic = true;
             if (tag.is("u")) self.state.style.underline = true;
@@ -465,12 +483,8 @@ const Context = struct {
                 if (tag.attribute("class")) |class| {
                     if (tag.is("div") and std.mem.eql(u8, class, "omagma-footer")) self.state.style.footer = .text;
                     if (tag.is("a") and self.state.style.footer != .none and std.mem.eql(u8, class, "omagma-footer-link")) {
-                        // The separator before the link belongs to its grey
-                        // prefix. Do not migrate it into the underlined brand.
-                        if (self.pending_space and (self.text_buffer.items.len != 0 or self.spans.items.len != 0)) {
-                            self.pending_space = false;
-                            try self.append(" ");
-                        }
+                        // The pending separator retains its grey prefix
+                        // ownership when the next label becomes the brand.
                         self.state.style.footer = .link;
                     }
                 }
@@ -610,6 +624,16 @@ const Context = struct {
                 if (frame.data_table) try self.finishTable() else try self.flushBlock();
                 self.table_depth -|= 1;
             } else if (self.table != null and (std.ascii.eqlIgnoreCase(frame.name, "td") or std.ascii.eqlIgnoreCase(frame.name, "th"))) try self.finishCell() else if (self.table != null and std.ascii.eqlIgnoreCase(frame.name, "tr")) try self.finishRow() else if (blockTag(frame.name)) try self.flushBlock();
+        }
+        if (!self.state.skip and std.ascii.eqlIgnoreCase(frame.name, "a") and self.pending_space) {
+            // Formatting whitespace and image-placeholder spacing at a link's
+            // closing edge separate labels, rather than extending its underline.
+            // Missing/unsafe hrefs still set underline, so link equality alone
+            // cannot detect this boundary. Keep originating code/emphasis.
+            self.pending_style.underline = frame.before.style.underline;
+            self.pending_link = frame.before.link;
+            if (self.pending_style.footer == self.state.style.footer and self.state.style.footer != frame.before.style.footer)
+                self.pending_style.footer = frame.before.style.footer;
         }
         self.depth -= 1;
         self.state = frame.before;
@@ -1017,4 +1041,24 @@ test "HTML reader leaves orphan CSS and escaped tutorials literal without guessi
     const a = arena.allocator();
     const doc = try parse("<p>Technical note: .sample { color: red; } &lt;div&gt;</p><pre>&lt;style&gt;body { display: none; }&lt;/style&gt;</pre>", a);
     try std.testing.expectEqualStrings("Technical note: .sample { color: red; } <div>\n<style>body { display: none; }</style>", try Oracle.document(a, doc));
+}
+
+test "reader polish: deferred whitespace retains its inline source style across tag boundaries" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try parse("<p>Before <strong><code>DEMO </code></strong>after.</p>", a);
+    var text: std.ArrayList(u8) = .empty;
+    var offset: usize = 0;
+    for (doc.blocks[0].spans) |span| {
+        try text.appendSlice(a, span.text);
+        for (span.text, 0..) |_, i| {
+            const at = offset + i;
+            if (at == 6) try std.testing.expect(!span.style.code and !span.style.bold);
+            if (at >= 7 and at <= 11) try std.testing.expect(span.style.code and span.style.bold);
+            if (at >= 12) try std.testing.expect(!span.style.code and !span.style.bold);
+        }
+        offset += span.text.len;
+    }
+    try std.testing.expectEqualStrings("Before DEMO after.", text.items);
 }

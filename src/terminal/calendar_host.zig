@@ -33,7 +33,7 @@ pub const Host = struct {
         if (!self.options.fixtures) _ = try self.checkGrant(request, "calendar.review", account);
         var store: persistence.Host = .{ .io = self.io, .allocator = self.backing_allocator, .result_allocator = self.allocator, .root = self.cache_root, .account = account, .options = self.options, .access = self.access };
         var inputs: Inputs = .{ .store = &store, .source = source };
-        const callbacks: commands.HostInputs = .{ .io = self.io, .env = self.env, .context = &inputs, .loadInvitationFn = Inputs.sourceInput, .loadReviewFn = Inputs.reviewInput };
+        const callbacks: commands.HostInputs = .{ .io = self.io, .env = self.env, .context = &inputs, .loadInvitationFn = Inputs.sourceInput, .loadReviewFn = Inputs.reviewInput, .loadReceiptFn = Inputs.receiptInput, .loadPendingFn = Inputs.pendingInput };
         const now = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         if (self.options.fixtures) {
             var transport = try @import("calendar_fixture.zig").Provider.init(.{ .io = self.io, .allocator = self.backing_allocator, .root = self.cache_root, .account = account, .options = self.options, .now_ms = now, .access = self.access });
@@ -68,9 +68,10 @@ pub const Host = struct {
         }
         var store: persistence.Host = .{ .io = self.io, .allocator = self.backing_allocator, .result_allocator = self.allocator, .root = self.cache_root, .account = account, .options = self.options, .access = self.access };
         var inputs: Inputs = .{ .store = &store, .source = input };
-        const callbacks: commands.HostInputs = .{ .io = self.io, .env = self.env, .context = &inputs, .loadInvitationFn = Inputs.sourceInput, .loadReviewFn = Inputs.reviewInput };
+        const callbacks: commands.HostInputs = .{ .io = self.io, .env = self.env, .context = &inputs, .loadInvitationFn = Inputs.sourceInput, .loadReviewFn = Inputs.reviewInput, .loadReceiptFn = Inputs.receiptInput, .loadPendingFn = Inputs.pendingInput };
         const now = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         if (self.options.fixtures) return self.fixtureRun(request, &store, callbacks, now);
+        if (commands.localCommand(command)) return commands.dispatch(.{ .a = self.allocator, .grants = local_grants.?, .transport = .{ .context = &inputs, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now }, request, callbacks);
         if (try j.boolean(request, "cacheOnly", false)) return cached.dispatch(self.allocator, local_grants.?, &store, request, callbacks, "");
         const transport = try self.backing_allocator.create(native.Native);
         defer self.backing_allocator.destroy(transport);
@@ -103,6 +104,7 @@ pub const Host = struct {
 
     fn fixtureRun(self: Host, request: j.Value, store: *persistence.Host, inputs: commands.HostInputs, now: i64) !j.Value {
         var transport = try @import("calendar_fixture.zig").Provider.init(.{ .io = self.io, .allocator = self.backing_allocator, .root = self.cache_root, .account = store.account, .options = self.options, .now_ms = now, .access = self.access });
+        if (commands.localCommand(j.text(request, "cmd"))) return commands.dispatch(.{ .a = self.allocator, .grants = transport.grants(), .transport = .{ .context = store, .sendFn = Inputs.localOnly }, .persistence = store.persistence(), .cache = store.cache(), .now_ms = now }, request, inputs);
         if (try j.boolean(request, "cacheOnly", false)) return cached.dispatch(self.allocator, transport.grants(), store, request, inputs, "");
         if (std.mem.eql(u8, self.options.fixture_scenario, "calendar-offline")) return self.offlineFallback(request, transport.grants(), store, inputs, error.ConnectionRefused);
         const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants(), .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
@@ -114,6 +116,10 @@ const Inputs = struct {
     store: *persistence.Host,
     source: ?commands.InvitationInput,
 
+    fn localOnly(_: *anyopaque, _: std.mem.Allocator, _: @import("calendar_provider.zig").Request) anyerror!service.Response {
+        return error.CalendarLocalReadOnly;
+    }
+
     fn sourceInput(context: *anyopaque, _: std.mem.Allocator, account: []const u8, _: j.Value) anyerror!commands.InvitationInput {
         const self: *Inputs = @ptrCast(@alignCast(context));
         if (!std.ascii.eqlIgnoreCase(account, self.store.account)) return error.CalendarAccountMismatch;
@@ -122,5 +128,13 @@ const Inputs = struct {
     fn reviewInput(context: *anyopaque, a: std.mem.Allocator, target: t.Target, operation_id: []const u8) anyerror!service.Review {
         const self: *Inputs = @ptrCast(@alignCast(context));
         return self.store.loadReview(a, target, operation_id);
+    }
+    fn receiptInput(context: *anyopaque, a: std.mem.Allocator, target: t.Target, operation_id: []const u8) anyerror!?service.Receipt {
+        const self: *Inputs = @ptrCast(@alignCast(context));
+        return self.store.loadReceipt(a, target, operation_id);
+    }
+    fn pendingInput(context: *anyopaque, a: std.mem.Allocator, target: t.Target, event_id: []const u8) anyerror!?service.Pending {
+        const self: *Inputs = @ptrCast(@alignCast(context));
+        return self.store.loadPending(a, target, event_id);
     }
 };

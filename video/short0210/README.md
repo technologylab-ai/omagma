@@ -1,0 +1,26 @@
+# Omagma v0.2.10 release film
+
+The current deliverable is the **three-chapter MP4**, 1920×1080,30fps,2,920frames (97.333333s). `chapters.html`, `chapters.js`, `chapters.css` and `chapter-plan.json` are its production source. The older84s compositor remains preserved as `film.html`/`direction.*`/`timeline.json`; its pacing treatment was rejected because first-time viewers could not follow the workflow.
+
+Actual Opus5.5 at xhigh through Claude designed the new chapter structure and timing. It reviewed eight composed stills and the complete timeline; Astra xhigh independently reviewed first-viewer clarity. These are still/timeline reviews, not claims of watching encoded video or listening to music. Subsequent root review checks actual motion and encoded1× playback separately.
+
+The opening restores the established logo/wordmark rise, central warm glow and staggered bars in3.233seconds. Two1.9second dividers use one entrance and rule draw without subtitles. Native screens remain intact, in fixed crops, without collapsing forms, detached strips, animated account connectors or competing camera moves. Key cues precede actual actions; their result replaces the native image opaquely. Maya and Leo each have an empty Contacts search, genuine character-by-character input, a readable filtered selection, Enter and a separate populated Guests result. The final Calendar results hold3.4/3.6seconds; an editorial cyan marker points to the genuine full event summary.
+
+The three chapters cover combined calendars/Priority/busy-hour disclosure; event creation/Contacts/GoogleMeet/review; and rescheduling/guest updates/browser profile/all-day events. Only the selected-event browser action is shown. The account/profile/destination row is an editorial explanation based on verified native opener arguments; no GoogleCalendar page is fabricated.
+
+The music now uses the **original Slow Eruption song continuously through83.546333seconds**, with one30ms linear sum-one handoff into the original softer closing phrase and complete natural ending. The rejected105.967s comparison had reused an older arrangement with a backward phrase jump at44.095s; that arrangement is no longer used. The new plan is `soundtrack-plan.json`. The song SHA256 remains `13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754`; prepared AAC is copied packet for packet during picture encoding. `audio-fix-13/verification.json` verifies sample-identical unmastered original music before the sole ending handoff, including40–50seconds, plus a single incoming attack,−14.06LUFS and−2.72dBTP after AAC. One static gain preserves dynamics; there is no music loop, tempo/pitch change or artificial fade. These are structural/signal checks, not a model-listening claim.
+
+Actual Opus5.5 xhigh supplied the restored opening and short-divider direction; `chapter-motion.js/css` keeps all new movement outside native input/review scenes. The preceding chapter layout had the independent Astra review. The current motion helper and five composed opening/divider stills were separately checked after integration.
+
+Native assets are recorded132×32 or132×48 completed PTY states from the frozen Safe candidate, Zig0.17.0, SHA256 `fc9d4d1cd62f62a3d2595236f6304ca7d282bb52dc4b89049ce9630b491f58fb`. The application still reports0.2.9;0.2.10 is unreleased. `revision-08/assets-manifest.json` combines the original synthetic story with actual Contacts/title typing and complete intermediate edit states. Images and original tapes are hash checked. New contact footage performs no saves; the earlier original story contains3synthetic Calendar writes. No live accounts, provider writes or desktop input are used.
+
+The production coordinator acquires a cooperative host reservation before each heavy stage, holds it through child cleanup and refuses an existing output directory. Use a fresh attempt identifier:
+
+```sh
+python3 video/short0210/build-chapters.py stills --attempt NN
+python3 video/short0210/build-chapters.py film --attempt NN
+python3 video/short0210/build-chapters.py playback --attempt NN
+python3 video/short0210/build-chapters.py deliver --attempt NN
+```
+
+The encoder refuses partial/sample/low-resolution picture sets and verifies all2,920decoded frames,30/1fps and exact source audio packets. Normal-speed playback is muted and inspects decoded callbacks, wall-clock continuity and captured frames. Delivery verifies frozen source/native hashes and playback receipts, then copies a unique MP4, poster, contact sheet and report to `~/Videos/Omagma`. No release or publication is performed.

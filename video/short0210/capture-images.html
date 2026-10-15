@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#111620}
+#host{position:absolute}.term-grid{position:relative;font-family:"JetBrainsMono Nerd Font","Noto Color Emoji",monospace;font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;color:#e8ebf1}
+.term-text .run{position:absolute;white-space:pre;overflow:visible;height:inherit}.term-text .run.wide{text-align:center}.term-lines{position:absolute;left:0;top:0;overflow:visible}.term-cursor{position:absolute;background:rgba(232,235,241,.82);mix-blend-mode:difference}
+</style></head><body><div id="host"></div><script type="module">
+import {Tape,TermView} from '/video/web/term.js';
+const tapes={};let view;const host=document.querySelector('#host');
+const revision=new URLSearchParams(location.search).get('revision')||'revision-01';
+if(!/^revision-\d{2}$/.test(revision))throw Error('Invalid owned capture revision');
+window.READY=(async()=>{await document.fonts.ready;view=new TermView(host,{cellW:11,cellH:22,columns:156,rows:42});return true;})();
+window.capture=async(path,mark,frame)=>{
+ if(!tapes[path]){const r=await fetch('/video/cache/short0210/'+revision+'/'+path);if(!r.ok)throw Error('Missing tape '+path);tapes[path]=new Tape(await r.json());}
+ const tape=tapes[path],index=frame===undefined?tape.mark(mark).frame:frame;
+ view.show(tape,index,{blink:false});const left=(1920-tape.columns*11)/2,top=(1080-tape.rows*22)/2;
+ host.style.left=left+'px';host.style.top=top+'px';
+ return{left,top,panes:tape.panes(index),columns:tape.columns,rows:tape.rows,cellW:11,cellH:22};
+};
+</script></body></html>

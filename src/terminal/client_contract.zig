@@ -8,6 +8,7 @@ pub fn readOnlyCommand(command: []const u8) bool {
     // The command name alone cannot prove whether inspection will continue a
     // previously authorized Calendar write. Callers with flags use the helper.
     if (std.mem.eql(u8, command, "invitation.inspect")) return false;
+    if (std.mem.eql(u8, command, "calendar.event-pending")) return true;
     if (cachedCommand(command)) return true;
     for ([_][]const u8{ "accounts.list", "auth.status", "preferences.get", "labels.palette", "mail.label-state", "mail.triage-scope", "draft.list", "draft.read", "queue.list", "queue.status", "updates.check" }) |allowed| if (std.mem.eql(u8, command, allowed)) return true;
     return false;
@@ -30,6 +31,8 @@ pub fn cachedCommand(command: []const u8) bool {
     return false;
 }
 test "client contract: cached reads exclude draft and provider mutations" {
+    try std.testing.expect(readOnlyCommand("calendar.event-pending"));
+    try std.testing.expect(!cachedCommand("calendar.event-pending"));
     for ([_][]const u8{ "mail.read", "mail.search", "mail.list", "contacts.search", "mail.recipients" }) |command| try std.testing.expect(cachedCommand(command));
     for ([_][]const u8{ "draft.send", "draft.update", "draft.discard", "mail.reply", "mail.forward", "contacts.upsert", "mail.refresh", "calendar.review", "calendar.apply", "calendar.freebusy", "calendar.reconcile" }) |command| try std.testing.expect(!cachedCommand(command));
 }

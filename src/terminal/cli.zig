@@ -155,6 +155,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
         } else if (eq(arg, "--account")) {
             options.account = v;
             try req.object.put(sa, "account", .{ .string = v });
+        } else if (eq(arg, "--next-attempt")) {
+            if (interactive or jsonl or !eq(mode, "calendar")) return error.InvalidCalendarRequest;
+            const attempt = std.fmt.parseInt(u32, v, 10) catch return error.InvalidCalendarRetry;
+            if (attempt == 0 or attempt > 1_000_000) return error.InvalidCalendarRetry;
+            try req.object.put(sa, "nextAttempt", .{ .integer = attempt });
         } else if (calendarField(arg)) |key| {
             if (interactive or jsonl or !eq(mode, "calendar")) return error.InvalidCalendarRequest;
             try req.object.put(sa, key, .{ .string = v });
@@ -218,11 +223,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             const body = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.body_bytes);
             try draft.object.put(sa, "bodyText", .{ .string = body });
             has_draft = true;
-        } else if (eq(arg, "--draft-file") or eq(arg, "--contact-file")) {
+        } else if (eq(arg, "--draft-file") or eq(arg, "--contact-file") or eq(arg, "--event-file")) {
             const raw = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.request_bytes);
             if (!core.boundedJson(raw)) return error.InvalidRequest;
             const value = try std.json.parseFromSliceLeaky(j.Value, sa, raw, .{});
-            try req.object.put(sa, if (eq(arg, "--draft-file")) "draft" else "contact", value);
+            try req.object.put(sa, if (eq(arg, "--draft-file")) "draft" else if (eq(arg, "--event-file")) "event" else "contact", value);
         } else if (eq(arg, "--expected-etag")) try req.object.put(sa, "expectedEtag", .{ .string = v }) else if (eq(arg, "--add-label") or eq(arg, "--remove-label")) {
             const key = if (eq(arg, "--add-label")) "addLabels" else "removeLabels";
             var values = if (req.object.get(key)) |x| x else j.Value{ .array = .init(sa) };
@@ -368,17 +373,17 @@ fn knownVerb(mode: []const u8, verb: []const u8) bool {
 fn valueOption(arg: []const u8) bool {
     if (calendarField(arg) != null) return true;
     for ([_][]const u8{
-        "--backend",           "--config",           "--metrics-file",         "--grant-file",  "--client-file",  "--capabilities",
-        "--fixture-root",      "--fixture-scenario", "--cache-dir",            "--ui-file",     "--editor-mode",  "--metadata-limit",
-        "--cache-messages",    "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes", "--account",      "--action",
-        "--undo-token",        "--url",              "--path",                 "--message-ids", "--message-id",   "--id",
-        "--before-message-id", "--after-message-id", "--boundary-received-at", "--format",      "--from",         "--limit",
-        "--cursor",            "--query",            "--label",                "--thread-id",   "--draft-id",     "--attachment-id",
-        "--operation-id",      "--status",           "--to",                   "--cc",          "--bcc",          "--subject",
-        "--body",              "--attach-file",      "--name",                 "--label-id",    "--confirm-name", "--body-file",
-        "--draft-file",        "--contact-file",     "--expected-etag",        "--add-label",   "--remove-label", "--background-color",
-        "--text-color",        "--queue-id",         "--blob-id",              "--mime-type",   "--scope",        "--send-delay",
-        "--delay-seconds",
+        "--backend",           "--config",           "--metrics-file",         "--grant-file",    "--client-file",  "--capabilities",
+        "--fixture-root",      "--fixture-scenario", "--cache-dir",            "--ui-file",       "--editor-mode",  "--metadata-limit",
+        "--cache-messages",    "--prefetch-bodies",  "--disk-limit-bytes",     "--cache-bytes",   "--account",      "--action",
+        "--undo-token",        "--url",              "--path",                 "--message-ids",   "--message-id",   "--id",
+        "--before-message-id", "--after-message-id", "--boundary-received-at", "--format",        "--from",         "--limit",
+        "--cursor",            "--query",            "--label",                "--thread-id",     "--draft-id",     "--attachment-id",
+        "--operation-id",      "--status",           "--to",                   "--cc",            "--bcc",          "--subject",
+        "--body",              "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
+        "--draft-file",        "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
+        "--background-color",  "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
+        "--send-delay",        "--delay-seconds", "--next-attempt",
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }
@@ -392,6 +397,7 @@ fn calendarField(arg: []const u8) ?[]const u8 {
         .{ .flag = "--start-time-zone", .key = "startTimeZone" },
         .{ .flag = "--end-time-zone", .key = "endTimeZone" },
         .{ .flag = "--review-hash", .key = "reviewHash" },
+        .{ .flag = "--send-updates", .key = "sendUpdates" },
     };
     for (fields) |field| if (eq(arg, field.flag)) return field.key;
     return null;

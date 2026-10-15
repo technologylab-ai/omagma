@@ -1,0 +1,46 @@
+/* Editorial language for v0.2.10: ivory keys, icy cyan ink, source-colored strands and magma used
+   sparingly. It stays visibly separate from the native terminal pixels it explains. */
+#overlay-prev,#overlay,#cues{position:absolute;inset:0;pointer-events:none;color:#f3f5f7}
+.ink{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:visible}
+.ink-line{fill:none;stroke:#a3eff0;stroke-width:3.5;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 6px rgba(130,220,233,.5))}
+.ink-line.thin{stroke-width:2.5}
+.ink-line.bold{stroke-width:4.5}
+.ink-dot{fill:#a3eff0;filter:drop-shadow(0 0 8px rgba(163,239,240,.75))}
+.ink-ring{fill:#0b1017;stroke:#a3eff0;stroke-width:2.5}
+.strand{fill:none;stroke-linecap:round;stroke-linejoin:round}
+.lane{fill:none;stroke:#2a3a4b;stroke-width:3;stroke-linecap:round}
+
+.cue{position:absolute;display:flex;align-items:center;gap:22px;filter:drop-shadow(0 12px 24px rgba(0,0,0,.45))}
+.cue.left{flex-direction:row-reverse}
+.cue .key{display:flex;align-items:center;justify-content:center;min-width:84px;height:84px;padding:0 24px;border-radius:20px;background:#f2f4ee;color:#0b1017;font:800 40px "JetBrainsMono Nerd Font",monospace;transform-origin:50% 80%;white-space:nowrap}
+.cue .key.long{font-size:32px}
+.cue .key.pressed{background:#a3eff0}
+.cue .label{font:650 30px "Adwaita Sans",sans-serif;letter-spacing:-.01em;white-space:nowrap;color:#f3f5f7}
+
+.note{position:absolute;max-width:440px}
+.note.left{text-align:right}
+.note-kicker{font:700 18px "JetBrainsMono Nerd Font",monospace;letter-spacing:.16em;text-transform:uppercase;color:#82dce9}
+.note-text{margin-top:6px;font:780 36px "Adwaita Sans","JetBrainsMono Nerd Font",sans-serif;letter-spacing:-.02em;line-height:1.12;white-space:nowrap}
+.note-sub{margin-top:8px;font:500 24px "Adwaita Sans",sans-serif;line-height:1.3;color:#aebbc9}
+
+.thread-label{position:absolute;transform:translate(-50%,-100%);font:700 18px "JetBrainsMono Nerd Font",monospace;letter-spacing:.16em;text-transform:uppercase;color:#a3eff0;white-space:nowrap}
+.pane-label{position:absolute;font:700 19px "JetBrainsMono Nerd Font",monospace;letter-spacing:.18em;text-transform:uppercase;color:#93a3b5;white-space:nowrap}
+.pane-label.after{color:#a3eff0}
+.chip{position:absolute;padding:10px 24px;border-radius:999px;background:#0f1a24;box-shadow:0 0 0 1.5px #a3eff0,0 12px 32px rgba(0,0,0,.55);font:700 30px "JetBrainsMono Nerd Font",monospace;color:#a3eff0;white-space:nowrap}
+
+.node{position:absolute;width:390px;padding:16px 20px 18px;border-radius:18px;background:#101924;text-align:center;transform:translate(-50%,-50%)}
+.node .k{font:700 17px "JetBrainsMono Nerd Font",monospace;letter-spacing:.16em;text-transform:uppercase}
+.node .m{margin-top:6px;font:760 31px "Adwaita Sans",sans-serif;letter-spacing:-.015em;white-space:nowrap}
+.node .s{margin-top:6px;min-height:27px;font:500 21px "JetBrainsMono Nerd Font",monospace;color:#9fb0c1;white-space:nowrap}
+
+.intro,.outro{position:absolute;inset:0;text-align:center}
+.intro>*,.outro>*{position:absolute;left:0;width:100%}
+.intro-logo{left:870px!important;top:244px;width:180px!important;height:180px}
+.intro-word{top:450px;font:800 108px "Adwaita Sans",sans-serif;letter-spacing:-.035em}
+.intro-version{top:592px;font:700 36px "JetBrainsMono Nerd Font",monospace;letter-spacing:.04em;color:#ff9e61}
+.intro-strap{top:658px;font:600 34px "Adwaita Sans",sans-serif;color:#bac4d0}
+.outro-logo{left:875px!important;top:196px;width:170px!important;height:170px}
+.outro-title{top:404px;font:800 72px "Adwaita Sans",sans-serif;letter-spacing:-.02em}
+.outro-site{top:566px;font:600 36px "JetBrainsMono Nerd Font",monospace;color:#ff9e61}
+.outro-scope{top:640px;font:500 26px "Adwaita Sans",sans-serif;color:#aeb9c8}
+.outro-strap{top:712px;font:600 31px "Adwaita Sans",sans-serif;color:#c3cdd9}

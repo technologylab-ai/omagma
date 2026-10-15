@@ -379,7 +379,10 @@ const Builder = struct {
                     continue;
                 }
                 if (span.text[offset] == ' ' or span.text[offset] == '\t') {
-                    if (pre) try self.chunk(" ", flags, role) else {
+                    if (pre) try self.chunk(" ", flags, role) else if (!self.pending_space) {
+                        // Adjacent spans may each supply collapsible whitespace.
+                        // Keep the first separator's style rather than adopting
+                        // the next span's link or code decoration.
                         self.pending_space = self.column > self.prefix_width;
                         self.pending_flags = flags;
                         self.pending_role = role;
@@ -916,4 +919,142 @@ test "reader polish: inline link underline excludes surrounding prose spaces and
     try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(6, 0).?.style.ul_style);
     try std.testing.expectEqual(vaxis.Style.Underline.single, screen.readCell(10, 0).?.style.ul_style);
     try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(16, 0).?.style.ul_style);
+}
+
+test "reader polish: Markdown inline-code backgrounds exclude prose whitespace at real rendered cells" {
+    const a = std.testing.allocator;
+    const palette: theme.Palette = .{};
+    const Case = struct { source: []const u8, plain: []const u8, start: u16, code: []const u8, bold_gap: bool = false, link_start: ?u16 = null };
+    for ([_]Case{
+        .{ .source = "updated the completion code to `DEMO` now...", .plain = "updated the completion code to DEMO now...", .start = 31, .code = "DEMO" },
+        .{ .source = "Before `DEMO ONE`. After", .plain = "Before DEMO ONE. After", .start = 7, .code = "DEMO ONE" },
+        .{ .source = "**Before `DEMO`**.", .plain = "Before DEMO.", .start = 7, .code = "DEMO", .bold_gap = true },
+        .{ .source = "Grüße `DEMO`, [link](https://example.test/).", .plain = "Grüße DEMO, link.", .start = 6, .code = "DEMO", .link_start = 12 },
+    }) |case| {
+        const rendered = try @import("markdown_mail.zig").render(a, case.source);
+        defer a.free(rendered.html);
+        defer a.free(rendered.plain);
+        var prepared = try Prepared.initGeneratedMarkdown(a, rendered.html);
+        defer prepared.deinit();
+        var screen = try vaxis.Screen.init(a, .{ .cols = 100, .rows = 8, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 100, .height = 8, .screen = &screen };
+        try prepared.ensure(100, .unicode);
+        _ = prepared.draw(win, 0, 0, palette, false);
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(a);
+        for (0..100) |column| try line.appendSlice(a, screen.readCell(@intCast(column), 0).?.char.grapheme);
+        try std.testing.expectEqualStrings(case.plain, std.mem.trimEnd(u8, line.items, " "));
+        const gap = screen.readCell(case.start - 1, 0).?;
+        try std.testing.expectEqualStrings(" ", gap.char.grapheme);
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.background }, gap.style.bg));
+        try std.testing.expectEqual(case.bold_gap, gap.style.bold);
+        for (0..case.code.len) |i| {
+            const cell = screen.readCell(case.start + @as(u16, @intCast(i)), 0).?;
+            try std.testing.expectEqualStrings(case.code[i .. i + 1], cell.char.grapheme);
+            try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.selection }, cell.style.bg));
+        }
+        const after = screen.readCell(case.start + @as(u16, @intCast(case.code.len)), 0).?;
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.background }, after.style.bg));
+        if (case.link_start) |link_start| {
+            try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(link_start - 1, 0).?.style.ul_style);
+            for (0..4) |i| try std.testing.expectEqual(vaxis.Style.Underline.single, screen.readCell(link_start + @as(u16, @intCast(i)), 0).?.style.ul_style);
+            try std.testing.expectEqualStrings(".", screen.readCell(link_start + 4, 0).?.char.grapheme);
+            try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(link_start + 4, 0).?.style.ul_style);
+        }
+    }
+    // A genuine space authored inside the code remains highlighted after its
+    // closing tag; kbd/samp share the same semantic code-style boundary.
+    for ([_][]const u8{ "code", "kbd", "samp" }) |tag| {
+        const input = try std.fmt.allocPrint(a, "<p>Before <{s}>DEMO </{s}>after.</p>", .{ tag, tag });
+        defer a.free(input);
+        var prepared = try Prepared.init(a, input);
+        defer prepared.deinit();
+        var screen = try vaxis.Screen.init(a, .{ .cols = 30, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 30, .height = 2, .screen = &screen };
+        try prepared.ensure(30, .unicode);
+        _ = prepared.draw(win, 0, 0, palette, false);
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.background }, screen.readCell(6, 0).?.style.bg));
+        try std.testing.expectEqualStrings(" ", screen.readCell(11, 0).?.char.grapheme);
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.selection }, screen.readCell(11, 0).?.style.bg));
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.background }, screen.readCell(12, 0).?.style.bg));
+    }
+    var wrapped = try Prepared.init(a, "<p>Some text before <code>DEMO</code></p>");
+    defer wrapped.deinit();
+    var screen = try vaxis.Screen.init(a, .{ .cols = 12, .rows = 3, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 12, .height = 3, .screen = &screen };
+    try wrapped.ensure(12, .unicode);
+    _ = wrapped.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{ "Some text", "before DEMO" });
+    try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.background }, screen.readCell(6, 1).?.style.bg));
+    for (7..11) |column| try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.selection }, screen.readCell(@intCast(column), 1).?.style.bg));
+}
+
+test "reader polish: anchor closing and image gaps stay outside link underline at rendered cells" {
+    const a = std.testing.allocator;
+    const palette: theme.Palette = .{};
+    const Range = struct { start: u16, end: u16 };
+    const Case = struct { input: []const u8, expected: []const u8, labels: []const Range, bold_gap: bool = false };
+    for ([_]Case{
+        .{ .input = "<p><a href='https://example.test/'>label </a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }} },
+        .{ .input = "<p><a>label </a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }} },
+        .{ .input = "<p><a href='javascript:unused'>label </a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }} },
+        .{ .input = "<p><a href='https://example.test/'><strong>label </strong></a>after.</p>", .expected = "label after.", .labels = &.{.{ .start = 0, .end = 5 }}, .bold_gap = true },
+        .{ .input = "<p>Please <a href='https://example.test/'>\n confirm\n</a> to continue.</p>", .expected = "Please confirm to continue.", .labels = &.{.{ .start = 7, .end = 14 }} },
+        .{ .input = "<p><a href='https://example.test/'><img alt='Logo'></a>Welcome.</p>", .expected = "[Image: Logo] Welcome.", .labels = &.{.{ .start = 0, .end = 13 }} },
+        .{ .input = "<p><a href='https://example.test/a'><img alt='One'></a>&nbsp;<a href='https://example.test/b'><img alt='Two'></a>.</p>", .expected = "[Image: One] [Image: Two] .", .labels = &.{ .{ .start = 0, .end = 12 }, .{ .start = 13, .end = 25 } } },
+    }) |case| {
+        for ([_]bool{ false, true }) |generated| {
+            var prepared = if (generated) try Prepared.initGeneratedMarkdown(a, case.input) else try Prepared.init(a, case.input);
+            defer prepared.deinit();
+            var screen = try vaxis.Screen.init(a, .{ .cols = 64, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+            defer screen.deinit(a);
+            const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 64, .height = 2, .screen = &screen };
+            try prepared.ensure(64, .unicode);
+            _ = prepared.draw(win, 0, 0, palette, false);
+            try expectWindowLines(win, &.{case.expected});
+            if (case.bold_gap) try std.testing.expect(screen.readCell(5, 0).?.style.bold);
+            for (0..case.expected.len) |i| {
+                const col: u16 = @intCast(i);
+                var label = false;
+                for (case.labels) |range| label = label or (col >= range.start and col < range.end);
+                const cell = screen.readCell(col, 0).?;
+                const underline = if (label) vaxis.Style.Underline.single else .off;
+                if (cell.style.ul_style != underline) std.debug.print("anchor gap case generated={any} col={d} glyph={s} expected={t} actual={t} input={s}\n", .{ generated, col, cell.char.grapheme, underline, cell.style.ul_style, case.input });
+                try std.testing.expectEqual(underline, cell.style.ul_style);
+                try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.background }, cell.style.bg));
+            }
+        }
+    }
+    for ([_]bool{ false, true }) |code| {
+        const input = if (code) "<p><code>X </code><a href='https://example.test/'></a>Y</p>" else "<p><strong>X </strong><a></a>Y</p>";
+        var prepared = try Prepared.init(a, input);
+        defer prepared.deinit();
+        var empty_screen = try vaxis.Screen.init(a, .{ .cols = 10, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        defer empty_screen.deinit(a);
+        const empty_win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 10, .height = 2, .screen = &empty_screen };
+        try prepared.ensure(10, .unicode);
+        _ = prepared.draw(empty_win, 0, 0, palette, false);
+        try expectWindowLines(empty_win, &.{"X Y"});
+        const gap = empty_screen.readCell(1, 0).?;
+        try std.testing.expectEqual(vaxis.Style.Underline.off, gap.style.ul_style);
+        try std.testing.expectEqual(!code, gap.style.bold);
+        try std.testing.expect(vaxis.Color.eql(.{ .rgb = if (code) palette.selection else palette.background }, gap.style.bg));
+    }
+    // Explicit trailing code whitespace keeps its code background while the
+    // enclosing anchor's trailing separator loses link decoration/ownership.
+    var nested = try Prepared.init(a, "<p><a href='https://example.test/'><code>DEMO </code></a>after.</p>");
+    defer nested.deinit();
+    var screen = try vaxis.Screen.init(a, .{ .cols = 20, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 2, .screen = &screen };
+    try nested.ensure(20, .unicode);
+    _ = nested.draw(win, 0, 0, palette, false);
+    try expectWindowLines(win, &.{"DEMO after."});
+    for (0..5) |col| try std.testing.expect(vaxis.Color.eql(.{ .rgb = palette.selection }, screen.readCell(@intCast(col), 0).?.style.bg));
+    try std.testing.expectEqual(vaxis.Style.Underline.single, screen.readCell(0, 0).?.style.ul_style);
+    try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(4, 0).?.style.ul_style);
+    try std.testing.expectEqual(vaxis.Style.Underline.off, screen.readCell(5, 0).?.style.ul_style);
 }

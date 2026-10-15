@@ -23,14 +23,19 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import MouseTerminal, click, point
 from terminal_reader_copy import clips
 from terminal_reader_editor import ReaderScreen
+from terminal_theme_picker import ThemeScreen
 
 
-def start(binary, directory, fixture, scenario=None, columns=140, rows=38):
+class CalendarScreen(ThemeScreen, ReaderScreen):
+    """Preserve synchronized reader cells and actual SGR reverse selection."""
+
+
+def start(binary, directory, fixture, scenario=None, columns=140, rows=38, no_color=False):
     extra = fixture.options() + ("--account", ACCOUNTS[0])
     if scenario:
         extra += ("--fixture-scenario", scenario)
-    terminal = MouseTerminal(binary, directory, extra=extra, screen_type=ReaderScreen,
-                             columns=columns, rows=rows, environment={"TZ": "UTC", "NO_COLOR": None, "COLORTERM": "truecolor"})
+    terminal = MouseTerminal(binary, directory, extra=extra, screen_type=CalendarScreen if no_color else ReaderScreen,
+                             columns=columns, rows=rows, environment={"TZ": "UTC", "NO_COLOR": "1" if no_color else None, "COLORTERM": "truecolor"})
     terminal.until(lambda: "Planning version" in terminal.text())
     terminal.gap(.2)
     return terminal
@@ -40,7 +45,10 @@ def capture(terminal, destination, name):
     if destination:
         terminal.gap(.1)
         destination.mkdir(parents=True, exist_ok=True)
-        (destination / (name + ".json")).write_text(json.dumps(screen_capture(terminal)) + "\n")
+        value = screen_capture(terminal)
+        if hasattr(terminal.screen, "reversed"):
+            value["currentReverseCells"] = terminal.screen.reversed
+        (destination / (name + ".json")).write_text(json.dumps(value) + "\n")
 
 
 def wait_calendar(terminal, view="Agenda"):
@@ -59,6 +67,458 @@ def provider_counts(binary, directory, fixture, writes):
     with Client(binary, directory, extra=fixture.options()) as client:
         require(provider_state(client)["writes"] == writes, "calendar provider mutation count changed unexpectedly")
         require(client.request("cache.stats")["fixtureSends"] == 0, "Calendar action unexpectedly sent RSVP mail")
+
+
+def combined_sources(binary, directory, captures):
+    fixture = Invitations(directory)
+    owned = directory / "client"
+    terminal = start(binary, owned, fixture)
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        require("3 selected calendars" in terminal.text(), "provider-selected calendars were not combined by default")
+        require("Company day" in terminal.text() and "Project planning" in terminal.text(), "combined view omitted read-only holidays or timed events")
+        capture(terminal, captures, "calendar-combined-account")
+        terminal.send(b"g")
+        terminal.until(lambda: "Show calendars" in terminal.text() and "Holidays" in terminal.text())
+        terminal.send(b"j \r")  # Uncheck Shared team, retaining Personal + Holidays.
+        wait_calendar(terminal)
+        require("2 selected calendars" in terminal.text(), "checkbox Apply did not choose the two requested sources")
+        preferences = owned / "config" / "omagma" / "ui.json"
+        saved = json.loads(preferences.read_text())
+        override = next(source for source in saved["calendar"]["sources"] if source["calendarId"] == "fixture-shared-team")
+        require(override["account"] == ACCOUNTS[0] and not override["visible"], "saved selection lost exact account/calendar identity")
+        terminal.send(b"g ")
+        terminal.gap(.1)
+        terminal.send(b"\x1b")
+        wait_calendar(terminal)
+        require(json.loads(preferences.read_text())["calendar"] == saved["calendar"], "Esc changed persisted source choices")
+        require("2 selected calendars" in terminal.text(), "Esc did not restore the previously applied source set")
+        terminal.send(b"g")
+        terminal.until(lambda: "Show calendars" in terminal.text())
+        terminal.send(b"a")
+        terminal.until(lambda: "Show calendars · all accounts" in terminal.text() and ACCOUNTS[1] in terminal.text())
+        capture(terminal, captures, "calendar-combined-picker-all-accounts")
+        terminal.send(b"\r")
+        wait_calendar(terminal)
+        require("All accounts" in terminal.text() and "8 selected calendars" in terminal.text(), "all-account source selection omitted enabled account calendars")
+        require("A Personal" in terminal.text() and "C Holidays" in terminal.text() and "D Personal" in terminal.text(), "calendar legend lacks independent source identifiers")
+        capture(terminal, captures, "calendar-combined-all-accounts")
+        terminal.send(b"3")
+        wait_calendar(terminal, "Week")
+        capture(terminal, captures, "calendar-combined-week")
+        terminal.send(b"q")
+        terminal.finish()
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+    terminal = start(binary, owned, fixture, no_color=True)
+    try:
+        terminal.send(b"C")
+        wait_calendar(terminal)
+        require("All accounts" in terminal.text() and "8 selected calendars" in terminal.text(), "source scope/visibility did not survive process restart")
+        require("A Personal" in terminal.text() and "D Personal" in terminal.text(), "NO_COLOR source identities depend on color")
+        require("Company day" in terminal.text(), "read-only all-day source disappeared after restart")
+        capture(terminal, captures, "calendar-combined-no-color")
+        terminal.send(b"b")
+        terminal.until(lambda: "Google Calendar target validated" in terminal.text())
+        terminal.send(b"q")
+        terminal.finish()
+        for account in ACCOUNTS:
+            with Client(binary, owned, extra=fixture.options()) as client:
+                require(provider_state(client, account)["writes"] == 0, "combined calendar browsing wrote provider data")
+        return {"accounts": 3, "readOnlyHoliday": True, "persistentScope": True, "cancelRollback": True, "noColorIdentity": True, "browserOpen": True, "writes": 0}
+    except Exception:
+        print(terminal.text(), file=sys.stderr)
+        raise
+    finally:
+        terminal.close()
+
+
+def picker_read_access(binary, directory, captures):
+    fixture = Invitations(directory)
+    for columns, rows in ((140, 38), (48, 24)):
+        owned = directory / f"picker-access-{columns}"
+
+        def choose_c(terminal):
+            terminal.send(b"k" * 9 + b"jj")
+            terminal.until(lambda: "C Imported own calendar" in terminal.text())
+
+        def choose_g(terminal):
+            terminal.send(b"k" * 9 + b"j" * 6)
+            terminal.until(lambda: "[x] G Personal" in terminal.text())
+
+        terminal = start(binary, owned, fixture, scenario="calendar-picker-owned-only", columns=columns, rows=rows)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            # Hold the next account catalogue before its store lock. Early
+            # Enter and a click on visibly disabled Apply must keep discovery
+            # alive; Cancel must restore the original view permanently.
+            control = fixture.root / "calendar-priority-control.json"
+            hold = fixture.root / "calendar-priority.hold"
+            entered = fixture.root / "calendar-priority.entered"
+            control.write_text(json.dumps({"account": ACCOUNTS[1], "kind": "calendar_list"}))
+            hold.write_text("hold\n")
+            terminal.send(b"ga")
+            terminal.until(lambda: entered.exists() and "[Loading calendars…]" in terminal.text())
+            click(terminal, *point(terminal, "[Loading calendars…]"))
+            terminal.send(b"\r")
+            terminal.until(lambda: "Loading account calendars · Apply" in terminal.text())
+            require("Calendar · Calendars" in terminal.text() and "[Loading calendars…]" in terminal.text(), "early Apply changed the picker or stopped discovery")
+            capture(terminal, captures, f"calendar-picker-loading-{columns}")
+            terminal.send(b"\x1b")
+            wait_calendar(terminal)
+            require("1 selected calendars" in terminal.text(), "Cancel changed the applied source scope")
+            terminal.gap(.2)
+            require("Calendar · Agenda" in terminal.text(), "canceled discovery reopened its picker")
+            for path in (control, hold, entered):
+                path.unlink(missing_ok=True)
+            terminal.send(b"ga")
+            terminal.until(lambda: "Show calendars · all accounts" in terminal.text() and "9 checked" in terminal.text() and "[Enter Apply]" in terminal.text())
+            terminal.send(b"\r")
+            wait_calendar(terminal)
+            require("3 selected calendars" in terminal.text(), "unreadable calendars counted as displayed sources")
+            terminal.send(b"g")
+            choose_c(terminal)
+            terminal.until(lambda: "[x] C Imported own calendar" in terminal.text() and "Not shown · no read access" in terminal.text())
+            require("Showing 3 · 9 checked" in terminal.text(), "picker confused desired checks and displayed readable sources")
+            capture(terminal, captures, f"calendar-picker-unreadable-checked-{columns}")
+            terminal.send(b" ")
+            terminal.until(lambda: "[ ] C Imported own calendar" in terminal.text() and "8 checked" in terminal.text())
+            terminal.send(b" ")
+            terminal.until(lambda: "[x] C Imported own calendar" in terminal.text() and "9 checked" in terminal.text() and "Selection restored" in terminal.text())
+            require("Showing 3" in terminal.text(), "restoring the applied checkbox displayed an unreadable source")
+            terminal.send(b" ")
+            terminal.until(lambda: "[ ] C Imported own calendar" in terminal.text() and "8 checked" in terminal.text())
+            terminal.send(b"\x1b")
+            wait_calendar(terminal)
+            terminal.send(b"g")
+            choose_c(terminal)
+            terminal.until(lambda: "[x] C Imported own calendar" in terminal.text() and "9 checked" in terminal.text())
+            click(terminal, *point(terminal, "C Imported own calendar"))
+            terminal.until(lambda: "[ ] C Imported own calendar" in terminal.text() and "8 checked" in terminal.text())
+            capture(terminal, captures, f"calendar-picker-unreadable-hidden-{columns}")
+            terminal.send(b"\r")
+            wait_calendar(terminal)
+            preferences = owned / "config" / "omagma" / "ui.json"
+            saved = json.loads(preferences.read_text())["calendar"]
+            hidden = next(choice for choice in saved["sources"] if choice["account"] == ACCOUNTS[0] and choice["calendarId"] == ACCOUNTS[2])
+            require(not hidden["visible"], "Apply did not persist the exact unreadable imported source")
+            require(not any(choice["account"] == ACCOUNTS[2] and choice["calendarId"] == ACCOUNTS[2] and not choice["visible"] for choice in saved["sources"]), "hiding C also hid owning source G")
+            terminal.send(b"g")
+            choose_g(terminal)
+            capture(terminal, captures, f"calendar-picker-own-source-g-{columns}")
+            terminal.send(b"\x1b")
+            wait_calendar(terminal)
+            terminal.send(b"q")
+            terminal.finish()
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+            for name in ("calendar-priority-control.json", "calendar-priority.hold", "calendar-priority.entered"):
+                (fixture.root / name).unlink(missing_ok=True)
+
+        for scenario, expected_count in (("calendar-picker-owned-only", 3), ("calendar-picker-restored", 8)):
+            terminal = start(binary, owned, fixture, scenario=scenario, columns=columns, rows=rows)
+            try:
+                terminal.send(b"C")
+                wait_calendar(terminal)
+                require(f"{expected_count} selected calendars" in terminal.text(), "restart or restored grant changed the displayed source set")
+                terminal.send(b"g")
+                choose_c(terminal)
+                terminal.until(lambda: "[ ] C Imported own calendar" in terminal.text() and "8 checked" in terminal.text())
+                if scenario == "calendar-picker-owned-only":
+                    terminal.send(b" ")
+                    terminal.until(lambda: "No read access · this saved hidden source" in terminal.text())
+                    require("[ ] C Imported own calendar" in terminal.text(), "initially hidden unreadable source enabled after restart")
+                else:
+                    require("no read access" not in terminal.text(), "restored read access remained unavailable")
+                choose_g(terminal)
+                terminal.send(b"\x1b")
+                wait_calendar(terminal)
+                terminal.send(b"q")
+                terminal.finish()
+            except Exception:
+                print(terminal.text(), file=sys.stderr)
+                raise
+            finally:
+                terminal.close()
+        with Client(binary, owned, scenario="calendar-picker-owned-only", extra=fixture.options()) as client:
+            imported = client.request("calendar.list", ACCOUNTS[0])["calendars"][2]
+            original = client.request("calendar.list", ACCOUNTS[2])["calendars"][0]
+            require(imported["calendar"]["target"]["calendar_id"] == original["calendar"]["target"]["calendar_id"], "fixture did not reproduce the same provider calendar across accounts")
+            require(not imported["canRead"] and original["canRead"], "fixture failed to exercise imported-vs-owned grants")
+            for account in ACCOUNTS:
+                require(provider_state(client, account)["writes"] == 0, "picker visibility sent a Calendar mutation")
+    return {"widths": [140, 48], "unreadableCheckedAndUnchecked": True,
+            "keyboardAndMouse": True, "cancelRollback": True, "restoreAppliedCheck": True,
+            "busyApplyParity": True, "cancelledDiscoveryStaysClosed": True,
+            "restartPersistence": True, "restoredAccessStaysHidden": True,
+            "sameCalendarDifferentAccountsIndependent": True, "writes": 0}
+
+
+def source_priority(binary, directory, captures):
+    fixture = Invitations(directory)
+    for columns in (132, 48):
+        owned = directory / f"source-priority-{columns}"
+        preferences = owned / "config" / "omagma" / "ui.json"
+
+        def saved():
+            return json.loads(preferences.read_text()).get("calendar", {})
+
+        def preferred():
+            return saved().get("preferred")
+
+        def choose(terminal, index, label):
+            terminal.send(b"k" * 12 + b"j" * index)
+            terminal.until(lambda: label in terminal.text())
+            terminal.gap(.05)
+
+        def apply(terminal):
+            click(terminal, *point(terminal, "[Enter Apply]"))
+            wait_calendar(terminal)
+
+        def close(terminal):
+            terminal.send(b"q")
+            terminal.finish()
+
+        terminal = start(binary, owned, fixture, scenario="calendar-picker-owned-only", columns=columns)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            terminal.send(b"gp")
+            terminal.until(lambda: "* Priority" in terminal.text() and "[p Clear priority]" in terminal.text())
+            terminal.send(b"\x1b")
+            wait_calendar(terminal)
+            require(not preferences.exists() or preferred() is None, "Esc persisted a staged Priority-only choice")
+            terminal.send(b"g")
+            terminal.until(lambda: "Show calendars" in terminal.text() and "[p Priority]" in terminal.text())
+            # Cancel, visibility, account, color, Priority: the fifth Tab makes
+            # Priority an ordinary reachable button; Enter activates it.
+            terminal.send(b"\t" * 5 + b"\r")
+            terminal.until(lambda: "[p Clear priority]" in terminal.text() and "* Priority" in terminal.text())
+            capture(terminal, captures, f"calendar-priority-picker-{columns}")
+            apply(terminal)
+            require("A*" in terminal.text(), "applied visible Priority is missing from source legend")
+            require(preferred() == {"account": ACCOUNTS[0], "calendarId": ACCOUNTS[0]}, "Priority-only Apply lost exact source identity")
+            require(saved().get("scope", "account") == "account" and not saved().get("sources", []), "Priority-only Apply changed visibility, colors, or account scope")
+            terminal.send(b"g")
+            terminal.until(lambda: "[p Clear priority]" in terminal.text())
+            click(terminal, *point(terminal, "[p Clear priority]"))
+            terminal.until(lambda: "Priority cleared" in terminal.text() and "[p Priority]" in terminal.text())
+            terminal.send(b"\x1b")
+            wait_calendar(terminal)
+            require("A*" in terminal.text() and preferred()["account"] == ACCOUNTS[0], "Esc did not restore the applied Priority after clearing")
+            close(terminal)
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+
+        terminal = start(binary, owned, fixture, scenario="calendar-picker-owned-only", columns=columns)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            require("A*" in terminal.text(), "Priority-only preference did not survive a fresh process")
+            terminal.send(b"ga")
+            terminal.until(lambda: "Show calendars · all accounts" in terminal.text() and "9 checked" in terminal.text() and "[Enter Apply]" in terminal.text())
+            choose(terminal, 2, "C Imported own calendar")
+            terminal.send(b"p")
+            terminal.until(lambda: "No read access · cannot be Priority" in terminal.text())
+            require(preferred()["account"] == ACCOUNTS[0], "refused unreadable source replaced saved Priority")
+            choose(terminal, 6, "G Personal")
+            terminal.send(b"p")
+            terminal.until(lambda: "* Priority" in terminal.text() and "[p Clear priority]" in terminal.text())
+            apply(terminal)
+            expected_g = {"account": ACCOUNTS[2], "calendarId": ACCOUNTS[2]}
+            require(preferred() == expected_g, "same-ID source from the owning account was not independently preferred")
+            require("G*" in terminal.text() and "C*" not in terminal.text(), "same calendar ID gave a second account an unintended Priority badge")
+            require(not saved().get("sources", []), "moving Priority created visibility/color overrides")
+            terminal.send(b"g")
+            choose(terminal, 6, "G Personal")
+            terminal.send(b" p")  # Hide the selected Priority, then clear it.
+            terminal.until(lambda: "[ ] G Personal" in terminal.text() and "[p Priority]" in terminal.text())
+            terminal.send(b"p")  # Setting it while hidden must not show it.
+            terminal.until(lambda: "hidden until shown" in terminal.text() and "Priority (hidden)" in terminal.text())
+            capture(terminal, captures, f"calendar-priority-hidden-{columns}")
+            apply(terminal)
+            require("G*" not in terminal.text() and preferred() == expected_g, "hidden Priority was dropped or unexpectedly displayed")
+            source_g = next(value for value in saved()["sources"] if value["account"] == ACCOUNTS[2] and value["calendarId"] == ACCOUNTS[2])
+            require(not source_g["visible"], "setting Priority enabled its hidden source")
+            close(terminal)
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+
+        # The same imported C becomes readable. Choosing it is explicit; it
+        # neither unhides owning G nor aliases its account-bound preference.
+        terminal = start(binary, owned, fixture, scenario="calendar-picker-restored", columns=columns, no_color=True)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            require("G*" not in terminal.text(), "hidden Priority became shown after restart or restored access")
+            terminal.send(b"g")
+            choose(terminal, 6, "G Personal")
+            terminal.until(lambda: "Priority (hidden)" in terminal.text())
+            choose(terminal, 2, "C Imported own calendar")
+            terminal.send(b"p")
+            terminal.until(lambda: "[p Clear priority]" in terminal.text())
+            apply(terminal)
+            require(preferred() == {"account": ACCOUNTS[0], "calendarId": ACCOUNTS[2]}, "readable imported Priority used the owning account instead")
+            require("C*" in terminal.text() and "G*" not in terminal.text(), "NO_COLOR lost exact readable source Priority")
+            capture(terminal, captures, f"calendar-priority-no-color-{columns}")
+            close(terminal)
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+
+        # Losing read access keeps the user's preferred identity, but its
+        # existing Priority can always be cleared, by mouse or keyboard.
+        terminal = start(binary, owned, fixture, scenario="calendar-picker-owned-only", columns=columns, no_color=True)
+        try:
+            terminal.send(b"C")
+            wait_calendar(terminal)
+            require("C*" not in terminal.text(), "unreadable Priority appeared as an actually displayed source")
+            terminal.send(b"g")
+            choose(terminal, 2, "C Imported own calendar")
+            terminal.until(lambda: "* Priority · not shown · no read access" in terminal.text())
+            click(terminal, *point(terminal, "[p Clear priority]"))
+            terminal.until(lambda: "Priority cleared" in terminal.text())
+            terminal.send(b"\x1b")
+            wait_calendar(terminal)
+            require(preferred() == {"account": ACCOUNTS[0], "calendarId": ACCOUNTS[2]}, "Cancel forgot an unreadable applied Priority")
+            terminal.send(b"g")
+            choose(terminal, 2, "C Imported own calendar")
+            terminal.send(b"p")
+            terminal.until(lambda: "Priority cleared" in terminal.text())
+            apply(terminal)
+            require(preferred() is None, "clearing an existing unreadable Priority was not persisted")
+            close(terminal)
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+        with Client(binary, owned, scenario="calendar-picker-owned-only", extra=fixture.options()) as client:
+            for account in ACCOUNTS:
+                require(provider_state(client, account)["writes"] == 0, "Priority UI wrote to Calendar")
+            require(client.request("cache.stats")["fixtureSends"] == 0, "Priority UI sent RSVP mail")
+    return {"widths": [132, 48], "priorityOnlyApplyAndFreshProcess": True,
+            "keyboardTabMouse": True, "moveClearCancel": True,
+            "sameCalendarDifferentAccountsIndependent": True, "hiddenStaysHidden": True,
+            "unreadableNewRefusedExistingClearable": True, "noColorLegend": True, "writes": 0}
+
+
+def sidebar_navigation(binary, directory, captures):
+    fixture = Invitations(directory)
+    for columns, rows in ((140, 38), (48, 20)):
+        owned = directory / f"sidebar-{columns}"
+        terminal = start(binary, owned, fixture, columns=columns, rows=rows)
+
+        def sidebar_point(literal):
+            # Desktop sidebars are at most36 cells wide; a focused narrow
+            # sidebar fills the terminal. Exclude global header/status rows so
+            # a list title or stale feedback can never stand in for the target.
+            width = 36 if columns >= 120 else columns
+            for y in range(3, rows - 3):
+                cells = terminal.screen.cells[y]
+                for x in range(width):
+                    if cells[x] and "".join(cells[x:width]).startswith(literal):
+                        return {"row": y, "column": x}
+            return None
+
+        def selected(literal):
+            where = sidebar_point(literal)
+            return where is not None and terminal.screen.styles[where["row"]][where["column"]][1] == ("rgb", 57, 43, 48)
+
+        def sidebar_click(literal):
+            where = sidebar_point(literal)
+            require(where is not None, "expected sidebar-only mouse target absent")
+            click(terminal, where["column"], where["row"])
+
+        def follow_ups_open():
+            # Neither the sidebar due badge nor generic status contains total.
+            return any("Follow-ups ·" in line and "total" in line for line in terminal.screen.lines()) and "Enter Mail" in terminal.text()
+
+        try:
+            terminal.send(b"\x1b[Z")  # Mail list -> sidebar; never C or the palette.
+            terminal.send(b"\x1b[B" * (len(ACCOUNTS) + 7))
+            terminal.until(lambda: selected("Unread"))
+            terminal.send(b"\x1b[B")
+            terminal.until(lambda: selected("Contacts"))
+            terminal.send(b"\x1b[B")
+            terminal.until(lambda: selected("Calendar · C"))
+            capture(terminal, captures, f"sidebar-calendar-{columns}")
+            # Tab still changes panes; both directions preserve the selected
+            # sidebar destination, including the full-screen narrow sidebar.
+            terminal.send(b"\t\x1b[Z")
+            terminal.until(lambda: selected("Calendar · C"))
+            terminal.send(b"\x1b[Z\t")
+            terminal.until(lambda: selected("Calendar · C"))
+            terminal.send(b"\r")
+            wait_calendar(terminal)
+            terminal.send(b"q")
+            terminal.until(lambda: selected("Calendar · C"))
+            terminal.send(b"\x1b[B")
+            terminal.until(lambda: selected("Follow-ups"))
+            require(not follow_ups_open(), "Follow-ups was already open before Enter activation")
+            terminal.send(b"\r")
+            terminal.until(follow_ups_open)
+            terminal.send(b"\x1b[Z")
+            terminal.until(lambda: selected("Follow-ups"))
+            capture(terminal, captures, f"sidebar-follow-ups-{columns}")
+            terminal.send(b"\x1b[B")
+            terminal.until(lambda: selected("LABELS"))
+            terminal.send(b"\x1b[A")
+            terminal.until(lambda: selected("Follow-ups"))
+            terminal.send(b"\x1b[A")
+            terminal.until(lambda: selected("Calendar · C"))
+            terminal.send(b"\x1b[A")
+            terminal.until(lambda: selected("Contacts"))
+            # Restore ordinary mail before the independent mouse workflow;
+            # its Follow-ups result must be a new observable transition.
+            terminal.send(b"q\t")  # q keeps sidebar focus; Tab shows the list.
+            terminal.until(lambda: "Mail ·" in terminal.text() and "Planning version" in terminal.text() and not follow_ups_open())
+            terminal.send(b"\x1b[Z")
+            terminal.until(lambda: selected("Contacts"))
+            # Mouse targets use the same logical destination after scrolling.
+            terminal.send(b"\x1b[B")
+            terminal.until(lambda: selected("Calendar · C"))
+            sidebar_click("Calendar · C")
+            wait_calendar(terminal)
+            terminal.send(b"q\x1b[B")
+            terminal.until(lambda: selected("Follow-ups"))
+            require(not follow_ups_open(), "Follow-ups was already open before mouse activation")
+            sidebar_click("Follow-ups")
+            terminal.until(follow_ups_open)
+            terminal.send(b"q")
+            terminal.gap(.1)
+            terminal.send(b"q")
+            terminal.finish()
+        except Exception:
+            print(terminal.text(), file=sys.stderr)
+            raise
+        finally:
+            terminal.close()
+        with Client(binary, owned, extra=fixture.options()) as client:
+            # This workflow visits the current account only. Unvisited
+            # accounts correctly have no provider fixture storage yet.
+            require(provider_state(client)["writes"] == 0, "sidebar navigation wrote Calendar data")
+        for path in (owned / "cache").rglob("calendar-provider-fixture.json"):
+            require(json.loads(path.read_text())["writes"] == 0, "sidebar navigation wrote another Calendar source")
+    return {"widths": [140, 48], "arrowOrder": True, "inverseOrder": True,
+            "paneTabRetainsDestination": True, "calendarEnter": True,
+            "followUpsEnter": True, "mouseParity": True, "writes": 0}
 
 
 def browsing(binary, directory, captures):
@@ -113,11 +573,11 @@ def browsing(binary, directory, captures):
         terminal.until(lambda: "Calendar · keyboard & mouse" in terminal.text())
         terminal.send(b"/cHrOmE\r")
         # The action column wraps independently inside the bordered help panel.
-        terminal.until(lambda: "1/1 matches" in terminal.text() and
+        terminal.until(lambda: "1/2 matches" in terminal.text() and
                        "Chrome profile" in " ".join(terminal.text().replace("│", " ").split()))
         capture(terminal, captures, "calendar-help-search-from-card")
         terminal.send(b"\x1b")
-        terminal.until(lambda: "Search help" in terminal.text() and "1/1 matches" not in terminal.text())
+        terminal.until(lambda: "Search help" in terminal.text() and "1/2 matches" not in terminal.text())
         terminal.send(b"\t\r")
         terminal.until(lambda: "Calendar · Event" in terminal.text() and "[o Join]" in terminal.text()
                        and "keyboard & mouse" not in terminal.text())
@@ -135,9 +595,9 @@ def browsing(binary, directory, captures):
         terminal.send(b"q/\x1b")
         terminal.gap(.1)
         terminal.send(b"g")
-        terminal.until(lambda: "Choose calendar" in terminal.text() and "Holidays" in terminal.text())
+        terminal.until(lambda: "Show calendars" in terminal.text() and "Holidays" in terminal.text())
         capture(terminal, captures, "calendar-picker")
-        terminal.send(b"jj\r")
+        terminal.send(b"jjo")
         wait_calendar(terminal)
         require("Company day" in terminal.text() and "all-day" in terminal.text(), "all-day event lost civil-date presentation")
         terminal.send(b"\r")
@@ -156,11 +616,11 @@ def browsing(binary, directory, captures):
         capture(terminal, captures, "calendar-help")
         terminal.resize(48, 24)
         terminal.send(b"/profile\r")
-        terminal.until(lambda: "1/1 matches" in terminal.text() and "[q Back]" in terminal.text() and
+        terminal.until(lambda: "1/2 matches" in terminal.text() and "[q Back]" in terminal.text() and
                        "Chrome profile" in " ".join(terminal.text().replace("│", " ").split()))
         capture(terminal, captures, "calendar-help-search-48")
         terminal.send(b"\x1b")
-        terminal.until(lambda: "Search help" in terminal.text() and "1/1 matches" not in terminal.text())
+        terminal.until(lambda: "Search help" in terminal.text() and "1/2 matches" not in terminal.text())
         terminal.send(b"q")
         terminal.until(lambda: "Calendar · Week" in terminal.text() and "keyboard & mouse" not in terminal.text())
         terminal.resize(140, 38)
@@ -191,10 +651,17 @@ def browsing(binary, directory, captures):
         terminal.close()
 
 
+def wait_destination(terminal):
+    terminal.until(lambda: "Calendar · Calendars" in terminal.text()
+                   and "Choose destination calendar" in terminal.text()
+                   and "A Personal" in terminal.text() and ACCOUNTS[0] in terminal.text()
+                   and "[q Back]" in terminal.text() and "[Enter Select]" in terminal.text())
+
+
 def plan(terminal, version, action):
     search_mail(terminal, version)
     terminal.send(b"A")
-    terminal.until(lambda: "Choose calendar" in terminal.text() and "Personal" in terminal.text())
+    wait_destination(terminal)
     terminal.send(b"\r")
     terminal.until(lambda: "Action: " + {"import_missing": "Add to Calendar", "review_update": "Apply organizer's update", "review_cancel": "Apply organizer's cancellation"}.get(action, action) in terminal.text() and "[Enter Review]" in terminal.text())
 
@@ -242,7 +709,7 @@ def lifecycle(binary, directory, captures, lost=False):
                 terminal = start(binary, client_dir, fixture, scenario=scenario)
                 search_mail(terminal, version)
                 terminal.send(b"A")
-                terminal.until(lambda: "Choose calendar" in terminal.text() and "Personal" in terminal.text())
+                wait_destination(terminal)
                 terminal.send(b"\r")
                 terminal.until(lambda: "[r Check Calendar]" in terminal.text())
                 terminal.send(b"r")
@@ -396,11 +863,11 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--capture-dir", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--case", choices=("browse", "lifecycle", "lost-response", "readonly", "narrow-confirm", "grid-coverage"))
+    parser.add_argument("--case", choices=("browse", "combined-sources", "picker-read-access", "source-priority", "sidebar-navigation", "lifecycle", "lost-response", "readonly", "narrow-confirm", "grid-coverage"))
     args = parser.parse_args()
     binary = args.binary.resolve()
     receipt = {"build": read_build_info(binary), "cases": []}
-    cases = [("browse", browsing), ("lifecycle", lifecycle),
+    cases = [("browse", browsing), ("combined-sources", combined_sources), ("picker-read-access", picker_read_access), ("source-priority", source_priority), ("sidebar-navigation", sidebar_navigation), ("lifecycle", lifecycle),
              ("lost-response", lambda b, d, c: lifecycle(b, d, c, True)), ("readonly", readonly), ("narrow-confirm", narrow_confirmation), ("grid-coverage", grid_coverage)]
     try:
         for name, task in cases:

@@ -21,6 +21,9 @@ pub const Palette = struct {
     cyan: Color = .{ 92, 177, 255 },
     green: Color = .{ 133, 207, 149 },
     yellow: Color = .{ 255, 198, 98 },
+    blue: Color = .{ 117, 156, 255 },
+    magenta: Color = .{ 199, 149, 230 },
+    orange: Color = .{ 255, 158, 97 },
     red: Color = .{ 255, 112, 112 },
     from_omarchy: bool = false,
 };
@@ -82,7 +85,7 @@ pub fn parse(bytes: []const u8) !Palette {
         if (line.len == 0 or line[0] == '#' or line[0] == '[') continue;
         const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
         const key = std.mem.trim(u8, line[0..separator], " \t");
-        const target: ?*Color = if (std.mem.eql(u8, key, "foreground")) &palette.foreground else if (std.mem.eql(u8, key, "background")) &palette.background else if (std.mem.eql(u8, key, "dark_foreground")) &palette.muted else if (std.mem.eql(u8, key, "accent")) &palette.accent else if (std.mem.eql(u8, key, "selection")) &palette.selection else if (std.mem.eql(u8, key, "cyan")) &palette.cyan else if (std.mem.eql(u8, key, "green")) &palette.green else if (std.mem.eql(u8, key, "yellow")) &palette.yellow else if (std.mem.eql(u8, key, "red")) &palette.red else null;
+        const target: ?*Color = if (std.mem.eql(u8, key, "foreground")) &palette.foreground else if (std.mem.eql(u8, key, "background")) &palette.background else if (std.mem.eql(u8, key, "dark_foreground")) &palette.muted else if (std.mem.eql(u8, key, "accent")) &palette.accent else if (std.mem.eql(u8, key, "selection")) &palette.selection else if (std.mem.eql(u8, key, "cyan")) &palette.cyan else if (std.mem.eql(u8, key, "green")) &palette.green else if (std.mem.eql(u8, key, "yellow")) &palette.yellow else if (std.mem.eql(u8, key, "red")) &palette.red else if (std.mem.eql(u8, key, "blue")) &palette.blue else if (std.mem.eql(u8, key, "magenta")) &palette.magenta else if (std.mem.eql(u8, key, "orange")) &palette.orange else null;
         if (target) |dest| {
             dest.* = try color(line[separator + 1 ..]);
             palette.from_omarchy = true;

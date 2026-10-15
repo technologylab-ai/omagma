@@ -86,6 +86,7 @@ pub const Calendar = struct {
     selected: bool = false,
     /// ACL owner is not proof that calendar.events.owned covers this calendar.
     owned_scope_verified: bool = false,
+    supports_meet: bool = false,
 
     pub fn writable(self: Calendar) bool {
         return self.access == .writer_without_private or self.access == .writer or self.access == .owner;
@@ -113,6 +114,13 @@ pub const Event = struct {
     locked: bool = false,
     private_copy: bool = false,
     response: enum { unknown, needs_action, accepted, tentative, declined } = .unknown,
+    event_type: []const u8 = "",
+    attendees: []const []const u8 = &.{},
+    attendees_omitted: bool = false,
+    /// Number returned by the provider; a provider-omitted list may be larger.
+    attendee_count: usize = 0,
+    conference_status: []const u8 = "",
+    conference_present: bool = false,
     /// An opaque operation ID; never place account names or message bodies here.
     operation_marker: []const u8 = "",
     source_marker: []const u8 = "",

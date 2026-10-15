@@ -41,11 +41,16 @@ Set `refreshIntervalSeconds` to `300` in your private account configuration to r
 
 **The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides separate accounts, full mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, local drafts, replies/forwarding, contacts, custom labels, attachments, mailbox changes and invitation replies. Copy received text by dragging or using Vim visual selection, or open the message in `$EDITOR`. The editor takes over the terminal and returns to the TUI; compose edits return to the draft, while received-message snapshots are discarded. No tmux is required. Permanent mail deletion and contact deletion remain outside the current scope. [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) describes their interface differences.
 
-Version **0.2.9** adds Calendar agenda, day and week views, meeting reminders
-and profile-aware Join, reviewed invitation saving, local follow-ups, and explicit
-Gmail draft handoff. Calendar requires optional per-account permissions. Optional
-encrypted storage uses one unlocked native daemon for the TUI and agent CLI.
-See the [0.2.9 notes](docs/release-notes/0.2.9.md),
+Version **0.2.10** adds reviewed Calendar event creation, editing and rescheduling,
+including all-day events, Google Meet links, invitations and a Contacts guest
+picker. Combine calendars across accounts with saved colours and visibility,
+choose a Priority source, and find hidden events with the Week chooser. Calendar
+agenda/day/week views, meeting reminders, profile-aware Join, local follow-ups
+and Gmail draft handoff remain available. Calendar requires optional per-account
+permissions; existing write grants cover the editor and Meet. Optional encrypted
+storage uses one unlocked native daemon for the TUI and agent CLI.
+See the [0.2.10 notes](docs/release-notes/0.2.10.md),
+[event guide](docs/CALENDAR-EVENTS.md),
 [Calendar setup](docs/CALENDAR-PERMISSIONS.md) and
 [vault setup](docs/ENCRYPTION.md).
 

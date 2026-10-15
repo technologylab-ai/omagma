@@ -26,6 +26,7 @@ const State = struct {
     account: []const u8,
     generation: u64 = 0,
     writes: u64 = 0,
+    dispatch_attempts: u64 = 0,
     events: []StoredEvent = &.{},
 };
 
@@ -39,6 +40,7 @@ pub const Provider = struct {
     }
     pub fn grants(self: *const Provider) service.Grants {
         const readonly = std.mem.eql(u8, self.config.options.fixture_scenario, "readonly") or std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-readonly");
+        if (std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-picker-owned-only")) return .{ .account = self.config.account, .calendar_list = true, .write_owned = true };
         return .{ .account = self.config.account, .calendar_list = true, .read_events = true, .write_owned = !readonly, .write_shared = !readonly, .free_busy = true };
     }
     pub fn transport(self: *Provider) service.Transport {
@@ -56,14 +58,19 @@ pub const Provider = struct {
         try self.waitForReadFixture(a, request.kind);
         var store = try self.config.access.open(self.config.io, a, self.config.root, self.config.account, self.config.options, false);
         defer store.close();
-        var state = if (try store.readDocument(a, document_name, document_bytes)) |bytes| try load(a, self.config.account, bytes) else initial: {
+        var state = if (try store.readDocument(a, document_name, document_bytes)) |bytes| try load(a, self.config.account, self.config.options.fixture_scenario, bytes) else initial: {
             const value = try seed(a, self.config.account, self.config.now_ms);
             try save(&store, a, value);
             break :initial value;
         };
-        if (request.kind == .calendar_list) return response(out, self.config.account, 200, try calendars(a, self.config.account));
-        const access = calendarAccess(self.config.account, request.target.calendar_id) orelse return failure(out, self.config.account, 404, "notFound");
+        if (request.kind == .calendar_list) return response(out, self.config.account, 200, try calendars(a, self.config.account, self.config.options.fixture_scenario));
+        const access = calendarAccess(self.config.account, request.target.calendar_id, self.config.options.fixture_scenario) orelse return failure(out, self.config.account, 404, "notFound");
         if (request.kind.mutating() and (access == .reader or !self.grants().write_shared)) return failure(out, self.config.account, 403, "forbidden");
+        if (request.kind.mutating()) {
+            state.dispatch_attempts += 1;
+            try save(&store, a, state);
+            if (std.mem.eql(u8, self.config.options.fixture_scenario, "calendar-prewrite-unavailable")) return failure(out, self.config.account, 503, "backendError");
+        }
         switch (request.kind) {
             .calendar_list => unreachable,
             .event_lookup => {
@@ -79,19 +86,22 @@ pub const Provider = struct {
                 return failure(out, self.config.account, 404, "notFound");
             },
             .free_busy => return response(out, self.config.account, 200, try freeBusy(a, state, request)),
-            .import_event => {
+            .import_event, .insert_event => {
                 const body = try parse(a, request.body.?);
-                const uid = try j.required(body, "iCalUID");
+                const uid = if (request.kind == .import_event) try j.required(body, "iCalUID") else try std.fmt.allocPrint(a, "{s}@google.com", .{try j.required(body, "id")});
                 for (state.events) |event| if (std.mem.eql(u8, event.calendar_id, request.target.calendar_id) and std.mem.eql(u8, j.text(event.value, "iCalUID"), uid)) return failure(out, self.config.account, 409, "duplicate");
                 if (state.events.len >= 128) return failure(out, self.config.account, 403, "quotaExceeded");
                 var event = try j.copyObject(a, body);
                 state.generation += 1;
-                const id = try std.fmt.allocPrint(a, "fixture-imported-{d}", .{state.generation});
+                const id = if (request.kind == .insert_event) try j.required(body, "id") else try std.fmt.allocPrint(a, "fixture-imported-{d}", .{state.generation});
+                try event.object.put(a, "iCalUID", .{ .string = uid });
+                if (request.kind == .insert_event) try event.object.put(a, "organizer", try j.value(a, .{ .email = self.config.account, .self = true }));
                 try event.object.put(a, "id", .{ .string = id });
                 try event.object.put(a, "etag", .{ .string = try etag(a, state.generation) });
                 try event.object.put(a, "status", .{ .string = "confirmed" });
-                try event.object.put(a, "privateCopy", .{ .bool = true });
-                try event.object.put(a, "htmlLink", .{ .string = try std.fmt.allocPrint(a, "https://calendar.example.test/event/{s}", .{id}) });
+                if (request.kind == .import_event) try event.object.put(a, "privateCopy", .{ .bool = true });
+                if (j.get(body, "conferenceData") != null) try fixtureConference(a, &event, self.config.options.fixture_scenario);
+                try event.object.put(a, "htmlLink", .{ .string = try std.fmt.allocPrint(a, "https://calendar.google.com/calendar/event?eid={s}", .{id}) });
                 _ = try provider.decodeDocument(a, request.target, try std.json.Stringify.valueAlloc(a, event, .{}));
                 const events = try a.alloc(StoredEvent, state.events.len + 1);
                 @memcpy(events[0..state.events.len], state.events);
@@ -128,12 +138,20 @@ pub const Provider = struct {
                                 if (!matched) return error.InvalidCalendarRequest;
                             }
                             try event.object.put(a, "attendees", .{ .array = .fromOwnedSlice(a, merged) });
+                        } else if (std.mem.eql(u8, field.key_ptr.*, "start") or std.mem.eql(u8, field.key_ptr.*, "end")) {
+                            var endpoint = try j.copyObject(a, field.value_ptr.*);
+                            // Google PATCH clears null keys; responses omit them.
+                            for ([_][]const u8{ "date", "dateTime", "timeZone" }) |key| if (j.get(endpoint, key)) |entry| if (entry == .null) {
+                                _ = endpoint.object.swapRemove(key);
+                            };
+                            try event.object.put(a, field.key_ptr.*, endpoint);
                         } else if (std.mem.eql(u8, field.key_ptr.*, "attendeesOmitted")) {
                             // Only the submitted response is partial; the fixture
                             // still retains the complete provider representation.
                         } else try event.object.put(a, field.key_ptr.*, field.value_ptr.*);
                     }
                 } else try event.object.put(a, "status", .{ .string = "cancelled" });
+                if (request.kind == .update_event and j.get(try parse(a, request.body.?), "conferenceData") != null) try fixtureConference(a, &event, self.config.options.fixture_scenario);
                 state.generation += 1;
                 try event.object.put(a, "etag", .{ .string = try etag(a, state.generation) });
                 _ = try provider.decodeDocument(a, request.target, try std.json.Stringify.valueAlloc(a, event, .{}));
@@ -188,13 +206,13 @@ fn parse(a: std.mem.Allocator, bytes: []const u8) !j.Value {
     try @import("../bounded.zig").preflight(bytes);
     return std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" });
 }
-fn load(a: std.mem.Allocator, account: []const u8, bytes: []const u8) !State {
+fn load(a: std.mem.Allocator, account: []const u8, scenario: []const u8, bytes: []const u8) !State {
     if (bytes.len > document_bytes) return error.CalendarFixtureTooLarge;
     try @import("../bounded.zig").preflight(bytes);
     const state = try std.json.parseFromSliceLeaky(State, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" });
     if (state.schema != 1 or !std.mem.eql(u8, state.account, account) or state.events.len > 128 or state.writes != state.generation or state.generation == std.math.maxInt(u64)) return error.InvalidCalendarFixture;
     for (state.events, 0..) |event, index| {
-        if (calendarAccess(account, event.calendar_id) == null) return error.InvalidCalendarFixture;
+        if (calendarAccess(account, event.calendar_id, scenario) == null) return error.InvalidCalendarFixture;
         const id = try j.required(event.value, "id");
         for (state.events[0..index]) |previous| if (std.mem.eql(u8, previous.calendar_id, event.calendar_id) and std.mem.eql(u8, j.text(previous.value, "id"), id)) return error.InvalidCalendarFixture;
         const decoded = (try provider.decodeDocument(a, .{ .account = account, .calendar_id = event.calendar_id }, try std.json.Stringify.valueAlloc(a, event.value, .{}))).event;
@@ -218,14 +236,23 @@ fn response(a: std.mem.Allocator, account: []const u8, status: u16, value: j.Val
 fn failure(a: std.mem.Allocator, account: []const u8, status: u16, reason: []const u8) !service.Response {
     return response(a, account, status, try j.value(a, .{ .@"error" = .{ .code = status, .errors = [_]struct { reason: []const u8 }{.{ .reason = reason }} } }));
 }
-fn calendars(a: std.mem.Allocator, account: []const u8) !j.Value {
-    return j.value(a, .{ .items = .{
+fn pickerAccessScenario(scenario: []const u8) bool {
+    return std.mem.eql(u8, scenario, "calendar-picker-owned-only") or std.mem.eql(u8, scenario, "calendar-picker-restored");
+}
+fn calendars(a: std.mem.Allocator, account: []const u8, scenario: []const u8) !j.Value {
+    if (pickerAccessScenario(scenario) and std.mem.eql(u8, account, "personal@example.com")) return j.value(a, .{ .items = .{
         .{ .id = account, .summary = "Personal", .timeZone = "UTC", .accessRole = "owner", .primary = true, .selected = true },
+        .{ .id = "fixture-shared-team", .summary = "Shared team", .timeZone = "UTC", .accessRole = "owner", .dataOwner = "calendar-owner@example.test", .selected = true },
+        .{ .id = "optional@example.com", .summary = "Imported own calendar", .timeZone = "UTC", .accessRole = "owner", .dataOwner = "optional@example.com", .selected = true },
+    } });
+    return j.value(a, .{ .items = .{
+        .{ .id = account, .summary = "Personal", .timeZone = "UTC", .accessRole = "owner", .primary = true, .selected = true, .conferenceProperties = .{ .allowedConferenceSolutionTypes = .{"hangoutsMeet"} } },
         .{ .id = "fixture-shared-team", .summary = "Shared team", .timeZone = "UTC", .accessRole = "owner", .dataOwner = "calendar-owner@example.test", .selected = true },
         .{ .id = "fixture-readonly", .summary = "Holidays", .timeZone = "UTC", .accessRole = "reader", .selected = true },
     } });
 }
-fn calendarAccess(account: []const u8, id: []const u8) ?t.Access {
+fn calendarAccess(account: []const u8, id: []const u8, scenario: []const u8) ?t.Access {
+    if (pickerAccessScenario(scenario) and std.mem.eql(u8, account, "personal@example.com") and std.mem.eql(u8, id, "optional@example.com")) return .owner;
     if (std.mem.eql(u8, account, id) or std.mem.eql(u8, id, "fixture-shared-team")) return .owner;
     if (std.mem.eql(u8, id, "fixture-readonly")) return .reader;
     return null;
@@ -262,13 +289,13 @@ fn pageItems(a: std.mem.Allocator, url: []const u8, items: []const j.Value) !j.V
 fn validateRequest(a: std.mem.Allocator, request: provider.Request) ![]const u8 {
     const method: std.http.Method = switch (request.kind) {
         .calendar_list, .event_lookup, .agenda, .event_get => .GET,
-        .free_busy, .import_event => .POST,
+        .free_busy, .import_event, .insert_event => .POST,
         .update_event => .PATCH,
         .cancel_event => .DELETE,
     };
     if (request.method != method) return error.InvalidCalendarRequest;
     const conditional = request.kind == .update_event or request.kind == .cancel_event;
-    const body = request.kind == .free_busy or request.kind == .import_event or request.kind == .update_event;
+    const body = request.kind == .free_busy or request.kind == .import_event or request.kind == .insert_event or request.kind == .update_event;
     if (conditional != (request.if_match != null) or body != (request.body != null)) return error.InvalidCalendarRequest;
     if (request.kind == .calendar_list) {
         if (!std.mem.startsWith(u8, request.url, provider.base_url ++ "/users/me/calendarList?")) return error.InvalidCalendarPath;
@@ -281,7 +308,7 @@ fn validateRequest(a: std.mem.Allocator, request: provider.Request) ![]const u8 
     const marker = "fixture-event-marker";
     const bound = try provider.get(a, request.target, marker);
     const prefix = bound.url[0 .. bound.url.len - marker.len];
-    if (request.kind == .event_lookup or request.kind == .agenda) {
+    if (request.kind == .event_lookup or request.kind == .agenda or request.kind == .insert_event) {
         const collection = try std.fmt.allocPrint(a, "{s}?", .{prefix[0 .. prefix.len - 1]});
         if (!std.mem.startsWith(u8, request.url, collection)) return error.CalendarIdentityMismatch;
         return "";
@@ -314,7 +341,7 @@ fn seed(a: std.mem.Allocator, account: []const u8, now_ms: i64) !State {
     return .{ .account = account, .events = events };
 }
 fn timedEvent(a: std.mem.Allocator, id: []const u8, uid: []const u8, summary: []const u8, start: i64, end: i64) !j.Value {
-    return j.value(a, .{ .id = id, .iCalUID = uid, .etag = "\"fixture-seed-1\"", .status = "confirmed", .organizer = .{ .email = "host@example.test" }, .summary = summary, .description = "Synthetic Calendar acceptance event.", .location = "Meeting room", .start = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = start }) }, .end = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = end }) }, .sequence = 0, .htmlLink = try std.fmt.allocPrint(a, "https://calendar.example.test/event/{s}", .{id}), .hangoutLink = "https://meet.example.test/fixture", .extendedProperties = .{ .private = .{ .fixtureProperty = "preserved" } } });
+    return j.value(a, .{ .id = id, .iCalUID = uid, .etag = "\"fixture-seed-1\"", .status = "confirmed", .organizer = .{ .email = "host@example.test" }, .summary = summary, .description = "Synthetic Calendar acceptance event.", .location = "Meeting room", .start = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = start }) }, .end = .{ .dateTime = try t.time.format(a, .{ .kind = .instant, .value = end }) }, .sequence = 0, .htmlLink = try std.fmt.allocPrint(a, "https://calendar.google.com/calendar/event?eid={s}", .{id}), .hangoutLink = "https://meet.example.test/fixture", .extendedProperties = .{ .private = .{ .fixtureProperty = "preserved" } } });
 }
 fn agendaItems(a: std.mem.Allocator, state: State, target: t.Target, window: t.Window) ![]const j.Value {
     var items: std.ArrayList(j.Value) = .empty;
@@ -396,7 +423,7 @@ fn freeBusy(a: std.mem.Allocator, state: State, request: provider.Request) !j.Va
     return j.value(a, .{ .timeMin = try j.required(body, "timeMin"), .timeMax = try j.required(body, "timeMax"), .calendars = values });
 }
 fn patchField(name: []const u8) bool {
-    for ([_][]const u8{ "summary", "description", "location", "start", "end", "sequence", "extendedProperties", "attendees", "attendeesOmitted" }) |field| if (std.mem.eql(u8, name, field)) return true;
+    for ([_][]const u8{ "summary", "description", "location", "start", "end", "sequence", "extendedProperties", "attendees", "attendeesOmitted", "conferenceData" }) |field| if (std.mem.eql(u8, name, field)) return true;
     return false;
 }
 fn mergeProperties(a: std.mem.Allocator, previous: ?j.Value, changes: j.Value) !j.Value {
@@ -413,4 +440,22 @@ fn mergeProperties(a: std.mem.Allocator, previous: ?j.Value, changes: j.Value) !
         try result.object.put(a, group.key_ptr.*, fields);
     }
     return result;
+}
+
+fn fixtureConference(a: std.mem.Allocator, event: *j.Value, scenario: []const u8) !void {
+    var conference = j.get(event.*, "conferenceData") orelse return;
+    const create = j.get(conference, "createRequest") orelse return;
+    var updated = try j.copyObject(a, create);
+    const status: []const u8 = if (std.mem.eql(u8, scenario, "calendar-meet-pending")) "pending" else if (std.mem.eql(u8, scenario, "calendar-meet-failure")) "failure" else "success";
+    try updated.object.put(a, "status", try j.value(a, .{ .statusCode = status }));
+    conference = try j.copyObject(a, conference);
+    try conference.object.put(a, "createRequest", updated);
+    if (!std.mem.eql(u8, status, "success")) {
+        try event.object.put(a, "conferenceData", conference);
+        return;
+    }
+    const link = "https://meet.google.com/abc-defg-hij";
+    try conference.object.put(a, "entryPoints", try j.value(a, [_]struct { entryPointType: []const u8, uri: []const u8 }{.{ .entryPointType = "video", .uri = link }}));
+    try event.object.put(a, "conferenceData", conference);
+    try event.object.put(a, "hangoutLink", .{ .string = link });
 }

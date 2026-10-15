@@ -8,6 +8,13 @@ Calendar storage, views and the capabilities below require Omagma 0.2.9 or
 later. Version 0.2.8 rejects these Calendar capabilities. Existing mail/contact
 setup commands are documented in [account setup](SETUP.md).
 
+The v0.2.10 editor adds ordinary timed/all-day events, guest
+invitations and rescheduling with these same grants. An account already using
+the appropriate Calendar write permission needs no additional scope for that
+editor or for an event's generated Google Meet link. Calendar subscriptions
+such as holidays still need event read access. See [creating and editing
+events](CALENDAR-EVENTS.md) for the native TUI workflow.
+
 ## Choose the access needed
 
 The scope URLs in this table are complete and can be pasted into Google Auth
@@ -17,8 +24,8 @@ the complete terminal grant when you continue using those features.
 | Terminal capability | Calendar scopes | Intended use |
 | --- | --- | --- |
 | `calendar-read` | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` and `https://www.googleapis.com/auth/calendar.events.readonly` | Select subscribed calendars and read their events, subject to each calendar's sharing rules. |
-| `calendar-write-owned` | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` and `https://www.googleapis.com/auth/calendar.events.owned` | Find and import invitations into calendars covered by Google's owned-calendar permission. This also permits reading those events. |
-| `calendar-write-shared` | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` and `https://www.googleapis.com/auth/calendar.events` | Read and change events on shared calendars where the account has sufficient calendar access. |
+| `calendar-write-owned` | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` and `https://www.googleapis.com/auth/calendar.events.owned` | Read, create, move and edit events, or import invitations, on calendars covered by Google's owned-calendar permission. |
+| `calendar-write-shared` | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` and `https://www.googleapis.com/auth/calendar.events` | Read, create and change events on shared calendars where the account has sufficient calendar access. |
 | `calendar-freebusy` | `https://www.googleapis.com/auth/calendar.calendarlist.readonly` and `https://www.googleapis.com/auth/calendar.events.freebusy` | Check availability without requesting event titles and descriptions. |
 | Existing `calendar-rsvp` | No Calendar scope; the existing Gmail sending permission applies. | Send a reviewed invitation response email to the organizer. |
 
@@ -39,6 +46,13 @@ reviewed action before changing an event. The broader
 `calendar.app.created` is appropriate only for a separate app-created calendar,
 not for adding invitations to your existing primary calendar.
 [Calendar API scopes](https://developers.google.com/workspace/calendar/api/auth).
+
+Creating Google Meet details through an event's `conferenceData.createRequest`
+uses the Calendar event write scope. The destination calendar must advertise
+Google Meet support; organization policies can still restrict it. Pasting a
+Zoom, Teams or other meeting link only includes that existing link in the event
+and does not grant Omagma access to that service.
+[Event creation and conference requests](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert).
 
 A calendar being visible does not make it writable. A shared calendar may allow
 only busy information, public event details, or event editing. An ACL `owner`
@@ -87,8 +101,8 @@ flow. Adding scopes in Console or refreshing an old token does not upgrade an
 existing grant.
 [Installed-app scope selection](https://developers.google.com/identity/protocols/oauth2/native-app#identify-access-scopes).
 
-For a development build exposing the new capabilities, a minimal import grant
-would be:
+A minimal grant for creating events and importing invitations into your own
+calendar is:
 
 ```sh
 omagma terminal-auth authorize --account personal@example.com \

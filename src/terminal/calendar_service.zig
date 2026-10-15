@@ -9,6 +9,7 @@ const invitation = @import("calendar_invitation.zig");
 const agenda_builder = @import("calendar_agenda.zig");
 const timezone = @import("timezone.zig");
 const j = @import("json.zig");
+const ordinary = @import("calendar_event.zig");
 
 pub const Grants = struct {
     account: []const u8,
@@ -100,17 +101,22 @@ pub const Review = struct {
     previous: ?t.Event = null,
     rsvp_response: ?p.RsvpResponse = null,
     response_only: bool = false,
+    ordinary_event: ?ordinary.Prepared = null,
 
     pub fn confirmation(self: Review) Confirmation {
         return .{ .target = self.intent.identity.target, .operation_id = self.intent.operation_id, .review_hash = self.review_hash };
     }
 };
+pub const Receipt = struct { operation: planner.Operation, review_hash: [32]u8, ordinary: bool = true };
+pub const Pending = struct { review: Review, operation: planner.Operation };
 pub const Confirmation = struct { target: t.Target, operation_id: []const u8, review_hash: [32]u8 };
 pub const Applied = struct {
     operation: planner.Operation,
     event: ?t.Event = null,
     reconciled: bool = false,
     failure: ?p.Failure = null,
+    retry_possible: bool = false,
+    recovery_reason: []const u8 = "",
 };
 pub const BusyRange = struct { start_ms: i64, end_ms: i64 };
 pub const FreeBusy = struct {
@@ -216,12 +222,58 @@ pub const Service = struct {
         return (try self.document(calendar, event_id)).event;
     }
 
-    fn document(self: Service, calendar: t.Calendar, event_id: []const u8) !p.EventDocument {
+    pub fn document(self: Service, calendar: t.Calendar, event_id: []const u8) !p.EventDocument {
         try self.requireRead(calendar);
         const response = try self.read(try p.get(self.a, calendar.target, event_id));
         const result = try p.decodeDocument(self.a, calendar.target, response.body);
         if (!std.mem.eql(u8, result.event.id, event_id)) return error.CalendarIdentityMismatch;
         return result;
+    }
+
+    /// Ordinary organizer events share the same durable single-dispatch journal
+    /// as invitation imports, while retaining a separate draft/review contract.
+    pub const EventFields = struct { description_present: bool = true, location_present: bool = true };
+    pub fn prepareEventReview(self: Service, calendar: t.Calendar, initial: ordinary.Prepared, operation_id: []const u8, event_id: []const u8, expected_etag: []const u8) !Review {
+        return self.prepareEventReviewFields(calendar, initial, operation_id, event_id, expected_etag, .{});
+    }
+    pub fn prepareEventReviewFields(self: Service, calendar: t.Calendar, initial: ordinary.Prepared, operation_id: []const u8, event_id: []const u8, expected_etag: []const u8, fields: EventFields) !Review {
+        try self.requireRead(calendar);
+        try self.requireWrite(calendar);
+        const current = if (event_id.len != 0) try self.document(calendar, event_id) else null;
+        var prepared = initial;
+        if (current) |document_value| {
+            if (!fields.description_present) prepared.draft.description = document_value.event.description;
+            if (!fields.location_present) prepared.draft.location = document_value.event.location;
+            if (ordinary.htmlDescription(document_value.event.description) and prepared.draft.conference == .link) return error.CalendarHtmlNotesReadOnly;
+            if (ordinary.htmlDescription(document_value.event.description) and !std.mem.eql(u8, prepared.draft.description, document_value.event.description)) return error.CalendarHtmlNotesReadOnly;
+            const link = document_value.event.join_url;
+            // Notes/location links are the conference identity when Google has
+            // no conferenceData. Editing surrounding text must retain Join.
+            if (prepared.draft.conference == .none and !ordinary.htmlDescription(document_value.event.description) and link.len != 0 and j.get(document_value.value, "conferenceData") == null and j.text(document_value.value, "hangoutLink").len == 0 and std.mem.indexOf(u8, prepared.draft.description, link) == null and std.mem.indexOf(u8, prepared.draft.location, link) == null) {
+                prepared.draft.description = try std.fmt.allocPrint(self.a, "{s}\n\nJoin: {s}", .{ prepared.draft.description, link });
+            }
+        }
+        if (current) |document_value| {
+            if (!std.mem.eql(u8, document_value.event.etag, expected_etag)) return error.CalendarReviewStale;
+        } else if (expected_etag.len != 0) return error.InvalidCalendarConfirmation;
+        const id = if (current) |value| value.event.id else try ordinary.eventId(self.a, calendar.target, operation_id);
+        const identity: planner.Identity = .{ .target = calendar.target, .uid = try std.fmt.allocPrint(self.a, "event:{s}", .{id}) };
+        const source_bytes = try std.json.Stringify.valueAlloc(self.a, prepared, .{});
+        if (source_bytes.len > t.Limits.source_bytes) return error.CalendarTooLarge;
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source_bytes, &hash, .{});
+        const version: t.Version = .{ .sequence = if (current) |value| value.event.sequence else 0, .dtstamp_ms = 0 };
+        const source: t.Invitation = .{ .account = calendar.target.account, .source = source_bytes, .unfolded = source_bytes, .source_hash = hash, .method = .request, .uid = identity.uid, .organizer = calendar.target.account, .attendee = calendar.target.account, .version = version, .summary = prepared.draft.summary };
+        var intent: planner.Intent = .{ .operation_id = operation_id, .identity = identity, .version = version, .kind = if (current != null) .update_event else .insert_event, .source_hash = hash, .payload_hash = @splat(0), .event_id = id, .expected_etag = expected_etag };
+        const request = try ordinary.prepare(self.a, calendar, prepared, intent, current);
+        intent = try request.bindIntent(intent);
+        var review: Review = .{ .calendar = calendar, .source = source, .span = prepared.span, .intent = intent, .request = request, .review_hash = undefined, .previous = if (current) |value| value.event else null, .ordinary_event = prepared };
+        review.review_hash = try reviewHash(self.a, review);
+        return review;
+    }
+
+    pub fn eventEditable(self: Service, calendar: t.Calendar, document_value: p.EventDocument) bool {
+        return self.grants.canWrite(calendar) and ordinary.canEdit(calendar, document_value);
     }
 
     pub fn invitationPlan(self: Service, calendar: t.Calendar, raw: []const u8, verified_aliases: []const []const u8, bindings: Bindings) !InvitationPlan {
@@ -308,26 +360,79 @@ pub const Service = struct {
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
         }
-        if (state.tracked) |tracked| {
-            if (review.intent.kind == .import_event or (if (review.response_only) review.intent.version.order(tracked.version) == .lt else review.intent.version.order(tracked.version) != .gt) or !std.mem.eql(u8, review.intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
-        } else if (review.intent.kind != .import_event and !review.response_only) return error.CalendarReviewStale;
+        if (review.ordinary_event == null) {
+            if (state.tracked) |tracked| {
+                if (review.intent.kind == .import_event or (if (review.response_only) review.intent.version.order(tracked.version) == .lt else review.intent.version.order(tracked.version) != .gt) or !std.mem.eql(u8, review.intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
+            } else if (review.intent.kind != .import_event and !review.response_only) return error.CalendarReviewStale;
 
-        if (review.intent.kind == .import_event) {
-            const found = try self.lookup(review.calendar, review.intent.identity.uid);
-            if (!found.complete) return error.CalendarLookupIncomplete;
-            if (found.events.len != 0) return error.CalendarReviewStale;
+            if (review.intent.kind == .import_event) {
+                const found = try self.lookup(review.calendar, review.intent.identity.uid);
+                if (!found.complete) return error.CalendarLookupIncomplete;
+                if (found.events.len != 0) return error.CalendarReviewStale;
+            } else {
+                const current = try self.event(review.calendar, review.intent.event_id);
+                if (!sameEventIdentity(current, review.source) or current.cancelled or current.locked or !std.mem.eql(u8, current.etag, review.intent.expected_etag) or current.sequence > review.intent.version.sequence) return error.CalendarReviewStale;
+            }
+        } else if (review.intent.kind == .insert_event) {
+            // The stable client-generated ID is the exact recovery address.
+            // A pre-existing record never authorizes inserting over it.
+            if (self.event(review.calendar, review.intent.event_id)) |_| return error.CalendarReviewStale else |err| {
+                if (err != error.CalendarNotFound) return err;
+            }
         } else {
-            const current = try self.event(review.calendar, review.intent.event_id);
-            if (!sameEventIdentity(current, review.source) or current.cancelled or current.locked or !std.mem.eql(u8, current.etag, review.intent.expected_etag) or current.sequence > review.intent.version.sequence) return error.CalendarReviewStale;
+            const current = try self.document(review.calendar, review.intent.event_id);
+            if (!ordinary.canEdit(review.calendar, current) or !std.mem.eql(u8, current.event.etag, review.intent.expected_etag)) return error.CalendarReviewStale;
         }
         try store.preserveFn(store.context, review);
         const claim = try store.journal.claim(review.intent);
         if (!claim.fresh) return self.reconcileOperation(review, claim.operation);
-        var operation = claim.operation;
-        const response = self.send(review.request) catch return .{ .operation = operation };
+        return self.dispatchClaimed(review, claim.operation, false);
+    }
+
+    /// A retry is an explicit fresh confirmation of the identical saved wire
+    /// request. The fixed create ID / original If-Match / conference request ID
+    /// remain unchanged; a monotonic durable attempt token fences double clicks.
+    pub fn retry(self: Service, review: Review, confirmation: Confirmation, next_attempt: u32) !Applied {
+        try self.validateReview(review, confirmation);
+        try self.requireWrite(review.calendar);
+        if (review.ordinary_event == null) return error.CalendarReviewMismatch;
+        const store = self.persistence orelse return error.CalendarPersistenceRequired;
+        const state = try store.load(self.a, review.intent.identity);
+        const operation = state.operation orelse return error.CalendarOperationNotFound;
+        if (!operation.intent.eql(review.intent)) return error.OperationConflict;
+        if (operation.state != .unknown) return .{ .operation = operation };
+        const checked = try self.reconcileOperation(review, operation);
+        if (checked.operation.state != .unknown) return checked;
+        if (!checked.retry_possible) return error.CalendarRetryUnavailable;
+        const claim = try store.journal.retry(review.intent, next_attempt);
+        if (!claim.fresh) return self.reconcileOperation(review, claim.operation);
+        return self.dispatchClaimed(review, claim.operation, true);
+    }
+
+    /// Explicit local archiving releases the pending-operation guard. It never
+    /// asserts the event was not saved and never issues a provider request.
+    pub fn archive(self: Service, review: Review, confirmation: Confirmation) !Applied {
+        try self.validateReview(review, confirmation);
+        if (review.ordinary_event == null) return error.CalendarReviewMismatch;
+        const store = self.persistence orelse return error.CalendarPersistenceRequired;
+        const state = try store.load(self.a, review.intent.identity);
+        var operation = state.operation orelse return error.CalendarOperationNotFound;
+        if (!operation.intent.eql(review.intent)) return error.OperationConflict;
+        if (operation.state != .unknown) return .{ .operation = operation };
+        operation.state = .archived;
+        operation.error_code = "UncertaintyArchived";
+        try store.journal.record(operation);
+        return .{ .operation = operation, .recovery_reason = "The event may still appear in Calendar" };
+    }
+
+    fn dispatchClaimed(self: Service, review: Review, claimed: planner.Operation, retrying: bool) !Applied {
+        const store = self.persistence orelse return error.CalendarPersistenceRequired;
+        var operation = claimed;
+        const response = self.send(review.request) catch |err| return .{ .operation = operation, .recovery_reason = @errorName(err) };
         if (response.status < 200 or response.status >= 300) {
             const failure = p.classifyFailure(review.request.kind, response.status, reason(self.a, response.body));
-            if (failure == .unknown) return .{ .operation = operation, .failure = failure };
+            if (retrying and (failure == .duplicate or failure == .version_conflict)) return self.reconcileOperation(review, operation);
+            if (failure == .unknown or retrying) return .{ .operation = operation, .failure = failure, .recovery_reason = "ProviderOutcomeUnknown" };
             operation.state = .rejected;
             operation.error_code = @tagName(failure);
             try store.journal.record(operation);
@@ -338,7 +443,7 @@ pub const Service = struct {
             operation.provider_id = review.intent.event_id;
         } else {
             const document_value = p.decodeDocument(self.a, review.calendar.target, response.body) catch return .{ .operation = operation };
-            if (!provesWrite(document_value.event, review) or (if (review.rsvp_response) |response_status| !p.responseMatches(document_value, review.source.attendee, response_status) else false)) return .{ .operation = operation };
+            if (!(if (review.ordinary_event != null) ordinary.receiptProof(document_value.event, review.intent) else provesWrite(document_value.event, review)) or (if (review.rsvp_response) |response_status| !p.responseMatches(document_value, review.source.attendee, response_status) else false)) return .{ .operation = operation };
             result_event = document_value.event;
             operation.provider_id = document_value.event.id;
         }
@@ -361,6 +466,19 @@ pub const Service = struct {
         if (pending.state != .unknown) return .{ .operation = pending };
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
         var match: ?t.Event = null;
+        if (review.ordinary_event != null) {
+            const document_value = self.document(review.calendar, pending.intent.event_id) catch |err| return .{ .operation = pending, .retry_possible = pending.intent.kind == .insert_event and err == error.CalendarNotFound and pending.attempt < 1000000, .recovery_reason = @errorName(err) };
+            const current = document_value.event;
+            if (!ordinary.receiptProof(current, pending.intent)) {
+                const possible = pending.intent.kind == .update_event and std.mem.eql(u8, current.etag, pending.intent.expected_etag) and ordinary.canEdit(review.calendar, document_value) and pending.attempt < 1000000;
+                return .{ .operation = pending, .retry_possible = possible, .recovery_reason = if (possible) @as([]const u8, "SavedVersionStillCurrent") else if (current.cancelled) "EventDeletedWithoutReceipt" else "EventChangedWithoutReceipt" };
+            }
+            var resolved = pending;
+            resolved.state = .applied;
+            resolved.provider_id = current.id;
+            try store.journal.record(resolved);
+            return .{ .operation = resolved, .event = current, .reconciled = true };
+        }
         if (pending.intent.kind == .cancel_event) {
             const current = self.event(review.calendar, pending.intent.event_id) catch return .{ .operation = pending };
             if (!current.cancelled or (current.uid.len != 0 and !std.mem.eql(u8, current.uid, pending.intent.identity.uid))) return .{ .operation = pending };
@@ -429,18 +547,48 @@ pub const Service = struct {
         var actual_source: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(review.source.source, &actual_source, .{});
         if (!std.mem.eql(u8, &actual_source, &review.intent.source_hash) or !std.mem.eql(u8, &review.source.source_hash, &actual_source) or review.source.version.order(review.intent.version) != .eq or !std.mem.eql(u8, review.source.uid, review.intent.identity.uid) or !std.ascii.eqlIgnoreCase(review.source.account, review.intent.identity.target.account)) return error.CalendarReviewMismatch;
+        if (review.ordinary_event) |prepared| {
+            const serialized = try std.json.Stringify.valueAlloc(self.a, prepared, .{});
+            if (!std.mem.eql(u8, serialized, review.source.source) or (review.intent.kind != .insert_event and review.intent.kind != .update_event)) return error.CalendarReviewMismatch;
+        } else if (review.intent.kind == .insert_event) return error.CalendarReviewMismatch;
         if (!(try review.request.bindIntent(review.intent)).eql(review.intent)) return error.CalendarReviewMismatch;
         const actual_review = try reviewHash(self.a, review);
-        if (!std.mem.eql(u8, &actual_review, &review.review_hash)) return error.CalendarReviewMismatch;
+        if (!std.mem.eql(u8, &actual_review, &review.review_hash)) {
+            // v0.2.9 persisted the then-current Event shape in invitation
+            // hashes. Added presentation fields must not strand a durable
+            // unknown operation after an upgrade. Only the exact old shape,
+            // with no newly populated metadata, can use its frozen projection.
+            if (!legacyInvitationReview(review)) return error.CalendarReviewMismatch;
+            const legacy_hash = try legacyReviewHash(self.a, review);
+            if (!std.mem.eql(u8, &legacy_hash, &review.review_hash)) return error.CalendarReviewMismatch;
+        }
     }
 };
 
 fn reviewHash(a: std.mem.Allocator, review: Review) ![32]u8 {
-    const bytes = if (review.rsvp_response != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous, .rsvp_response = review.rsvp_response, .response_only = review.response_only }, .{}) else try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous }, .{});
+    const bytes = if (review.ordinary_event != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .ordinary_event = review.ordinary_event, .previous = review.previous }, .{}) else if (review.rsvp_response != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous, .rsvp_response = review.rsvp_response, .response_only = review.response_only }, .{}) else try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = review.previous }, .{});
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     return hash;
 }
+fn legacyInvitationReview(review: Review) bool {
+    if (review.ordinary_event != null) return false;
+    const previous = review.previous orelse return false;
+    return previous.event_type.len == 0 and previous.attendees.len == 0 and !previous.attendees_omitted and previous.attendee_count == 0 and previous.conference_status.len == 0 and !previous.conference_present;
+}
+fn legacyReviewHash(a: std.mem.Allocator, review: Review) ![32]u8 {
+    const previous = review.previous orelse return error.CalendarReviewMismatch;
+    // Keep this explicit order frozen to the released v0.2.9 Event contract.
+    const fields = [_][]const u8{ "target", "id", "uid", "etag", "organizer", "summary", "description", "location", "join_url", "html_url", "start", "end", "original_start", "recurring_event_id", "sequence", "cancelled", "transparent", "locked", "private_copy", "response", "operation_marker", "source_marker" };
+    const current = try std.json.parseFromSliceLeaky(j.Value, a, try std.json.Stringify.valueAlloc(a, previous, .{}), .{});
+    var old = j.object(a);
+    for (fields) |field| try old.object.put(a, field, j.get(current, field) orelse return error.CalendarReviewMismatch);
+    const bytes = if (review.rsvp_response != null) try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = old, .rsvp_response = review.rsvp_response, .response_only = review.response_only }, .{}) else try std.json.Stringify.valueAlloc(a, .{ .intent = review.intent, .organizer = review.source.organizer, .attendee = review.source.attendee, .summary = review.source.summary, .span = review.span, .previous = old }, .{});
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    return hash;
+}
+
 fn sameEventIdentity(event: t.Event, source: t.Invitation) bool {
     return std.mem.eql(u8, event.uid, source.uid) and std.ascii.eqlIgnoreCase(event.organizer, source.organizer);
 }
@@ -461,9 +609,57 @@ pub fn windowForDays(a: std.mem.Allocator, date: []const u8, days: enum { day, w
     const first = try timezone.parseDate(date);
     const last_day = try timezone.dateDay(date) + @as(i64, if (days == .day) 1 else 7);
     const last = try timezone.parseDate(try t.time.format(a, .{ .kind = .date, .value = last_day }));
-    const result: t.Window = .{ .start_ms = try binding.zone.fromLocal(first), .end_ms = try binding.zone.fromLocal(last), .time_zone = binding.id };
+    const result: t.Window = .{ .start_ms = try firstInstantOfDay(binding.zone, first), .end_ms = try firstInstantOfDay(binding.zone, last), .time_zone = binding.id };
     try result.validate();
     return result;
+}
+
+/// Day-window boundaries represent the first actual instant of a civil date.
+/// Midnight transitions can skip 00:00 or repeat it; neither is a compose-time
+/// ambiguity. All event/editor wall times keep their strict gap/fold policy.
+pub fn firstInstantOfDay(zone: *const timezone.Zone, date: timezone.CivilTime) !i64 {
+    var midnight = date;
+    midnight.hour = 0;
+    midnight.minute = 0;
+    midnight.second = 0;
+    const at_midnight = try zone.localCandidates(midnight);
+    if (at_midnight.count != 0) return at_midnight.values[0].milliseconds;
+    // Search this bounded civil day for the end of its midnight gap. A minute
+    // probe locates the transition; second-level refinement also handles old
+    // IANA transitions whose offsets included seconds.
+    var minute: u32 = 1;
+    while (minute < 1440) : (minute += 1) {
+        var candidate = midnight;
+        candidate.hour = @intCast(minute / 60);
+        candidate.minute = @intCast(minute % 60);
+        const found = try zone.localCandidates(candidate);
+        if (found.count == 0) continue;
+        var second = (minute - 1) * 60 + 1;
+        while (second <= minute * 60) : (second += 1) {
+            candidate.hour = @intCast(second / 3600);
+            candidate.minute = @intCast((second % 3600) / 60);
+            candidate.second = @intCast(second % 60);
+            const exact = try zone.localCandidates(candidate);
+            if (exact.count != 0) return exact.values[0].milliseconds;
+        }
+        unreachable;
+    }
+    return error.CalendarCivilDateSkipped;
+}
+
+test "calendar ordinary: midnight DST agenda windows use the first valid civil instant and earliest repeated midnight" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Chile-style clock jump from 00:00 to 01:00 on September's first Sunday.
+    const santiago = try timezone.Zone.fromPosix("CLT4CLST,M9.1.0/0,M4.1.0/0");
+    const first = try windowForDays(arena.allocator(), "2026-09-06", .day, .{ .id = "America/Santiago", .zone = &santiago });
+    try std.testing.expectEqual(try t.time.rfc3339("2026-09-06T04:00:00Z"), first.start_ms);
+    try std.testing.expectEqual(@as(i64, 23 * 3600000), first.end_ms - first.start_ms);
+    // Cuba-style autumn shift at 01:00 repeats midnight; choose its first side.
+    const havana = try timezone.Zone.fromPosix("CST5CDT,M3.2.0/0,M11.1.0/1");
+    const repeated = try windowForDays(arena.allocator(), "2026-11-01", .day, .{ .id = "America/Havana", .zone = &havana });
+    try std.testing.expectEqual(try t.time.rfc3339("2026-11-01T04:00:00Z"), repeated.start_ms);
+    try std.testing.expectEqual(@as(i64, 25 * 3600000), repeated.end_ms - repeated.start_ms);
 }
 
 const Pages = struct {

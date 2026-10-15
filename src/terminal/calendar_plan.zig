@@ -18,7 +18,7 @@ pub const Intent = struct {
     operation_id: []const u8,
     identity: Identity,
     version: t.Version,
-    kind: enum { import_event, update_event, cancel_event },
+    kind: enum { import_event, insert_event, update_event, cancel_event },
     source_hash: [32]u8,
     payload_hash: [32]u8,
     event_id: []const u8 = "",
@@ -30,7 +30,8 @@ pub const Intent = struct {
         try t.text(self.identity.recurrence_key, 1024, true);
         try t.text(self.operation_id, 128, false);
         for (self.operation_id) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidOperationId;
-        if (self.kind != .import_event) {
+        if (self.kind == .insert_event) try t.text(self.event_id, 1024, false);
+        if (self.kind != .import_event and self.kind != .insert_event) {
             try t.text(self.event_id, 1024, false);
             try t.text(self.expected_etag, 1024, false);
         }
@@ -49,9 +50,10 @@ pub const Intent = struct {
 
 pub const Operation = struct {
     intent: Intent,
-    state: enum { unknown, applied, rejected } = .unknown,
+    state: enum { unknown, applied, rejected, archived } = .unknown,
     provider_id: []const u8 = "",
     error_code: []const u8 = "",
+    attempt: u32 = 0,
 };
 pub const Claim = struct {
     operation: Operation,
@@ -68,6 +70,7 @@ pub const Journal = struct {
     context: *anyopaque,
     claimFn: *const fn (*anyopaque, Intent) anyerror!Claim,
     recordFn: *const fn (*anyopaque, Operation) anyerror!void,
+    retryFn: ?*const fn (*anyopaque, Intent, u32) anyerror!Claim = null,
 
     pub fn claim(self: Journal, intent: Intent) !Claim {
         try intent.validate();
@@ -75,6 +78,14 @@ pub const Journal = struct {
         const operation = result.operation;
         if (!operation.intent.eql(intent)) return error.OperationConflict;
         if (result.fresh and operation.state != .unknown) return error.OperationConflict;
+        return result;
+    }
+    pub fn retry(self: Journal, intent: Intent, next_attempt: u32) !Claim {
+        try intent.validate();
+        if (next_attempt == 0 or next_attempt > 1000000) return error.InvalidCalendarRetry;
+        const callback = self.retryFn orelse return error.CalendarRetryUnavailable;
+        const result = try callback(self.context, intent, next_attempt);
+        if (!result.operation.intent.eql(intent) or (result.fresh and (result.operation.state != .unknown or result.operation.attempt != next_attempt))) return error.OperationConflict;
         return result;
     }
     pub fn record(self: Journal, operation: Operation) !void {

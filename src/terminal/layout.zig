@@ -5,12 +5,66 @@ pub const Focus = enum { navigation, list, reader };
 pub const Rect = struct { x: u16 = 0, y: u16 = 0, width: u16, height: u16 };
 pub const Panes = struct { navigation: ?Rect = null, list: ?Rect = null, reader: ?Rect = null };
 
-pub const HitKind = enum { file_row, file_mark, file_parent, file_home, file_hidden, file_location, file_confirm, file_cancel, label_choice, label_add, label_remove, label_filter, label_back, labels_header, label_manager_choice, label_manager_filter, label_manager_name, label_manager_action, custom_label, account, folder, contacts, mail_scroll, mail, reader, reader_thread, reader_link, reader_attachment, reader_invitation, reader_picker, reader_picker_save, reader_picker_open, reader_picker_activate, reader_picker_back, dialog_action, contact_action, contact, compose_field, compose_from, compose_completion, compose_attachment_select, compose_attachment_add, compose_attachment_remove, compose_attachment_scroll, compose_format, compose_preview_toggle, compose_preview_back, compose_preview_scroll, contact_field, theme_choice, theme_action };
+/// Logical order shared by keyboard selection, activation and painted hits.
+/// Native destinations precede Labels, exactly as they appear in the sidebar.
+pub const Sidebar = struct {
+    accounts: usize,
+    folders: usize,
+    user_labels: usize = 0,
+    labels: bool = false,
+    native: bool = true,
+    pub fn contacts(self: Sidebar) usize {
+        return self.accounts + self.folders;
+    }
+    pub fn calendar(self: Sidebar) usize {
+        return self.contacts() + 1;
+    }
+    pub fn followUps(self: Sidebar) usize {
+        return self.calendar() + 1;
+    }
+    pub fn labelsHeader(self: Sidebar) usize {
+        return self.contacts() + 1 + @as(usize, if (self.native) 2 else 0);
+    }
+    pub fn labelsStart(self: Sidebar) usize {
+        return self.labelsHeader() + 1;
+    }
+    pub fn count(self: Sidebar) usize {
+        return self.labelsHeader() + @as(usize, if (self.labels) 1 + self.user_labels else 0);
+    }
+    pub fn clamp(self: Sidebar, selected: usize) usize {
+        return @min(selected, self.count() -| 1);
+    }
+    pub fn step(self: Sidebar, selected: usize, forward: bool, amount: usize) usize {
+        const current = self.clamp(selected);
+        return if (forward) self.clamp(current +| amount) else current -| amount;
+    }
+};
+
+test "sidebar navigation: native destinations precede labels with bounded inverse steps in every configuration" {
+    for (0..4) |accounts| for ([_]bool{ false, true }) |native| for ([_]bool{ false, true }) |labels| for ([_]usize{ 0, 1, 32 }) |user_labels| {
+        const sidebar: Sidebar = .{ .accounts = accounts, .folders = 8, .native = native, .labels = labels, .user_labels = user_labels };
+        try std.testing.expectEqual(accounts + 8, sidebar.contacts());
+        if (native) {
+            try std.testing.expectEqual(sidebar.calendar(), sidebar.step(sidebar.contacts(), true, 1));
+            try std.testing.expectEqual(sidebar.followUps(), sidebar.step(sidebar.calendar(), true, 1));
+            try std.testing.expectEqual(sidebar.calendar(), sidebar.step(sidebar.followUps(), false, 1));
+        }
+        if (labels) {
+            try std.testing.expectEqual(sidebar.contacts() + 1 + @as(usize, if (native) 2 else 0), sidebar.labelsHeader());
+            try std.testing.expectEqual(sidebar.labelsStart() + user_labels, sidebar.count());
+        } else try std.testing.expectEqual(sidebar.contacts() + 1 + @as(usize, if (native) 2 else 0), sidebar.count());
+        try std.testing.expectEqual(sidebar.count() - 1, sidebar.step(0, true, std.math.maxInt(usize)));
+        try std.testing.expectEqual(@as(usize, 0), sidebar.step(sidebar.count() - 1, false, std.math.maxInt(usize)));
+        for (0..sidebar.count() - 1) |index| try std.testing.expectEqual(index, sidebar.step(sidebar.step(index, true, 1), false, 1));
+    };
+}
+
+pub const HitKind = enum { calendar_week_event, sidebar, file_row, file_mark, file_parent, file_home, file_hidden, file_location, file_confirm, file_cancel, label_choice, label_add, label_remove, label_filter, label_back, labels_header, label_manager_choice, label_manager_filter, label_manager_name, label_manager_action, custom_label, account, folder, contacts, mail_scroll, mail, reader, reader_thread, reader_link, reader_attachment, reader_invitation, reader_picker, reader_picker_save, reader_picker_open, reader_picker_activate, reader_picker_back, dialog_action, contact_action, contact, compose_field, compose_from, compose_completion, compose_attachment_select, compose_attachment_add, compose_attachment_remove, compose_attachment_scroll, compose_format, compose_preview_toggle, compose_preview_back, compose_preview_scroll, contact_field, theme_choice, theme_action };
 pub const Hit = struct { rect: Rect, kind: HitKind, index: usize = 0 };
 /// Populated by drawing, rather than recomputing a second approximation of
 /// wrapped account rows, paged messages or responsive pane geometry.
 pub const HitMap = struct {
-    areas: [128]Hit = undefined,
+    areas: [1024]Hit = undefined,
     count: usize = 0,
 
     pub fn clear(self: *HitMap) void {

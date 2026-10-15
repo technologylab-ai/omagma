@@ -30,6 +30,28 @@ pub const Record = struct {
     announced: bool = false,
     observed_at: i64 = 0,
 };
+pub const CalendarListShape = struct { complete: bool, cached: bool, stale: bool, entries: j.Value };
+/// Check the original provider shape before any preference adapter rewrites
+/// primary/selected flags or maps an invalid collection to an empty array.
+pub fn validateCalendars(address: []const u8, result: j.Value) !CalendarListShape {
+    if (!std.mem.eql(u8, j.text(result, "account"), address)) return error.CalendarAccountMismatch;
+    const complete = try j.boolean(result, "complete", false);
+    const cached = try j.boolean(result, "cached", false);
+    const stale = try j.boolean(result, "stale", false);
+    const entries = j.get(result, "calendars") orelse return error.InvalidCalendarResponse;
+    if (entries != .array or entries.array.items.len > calendar.Limits.calendars) return error.InvalidCalendarResponse;
+    // Validate every identity before changing a previously usable target set.
+    for (entries.array.items) |entry| {
+        const value = j.get(entry, "calendar") orelse return error.InvalidCalendarResponse;
+        const target = j.get(value, "target") orelse return error.InvalidCalendarResponse;
+        if (!std.mem.eql(u8, j.text(target, "account"), address)) return error.CalendarAccountMismatch;
+        try calendar.text(j.text(target, "calendar_id"), 1024, false);
+        _ = try j.boolean(entry, "canRead", false);
+        _ = try j.boolean(value, "primary", false);
+        _ = try j.boolean(value, "selected", false);
+    }
+    return .{ .complete = complete, .cached = cached, .stale = stale, .entries = entries };
+}
 pub const State = struct {
     targets: [max_targets]Target = @splat(.{}),
     records: [max_records]?Record = @splat(null),
@@ -89,22 +111,11 @@ pub const State = struct {
         };
     }
     pub fn calendars(self: *State, account: u8, address: []const u8, result: j.Value) !void {
-        if (!std.mem.eql(u8, j.text(result, "account"), address)) return error.CalendarAccountMismatch;
-        const complete = try j.boolean(result, "complete", false);
-        const cached = try j.boolean(result, "cached", false);
-        const stale = try j.boolean(result, "stale", false);
-        const entries = j.get(result, "calendars") orelse return error.InvalidCalendarResponse;
-        if (entries != .array or entries.array.items.len > calendar.Limits.calendars) return error.InvalidCalendarResponse;
-        // Validate every identity before changing a previously usable target set.
-        for (entries.array.items) |entry| {
-            const value = j.get(entry, "calendar") orelse return error.InvalidCalendarResponse;
-            const target = j.get(value, "target") orelse return error.InvalidCalendarResponse;
-            if (!std.mem.eql(u8, j.text(target, "account"), address)) return error.CalendarAccountMismatch;
-            try calendar.text(j.text(target, "calendar_id"), 1024, false);
-            _ = try j.boolean(entry, "canRead", false);
-            _ = try j.boolean(value, "primary", false);
-            _ = try j.boolean(value, "selected", false);
-        }
+        const validated = try validateCalendars(address, result);
+        const complete = validated.complete;
+        const cached = validated.cached;
+        const stale = validated.stale;
+        const entries = validated.entries;
         if (!complete or cached or stale) return;
         // Release obsolete owned slots first, including at full capacity. Other
         // accounts retain their slots; identity-keyed dismissal records survive.
@@ -525,4 +536,26 @@ test "meeting notifications: permission deactivation frees records and retains d
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{ dismissed, visible }, false), 2000000);
     try std.testing.expectEqual(@as(usize, 2), state.count());
     try std.testing.expect(state.find(dismissed_key) == null);
+}
+
+test "meeting notifications: preference adapters must validate original list and flag types" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const address = "work@example.test";
+    for ([_][]const u8{
+        \\{"account":"work@example.test","complete":false,"calendars":{}}
+        ,
+        \\{"account":"work@example.test","complete":true,"cached":"true","calendars":[]}
+        ,
+        \\{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"primary":"true"}}]}
+        ,
+        \\{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"selected":"true"}}]}
+        ,
+    }) |raw| {
+        const value = try std.json.parseFromSliceLeaky(j.Value, a, raw, .{});
+        if (validateCalendars(address, value)) |_| return error.InvalidListAccepted else |_| {}
+    }
+    const partial = try validateCalendars(address, try std.json.parseFromSliceLeaky(j.Value, a, "{\"account\":\"work@example.test\",\"complete\":false,\"calendars\":[]}", .{}));
+    try std.testing.expect(!partial.complete and !partial.cached and !partial.stale);
 }

@@ -110,6 +110,8 @@ provide detailed JSON receipts write them beside the runner's receipt.
 | `terminal_attachment_lifecycle` | All 13 default groups: provider bytes and ownership, rotated/missing/unindexed sources, reply/forward formats, large files and related resources, send boundaries, draft persistence, uncertain outcomes, failure recovery and actual TUI attachment/forward actions |
 | `terminal_formatted_original`, `terminal_formatted_tui`, `terminal_message_isolation` | Preserved-format reply, reply-all and forward through CLI/TUI, and independent message body, link and attachment identities |
 | `terminal_calendar`, `terminal_calendar_tui`, `terminal_calendar_review_stale` | Calendar reads and mutation review, offline/permission guards, lost responses, narrow dialogs, grid navigation and stale-review recovery |
+| `terminal_calendar_slots` | Native Week exact-hour and selected-event row disclosure, all-day groups, adaptive multiple event titles, narrow and NO_COLOR selection, same-ID events across accounts, keyboard/mouse and zero provider writes |
+| `terminal_calendar_compose` | All 16 native event-editor workflows: timed/all-day create/edit, fresh ETags, explicit DST occurrence selection, Google Meet and pasted links, guest email policy, readonly formatted notes, fresh Escape/mouse cancellation and modal discard, exact-account Contacts guest selection with dedup and narrow/manual fallbacks, repeated rescheduling reviews, saved uncertain outcomes across restart, explicit identical retry and confirmed archival; provider writes and dispatch attempts checked independently |
 | `terminal_calendar_join_profile`, `terminal_invitation_calendar_ui` | Actual native browser launch arguments and account profile selection; Accept/Tentative through Mail with separate Calendar outcomes and no duplicate RSVP |
 | `terminal_calendar_notifications` | Mail-startup reminders, countdown/expiry, overlapping events, held-key dismissal, exact typed/pasted draft retention, reminder arrival during review and Send/Undo, editor isolation, account-bound Join after Mail account changes, focused event cancellation/rescheduling, and vault lock/unlock/restart recovery |
 | `terminal_invitation_notices`, `terminal_invitation_reconcile` | Non-actionable invitation notices, disabled RSVP controls and explicit Sent reconciliation after uncertain replies without resending |
@@ -125,7 +127,8 @@ python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --
   --suite terminal_attachment_lifecycle --suite terminal_reader_next_ux \
   --output tests/results/workflows-reader-debug.json
 python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
-  --suite terminal_calendar --suite terminal_calendar_tui --suite terminal_calendar_review_stale \
+  --suite terminal_calendar --suite terminal_calendar_tui --suite terminal_calendar_compose \
+  --suite terminal_calendar_review_stale \
   --suite terminal_calendar_notifications \
   --suite terminal_invitation_notices --suite terminal_invitation_reconcile \
   --output tests/results/workflows-calendar-debug.json
@@ -136,7 +139,7 @@ python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --
   --suite vault_migration --suite vault_daemon --output tests/results/workflows-vault-debug.json
 ```
 
-Omit `--suite` for all 18 suites. The release workflow requires the full runner
+Omit `--suite` for all 19 suites. The release workflow requires the full runner
 once in Debug and once against the packaged Safe executable on native Linux
 x86_64/arm64 and macOS x86_64/arm64. The native macOS pull-request workflow also
 runs it in both modes on Linux x86_64 and both Mac architectures. Existing

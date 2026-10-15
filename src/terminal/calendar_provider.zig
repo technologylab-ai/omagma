@@ -10,7 +10,7 @@ const time = t.time;
 const tools = @import("reader_tools.zig");
 const meeting_link = @import("meeting_link.zig");
 pub const base_url = "https://www.googleapis.com/calendar/v3";
-pub const event_fields = "id,iCalUID,etag,organizer(email),summary,description,location,hangoutLink,htmlLink,start,end,originalStartTime,recurringEventId,sequence,status,transparency,locked,privateCopy,attendees(self,email,responseStatus),extendedProperties(private),conferenceData(entryPoints(entryPointType,uri))";
+pub const event_fields = "id,iCalUID,etag,organizer(email),summary,description,location,hangoutLink,htmlLink,eventType,start,end,originalStartTime,recurringEventId,sequence,status,transparency,locked,privateCopy,attendees(self,email,responseStatus),attendeesOmitted,extendedProperties(private),conferenceData(createRequest(status(statusCode)),entryPoints(entryPointType,uri))";
 pub const OperationKind = enum {
     calendar_list,
     event_lookup,
@@ -18,10 +18,11 @@ pub const OperationKind = enum {
     event_get,
     free_busy,
     import_event,
+    insert_event,
     update_event,
     cancel_event,
     pub fn mutating(self: OperationKind) bool {
-        return self == .import_event or self == .update_event or self == .cancel_event;
+        return self == .insert_event or self == .import_event or self == .update_event or self == .cancel_event;
     }
 };
 pub const Request = struct {
@@ -39,6 +40,7 @@ pub const Request = struct {
         if (!self.kind.mutating() or !self.target.eql(intent.identity.target)) return error.CalendarIdentityMismatch;
         const expected: OperationKind = switch (intent.kind) {
             .import_event => .import_event,
+            .insert_event => .insert_event,
             .update_event => .update_event,
             .cancel_event => .cancel_event,
         };
@@ -60,7 +62,7 @@ pub fn listCalendars(a: std.mem.Allocator, account: []const u8, page_token: []co
     const target: t.Target = .{ .account = account, .calendar_id = "primary" };
     try target.validate();
     const suffix = try tokenSuffix(a, page_token);
-    return .{ .target = target, .kind = .calendar_list, .method = .GET, .url = try std.fmt.allocPrint(a, base_url ++ "/users/me/calendarList?maxResults=24&showHidden=true&fields=items(id,summary,timeZone,accessRole,dataOwner,primary,selected),nextPageToken{s}", .{suffix}) };
+    return .{ .target = target, .kind = .calendar_list, .method = .GET, .url = try std.fmt.allocPrint(a, base_url ++ "/users/me/calendarList?maxResults=24&showHidden=true&fields=items(id,summary,timeZone,accessRole,dataOwner,primary,selected,conferenceProperties),nextPageToken{s}", .{suffix}) };
 }
 
 pub fn lookup(a: std.mem.Allocator, target: t.Target, uid: []const u8, page_token: []const u8) !Request {
@@ -207,6 +209,12 @@ pub fn decodeCalendars(a: std.mem.Allocator, account: []const u8, bytes: []const
         const role = try field(a, item, "accessRole", 32, false);
         const access: t.Access = if (std.mem.eql(u8, role, "owner")) .owner else if (std.mem.eql(u8, role, "writer")) .writer else if (std.mem.eql(u8, role, "writerWithoutPrivateAccess")) .writer_without_private else if (std.mem.eql(u8, role, "reader")) .reader else if (std.mem.eql(u8, role, "freeBusyReader")) .free_busy else if (std.mem.eql(u8, role, "none")) .none else return error.InvalidCalendarResponse;
         calendar.* = .{ .target = .{ .account = owned_account, .calendar_id = try field(a, item, "id", 1024, false) }, .summary = try field(a, item, "summary", 1024, true), .time_zone = try field(a, item, "timeZone", 512, false), .access = access, .primary = try j.boolean(item, "primary", false), .selected = try j.boolean(item, "selected", false) };
+        if (j.get(item, "conferenceProperties")) |properties| if (j.get(properties, "allowedConferenceSolutionTypes")) |allowed| {
+            if (allowed != .array or allowed.array.items.len > 16) return error.InvalidCalendarResponse;
+            for (allowed.array.items) |solution| if (std.mem.eql(u8, try j.string(solution), "hangoutsMeet")) {
+                calendar.supports_meet = true;
+            };
+        };
         calendar.data_owner = try field(a, item, "dataOwner", 512, true);
         if (calendar.data_owner.len != 0) try b.address(calendar.data_owner);
         calendar.owned_scope_verified = calendar.primary or std.ascii.eqlIgnoreCase(calendar.data_owner, account);
@@ -273,6 +281,7 @@ fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
         .uid = try field(a, item, "iCalUID", 1024, true),
         .etag = try field(a, item, "etag", 1024, true),
         .summary = try field(a, item, "summary", 4096, true),
+        .event_type = try field(a, item, "eventType", 64, true),
         .location = try field(a, item, "location", 4096, true),
         .recurring_event_id = try field(a, item, "recurringEventId", 1024, true),
         .cancelled = std.mem.eql(u8, status, "cancelled"),
@@ -299,6 +308,12 @@ fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
     if (tools.safeUrl(hangout)) event.join_url = hangout;
     const html = try field(a, item, "htmlLink", 4096, true);
     if (tools.safeUrl(html)) event.html_url = html;
+    if (j.get(item, "conferenceData")) |conference| {
+        event.conference_present = true;
+        if (j.get(conference, "createRequest")) |create| if (j.get(create, "status")) |status_value| {
+            event.conference_status = try field(a, status_value, "statusCode", 32, true);
+        };
+    }
     if (j.get(item, "conferenceData")) |conference| if (j.get(conference, "entryPoints")) |points| {
         if (points != .array or points.array.items.len > 32) return error.InvalidCalendarResponse;
         for (points.array.items) |entry| {
@@ -320,8 +335,15 @@ fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
             event.source_marker = try field(a, private, "omagmaSource", 64, true);
         }
     }
+    event.attendees_omitted = try j.boolean(item, "attendeesOmitted", false);
     if (j.get(item, "attendees")) |attendees| {
-        if (attendees != .array or attendees.array.items.len > 200) return error.InvalidCalendarResponse;
+        if (attendees != .array) return error.InvalidCalendarResponse;
+        event.attendee_count = attendees.array.items.len;
+        const retained = @min(attendees.array.items.len, 200);
+        const emails = try a.alloc([]const u8, retained);
+        for (attendees.array.items[0..retained], emails) |attendee, *email| email.* = try field(a, attendee, "email", 512, false);
+        event.attendees = emails;
+        event.attendees_omitted = event.attendees_omitted or attendees.array.items.len > retained;
         var self_seen = false;
         for (attendees.array.items) |attendee| if (try j.boolean(attendee, "self", false)) {
             if (self_seen) return error.InvalidCalendarResponse;
@@ -334,9 +356,7 @@ fn decodeEvent(a: std.mem.Allocator, target: t.Target, item: j.Value) !t.Event {
 }
 
 fn descriptionJoin(a: std.mem.Allocator, description: []const u8) ![]const u8 {
-    var html = false;
-    for ([_][]const u8{ "<a", "<p", "<div", "<br", "<table" }) |tag| html = html or std.ascii.findIgnoreCase(description, tag) != null;
-    if (!html) return meeting_link.plain(description);
+    if (!meeting_link.htmlDescription(description)) return meeting_link.plain(description);
     // Reuse the reader's inert semantic parser so HTML entities inside hrefs
     // preserve the exact meeting URL. A malformed description has no fallback
     // through raw markup, which could turn &amp; into a different join token.
@@ -529,4 +549,22 @@ test "meeting Join: Mail and Calendar import retain the same description meeting
     try mail.parseDisplay(raw, account, &.{}, &preview);
     try std.testing.expectEqualStrings("https://conference.example.test/room?token=fixture!", preview.join_url.slice());
     try std.testing.expectEqualStrings(preview.join_url.slice(), (try invitation.parse(a, raw, account, &.{})).join_url);
+}
+
+test "calendar ordinary: large incoming guest lists remain readable and preserve self response beyond editor limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const target: t.Target = .{ .account = "self@example.test", .calendar_id = "primary" };
+    var item = try j.value(a, .{ .id = "company-meeting", .status = "confirmed", .eventType = "default", .start = .{ .date = "2026-10-22" }, .end = .{ .date = "2026-10-23" } });
+    const Guest = struct { email: []const u8, self: bool, responseStatus: []const u8 };
+    const guests = try a.alloc(Guest, 250);
+    for (guests, 0..) |*guest, index| guest.* = .{ .email = try std.fmt.allocPrint(a, "guest{d}@example.test", .{index}), .self = index == 249, .responseStatus = if (index == 249) "accepted" else "needsAction" };
+    try item.object.put(a, "attendees", try j.value(a, guests));
+    const event = (try decodeDocument(a, target, try std.json.Stringify.valueAlloc(a, item, .{}))).event;
+    try std.testing.expectEqual(@as(usize, 250), event.attendee_count);
+    try std.testing.expectEqual(@as(usize, 200), event.attendees.len);
+    try std.testing.expect(event.attendees_omitted);
+    try std.testing.expectEqual(.accepted, event.response);
+    try std.testing.expectEqualStrings("default", event.event_type);
 }

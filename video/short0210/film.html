@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Omagma · v0.2.10 · What’s new</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#0b1017;overflow:hidden}*{box-sizing:border-box;animation:none!important;transition:none!important}
+#screen{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;transform-origin:0 0;background:#0b1017;color:#f3f5f7;font-family:"Adwaita Sans",sans-serif}
+#layers{position:absolute;inset:0}
+.pane{position:absolute;display:none;overflow:hidden}
+.pane img{position:absolute;left:0;top:0;max-width:none;display:block;transform-origin:0 0}
+.pane .spot{position:absolute;display:none;filter:blur(16px)}
+#caption{position:absolute;left:120px;top:40px;width:1400px}
+.slot{position:relative;display:flow-root}.title-slot{height:74px}.subtitle-slot{height:40px}.slot .previous{position:absolute;left:0;top:0;width:100%}
+#caption h1{margin:0 0 10px;font-size:56px;line-height:1.14;font-weight:800;letter-spacing:-.02em;white-space:nowrap}
+#caption .subtitle{margin:0;font-size:28px;line-height:1.3;font-weight:500;color:#aeb9c7;white-space:nowrap}
+#bug{position:absolute;right:120px;top:54px;font:700 19px "JetBrainsMono Nerd Font",monospace;letter-spacing:.06em;color:#b6c0cd;white-space:nowrap}
+#bug b{font-weight:700;color:#ff9e61}
+#failure{position:absolute;inset:0;z-index:10;margin:0;padding:100px;display:none;background:#0c1118;color:#ffb988;font:26px/1.5 "JetBrainsMono Nerd Font",monospace;white-space:pre-wrap}
+</style><link rel="stylesheet" href="direction.css"></head>
+<body><div id="screen"><div id="layers"></div><div id="overlay-prev"></div><div id="overlay"></div><div id="cues"></div><div id="caption"><div class="slot title-slot"><h1 class="previous"></h1><h1 class="current"></h1></div><div class="slot subtitle-slot"><p class="subtitle previous"></p><p class="subtitle current"></p></div></div><div id="bug">Omagma <b>v0.2.10</b></div><pre id="failure"></pre></div>
+<script src="direction.js"></script><script>
+(function(){
+'use strict';
+const FPS=30,FRAMES=2527,DURATION=FRAMES/FPS,LAST=(FRAMES-1)/FPS,MAX_LAYERS=10;
+const screen=document.getElementById('screen'),layersHost=document.getElementById('layers'),caption=document.getElementById('caption'),bug=document.getElementById('bug');
+const hosts={previous:document.getElementById('overlay-prev'),current:document.getElementById('overlay'),cues:document.getElementById('cues')};
+const query=new URLSearchParams(location.search);
+const timelineURL=new URL(query.get('timeline')||'timeline.json',location.href);
+const manifestURL=new URL(query.get('manifest')||'/video/cache/short0210/revision-05/assets-manifest.json',location.href);
+const LOGOS=['/video/assets/omagma-logo-master.png','/assets/omagma-logo.png'];
+const EASE={linear:x=>x,smooth:x=>x*x*(3-2*x),inOut:x=>x<.5?4*x*x*x:1-Math.pow(2-2*x,3)/2,out:x=>1-Math.pow(1-x,3),in:x=>x*x*x,hold:x=>x>=1?1:0};
+const DEFAULT_EASE={roi:'inOut',box:'inOut',zoom:'inOut',matte:'inOut',align:'inOut',offset:'inOut',opacity:'smooth',dim:'smooth',chrome:'smooth',spot:'inOut'};
+let plan=null,manifest=null,logo=null,current=null;const images={},backgrounds={},layers=[],headingSizes=new Map();
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x)),lerp=(a,b,p)=>a+(b-a)*p,isNum=Number.isFinite,round=(v,d)=>{const k=10**(d===undefined?2:d);return Math.round(v*k)/k;};
+function fail(message){throw Error(message);}
+function progress(t,a,b,ease){if(b<=a)return t>=b?1:0;return EASE[ease||'smooth'](clamp((t-a)/(b-a),0,1));}
+function fetchJSON(url){return fetch(url,{cache:'no-store'}).then(r=>{if(!r.ok)fail('Cannot load '+url.pathname+': HTTP '+r.status);return r.json();});}
+function failure(err){const el=document.getElementById('failure');el.style.display='block';el.textContent='Film render stopped.\n'+String(err&&err.stack||err);throw err;}
+
+/* Timeline: contiguous parts on the 2,527-frame clock. Views are native layers whose camera
+   (ROI), screen box, opacity and spotlight are keyframed in part-local seconds. */
+const isRect=r=>Array.isArray(r)&&r.length===4&&r.every(isNum)&&r[2]>0&&r[3]>0;
+const isUnitRect=r=>isRect(r)&&r[0]>=0&&r[1]>=0&&r[0]+r[2]<=1.000001&&r[1]+r[3]<=1.000001;
+const roiValue=v=>typeof v==='string'&&/^[a-z][a-z0-9_-]*$/i.test(v)||isUnitRect(v);
+function isRef(v,known){
+ if(!v||Array.isArray(v)||typeof v!=='object')return false;
+ if(typeof v.of==='string')return v.dock===undefined&&known.has(v.of)&&roiValue(v.roi);
+ if(typeof v.dock==='string')return v.of===undefined&&known.has(v.dock)&&['top','bottom','left','right'].includes(v.side)&&isNum(v.gap)&&v.gap>=0&&isNum(v.size)&&v.size>0;
+ return false;
+}
+function frames(list,where,dur,channel,check){
+ if(!Array.isArray(list)||!list.length)fail('Empty '+channel+' keyframes '+where);
+ let last=-Infinity;
+ list.forEach(k=>{
+  if(!k||typeof k!=='object'||!isNum(k.at)||k.at<0||k.at>dur+2||k.at<=last)fail('Keyframes must ascend inside the part: '+channel+' '+where);
+  if(k.ease!==undefined&&!EASE[k.ease])fail('Unknown easing '+k.ease+' '+where);
+  if(!check(k))fail('Invalid '+channel+' keyframe at '+k.at+' '+where);
+  if(DEFAULT_EASE[channel]&&k.ease===undefined)k.ease=DEFAULT_EASE[channel];last=k.at;
+ });
+ return list;
+}
+function scalarFrames(value,fallback,lo,hi,where,dur,channel){if(value===undefined)value=fallback;return frames(isNum(value)?[{at:0,v:value}]:value,where,dur,channel,k=>isNum(k.v)&&k.v>=lo&&k.v<=hi);}
+function vectorFrames(value,fallback,lo,hi,where,dur,channel){
+ const ok=v=>Array.isArray(v)&&v.length===2&&v.every(x=>isNum(x)&&x>=lo&&x<=hi);if(value===undefined)value=fallback;
+ return frames(ok(value)?[{at:0,v:value}]:value,where,dur,channel,k=>ok(k.v));
+}
+function normalizeView(v,part,dur,known,assets){
+ const where=part.id+'.'+(v&&v.id);
+ if(!v||typeof v.id!=='string'||!/^[a-zA-Z][a-zA-Z0-9-]*$/.test(v.id)||known.has(v.id))fail('Invalid or duplicate view '+where);
+ if((v.asset===undefined)===(v.sequence===undefined))fail('View needs exactly one of asset or sequence '+where);
+ if(v.asset!==undefined){if(typeof v.asset!=='string'||!v.asset)fail('Invalid asset '+where);v.sequence=[{at:0,asset:v.asset}];}
+ frames(v.sequence,where,dur,'sequence',k=>typeof k.asset==='string'&&k.asset.length>0);if(v.sequence[0].at!==0)fail('Capture sequence must start at zero '+where);
+ v.sequence.forEach(k=>assets.add(k.asset));
+ if(v.fit===undefined)v.fit='hug';if(v.fit!=='hug'&&v.fit!=='fill')fail('Unknown fit '+where);
+ v.roi=frames(roiValue(v.roi)?[{at:0,roi:v.roi}]:v.roi,where,dur,'roi',k=>roiValue(k.roi));
+ const box=x=>isRect(x)||isRef(x,known);v.box=frames(box(v.box)?[{at:0,rect:v.box}]:v.box,where,dur,'box',k=>box(k.rect));
+ v.zoom=scalarFrames(v.zoom,1,.2,4,where,dur,'zoom');v.matte=scalarFrames(v.matte,20,0,80,where,dur,'matte');
+ v.opacity=scalarFrames(v.opacity,1,0,1,where,dur,'opacity');v.dim=scalarFrames(v.dim,1,0,1,where,dur,'dim');v.chrome=scalarFrames(v.chrome,1,0,1,where,dur,'chrome');
+ v.align=vectorFrames(v.align,[.5,.5],0,1,where,dur,'align');v.offset=vectorFrames(v.offset,[0,0],-1600,1600,where,dur,'offset');
+ if(v.spot!==undefined)frames(v.spot,where,dur,'spot',k=>roiValue(k.roi)&&isNum(k.a)&&k.a>=0&&k.a<=1);
+ if(v.spotPad===undefined)v.spotPad=[20,10];if(!Array.isArray(v.spotPad)||v.spotPad.length!==2||!v.spotPad.every(x=>isNum(x)&&x>=0&&x<=80))fail('Invalid spotlight padding '+where);
+ if(v.mask!==undefined&&!(v.mask&&roiValue(v.mask.roi)&&isNum(v.mask.from)&&isNum(v.mask.until)&&v.mask.from>=0&&v.mask.until>v.mask.from&&v.mask.until<=dur))fail('Invalid native band mask '+where);
+ if(v.reveal!==undefined&&!(v.reveal&&roiValue(v.reveal.roi)&&isNum(v.reveal.from)&&isNum(v.reveal.until)&&v.reveal.from>=0&&v.reveal.until>v.reveal.from&&v.reveal.until<=dur))fail('Invalid reveal '+where);
+ known.add(v.id);
+}
+function normalizePlan(p){
+ if(!p||p.schema!=='omagma.video.timeline.v1'||p.width!==1920||p.height!==1080||p.fps!==FPS||p.frameCount!==FRAMES||Math.abs(p.duration-DURATION)>1e-9)fail('Unexpected film clock or timeline schema');
+ if(!Array.isArray(p.parts)||!p.parts.length)fail('Empty timeline');
+ let expected=0;const ids=new Set();
+ p.parts.forEach((part,index)=>{
+  const where='part '+(part&&part.id);
+  if(!part||typeof part.id!=='string'||!/^[a-z0-9-]+$/.test(part.id)||ids.has(part.id))fail('Invalid or duplicate '+where);ids.add(part.id);
+  if(!Number.isInteger(part.frameIn)||!Number.isInteger(part.frameOut)||part.frameIn!==expected||part.frameOut<=part.frameIn||part.frameOut>FRAMES)fail('Timeline gap or overlap at '+where);expected=part.frameOut;
+  if(typeof part.title!=='string'||!part.title.trim())fail('Missing human title '+where);
+  if(part.headline!==null&&(typeof part.headline!=='string'||!part.headline.trim())||typeof part.subtitle!=='string')fail('Invalid caption '+where);
+  const dur=(part.frameOut-part.frameIn)/FPS;
+  if(!isNum(part.carry)||part.carry<0||part.carry>Math.min(1.5,dur)||index===0&&part.carry!==0)fail('Invalid carry '+where);
+  if(!Array.isArray(part.captures)||new Set(part.captures).size!==part.captures.length||part.captures.some(k=>typeof k!=='string'||!k))fail('Invalid captures '+where);
+  if(!Array.isArray(part.views)||!Array.isArray(part.cues)||!Array.isArray(part.overlays))fail('Part needs views, cues and overlays arrays '+where);
+  const known=new Set(),assets=new Set();part.views.forEach(v=>normalizeView(v,part,dur,known,assets));
+  if(assets.size!==part.captures.length||part.captures.some(k=>!assets.has(k)))fail('captures must list exactly the native assets used by '+where);
+ });
+ if(expected!==FRAMES)fail('Timeline does not cover the final frame');
+ return p;
+}
+function validateManifest(m,used){
+ if(!m||m.schema!=='omagma.video.assets.v1'||!m.assets||typeof m.assets!=='object'||Array.isArray(m.assets))fail('Invalid asset manifest schema');
+ used.forEach(key=>{
+  const meta=m.assets[key];if(!meta||typeof meta!=='object')fail('Missing native asset '+key+' in the manifest');
+  if(typeof meta.file!=='string'||!meta.file||!Number.isInteger(meta.width)||!Number.isInteger(meta.height)||meta.width<=0||meta.height<=0||!/^[0-9a-f]{64}$/i.test(meta.sha256||''))fail('Invalid asset metadata '+key);
+  if(new URL(meta.file,manifestURL).origin!==location.origin)fail('Native asset outside the film origin '+key);
+  if(!meta.rois||typeof meta.rois!=='object'||Array.isArray(meta.rois))fail('Missing ROI table '+key);
+  Object.keys(meta.rois).forEach(name=>{if(!isUnitRect(meta.rois[name]))fail('Invalid ROI '+key+'.'+name);});
+  if(meta.rois.full&&meta.rois.full.some((v,i)=>Math.abs(v-[0,0,1,1][i])>1e-9))fail('ROI full must cover the whole capture '+key);
+ });
+ return m;
+}
+function assetAt(view,t){let key=view.sequence[0].asset;for(const take of view.sequence)if(take.at<=t+1e-7)key=take.asset;return key;}
+function roiOf(asset,name){
+ if(Array.isArray(name))return name;
+ const rois=manifest.assets[asset].rois;if(name==='full'&&!rois.full)return[0,0,1,1];
+ const r=rois[name];if(!r)fail('Missing ROI '+asset+'.'+name+' (never replaced by full)');return r;
+}
+function requiredRois(){
+ const need=new Map(),add=(asset,name)=>{if(typeof name!=='string'||name==='full')return;if(!need.has(asset))need.set(asset,new Set());need.get(asset).add(name);};
+ plan.parts.forEach(part=>{
+  const views=new Map(part.views.map(v=>[v.id,v])),everywhere=(id,name)=>views.get(id).sequence.forEach(k=>add(k.asset,name));
+  part.views.forEach(v=>{
+   v.roi.forEach(k=>add(assetAt(v,k.at),k.roi));(v.spot||[]).forEach(k=>add(assetAt(v,k.at),k.roi));
+   if(v.reveal)add(assetAt(v,v.reveal.from),v.reveal.roi);if(v.mask)add(assetAt(v,v.mask.from),v.mask.roi);v.box.forEach(k=>{if(k.rect.of)everywhere(k.rect.of,k.rect.roi);});
+  });
+  window.DIRECTION.references(part).forEach(([id,name])=>everywhere(id,name));
+ });
+ need.forEach((names,asset)=>names.forEach(name=>{if(!manifest.assets[asset].rois[name])fail('Missing ROI '+asset+'.'+name+' (never replaced by full)');}));
+ return Object.fromEntries([...need].map(([asset,names])=>[asset,[...names].sort()]));
+}
+
+/* Native assets: fetched relative to the manifest, SHA-256 verified, decoded at their declared
+   size. A missing or altered capture rejects READY; there is no substitute image. */
+const probe=document.createElement('canvas');probe.width=probe.height=1;const probeContext=probe.getContext('2d',{willReadFrequently:true});
+function pixel(image,x,y){probeContext.clearRect(0,0,1,1);probeContext.drawImage(image,x,y,1,1,0,0,1,1);const d=probeContext.getImageData(0,0,1,1).data;return'rgb('+d[0]+','+d[1]+','+d[2]+')';}
+function terminalBackground(image){
+ const w=image.naturalWidth,h=image.naturalHeight,samples=[[2,2],[w-3,2],[2,h-3],[w-3,h-3]].map(p=>pixel(image,p[0],p[1])),count=new Map();
+ samples.forEach(c=>count.set(c,(count.get(c)||0)+1));return samples.reduce((best,c)=>count.get(c)>count.get(best)?c:best,samples[0]);
+}
+async function loadAsset(key){
+ const meta=manifest.assets[key],response=await fetch(new URL(meta.file,manifestURL),{cache:'no-store'});
+ if(!response.ok)fail('Missing native asset '+key+': HTTP '+response.status);
+ if(!crypto.subtle)fail('Asset hash validation requires a secure localhost origin');
+ const bytes=await response.arrayBuffer(),hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(b=>b.toString(16).padStart(2,'0')).join('');
+ if(hash!==meta.sha256.toLowerCase())fail('Native asset SHA-256 mismatch '+key);
+ const image=new Image();image.decoding='sync';image.src=URL.createObjectURL(new Blob([bytes],{type:response.headers.get('content-type')||'image/png'}));
+ await image.decode().catch(()=>fail('Cannot decode native asset '+key));
+ if(image.naturalWidth!==meta.width||image.naturalHeight!==meta.height)fail('Native asset dimensions differ from the manifest '+key);
+ images[key]=image;backgrounds[key]=terminalBackground(image);
+}
+async function loadLogo(){
+ for(const path of LOGOS){const response=await fetch(path,{cache:'no-store'}).catch(()=>null);if(!response||!response.ok)continue;const url=URL.createObjectURL(await response.blob()),image=new Image();image.src=url;await image.decode();return{url,path};}
+ fail('Omagma logo unavailable');
+}
+
+/* Camera: each keyframe's named ROI resolves against the capture shown at that keyframe, so a
+   state change inside a view never jumps the camera. Panes hug the ROI inside their box. */
+function segment(list,t){
+ const n=list.length;if(n===1||t<=list[0].at+1e-7)return[list[0],list[0],0,false];if(t>=list[n-1].at-1e-7)return[list[n-1],list[n-1],1,false];
+ let i=0;while(t>=list[i+1].at-1e-7)i++;const a=list[i],b=list[i+1];return[a,b,EASE[b.ease]((t-a.at)/(b.at-a.at)),true];
+}
+function scalar(list,t){const[a,b,p,m]=segment(list,t);return{v:lerp(a.v,b.v,p),moving:m&&a.v!==b.v};}
+function vector(list,t){const[a,b,p,m]=segment(list,t);return{v:a.v.map((x,i)=>lerp(x,b.v[i],p)),moving:m&&a.v.some((x,i)=>x!==b.v[i])};}
+function rects(r0,r1,p){return r0.map((x,i)=>lerp(x,r1[i],p));}
+function project(st,roi){const r=typeof roi==='string'?roiOf(st.asset,roi):roi,m=manifest.assets[st.asset];return[st.pane[0]+st.translate[0]+r[0]*m.width*st.scale,st.pane[1]+st.translate[1]+r[1]*m.height*st.scale,r[2]*m.width*st.scale,r[3]*m.height*st.scale];}
+function boxValue(value,states){
+ if(Array.isArray(value))return{rect:value,moving:false};
+ const ref=states[value.of||value.dock];if(!ref)fail('Unresolved view reference '+(value.of||value.dock));
+ if(value.of)return{rect:project(ref,value.roi),moving:ref.moving};
+ const p=ref.pane,g=value.gap,s=value.size,rect=value.side==='top'?[p[0],p[1]-g-s,p[2],s]:value.side==='bottom'?[p[0],p[1]+p[3]+g,p[2],s]:value.side==='left'?[p[0]-g-s,p[1],s,p[3]]:[p[0]+p[2]+g,p[1],s,p[3]];
+ return{rect,moving:ref.moving};
+}
+function evalView(view,t,states){
+ const asset=assetAt(view,t),meta=manifest.assets[asset];
+ const[ra,rb,rp,rm]=segment(view.roi,t),r0=roiOf(assetAt(view,ra.at),ra.roi),r1=roiOf(assetAt(view,rb.at),rb.roi),r=rects(r0,r1,rp);
+ const[ba,bb,bp,bm]=segment(view.box,t),b0=boxValue(ba.rect,states),b1=boxValue(bb.rect,states),b=rects(b0.rect,b1.rect,bp);
+ const zoom=scalar(view.zoom,t),matte=scalar(view.matte,t),align=vector(view.align,t),offset=vector(view.offset,t),m=matte.v,rw=r[2]*meta.width,rh=r[3]*meta.height;
+ const s=Math.min((b[2]-2*m)/rw,(b[3]-2*m)/rh)*zoom.v;
+ if(!isNum(s)||s<=0)fail('Degenerate camera '+view.id+' at local '+t.toFixed(3));
+ let w,h,tx,ty;
+ if(view.fit==='fill'){w=b[2];h=b[3];tx=w/2-(r[0]+r[2]/2)*meta.width*s;ty=h/2-(r[1]+r[3]/2)*meta.height*s;}
+ else{w=rw*s+2*m;h=rh*s+2*m;tx=m-r[0]*meta.width*s;ty=m-r[1]*meta.height*s;}
+ let x=b[0]+(b[2]-w)*align.v[0]+offset.v[0],y=b[1]+(b[3]-h)*align.v[1]+offset.v[1];
+ const moving=rm&&r0.some((v,i)=>v!==r1[i])||bm&&b0.rect.some((v,i)=>v!==b1.rect[i])||b0.moving||b1.moving||zoom.moving||matte.moving||align.moving||offset.moving;
+ if(!moving){const ix=Math.round(x+tx),iy=Math.round(y+ty);x=Math.round(x);y=Math.round(y);w=Math.round(w);h=Math.round(h);tx=ix-x;ty=iy-y;}
+ if(!(w>1&&h>1)||![x,y,w,h,tx,ty].every(isNum))fail('Degenerate pane '+view.id+' at local '+t.toFixed(3));
+ let spot=null;
+ if(view.spot){
+  const[a,c,p]=segment(view.spot,t),r0=roiOf(assetAt(view,a.at),a.roi),r1=roiOf(assetAt(view,c.at),c.roi),changed=r0.some((v,i)=>Math.abs(v-r1[i])>1e-7);
+  // Change attention by fading it out and back in. A sweeping hole would emphasize incidental fields.
+  const alpha=changed?(p<.5?a.a*(1-p*2):c.a*(p*2-1)):lerp(a.a,c.a,p),roi=changed?(p<.5?r0:r1):r0;
+  if(alpha>.001)spot={roi,alpha};
+ }
+ const reveal=view.reveal&&t<view.reveal.until?{progress:progress(t,view.reveal.from,view.reveal.until,'inOut'),line:roiOf(assetAt(view,view.reveal.from),view.reveal.roi)}:null;
+ return{id:view.id,asset,roi:r,pane:[x,y,w,h],scale:s,translate:[tx,ty],opacity:scalar(view.opacity,t).v,dim:scalar(view.dim,t).v,chrome:scalar(view.chrome,t).v,spot,spotPad:view.spotPad,reveal,mask:view.mask&&t>=view.mask.from&&t<view.mask.until?roiOf(asset,view.mask.roi):null,moving};
+}
+function evalPart(part,t){const states={},list=[];part.views.forEach(v=>{const st=evalView(v,t,states);states[v.id]=st;list.push(st);});return{states,list};}
+
+function newLayer(){const pane=document.createElement('div'),img=document.createElement('img'),mask=document.createElement('div'),spot=document.createElement('div');pane.className='pane';img.decoding='sync';img.alt='';mask.className='native-band-mask';mask.style.position='absolute';spot.className='spot';pane.append(img,mask,spot);layersHost.append(pane);return{pane,img,mask,spot,key:null};}
+// Fixed-point strings only: exponent notation such as 3e-14 is invalid CSS and would leave a stale style.
+const pct=v=>(clamp(v,0,1)*100).toFixed(4)+'%',css=v=>String(Math.round(v*10000)/10000);
+function drawLayer(layer,st,alpha){
+ const ps=layer.pane.style,[x,y,w,h]=st.pane,meta=manifest.assets[st.asset],r=st.roi,radius=round(14*st.chrome);
+ if(layer.key!==st.asset){layer.img.src=images[st.asset].src;layer.img.dataset.asset=st.asset;layer.key=st.asset;}
+ layer.pane.dataset.on='1';ps.display='block';ps.left=css(x)+'px';ps.top=css(y)+'px';ps.width=css(w)+'px';ps.height=css(h)+'px';ps.opacity=String(round(alpha,4));ps.background=backgrounds[st.asset];ps.borderRadius=radius+'px';
+ ps.boxShadow=st.chrome>0?'0 24px 64px rgba(0,0,0,'+round(.42*st.chrome,3)+'),0 0 0 1px rgba(54,72,92,'+round(st.chrome,3)+')':'none';
+ ps.filter=st.dim<.9995?'brightness('+round(st.dim,4)+')':'none';
+ if(st.reveal){const line=project(st,st.reveal.line),mid=clamp(line[1]+line[3]/2-y,0,h),q=st.reveal.progress;ps.clipPath='inset('+round(mid*(1-q))+'px 0 '+round((h-mid)*(1-q))+'px 0 round '+radius+'px)';}else ps.clipPath='none';
+ const is=layer.img.style;is.width=meta.width+'px';is.height=meta.height+'px';is.transform='translate('+css(st.translate[0])+'px,'+css(st.translate[1])+'px) scale('+String(Math.round(st.scale*1e7)/1e7)+')';
+ is.clipPath='inset('+pct(r[1])+' '+pct(1-r[0]-r[2])+' '+pct(1-r[1]-r[3])+' '+pct(r[0])+')';
+ const ms=layer.mask.style;if(st.mask){const q=project(st,st.mask);ms.display='block';ms.left=css(q[0]-x)+'px';ms.top=css(q[1]-y)+'px';ms.width=css(q[2])+'px';ms.height=css(q[3])+'px';ms.background=backgrounds[st.asset];}else ms.display='none';
+ const ss=layer.spot.style;
+ if(st.spot){const q=project(st,st.spot.roi),[px,py]=st.spotPad,sh=q[3]+2*py;ss.display='block';ss.left=round(q[0]-x-px)+'px';ss.top=round(q[1]-y-py)+'px';ss.width=round(q[2]+2*px)+'px';ss.height=round(sh)+'px';ss.borderRadius=round(Math.min(sh/2,22))+'px';ss.boxShadow='0 0 0 3200px rgba(4,9,15,'+round(.6*st.spot.alpha,3)+')';}
+ else ss.display='none';
+}
+function hideLayer(layer){layer.pane.style.display='none';layer.pane.dataset.on='0';}
+
+function fitCaptions(){
+ const h=caption.querySelector('.title-slot .current'),s=caption.querySelector('.subtitle-slot .current'),width=caption.clientWidth;
+ plan.parts.forEach(part=>{
+  if(part.headline&&!headingSizes.has(part.headline)){let size=56;h.textContent=part.headline;h.style.fontSize=size+'px';while(h.scrollWidth>width+1&&size>46){size-=2;h.style.fontSize=size+'px';}if(h.scrollWidth>width+1)fail('Headline exceeds the caption width '+part.id);headingSizes.set(part.headline,size);}
+  s.textContent=part.subtitle;if(s.scrollWidth>width+1)fail('Subtitle exceeds the caption width '+part.id);
+ });
+ h.textContent='';s.textContent='';
+}
+function drawCaption(index,local){
+ const part=plan.parts[index],prev=index>0?plan.parts[index-1]:null,span=Math.max(.5,part.carry);
+ const slot=(name,now,before)=>{
+  const host=caption.querySelector('.'+name+'-slot'),cur=host.querySelector('.current'),old=host.querySelector('.previous'),changed=prev!==null&&now!==before;
+  const incoming=changed?progress(local,.16,.34):1,outgoing=changed?1-progress(local,0,.14):0;
+  cur.textContent=now;old.textContent=before;cur.style.opacity=String(now?round(incoming,4):0);old.style.opacity=String(before?round(outgoing,4):0);cur.style.transform='translateY('+round((1-incoming)*10)+'px)';
+  if(name==='title'){cur.style.fontSize=(headingSizes.get(now)||56)+'px';old.style.fontSize=(headingSizes.get(before)||56)+'px';}
+  return{text:now,incoming:round(incoming,3),outgoing:round(outgoing,3)};
+ };
+ const headline=slot('title',part.headline||'',prev&&prev.headline||''),subtitle=slot('subtitle',part.subtitle,prev?prev.subtitle:'');
+ const shown=!!part.headline,was=!!(prev&&prev.headline);
+ bug.style.opacity=String(round(shown&&was?1:shown?progress(local,.25*span,span):was?1-progress(local,0,.55*span):0,4));
+ return{headline,subtitle};
+}
+function partAt(frame){let lo=0,hi=plan.parts.length-1;while(lo<hi){const mid=(lo+hi)>>1;if(frame<plan.parts[mid].frameOut)hi=mid;else lo=mid+1;}return lo;}
+
+window.render=function(tIn){
+ if(!plan)return null;
+ const t=clamp(Number(tIn)||0,0,LAST),frame=Math.min(FRAMES-1,Math.floor(t*FPS+1e-7)),index=partAt(frame),part=plan.parts[index],local=t-part.frameIn/FPS;
+ const prev=index>0?plan.parts[index-1]:null,prevLocal=prev?local+(prev.frameOut-prev.frameIn)/FPS:0,carry=prev&&part.carry>0?progress(local,0,part.carry):1,draws=[];
+ // Native action changes use opaque replacements; only the opening and closing brand transitions carry a previous plane.
+ if(prev&&carry<1){const fade=1-progress(local,.3*part.carry,part.carry);evalPart(prev,prevLocal).list.forEach(st=>{if(st.opacity*fade>.002)draws.push({part:prev.id,st,alpha:st.opacity*fade});});}
+ evalPart(part,local).list.forEach(st=>{if(st.opacity>.002)draws.push({part:part.id,st,alpha:st.opacity});});
+ if(draws.length>layers.length)fail('Too many simultaneous native layers at '+t.toFixed(3));
+ draws.forEach((d,i)=>drawLayer(layers[i],d.st,d.alpha));for(let i=draws.length;i<layers.length;i++)hideLayer(layers[i]);
+ const direction=window.DIRECTION.render({t,index,part,prev,local,prevLocal,carry,parts:plan.parts,logo:logo.url,geom:(i,time)=>evalPart(plan.parts[i],time),project},hosts);
+ const captions=drawCaption(index,local);
+ current={t:round(t,5),frame,phase:part.id,title:part.title,local:round(local,4),partFrames:[part.frameIn,part.frameOut],transition:round(carry,4),
+  visibleAssets:[...new Set(draws.map(d=>d.st.asset))],
+  views:draws.map(d=>({part:d.part,id:d.st.id,asset:d.st.asset,crop:d.st.roi.map(v=>round(v,5)),pane:d.st.pane.map(v=>round(v,2)),scale:round(d.st.scale,5),opacity:round(d.alpha,4),dim:round(d.st.dim,4),spot:d.st.spot?{crop:d.st.spot.roi.map(v=>round(v,5)),alpha:round(d.st.spot.alpha,3)}:null,moving:d.st.moving})),
+  captions:[part.headline,part.subtitle].filter(Boolean),visibleCaptions:[captions.headline,captions.subtitle].filter(c=>c.text&&c.incoming>0).map(c=>c.text),textSlots:captions,
+  cues:direction.cues,overlays:direction.overlays,background:'constant #0b1017',source:'genuine native capture assets',publication:'held'};
+ return current;
+};
+window.qa=function(t){return JSON.parse(JSON.stringify(window.render(t)));};
+window.prepareFrame=async function(){
+ const pending=[];document.querySelectorAll('#screen img').forEach(im=>{const pane=im.closest('.pane');if(pane&&pane.style.display==='none')return;pending.push(im.decode().catch(()=>fail('Image decode failed '+(im.dataset.asset||'logo'))));});
+ await Promise.all(pending);await document.fonts.ready;return true;
+};
+window.READY=(async function(){
+ const[timeline,assetManifest]=await Promise.all([fetchJSON(timelineURL),fetchJSON(manifestURL)]);
+ if(!window.DIRECTION)fail('direction.js did not load');
+ plan=normalizePlan(timeline);
+ plan.parts.forEach(part=>window.DIRECTION.validate(part,{fail,duration:(part.frameOut-part.frameIn)/FPS,hasView:id=>part.views.some(v=>v.id===id)}));
+ const used=[...new Set(plan.parts.flatMap(p=>p.captures))].sort();
+ manifest=validateManifest(assetManifest,used);
+ const rois=requiredRois();
+ await Promise.all(used.map(loadAsset));logo=await loadLogo();
+ await Promise.all(['800 56px "Adwaita Sans"','500 28px "Adwaita Sans"','650 30px "Adwaita Sans"','780 36px "Adwaita Sans"','800 40px "JetBrainsMono Nerd Font"','700 19px "JetBrainsMono Nerd Font"'].map(f=>document.fonts.load(f)));await document.fonts.ready;
+ for(let i=0;i<MAX_LAYERS;i++)layers.push(newLayer());
+ fitCaptions();
+ // Exercise every frame once so cameras, references and anchors fail here rather than mid-render.
+ for(let f=0;f<FRAMES;f++)window.render(f/FPS);
+ window.FILM={width:1920,height:1080,fps:FPS,frameCount:FRAMES,duration:DURATION,revision:plan.revision,
+  parts:plan.parts.map(p=>({id:p.id,frameIn:p.frameIn,frameOut:p.frameOut,title:p.title,headline:p.headline,subtitle:p.subtitle,captures:p.captures})),
+  assets:Object.fromEntries(used.map(k=>[k,{file:manifest.assets[k].file,width:manifest.assets[k].width,height:manifest.assets[k].height,sha256:manifest.assets[k].sha256.toLowerCase()}])),
+  requiredRois:rois,manifest:manifestURL.pathname,manifestSchema:manifest.schema,logo:logo.path};
+ window.render(0);await window.prepareFrame();
+ return{ok:true,...window.FILM,warnings:[]};
+})().catch(failure);
+function fit(){screen.style.transform='scale('+Math.min(innerWidth/1920,innerHeight/1080)+')';}addEventListener('resize',fit);fit();
+})();
+</script></body></html>

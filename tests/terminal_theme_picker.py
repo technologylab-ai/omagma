@@ -71,6 +71,37 @@ class ThemeScreen(MouseScreen):
         self.reversed = [(old[row][:columns] + [False] * max(0, columns - len(old[row])))
                          if row < len(old) else [False] * columns for row in range(rows)]
 
+    def csi(self, sequence, final):
+        # Erasure writes blank cells with the current SGR state. Keep this
+        # independent plane aligned with StatusScreen.styles and Screen.cells,
+        # including partial clears used by resized NO_COLOR frames.
+        try:
+            values = [int(value) if value else 0 for value in sequence.lstrip("?><!").split(";")]
+        except ValueError:
+            values = []
+        n = (values[0] or 1) if values else 1
+        if final == "J" and values:
+            if values[0] == 0:
+                self.reversed[self.y][self.x:] = [self.reverse] * (self.columns - self.x)
+                for row in range(self.y + 1, self.rows):
+                    self.reversed[row] = [self.reverse] * self.columns
+            elif values[0] == 1:
+                for row in range(self.y):
+                    self.reversed[row] = [self.reverse] * self.columns
+                self.reversed[self.y][:self.x + 1] = [self.reverse] * (self.x + 1)
+        elif final == "K" and values:
+            mode = values[0]
+            start, end = (0, self.columns) if mode == 2 else ((0, self.x + 1) if mode == 1 else (self.x, self.columns))
+            self.reversed[self.y][start:end] = [self.reverse] * (end - start)
+        elif final == "X":
+            end = min(self.columns, self.x + n)
+            self.reversed[self.y][self.x:end] = [self.reverse] * (end - self.x)
+        elif final == "P":
+            self.reversed[self.y][self.x:] = (self.reversed[self.y][self.x + n:] + [self.reverse] * n)[:self.columns - self.x]
+        elif final == "@":
+            self.reversed[self.y][self.x:] = ([self.reverse] * n + self.reversed[self.y][self.x:])[:self.columns - self.x]
+        super().csi(sequence, final)
+
 
 def setup(binary, directory, *, theme_file=True, preferences=True):
     source = ProviderFixture(directory)

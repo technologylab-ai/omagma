@@ -15,6 +15,12 @@ storage adapters. The TUI and CLI use this shared integration.
 | `calendar.review` | `Service.prepareReview(planned, operation_id)` | Exact request bytes and a review hash; no provider mutation |
 | `calendar.apply` | `Service.apply(review, confirmation)` | Applied, rejected, or unknown durable outcome |
 | `calendar.reconcile` | `Service.reconcile(review)` | Read-only reconciliation of an existing durable operation |
+| `calendar.event-review` | `Service.prepareEventReview(...)` | Ordinary organizer creation/edit review; no provider mutation |
+| `calendar.event-apply` | `Service.apply(review, confirmation)` | Single-dispatch ordinary event save with reviewed guest notifications |
+| `calendar.event-reconcile` | `Service.reconcile(review)` | Exact event-ID recovery; never repeats invitations |
+| `calendar.event-retry` | `Service.retry(review, confirmation, nextAttempt)` | Explicit identical-request retry with a durable single-use attempt token |
+| `calendar.event-abandon` | `Service.archive(review, confirmation)` | Local archived uncertainty; the event may still appear |
+| `calendar.event-pending` | Durable pending-review callback | Restore an unknown ordinary create/edit without credentials or provider traffic |
 | `calendar.freebusy` | `Service.freeBusy(calendar, window)` | Busy ranges, or an explicit incomplete result for a per-calendar error |
 
 Use one bounded request arena per command. Retain a review in the account's
@@ -22,7 +28,7 @@ durable store or copy it into an owned bounded session arena while a TUI
 confirmation is pending. Never leave borrowed request-arena strings in the UI.
 `windowForDays` resolves a local day or seven-day window using the supplied zone;
 it preserves 23-hour and 25-hour days. Agenda requests ask Google to expand
-recurrences in that bounded window. Source recurrence writes remain unavailable.
+recurrences in that bounded window. Source recurrence writes remain unavailable. Ordinary organizer creation, guest invitations, Google Meet creation and exact occurrence edits use a separate [event draft contract](CALENDAR-EVENTS.md).
 
 ## Native transport
 
@@ -64,7 +70,9 @@ the availability capability and is never an import destination.
 `calendar_commands.dispatch(service, request, host)` is the common JSON boundary.
 It does not instantiate credentials or storage. Core supplies an initialized
 native service and `HostInputs { io, env, context, loadInvitationFn,
-loadReviewFn }`. First run the allocation-free, IO-free
+loadReviewFn, loadReceiptFn, loadPendingFn }`. Terminal receipts allow replay
+without retaining full review bodies; unknown reviews retain the exact request.
+First run the allocation-free, IO-free
 `calendar_commands.preflight(request)` and check the validated local grant
 against `calendar_native.capabilitiesForCommand(command)`. Then load the
 account's original invitation and verified identities and close its mail

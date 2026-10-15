@@ -5,6 +5,7 @@ import http.server
 import json
 import subprocess
 import threading
+import urllib.parse
 
 BODY = b'{"summary":"Fixture reviewed update","sequence":5,"extendedProperties":{"private":{"omagmaOperation":"wire-fixture"}}}'
 
@@ -23,7 +24,7 @@ def main():
             size = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(size)
             received.append((self.command, self.path, dict(self.headers), body))
-            status = int(self.path.rsplit("/", 1)[-1])
+            status = int(urllib.parse.urlsplit(self.path).path.rsplit("/", 1)[-1])
             if status == 299:  # Interrupted response after accepting request bytes.
                 self.close_connection = True
                 return
@@ -55,11 +56,21 @@ def main():
         assert len(received) == before + 1, "Calendar request was replayed"
         method, path, headers, body = received[-1]
         headers = {key.lower(): value for key, value in headers.items()}
-        assert path == "/calendar/" + str(status)
+        assert urllib.parse.urlsplit(path).path == "/calendar/" + str(status)
         assert headers["authorization"] == "Bearer synthetic-omagma-calendar-bearer"
-        assert method == {"get": "GET", "import": "POST", "freebusy": "POST", "patch": "PATCH", "delete": "DELETE"}[mode]
+        assert method == {"get": "GET", "import": "POST", "freebusy": "POST", "patch": "PATCH", "delete": "DELETE", "create-meet": "POST"}[mode]
         assert headers.get("if-match") == ('"wire-etag-4"' if mode in ("patch", "delete") else None), headers
-        assert body == (BODY if method in ("POST", "PATCH") else b""), body
+        if mode == "create-meet":
+            assert urllib.parse.parse_qs(urllib.parse.urlsplit(path).query) == {"sendUpdates": ["all"], "conferenceDataVersion": ["1"]}, path
+            event = json.loads(body)
+            assert event["id"] == "omagma012345" and "iCalUID" not in event
+            assert event["start"] == {"dateTime": "2026-10-22T10:00:00.000Z", "timeZone": "UTC"}
+            assert event["end"] == {"dateTime": "2026-10-22T11:00:00.000Z", "timeZone": "UTC"}
+            assert event["attendees"] == [{"email": "guest@example.test", "responseStatus": "needsAction"}]
+            assert event["conferenceData"] == {"createRequest": {"requestId": "wire-event-create", "conferenceSolutionKey": {"type": "hangoutsMeet"}}}
+            assert event["extendedProperties"]["private"] == {"omagmaOperation": "wire-event-create", "omagmaSource": "0" * 64}
+        else:
+            assert body == (BODY if method in ("POST", "PATCH") else b""), body
         if body:
             assert headers["content-type"] == "application/json", headers
         return result
@@ -78,7 +89,9 @@ def main():
         assert interrupted_result["errorCode"] and interrupted_result["status"] == 0, interrupted_result
         assert sum(path == "/calendar/299" for _, path, _, _ in received) == 1
         run("bad-etag", 200, "InvalidCalendarEtag")
-        print(json.dumps({"ok": True, "wireRequests": len(received), "checks": 14, "compiler": deleted["zigVersion"], "mode": deleted["optimizeMode"]}))
+        run("create-meet", 200, "")
+        run("create-meet", 503, "UnknownOutcome")
+        print(json.dumps({"ok": True, "wireRequests": len(received), "checks": 16, "compiler": deleted["zigVersion"], "mode": deleted["optimizeMode"]}))
     finally:
         server.shutdown()
         server.server_close()

@@ -239,6 +239,18 @@ const Table = struct {
         return self.offset(if (low == 0) 0 else self.indices[low - 1]);
     }
 };
+pub const LocalCandidate = struct {
+    milliseconds: i64,
+    offset_seconds: i32,
+};
+pub const LocalCandidates = struct {
+    values: [2]LocalCandidate = undefined,
+    count: usize = 0,
+
+    pub fn slice(self: *const LocalCandidates) []const LocalCandidate {
+        return self.values[0..self.count];
+    }
+};
 pub const Zone = struct {
     owned: ?[]u8 = null,
     table: ?Table = null,
@@ -316,10 +328,10 @@ pub const Zone = struct {
         if (seconds < -62135596800 or seconds > max_seconds) return error.TimezoneRangeUnavailable;
         return @divFloor(seconds + try self.offsetSeconds(seconds), 86400);
     }
-    /// Resolve a wall-clock timestamp without choosing an arbitrary side of a
-    /// daylight-saving transition. Ambiguous/nonexistent times are explicit.
-    /// The result uses the repository's UTC millisecond timestamp convention.
-    pub fn fromLocal(self: *const Zone, date: CivilTime) !i64 {
+    /// Actual occurrences of a wall time under these loaded rules. A skipped
+    /// clock returns zero; a repeated clock returns two in chronological order.
+    /// Offsets are derived from the zone, never guessed from a display name.
+    pub fn localCandidates(self: *const Zone, date: CivilTime) !LocalCandidates {
         const wall = try date.seconds();
         var candidates: [259]i32 = undefined;
         var count: usize = 0;
@@ -349,19 +361,38 @@ pub const Zone = struct {
             candidates[0] = 0;
             count = 1;
         }
-        var result: ?i64 = null;
+        var result: LocalCandidates = .{};
         var resolved_any = false;
         for (candidates[0..count]) |offset_value| {
             const instant = wall - offset_value;
             const actual = self.offsetSeconds(instant) catch continue;
             resolved_any = true;
             if (actual != offset_value) continue;
-            if (result) |previous| {
-                if (previous != instant) return error.AmbiguousLocalTime;
-            } else result = instant;
+            var duplicate = false;
+            for (result.slice()) |previous| if (previous.milliseconds == instant * 1000) {
+                duplicate = true;
+            };
+            if (duplicate) continue;
+            // Real IANA folds have two sides. Refuse an exotic multi-fold
+            // instead of presenting a truncated choice as the complete set.
+            if (result.count == result.values.len) return error.AmbiguousLocalTime;
+            result.values[result.count] = .{ .milliseconds = instant * 1000, .offset_seconds = offset_value };
+            result.count += 1;
         }
         if (!resolved_any) return error.TimezoneRangeUnavailable;
-        return (result orelse return error.NonexistentLocalTime) * 1000;
+        if (result.count == 2 and result.values[0].milliseconds > result.values[1].milliseconds) std.mem.swap(LocalCandidate, &result.values[0], &result.values[1]);
+        return result;
+    }
+    /// Resolve a wall-clock timestamp without choosing an arbitrary side of a
+    /// daylight-saving transition. Ambiguous/nonexistent times are explicit.
+    /// The result uses the repository's UTC millisecond timestamp convention.
+    pub fn fromLocal(self: *const Zone, date: CivilTime) !i64 {
+        const result = try self.localCandidates(date);
+        return switch (result.count) {
+            0 => error.NonexistentLocalTime,
+            1 => result.values[0].milliseconds,
+            else => error.AmbiguousLocalTime,
+        };
     }
     pub fn format(self: *const Zone, allocator: Allocator, milliseconds: i64) ![]const u8 {
         if (milliseconds <= 0 or milliseconds > max_seconds * 1000 + 999) return "";
@@ -408,6 +439,8 @@ pub fn dateDay(raw: []const u8) !i64 {
 }
 /// A calendar TZID is a zoneinfo identifier, never an arbitrary file path.
 pub fn loadNamed(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map, identifier: []const u8) !Zone {
+    // The shared browser UI cannot read the native zoneinfo filesystem.
+    if (@import("platform.zig").browser) return error.UnsupportedPlatform;
     if (!zoneIdentifier(identifier) or identifier.len > 512) return error.InvalidTimezoneName;
     const directory = environ.get("TZDIR") orelse "/usr/share/zoneinfo";
     if (directory.len == 0 or directory[0] != '/' or directory.len > 4096) return error.InvalidTimezoneDirectory;
@@ -416,6 +449,7 @@ pub fn loadNamed(io: Io, allocator: Allocator, environ: *const std.process.Envir
     return loadFile(io, allocator, path);
 }
 pub fn load(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map) !Zone {
+    if (@import("platform.zig").browser) return error.UnsupportedPlatform;
     const selected = environ.get("TZ") orelse return loadFile(io, allocator, "/etc/localtime");
     if (selected.len == 0) return .{}; // POSIX explicitly empty TZ means UTC.
     const value = if (selected[0] == ':') selected[1..] else selected;
@@ -610,4 +644,29 @@ test "timezone: unspecified POSIX and Factory footer zones explicitly fall back"
     defer zone.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), zone.table.?.indices.len);
     try expectStamp(&zone, 1794054840000, "2026-11-07 12:34 UTC (TZ unavailable)");
+}
+
+test "calendar composer: local candidates distinguish gap fold unique and fractional-hour zones" {
+    const zone = try Zone.fromPosix("CET-1CEST,M3.5.0/2,M10.5.0/3");
+    const gap = try zone.localCandidates(.{ .year = 2026, .month = 3, .day = 29, .hour = 2, .minute = 30 });
+    try std.testing.expectEqual(@as(usize, 0), gap.count);
+    const fold_date: CivilTime = .{ .year = 2026, .month = 10, .day = 25, .hour = 2, .minute = 30, .second = 7 };
+    const fold = try zone.localCandidates(fold_date);
+    try std.testing.expectEqual(@as(usize, 2), fold.count);
+    try std.testing.expectEqual(@as(i32, 7200), fold.values[0].offset_seconds);
+    try std.testing.expectEqual(@as(i32, 3600), fold.values[1].offset_seconds);
+    try std.testing.expectEqual(@as(i64, 3600000), fold.values[1].milliseconds - fold.values[0].milliseconds);
+    try std.testing.expectEqual((try fold_date.seconds() - 7200) * 1000, fold.values[0].milliseconds);
+    try std.testing.expectError(error.AmbiguousLocalTime, zone.fromLocal(fold_date));
+    const unique = try zone.localCandidates(.{ .year = 2026, .month = 10, .day = 25, .hour = 10 });
+    try std.testing.expectEqual(@as(usize, 1), unique.count);
+    try std.testing.expectEqual(@as(i32, 3600), unique.values[0].offset_seconds);
+    const nepal = try Zone.fromPosix("NPT-5:45");
+    const nepal_date: CivilTime = .{ .year = 2026, .month = 10, .day = 15, .hour = 9, .minute = 45 };
+    const nepal_time = try nepal.localCandidates(nepal_date);
+    try std.testing.expectEqual(@as(usize, 1), nepal_time.count);
+    try std.testing.expectEqual(@as(i32, 20700), nepal_time.values[0].offset_seconds);
+    try std.testing.expectEqual((try nepal_date.seconds() - 20700) * 1000, nepal_time.values[0].milliseconds);
+    const unavailable: Zone = .{ .unavailable = true };
+    try std.testing.expectError(error.TimezoneUnavailable, unavailable.localCandidates(nepal_date));
 }

@@ -14,6 +14,10 @@ test {
     std.testing.refAllDecls(plan);
     std.testing.refAllDecls(agenda);
     std.testing.refAllDecls(@import("terminal/calendar_permissions.zig"));
+    std.testing.refAllDecls(@import("terminal/calendar_composer.zig"));
+    std.testing.refAllDecls(@import("terminal/calendar_guest_picker.zig"));
+    std.testing.refAllDecls(@import("terminal/calendar_slot.zig"));
+    std.testing.refAllDecls(@import("terminal/calendar_week_rows.zig"));
 }
 
 fn fixture(a: std.mem.Allocator, name: []const u8) ![]const u8 {

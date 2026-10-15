@@ -1,0 +1,18 @@
+/* The approved short027 opener, sampled by chapter-motion.js. No CSS clock. */
+#motion{position:absolute;inset:0;z-index:30;display:none;overflow:hidden;pointer-events:none;background:inherit;color:#f3f5f7;font-family:"Adwaita Sans",sans-serif}
+#motion *{box-sizing:border-box;transition:none!important;animation:none!important}
+#motion .cm-glow{position:absolute;left:220px;top:330px;width:1480px;height:1500px;border-radius:50%;background:radial-gradient(closest-side,rgba(255,118,38,.45),rgba(236,80,22,.13) 50%,transparent)}
+#motion .cm-intro,#motion .cm-divider{position:absolute;inset:0;display:none}
+#motion .cm-logo{position:absolute;left:845px;top:200px;width:230px;height:230px;transform-origin:50% 50%}
+#motion .cm-word,#motion .cm-version,#motion .cm-strap{position:absolute;left:0;width:1920px;text-align:center}
+#motion .cm-word{top:452px;font-size:110px;font-weight:800;letter-spacing:-.02em;color:#f7ede5}
+#motion .cm-version{top:604px;font:700 34px "JetBrainsMono Nerd Font",monospace;letter-spacing:.12em;color:#ff9e61}
+#motion .cm-strap{top:686px;font-size:40px;font-weight:600;color:#f3dccb}
+#motion .cm-segments{position:absolute;top:774px;left:0;width:1920px;display:flex;justify-content:center;gap:16px}
+#motion .cm-segments i{display:block;width:64px;height:6px;border-radius:3px;background:#ff8a45;box-shadow:0 0 14px rgba(255,122,53,.7)}
+#motion .cm-divider{background:radial-gradient(ellipse at 80% 100%,#101f2b 0,transparent 55%),#0b1017}
+#motion .cm-number{position:absolute;right:114px;top:186px;font-size:600px;font-weight:850;line-height:1;letter-spacing:-.1em;color:#14232e}
+#motion .cm-divider-group{position:absolute;inset:0}
+#motion .cm-kicker{position:absolute;left:140px;top:284px;font:650 25px "JetBrainsMono Nerd Font",monospace;letter-spacing:.12em;color:#a3eff0}
+#motion .cm-title{position:absolute;left:140px;top:366px;max-width:1480px;margin:0;font-size:104px;line-height:1.04;letter-spacing:-.035em;white-space:pre-line;font-weight:800}
+#motion .cm-rule{position:absolute;left:140px;top:704px;width:200px;height:5px;background:#a3eff0;transform-origin:left center}

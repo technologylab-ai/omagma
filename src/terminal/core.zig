@@ -270,7 +270,7 @@ pub const Session = struct {
     fn successResponse(a: std.mem.Allocator, id: Value, account: []const u8, cmd: []const u8, may_write: bool, fixtures: bool, data: Value) ![]const u8 {
         return j.encodeAlloc(a, .{ .version = @as(u8, 1), .id = id, .ok = true, .account = account, .data = data }, .{}) catch |err| {
             if (!fixtures and may_write and std.mem.eql(u8, cmd, "invitation.inspect")) return failureForError(a, id, account, error.UnknownOutcome);
-            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "draft.gmail-save" }) |mutation| {
+            if (!fixtures) for ([_][]const u8{ "mail.batch", "mail.undo", "contacts.upsert", "mail.mark", "mail.archive", "mail.trash", "mail.restore", "mail.send", "draft.send", "queue.process", "queue.send-now", "invitation.reply", "labels.create", "labels.rename", "labels.delete", "labels.color", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-apply", "calendar.event-retry", "draft.gmail-save" }) |mutation| {
                 if (std.mem.eql(u8, cmd, mutation)) return failureForError(a, id, account, error.UnknownOutcome);
             };
             return err;
@@ -425,6 +425,9 @@ pub const Session = struct {
             const target = try @import("../open_target.zig").makeUrl(&s.config.accounts[index], try j.required(req, "url"));
             if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, &s.config.accounts[index], &target);
             return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .url = target.url.slice(), .profile = target.profile_arg.slice() });
+        }
+        if (std.mem.eql(u8, cmd, "calendar.open") or std.mem.eql(u8, cmd, "calendar.event-open")) {
+            return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), calendarBrowserJob, .{ s, a, req, index });
         }
         if (std.mem.eql(u8, cmd, "attachment.open")) {
             const path = try j.required(req, "path");
@@ -938,6 +941,36 @@ pub const Session = struct {
     }
     fn calendarJob(s: *Session, a: std.mem.Allocator, req: Value) !Value {
         return s.calendarHost(a).run(req);
+    }
+    fn calendarBrowserJob(s: *Session, a: std.mem.Allocator, req: Value, account_index: usize) !Value {
+        const calendar_browser = @import("calendar_browser.zig");
+        const calendar_types = @import("calendar_types.zig");
+        const account = &s.config.accounts[account_index];
+        const is_event = std.mem.eql(u8, j.text(req, "cmd"), "calendar.event-open");
+        var request = try j.copyObject(a, req);
+        try request.object.put(a, "cmd", .{ .string = if (is_event) "calendar.event" else "calendar.list" });
+        const data = try s.calendarJob(a, request);
+        const target = if (is_event) blk: {
+            const source: calendar_types.Target = .{ .account = account.address.slice(), .calendar_id = try j.required(req, "calendarId") };
+            const event = try j.decode(calendar_types.Event, a, j.get(data, "event") orelse return error.InvalidCalendarResponse);
+            break :blk try calendar_browser.event(account, source, try j.required(req, "eventId"), event);
+        } else blk: {
+            if (!std.ascii.eqlIgnoreCase(j.text(data, "account"), account.address.slice())) return error.CalendarAccountMismatch;
+            const wanted = j.text(req, "calendarId");
+            if (wanted.len > 0) {
+                try calendar_types.text(wanted, 1024, false);
+                var found = false;
+                for (try array(data, "calendars")) |entry| {
+                    const source = try @import("calendar_sources.zig").jsonTarget(j.get(entry, "calendar") orelse return error.InvalidCalendarResponse);
+                    if (!std.ascii.eqlIgnoreCase(source.account, account.address.slice())) return error.CalendarAccountMismatch;
+                    if (std.mem.eql(u8, source.calendar_id, wanted)) found = true;
+                }
+                if (!found) return error.CalendarNotFound;
+            }
+            break :blk try calendar_browser.calendar(account);
+        };
+        if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, account, &target);
+        return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .url = target.url.slice(), .profile = target.profile_arg.slice(), .cached = try j.boolean(data, "cached", false), .stale = try j.boolean(data, "stale", false), .refreshError = j.text(data, "refreshError") });
     }
     fn calendarHost(s: *Session, a: std.mem.Allocator) @import("calendar_host.zig").Host {
         return .{ .io = s.io, .allocator = a, .backing_allocator = s.allocator, .env = s.env, .config = &s.config, .options = s.options, .cache_root = s.cache_root, .source_context = s, .loadSourceFn = calendarSource, .access = .{ .context = s, .openFn = storeAccessOpen } };
@@ -5252,4 +5285,43 @@ test "calendar RSVP: Check Sent resumes calendar only after confirming the reply
     try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
     const state = try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes) orelse return error.MissingCalendarFixture;
     try std.testing.expectEqual(@as(i64, 1), try j.integer(try std.json.parseFromSliceLeaky(Value, a, state, .{}), "writes", -1));
+}
+
+test "calendar browser: native commands open exact account profile after source-bound reads without writes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var environment = std.process.Environ.Map.init(a);
+    defer environment.deinit();
+    try environment.put("HOME", "/tmp/synthetic-calendar-browser-home");
+    const session = try a.create(Session);
+    session.* = try Session.init(std.testing.io, a, &environment, .{ .fixtures = true, .cache_dir = try std.fs.path.join(a, &.{ root, "cache" }) });
+    defer session.deinit();
+    const account_names = [_][]const u8{ "personal@example.com", "work@example.com", "optional@example.com" };
+    session.config.accounts[session.config.index("optional@example.com").?].enabled = true;
+    for (account_names) |address| {
+        const home = session.dispatch(a, try j.value(a, .{ .cmd = "calendar.open", .account = address })) catch |err| {
+            std.debug.print("Calendar browser source read failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        const index = session.config.index(address).?;
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--profile-directory={s}", .{session.config.accounts[index].profile.slice()}), j.text(home, "profile"));
+        const calendar_url = j.text(home, "url");
+        try std.testing.expect(std.mem.startsWith(u8, calendar_url, "https://calendar.google.com/calendar/r?authuser="));
+        try std.testing.expect(std.mem.indexOf(u8, calendar_url, "%40example.com") != null);
+        const opened = try session.dispatch(a, try j.value(a, .{ .cmd = "calendar.event-open", .account = address, .calendarId = address, .eventId = "fixture-planning" }));
+        try std.testing.expectEqualStrings(j.text(home, "profile"), j.text(opened, "profile"));
+        try std.testing.expect(std.mem.indexOf(u8, j.text(opened, "url"), "eid=fixture-planning") != null);
+        try std.testing.expect(!try j.boolean(opened, "opened", true));
+        try std.testing.expectError(error.CalendarNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "calendar.open", .account = address, .calendarId = "does-not-exist" })));
+        var store = try session.openStore(a, address, false);
+        defer store.close();
+        const bytes = try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes) orelse return error.MissingCalendarFixture;
+        const state = try std.json.parseFromSliceLeaky(Value, a, bytes, .{});
+        try std.testing.expectEqual(@as(i64, 0), try j.integer(state, "writes", -1));
+        try std.testing.expectEqual(@as(u64, 0), store.state.fixtureSends);
+    }
 }

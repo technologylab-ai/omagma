@@ -51,8 +51,8 @@ pub const Native = struct {
 pub fn capabilitiesForCommand(command: []const u8) ![]const []const u8 {
     if (std.mem.eql(u8, command, "calendar.list")) return &.{ "calendar-read", "calendar-write-owned", "calendar-write-shared", "calendar-freebusy" };
     if (std.mem.eql(u8, command, "calendar.freebusy")) return &.{"calendar-freebusy"};
-    for ([_][]const u8{ "calendar.agenda", "calendar.event", "calendar.invitation-plan", "calendar.reconcile" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-read", "calendar-write-owned", "calendar-write-shared" };
-    for ([_][]const u8{ "calendar.review", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-write-owned", "calendar-write-shared" };
+    for ([_][]const u8{ "calendar.agenda", "calendar.event", "calendar.invitation-plan", "calendar.reconcile", "calendar.event-reconcile", "calendar.event-pending", "calendar.event-abandon" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-read", "calendar-write-owned", "calendar-write-shared" };
+    for ([_][]const u8{ "calendar.review", "calendar.apply", "calendar.import", "calendar.update", "calendar.cancel", "calendar.event-review", "calendar.event-apply", "calendar.event-retry" }) |name| if (std.mem.eql(u8, command, name)) return &.{ "calendar-write-owned", "calendar-write-shared" };
     return error.UnsupportedCalendarCommand;
 }
 
@@ -77,12 +77,12 @@ pub fn validateRequest(a: std.mem.Allocator, grants: service.Grants, request: p.
     if (!std.ascii.eqlIgnoreCase(grants.account, request.target.account)) return error.CalendarAccountMismatch;
     const expected_method: std.http.Method = switch (request.kind) {
         .calendar_list, .event_lookup, .agenda, .event_get => .GET,
-        .free_busy, .import_event => .POST,
+        .free_busy, .import_event, .insert_event => .POST,
         .update_event => .PATCH,
         .cancel_event => .DELETE,
     };
     if (request.method != expected_method) return error.InvalidCalendarRequest;
-    const has_body = request.kind == .free_busy or request.kind == .import_event or request.kind == .update_event;
+    const has_body = request.kind == .free_busy or request.kind == .import_event or request.kind == .insert_event or request.kind == .update_event;
     const conditional = request.kind == .update_event or request.kind == .cancel_event;
     if (has_body != (request.body != null) or conditional != (request.if_match != null)) return error.InvalidCalendarRequest;
     if (request.body) |body| if (body.len > t.Limits.source_bytes * 2) return error.CalendarTooLarge;
@@ -102,9 +102,10 @@ pub fn validateRequest(a: std.mem.Allocator, grants: service.Grants, request: p.
             const marker = "calendar-native-path-binding";
             const bound = try p.get(a, request.target, marker);
             const prefix = bound.url[0 .. bound.url.len - marker.len];
-            if (request.kind == .agenda or request.kind == .event_lookup) {
+            if (request.kind == .agenda or request.kind == .event_lookup or request.kind == .insert_event) {
                 const collection = try std.fmt.allocPrint(a, "{s}?", .{prefix[0 .. prefix.len - 1]});
                 if (!std.mem.startsWith(u8, request.url, collection)) return error.CalendarIdentityMismatch;
+                if (request.kind == .insert_event and !std.mem.startsWith(u8, request.url, try std.fmt.allocPrint(a, "{s}sendUpdates=", .{collection}))) return error.InvalidCalendarPath;
             } else {
                 if (!std.mem.startsWith(u8, request.url, prefix)) return error.CalendarIdentityMismatch;
                 const tail = request.url[prefix.len..];

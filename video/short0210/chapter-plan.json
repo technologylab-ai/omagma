@@ -1,0 +1,927 @@
+{
+  "schema": "omagma.video.chapters.v1",
+  "frames": 2920,
+  "fps": 30,
+  "chapters": [
+    "View calendars",
+    "Create a meeting",
+    "Update and open"
+  ],
+  "shots": [
+    {
+      "id": "chapter-1",
+      "kind": "intro",
+      "chapter": 1,
+      "in": 0.0,
+      "out": 3.2333333333333334,
+      "title": "Calendar, upgraded",
+      "subtitle": "All your calendars. Meetings, right from your terminal."
+    },
+    {
+      "id": "combined-week",
+      "kind": "native",
+      "chapter": 1,
+      "in": 3.2333333333333334,
+      "out": 8.033333333333333,
+      "title": "Three accounts, one week",
+      "states": [
+        {
+          "at": 0,
+          "asset": "week.overview"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0,
+        0,
+        1,
+        0.94
+      ],
+      "subtitle": "Personal, work and shared calendars in the same view.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 4.8,
+          "key": null,
+          "text": "Five selected calendars across three accounts",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "priority",
+      "kind": "native",
+      "chapter": 1,
+      "in": 8.033333333333333,
+      "out": 13.333333333333334,
+      "title": "Choose a priority calendar",
+      "states": [
+        {
+          "at": 0,
+          "asset": "sources.before-priority"
+        },
+        {
+          "at": 2.2,
+          "asset": "sources.priority"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0,
+        0,
+        0.85,
+        0.8
+      ],
+      "subtitle": "Your important calendar appears first when meetings overlap.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 2.2,
+          "key": "p",
+          "text": "Make Shared team the Priority calendar",
+          "press": 2
+        },
+        {
+          "from": 2.2,
+          "until": 4.5,
+          "key": null,
+          "text": "Shared team now has \u2605 Priority",
+          "press": 0
+        },
+        {
+          "from": 4.5,
+          "until": 5.3,
+          "key": "Enter",
+          "text": "Apply the selection",
+          "press": 5.1
+        }
+      ]
+    },
+    {
+      "id": "busy-hour",
+      "kind": "native",
+      "chapter": 1,
+      "in": 13.333333333333334,
+      "out": 17.333333333333332,
+      "title": "Overlapping meetings, easier to find",
+      "states": [
+        {
+          "at": 0,
+          "asset": "week.crowded-before"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0,
+        0.4791666666666667,
+        0.18181818181818182,
+        0.1875
+      ],
+      "subtitle": "Monday 19 October \u00b7 09:00\u201312:00 UTC \u00b7 +1 marks another meeting.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 3.2,
+          "key": null,
+          "text": "More room shows more meetings in the same hour",
+          "press": 0
+        },
+        {
+          "from": 3.2,
+          "until": 4,
+          "key": "Space",
+          "text": "Show all five meetings",
+          "press": 3.6
+        }
+      ]
+    },
+    {
+      "id": "overlap-list",
+      "kind": "native",
+      "chapter": 1,
+      "in": 17.333333333333332,
+      "out": 20.533333333333335,
+      "title": "See every meeting in the busy hour",
+      "states": [
+        {
+          "at": 0,
+          "asset": "week.alternatives"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0,
+        0,
+        0.6060606060606061,
+        1
+      ],
+      "subtitle": "Five meetings in the list, with exact times and calendar names.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 3.2,
+          "key": null,
+          "text": "Exact start, end and calendar for each meeting",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "chapter-2",
+      "kind": "chapter",
+      "chapter": 2,
+      "in": 20.533333333333335,
+      "out": 22.433333333333334,
+      "title": "Create an event\nwith guests",
+      "subtitle": ""
+    },
+    {
+      "id": "name-time",
+      "kind": "native",
+      "chapter": 2,
+      "in": 22.433333333333334,
+      "out": 29.133333333333333,
+      "title": "Create an event in your calendar",
+      "states": [
+        {
+          "at": 0,
+          "asset": "week.revealed",
+          "roi": [
+            0,
+            0.125,
+            1,
+            0.78125
+          ]
+        },
+        {
+          "at": 1.1,
+          "asset": "event.title-empty"
+        },
+        {
+          "at": 1.7,
+          "asset": "event.title-r"
+        },
+        {
+          "at": 2.05,
+          "asset": "event.title-road"
+        },
+        {
+          "at": 2.4,
+          "asset": "event.title-roadmap"
+        },
+        {
+          "at": 2.75,
+          "asset": "event.title-roadmap-re"
+        },
+        {
+          "at": 3.1,
+          "asset": "event.title-roadmap-revie"
+        },
+        {
+          "at": 3.4,
+          "asset": "event.title-typed"
+        },
+        {
+          "at": 4.25,
+          "asset": "event.times-set",
+          "subtitle": "Tuesday 20 October \u00b7 10:30\u201311:15 UTC \u00b7 Work account"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.09375,
+        0.6818181818181818,
+        0.78125
+      ],
+      "subtitle": "Personal calendar in the Work account.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.1,
+          "key": "n",
+          "text": "Create a new event",
+          "press": 1
+        },
+        {
+          "from": 1.1,
+          "until": 4.25,
+          "key": null,
+          "text": "Name the event",
+          "press": 0
+        },
+        {
+          "from": 4.25,
+          "until": 6.7,
+          "key": null,
+          "text": "Set its date, time and time zone",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "maya",
+      "kind": "native",
+      "chapter": 2,
+      "in": 29.133333333333333,
+      "out": 37.63333333333333,
+      "title": "Add guests from Contacts",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.new-before-contacts"
+        },
+        {
+          "at": 1.1,
+          "asset": "event.contacts-maya-empty"
+        },
+        {
+          "at": 1.8,
+          "asset": "event.contacts-maya-m"
+        },
+        {
+          "at": 2.3,
+          "asset": "event.contacts-maya-ma"
+        },
+        {
+          "at": 2.8,
+          "asset": "event.contacts-maya-may"
+        },
+        {
+          "at": 3.3,
+          "asset": "event.contacts-maya-maya"
+        },
+        {
+          "at": 5.7,
+          "asset": "event.guests-maya"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.09375,
+        0.6818181818181818,
+        0.78125
+      ],
+      "subtitle": "Search for Maya, select her, then return to the event.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.1,
+          "key": "Ctrl+Space",
+          "text": "Open Contacts",
+          "press": 1
+        },
+        {
+          "from": 1.1,
+          "until": 4.9,
+          "key": null,
+          "text": "Type \u201cMaya\u201d into Search",
+          "press": 0
+        },
+        {
+          "from": 4.9,
+          "until": 5.7,
+          "key": "Enter",
+          "text": "Add Maya Chen",
+          "press": 5.3
+        },
+        {
+          "from": 5.7,
+          "until": 8.5,
+          "key": null,
+          "text": "Maya\u2019s email is now in Guests",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "leo",
+      "kind": "native",
+      "chapter": 2,
+      "in": 37.63333333333333,
+      "out": 46.13333333333333,
+      "title": "Add guests from Contacts",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.guests-maya"
+        },
+        {
+          "at": 1.1,
+          "asset": "event.contacts-leo-empty"
+        },
+        {
+          "at": 1.8,
+          "asset": "event.contacts-leo-l"
+        },
+        {
+          "at": 2.3,
+          "asset": "event.contacts-leo-le"
+        },
+        {
+          "at": 2.8,
+          "asset": "event.contacts-leo-leo"
+        },
+        {
+          "at": 5.2,
+          "asset": "event.guests-both"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.09375,
+        0.6818181818181818,
+        0.78125
+      ],
+      "subtitle": "Repeat for Leo. Both guests remain in the event.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.1,
+          "key": "Ctrl+Space",
+          "text": "Open Contacts again",
+          "press": 1
+        },
+        {
+          "from": 1.1,
+          "until": 4.4,
+          "key": null,
+          "text": "Type \u201cLeo\u201d into Search",
+          "press": 0
+        },
+        {
+          "from": 4.4,
+          "until": 5.2,
+          "key": "Enter",
+          "text": "Add Leo Park",
+          "press": 4.8
+        },
+        {
+          "from": 5.2,
+          "until": 8.5,
+          "key": null,
+          "text": "Maya and Leo are both added",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "meet",
+      "kind": "native",
+      "chapter": 2,
+      "in": 46.13333333333333,
+      "out": 50.733333333333334,
+      "title": "Add Google Meet to the meeting",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.guests-both"
+        },
+        {
+          "at": 2,
+          "asset": "event.meet"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.09375,
+        0.6818181818181818,
+        0.78125
+      ],
+      "subtitle": "Omagma generates the video link when you save.",
+      "pointer": {
+        "from": 0.8,
+        "press": 1.6,
+        "until": 2,
+        "at": [
+          0.1856060606060606,
+          0.546875
+        ]
+      },
+      "actions": [
+        {
+          "from": 0,
+          "until": 2,
+          "key": null,
+          "text": "Click Video: None to choose Google Meet",
+          "press": 0
+        },
+        {
+          "from": 2,
+          "until": 4.6,
+          "key": null,
+          "text": "Google Meet selected. Both guests remain in place.",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "review-create",
+      "kind": "native",
+      "chapter": 2,
+      "in": 50.733333333333334,
+      "out": 57.03333333333333,
+      "title": "Review before sending invitations",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.meet",
+          "roi": [
+            0.1590909090909091,
+            0.09375,
+            0.6818181818181818,
+            0.78125
+          ]
+        },
+        {
+          "at": 1.5,
+          "asset": "event.review"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.0625,
+        0.6818181818181818,
+        0.84375
+      ],
+      "subtitle": "Check the account, time, guests and Google Meet.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.5,
+          "key": "Ctrl+S",
+          "text": "Review the event",
+          "press": 1
+        },
+        {
+          "from": 1.5,
+          "until": 6.3,
+          "key": null,
+          "text": "Review the details. Invitations have not been sent.",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "save-create",
+      "kind": "native",
+      "chapter": 2,
+      "in": 57.03333333333333,
+      "out": 61.93333333333333,
+      "title": "Create the meeting and invite both guests",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.review"
+        },
+        {
+          "at": 1.5,
+          "asset": "week.created",
+          "roi": [
+            0,
+            0.125,
+            1,
+            0.78125
+          ]
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.0625,
+        0.6818181818181818,
+        0.84375
+      ],
+      "subtitle": "Roadmap review \u00b7 10:30\u201311:15 UTC \u00b7 Work account",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.5,
+          "key": "y",
+          "text": "Create and email both guests",
+          "press": 1
+        },
+        {
+          "from": 1.5,
+          "until": 4.9,
+          "key": null,
+          "text": "Meeting saved in the calendar. Invitations sent.",
+          "press": 0
+        }
+      ],
+      "resultPoint": [
+        0,
+        0.890625
+      ],
+      "pointAfter": 1.5
+    },
+    {
+      "id": "chapter-3",
+      "kind": "chapter",
+      "chapter": 3,
+      "in": 61.93333333333333,
+      "out": 63.833333333333336,
+      "title": "Reschedule\nand open",
+      "subtitle": ""
+    },
+    {
+      "id": "edit-time",
+      "kind": "native",
+      "chapter": 3,
+      "in": 63.833333333333336,
+      "out": 71.33333333333333,
+      "title": "Move the meeting and notify your guests",
+      "states": [
+        {
+          "at": 0,
+          "asset": "week.created",
+          "roi": [
+            0,
+            0.125,
+            1,
+            0.78125
+          ]
+        },
+        {
+          "at": 1.2,
+          "asset": "event.edit-before"
+        },
+        {
+          "at": 2.1,
+          "asset": "event.edit-start-set"
+        },
+        {
+          "at": 3.3,
+          "asset": "event.edit-times-set"
+        },
+        {
+          "at": 4.5,
+          "asset": "event.edit"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.09375,
+        0.6818181818181818,
+        0.78125
+      ],
+      "subtitle": "Roadmap review moves from 10:30 to 11:30 UTC.",
+      "pointer": {
+        "from": 3.6,
+        "press": 4,
+        "until": 4.5,
+        "at": [
+          0.1856060606060606,
+          0.609375
+        ]
+      },
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.2,
+          "key": "e",
+          "text": "Edit Roadmap review",
+          "press": 1
+        },
+        {
+          "from": 1.2,
+          "until": 3.6,
+          "key": null,
+          "text": "Change the start and end time",
+          "press": 0
+        },
+        {
+          "from": 3.6,
+          "until": 4.5,
+          "key": null,
+          "text": "Choose Email guests about these changes",
+          "press": 0
+        },
+        {
+          "from": 4.5,
+          "until": 7.5,
+          "key": null,
+          "text": "11:30\u201312:15 UTC. Guests will receive the update.",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "review-edit",
+      "kind": "native",
+      "chapter": 3,
+      "in": 71.33333333333333,
+      "out": 76.33333333333333,
+      "title": "Review the new time and guest update",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.edit",
+          "roi": [
+            0.1590909090909091,
+            0.09375,
+            0.6818181818181818,
+            0.78125
+          ]
+        },
+        {
+          "at": 1.5,
+          "asset": "event.edit-review"
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.0625,
+        0.6818181818181818,
+        0.84375
+      ],
+      "subtitle": "The existing Google Meet link is preserved.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.5,
+          "key": "Ctrl+S",
+          "text": "Review the change",
+          "press": 1
+        },
+        {
+          "from": 1.5,
+          "until": 5,
+          "key": null,
+          "text": "11:30\u201312:15 UTC \u00b7 email both guests",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "save-edit",
+      "kind": "native",
+      "chapter": 3,
+      "in": 76.33333333333333,
+      "out": 81.43333333333334,
+      "title": "Save the change and notify your guests",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.edit-review"
+        },
+        {
+          "at": 1.5,
+          "asset": "week.rescheduled",
+          "roi": [
+            0,
+            0.125,
+            1,
+            0.78125
+          ]
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.0625,
+        0.6818181818181818,
+        0.84375
+      ],
+      "subtitle": "The same Roadmap review, now one hour later.",
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.5,
+          "key": "y",
+          "text": "Save and email the update",
+          "press": 1
+        },
+        {
+          "from": 1.5,
+          "until": 5.1,
+          "key": null,
+          "text": "New time saved. Guests notified. Video link kept.",
+          "press": 0
+        }
+      ],
+      "resultPoint": [
+        0,
+        0.890625
+      ],
+      "pointAfter": 1.5
+    },
+    {
+      "id": "browser",
+      "kind": "browser",
+      "chapter": 3,
+      "in": 81.43333333333334,
+      "out": 85.93333333333334,
+      "title": "Open the event in its account\u2019s Chrome profile",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.detail-rescheduled"
+        }
+      ],
+      "box": [
+        180,
+        225,
+        1560,
+        450
+      ],
+      "roi": [
+        0.16666666666666666,
+        0.09375,
+        0.6666666666666666,
+        0.46875
+      ],
+      "subtitle": "From the event details, b uses the meeting\u2019s owning account.",
+      "proofAt": 1.5,
+      "actions": [
+        {
+          "from": 0,
+          "until": 1.5,
+          "key": "b",
+          "text": "Open the selected event in Google Calendar",
+          "press": 1
+        },
+        {
+          "from": 1.5,
+          "until": 4.5,
+          "key": null,
+          "text": "Work account \u2192 Work Chrome profile",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "all-day",
+      "kind": "native",
+      "chapter": 3,
+      "in": 85.93333333333334,
+      "out": 93.33333333333333,
+      "title": "Create all-day events as well",
+      "states": [
+        {
+          "at": 0,
+          "asset": "event.all-day"
+        },
+        {
+          "at": 3.5,
+          "asset": "week.all-day",
+          "roi": [
+            0,
+            0,
+            0.75,
+            0.35
+          ]
+        }
+      ],
+      "box": [
+        100,
+        224,
+        1720,
+        730
+      ],
+      "roi": [
+        0.1590909090909091,
+        0.09375,
+        0.6818181818181818,
+        0.78125
+      ],
+      "subtitle": "Studio offsite \u00b7 Thursday 22 October",
+      "actions": [
+        {
+          "from": 0,
+          "until": 3.5,
+          "key": null,
+          "text": "Choose All day. Set the first and last day.",
+          "press": 0
+        },
+        {
+          "from": 3.5,
+          "until": 7.4,
+          "key": null,
+          "text": "After saving: Studio offsite appears in the all-day row",
+          "press": 0
+        }
+      ]
+    },
+    {
+      "id": "outro",
+      "kind": "end",
+      "chapter": 0,
+      "in": 93.33333333333333,
+      "out": 97.33333333333333,
+      "title": "Gmail and Calendar in your terminal"
+    }
+  ],
+  "revision": "motion-continuous"
+}

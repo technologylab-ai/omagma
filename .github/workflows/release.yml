@@ -116,6 +116,7 @@ jobs:
           python3 tests/terminal_ux_focus.py
           python3 tests/terminal_cache_fixture_check.py
           python3 tests/terminal_status_screen.py
+          python3 tests/terminal_theme_screen.py
           python3 tests/terminal_reader.py
           python3 tests/terminal_html_screen.py
           python3 tests/terminal_html_fixture_check.py
@@ -367,6 +368,7 @@ jobs:
           python3 tests/terminal_screen.py
           python3 tests/terminal_ux_focus.py
           python3 tests/terminal_status_screen.py
+          python3 tests/terminal_theme_screen.py
           python3 tests/terminal_reader.py
           python3 tests/terminal_html_screen.py
           python3 tests/terminal_html_fixture_check.py

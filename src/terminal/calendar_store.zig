@@ -19,9 +19,23 @@ const Entry = struct {
     identity: plan.Identity,
     state: svc.State = .{},
     review: ?svc.Review = null,
+    /// Ordinary event IDs and ETags prevent duplicate writes independently of
+    /// invitation UID tracking. Their settled receipts may be pruned, whereas
+    /// invitation identities survive a provider-side deletion.
+    ordinary: bool = false,
+    receipt_hash: ?[32]u8 = null,
+    /// Older journals had no reservation. Do not retroactively charge their
+    /// unknown entries and block the very finalization that frees that space.
+    receipt_reserved: bool = false,
 };
 const StateFile = struct { schema: u8 = 1, account: []const u8, entries: []Entry = &.{} };
 const CacheFile = struct { schema: u8 = 1, account: []const u8, snapshots: []const t.Snapshot = &.{}, calendars: ?svc.CalendarList = null };
+
+// A final invitation receipt may add the bounded tracked identity plus a
+// provider ID (each at most 1024 bytes), including worst-case JSON escaping.
+// Ordinary receipts shrink after completion. Every unknown claim reserves this
+// headroom before dispatch; subsequent reviews cannot consume it.
+pub const final_receipt_reserve = 16 * 1024;
 
 pub const Host = struct {
     io: std.Io,
@@ -33,7 +47,7 @@ pub const Host = struct {
     access: @import("store_access.zig").Access = .{},
 
     pub fn persistence(self: *Host) svc.Persistence {
-        return .{ .context = self, .journal = .{ .context = self, .claimFn = claim, .recordFn = record }, .loadFn = load, .preserveFn = preserve };
+        return .{ .context = self, .journal = .{ .context = self, .claimFn = claim, .recordFn = record, .retryFn = retry }, .loadFn = load, .preserveFn = preserve };
     }
     pub fn cache(self: *Host) svc.Cache {
         return .{ .context = self, .loadFn = cacheLoad, .saveFn = cacheSave, .loadCalendarsFn = calendarsLoad, .saveCalendarsFn = calendarsSave };
@@ -50,7 +64,7 @@ pub const Host = struct {
     }
     fn readState(self: *Host, store: *storage.Store, a: std.mem.Allocator) !StateFile {
         const raw = try store.readDocument(a, state_name, state_bytes) orelse return .{ .account = self.account };
-        const state = try std.json.parseFromSliceLeaky(StateFile, a, raw, .{ .allocate = .alloc_if_needed });
+        var state = try std.json.parseFromSliceLeaky(StateFile, a, raw, .{ .allocate = .alloc_if_needed });
         if (state.schema != 1 or !std.mem.eql(u8, state.account, self.account) or state.entries.len > max_identities) return error.CalendarStoreCorrupt;
         for (state.entries, 0..) |entry, index| {
             try self.check(entry.identity.target);
@@ -69,7 +83,9 @@ pub const Host = struct {
                 const bound = try review.request.bindIntent(review.intent);
                 if (!bound.eql(review.intent)) return error.CalendarStoreCorrupt;
             }
+            if (entry.receipt_hash != null and (entry.state.operation == null or entry.state.operation.?.state == .unknown)) return error.CalendarStoreCorrupt;
         }
+        compact(&state);
         return state;
     }
     fn writeState(store: *storage.Store, a: std.mem.Allocator, state: StateFile) !void {
@@ -80,8 +96,54 @@ pub const Host = struct {
         for (state.entries) |*value| if (value.identity.eql(identity)) return value;
         return null;
     }
-    /// Recent reviews lead the table. Unknown outcomes and tracked identities
-    /// are never pruned: even a provider deletion must not resurrect an invite.
+    fn compact(state: *StateFile) void {
+        for (state.entries) |*entry| {
+            if (entry.review) |review| {
+                if (review.ordinary_event != null) entry.ordinary = true;
+                if (entry.state.operation) |operation| if (operation.state != .unknown and operation.intent.eql(review.intent)) {
+                    entry.receipt_hash = review.review_hash;
+                    entry.review = null;
+                };
+            }
+            if (entry.state.operation != null and entry.state.operation.?.state != .unknown) entry.receipt_reserved = false;
+            if (entry.ordinary and entry.state.operation != null and entry.state.operation.?.state != .unknown) entry.state.tracked = null;
+        }
+    }
+    fn evictable(entry: Entry) bool {
+        return entry.state.tracked == null and (entry.state.operation == null or entry.state.operation.?.state != .unknown);
+    }
+    fn reservedBytes(state: StateFile) usize {
+        var count: usize = 0;
+        for (state.entries) |entry| if (entry.state.operation) |operation| {
+            if (operation.state == .unknown and entry.receipt_reserved) count += 1;
+        };
+        return count * final_receipt_reserve;
+    }
+    fn removeAt(state: *StateFile, index: usize) void {
+        std.mem.copyForwards(Entry, state.entries[index .. state.entries.len - 1], state.entries[index + 1 ..]);
+        state.entries = state.entries[0 .. state.entries.len - 1];
+    }
+    /// Admission accounts for every in-flight final receipt. A new draft may
+    /// evict old unclaimed reviews and settled ordinary receipts by bytes as
+    /// well as count, but never its own review or another pending operation.
+    fn fit(state: *StateFile, protected: plan.Identity) !void {
+        compact(state);
+        while (state.entries.len > max_identities or @import("gmail_decode.zig").serializedBytes(state.*) + reservedBytes(state.*) > state_bytes) {
+            var index = state.entries.len;
+            var removed = false;
+            while (index > 0) {
+                index -= 1;
+                const candidate = state.entries[index];
+                if (candidate.identity.eql(protected) or !evictable(candidate)) continue;
+                removeAt(state, index);
+                removed = true;
+                break;
+            }
+            if (!removed) return error.CalendarStoreFull;
+        }
+    }
+    /// Recent reviews lead the table. Unknown outcomes and tracked invitation
+    /// identities are never pruned: provider deletion must not resurrect mail.
     fn ensure(state: *StateFile, a: std.mem.Allocator, identity: plan.Identity) !*Entry {
         for (state.entries, 0..) |existing, index| if (existing.identity.eql(identity)) {
             std.mem.copyBackwards(Entry, state.entries[1 .. index + 1], state.entries[0..index]);
@@ -94,7 +156,7 @@ pub const Host = struct {
             while (index > 0) {
                 index -= 1;
                 const candidate = state.entries[index];
-                if (candidate.state.tracked == null and (candidate.state.operation == null or candidate.state.operation.?.state != .unknown)) {
+                if (evictable(candidate)) {
                     remove = index;
                     break;
                 }
@@ -136,6 +198,39 @@ pub const Host = struct {
         };
         return error.CalendarReviewNotFound;
     }
+    pub fn loadReceipt(self: *Host, out: std.mem.Allocator, target: t.Target, operation_id: []const u8) !?svc.Receipt {
+        try self.check(target);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var store = try self.open(a);
+        defer store.close();
+        const state = try self.readState(&store, a);
+        for (state.entries) |entry| if (entry.receipt_hash) |hash| {
+            const operation = entry.state.operation orelse return error.CalendarStoreCorrupt;
+            if (operation.intent.identity.target.eql(target) and std.mem.eql(u8, operation.intent.operation_id, operation_id))
+                return try clone(svc.Receipt, out, .{ .operation = operation, .review_hash = hash, .ordinary = entry.ordinary });
+        };
+        return null;
+    }
+    pub fn loadPending(self: *Host, out: std.mem.Allocator, target: t.Target, event_id: []const u8) !?svc.Pending {
+        try self.check(target);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var store = try self.open(a);
+        defer store.close();
+        const state = try self.readState(&store, a);
+        for (state.entries) |entry| {
+            const operation = entry.state.operation orelse continue;
+            if (operation.state != .unknown or !operation.intent.identity.target.eql(target)) continue;
+            const review = entry.review orelse continue;
+            if (review.ordinary_event == null) continue;
+            if (if (event_id.len == 0) operation.intent.kind != .insert_event else !std.mem.eql(u8, event_id, operation.intent.event_id)) continue;
+            return try clone(svc.Pending, out, .{ .review = review, .operation = operation });
+        }
+        return null;
+    }
     fn preserve(context: *anyopaque, review: svc.Review) anyerror!void {
         const self = cast(context);
         try self.check(review.intent.identity.target);
@@ -153,10 +248,13 @@ pub const Host = struct {
             if (prior.state.operation) |operation| {
                 if (std.mem.eql(u8, operation.intent.operation_id, review.intent.operation_id) and !operation.intent.eql(review.intent)) return error.OperationConflict;
                 if (prior.identity.eql(review.intent.identity) and operation.state == .unknown and !operation.intent.eql(review.intent)) return error.CalendarOperationPending;
+                if (operation.state == .unknown and operation.intent.kind == .insert_event and review.intent.kind == .insert_event and prior.identity.target.eql(review.intent.identity.target) and !operation.intent.eql(review.intent)) return error.CalendarOperationPending;
             }
         }
         const current = try ensure(&state, a, review.intent.identity);
         current.review = review;
+        current.ordinary = review.ordinary_event != null;
+        try fit(&state, review.intent.identity);
         try writeState(&store, a, state);
     }
     fn claim(context: *anyopaque, intent: plan.Intent) anyerror!plan.Claim {
@@ -169,6 +267,9 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         var state = try self.readState(&store, a);
+        if (intent.kind == .insert_event) for (state.entries) |prior| if (prior.state.operation) |operation| {
+            if (operation.state == .unknown and operation.intent.kind == .insert_event and prior.identity.target.eql(intent.identity.target) and !operation.intent.eql(intent)) return error.CalendarOperationPending;
+        };
         const current = findEntry(&state, intent.identity) orelse return error.CalendarReviewNotFound;
         const review = current.review orelse return error.CalendarReviewNotFound;
         if (!review.intent.eql(intent)) return error.OperationConflict;
@@ -182,11 +283,16 @@ pub const Host = struct {
         // Another process may have completed an action after Service.apply's
         // read/lookup but before this locked claim. Recheck the durable target
         // and version here; only this transaction can grant fresh dispatch.
-        if (current.state.tracked) |tracked| {
+        if (review.ordinary_event != null) {
+            if (current.state.tracked) |tracked| if (intent.kind == .insert_event or !std.mem.eql(u8, intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
+        } else if (current.state.tracked) |tracked| {
             if (intent.kind == .import_event or (if (review.response_only) intent.version.order(tracked.version) == .lt else intent.version.order(tracked.version) != .gt) or !std.mem.eql(u8, intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
         } else if (intent.kind != .import_event and !review.response_only) return error.CalendarReviewStale;
         const operation: plan.Operation = .{ .intent = intent };
         current.state.operation = operation;
+        current.receipt_hash = null;
+        current.receipt_reserved = true;
+        try fit(&state, intent.identity);
         try writeState(&store, a, state);
         return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = true };
     }
@@ -194,6 +300,8 @@ pub const Host = struct {
         const self = cast(context);
         try self.check(operation.intent.identity.target);
         try operation.intent.validate();
+        try t.text(operation.provider_id, 1024, operation.state != .applied);
+        try t.text(operation.error_code, 128, true);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -202,14 +310,46 @@ pub const Host = struct {
         var state = try self.readState(&store, a);
         const current = findEntry(&state, operation.intent.identity) orelse return error.CalendarOperationNotFound;
         const previous = current.state.operation orelse return error.CalendarOperationNotFound;
-        if (!previous.intent.eql(operation.intent)) return error.OperationConflict;
+        if (!previous.intent.eql(operation.intent) or operation.attempt > previous.attempt) return error.OperationConflict;
+        // A late refusal from an earlier attempt cannot settle a newer send.
+        // Positive provider proof, however, resolves the same immutable write.
+        if (operation.attempt < previous.attempt and operation.state != .applied) return error.OperationConflict;
         if (previous.state != .unknown and (previous.state != operation.state or !std.mem.eql(u8, previous.provider_id, operation.provider_id))) return error.OperationConflict;
         if (operation.state == .applied) {
             try t.text(operation.provider_id, 1024, false);
             current.state.tracked = .{ .identity = operation.intent.identity, .event_id = operation.provider_id, .version = operation.intent.version, .source_hash = operation.intent.source_hash };
         }
-        current.state.operation = operation;
+        var final_operation = operation;
+        final_operation.attempt = previous.attempt;
+        current.state.operation = final_operation;
+        try fit(&state, operation.intent.identity);
         try writeState(&store, a, state);
+    }
+    fn retry(context: *anyopaque, intent: plan.Intent, next_attempt: u32) anyerror!plan.Claim {
+        const self = cast(context);
+        try self.check(intent.identity.target);
+        try intent.validate();
+        if (next_attempt == 0 or next_attempt > 1_000_000) return error.InvalidCalendarRetry;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var store = try self.open(a);
+        defer store.close();
+        var state = try self.readState(&store, a);
+        const entry = findEntry(&state, intent.identity) orelse return error.CalendarOperationNotFound;
+        var operation = entry.state.operation orelse return error.CalendarOperationNotFound;
+        if (!operation.intent.eql(intent)) return error.OperationConflict;
+        if (operation.state != .unknown or next_attempt <= operation.attempt)
+            return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = false };
+        if (next_attempt != operation.attempt + 1) return error.InvalidCalendarRetry;
+        const review = entry.review orelse return error.CalendarReviewNotFound;
+        if (review.ordinary_event == null or !review.intent.eql(intent)) return error.OperationConflict;
+        operation.attempt = next_attempt;
+        entry.state.operation = operation;
+        entry.receipt_reserved = true;
+        try fit(&state, intent.identity);
+        try writeState(&store, a, state);
+        return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = true };
     }
     fn readCache(self: *Host, store: *storage.Store, a: std.mem.Allocator) !CacheFile {
         const raw = try store.readDocument(a, cache_name, cache_bytes) orelse return .{ .account = self.account };
@@ -363,4 +503,26 @@ test "calendar store: bounded identity retention never discards an unknown outco
     }
     try std.testing.expectError(error.CalendarStoreFull, Host.ensure(&state, a, .{ .target = target, .uid = "cannot-evict-tracked" }));
     try std.testing.expect(Host.findEntry(&state, oldest_unknown).?.state.tracked != null);
+}
+
+test "calendar store: final reservation exceeds maximum escaped receipt growth and legacy unknowns are not retroactively charged" {
+    const quoted: [1024]u8 = @splat('"');
+    const account_text: [254]u8 = @splat('a');
+    const operation_text: [128]u8 = @splat('a');
+    const error_text: [128]u8 = @splat('"');
+    const identity: plan.Identity = .{ .target = .{ .account = &account_text, .calendar_id = &quoted }, .uid = &quoted, .recurrence_key = &quoted };
+    const intent: plan.Intent = .{ .operation_id = &operation_text, .identity = identity, .version = .{ .sequence = std.math.maxInt(u32), .dtstamp_ms = std.math.minInt(i64) }, .kind = .update_event, .source_hash = @splat(255), .payload_hash = @splat(255), .event_id = &quoted, .expected_etag = &quoted };
+    var entries = [_]Entry{.{ .identity = identity, .state = .{ .operation = .{ .intent = intent } } }};
+    const state: StateFile = .{ .account = identity.target.account, .entries = &entries };
+    try std.testing.expectEqual(@as(usize, 0), Host.reservedBytes(state));
+    entries[0].receipt_reserved = true;
+    try std.testing.expectEqual(@as(usize, final_receipt_reserve), Host.reservedBytes(state));
+    const initial_bytes = @import("gmail_decode.zig").serializedBytes(entries[0]);
+    entries[0].state.operation.?.state = .applied;
+    entries[0].state.operation.?.provider_id = &quoted;
+    entries[0].state.operation.?.error_code = &error_text;
+    entries[0].state.operation.?.attempt = 1_000_000;
+    entries[0].state.tracked = .{ .identity = identity, .event_id = &quoted, .version = intent.version, .source_hash = intent.source_hash };
+    entries[0].receipt_hash = @splat(255);
+    try std.testing.expect(@import("gmail_decode.zig").serializedBytes(entries[0]) - initial_bytes < final_receipt_reserve);
 }

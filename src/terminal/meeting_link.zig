@@ -100,3 +100,22 @@ test "meeting Join: description and candidate scans remain bounded" {
     try input.appendSlice(std.testing.allocator, "https://docs.example.test/last\n" ++ meeting);
     try std.testing.expectEqualStrings("", plain(input.items));
 }
+
+/// Detect actual inert HTML tags, not email-address angle brackets or plain
+/// prose whose first letters happen to match a tag name.
+pub fn htmlDescription(value: []const u8) bool {
+    var position: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, value, position, '<')) |start| {
+        const first = start + 1 + @as(usize, if (start + 1 < value.len and value[start + 1] == '/') 1 else 0);
+        for ([_][]const u8{ "a", "p", "div", "br", "table", "html", "span", "b", "i", "ul", "ol", "pre", "strong", "em", "blockquote", "h1", "h2", "h3", "li", "td", "tr" }) |tag| {
+            const last = first + tag.len;
+            if (last < value.len and std.ascii.eqlIgnoreCase(value[first..last], tag) and (value[last] == '>' or value[last] == '/' or std.ascii.isWhitespace(value[last]))) return true;
+        }
+        position = start + 1;
+    }
+    return false;
+}
+test "meeting Join: HTML detection distinguishes real tags from literal email addresses" {
+    for ([_][]const u8{ "Alice <alice@example.test>", "<peter@example.test>", "Contact <olga@example.test>", "Math <bigger than>" }) |plain_text| try std.testing.expect(!htmlDescription(plain_text));
+    for ([_][]const u8{ "<p>Notes</p>", "<A href=\"https://meet.example.test\">Join</a>", "<br />Next", "<table><tr><td>Meeting</td></tr></table>" }) |html| try std.testing.expect(htmlDescription(html));
+}

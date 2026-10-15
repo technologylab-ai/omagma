@@ -13,6 +13,11 @@ Omagma.
 
 ## Release films
 
+- [v0.2.10 — one meeting, one combined week](short0210/README.md):
+  combined calendars, persistent calendar priority, compact overlaps, event
+  creation with Contacts and Google Meet, rescheduling, all-day events and
+  account-specific browser handoff. Captured from the unreleased native
+  candidate; producing the film does not publish the application.
 - [v0.2.9 — six native workflows](short029/README.md): encrypted local mail,
   an unlocked daemon for the TUI and agents, Calendar, invitation acceptance,
   profile-aware Join, follow-ups and Gmail draft handoff.

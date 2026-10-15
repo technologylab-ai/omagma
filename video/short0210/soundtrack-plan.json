@@ -1,0 +1,63 @@
+{
+  "schema": "omagma.soundtrack-plan.v1",
+  "revision": "chapters-continuous",
+  "fps": 30,
+  "frameCount": 2920,
+  "duration": 97.33333333333333,
+  "sampleRate": 48000,
+  "durationSamples48k": 4672000,
+  "sourceSha256": "13e575b81fe74e7e4888cc5c59fe54841c57fc99156cb54bd5a5a8e223c8d754",
+  "derivation": "Remove the rejected 44.095s backward jump to the introduction. Play the original song continuously from0 through83.546333, then a single30ms linear sum-one handoff before the next attack to the original softer closing phrase and full natural ending. Picture pacing loses only static slack; Contacts searches/review actions remain readable. No loop, pitch/tempo processing, overlapping active drum loops, added silence or artificial tail fade.",
+  "crossfadeSeconds": 0.03,
+  "crossfadeCurves": [
+    "tri",
+    "tri"
+  ],
+  "segments": [
+    {
+      "id": "uninterrupted-original",
+      "sourceIn": 0,
+      "sourceOut": 83.57633333333334,
+      "sourceSamples48k": [
+        0,
+        4011664
+      ],
+      "filmIn": 0,
+      "filmOut": 83.57633333333334
+    },
+    {
+      "id": "original-closing-phrase-and-natural-ending",
+      "sourceIn": 176.173,
+      "sourceOut": 189.96,
+      "sourceSamples48k": [
+        8456304,
+        9118080
+      ],
+      "filmIn": 83.54633333333334,
+      "filmOut": 97.33333333333333
+    }
+  ],
+  "mappedMusicLandmarks": [
+    {
+      "name": "singleJoin",
+      "film": 83.54633333333334
+    },
+    {
+      "name": "incomingAttackRise",
+      "film": 83.57629166666665
+    },
+    {
+      "name": "lastPhrase",
+      "film": 92.06533333333333
+    },
+    {
+      "name": "stop",
+      "film": 94.49333333333333
+    },
+    {
+      "name": "naturalEnd",
+      "film": 97.33333333333333
+    }
+  ],
+  "pictureTimingChanged": true
+}

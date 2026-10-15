@@ -1,0 +1,3246 @@
+{
+  "schema": "omagma.video.timeline.v1",
+  "revision": "pacing-and-single-profile-route-05",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "frameCount": 2527,
+  "duration": 84.23333333333333,
+  "audio": {
+    "source": "video/out/omagma-v0.2.7-flow.mp4",
+    "policy": "copy every packet and timestamp unchanged"
+  },
+  "parts": [
+    {
+      "id": "intro",
+      "frameIn": 0,
+      "frameOut": 60,
+      "title": "Version introduction",
+      "headline": null,
+      "subtitle": "",
+      "captures": [],
+      "carry": 0,
+      "views": [],
+      "cues": [],
+      "overlays": [
+        {
+          "kind": "intro",
+          "version": "v0.2.10",
+          "strap": "Calendar events, right from your terminal"
+        }
+      ]
+    },
+    {
+      "id": "together",
+      "frameIn": 60,
+      "frameOut": 255,
+      "title": "Three account strands merge into the genuine combined Week; its legend docks above a readable detail",
+      "headline": "All your calendars, together",
+      "subtitle": "Calendars from three accounts in one Week, each in its own color.",
+      "captures": [
+        "week.overview"
+      ],
+      "carry": 0.5,
+      "views": [
+        {
+          "id": "main",
+          "asset": "week.overview",
+          "align": [
+            0.5,
+            0
+          ],
+          "roi": [
+            {
+              "at": 0,
+              "roi": [
+                0,
+                0,
+                1,
+                1
+              ]
+            },
+            {
+              "at": 3.4,
+              "roi": [
+                0,
+                0,
+                1,
+                1
+              ]
+            },
+            {
+              "at": 5.0,
+              "roi": [
+                0.0,
+                0.1875,
+                0.7272727272727273,
+                0.4375
+              ]
+            }
+          ],
+          "box": [
+            {
+              "at": 0,
+              "rect": [
+                120,
+                232,
+                1680,
+                800
+              ]
+            },
+            {
+              "at": 3.4,
+              "rect": [
+                120,
+                232,
+                1680,
+                800
+              ]
+            },
+            {
+              "at": 5.0,
+              "rect": [
+                120,
+                318,
+                1680,
+                588
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 1.3,
+              "v": 0
+            },
+            {
+              "at": 2.0,
+              "v": 1
+            }
+          ],
+          "reveal": {
+            "roi": [
+              0.0,
+              0.15625,
+              0.7272727272727273,
+              0.03125
+            ],
+            "from": 1.4,
+            "until": 2.4
+          },
+          "mask": {
+            "roi": [
+              0,
+              0.125,
+              1,
+              0.0625
+            ],
+            "from": 3.4,
+            "until": 6.5
+          }
+        },
+        {
+          "id": "legend",
+          "asset": "week.overview",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": [
+            {
+              "at": 3.4,
+              "v": 0
+            },
+            {
+              "at": 5,
+              "v": 20
+            }
+          ],
+          "chrome": [
+            {
+              "at": 3.4,
+              "v": 0
+            },
+            {
+              "at": 5.0,
+              "v": 1
+            }
+          ],
+          "box": [
+            {
+              "at": 0,
+              "rect": {
+                "of": "main",
+                "roi": [
+                  0.0,
+                  0.15625,
+                  0.7272727272727273,
+                  0.03125
+                ]
+              }
+            },
+            {
+              "at": 3.4,
+              "rect": {
+                "of": "main",
+                "roi": [
+                  0.0,
+                  0.15625,
+                  0.7272727272727273,
+                  0.03125
+                ]
+              }
+            },
+            {
+              "at": 5.0,
+              "rect": {
+                "dock": "main",
+                "side": "top",
+                "gap": 14,
+                "size": 76
+              }
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 3.4,
+              "v": 1,
+              "ease": "hold"
+            }
+          ]
+        }
+      ],
+      "cues": [],
+      "overlays": [
+        {
+          "kind": "merge",
+          "view": "main",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "draw": [
+            0.1,
+            1.1
+          ],
+          "converge": [
+            0.9,
+            1.85
+          ],
+          "settle": [
+            1.85,
+            2.8
+          ],
+          "segments": [
+            [
+              0,
+              0.22
+            ],
+            [
+              0.22,
+              0.70125
+            ],
+            [
+              0.70125,
+              0.9624999999999999
+            ]
+          ],
+          "echoView": "legend",
+          "echo": [
+            5,
+            6.45
+          ]
+        }
+      ]
+    },
+    {
+      "id": "priority",
+      "frameIn": 255,
+      "frameOut": 465,
+      "title": "g opens the source picker; p marks E Shared team; Enter applies the Priority choice",
+      "headline": "Choose calendars and a Priority",
+      "subtitle": "Choose the calendars you see. Priority helps decide what busy hours show.",
+      "captures": [
+        "week.overview",
+        "sources.all",
+        "sources.before-priority",
+        "sources.priority",
+        "week.priority"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "main",
+          "asset": "week.overview",
+          "roi": [
+            0.0,
+            0.1875,
+            0.7272727272727273,
+            0.4375
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 0.9,
+              "v": 1
+            },
+            {
+              "at": 1.5,
+              "v": 0.95
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 1.1,
+              "v": 0,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "legend",
+          "asset": "week.overview",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "main",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 1.1,
+              "v": 0,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "picker",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "sources.all"
+            },
+            {
+              "at": 1.8,
+              "asset": "sources.before-priority"
+            },
+            {
+              "at": 3.05,
+              "asset": "sources.priority"
+            }
+          ],
+          "roi": [
+            0.0,
+            0.0,
+            0.6515151515151515,
+            0.75
+          ],
+          "box": [
+            120,
+            232,
+            1680,
+            668
+          ],
+          "matte": 22,
+          "offset": [
+            {
+              "at": 0.9,
+              "v": [
+                0,
+                56
+              ]
+            },
+            {
+              "at": 1.55,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 1.1,
+              "v": 1,
+              "ease": "hold"
+            },
+            {
+              "at": 5.1,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 1.6,
+              "roi": [
+                0.0,
+                0.5,
+                0.5303030303030303,
+                0.0625
+              ],
+              "a": 0
+            },
+            {
+              "at": 2.05,
+              "roi": [
+                0.0,
+                0.5,
+                0.5303030303030303,
+                0.0625
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "result",
+          "asset": "week.priority",
+          "roi": [
+            0.0,
+            0.1875,
+            0.7272727272727273,
+            0.4375
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 4.9,
+              "v": 0.96
+            },
+            {
+              "at": 5.7,
+              "v": 1
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 5.1,
+              "v": 1,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "resultLegend",
+          "asset": "week.priority",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "result",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 5.1,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 5.5,
+              "roi": [
+                0.30303030303030304,
+                0.15625,
+                0.09848484848484848,
+                0.03125
+              ],
+              "a": 0
+            },
+            {
+              "at": 5.95,
+              "roi": [
+                0.30303030303030304,
+                0.15625,
+                0.09848484848484848,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "g",
+          "label": "Calendars",
+          "show": 0.1,
+          "at": 0.75,
+          "hide": 1.1,
+          "target": {
+            "view": "main",
+            "roi": [
+              0.0,
+              0.1875,
+              0.7272727272727273,
+              0.4375
+            ]
+          },
+          "place": "below"
+        },
+        {
+          "key": "p",
+          "label": "Priority",
+          "show": 2.3,
+          "at": 2.95,
+          "hide": 3.55,
+          "target": {
+            "view": "picker",
+            "roi": [
+              0.0,
+              0.5,
+              0.5303030303030303,
+              0.0625
+            ]
+          },
+          "place": "below"
+        },
+        {
+          "key": "Enter",
+          "label": "Apply",
+          "show": 4.1,
+          "at": 4.75,
+          "hide": 5.1,
+          "target": {
+            "view": "picker",
+            "roi": [
+              0.0,
+              0.5,
+              0.5303030303030303,
+              0.0625
+            ]
+          },
+          "place": "below"
+        }
+      ],
+      "overlays": []
+    },
+    {
+      "id": "busy",
+      "frameIn": 465,
+      "frameOut": 693,
+      "title": "Dense Week shows several real titles per hour; Space lists that hour's events; Enter reveals the chosen one",
+      "headline": "See every meeting in a busy hour",
+      "subtitle": "Up to four titles per hour. Space lists them all, with calendar and account.",
+      "captures": [
+        "week.crowded-before",
+        "week.alternatives",
+        "week.alternatives-selected",
+        "week.revealed"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "main",
+          "asset": "week.crowded-before",
+          "roi": [
+            0.0,
+            0.4375,
+            0.7272727272727273,
+            0.2916666666666667
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 0,
+              "v": 0.95
+            },
+            {
+              "at": 2.3,
+              "v": 1
+            },
+            {
+              "at": 2.8,
+              "v": 1
+            },
+            {
+              "at": 3.2,
+              "v": 0.95
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 3.1,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 0.9,
+              "roi": [
+                0.045454545454545456,
+                0.5,
+                0.12878787878787878,
+                0.08333333333333333
+              ],
+              "a": 0
+            },
+            {
+              "at": 1.4,
+              "roi": [
+                0.045454545454545456,
+                0.5,
+                0.12878787878787878,
+                0.08333333333333333
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "legend",
+          "asset": "week.crowded-before",
+          "roi": [
+            0.0,
+            0.10416666666666667,
+            0.7272727272727273,
+            0.041666666666666664
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "main",
+            "side": "top",
+            "gap": 14,
+            "size": 110
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 3.1,
+              "v": 0,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "chooser",
+          "roi": [
+            0.0,
+            0.0625,
+            0.6515151515151515,
+            0.71875
+          ],
+          "box": [
+            120,
+            232,
+            1680,
+            668
+          ],
+          "matte": 22,
+          "offset": [
+            {
+              "at": 2.85,
+              "v": [
+                0,
+                56
+              ]
+            },
+            {
+              "at": 3.5,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 3.1,
+              "v": 1,
+              "ease": "hold"
+            },
+            {
+              "at": 6.15,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 3.6,
+              "roi": [
+                0.0,
+                0.1875,
+                0.6060606060606061,
+                0.125
+              ],
+              "a": 0
+            },
+            {
+              "at": 4.05,
+              "roi": [
+                0.0,
+                0.1875,
+                0.6060606060606061,
+                0.125
+              ],
+              "a": 1
+            },
+            {
+              "at": 4.44,
+              "roi": [
+                0.0,
+                0.1875,
+                0.6060606060606061,
+                0.125
+              ],
+              "a": 1
+            },
+            {
+              "at": 4.45,
+              "roi": [
+                0.0,
+                0.65625,
+                0.6060606060606061,
+                0.125
+              ],
+              "a": 1,
+              "ease": "hold"
+            }
+          ],
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "week.alternatives"
+            },
+            {
+              "at": 4.45,
+              "asset": "week.alternatives-selected"
+            }
+          ]
+        },
+        {
+          "id": "revealed",
+          "asset": "week.revealed",
+          "roi": [
+            0.0,
+            0.1875,
+            0.7272727272727273,
+            0.4375
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 5.95,
+              "v": 0.96
+            },
+            {
+              "at": 6.7,
+              "v": 1
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 6.15,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 6.4,
+              "roi": [
+                0.045454545454545456,
+                0.40625,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 0
+            },
+            {
+              "at": 6.8,
+              "roi": [
+                0.045454545454545456,
+                0.40625,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "revealedLegend",
+          "asset": "week.revealed",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "revealed",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 6.15,
+              "v": 1,
+              "ease": "hold"
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "Space",
+          "label": "Show all",
+          "show": 2.05,
+          "at": 2.75,
+          "hide": 3.1,
+          "target": {
+            "view": "main",
+            "roi": [
+              0.045454545454545456,
+              0.5,
+              0.12878787878787878,
+              0.08333333333333333
+            ]
+          },
+          "place": "below"
+        },
+        {
+          "key": "j ×4",
+          "label": "Next events",
+          "show": 3.75,
+          "at": 4.35,
+          "hide": 4.95,
+          "target": {
+            "view": "chooser",
+            "roi": [
+              0.0,
+              0.65625,
+              0.6060606060606061,
+              0.125
+            ]
+          },
+          "place": "below"
+        },
+        {
+          "key": "Enter",
+          "label": "Select",
+          "show": 5.2,
+          "at": 5.9,
+          "hide": 6.15,
+          "target": {
+            "view": "chooser",
+            "roi": [
+              0.0,
+              0.65625,
+              0.6060606060606061,
+              0.125
+            ]
+          },
+          "place": "below"
+        }
+      ],
+      "overlays": []
+    },
+    {
+      "id": "create",
+      "frameIn": 693,
+      "frameOut": 879,
+      "title": "n opens the new event form in the Work account, with its actual Personal calendar and 10:30–11:15 UTC",
+      "headline": "Create Calendar events in your terminal",
+      "subtitle": "Choose the exact account, calendar and time.",
+      "captures": [
+        "week.revealed",
+        "event.new"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "week",
+          "asset": "week.revealed",
+          "roi": [
+            0.0,
+            0.1875,
+            0.7272727272727273,
+            0.4375
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 0.95,
+              "v": 1
+            },
+            {
+              "at": 1.55,
+              "v": 0.95
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 1.2,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 0,
+              "roi": [
+                0.045454545454545456,
+                0.40625,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "weekLegend",
+          "asset": "week.revealed",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "week",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 1.2,
+              "v": 0,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "form",
+          "roi": [
+            0.1590909090909091,
+            0.125,
+            0.6818181818181818,
+            0.75
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "zoom": [
+            {
+              "at": 0.95,
+              "v": 0.96
+            },
+            {
+              "at": 1.9,
+              "v": 1
+            }
+          ],
+          "offset": [
+            {
+              "at": 0.95,
+              "v": [
+                0,
+                56
+              ]
+            },
+            {
+              "at": 1.65,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 1.2,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 1.7,
+              "roi": [
+                0.18181818181818182,
+                0.1875,
+                0.48484848484848486,
+                0.0625
+              ],
+              "a": 0
+            },
+            {
+              "at": 2.05,
+              "roi": [
+                0.18181818181818182,
+                0.1875,
+                0.48484848484848486,
+                0.0625
+              ],
+              "a": 1
+            },
+            {
+              "at": 3.8,
+              "roi": [
+                0.18181818181818182,
+                0.1875,
+                0.48484848484848486,
+                0.0625
+              ],
+              "a": 1
+            },
+            {
+              "at": 4.15,
+              "roi": [
+                0.18181818181818182,
+                0.375,
+                0.45454545454545453,
+                0.15625
+              ],
+              "a": 1
+            }
+          ],
+          "asset": "event.new"
+        }
+      ],
+      "cues": [
+        {
+          "key": "n",
+          "label": "New event",
+          "show": 0.15,
+          "at": 0.95,
+          "hide": 1.2,
+          "target": {
+            "view": "week",
+            "roi": [
+              0.045454545454545456,
+              0.40625,
+              0.12878787878787878,
+              0.03125
+            ]
+          },
+          "place": "below"
+        }
+      ],
+      "overlays": [
+        {
+          "kind": "note",
+          "view": "form",
+          "roi": [
+            0.18181818181818182,
+            0.1875,
+            0.48484848484848486,
+            0.0625
+          ],
+          "kicker": "Destination",
+          "text": "Work account",
+          "sub": "its calendar is named “Personal”",
+          "in": 2.05,
+          "out": 3.9,
+          "side": "right"
+        },
+        {
+          "kind": "note",
+          "view": "form",
+          "roi": [
+            0.18181818181818182,
+            0.375,
+            0.45454545454545453,
+            0.15625
+          ],
+          "kicker": "Tuesday · UTC",
+          "text": "10:30–11:15",
+          "sub": "Roadmap review",
+          "in": 4.2,
+          "out": 6.2,
+          "side": "right"
+        }
+      ]
+    },
+    {
+      "id": "guests",
+      "frameIn": 879,
+      "frameOut": 1185,
+      "title": "Two genuine Contacts openings add Maya, then Leo, returning to the form after each Add guest",
+      "headline": "Pick guests from Contacts",
+      "subtitle": "Contacts come from the event’s own account. Add Maya, then Leo.",
+      "captures": [
+        "event.new",
+        "event.guests-first",
+        "event.guests",
+        "event.contacts",
+        "event.contacts-leo"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "editor",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.new"
+            },
+            {
+              "at": 3.45,
+              "asset": "event.guests-first"
+            },
+            {
+              "at": 7.05,
+              "asset": "event.guests"
+            }
+          ],
+          "roi": [
+            {
+              "at": 0,
+              "roi": [
+                0.1590909090909091,
+                0.125,
+                0.6818181818181818,
+                0.75
+              ]
+            },
+            {
+              "at": 1.3,
+              "roi": [
+                0.1590909090909091,
+                0.125,
+                0.6818181818181818,
+                0.75
+              ]
+            },
+            {
+              "at": 1.8,
+              "roi": [
+                0.18181818181818182,
+                0.1875,
+                0.48484848484848486,
+                0.0625
+              ]
+            },
+            {
+              "at": 8.6,
+              "roi": [
+                0.1590909090909091,
+                0.125,
+                0.6818181818181818,
+                0.75
+              ],
+              "ease": "hold"
+            }
+          ],
+          "box": [
+            {
+              "at": 0,
+              "rect": [
+                120,
+                232,
+                1220,
+                800
+              ]
+            },
+            {
+              "at": 1.3,
+              "rect": [
+                120,
+                232,
+                1220,
+                800
+              ]
+            },
+            {
+              "at": 1.8,
+              "rect": [
+                120,
+                240,
+                900,
+                104
+              ]
+            },
+            {
+              "at": 8.6,
+              "rect": [
+                120,
+                232,
+                1220,
+                800
+              ],
+              "ease": "hold"
+            }
+          ],
+          "align": [
+            {
+              "at": 0,
+              "v": [
+                0.5,
+                0.5
+              ]
+            },
+            {
+              "at": 1.3,
+              "v": [
+                0.5,
+                0.5
+              ]
+            },
+            {
+              "at": 1.8,
+              "v": [
+                0,
+                0
+              ]
+            },
+            {
+              "at": 8.6,
+              "v": [
+                0.5,
+                0.5
+              ],
+              "ease": "hold"
+            }
+          ],
+          "matte": [
+            {
+              "at": 0,
+              "v": 22
+            },
+            {
+              "at": 1.3,
+              "v": 22
+            },
+            {
+              "at": 1.8,
+              "v": 12
+            },
+            {
+              "at": 8.6,
+              "v": 22,
+              "ease": "hold"
+            }
+          ],
+          "dim": 1,
+          "spot": [
+            {
+              "at": 0,
+              "roi": [
+                0.18181818181818182,
+                0.375,
+                0.45454545454545453,
+                0.15625
+              ],
+              "a": 1
+            },
+            {
+              "at": 1.3,
+              "roi": [
+                0.18181818181818182,
+                0.375,
+                0.45454545454545453,
+                0.15625
+              ],
+              "a": 0
+            },
+            {
+              "at": 8.6,
+              "roi": [
+                0.18181818181818182,
+                0.5625,
+                0.6060606060606061,
+                0.0625
+              ],
+              "a": 0
+            },
+            {
+              "at": 8.95,
+              "roi": [
+                0.18181818181818182,
+                0.5625,
+                0.6060606060606061,
+                0.0625
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "picker",
+          "roi": [
+            0.21212121212121213,
+            0.09375,
+            0.5757575757575758,
+            0.78125
+          ],
+          "box": [
+            600,
+            356,
+            1200,
+            676
+          ],
+          "matte": 22,
+          "offset": [
+            {
+              "at": 1.85,
+              "v": [
+                0,
+                35
+              ]
+            },
+            {
+              "at": 2.05,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 1.85,
+              "v": 0
+            },
+            {
+              "at": 2.05,
+              "v": 1
+            },
+            {
+              "at": 3.35,
+              "v": 1
+            },
+            {
+              "at": 3.5,
+              "v": 0
+            },
+            {
+              "at": 5.35,
+              "v": 0
+            },
+            {
+              "at": 5.55,
+              "v": 1
+            },
+            {
+              "at": 6.9,
+              "v": 1
+            },
+            {
+              "at": 7.05,
+              "v": 0
+            }
+          ],
+          "spot": [
+            {
+              "at": 2.05,
+              "roi": [
+                0.22727272727272727,
+                0.34375,
+                0.4696969696969697,
+                0.0625
+              ],
+              "a": 0
+            },
+            {
+              "at": 2.35,
+              "roi": [
+                0.22727272727272727,
+                0.34375,
+                0.4696969696969697,
+                0.0625
+              ],
+              "a": 1
+            }
+          ],
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.contacts"
+            },
+            {
+              "at": 5.3,
+              "asset": "event.contacts-leo"
+            }
+          ]
+        },
+        {
+          "id": "guestline",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.guests-first"
+            },
+            {
+              "at": 7.05,
+              "asset": "event.guests"
+            }
+          ],
+          "roi": [
+            0.18181818181818182,
+            0.5625,
+            0.45454545454545453,
+            0.03125
+          ],
+          "box": [
+            120,
+            365,
+            900,
+            76
+          ],
+          "matte": 8,
+          "align": [
+            0,
+            0
+          ],
+          "opacity": [
+            {
+              "at": 3.55,
+              "v": 0
+            },
+            {
+              "at": 3.7,
+              "v": 1
+            },
+            {
+              "at": 5.1,
+              "v": 1
+            },
+            {
+              "at": 5.3,
+              "v": 0
+            },
+            {
+              "at": 7.05,
+              "v": 0
+            },
+            {
+              "at": 7.2,
+              "v": 1
+            },
+            {
+              "at": 8.59,
+              "v": 1
+            },
+            {
+              "at": 8.6,
+              "v": 0,
+              "ease": "hold"
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "Ctrl+Space",
+          "label": "Contacts",
+          "show": 0.3,
+          "at": 1.05,
+          "hide": 1.35,
+          "target": {
+            "view": "editor",
+            "roi": [
+              0.18181818181818182,
+              0.59375,
+              0.1590909090909091,
+              0.03125
+            ]
+          },
+          "place": "right"
+        },
+        {
+          "key": "Enter",
+          "label": "Add Maya",
+          "show": 2.4,
+          "at": 3.25,
+          "hide": 3.45,
+          "target": {
+            "view": "picker",
+            "roi": [
+              0.22727272727272727,
+              0.75,
+              0.1893939393939394,
+              0.03125
+            ]
+          },
+          "place": "left"
+        },
+        {
+          "key": "Ctrl+Space",
+          "label": "Contacts · search Leo",
+          "show": 4.2,
+          "at": 5,
+          "hide": 5.3,
+          "target": {
+            "view": "editor",
+            "roi": [
+              0.18181818181818182,
+              0.1875,
+              0.48484848484848486,
+              0.0625
+            ]
+          },
+          "place": "right",
+          "position": [
+            1210,
+            240
+          ],
+          "leader": false
+        },
+        {
+          "key": "Enter",
+          "label": "Add Leo",
+          "show": 5.8,
+          "at": 6.75,
+          "hide": 7.0,
+          "target": {
+            "view": "picker",
+            "roi": [
+              0.22727272727272727,
+              0.75,
+              0.1893939393939394,
+              0.03125
+            ]
+          },
+          "place": "left"
+        }
+      ],
+      "overlays": [
+        {
+          "kind": "thread",
+          "from": {
+            "view": "editor",
+            "roi": [
+              0.18181818181818182,
+              0.1875,
+              0.48484848484848486,
+              0.0625
+            ]
+          },
+          "to": {
+            "view": "picker",
+            "roi": [
+              0.22727272727272727,
+              0.15625,
+              0.48484848484848486,
+              0.0625
+            ]
+          },
+          "in": 1.85,
+          "out": 3.35,
+          "label": "same account"
+        },
+        {
+          "kind": "thread",
+          "from": {
+            "view": "editor",
+            "roi": [
+              0.18181818181818182,
+              0.1875,
+              0.48484848484848486,
+              0.0625
+            ]
+          },
+          "to": {
+            "view": "picker",
+            "roi": [
+              0.22727272727272727,
+              0.15625,
+              0.48484848484848486,
+              0.0625
+            ]
+          },
+          "in": 5.35,
+          "out": 6.9,
+          "label": "same account"
+        }
+      ]
+    },
+    {
+      "id": "meet",
+      "frameIn": 1185,
+      "frameOut": 1287,
+      "title": "The actual Video control changes from None to Google Meet after both guests have been added",
+      "headline": "Create meetings with Google Meet",
+      "subtitle": "Google Calendar generates the meeting link when you save.",
+      "captures": [
+        "event.guests",
+        "event.meet"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "form",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.guests"
+            },
+            {
+              "at": 1.2,
+              "asset": "event.meet"
+            }
+          ],
+          "roi": [
+            0.1590909090909091,
+            0.125,
+            0.6818181818181818,
+            0.75
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "spot": [
+            {
+              "at": 0,
+              "roi": [
+                0.18181818181818182,
+                0.5625,
+                0.6060606060606061,
+                0.0625
+              ],
+              "a": 1
+            },
+            {
+              "at": 0.9,
+              "roi": [
+                0.18181818181818182,
+                0.53125,
+                0.45454545454545453,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "input": "mouse",
+          "key": "Click",
+          "label": "Google Meet",
+          "show": 0.4,
+          "at": 1.05,
+          "hide": 1.45,
+          "target": {
+            "view": "form",
+            "roi": [
+              0.18181818181818182,
+              0.53125,
+              0.08333333333333333,
+              0.03125
+            ]
+          },
+          "place": "right"
+        }
+      ],
+      "overlays": [
+        {
+          "kind": "note",
+          "view": "form",
+          "roi": [
+            0.18181818181818182,
+            0.53125,
+            0.45454545454545453,
+            0.03125
+          ],
+          "kicker": "Video",
+          "text": "Google Meet",
+          "sub": "Generate a link with the event",
+          "in": 1.65,
+          "out": 3.4,
+          "side": "right"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "frameIn": 1287,
+      "frameOut": 1467,
+      "title": "Ctrl+S reviews account, time, guests and Meet; y creates the event and emails both guests",
+      "headline": "Review, then send the invitations",
+      "subtitle": "Account, time, guests and Meet on one screen. Nothing is sent until you confirm.",
+      "captures": [
+        "event.meet",
+        "event.review",
+        "event.saved"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "editor",
+          "asset": "event.meet",
+          "roi": [
+            0.1590909090909091,
+            0.125,
+            0.6818181818181818,
+            0.75
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 1.3,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 0,
+              "roi": [
+                0.18181818181818182,
+                0.53125,
+                0.45454545454545453,
+                0.03125
+              ],
+              "a": 1
+            },
+            {
+              "at": 0.8,
+              "roi": [
+                0.2878787878787879,
+                0.75,
+                0.11363636363636363,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "review",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.review"
+            },
+            {
+              "at": 4.6,
+              "asset": "event.saved"
+            }
+          ],
+          "roi": [
+            0.1590909090909091,
+            0.0625,
+            0.6818181818181818,
+            0.84375
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 1.3,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 1.5,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.375
+              ],
+              "a": 0
+            },
+            {
+              "at": 1.8,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.375
+              ],
+              "a": 1
+            },
+            {
+              "at": 3.4,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.375
+              ],
+              "a": 1
+            },
+            {
+              "at": 3.85,
+              "roi": [
+                0.3560606060606061,
+                0.78125,
+                0.20454545454545456,
+                0.03125
+              ],
+              "a": 1
+            },
+            {
+              "at": 4.59,
+              "roi": [
+                0.3560606060606061,
+                0.78125,
+                0.20454545454545456,
+                0.03125
+              ],
+              "a": 1
+            },
+            {
+              "at": 4.6,
+              "roi": [
+                0.18181818181818182,
+                0.125,
+                0.5151515151515151,
+                0.15625
+              ],
+              "a": 1,
+              "ease": "hold"
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "Ctrl+S",
+          "label": "Review",
+          "show": 0.25,
+          "at": 1.05,
+          "hide": 1.3,
+          "target": {
+            "view": "editor",
+            "roi": [
+              0.2878787878787879,
+              0.75,
+              0.11363636363636363,
+              0.03125
+            ]
+          },
+          "place": "right"
+        },
+        {
+          "key": "y",
+          "label": "Create & email 2 guests",
+          "show": 3.6,
+          "at": 4.35,
+          "hide": 4.6,
+          "target": {
+            "view": "review",
+            "roi": [
+              0.3560606060606061,
+              0.78125,
+              0.20454545454545456,
+              0.03125
+            ]
+          },
+          "place": "right"
+        }
+      ],
+      "overlays": []
+    },
+    {
+      "id": "in-week",
+      "frameIn": 1467,
+      "frameOut": 1617,
+      "title": "Roadmap review appears in the Week at 10:30; Enter opens details with the generated Meet link",
+      "headline": "Saved in the Work account, with Google Meet",
+      "subtitle": "Roadmap review · Tue 20 Oct · 10:30–11:15 UTC · guests Maya and Leo",
+      "captures": [
+        "week.created",
+        "event.detail"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "week",
+          "asset": "week.created",
+          "roi": [
+            0.0,
+            0.1875,
+            0.7272727272727273,
+            0.4375
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 0,
+              "v": 0.95
+            },
+            {
+              "at": 0.9,
+              "v": 1
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 2.65,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 0.5,
+              "roi": [
+                0.18181818181818182,
+                0.40625,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 0
+            },
+            {
+              "at": 1.0,
+              "roi": [
+                0.18181818181818182,
+                0.40625,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "weekLegend",
+          "asset": "week.created",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "week",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 2.65,
+              "v": 0,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "detail",
+          "asset": "event.detail",
+          "roi": [
+            0.16666666666666666,
+            0.09375,
+            0.6666666666666666,
+            0.46875
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "offset": [
+            {
+              "at": 2.45,
+              "v": [
+                0,
+                50
+              ]
+            },
+            {
+              "at": 3.05,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 2.65,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 3.05,
+              "roi": [
+                0.1893939393939394,
+                0.34375,
+                0.3333333333333333,
+                0.03125
+              ],
+              "a": 0
+            },
+            {
+              "at": 3.45,
+              "roi": [
+                0.1893939393939394,
+                0.34375,
+                0.3333333333333333,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "Enter",
+          "label": "Details",
+          "show": 1.7,
+          "at": 2.35,
+          "hide": 2.65,
+          "target": {
+            "view": "week",
+            "roi": [
+              0.18181818181818182,
+              0.40625,
+              0.12878787878787878,
+              0.03125
+            ]
+          },
+          "place": "below"
+        }
+      ],
+      "overlays": [
+        {
+          "kind": "note",
+          "view": "detail",
+          "roi": [
+            0.1893939393939394,
+            0.34375,
+            0.3333333333333333,
+            0.03125
+          ],
+          "kicker": "Generated",
+          "text": "Google Meet link",
+          "in": 3.35,
+          "out": 5,
+          "side": "right"
+        }
+      ]
+    },
+    {
+      "id": "reschedule",
+      "frameIn": 1617,
+      "frameOut": 2028,
+      "title": "e edits to 11:30-12:15 with Email guests chosen; Ctrl+S reviews; y saves; split before/after Week shows the move",
+      "headline": "Move a meeting. Notify your guests.",
+      "subtitle": "Change the time, choose to email guests, then review and save.",
+      "captures": [
+        "event.detail",
+        "event.edit",
+        "event.edit-review",
+        "event.rescheduled",
+        "week.created",
+        "week.rescheduled"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "detail",
+          "asset": "event.detail",
+          "roi": [
+            0.16666666666666666,
+            0.09375,
+            0.6666666666666666,
+            0.46875
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 0.95,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 0,
+              "roi": [
+                0.18181818181818182,
+                0.34375,
+                0.48484848484848486,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "editor",
+          "asset": "event.edit",
+          "roi": [
+            0.1590909090909091,
+            0.125,
+            0.6818181818181818,
+            0.75
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "offset": [
+            {
+              "at": 0.75,
+              "v": [
+                0,
+                50
+              ]
+            },
+            {
+              "at": 1.35,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 0.95,
+              "v": 1,
+              "ease": "hold"
+            },
+            {
+              "at": 5.7,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 1.3,
+              "roi": [
+                0.18181818181818182,
+                0.34375,
+                0.45454545454545453,
+                0.15625
+              ],
+              "a": 0
+            },
+            {
+              "at": 1.7,
+              "roi": [
+                0.18181818181818182,
+                0.34375,
+                0.45454545454545453,
+                0.15625
+              ],
+              "a": 1
+            },
+            {
+              "at": 3.5,
+              "roi": [
+                0.18181818181818182,
+                0.34375,
+                0.45454545454545453,
+                0.15625
+              ],
+              "a": 1
+            },
+            {
+              "at": 4,
+              "roi": [
+                0.18181818181818182,
+                0.59375,
+                0.5303030303030303,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "review",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.edit-review"
+            },
+            {
+              "at": 7.8,
+              "asset": "event.rescheduled"
+            }
+          ],
+          "roi": [
+            0.1590909090909091,
+            0.0625,
+            0.6818181818181818,
+            0.84375
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 5.7,
+              "v": 1,
+              "ease": "hold"
+            },
+            {
+              "at": 9.1,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 5.95,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.375
+              ],
+              "a": 0
+            },
+            {
+              "at": 6.3,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.375
+              ],
+              "a": 1
+            },
+            {
+              "at": 6.85,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.375
+              ],
+              "a": 1
+            },
+            {
+              "at": 7.25,
+              "roi": [
+                0.3560606060606061,
+                0.78125,
+                0.1893939393939394,
+                0.03125
+              ],
+              "a": 1
+            },
+            {
+              "at": 7.79,
+              "roi": [
+                0.3560606060606061,
+                0.78125,
+                0.1893939393939394,
+                0.03125
+              ],
+              "a": 1
+            },
+            {
+              "at": 7.8,
+              "roi": [
+                0.18181818181818182,
+                0.125,
+                0.5151515151515151,
+                0.15625
+              ],
+              "a": 1,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "before",
+          "asset": "week.created",
+          "roi": [
+            0,
+            0.1875,
+            0.3181818181818182,
+            0.4375
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "box": [
+            100,
+            334,
+            840,
+            572
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 9.1,
+              "v": 1,
+              "ease": "hold"
+            },
+            {
+              "at": 11.8,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "dim": 1,
+          "spot": [
+            {
+              "at": 9.1,
+              "roi": [
+                0.18181818181818182,
+                0.40625,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "beforeLegend",
+          "asset": "week.created",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "before",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": 0
+        },
+        {
+          "id": "after",
+          "asset": "week.rescheduled",
+          "roi": [
+            {
+              "at": 0,
+              "roi": [
+                0.0,
+                0.1875,
+                0.3181818181818182,
+                0.4375
+              ]
+            },
+            {
+              "at": 11.8,
+              "roi": [
+                0.0,
+                0.1875,
+                0.3181818181818182,
+                0.4375
+              ]
+            },
+            {
+              "at": 12.7,
+              "roi": [
+                0.0,
+                0.1875,
+                0.7272727272727273,
+                0.4375
+              ]
+            }
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "box": [
+            {
+              "at": 0,
+              "rect": [
+                980,
+                334,
+                840,
+                572
+              ]
+            },
+            {
+              "at": 11.8,
+              "rect": [
+                980,
+                334,
+                840,
+                572
+              ]
+            },
+            {
+              "at": 12.7,
+              "rect": [
+                120,
+                318,
+                1680,
+                588
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 9.1,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 9.1,
+              "roi": [
+                0.18181818181818182,
+                0.4375,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "afterLegend",
+          "asset": "week.rescheduled",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "after",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 12.7,
+              "v": 0
+            },
+            {
+              "at": 13,
+              "v": 1
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "e",
+          "label": "Edit",
+          "show": 0.05,
+          "at": 0.6,
+          "hide": 0.95,
+          "target": {
+            "view": "detail",
+            "roi": [
+              0.5,
+              0.5,
+              0.10606060606060606,
+              0.03125
+            ]
+          },
+          "place": "right"
+        },
+        {
+          "key": "Ctrl+S",
+          "label": "Review",
+          "show": 4.75,
+          "at": 5.4,
+          "hide": 5.7,
+          "target": {
+            "view": "editor",
+            "roi": [
+              0.2878787878787879,
+              0.75,
+              0.11363636363636363,
+              0.03125
+            ]
+          },
+          "place": "right",
+          "offset": [
+            0,
+            118
+          ]
+        },
+        {
+          "key": "y",
+          "label": "Save & email guests",
+          "show": 6.95,
+          "at": 7.65,
+          "hide": 7.8,
+          "target": {
+            "view": "review",
+            "roi": [
+              0.3560606060606061,
+              0.78125,
+              0.1893939393939394,
+              0.03125
+            ]
+          },
+          "place": "right"
+        }
+      ],
+      "overlays": [
+        {
+          "kind": "note",
+          "view": "editor",
+          "roi": [
+            0.18181818181818182,
+            0.34375,
+            0.45454545454545453,
+            0.15625
+          ],
+          "kicker": "New time",
+          "text": "11:30–12:15",
+          "in": 1.8,
+          "out": 3.6,
+          "side": "right"
+        },
+        {
+          "kind": "note",
+          "view": "editor",
+          "roi": [
+            0.18181818181818182,
+            0.59375,
+            0.5303030303030303,
+            0.03125
+          ],
+          "kicker": "Your choice",
+          "text": "Email the guests",
+          "sub": "Maya and Leo get the new time",
+          "in": 4.0,
+          "out": 5.6,
+          "side": "right"
+        },
+        {
+          "kind": "move",
+          "before": {
+            "view": "before",
+            "roi": [
+              0.18181818181818182,
+              0.40625,
+              0.12878787878787878,
+              0.03125
+            ]
+          },
+          "after": {
+            "view": "after",
+            "roi": [
+              0.18181818181818182,
+              0.4375,
+              0.12878787878787878,
+              0.03125
+            ]
+          },
+          "labels": [
+            8.7,
+            12.15
+          ],
+          "arc": [
+            9.8,
+            10.7
+          ],
+          "out": 11.6,
+          "beforeLabel": "Before",
+          "afterLabel": "After",
+          "chip": "10:30 → 11:30",
+          "lift": 200
+        }
+      ]
+    },
+    {
+      "id": "browser",
+      "frameIn": 2028,
+      "frameOut": 2220,
+      "title": "b opens the event and O opens Google Calendar in the Work account's configured Chrome profile",
+      "headline": "Open events in the right Chrome profile",
+      "subtitle": "b opens this event’s details. O opens Google Calendar’s home view.",
+      "captures": [
+        "event.detail-rescheduled",
+        "event.web-profile",
+        "calendar.web-profile"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "result",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.detail-rescheduled"
+            },
+            {
+              "at": 1.2,
+              "asset": "event.web-profile"
+            },
+            {
+              "at": 4.3,
+              "asset": "calendar.web-profile"
+            }
+          ],
+          "roi": [
+            0.16666666666666666,
+            0.09375,
+            0.6666666666666666,
+            0.46875
+          ],
+          "box": [
+            120,
+            250,
+            1680,
+            420
+          ],
+          "matte": 22,
+          "opacity": 1
+        }
+      ],
+      "cues": [
+        {
+          "key": "b",
+          "label": "This event",
+          "show": 0.45,
+          "at": 1.05,
+          "hide": 1.65,
+          "target": {
+            "view": "result",
+            "roi": [
+              0.3409090909090909,
+              0.5,
+              0.14393939393939395,
+              0.03125
+            ]
+          },
+          "place": "below"
+        },
+        {
+          "key": "O",
+          "label": "Calendar home",
+          "show": 3.55,
+          "at": 4.15,
+          "hide": 4.75,
+          "target": {
+            "view": "result",
+            "roi": [
+              0.16666666666666666,
+              0.09375,
+              0.6666666666666666,
+              0.46875
+            ]
+          },
+          "place": "below"
+        }
+      ],
+      "overlays": [
+        {
+          "kind": "handoff",
+          "from": {
+            "view": "result",
+            "roi": [
+              0.16666666666666666,
+              0.09375,
+              0.6666666666666666,
+              0.46875
+            ]
+          },
+          "y": 900,
+          "xs": [
+            480,
+            960,
+            1440
+          ],
+          "in": 1.5,
+          "out": 6.4,
+          "nodes": [
+            {
+              "kicker": "Account",
+              "text": "Work account",
+              "sub": "work@example.com"
+            },
+            {
+              "kicker": "Chrome",
+              "text": "Work Chrome profile",
+              "sub": "configured for this account"
+            },
+            {
+              "kicker": "Selected event",
+              "text": "Roadmap review",
+              "sub": "Google Calendar event"
+            }
+          ],
+          "runs": [
+            {
+              "from": 1.65,
+              "until": 3.1
+            }
+          ],
+          "destination": {
+            "at": 4.3,
+            "kicker": "Whole calendar",
+            "text": "Calendar home",
+            "sub": "Google Calendar home"
+          }
+        }
+      ]
+    },
+    {
+      "id": "all-day",
+      "frameIn": 2220,
+      "frameOut": 2382,
+      "title": "All-day form with the inclusive last day; the genuine Week shows it in the all-day band",
+      "headline": "Create all-day events",
+      "subtitle": "Enter the last included day. It lands in the Week’s all-day band.",
+      "captures": [
+        "event.all-day",
+        "event.all-day-review",
+        "event.all-day-saved",
+        "week.all-day"
+      ],
+      "carry": 0,
+      "views": [
+        {
+          "id": "form",
+          "asset": "event.all-day",
+          "roi": [
+            0.1590909090909091,
+            0.15625,
+            0.6818181818181818,
+            0.65625
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "offset": [
+            {
+              "at": 0,
+              "v": [
+                0,
+                46
+              ]
+            },
+            {
+              "at": 0.6,
+              "v": [
+                0,
+                0
+              ]
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 1
+            },
+            {
+              "at": 2.05,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 0.45,
+              "roi": [
+                0.18181818181818182,
+                0.3125,
+                0.5303030303030303,
+                0.15625
+              ],
+              "a": 0
+            },
+            {
+              "at": 0.85,
+              "roi": [
+                0.18181818181818182,
+                0.3125,
+                0.5303030303030303,
+                0.15625
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "review",
+          "sequence": [
+            {
+              "at": 0,
+              "asset": "event.all-day-review"
+            },
+            {
+              "at": 3.25,
+              "asset": "event.all-day-saved"
+            }
+          ],
+          "roi": [
+            0.1590909090909091,
+            0.0625,
+            0.6818181818181818,
+            0.84375
+          ],
+          "box": [
+            120,
+            232,
+            1220,
+            800
+          ],
+          "matte": 22,
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 2.05,
+              "v": 1,
+              "ease": "hold"
+            },
+            {
+              "at": 3.85,
+              "v": 0,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 2.2,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.1875
+              ],
+              "a": 0
+            },
+            {
+              "at": 2.6,
+              "roi": [
+                0.18181818181818182,
+                0.21875,
+                0.6060606060606061,
+                0.1875
+              ],
+              "a": 1
+            },
+            {
+              "at": 2.95,
+              "roi": [
+                0.3560606060606061,
+                0.78125,
+                0.12121212121212122,
+                0.03125
+              ],
+              "a": 1
+            },
+            {
+              "at": 3.25,
+              "roi": [
+                0.18181818181818182,
+                0.125,
+                0.5151515151515151,
+                0.15625
+              ],
+              "a": 1,
+              "ease": "hold"
+            }
+          ]
+        },
+        {
+          "id": "week",
+          "asset": "week.all-day",
+          "roi": [
+            0.0,
+            0.1875,
+            0.7272727272727273,
+            0.4375
+          ],
+          "box": [
+            120,
+            318,
+            1680,
+            588
+          ],
+          "align": [
+            0.5,
+            0
+          ],
+          "zoom": [
+            {
+              "at": 3.65,
+              "v": 0.96
+            },
+            {
+              "at": 4.35,
+              "v": 1
+            }
+          ],
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 3.85,
+              "v": 1,
+              "ease": "hold"
+            }
+          ],
+          "spot": [
+            {
+              "at": 4.05,
+              "roi": [
+                0.45454545454545453,
+                0.21875,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 0
+            },
+            {
+              "at": 4.4,
+              "roi": [
+                0.45454545454545453,
+                0.21875,
+                0.12878787878787878,
+                0.03125
+              ],
+              "a": 1
+            }
+          ]
+        },
+        {
+          "id": "weekLegend",
+          "asset": "week.all-day",
+          "roi": [
+            0.0,
+            0.15625,
+            0.7272727272727273,
+            0.03125
+          ],
+          "align": [
+            0,
+            1
+          ],
+          "matte": 20,
+          "box": {
+            "dock": "week",
+            "side": "top",
+            "gap": 14,
+            "size": 76
+          },
+          "opacity": [
+            {
+              "at": 0,
+              "v": 0
+            },
+            {
+              "at": 3.85,
+              "v": 1,
+              "ease": "hold"
+            }
+          ]
+        }
+      ],
+      "cues": [
+        {
+          "key": "Ctrl+S",
+          "label": "Review",
+          "show": 1.1,
+          "at": 1.75,
+          "hide": 2.05,
+          "target": {
+            "view": "form",
+            "roi": [
+              0.2878787878787879,
+              0.6875,
+              0.11363636363636363,
+              0.03125
+            ]
+          },
+          "place": "right"
+        },
+        {
+          "key": "y",
+          "label": "Create",
+          "show": 2.55,
+          "at": 3.1,
+          "hide": 3.25,
+          "target": {
+            "view": "review",
+            "roi": [
+              0.3560606060606061,
+              0.78125,
+              0.12121212121212122,
+              0.03125
+            ]
+          },
+          "place": "right"
+        }
+      ],
+      "overlays": []
+    },
+    {
+      "id": "outro",
+      "frameIn": 2382,
+      "frameOut": 2527,
+      "title": "Version, project address and the unchanged soundtrack ending",
+      "headline": null,
+      "subtitle": "",
+      "captures": [],
+      "carry": 0.6,
+      "views": [],
+      "cues": [],
+      "overlays": [
+        {
+          "kind": "outro",
+          "title": "Omagma v0.2.10",
+          "website": "technologylab-ai.github.io/omagma",
+          "scope": "Linux · macOS · native TUI + agent CLI",
+          "strap": "Your mail and calendar. Your terminal."
+        }
+      ]
+    }
+  ]
+}

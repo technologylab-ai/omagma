@@ -1,0 +1,183 @@
+{
+  "day": "2026-10-19",
+  "events": [
+    {
+      "target": {
+        "account": "personal@example.com",
+        "calendar_id": "personal@example.com"
+      },
+      "id": "weekly-routine",
+      "summary": "Weekly studio block",
+      "start": {
+        "kind": "instant",
+        "value": 1792400400000,
+        "zone": "UTC"
+      },
+      "end": {
+        "kind": "instant",
+        "value": 1792411200000,
+        "zone": "UTC"
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "personal@example.com",
+      "recurring_event_id": "weekly-studio",
+      "original_start": {
+        "kind": "instant",
+        "value": 1792400400000,
+        "zone": "UTC"
+      }
+    },
+    {
+      "target": {
+        "account": "work@example.com",
+        "calendar_id": "work@example.com"
+      },
+      "id": "special-visit",
+      "summary": "Special visit",
+      "start": {
+        "kind": "instant",
+        "value": 1792405800000,
+        "zone": "UTC"
+      },
+      "end": {
+        "kind": "instant",
+        "value": 1792407600000,
+        "zone": "UTC"
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "work@example.com",
+      "join_url": "https://meet.example.test/special-visit"
+    },
+    {
+      "target": {
+        "account": "optional@example.com",
+        "calendar_id": "optional@example.com"
+      },
+      "id": "early-check-in",
+      "summary": "Early check-in",
+      "start": {
+        "kind": "instant",
+        "value": 1792404300000,
+        "zone": "UTC"
+      },
+      "end": {
+        "kind": "instant",
+        "value": 1792405200000,
+        "zone": "UTC"
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "optional@example.com"
+    },
+    {
+      "target": {
+        "account": "personal@example.com",
+        "calendar_id": "personal@example.com"
+      },
+      "id": "next-hour",
+      "summary": "Next-hour call",
+      "start": {
+        "kind": "instant",
+        "value": 1792407600000,
+        "zone": "UTC"
+      },
+      "end": {
+        "kind": "instant",
+        "value": 1792409400000,
+        "zone": "UTC"
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "personal@example.com",
+      "join_url": "https://meet.example.test/next-hour"
+    },
+    {
+      "target": {
+        "account": "work@example.com",
+        "calendar_id": "work@example.com"
+      },
+      "id": "overnight",
+      "summary": "Overnight handover",
+      "start": {
+        "kind": "instant",
+        "value": 1792452600000,
+        "zone": "UTC"
+      },
+      "end": {
+        "kind": "instant",
+        "value": 1792456200000,
+        "zone": "UTC"
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "work@example.com"
+    },
+    {
+      "target": {
+        "account": "personal@example.com",
+        "calendar_id": "personal@example.com"
+      },
+      "id": "home",
+      "summary": "Home",
+      "start": {
+        "kind": "date",
+        "value": 20745
+      },
+      "end": {
+        "kind": "date",
+        "value": 20747
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "personal@example.com"
+    },
+    {
+      "target": {
+        "account": "work@example.com",
+        "calendar_id": "fixture-readonly"
+      },
+      "id": "holiday",
+      "summary": "Local holiday",
+      "start": {
+        "kind": "date",
+        "value": 20745
+      },
+      "end": {
+        "kind": "date",
+        "value": 20746
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "fixture-readonly"
+    },
+    {
+      "target": {
+        "account": "optional@example.com",
+        "calendar_id": "optional@example.com"
+      },
+      "id": "travel",
+      "summary": "Travel",
+      "start": {
+        "kind": "date",
+        "value": 20745
+      },
+      "end": {
+        "kind": "date",
+        "value": 20746
+      },
+      "response": "accepted",
+      "cancelled": false,
+      "source_color": "cyan",
+      "source_name": "optional@example.com"
+    }
+  ]
+}

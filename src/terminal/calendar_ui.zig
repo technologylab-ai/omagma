@@ -6,10 +6,11 @@ const b = @import("../bounded.zig");
 const tz = @import("timezone.zig");
 const t = @import("calendar_types.zig");
 pub const View = enum { agenda, day, week };
-pub const Page = enum { main, calendars, detail, review, permissions, help, actions };
+pub const Page = enum { compose, event_review, main, calendars, detail, review, permissions, help, actions, overlaps };
 pub const Document = struct {
     arena: ?std.heap.ArenaAllocator = null,
     value: j.Value = .null,
+    bytes: usize = 0,
     pub fn deinit(self: *Document) void {
         if (self.arena) |*arena| arena.deinit();
         self.* = .{};
@@ -20,6 +21,7 @@ pub const Document = struct {
         const owned = next.arena.?.allocator();
         const raw = try std.json.Stringify.valueAlloc(owned, value, .{});
         if (raw.len > t.Limits.snapshot_bytes) return error.CalendarTooLarge;
+        next.bytes = raw.len;
         next.value = try std.json.parseFromSliceLeaky(j.Value, owned, raw, .{ .allocate = .alloc_always });
         self.deinit();
         self.* = next;
@@ -35,6 +37,8 @@ pub const State = struct {
     help_return_focus: ?usize = null,
     day: i64 = 0,
     selected: usize = 0,
+    /// Only explicit navigation/reveal promotes a hidden selection in Week.
+    week_reveal_selected: bool = false,
     picker: usize = 0,
     top: usize = 0,
     scroll: usize = 0,
@@ -59,6 +63,26 @@ pub const State = struct {
     error_code: b.Text(128) = .{},
     notice: b.Text(256) = .{},
     calendars: Document = .{},
+    source_lists: [3]Document = @splat(.{}),
+    source_snapshots: [72]Document = @splat(.{}),
+    source_errors: [72]b.Text(128) = @splat(.{}),
+    list_errors: [3]b.Text(128) = @splat(.{}),
+    list_cursor: usize = 0,
+    source_cursor: usize = 0,
+    source_loading: bool = false,
+    resume_sources: bool = false,
+    resume_lists: bool = false,
+    pending_card: bool = false,
+    listing_all: bool = false,
+    single_source: bool = false,
+    selection_dirty: bool = false,
+    pending_selection: ?@import("calendar_sources.zig").Selection = null,
+    list_for_picker: bool = false,
+    selection_initialized: bool = false,
+    sources_cache_only: bool = false,
+    picker_return: Page = .main,
+    actions_return: Page = .main,
+    request_window: ?t.Window = null,
     agenda: Document = .{},
     card: Document = .{},
     review: Document = .{},
@@ -67,6 +91,8 @@ pub const State = struct {
     card_zone_name: b.Text(512) = .{},
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
         self.calendars.deinit();
+        for (&self.source_lists) |*document| document.deinit();
+        for (&self.source_snapshots) |*document| document.deinit();
         self.agenda.deinit();
         self.card.deinit();
         self.review.deinit();
