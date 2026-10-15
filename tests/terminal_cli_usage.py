@@ -25,7 +25,8 @@ HINT = b"Try omagma --help for available commands and options."
 CANARY = "fictional-private-argument-canary"
 LEGACY_MODES = ("daemon", "auth", "status")
 FAMILIES = {
-    "calendar": ("list", "agenda", "event", "freebusy", "invitation-plan", "review", "apply", "import", "update", "cancel", "reconcile"),
+    "calendar": ("list", "agenda", "event", "freebusy", "invitation-plan", "review", "apply", "import", "update", "cancel", "reconcile",
+                 "event-review", "event-apply", "event-reconcile", "open", "event-open", "event-retry", "event-abandon", "event-pending"),
     "mail": ("list", "search", "read", "thread", "attachment", "attachment-save", "open", "sync", "refresh", "recipients",
              "reply", "forward", "send", "archive", "trash", "restore", "spam", "unspam", "mark", "batch", "undo", "triage-scope", "label-state", "prefetch",
              "drafts", "compose", "labels", "identities", "open-link", "open-attachment"),
@@ -74,7 +75,7 @@ class Runner:
         result = subprocess.run([str(self.binary), *arguments], input=stdin, capture_output=True,
                                 cwd=self.directory, env=environment, timeout=8, preexec_fn=no_core_dump)
         self.calls += 1
-        # The complete 83-command catalogue now exceeds 256KiB; match the
+        # The complete 91-command catalogue now exceeds 256KiB; match the
         # discovery metadata's finite 512KiB bound only for full disclosure.
         # Ordinary command help and protocol diagnostics keep their old cap.
         stdout_limit = (512 if catalogue else 256) * 1024
@@ -235,6 +236,8 @@ invitation.inspect invitation.reply operation.list operation.read
 reminder.list reminder.set reminder.done
 calendar.list calendar.agenda calendar.event calendar.freebusy calendar.invitation-plan
 calendar.review calendar.apply calendar.import calendar.update calendar.cancel calendar.reconcile
+calendar.event-review calendar.event-apply calendar.event-reconcile calendar.open calendar.event-open
+calendar.event-retry calendar.event-abandon calendar.event-pending
 """.split())
 
 
@@ -259,7 +262,9 @@ def discovery(runner):
             for child in value: references(child, definitions)
     references(catalogue, catalogue["$defs"])
     for command in ("mail.read", "mail.list", "mail.send", "draft.update", "contacts.upsert", "invitation.reply",
-                    "calendar.agenda", "calendar.review", "draft.gmail-save", "reminder.set"):
+                    "calendar.agenda", "calendar.review", "calendar.event-review", "calendar.event-apply",
+                    "calendar.event-reconcile", "calendar.open", "calendar.event-open", "calendar.event-retry",
+                    "calendar.event-abandon", "calendar.event-pending", "draft.gmail-save", "reminder.set"):
         result = runner.run(["cli", "--config", str(runner.invalid_config), "--schema", command], without_home=True)
         require(result.returncode == 0 and not result.stderr, "command schema loaded private configuration")
         selected = json.loads(result.stdout)
