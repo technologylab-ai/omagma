@@ -15040,9 +15040,17 @@ const App = struct {
         const width: u16 = @intCast((win.width - 6) / days);
         const today = self.calendar.zone.localDay(Io.Timestamp.now(self.io, .real).toMilliseconds()) catch -1;
         const first = try self.calendarFirstDay(win.width);
-        const slots = @min(@as(usize, 24), win.height -| 6);
-        if (slots == 0) return self.drawCalendarAgenda(win);
         const projected = try calendar_slot.project(a, self.calendarEvents(), self.calendar_query.value());
+        var all_day_counts: [7]usize = @splat(0);
+        for (projected) |event| {
+            if (event.identity.start.kind != .date) continue;
+            for (0..days) |column| {
+                if (all_day_counts[column] < 3 and try calendar_ui.touchesDay(event.identity.start, event.end, first + @as(i64, @intCast(column)), &self.calendar.zone)) all_day_counts[column] += 1;
+            }
+        }
+        const bands = calendar_week_rows.Bands.init(win.height, std.mem.max(usize, all_day_counts[0..days]));
+        const slots = @min(@as(usize, 24), bands.hour_budget);
+        if (slots == 0) return self.drawCalendarAgenda(win);
         var start_hour: usize = @min(8, 24 - slots);
         if (self.calendar.selected < projected.len) {
             const point = projected[self.calendar.selected].identity.start;
@@ -15061,10 +15069,10 @@ const App = struct {
         const viewport: calendar_slot.Viewport = .{ .first_day = first, .days = days, .first_hour = @intCast(start_hour), .hours = slots };
         self.calendar_week_viewport = viewport;
         const grid = try calendar_slot.Grid.init(projected, viewport, &self.calendar.zone, if (self.calendar.week_reveal_selected and self.calendar.selected < projected.len) .{ .index = self.calendar.selected, .bucket = self.calendar_week_reveal_bucket } else null, &self.ui_preferences.calendar);
-        const plan = calendar_week_rows.allocate(win.height -| 6, grid.needs);
+        const plan = calendar_week_rows.allocate(bands.hour_budget, grid.needs);
         try self.line(win, 1, "all", .muted);
         try self.line(win, 2, "day", .muted);
-        for (0..slots) |slot| try self.line(win, 5 + plan.offsets[slot], try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + slot))}), .muted);
+        for (0..slots) |slot| try self.line(win, bands.grid_start + plan.offsets[slot], try std.fmt.allocPrint(a, "{d:0>2}:00", .{@as(u8, @intCast(start_hour + slot))}), .muted);
         var actually_shown: [calendar_sources.max_events]bool = @splat(false);
         for (0..days) |column| {
             const day = first + @as(i64, @intCast(column));
@@ -15084,14 +15092,14 @@ const App = struct {
                 self.calendarWeekTitleHit(cell, 1 + subrow, projected[index].visible_index, .{ .day = day });
                 actually_shown[index] = true;
             }
-            if (dates.hidden > 0) try self.calendarSlotBadge(cell, 3, try std.fmt.allocPrint(a, "+{d} all-day", .{dates.hidden}), 400 + column * 25 + 24);
+            if (dates.hidden > 0) try self.calendarSlotBadge(cell, bands.overflow_row.?, try std.fmt.allocPrint(a, "+{d} all-day", .{dates.hidden}), 400 + column * 25 + 24);
             if (grid.earlier[column] > 0 or grid.later[column] > 0) {
                 const hidden = if (grid.earlier[column] > 0 and grid.later[column] > 0) try std.fmt.allocPrint(a, "↑{d} ↓{d} · j/k", .{ grid.earlier[column], grid.later[column] }) else if (grid.earlier[column] > 0) try std.fmt.allocPrint(a, "↑{d} earlier · k", .{grid.earlier[column]}) else try std.fmt.allocPrint(a, "↓{d} later · j", .{grid.later[column]});
-                try self.line(cell, 4, try self.fitLine(cell, hidden, cell.width), .muted);
+                try self.line(cell, bands.offscreen_row.?, try self.fitLine(cell, hidden, cell.width), .muted);
             }
             for (0..slots) |slot| {
                 const shown = grid.hours[column][slot].shown(plan.lines[slot]);
-                const row = 5 + plan.offsets[slot];
+                const row = bands.grid_start + plan.offsets[slot];
                 const more = if (shown.hidden > 0) try std.fmt.allocPrint(a, "+{d}", .{shown.hidden}) else "";
                 for (0..plan.lines[slot]) |subrow| {
                     const last = subrow + 1 == plan.lines[slot];
@@ -15130,7 +15138,7 @@ const App = struct {
                 const hour: usize = @intCast(@divFloor(@mod(seconds + try self.calendar.zone.offsetSeconds(seconds), 86400), 3600));
                 if (hour >= start_hour and hour < start_hour + slots) {
                     const slot = hour - start_hour;
-                    if (grid.hours[column][slot].count == 0) try self.line(cell, 5 + plan.offsets[slot], "— now —", .accent);
+                    if (grid.hours[column][slot].count == 0) try self.line(cell, bands.grid_start + plan.offsets[slot], "— now —", .accent);
                 }
             }
         }
@@ -23640,6 +23648,61 @@ fn calendarSlotsTestAgenda(app: *App) !void {
     app.calendar.day = try timezone.dateDay(text(get(fixture, "day")));
 }
 
+fn calendarWeekTestHourRow(screen: *const vaxis.Screen, hour: u8) !u16 {
+    var buffer: [5]u8 = undefined;
+    const label = try std.fmt.bufPrint(&buffer, "{d:0>2}:00", .{hour});
+    for (0..screen.height) |row| {
+        for (label, 0..) |character, column| {
+            if (!same(screen.readCell(@intCast(column), @intCast(row)).?.char.grapheme, &.{character})) break;
+        } else return @intCast(row);
+    }
+    return error.MissingCalendarHourGutter;
+}
+
+test "calendar slots: fitting hour gutters retain two all-day titles and exact overflow controls" {
+    const a = std.testing.allocator;
+    const first = try timezone.dateDay("2026-10-19");
+    for (0..4) |all_day_count| for ([_]u16{ 27, 28, 29, 30 }) |height| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        const scratch = app.frame.allocator();
+        var events: std.ArrayList(Value) = .empty;
+        try events.append(scratch, try @import("json.zig").value(scratch, .{ .target = .{ .account = "personal@example.test", .calendar_id = "primary" }, .id = "early", .summary = "Early start", .start = .{ .kind = "instant", .value = first * 86400000 + 2 * 3600000 }, .end = .{ .kind = "instant", .value = first * 86400000 + 3 * 3600000 } }));
+        // Offscreen DATE entries cannot consume a visible overflow band.
+        for (0..all_day_count + 3) |index| {
+            const day = first + @as(i64, if (index < all_day_count) 0 else 7);
+            try events.append(scratch, try @import("json.zig").value(scratch, .{ .target = .{ .account = "personal@example.test", .calendar_id = "primary" }, .id = try std.fmt.allocPrint(scratch, "date-{d}", .{index}), .summary = "All-day title", .start = .{ .kind = "date", .value = day }, .end = .{ .kind = "date", .value = day + 1 } }));
+        }
+        try app.calendar.agenda.replace(a, try @import("json.zig").value(scratch, .{ .snapshot = .{ .events = events.items } }));
+        app.calendar.ready = true;
+        app.calendar.view = .week;
+        app.calendar.day = first;
+        var screen = try vaxis.Screen.init(a, .{ .cols = 140, .rows = height, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        try app.drawCalendarWeek(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = height, .screen = &screen });
+        const fits_all = height >= @as(u16, if (all_day_count > 2) 29 else 28);
+        try std.testing.expectEqual(fits_all, app.calendar_week_viewport.?.hours == 24);
+        if (fits_all) {
+            var previous: u16 = 0;
+            for (0..24) |hour| {
+                const row = try calendarWeekTestHourRow(&screen, @intCast(hour));
+                try std.testing.expect(row > previous and row < height - 1);
+                previous = row;
+            }
+        }
+        var titles: usize = 0;
+        for (app.calendar_week_title_hits[0..app.calendar_week_title_count]) |hit| {
+            if (hit.bucket.hour == null) titles += 1;
+        }
+        try std.testing.expectEqual(@min(all_day_count, 2), titles);
+        const overflow = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+            if (hit.kind == .dialog_action and hit.index == 424) break true;
+        } else false;
+        try std.testing.expectEqual(all_day_count > 2, overflow);
+    };
+}
+
 test "calendar slots: real week badges are styled disjoint exact-hour controls and chooser only reveals" {
     const a = std.testing.allocator;
     var factory: CacheTestClient = .{};
@@ -23913,7 +23976,7 @@ test "calendar slots: passive initial selection leaves starts and Priority visib
     try std.testing.expect(!app.calendar.week_reveal_selected);
     // The automatically pinned09:00 routine remains the rail target, but it
     // cannot overwrite the new10:30 start from the explicitly preferred source.
-    const initial = app.mouse_hits.at(6, 15).?;
+    const initial = app.mouse_hits.at(6, @intCast(try calendarWeekTestHourRow(&screen, 10))).?;
     try std.testing.expectEqual(layout.HitKind.calendar_week_event, initial.kind);
     try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[initial.index].index);
     try app.onCalendarKey(.{ .codepoint = 'k' });
@@ -23921,7 +23984,7 @@ test "calendar slots: passive initial selection leaves starts and Priority visib
     screen.clear();
     app.mouse_hits.clear();
     try app.drawCalendarWeek(win);
-    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, 15).?.index].index);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(try calendarWeekTestHourRow(&screen, 10))).?.index].index);
     // More space preserves the preferred first title while explicitly selected
     // routine takes the last actual line; changing selection never changes rows.
     var large = try vaxis.Screen.init(a, .{ .cols = 140, .rows = 33, .x_pixel = 0, .y_pixel = 0 });
@@ -23929,7 +23992,7 @@ test "calendar slots: passive initial selection leaves starts and Priority visib
     const larger: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 140, .height = 33, .screen = &large };
     app.mouse_hits.clear();
     try app.drawCalendarWeek(larger);
-    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, 15).?.index].index);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(try calendarWeekTestHourRow(&large, 10))).?.index].index);
     // Revealing the routine from11:00 only pins that hour. It must not cover
     // the preferred new start at10:00, even though the routine spans both.
     try app.calendarSlotsOpen(.{ .day = app.calendar.day, .hour = 11 });
@@ -23941,8 +24004,8 @@ test "calendar slots: passive initial selection leaves starts and Priority visib
     app.mouse_hits.clear();
     screen.clear();
     try app.drawCalendarWeek(win);
-    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, 15).?.index].index);
-    try std.testing.expectEqual(@as(usize, 0), app.calendar_week_title_hits[app.mouse_hits.at(6, 16).?.index].index);
+    try std.testing.expectEqual(@as(usize, 1), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(try calendarWeekTestHourRow(&screen, 10))).?.index].index);
+    try std.testing.expectEqual(@as(usize, 0), app.calendar_week_title_hits[app.mouse_hits.at(6, @intCast(try calendarWeekTestHourRow(&screen, 11))).?.index].index);
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 

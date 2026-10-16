@@ -16,3 +16,13 @@
 #motion .cm-kicker{position:absolute;left:140px;top:284px;font:650 25px "JetBrainsMono Nerd Font",monospace;letter-spacing:.12em;color:#a3eff0}
 #motion .cm-title{position:absolute;left:140px;top:366px;max-width:1480px;margin:0;font-size:104px;line-height:1.04;letter-spacing:-.035em;white-space:pre-line;font-weight:800}
 #motion .cm-rule{position:absolute;left:140px;top:704px;width:200px;height:5px;background:#a3eff0;transform-origin:left center}
+
+/* Editorial captions reveal by the compositor clock; native pixels stay fixed. */
+#heading .cm-wordpart{display:inline-block;white-space:pre;vertical-align:top;transform-origin:left center}
+#heading.section-entry{top:92px;font-size:66px;line-height:1.15}
+#heading.section-entry + #subheading{top:176px;font-size:27px}
+#heading,#heading *,#subheading,#action,.pointer,.route .node,.route .arrow{transition:none!important;animation:none!important}
+#editorial-result{transform-origin:100% 50%}
+#editorial-pointer{transform-origin:4px 4px}
+
+#editorial-focus{transform-origin:100% 50%}

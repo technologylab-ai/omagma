@@ -156,7 +156,7 @@
       "chapter": 1,
       "in": 17.333333333333332,
       "out": 20.533333333333335,
-      "title": "See every meeting in the busy hour",
+      "title": "Overlapping meetings, all five listed",
       "states": [
         {
           "at": 0,
@@ -187,62 +187,43 @@
       ]
     },
     {
-      "id": "chapter-2",
-      "kind": "chapter",
-      "chapter": 2,
-      "in": 20.533333333333335,
-      "out": 22.433333333333334,
-      "title": "Create an event\nwith guests",
-      "subtitle": ""
-    },
-    {
       "id": "name-time",
       "kind": "native",
       "chapter": 2,
-      "in": 22.433333333333334,
+      "in": 20.533333333333335,
       "out": 29.133333333333333,
-      "title": "Create an event in your calendar",
+      "title": "Create a meeting with guests",
       "states": [
         {
           "at": 0,
-          "asset": "week.revealed",
-          "roi": [
-            0,
-            0.125,
-            1,
-            0.78125
-          ]
-        },
-        {
-          "at": 1.1,
           "asset": "event.title-empty"
         },
         {
-          "at": 1.7,
+          "at": 3.6,
           "asset": "event.title-r"
         },
         {
-          "at": 2.05,
+          "at": 3.95,
           "asset": "event.title-road"
         },
         {
-          "at": 2.4,
+          "at": 4.3,
           "asset": "event.title-roadmap"
         },
         {
-          "at": 2.75,
+          "at": 4.65,
           "asset": "event.title-roadmap-re"
         },
         {
-          "at": 3.1,
+          "at": 5.0,
           "asset": "event.title-roadmap-revie"
         },
         {
-          "at": 3.4,
+          "at": 5.3,
           "asset": "event.title-typed"
         },
         {
-          "at": 4.25,
+          "at": 6.15,
           "asset": "event.times-set",
           "subtitle": "Tuesday 20 October \u00b7 10:30\u201311:15 UTC \u00b7 Work account"
         }
@@ -263,26 +244,28 @@
       "actions": [
         {
           "from": 0,
-          "until": 1.1,
-          "key": "n",
-          "text": "Create a new event",
-          "press": 1
-        },
-        {
-          "from": 1.1,
-          "until": 4.25,
+          "until": 6.15,
           "key": null,
           "text": "Name the event",
           "press": 0
         },
         {
-          "from": 4.25,
-          "until": 6.7,
+          "from": 6.15,
+          "until": 8.6,
           "key": null,
           "text": "Set its date, time and time zone",
           "press": 0
         }
-      ]
+      ],
+      "sectionEntry": true,
+      "focus": {
+        "from": 2.1,
+        "until": 5.6,
+        "at": [
+          0.1590909090909091,
+          0.296875
+        ]
+      }
     },
     {
       "id": "maya",
@@ -504,7 +487,7 @@
       "chapter": 2,
       "in": 50.733333333333334,
       "out": 57.03333333333333,
-      "title": "Review before sending invitations",
+      "title": "Create the meeting: review first",
       "states": [
         {
           "at": 0,
@@ -557,7 +540,7 @@
       "chapter": 2,
       "in": 57.03333333333333,
       "out": 61.93333333333333,
-      "title": "Create the meeting and invite both guests",
+      "title": "Create the meeting: invite both guests",
       "states": [
         {
           "at": 0,
@@ -607,49 +590,31 @@
         0,
         0.890625
       ],
-      "pointAfter": 1.5
-    },
-    {
-      "id": "chapter-3",
-      "kind": "chapter",
-      "chapter": 3,
-      "in": 61.93333333333333,
-      "out": 63.833333333333336,
-      "title": "Reschedule\nand open",
-      "subtitle": ""
+      "pointAfter": 1.5,
+      "markerAt": 2.45
     },
     {
       "id": "edit-time",
       "kind": "native",
       "chapter": 3,
-      "in": 63.833333333333336,
+      "in": 61.93333333333333,
       "out": 71.33333333333333,
-      "title": "Move the meeting and notify your guests",
+      "title": "Reschedule and notify guests",
       "states": [
         {
           "at": 0,
-          "asset": "week.created",
-          "roi": [
-            0,
-            0.125,
-            1,
-            0.78125
-          ]
-        },
-        {
-          "at": 1.2,
           "asset": "event.edit-before"
         },
         {
-          "at": 2.1,
+          "at": 4.0,
           "asset": "event.edit-start-set"
         },
         {
-          "at": 3.3,
+          "at": 5.2,
           "asset": "event.edit-times-set"
         },
         {
-          "at": 4.5,
+          "at": 6.4,
           "asset": "event.edit"
         }
       ],
@@ -667,9 +632,9 @@
       ],
       "subtitle": "Roadmap review moves from 10:30 to 11:30 UTC.",
       "pointer": {
-        "from": 3.6,
-        "press": 4,
-        "until": 4.5,
+        "from": 5.5,
+        "press": 5.9,
+        "until": 6.4,
         "at": [
           0.1856060606060606,
           0.609375
@@ -678,33 +643,35 @@
       "actions": [
         {
           "from": 0,
-          "until": 1.2,
-          "key": "e",
-          "text": "Edit Roadmap review",
-          "press": 1
-        },
-        {
-          "from": 1.2,
-          "until": 3.6,
+          "until": 5.5,
           "key": null,
           "text": "Change the start and end time",
           "press": 0
         },
         {
-          "from": 3.6,
-          "until": 4.5,
+          "from": 5.5,
+          "until": 6.4,
           "key": null,
           "text": "Choose Email guests about these changes",
           "press": 0
         },
         {
-          "from": 4.5,
-          "until": 7.5,
+          "from": 6.4,
+          "until": 9.4,
           "key": null,
           "text": "11:30\u201312:15 UTC. Guests will receive the update.",
           "press": 0
         }
-      ]
+      ],
+      "sectionEntry": true,
+      "focus": {
+        "from": 2.2,
+        "until": 5.35,
+        "at": [
+          0.1590909090909091,
+          0.390625
+        ]
+      }
     },
     {
       "id": "review-edit",
@@ -712,7 +679,7 @@
       "chapter": 3,
       "in": 71.33333333333333,
       "out": 76.33333333333333,
-      "title": "Review the new time and guest update",
+      "title": "Save the change: review first",
       "states": [
         {
           "at": 0,
@@ -765,7 +732,7 @@
       "chapter": 3,
       "in": 76.33333333333333,
       "out": 81.43333333333334,
-      "title": "Save the change and notify your guests",
+      "title": "Save the change: notify both guests",
       "states": [
         {
           "at": 0,
@@ -815,7 +782,8 @@
         0,
         0.890625
       ],
-      "pointAfter": 1.5
+      "pointAfter": 1.5,
+      "markerAt": 2.45
     },
     {
       "id": "browser",
@@ -823,7 +791,7 @@
       "chapter": 3,
       "in": 81.43333333333334,
       "out": 85.93333333333334,
-      "title": "Open the event in its account\u2019s Chrome profile",
+      "title": "Prefer the browser? Open it in Google Calendar.",
       "states": [
         {
           "at": 0,
@@ -842,14 +810,14 @@
         0.6666666666666666,
         0.46875
       ],
-      "subtitle": "From the event details, b uses the meeting\u2019s owning account.",
+      "subtitle": "An optional shortcut, using the meeting\u2019s own Chrome profile.",
       "proofAt": 1.5,
       "actions": [
         {
           "from": 0,
           "until": 1.5,
           "key": "b",
-          "text": "Open the selected event in Google Calendar",
+          "text": "Try the browser shortcut",
           "press": 1
         },
         {
@@ -923,5 +891,5 @@
       "title": "Gmail and Calendar in your terminal"
     }
   ],
-  "revision": "motion-continuous"
+  "revision": "progressive-native-opus"
 }

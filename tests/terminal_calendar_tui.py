@@ -12,6 +12,7 @@ import copy
 from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import traceback
@@ -55,6 +56,10 @@ def wait_calendar(terminal, view="Agenda"):
     terminal.until(lambda: "Calendar · " + view in terminal.text() and
                    ("Up to date" in terminal.text() or "Saved calendar" in terminal.text()))
     terminal.gap(.05)
+
+
+def hour_gutter(terminal):
+    return [line[:5] for line in terminal.screen.lines() if re.match(r"^\d{2}:00(?: |$)", line)]
 
 
 def search_mail(terminal, version):
@@ -797,7 +802,7 @@ def grid_coverage(binary, directory, captures):
     with Client(binary, client_dir, extra=fixture.options()) as client:
         client.request("calendar.list")
         state = provider_state(client)
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today = datetime(2026, 10, 19, tzinfo=timezone.utc)
     template = copy.deepcopy(state["events"][0])
     definitions = [("long", "Long planning 会議 🧭 with a long title", 9 * 60 + 30, 11 * 60 + 15),
                    ("overlap", "Overlap", 9 * 60 + 45, 10 * 60 + 45),
@@ -820,10 +825,18 @@ def grid_coverage(binary, directory, captures):
     try:
         terminal.send(b"C")
         wait_calendar(terminal)
+        terminal.send(b"\x07\x05" + b"\x7f" * 12 + today.date().isoformat().encode() + b"\r")
+        wait_calendar(terminal)
         terminal.send(b"3")
         wait_calendar(terminal, "Week")
-        # At38 rows the24 hours fit. No meeting can disappear off the grid.
-        require("00:00" in terminal.text() and "23:00" in terminal.text(), "wide grid wastes room while hiding hours")
+        # Pin selection independently of the clock; the Late call footer ends
+        # at00:00 and must never supply the midnight coverage oracle.
+        terminal.send(b"k" * len(definitions))
+        terminal.until(lambda: "Early start" in terminal.screen.lines()[-4])
+        expected_hours = [f"{hour:02}:00" for hour in range(24)]
+
+        # At38 rows all24 actual gutter labels fit, in chronological order.
+        require(hour_gutter(terminal) == expected_hours, "wide grid wastes room while hiding hours")
         require("09:30" in terminal.text() and "+1" in terminal.text(), "grid lost actual start minutes or overlap count")
         lines = terminal.screen.lines()
         row_10 = next(row for row in lines if row.startswith("10:00"))
@@ -832,8 +845,10 @@ def grid_coverage(binary, directory, captures):
                 "multi-hour meeting incorrectly appears free after start hour")
         capture(terminal, captures, "calendar-overlaps-wide")
         for columns in (104, 110):
+            before = terminal.screen.completed_frames
             terminal.resize(columns, 38)
-            terminal.until(lambda: "Sun" in terminal.text())
+            terminal.until(lambda: terminal.screen.completed_frames > before and "Sun" in terminal.text())
+            require(hour_gutter(terminal) == expected_hours, "seven-day resize hid an hour gutter label")
             camera_rows = [row for row in terminal.screen.lines() if row.startswith("09:00")]
             require(camera_rows and "" in camera_rows[0] and "Lo" in camera_rows[0] and "+1" in camera_rows[0], "narrow seven-day cell dropped camera, title or overlap count")
             capture(terminal, captures, f"calendar-camera-grid-{columns}")

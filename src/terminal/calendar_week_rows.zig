@@ -4,12 +4,56 @@ const std = @import("std");
 
 pub const hours = 24;
 pub const max_lines = 4;
+pub const Bands = struct {
+    overflow_row: ?usize,
+    offscreen_row: ?usize,
+    grid_start: usize,
+    hour_budget: usize,
+
+    /// Keep two all-day titles and the related-events footer. Overflow and
+    /// offscreen-hour hints consume a row only when they can contain content.
+    pub fn init(height: usize, max_all_day: usize) Bands {
+        const overflow = max_all_day > 2;
+        const after_dates: usize = 3 + @as(usize, @intFromBool(overflow));
+        const offscreen = height -| (after_dates + 1) < hours;
+        const grid_start = after_dates + @intFromBool(offscreen);
+        return .{
+            .overflow_row = if (overflow) 3 else null,
+            .offscreen_row = if (offscreen) after_dates else null,
+            .grid_start = grid_start,
+            .hour_budget = height -| (grid_start + 1),
+        };
+    }
+};
 pub const Plan = struct {
     count: usize = 0,
     lines: [hours]u8 = @splat(0),
     offsets: [hours]usize = @splat(0),
     used_rows: usize = 0,
 };
+
+test "calendar week rows: optional bands preserve all-day capacity and exactly fitting full-day grids" {
+    for (0..4) |all_day| {
+        const full_height: usize = if (all_day > 2) 29 else 28;
+        for (0..108) |height| {
+            const bands = Bands.init(height, all_day);
+            try std.testing.expectEqual(all_day > 2, bands.overflow_row != null);
+            try std.testing.expectEqual(height < full_height, bands.offscreen_row != null);
+            const plan = allocate(bands.hour_budget, @splat(0));
+            try std.testing.expectEqual(height >= full_height, plan.count == hours);
+            if (plan.count > 0) try std.testing.expect(bands.grid_start + plan.used_rows < height);
+            if (bands.overflow_row) |row| try std.testing.expect(row < bands.grid_start);
+            if (bands.offscreen_row) |row| {
+                try std.testing.expect(row < bands.grid_start);
+                if (bands.overflow_row) |overflow| try std.testing.expect(overflow < row);
+            }
+            if (height == full_height) {
+                try std.testing.expectEqual(@as(usize, hours), bands.hour_budget);
+                try std.testing.expectEqual(height - 2, bands.grid_start + plan.offsets[23]);
+            }
+        }
+    }
+}
 
 /// `needs[h]` is the largest candidate count in hour h across the visible days.
 /// Compact grids retain one row per visible hour. Once all 24 hours fit, spend

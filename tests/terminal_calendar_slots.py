@@ -18,7 +18,7 @@ import traceback
 
 from build_info import read_build_info
 from terminal_calendar import Invitations, provider_state
-from terminal_calendar_tui import capture, start, wait_calendar
+from terminal_calendar_tui import capture, hour_gutter, start, wait_calendar
 from terminal_integration import ACCOUNTS, Client, ROOT, require
 from terminal_mouse import click, point
 
@@ -249,8 +249,11 @@ def expansion(binary, directory, captures):
         capture(terminal, captures, "week-passive-priority-color")
         select_week_event(terminal, "Weekly studio block")
         capture(terminal, captures, "week-crowded-140x38")
+        expected_hours = [f"{hour:02}:00" for hour in range(24)]
+        before_frame = terminal.screen.completed_frames
         terminal.resize(140, 60)
-        terminal.until(lambda: "00:00" in terminal.text() and "23:00" in terminal.text() and "Notes" in terminal.text())
+        terminal.until(lambda: terminal.screen.completed_frames > before_frame and "Notes" in terminal.text())
+        require(hour_gutter(terminal) == expected_hours, "expanded grid hid an hour gutter label")
         lines = terminal.screen.lines()
         row10 = next(index for index, line in enumerate(lines) if line.startswith("10:00"))
         row11 = next(index for index, line in enumerate(lines) if line.startswith("11:00"))
@@ -261,13 +264,15 @@ def expansion(binary, directory, captures):
         require("overlapping" not in terminal.text(), "Week falsely labels same-hour appointments as conflicts")
         capture(terminal, captures, "week-expanded-140x60")
         # Layout geometry is independent of selection.
-        before = [line[:5] for line in lines if line[:2].isdigit() and line[2:5] == ":00"]
+        before = hour_gutter(terminal)
         terminal.send(b"jj")
         terminal.gap(.1)
-        after = [line[:5] for line in terminal.screen.lines() if line[:2].isdigit() and line[2:5] == ":00"]
+        after = hour_gutter(terminal)
         require(before == after, "selection changed the allocated hour rows")
+        before_frame = terminal.screen.completed_frames
         terminal.resize(104, 44)
-        terminal.until(lambda: "Sun" in terminal.text() and "23:00" in terminal.text())
+        terminal.until(lambda: terminal.screen.completed_frames > before_frame and "Sun" in terminal.text())
+        require(hour_gutter(terminal) == expected_hours, "populated seven-day resize hid an hour gutter label")
         capture(terminal, captures, "week-crowded-104")
         terminal.finish()
         with Client(binary, owned, extra=fixture.options()) as client:
