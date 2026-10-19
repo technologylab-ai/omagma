@@ -41,14 +41,24 @@ const routeFor = source => {
 const routes = new Map(sourceFiles.map(source => [source, routeFor(source)]));
 if (new Set(routes.values()).size !== routes.size) throw new Error('Duplicate documentation route');
 const navGroups = [
-  ['Get started', [['docs/README.md', 'Overview'], ['docs/FEATURES.md', 'Features'], ['docs/AGENT-SETUP.md', 'Agent-guided setup'], ['docs/INSTALL.md', 'Linux install'], ['docs/MACOS.md', 'Mac install'], ['docs/SETUP.md', 'Google & accounts']]],
-  ['Use Omagma', [['docs/UI.md', 'Bar'], ['docs/TERMINAL.md', 'Terminal'], ['docs/AGENT-CLI.md', 'Agent CLI'], ['docs/UPDATES.md', 'Updates'], ['docs/TUI-CACHE.md', 'Mail cache'], ['docs/BACKGROUND-REFRESH.md', 'Bar refresh'], ['docs/TERMINAL-BACKGROUND.md', 'Background cache']]],
+  ['Get started', [['docs/README.md', 'Overview'], ['docs/FEATURES.md', 'Features'], ['docs/AGENT-SETUP.md', 'Agent-guided setup'], ['docs/INSTALL.md', 'Linux install'], ['docs/MACOS.md', 'Mac install'], ['docs/SETUP.md', 'Google & accounts'], ['docs/CALENDAR-PERMISSIONS.md', 'Calendar access']]],
+  ['Use Omagma', [['docs/UI.md', 'Bar'], ['docs/TERMINAL.md', 'Mail & Calendar TUI'], ['docs/CALENDAR-EVENTS.md', 'Calendar & meetings'], ['docs/ENCRYPTION.md', 'Encrypted vault & daemon'], ['docs/AGENT-CLI.md', 'Agent CLI'], ['docs/UPDATES.md', 'Updates'], ['docs/TUI-CACHE.md', 'Mail cache'], ['docs/BACKGROUND-REFRESH.md', 'Bar refresh'], ['docs/TERMINAL-BACKGROUND.md', 'Background cache']]],
   ['About', [['docs/PRIVACY.md', 'Privacy'], ['docs/MEMORY.md', 'Memory'], ['docs/DISTRIBUTION.md', 'Distribution'], ['LICENSES/README.md', 'Licenses']]],
   ['Developers', [['docs/DEVELOPMENT.md', 'Development'], ['docs/ROADMAP.md', 'Next priorities'], ['docs/TRANSPORT.md', 'Transport'], ['docs/PROTOCOL.md', 'Bar protocol'], ['docs/TERMINAL-IMPLEMENTATION.md', 'Terminal architecture'], ['docs/TERMINAL-UI-DESIGN.md', 'Terminal UI'], ['docs/TERMINAL-PROVIDER-DESIGN.md', 'Provider design'], ['docs/VERIFICATION.md', 'Bar verification'], ['docs/TERMINAL-VERIFICATION.md', 'Terminal verification'], ['docs/RELEASING.md', 'Releases'], ['docs/ZIG017-WIKI-FOLLOWUP.md', 'Zig findings']]],
 ];
 const nav = active => navGroups.map(([label, entries]) => `<section class="nav-group"><h2>${label}</h2><ul>${entries.map(([source, name]) => `<li><a href="${base}${routes.get(source)}"${source === active ? ' aria-current="page" class="active"' : ''}>${name}</a></li>`).join('')}</ul></section>`).join('');
 const sectionFor = source => navGroups.find(([, entries]) => entries.some(([s]) => s === source))?.[0] ?? (source.includes('evidence') || source === 'EVIDENCE.md' ? 'Historical evidence' : 'Reference');
-const publicImages = new Set(['assets/omagma-logo.png', 'docs/images/omagma.png', 'docs/images/omagma-social.png', 'docs/images/omagma-social-preview.png']);
+const publicImages = new Set([
+  'assets/omagma-logo.png',
+  'docs/images/omagma.png',
+  'docs/images/omagma-calendar-week.png',
+  'docs/images/omagma-calendar-review.png',
+  'docs/images/omagma-meeting-reminder.png',
+  'docs/images/omagma-mail-invitation.png',
+  'docs/images/omagma-social-calendar.png',
+  'docs/images/omagma-social.png',
+  'docs/images/omagma-social-preview.png',
+]);
 for (const name of ['omagma-tui.png', 'omagma-tui-below.png', 'omagma-tui-arrivals.png', 'omagma-fetch.png', 'omagma-fetch.gif']) {
   const source = `docs/images/${name}`;
   try {
@@ -131,7 +141,7 @@ for (const source of sourceFiles) {
   const marked = new Marked({ renderer, gfm: true });
   const body = marked.parse(markdown.replace(/^---\n[\s\S]*?\n---\n/, ''));
   const title = headings.find(h => h.depth === 1)?.title ?? path.basename(source, '.md');
-  const description = `Omagma documentation: ${title}.`;
+  const description = `Omagma Gmail and Calendar documentation: ${title}.`;
   docs.push({ source, route: routes.get(source), title, description, headings, body });
 }
 const template = (content, values) => content.replace(/\{\{([a-z_]+)\}\}/g, (_, key) => {
@@ -147,11 +157,11 @@ for (const [source, target] of imageRoutes) {
   await fs.copyFile(path.join(repo, source), path.join(dist, target));
 }
 for (const name of ['site.css', 'site.js']) await fs.copyFile(path.join(here, name), path.join(dist, 'assets', name));
-const common = { base, version: escape(packageVersion), section: 'Omagma', title: 'Omagma — mail without the weight', description: 'Separate Gmail accounts in the Linux Omarchy bar, experimental Linux/Mac terminal client and agent CLI.', body: '', sidebar: '', toc: '', source_url: `${github}/blob/main/README.md` };
+const common = { base, version: escape(packageVersion), section: 'Omagma', title: 'Omagma — Gmail and Calendar in your terminal', description: 'Gmail and Google Calendar in your Linux or macOS terminal. Plan meetings, invite guests and join calls in the right Chrome profile. Optional encrypted vault, agent CLI and read-only Omarchy mail widget.', body: '', sidebar: '', toc: '', source_url: `${github}/blob/main/README.md` };
 const decorate = (html, route) => {
   const canonical = new URL(route, siteUrl).href;
-  const social = new URL('assets/omagma-social-preview.png', siteUrl).href;
-  return html.replace('</head>', `<link rel="canonical" href="${escape(canonical)}"><meta property="og:type" content="website"><meta property="og:url" content="${escape(canonical)}"><meta property="og:image" content="${escape(social)}"><meta name="theme-color" content="#14151c"></head>`);
+  const social = new URL('assets/omagma-social-calendar.png', siteUrl).href;
+  return html.replace('</head>', `<link rel="canonical" href="${escape(canonical)}"><meta property="og:url" content="${escape(canonical)}"><meta property="og:image" content="${escape(social)}"><meta property="og:image:type" content="image/png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Omagma: Gmail and Calendar in your terminal, with a real combined Week view and fictional demo events"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${escape(social)}"><meta name="twitter:image:alt" content="Omagma: Gmail and Calendar in your terminal"><meta name="theme-color" content="#14151c"></head>`);
 };
 await fs.writeFile(path.join(dist, 'index.html'), decorate(template(landing, common), ''));
 for (const doc of docs) {

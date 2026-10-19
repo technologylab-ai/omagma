@@ -27,10 +27,10 @@
       <nav class="site-nav" aria-label="Primary">
         <ul>
           <li><a href="{{base}}docs/">Docs</a></li>
-          <li class="site-nav__opt"><a href="{{base}}docs/features/">Features</a></li>
+          <li class="site-nav__opt"><a href="#calendar">Calendar</a></li>
           <li class="site-nav__opt"><a href="{{base}}docs/privacy/">Privacy</a></li>
           <li><a href="https://github.com/technologylab-ai/omagma">GitHub</a></li>
-          <li><a class="button button--quiet button--small" href="#get-started">Get started</a></li>
+          <li class="site-nav__cta"><a class="button button--quiet button--small" href="#get-started">Get started</a></li>
         </ul>
       </nav>
     </div>
@@ -38,27 +38,23 @@
 
   <main id="content" tabindex="-1">
 
-    <!-- Hero: copy, then the real terminal capture -->
+    <!-- Hero: product statement, then the combined Calendar Week -->
     <section class="hero" aria-labelledby="hero-title">
       <div class="wrap hero__copy">
         <div class="hero__headline">
-          <p class="eyebrow">Gmail for Omarchy and macOS</p>
-          <h1 id="hero-title" class="hero__title">Gmail, one account at a time.</h1>
+          <p class="eyebrow">Native terminal app · Linux and macOS</p>
+          <h1 id="hero-title" class="hero__title">Gmail and Calendar <em>in your terminal.</em></h1>
         </div>
         <div class="hero__intro">
-          <p class="hero__lede">Check Gmail from your Linux Omarchy bar, read and reply in the experimental Linux/Mac TUI, or use the structured agent CLI. Up to three accounts keep separate mail, permissions and Chrome profiles.</p>
-          <div class="hero__proof">
-            <p><a href="{{base}}docs/memory/#three-account-bar-measurement-v022"><strong>≈31 MB RAM</strong> Linux three-account bar baseline</a></p>
-            <p>Cached mail is ready while Gmail updates in the background.</p>
-            <p class="hero__proof-note">Bar v0.2.2 · 2026-10-05. Inspired by the author’s ~2 GB Gmail tab.</p>
-          </div>
+          <p class="hero__lede">Omagma is a keyboard-first terminal client for Linux and macOS. Read and send Gmail, see the calendars of up to three Google accounts in one Week, create meetings with Google Meet, and join each call in the right Chrome profile.</p>
           <div class="hero__actions">
             <a class="button button--primary" href="{{base}}docs/agent-setup/">Set up with your agent <span class="button__arrow" aria-hidden="true">→</span></a>
-            <a class="button button--quiet" href="{{base}}docs/install/">Install manually</a>
+            <a class="button button--quiet" href="#manual">Install manually</a>
           </div>
           <ul class="meta-list hero__meta">
-            <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Release bundles</a></li>
-            <li>Linux + macOS downloads</li>
+            <li><span class="tag tag--experimental">Experimental</span></li>
+            <li><a href="{{base}}docs/release-notes/0.2.10/">What’s new in 0.2.10</a></li>
+            <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Linux + macOS releases</a></li>
             <li>No Zig needed to install</li>
             <li>MIT licensed</li>
           </ul>
@@ -67,158 +63,275 @@
 
       <figure class="shot shot--hero wrap wrap--wide">
         <div class="shot__frame">
-          <img src="{{base}}assets/omagma-tui.png" width="1584" height="864" fetchpriority="high" decoding="async"
-               alt="The experimental Omagma terminal client showing fictional demo mail: accounts and mailboxes, a message list, and a reader pane.">
+          <p class="shot__bar" aria-hidden="true"><span>omagma tui</span><span>Calendar › Week › All accounts</span><span class="shot__pan-top">Swipe to explore ↔</span></p>
+          <div class="shot__body shot__body--week" role="region" tabindex="0" aria-label="Combined Calendar Week screenshot">
+            <a class="shot__zoom" href="{{base}}assets/omagma-calendar-week.png" tabindex="-1">
+              <img src="{{base}}assets/omagma-calendar-week.png" width="1584" height="768" fetchpriority="high" decoding="async"
+                   alt="Omagma’s Calendar Week view in a terminal: Monday to Sunday columns with hourly rows, events from three fictional accounts marked by source letter and colour, a legend of each account’s calendars, and the selected event’s details and actions in the footer.">
+            </a>
+          </div>
         </div>
         <figcaption class="shot__caption">
           <span class="shot__caption-text">
-            <span class="tag tag--experimental">Experimental</span>
-            <span><code>omagma tui</code> with fictional mail — a real terminal capture.</span>
+            <strong class="shot__title">Combined Week</strong>
+            <span class="shot__pan-hint">Swipe or use arrow keys to explore.</span>
+            <span>Three Google accounts, one grid. Real application, fictional demo data.</span>
           </span>
-          <a class="shot__link" href="{{base}}assets/omagma-tui.png">Full-size capture</a>
+          <a class="shot__link" href="{{base}}assets/omagma-calendar-week.png">Full size</a>
         </figcaption>
       </figure>
     </section>
 
-    <!-- Interfaces: Bar / TUI / CLI with permission scopes -->
-    <section class="section" id="interfaces" aria-labelledby="interfaces-title">
-      <div class="wrap">
+    <!-- Calendar: week → reviewed meeting → reminder and Join → invitation in Mail -->
+    <section class="section cal" id="calendar" aria-labelledby="calendar-title">
+      <div class="wrap wrap--wide">
         <header class="section-head">
-          <p class="eyebrow">Three interfaces</p>
-          <h2 id="interfaces-title">Read-only by default. Write access only where you grant it.</h2>
-          <p class="section-head__intro">The bar, terminal client and agent CLI share the same one to three accounts and keep them apart: separate lists, unread counts, credentials and Chrome profiles, with no combined Inbox. Terminal writes need a grant you approve per account. Alongside the Linux bar, use a different Google OAuth registration so its read-only grant stays intact.</p>
+          <p class="eyebrow eyebrow--cal">Calendar</p>
+          <h2 id="calendar-title">Plan the week, book the meeting, join the call.</h2>
+          <p class="section-head__intro">Agenda, Day and Week views combine the calendars you choose from up to three accounts. Calendar is opt-in per account and uses its own <a href="{{base}}docs/calendar-permissions/">Google permission</a>.</p>
         </header>
 
-        <ul class="ifaces">
-          <li class="iface">
-            <div class="iface__head">
-              <h3 class="iface__name">Omarchy bar</h3>
-              <span class="tag tag--readonly">Read-only</span>
-            </div>
-            <div class="iface__body">
-              <p>Click the magma icon to see each account’s unread count and up to 30 recent Inbox messages with sender, subject, time and snippet. Activating a message or <strong>Open inbox</strong> opens Gmail in that account’s own Chrome profile.</p>
-              <p>Refresh on demand, or turn on five-minute background refresh. The bar never sends mail, changes labels or read status, or saves mail to disk.</p>
-              <p><a class="more" href="{{base}}docs/ui/">Bar dropdown guide <span aria-hidden="true">→</span></a></p>
-            </div>
-            <dl class="iface__access">
-              <dt>Permission</dt>
-              <dd><code>gmail.readonly</code></dd>
-              <dt>Google OAuth</dt>
-              <dd>One registration</dd>
-              <dt>Mail kept</dt>
-              <dd>In memory only</dd>
-            </dl>
-            <figure class="shot iface__figure">
-              <div class="shot__frame">
-                <img src="{{base}}assets/omagma.png" width="1480" height="880" loading="lazy" decoding="async"
-                     alt="The bar dropdown: three fictional accounts in a sidebar, each marked Current with its own unread count, beside the selected account’s recent Inbox messages showing sender, subject, snippet and time.">
+        <div class="chapter chapter--text" id="week">
+          <header class="chapter__head">
+            <p class="chapter__num" aria-hidden="true">01</p>
+            <h3 class="chapter__title">Combined Week across three accounts</h3>
+          </header>
+          <div class="chapter__body">
+            <p>Show your own calendars, shared ones and subscriptions such as holidays, from one account or all three. Each event keeps its account, a source letter and the colour you picked, so the grid reads without colour too. Your choices persist across restarts.</p>
+            <p><strong>Priority</strong> helps order a crowded hour. Non-declined events and new starts come first; <code>+N</code> counts what doesn’t fit, and <kbd>Space</kbd> lists every event in those hours.</p>
+            <p><strong>Mail stays one account at a time.</strong> Calendar is the one place your accounts meet.</p>
+          </div>
+          <dl class="keys" aria-label="Calendar keys">
+            <div><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Agenda, Day, Week</dd></div>
+            <div><dt><kbd>g</kbd></dt><dd>Calendars, colours, Priority</dd></div>
+            <div><dt><kbd>Space</kbd></dt><dd>Show all in a busy hour</dd></div>
+            <div><dt><kbd>n</kbd> <kbd>e</kbd></dt><dd>New event, edit event</dd></div>
+            <div><dt><kbd>o</kbd></dt><dd>Join the call</dd></div>
+            <div><dt><kbd>b</kbd></dt><dd>Open this event in Google Calendar</dd></div>
+          </dl>
+        </div>
+
+        <div class="chapter chapter--wide" id="new-meetings">
+          <header class="chapter__head">
+            <p class="chapter__num" aria-hidden="true">02</p>
+            <h3 class="chapter__title">Create meetings with Contacts guests and Google Meet</h3>
+          </header>
+          <div class="chapter__body">
+            <p>Press <kbd>n</kbd>, choose the account and calendar, and set a timed or all-day event with its time zone. Pick guests from that account’s Contacts. Add Google Meet on calendars that support it, or paste an existing HTTPS meeting link.</p>
+            <p><strong>Review before saving.</strong> The review lists the destination, time, guests and exactly who gets an email. Nothing is saved or sent until you confirm with <kbd>y</kbd>, a click, or <kbd>Tab</kbd> and <kbd>Enter</kbd>. Google generates the Meet link when the event is saved.</p>
+            <p><strong>Reschedule with <kbd>e</kbd>.</strong> Edit events you organize, or one occurrence of a recurring series; guests, responses and the call stay attached. To change a whole series or an attendee copy, you can press <kbd>b</kbd> to open that event in Google Calendar.</p>
+          </div>
+          <figure class="shot chapter__figure">
+            <div class="shot__frame">
+              <p class="shot__bar" aria-hidden="true"><span>omagma tui</span><span>Calendar › Review new event</span></p>
+              <div class="shot__body">
+                <a class="shot__zoom" href="{{base}}assets/omagma-calendar-review.png" tabindex="-1">
+                  <img src="{{base}}assets/omagma-calendar-review.png" width="1584" height="912" loading="lazy" decoding="async"
+                       alt="Omagma’s review screen for a new meeting: title, date, time zone, calendar and account; two guests chosen from Contacts with a notice that they will receive invitation emails; Google Meet set to be generated on save; and the button that creates the event and emails both guests.">
+                </a>
               </div>
-              <figcaption class="shot__caption">
-                <span class="shot__caption-text">
-                  <span class="tag tag--readonly">Read-only</span>
-                  <span>The bar dropdown with fictional accounts.</span>
-                </span>
-              </figcaption>
-            </figure>
-          </li>
+            </div>
+            <figcaption class="shot__caption">
+              <span class="shot__caption-text">
+                <strong class="shot__title">New meeting review</strong>
+                <span>Two guests from Contacts. Meet is generated after you confirm.</span>
+              </span>
+              <a class="shot__link" href="{{base}}assets/omagma-calendar-review.png">Full size</a>
+            </figcaption>
+          </figure>
+        </div>
 
-          <li class="iface">
-            <div class="iface__head">
-              <h3 class="iface__name">Terminal client · Linux and Mac</h3>
-              <p class="iface__cmd"><code>omagma tui</code></p>
-              <span class="tag tag--experimental">Experimental</span>
+        <div class="chapter chapter--wide" id="reminders">
+          <header class="chapter__head">
+            <p class="chapter__num" aria-hidden="true">03</p>
+            <h3 class="chapter__title">Meeting reminders with Join in the right Chrome profile</h3>
+          </header>
+          <div class="chapter__body">
+            <p>While the TUI is open, a reminder appears over Mail or Calendar ten minutes before an event. It counts down to the start, then shows the time remaining during the meeting. <strong>Join</strong> opens the call in the Chrome profile configured for the event’s account, so a work call opens in your work profile.</p>
+            <p>Reminders wait while you compose or use your editor. Dismiss with a click, or <kbd>M</kbd> then <kbd>Ctrl+D</kbd>; ordinary typing never dismisses one.</p>
+          </div>
+          <figure class="shot chapter__figure">
+            <div class="shot__frame">
+              <p class="shot__bar" aria-hidden="true"><span>omagma tui</span><span>Meeting reminder</span></p>
+              <div class="shot__body">
+                <a class="shot__zoom" href="{{base}}assets/omagma-meeting-reminder.png" tabindex="-1">
+                  <img src="{{base}}assets/omagma-meeting-reminder.png" width="1584" height="912" loading="lazy" decoding="async"
+                       alt="A meeting reminder over Omagma’s running terminal view, showing the meeting title, the minutes remaining before it starts, and a Join button.">
+                </a>
+              </div>
             </div>
-            <div class="iface__body">
-              <p>Full messages and threads, with the reader beside or below the list, Vim keys, mouse navigation and a native text view of HTML-only mail. Scripts and remote images never load.</p>
-              <p>Search the cache with <kbd>/</kbd> or Gmail with <kbd>\</kbd>. Write drafts, replies and reply-all with attachments; create and edit contacts; archive, Trash, star and assign labels; create, rename and delete custom labels; answer invitations with an RSVP email. <code>$EDITOR</code> takes over the terminal to compose, then hands it back.</p>
-              <p>Compose Markdown source with a rendered outgoing preview, original reply context and a plain-text alternative. <kbd>Ctrl+T</kbd> changes format, normal compose <kbd>p</kbd> changes preview, and send review requires explicit <kbd>y</kbd>.</p>
-              <p><a class="more" href="{{base}}docs/terminal/">Terminal guide <span aria-hidden="true">→</span></a></p>
-            </div>
-            <dl class="iface__access">
-              <dt>To read</dt>
-              <dd>A <code>gmail.readonly</code> grant</dd>
-              <dt>Full access</dt>
-              <dd><code>gmail.modify</code> + <code>contacts</code>; a different registration if you also use the bar</dd>
-              <dt>Mail kept</dt>
-              <dd>Private plaintext disk cache</dd>
-            </dl>
-          </li>
+            <figcaption class="shot__caption">
+              <span class="shot__caption-text">
+                <strong class="shot__title">Meeting reminder</strong>
+                <span>Countdown and Join, over the Mail or Calendar view you’re in.</span>
+              </span>
+              <a class="shot__link" href="{{base}}assets/omagma-meeting-reminder.png">Full size</a>
+            </figcaption>
+          </figure>
+        </div>
 
-          <li class="iface">
-            <div class="iface__head">
-              <h3 class="iface__name">Agent CLI</h3>
-              <p class="iface__cmd"><code>omagma cli</code></p>
-              <span class="tag tag--experimental">Experimental</span>
+        <div class="chapter chapter--wide" id="invitations">
+          <header class="chapter__head">
+            <p class="chapter__num" aria-hidden="true">04</p>
+            <h3 class="chapter__title">Invitations in Mail, saved to Calendar</h3>
+          </header>
+          <div class="chapter__body">
+            <p>An invitation appears as a card inside the message. Review whether it adds, updates or cancels the event in Calendar. <strong>Accept</strong> or <strong>Tentative</strong> sends your RSVP and, with Calendar write permission, saves a supported invitation to Calendar.</p>
+            <p>Mail and Calendar results are reported separately, and checking an uncertain result never sends a second RSVP. Calendar and Follow-ups sit in the Mail sidebar.</p>
+          </div>
+          <figure class="shot chapter__figure">
+            <div class="shot__frame">
+              <p class="shot__bar" aria-hidden="true"><span>omagma tui</span><span>Mail › Inbox › Invitation</span></p>
+              <div class="shot__body">
+                <a class="shot__zoom" href="{{base}}assets/omagma-mail-invitation.png" tabindex="-1">
+                  <img src="{{base}}assets/omagma-mail-invitation.png" width="1584" height="912" loading="lazy" decoding="async"
+                       alt="Omagma Mail with an invitation open: the sidebar lists accounts, mailboxes, Contacts, Calendar and Follow-ups; the message list sits in the middle; the reader shows a themed invitation card with the meeting time and a Respond action above the message.">
+                </a>
+              </div>
             </div>
-            <div class="iface__body">
-              <p>One-shot commands and a JSONL client on the same account-scoped executor as the TUI. Every request names its account, pages return up to 100 messages with explicit cursors, and cached and Gmail search stay distinct.</p>
-              <p>Sends and RSVPs record durable operation receipts. An unknown outcome is never retried automatically. Use <code>--format markdown|plain</code> and local <code>draft preview</code> for rendered HTML and plain alternatives.</p>
-              <p><a class="more" href="{{base}}docs/agent-cli/">CLI contract <span aria-hidden="true">→</span></a></p>
-            </div>
-            <dl class="iface__access">
-              <dt>Permission</dt>
-              <dd>The TUI’s terminal grant</dd>
-              <dt>Output</dt>
-              <dd>JSON and JSONL on stdout</dd>
-              <dt>Agent writes</dt>
-              <dd>Only with your task authorization</dd>
-            </dl>
+            <figcaption class="shot__caption">
+              <span class="shot__caption-text">
+                <strong class="shot__title">Invitation in Mail</strong>
+                <span>Invitation card in the reader; Calendar and Follow-ups in the sidebar.</span>
+              </span>
+              <a class="shot__link" href="{{base}}assets/omagma-mail-invitation.png">Full size</a>
+            </figcaption>
+          </figure>
+        </div>
+
+        <p class="links cal__links">
+          <a class="more" href="{{base}}docs/calendar-events/">Create and edit events <span aria-hidden="true">→</span></a>
+          <a class="more" href="{{base}}docs/calendar-permissions/">Calendar permissions <span aria-hidden="true">→</span></a>
+          <a class="more" href="{{base}}docs/release-notes/0.2.10/">0.2.10 release notes <span aria-hidden="true">→</span></a>
+        </p>
+      </div>
+    </section>
+
+    <!-- Mail: account-separated, feature names as headings -->
+    <section class="section mail" id="mail" aria-labelledby="mail-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Mail</p>
+          <h2 id="mail-title">Gmail in the TUI, one account at a time.</h2>
+          <p class="section-head__intro">Each account keeps its own mailboxes, unread counts, credentials and Chrome profile. There is no combined Inbox.</p>
+        </header>
+
+        <ul class="feats">
+          <li>
+            <h3>Threads with the reader beside or below</h3>
+            <p>Vim keys and mouse. HTML mail renders as native text; scripts and remote images never load.</p>
+          </li>
+          <li>
+            <h3>Search the cache or Gmail</h3>
+            <p><kbd>/</kbd> searches cached mail and <kbd>\</kbd> asks Gmail. Cached mail opens first while Gmail catches up in the background.</p>
+          </li>
+          <li>
+            <h3>Markdown compose with preview</h3>
+            <p>Check the rendered message and its plain-text alternative, or hand the draft to <code>$EDITOR</code>. Replies keep the original context.</p>
+          </li>
+          <li>
+            <h3>Send review with undo</h3>
+            <p>Sending needs an explicit confirmation, then an undo countdown you can cancel: ten seconds by default, configurable.</p>
+          </li>
+          <li>
+            <h3>Attachments, labels and Contacts</h3>
+            <p>Attach and save files, archive, star and label mail, and edit the account’s contacts.</p>
+          </li>
+          <li>
+            <h3>Follow-ups</h3>
+            <p>Set a local reminder on a message. Due follow-ups stay available offline and after restarting.</p>
           </li>
         </ul>
+
+        <p class="links">
+          <a class="more" href="{{base}}docs/terminal/">Terminal guide <span aria-hidden="true">→</span></a>
+          <a class="more" href="{{base}}docs/tui-cache/">Mail cache <span aria-hidden="true">→</span></a>
+        </p>
       </div>
     </section>
 
-    <!-- Memory motivation: dated, scoped, anchored to the measurement page -->
-    <section class="memory" id="memory" aria-labelledby="memory-title">
-      <div class="wrap memory__inner">
-        <div class="memory__story">
-          <h2 class="eyebrow" id="memory-title">Why it exists</h2>
-          <p class="memory__lead">Omagma started because one Gmail tab was using roughly <strong>2&nbsp;GB of RAM</strong> on the author’s desktop.</p>
-          <p class="memory__note">An individual observation, not a universal Gmail requirement.</p>
-        </div>
-        <div class="memory__figure">
-          <p class="memory__value"><span class="memory__approx" aria-hidden="true">≈</span><span class="sr-only">Approximately </span>31&nbsp;MB</p>
-          <p class="memory__label">The read-only bar with three connected accounts: backend plus its attributed share of the bar UI.</p>
-          <ul class="meta-list">
-            <li>v0.2.2</li>
-            <li>Measured 2026-10-05</li>
-            <li>Linux x86_64</li>
-          </ul>
-        </div>
-        <p class="memory__fine">Chrome and unrelated shell widgets are excluded. Both figures are approximate observations, not a controlled benchmark, and the 31&nbsp;MB estimate covers the bar only — not the terminal client or later versions. <a href="{{base}}docs/memory/">Memory measurements <span aria-hidden="true">→</span></a></p>
-      </div>
-    </section>
+    <!-- Supporting interfaces: agent CLI, optional vault, read-only bar -->
+    <section class="section around" id="interfaces" aria-labelledby="interfaces-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Beyond the TUI</p>
+          <h2 id="interfaces-title">Agent CLI, optional encrypted vault and the Omarchy bar</h2>
+        </header>
 
-    <!-- Cache-first terminal behavior and progressive loading -->
-    <section class="section" id="cache" aria-labelledby="cache-title">
-      <div class="wrap split">
-        <div class="split__text">
-          <p class="eyebrow">Terminal cache</p>
-          <h2 id="cache-title">Cached mail first. Gmail catches up.</h2>
-          <p>The terminal client opens with the mail it already has and keeps it readable while Gmail refreshes in the background; a refresh requests only the changes since its last update. By default each account keeps its newest 2,000 messages within 256&nbsp;MiB and evicts the oldest tail. An optional Linux five-minute timer keeps the cache ready even while the TUI is closed. Mac installation does not add a background service.</p>
-          <p>Placeholder rows turn into messages as metadata and bodies arrive. A <code>metadata 1/32</code> or <code>bodies 1/32</code> counter reports the batch in progress, and scrolling past either end of the 32-row list moves continuously through adjacent cached mail.</p>
-          <p>Cached mail is private plaintext with owner-only permissions, kept apart from the bar’s memory-only snapshot.</p>
-          <p class="links">
-            <a class="more" href="{{base}}docs/tui-cache/">Cache behavior <span aria-hidden="true">→</span></a>
-            <a class="more" href="{{base}}docs/privacy/">Privacy and credentials <span aria-hidden="true">→</span></a>
-          </p>
-        </div>
-        <figure class="shot split__media">
-          <div class="shot__frame">
-            <picture>
-              <source srcset="{{base}}assets/omagma-fetch.png" media="(prefers-reduced-motion: reduce)">
-              <img src="{{base}}assets/omagma-fetch.gif" width="1584" height="864" loading="lazy" decoding="async"
-                   alt="Terminal capture of fictional mail loading: placeholder rows fill in with messages while a batch counter advances.">
-            </picture>
-          </div>
-          <figcaption class="shot__caption">
-            <span class="shot__caption-text">
+        <ul class="around__grid">
+          <li class="around__item">
+            <div class="around__head">
+              <h3>Agent CLI</h3>
               <span class="tag tag--experimental">Experimental</span>
-              <span>Fictional mail loading while cached messages stay readable.</span>
-            </span>
-            <button class="shot__link motion-toggle" type="button" data-animation-toggle data-animated="{{base}}assets/omagma-fetch.gif" data-still="{{base}}assets/omagma-fetch.png" aria-pressed="true">Pause animation</button>
-          </figcaption>
-        </figure>
+            </div>
+            <p class="around__cmd"><code>omagma cli</code></p>
+            <p>The TUI’s account-scoped actions as JSON and JSONL for coding agents: mail, drafts, contacts, invitations and Calendar events. Account actions name their account explicitly.</p>
+            <p>Discover it offline: <code>omagma cli --help</code> lists commands, and <code>omagma cli --help calendar.event-review</code> prints that command’s contract. Calendar writes go through review and apply with receipts; uncertain results are never retried automatically.</p>
+            <p><a class="more" href="{{base}}docs/agent-cli/">CLI contract <span aria-hidden="true">→</span></a></p>
+          </li>
+          <li class="around__item">
+            <div class="around__head">
+              <h3>Encrypted vault</h3>
+              <span class="tag tag--release">Opt-in</span>
+            </div>
+            <p class="around__cmd"><code>omagma vault migrate</code></p>
+            <p>Keep cached mail, drafts, attachments, settings and account credentials in an encrypted vault. One unlocked <code>omagma</code> daemon serves the TUI and agent CLI, including over SSH.</p>
+            <p>Without it, the cache is owner-only plaintext. Migrate explicitly, then activate the vault; only then are credentials stored there. Migration leaves your original files for you to retire.</p>
+            <p><a class="more" href="{{base}}docs/encryption/">Vault setup <span aria-hidden="true">→</span></a></p>
+          </li>
+          <li class="around__item">
+            <div class="around__head">
+              <h3>Omarchy bar</h3>
+              <span class="tag tag--readonly">Read-only · Linux</span>
+            </div>
+            <p class="around__cmd">Omarchy / Quickshell</p>
+            <p>Unread counts and up to 30 recent Inbox messages per account, in the Linux Omarchy bar. A message opens in that account’s Chrome profile.</p>
+            <p>Mail only, no Calendar. The bar never sends, changes or saves mail to disk.</p>
+            <p><a class="more" href="{{base}}docs/ui/">Bar guide <span aria-hidden="true">→</span></a></p>
+          </li>
+        </ul>
+
+        <p class="fine around__note"><span class="tag tag--source">Source build</span> Browser tech demo: an optional <code>-Dbrowser=true</code> build runs the TUI’s mail workflows in WebAssembly. Calendar and the vault are not available in the browser. <a href="https://github.com/technologylab-ai/omagma/blob/main/web-demo/README.md">Browser demo</a></p>
+      </div>
+    </section>
+
+    <!-- Access: short, after the product proof -->
+    <section class="section access" id="access" aria-labelledby="access-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Permissions and privacy</p>
+          <h2 id="access-title">Your Google project. Your consent, per account.</h2>
+          <p class="section-head__intro">Omagma uses an OAuth registration in your own Google Cloud project. Each account approves its own access in its own Chrome profile.</p>
+        </header>
+
+        <dl class="scope-notes">
+          <div>
+            <dt>Bar</dt>
+            <dd><code>gmail.readonly</code>. Mail stays in memory.</dd>
+          </div>
+          <div>
+            <dt>Mail in TUI/CLI</dt>
+            <dd>Reading works with <code>gmail.readonly</code>. Sending and mailbox changes add <code>gmail.modify</code>; Contacts add <code>contacts</code>. If you also run the bar, give the terminal a separate registration so the bar’s read-only grant stays intact.</dd>
+          </div>
+          <div>
+            <dt>Calendar</dt>
+            <dd>Opt-in per account. <code>calendar-write-owned</code> creates and edits events on your calendars and saves invitations; add <code>calendar-read</code> for shared calendars and subscriptions. Generated Meet links need no extra permission.</dd>
+          </div>
+          <div>
+            <dt>Storage</dt>
+            <dd>Credentials use the default platform keyring (Secret Service on Linux, Keychain on macOS), owner-only unencrypted files you explicitly choose, or the vault after you explicitly migrate and activate it. The default mail cache is owner-only plaintext.</dd>
+          </div>
+          <div>
+            <dt>Testing apps</dt>
+            <dd>While your Google app is in Testing, grants expire after seven days; reconnecting is one command per account.</dd>
+          </div>
+        </dl>
+
+        <p class="links access__links">
+          <a class="more" href="{{base}}docs/calendar-permissions/">Calendar permissions <span aria-hidden="true">→</span></a>
+          <a class="more" href="{{base}}docs/privacy/">Privacy and credentials <span aria-hidden="true">→</span></a>
+          <a class="more" href="{{base}}docs/memory/">Memory measurements <span aria-hidden="true">→</span></a>
+        </p>
       </div>
     </section>
 
@@ -228,38 +341,38 @@
         <header class="section-head">
           <p class="eyebrow">Get started</p>
           <h2 id="start-title">Let your coding agent walk you through setup.</h2>
-          <p class="section-head__intro">Give your coding agent <a href="https://technologylab-ai.github.io/omagma/">this website</a> or the <a href="https://github.com/technologylab-ai/omagma">GitHub URL</a> and the prompt below. The agent fetches the instructions and prepares its own local files. It installs with Homebrew on Mac or downloads and verifies the matching Linux bundle, prepares private configuration, then guides you through Google Cloud Console one small step at a time, waiting for your feedback. You make the Google clicks and approve access in your own browser.</p>
+          <p class="section-head__intro">Give your coding agent <a href="https://technologylab-ai.github.io/omagma/">this website</a> or the <a href="https://github.com/technologylab-ai/omagma">GitHub URL</a> and the prompt below. It installs with Homebrew on macOS or downloads and verifies the matching Linux bundle, prepares private configuration, then guides you through Google Cloud Console one small step at a time. You make the Google clicks and approve access in your own browser.</p>
         </header>
 
         <div class="start__grid">
           <div class="prompt">
-            <p class="prompt__label"><span>Setup prompt</span><span>Read-only bar</span></p>
+            <p class="prompt__label"><span>Setup prompt</span><span>TUI + CLI · Linux or macOS</span></p>
             <div class="code-block">
-<button class="copy-code" type="button" data-copy="setup-prompt" aria-label="Copy setup prompt">Copy</button><pre><code id="setup-prompt">Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Follow skills/omagma-setup/SKILL.md and docs/SETUP.md. Download and verify the latest complete Omagma bundle for my Linux architecture, then install its Omarchy bar plugin and Omagma launcher entry, and offer to make Super+Shift+E open Omagma instead of HEY. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail access and profile links, then give me launch and reconnect instructions.</code></pre>
+<button class="copy-code" type="button" data-copy="setup-prompt" aria-label="Copy setup prompt">Copy</button><pre><code id="setup-prompt">Read AGENTS.md at https://github.com/technologylab-ai/omagma/blob/main/AGENTS.md and fetch its linked setup workflow and account guide yourself. Follow skills/omagma-setup/SKILL.md, docs/SETUP.md and docs/CALENDAR-PERMISSIONS.md. Install the latest Omagma release for my platform: Homebrew on macOS, or the verified complete bundle for my Linux architecture. Set up the experimental terminal client and agent CLI with full Mail access, and ask me which accounts should also use Calendar and which Calendar capabilities I want. Help me map my Gmail accounts to their existing Chrome profiles. Walk me through Google Console and OAuth one small step at a time, waiting for my feedback before the next Google step. Reuse my existing project and configuration where available, keep any working read-only bar registration intact, keep downloaded credentials private, and open consent in the correct profile for each account. Verify mail and calendar access without sending invitations, then give me launch and reconnect instructions.</code></pre>
             </div>
-            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and whether you want five-minute background refresh. If you already downloaded the Google registration JSON, give its local path — never paste its contents or any tokens. For Mac or terminal-only setup, and for sending or mailbox changes, use the <a href="{{base}}docs/agent-setup/#terminal-client-and-agents">full-access prompt</a>.</p>
+            <p class="prompt__after">Add your account addresses, each account’s Chrome profile directory, and which accounts should use Calendar. If you already downloaded the Google registration JSON, give its local path; never paste its contents or any tokens. Only want the read-only Linux bar? Use the <a href="{{base}}docs/agent-setup/">read-only bar prompt</a>.</p>
           </div>
 
           <div class="google">
             <h3>What the Google part involves</h3>
             <ol class="numbered">
-              <li><strong>Your own Google project.</strong> Create a Google Cloud project, enable the Gmail API and configure the consent screen. Register Omagma with Google and keep its downloaded registration files private.</li>
-              <li><strong>One OAuth registration for the bar.</strong> A Google OAuth registration with <code>gmail.readonly</code> covers the bar and read-only terminal browsing.</li>
-              <li><strong>Terminal-only, or alongside the bar.</strong> Full TUI/CLI access uses <code>gmail.modify</code> and <code>contacts</code> (People API). A fresh terminal-only installation needs one registration; alongside the bar, use a different registration in the same project and preserve its read-only grant.</li>
-              <li><strong>Consent per account, in its own profile.</strong> Each account maps to an existing Chrome profile. Consent opens there, and Omagma checks the returned address before storing the token in Secret Service on Linux or your user Keychain on Mac.</li>
+              <li><strong>Your own Google project.</strong> Create a Google Cloud project, enable the Gmail API (and the Calendar API if you want Calendar) and configure the consent screen. Keep the downloaded registration files private.</li>
+              <li><strong>Mail permissions.</strong> <code>gmail.readonly</code> covers the bar and read-only browsing. Full TUI/CLI Mail uses <code>gmail.modify</code> and <code>contacts</code> (People API). Alongside the bar, use a different registration in the same project and keep its read-only grant.</li>
+              <li><strong>Calendar, only where you want it.</strong> Add Calendar capabilities per account; <code>calendar-write-owned</code> covers creating events, Meet links and saving invitations. <a href="{{base}}docs/calendar-permissions/">Calendar permissions</a></li>
+              <li><strong>Consent per account, in its own profile.</strong> Each account maps to an existing Chrome profile. Consent opens there, and Omagma checks the returned address before storing the token in your chosen credential store, by default Secret Service on Linux or your user Keychain on macOS.</li>
             </ol>
             <p class="fine">While a Google app is in Testing, these grants expire after seven days; reconnecting is one command per account.</p>
           </div>
         </div>
 
-        <div class="manual">
+        <div class="manual" id="manual">
           <h3>Prefer to set it up by hand?</h3>
           <ol class="numbered numbered--row">
-            <li><strong>Choose your platform.</strong> On Mac, use <code>brew install renerocksai/tap/omagma</code> and the <a href="{{base}}docs/macos/">Mac guide</a>. On Linux, get the complete x86_64 or arm64 bundle and its <code>SHA256SUMS</code> from the <a href="https://github.com/technologylab-ai/omagma/releases/latest">latest release</a>.</li>
+            <li><strong>Choose your platform.</strong> On macOS, use <code>brew install renerocksai/tap/omagma</code> and the <a href="{{base}}docs/macos/">Mac guide</a>. On Linux, get the complete x86_64 or arm64 bundle and its <code>SHA256SUMS</code> from the <a href="https://github.com/technologylab-ai/omagma/releases/latest">latest release</a>.</li>
             <li><strong>Install.</strong> Verify the Linux or manual Mac bundle. Add the widget only for a Linux bar installation; it also adds an Omagma launcher entry, and <kbd>Super+Shift+E</kbd> can open it instead of HEY. <a href="{{base}}docs/install/">Installation guide</a> · <a href="{{base}}docs/install/#keyboard-shortcut">Keyboard shortcut</a></li>
-            <li><strong>Connect accounts.</strong> Create your Google OAuth registration, map each account to its Chrome profile and approve access. <a href="{{base}}docs/setup/">Account setup</a></li>
+            <li><strong>Connect accounts.</strong> Create your Google OAuth registration, map each account to its Chrome profile and approve access. Add Calendar per account if you want it. <a href="{{base}}docs/setup/">Account setup</a> · <a href="{{base}}docs/calendar-permissions/">Calendar setup</a></li>
           </ol>
-          <p class="fine">Only the Linux bar needs Omarchy’s Quickshell plugin host. Live mail uses Chrome and the unlocked platform keyring; the TUI needs a UTF-8 terminal. Linux binaries are static musl, and Mac binaries use system libraries; no Zig compiler is needed to install either. arm64 backend builds are tested separately; ARM desktop integration has not been qualified.</p>
+          <p class="fine">Only the Linux bar needs Omarchy’s Quickshell plugin host. Live mail uses Chrome and the authorized credentials in your chosen store, by default the unlocked platform keyring; the TUI needs a UTF-8 terminal. Linux binaries are static musl, and Mac binaries use system libraries; no Zig compiler is needed to install either. Building from source needs Zig 0.17.0 exactly: see <a href="{{base}}docs/development/">Development</a>. arm64 backend builds are tested separately; ARM desktop integration has not been qualified.</p>
           <p class="fine">Optional preview: <code>omagma tui --fixtures</code> shows fictional mail without contacting Google. It isn’t part of installation.</p>
         </div>
       </div>
@@ -273,19 +386,20 @@
           <img class="brand__mark" src="{{base}}assets/omagma-logo.png" alt="" width="22" height="22">
           <span class="brand__name">omagma</span>
         </a>
-        <p class="site-footer__tagline">Gmail, one account at a time.</p>
+        <p class="site-footer__tagline">Gmail and Calendar in your terminal.</p>
       </div>
       <nav aria-label="Footer">
         <ul>
           <li><a href="{{base}}docs/">Documentation</a></li>
           <li><a href="{{base}}docs/features/">Features</a></li>
+          <li><a href="{{base}}docs/calendar-events/">Calendar</a></li>
           <li><a href="{{base}}docs/memory/">Memory</a></li>
           <li><a href="{{base}}docs/privacy/">Privacy</a></li>
           <li><a href="https://github.com/technologylab-ai/omagma">GitHub</a></li>
           <li><a href="https://github.com/technologylab-ai/omagma/releases/latest">Releases</a></li>
         </ul>
       </nav>
-      <p class="site-footer__legal">MIT licensed · © technologylab.ai · Screenshots show fictional accounts and mail.</p>
+      <p class="site-footer__legal">MIT licensed · © technologylab.ai</p>
     </div>
   </footer>
 </body>

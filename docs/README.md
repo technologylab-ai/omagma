@@ -2,7 +2,7 @@
 
 Start with installation and account setup, then choose the bar, terminal or
 agent guide. The bar is read-only; the experimental TUI and CLI can use an
-account grant for sending and mailbox/contact changes. The bar runs on Linux
+account grant for sending, mailbox/contact changes and optional Calendar access. The bar runs on Linux
 Omarchy; the TUI and CLI run on Linux and macOS.
 
 These guides describe Omagma’s current features. Dated evidence reports retain
@@ -26,7 +26,10 @@ smaller reading, composition, organization and agent workflow details.
 | --- | --- |
 | [macOS installation](MACOS.md) | Homebrew, native release bundles, Keychain and Chrome defaults |
 | [Bar dropdown](UI.md) | Account switching, mail links and refresh status |
-| [Terminal mail](TERMINAL.md) | Reading, search, compose/reply, contacts, attachments, labels and keyboard/mouse controls |
+| [Terminal Mail and Calendar](TERMINAL.md) | Mail, Calendar, meeting reminders, invitations, Follow-ups and keyboard/mouse controls |
+| [Calendar events and meetings](CALENDAR-EVENTS.md) | Combined calendars, timed/all-day events, Contacts guests, Meet links, rescheduling and reviewed saves |
+| [Calendar permissions](CALENDAR-PERMISSIONS.md) | Optional access per account and Google setup for reading, creating and updating events |
+| [Encrypted vault and daemon](ENCRYPTION.md) | Optional encrypted persistence, app-password unlock, native daemon and agent/SSH access |
 | [Agent CLI](AGENT-CLI.md) | Structured commands, account selection, cache/server search, drafts, receipts and CLI/TUI coverage |
 | [Browser WebAssembly](../web-demo/README.md) | Optional source build, local server, existing-account connection and supported browser workflows |
 | [Updates](UPDATES.md) | Daily release notices, dismissal and installation-specific Omarchy/Homebrew/manual upgrade guidance |

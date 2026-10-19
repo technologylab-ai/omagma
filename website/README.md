@@ -32,3 +32,40 @@ The approved logo and screenshots remain actual project assets. The guides
 describe current project features; historical memory observations
 retain their dates and accounting boundaries. The sidebar version follows
 `build.zig.zon` automatically when the application version changes.
+
+## Calendar screenshots and social preview
+
+The homepage, project README and social card use reviewed native v0.2.10
+screenshots under `docs/images/`. Reproduce the four views with
+[`scripts/public-captures/README.md`](../scripts/public-captures/README.md).
+All accounts, Contacts, events and invitations are fictional. The meeting review
+requests Google Meet generation; a Meet URL is created only after saving.
+
+`templates/social.html` composes the approved logo and actual combined Week
+capture at 1200 × 630. To render it, first acquire the cooperative host
+reservation described in `docs/VERIFICATION.md` and retain it through browser
+cleanup. Then pass its live token to the renderer:
+
+```sh
+HOST_TOKEN=YOUR_RESERVATION_TOKEN node website/tools/public-media.mjs social
+```
+
+The master is `docs/images/omagma-social-calendar.png`. The older
+`omagma-social.png` and `omagma-social-preview.png` names are compatibility
+copies of that artwork; the site metadata uses the Calendar-specific URL.
+No new runtime dependency is required. The renderer uses installed Chromium,
+a disposable headless profile, an explicit public asset map and blocked
+external requests.
+
+After building, run responsive and keyboard QA under the same reservation:
+
+```sh
+HOST_TOKEN=YOUR_RESERVATION_TOKEN node website/tools/public-media.mjs qa \
+  --out-dir .local-notes/fresh-site-qa
+```
+
+This checks 320/390/768/1440-pixel layouts, Calendar imagery and metadata,
+guide navigation and search, prompt copying and reduced motion. Review the
+composed screenshots and social card before publication. QA screenshots and
+receipts remain private. `npm run check --prefix website` also guards the
+Mail + Calendar entry points and current social-image dimensions.

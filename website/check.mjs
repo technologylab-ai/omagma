@@ -65,4 +65,30 @@ for (const file of files) {
   }
 }
 assert.equal(htmlFiles.length, manifest.pages.length, 'Unexpected documentation page count');
+// Public entry points must show the current Mail + Calendar product, including
+// the native workflows that otherwise disappear into ignored launch films.
+const homepage = html.get(path.join(dist, 'index.html'));
+for (const [label, pattern] of [
+  ['title', /<title>([\s\S]*?)<\/title>/],
+  ['headline', /<h1\b[^>]*>([\s\S]*?)<\/h1>/],
+  ['description', /<meta\b[^>]*name="description"[^>]*content="([^"]+)"/],
+  ['social description', /<meta\b[^>]*property="og:description"[^>]*content="([^"]+)"/],
+]) {
+  const value = homepage.match(pattern)?.[1]?.replace(/<[^>]*>/g, ' ');
+  assert(/gmail/i.test(value) && /calendar/i.test(value), `Homepage ${label} must describe Gmail and Calendar`);
+}
+for (const filename of ['omagma-calendar-week.png', 'omagma-calendar-review.png', 'omagma-meeting-reminder.png', 'omagma-mail-invitation.png']) {
+  for (const entry of ['index.html', 'docs/project/index.html']) {
+    assert(html.get(path.join(dist, entry))?.includes(`assets/${filename}`), `Missing public Calendar screenshot ${filename} in ${entry}`);
+  }
+}
+for (const [file, content] of html) {
+  const social = [...content.matchAll(/<meta\b[^>]*property="og:image"[^>]*content="([^"]+)"/g)];
+  assert.equal(social.length, 1, `Expected one social preview in ${file}`);
+  assert(social[0][1].endsWith('/assets/omagma-social-calendar.png'), `Outdated social preview in ${file}`);
+}
+const social = await fs.readFile(path.join(dist, 'assets/omagma-social-calendar.png'));
+assert.equal(social.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'Social preview must be a PNG');
+assert.equal(social.readUInt32BE(16), 1200, 'Social preview width');
+assert.equal(social.readUInt32BE(20), 630, 'Social preview height');
 console.log(`Checked ${htmlFiles.length} pages, ${references} local links/anchors and ${files.length} allowlisted public files.`);

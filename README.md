@@ -1,14 +1,14 @@
 # omagma
 
-Gmail in the Omarchy bar, your Linux or Mac terminal, and agent workflows. Keep up to three accounts separate, check recent mail without a browser tab, and open Gmail in each account’s configured Chrome profile.
+Gmail and Google Calendar in your Linux or Mac terminal, with a CLI for agents and a read-only Gmail widget for the Omarchy bar. Keep your mail accounts separate, combine selected calendars across up to three accounts, and join meetings in the right Chrome profile.
 
 [Explore the website and user documentation](https://technologylab-ai.github.io/omagma/).
 
-![omagma showing fictional accounts and messages](docs/images/omagma.png)
+![Omagma Calendar Week combining selected calendars across three fictional accounts](docs/images/omagma-calendar-week.png)
 
-The compact bar dropdown shows each account’s unread count, sender, subject, time and message snippet. It keeps up to 30 recent Inbox messages per account in memory, with optional five-minute background refresh. The bar is read-only and does not save mail to disk.
+A real v0.2.10 terminal capture with fictional demo data. [Calendar guide](docs/CALENDAR-EVENTS.md) · [Terminal guide](docs/TERMINAL.md).
 
-Omagma started because one Gmail tab was using roughly **2 GB of RAM** on the author’s desktop. On 2026-10-05, Omagma’s backend and attributed UI share measured approximately **31 MB for three connected accounts** in v0.2.2 on Linux x86_64. Chrome and unrelated shell widgets are excluded. These are approximate observations, not a controlled browser benchmark. [Memory details](docs/MEMORY.md).
+Read and write mail, plan meetings, answer invitations and get meeting reminders in the native TUI. The optional encrypted vault and unlocked daemon serve the TUI and agent CLI, including over SSH. The Linux Omarchy bar stays a separate, read-only mail interface.
 
 ## Install
 
@@ -24,35 +24,54 @@ For macOS, [install with Homebrew](docs/MACOS.md), then follow the terminal-only
 For manual Linux setup:
 
 1. [Download the latest release](https://github.com/technologylab-ai/omagma/releases/latest), choosing the complete Linux **x86_64** or **arm64** bundle and its `SHA256SUMS`.
-2. Follow [installation](docs/INSTALL.md) to verify the download and add the widget to your bar.
+2. Follow [installation](docs/INSTALL.md) to verify the download and put `omagma` on your PATH. Add the Omarchy widget only if you want the bar.
 3. Follow [account setup](docs/SETUP.md) to create your Google OAuth registration, map each account to its Chrome profile, and approve access.
 
 **No Zig compiler is needed for a release.** Linux bundles include a static musl backend and the Quickshell UI. Mac binaries use system libraries and default to Keychain. Live mail needs Chrome and authorized credentials in the selected credential store; the TUI needs a UTF-8 terminal. Only the Linux bar needs Omarchy/Quickshell. ARM backend builds are tested separately; ARM desktop integration has not been qualified. [Mac installation](docs/MACOS.md) · [Linux installation](docs/INSTALL.md).
 
 [AGENTS.md](AGENTS.md) directs agents to the included [setup workflow](skills/omagma-setup/SKILL.md). They can read it directly; installing it as a global skill is optional.
 
-## Use the bar
-
-Click the magma icon, choose an account, and select a message to preview its snippet. Activate a message or choose **Open inbox** to open the matching Gmail page in that account’s Chrome profile. **Open TUI** opens that account in a floating terminal. **Refresh** updates the selected account. Accounts have separate lists and counts; there is no combined Inbox.
-
-Set `refreshIntervalSeconds` to `300` in your private account configuration to refresh every five minutes, including while the dropdown is closed. It defaults to `0`, which disables scheduled refresh. [Dropdown keys and states](docs/UI.md) · [Background refresh](docs/BACKGROUND-REFRESH.md).
-
-## Terminal and agents
+## Mail and Calendar in the terminal
 
 **The TUI and CLI are experimental.** Launch the terminal client with `omagma tui`. It provides separate accounts, full mail and threads, a reader beside or below the list, Vim keys, mouse navigation, native HTML-to-text display, search, local drafts, replies/forwarding, contacts, custom labels, attachments, mailbox changes and invitation replies. Copy received text by dragging or using Vim visual selection, or open the message in `$EDITOR`. The editor takes over the terminal and returns to the TUI; compose edits return to the draft, while received-message snapshots are discarded. No tmux is required. Permanent mail deletion and contact deletion remain outside the current scope. [CLI/TUI coverage](docs/AGENT-CLI.md#cli-and-tui-coverage) describes their interface differences.
 
-Version **0.2.10** adds reviewed Calendar event creation, editing and rescheduling,
-including all-day events, Google Meet links, invitations and a Contacts guest
-picker. Combine calendars across accounts with saved colours and visibility,
-choose a Priority source, and find hidden events with the Week chooser. Calendar
-agenda/day/week views, meeting reminders, profile-aware Join, local follow-ups
-and Gmail draft handoff remain available. Calendar requires optional per-account
-permissions; existing write grants cover the editor and Meet. Optional encrypted
-storage uses one unlocked native daemon for the TUI and agent CLI.
-See the [0.2.10 notes](docs/release-notes/0.2.10.md),
-[event guide](docs/CALENDAR-EVENTS.md),
+### Calendar, meetings and invitations
+
+Calendar has Agenda, Day and Week views. Combine selected calendars across all
+three accounts, including read-only subscriptions such as holidays. Colours,
+visibility and your Priority calendar persist. Week exposes overlapping events
+through a chooser with full times, calendar and account names.
+[See the combined Week capture](docs/images/omagma-calendar-week.png).
+
+**Create a meeting, then review it.** Choose a destination calendar, timed or
+all-day dates and an explicit time zone. Pick guests from that account's
+Contacts, select Google Meet or paste an existing meeting link, then review
+before confirming. Google generates a new Meet link after saving. Edit and
+reschedule organizer-owned events while preserving their guests and conference.
+
+![Real Omagma meeting review with Contacts guests and Google Meet generation selected](docs/images/omagma-calendar-review.png)
+
+**Get a reminder and join in the right profile.** While the TUI is open, meeting
+reminders show minutes until the start, then minutes remaining. Join opens the
+meeting in its account's configured Chrome profile; Dismiss is deliberate.
+
+![Real Omagma meeting reminder with countdown and Join in the terminal](docs/images/omagma-meeting-reminder.png)
+
+**Handle invitations from Mail.** The invitation card shows the meeting beside
+the message. Review Accept, Tentative or Decline; supported
+Accept/Tentative replies also save to Calendar when that account has Calendar
+write permission. Local Follow-ups and Gmail draft handoff remain available.
+
+![Real Omagma Mail view with a themed invitation card, video-call marker and Calendar sidebar entry](docs/images/omagma-mail-invitation.png)
+
+Calendar is optional per account. Existing write grants cover the editor and
+Meet. Read the [event guide](docs/CALENDAR-EVENTS.md),
 [Calendar setup](docs/CALENDAR-PERMISSIONS.md) and
-[vault setup](docs/ENCRYPTION.md).
+[0.2.10 release notes](docs/release-notes/0.2.10.md).
+Optional encrypted storage uses one unlocked native daemon for the TUI and
+agent CLI; see [vault setup](docs/ENCRYPTION.md).
+
+### Mail, keyboard and agent workflows
 
 ![Omagma TUI with fictional mail, compact links and a new-mail card](docs/images/omagma-tui-arrivals.png)
 
@@ -130,6 +149,18 @@ omagma cli --fixtures
 
 Fixture mode never contacts Google. It is optional and is not part of normal installation.
 
+## Use the bar
+
+![Omagma read-only bar dropdown with fictional accounts and mail](docs/images/omagma.png)
+
+The compact bar dropdown shows each account’s unread count, sender, subject, time and message snippet. It keeps up to 30 recent Inbox messages per account in memory, with optional five-minute background refresh. The bar is read-only and does not save mail to disk.
+
+Click the magma icon, choose an account, and select a message to preview its snippet. Activate a message or choose **Open inbox** to open the matching Gmail page in that account’s Chrome profile. **Open TUI** opens that account in a floating terminal. **Refresh** updates the selected account. Accounts have separate lists and counts; there is no combined Inbox.
+
+Set `refreshIntervalSeconds` to `300` in your private account configuration to refresh every five minutes, including while the dropdown is closed. It defaults to `0`, which disables scheduled refresh. [Dropdown keys and states](docs/UI.md) · [Background refresh](docs/BACKGROUND-REFRESH.md).
+
+Omagma started because one Gmail tab was using roughly **2 GB of RAM** on the author’s desktop. On 2026-10-05, Omagma’s backend and attributed UI share measured approximately **31 MB for three connected accounts** in v0.2.2 on Linux x86_64. Chrome and unrelated shell widgets are excluded. These are approximate observations, not a controlled browser benchmark. [Memory details](docs/MEMORY.md).
+
 ## Documentation
 
 - [Documentation index](docs/README.md) and [feature catalogue](docs/FEATURES.md)
@@ -138,7 +169,7 @@ Fixture mode never contacts Google. It is optional and is not part of normal ins
 - [Terminal cache](docs/TUI-CACHE.md) and [background terminal fetching](docs/TERMINAL-BACKGROUND.md)
 - [Privacy and credentials](docs/PRIVACY.md) and [memory measurements](docs/MEMORY.md)
 - [Development and source builds](docs/DEVELOPMENT.md), [architecture and transport](docs/TRANSPORT.md), and [release publishing](docs/RELEASING.md)
-- Social images: [New mail and compact links](docs/images/omagma-tui-arrivals.png) · [Inbox view](docs/images/omagma-social.png) · [Mail preview and emoji](docs/images/omagma-social-preview.png)
+- [Public screenshots and social assets](scripts/public-captures/README.md): [Combined Calendar Week](docs/images/omagma-calendar-week.png) · [Meeting review](docs/images/omagma-calendar-review.png) · [Reminder with Join](docs/images/omagma-meeting-reminder.png) · [Invitation in Mail](docs/images/omagma-mail-invitation.png) · [Gmail + Calendar social preview](docs/images/omagma-social-calendar.png)
 
 ## Build from source
 

@@ -409,6 +409,8 @@ Contact deletion is not implemented.
 its recovery/preview copies. Cancel is the safe default. It does not delete a
 Gmail draft or message, and pending/unknown submissions remain protected.
 
+## Invitation replies
+
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
 
 **Accept** and **Tentative** also save supported
@@ -420,6 +422,8 @@ resends your RSVP. **C · Check status** checks an uncertain Calendar result or 
 Calendar failure without resending the RSVP.
 Without Calendar access, RSVP email continues to work as before. Unsupported
 recurring changes or ambiguous times remain explicit rather than guessed.
+
+## Calendar
 
 The native Calendar view requires optional per-account Calendar access.
 Press `C`, choose Calendar in the sidebar, or use the
@@ -448,6 +452,8 @@ starts in the current hour. Source letters and `*` remain readable without
 colour. A deliberate reveal pins only its chosen hour or all-day date, so a long
 routine cannot hide new starts in other hours.
 
+### Create and edit meetings
+
 Press `n` to create a timed or all-day event, or `e` to edit the selected event.
 The editor names the destination account/calendar and time zone. Its all-day
 last date is inclusive; the provider's exclusive end is handled automatically.
@@ -465,12 +471,16 @@ account's configured Chrome profile. Opening an event uses Google's returned
 event link and fixes the account selector; it does not guess an event ID from
 an invitation.
 
+### Join meetings in the right Chrome profile
+
 Events with a usable meeting link have a camera marker. Press **o** on the
 selected event, or use **Join** in its event card, to open the meeting in that
 account's configured Chrome profile. The card keeps the event title, time and
 actions visible while long descriptions scroll. Local times, date-only events
 and any differing event timezone are labeled explicitly. An event opened here
 already belongs to the displayed calendar; **A** is the invitation action in Mail.
+
+## Meeting reminders
 
 While the native TUI is open, meeting reminders appear ten minutes before a
 timed event in a readable primary or selected calendar. You can stay in Mail;
@@ -490,6 +500,8 @@ After returning to Mail or Calendar, a still-due reminder shows its current time
 Join appears only for a usable meeting link. Dismissal lasts for that occurrence
 in the current TUI session, including subsequent calendar refreshes. Reminders
 run only while the TUI is open and use the existing Calendar read permission.
+
+## Invitations in Mail
 
 From an invitation, `A` opens a review for adding the event to the selected
 calendar, or applying a supported newer update/cancellation. Review the account,
@@ -545,6 +557,8 @@ Cancel starts focused. `v`/Details toggles UID, sequence and recurrence details.
 Chrome profile. Enter submits only a deliberately focused reply action.
 
 A copied Teams/Zoom join link alone has no organizer/attendee scheduling identity. Such mail can be read and opened with `o`, but Omagma cannot invent a valid RSVP. This needs no Calendar API permission, calendar view or calendar editing; sending a response requires the account's existing terminal RSVP/send grant.
+
+## File dialogs
 
 File popups keep the current draft or reader underneath. Printable `q`, `j`,
 `k` and Space remain filename text while Path has focus; the Listing has its

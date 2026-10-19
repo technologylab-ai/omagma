@@ -171,3 +171,23 @@ method and stated uncertainties.
   - loudness and true peak after encode.
 - **Subjective review is the user's:** nothing here claims to have listened to
   the music or watched the film in real time.
+
+## Public Calendar screenshots (v0.2.10)
+
+The earlier film facts above describe their original release and stay historical.
+The current native application includes Calendar; the browser tech demo and
+read-only bar do not gain Calendar views from these captures.
+
+[Public screenshot production](../scripts/public-captures/README.md) applies the
+same real-application and fictional-data rules to four published v0.2.10 views:
+combined Calendar Week, meeting review with Contacts guests and Google Meet
+selected, a meeting reminder with Join, and an invitation card in Mail.
+Google generates a new Meet link only after the reviewed save; the review
+capture does not invent a pre-save link.
+
+The deliberately reviewed final PNGs live in `docs/images/` and are tracked
+public assets, available to the README, site and social preview. Raw tapes,
+isolated provider state, temporary configuration, browser profiles and local
+receipts remain ignored. Application cells are never rewritten for the image;
+layout, focus, selection and controls come from actual native interactions.
+These images make no timing, memory or live-account claims.
