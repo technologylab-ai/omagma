@@ -198,9 +198,13 @@ def empty_and_drafts(binary, directory, capture_dir=None):
         terminal.until(lambda: "New label" not in terminal.text())
         terminal.send(b"q")
         terminal.until(lambda: "Manage labels" not in terminal.text())
+        # Returning to Mail can start a background refresh. Reap the owned TUI
+        # and its worker before the independent durable-state read, so that a
+        # legitimate short write lease cannot turn this Cancel oracle into a
+        # timing-dependent CacheBusy failure.
+        terminal.finish()
         require(not any(value.get("type") == "user" for value in label_data(binary, directory, source)),
                 "cancelled empty/draft edits created definitions")
-        terminal.finish()
         print("PASS label manager: system-only collection, disabled action traversal, literal text Cancel, works from local Drafts without mail")
     except Exception:
         print(terminal.text(), file=sys.stderr)
