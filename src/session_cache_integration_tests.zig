@@ -65,6 +65,7 @@ const Oracle = struct {
     ttl: std.atomic.Value(u32) = .init(3600),
     wrong_profile: std.atomic.Value(bool) = .init(false),
     drop_write: std.atomic.Value(bool) = .init(false),
+    invalid_refresh: std.atomic.Value(bool) = .init(false),
     draft_flow: bool = false,
     draft_status_reads: std.atomic.Value(usize) = .init(0),
     draft_race: std.atomic.Value(bool) = .init(false),
@@ -103,6 +104,10 @@ const Oracle = struct {
             try std.testing.expect(std.mem.indexOf(u8, body[0..body_size], "refresh_token=synthetic-refresh-") != null);
             _ = self.refreshes.fetchAdd(1, .acq_rel);
             response = if (self.draft_flow) "{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose\"}" else try std.fmt.bufPrint(&token_buffer, "{{\"access_token\":\"synthetic-access\",\"token_type\":\"Bearer\",\"expires_in\":{d},\"scope\":\"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send\"}}", .{self.ttl.load(.acquire)});
+            if (self.invalid_refresh.load(.acquire)) {
+                status = .bad_request;
+                response = "{\"error\":\"invalid_grant\"}";
+            }
         } else if (std.mem.startsWith(u8, path, "/gmail.googleapis.com/gmail/v1/users/me/profile?")) {
             try std.testing.expectEqual(std.http.Method.GET, method);
             _ = self.profiles.fetchAdd(1, .acq_rel);
@@ -157,6 +162,75 @@ fn invoke(config: *const Config, method: std.http.Method) !void {
 fn expectCounts(oracle: *Oracle, refreshes: usize, profiles: usize) !void {
     try std.testing.expectEqual(refreshes, oracle.refreshes.load(.acquire));
     try std.testing.expectEqual(profiles, oracle.profiles.load(.acquire));
+}
+
+fn submitSpool(config: *const Config, draft_upload: bool, source: *const @import("terminal/send_spool.zig").Spool) !void {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const draft: @import("terminal/types.zig").Draft = .{ .id = "synthetic-draft" };
+    if (draft_upload) {
+        var session: @import("terminal/draft_gmail.zig").Session = undefined;
+        try session.init(io, alloc, a, config, account, j.object(alloc));
+        defer session.close();
+        _ = try session.create(alloc, draft, source);
+    } else _ = try gmail.executeSpool(io, alloc, config, account, j.object(alloc), draft, source, "<owned-upload@mail.invalid>");
+}
+
+test "session cache HTTP: expired Google sign-in blocks send and Gmail upload before provider writes and reconnect restores both" {
+    for ([_]bool{ false, true }) |draft_upload| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var identity = try Identity.init(alloc);
+        if (draft_upload) {
+            const scopes = try auth.scopesFor(alloc, &.{ "mail-read", "mail-drafts" });
+            identity.grant = auth.grantIdentity(scopes);
+            var grants = [_]auth.Grant{.{ .account = account, .clientFile = "synthetic-client", .clientId = client_id, .grantId = &identity.grant, .capabilities = &.{ "mail-read", "mail-drafts" }, .scopes = scopes }};
+            identity.registry = try j.encodeAlloc(alloc, auth.Registry{ .accounts = &grants }, .{});
+        }
+        var cache: cache_module.Cache = .{};
+        defer cache.clear();
+        const config = try alloc.create(Config);
+        try config.defaults("/nonexistent/synthetic-home");
+        config.count = 1;
+        try config.accounts[0].address.set(account);
+        config.credential_store = .vault;
+        config.runtime_provider = identity.provider();
+        config.runtime_access_cache = &cache;
+        var oracle: Oracle = .{
+            .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }),
+            .draft_flow = draft_upload,
+            .invalid_refresh = .init(true),
+            .write_status = .init(200),
+        };
+        defer oracle.listener.deinit(io);
+        http.TestRoute.origin = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{oracle.listener.socket.address.getPort()});
+        defer http.TestRoute.origin = null;
+        var task = try io.concurrent(Oracle.run, .{&oracle});
+        defer task.cancel(io) catch {};
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const raw = "From: self@example.test\r\nBcc: <hidden@example.test>\r\nMessage-ID: <owned-upload@mail.invalid>\r\n\r\nSynthetic exact spool body\r\n";
+        const file = try tmp.dir.createFile(io, "synthetic.mime", .{ .read = true, .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, raw);
+        var source: @import("terminal/send_spool.zig").Spool = .{ .io = io, .dir = tmp.dir, .file = file, .name = "synthetic.mime", .size = raw.len, .hash = @import("terminal/store.zig").Store.hash(raw) };
+        defer source.close();
+
+        try std.testing.expectError(error.InvalidGrant, submitSpool(config, draft_upload, &source));
+        try expectCounts(&oracle, 1, 0);
+        try std.testing.expectEqual(@as(usize, 0), oracle.writes.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), oracle.spools.load(.acquire));
+        // Replacement consent supplies a new refresh credential. Renewal
+        // itself must not submit anything; the user explicitly tries again.
+        identity.refresh = "synthetic-refresh-two";
+        oracle.invalid_refresh.store(false, .release);
+        try std.testing.expectEqual(@as(usize, 0), oracle.writes.load(.acquire));
+        try submitSpool(config, draft_upload, &source);
+        try expectCounts(&oracle, 2, 1);
+        try std.testing.expectEqual(@as(usize, 1), oracle.writes.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), oracle.spools.load(.acquire));
+    }
 }
 
 test "session cache HTTP: current vault identity reuse invalidation expiry and no duplicate mutations" {

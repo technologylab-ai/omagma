@@ -166,6 +166,7 @@ fn humanError(code: []const u8) []const u8 {
     const labels = [_]Label{
         .{ .code = "PermissionDenied", .label = "Permission required for this account" },
         .{ .code = "NotConnected", .label = "Connect this account" },
+        .{ .code = "InvalidGrant", .label = "Google sign-in expired or was revoked · reconnect this account" },
         .{ .code = "OAuthClientRequired", .label = "Account connection needs setup" },
         .{ .code = "WrongAccount", .label = "Account authorization does not match" },
         .{ .code = "GrantClientMismatch", .label = "Account authorization does not match" },
@@ -6381,7 +6382,7 @@ const App = struct {
                     if (kind == .send and same(self.compose.operation_error.value(), "SendCanceledBeforeSubmission")) {
                         self.review_ready = false;
                         self.say(false, "Send canceled · draft retained", .{});
-                    } else self.say(true, "{s} · {s}", .{ if (kind == .send) "Submission rejected · draft retained" else "RSVP submission rejected", if (kind == .send) self.compose.operation_error.value() else self.invitation_operation_error.value() });
+                    } else self.sayFailure(if (kind == .send) "Submission rejected · draft retained" else "RSVP submission rejected", if (kind == .send) self.compose.operation_error.value() else self.invitation_operation_error.value());
                 } else {
                     self.mode = .browse;
                     if (kind == .send) self.compose_active = false;
@@ -16265,7 +16266,7 @@ test "local UI: send refusals and cancellations remain visible after returning t
     defer app.deinit();
     app.compose_active = true;
     try app.compose.id.set(a, "retained-draft");
-    for ([_][]const u8{ "FormTooLarge", "SendCanceledBeforeSubmission" }) |code| {
+    for ([_][]const u8{ "FormTooLarge", "SendCanceledBeforeSubmission", "InvalidGrant" }) |code| {
         app.mode = .review;
         const response = try std.json.Stringify.valueAlloc(app.frame.allocator(), .{ .ok = true, .data = .{ .id = "operation-id", .draftId = "retained-draft", .outcome = "rejected", .errorCode = code } }, .{});
         try app.apply(.send, response);
@@ -16274,9 +16275,33 @@ test "local UI: send refusals and cancellations remain visible after returning t
         defer a.free(caption);
         app.clearObsoleteStatus();
         try std.testing.expectEqualStrings(caption, app.status[0..app.status_len]);
-        try std.testing.expect(std.mem.indexOf(u8, caption, if (same(code, "FormTooLarge")) "FormTooLarge" else "Send canceled") != null);
+        const expected = if (same(code, "InvalidGrant")) "reconnect this account" else if (same(code, "FormTooLarge")) "FormTooLarge" else "Send canceled";
+        try std.testing.expect(std.mem.indexOf(u8, caption, expected) != null);
         try std.testing.expect(!app.compose.unknown_outcome);
     }
+}
+
+test "local UI: expired Google sign-in during Gmail handoff explains reconnection and preserves draft" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    try app.compose.id.set(a, "retained-draft");
+    try app.compose.fields[4].set(a, "Keep this unsent text");
+    try app.apply(.gmail_draft_action, "{\"ok\":false,\"error\":{\"code\":\"InvalidGrant\"}}");
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqualStrings("InvalidGrant", app.status_error_code[0..app.status_error_len]);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "reconnect this account") != null);
+    try std.testing.expectEqualStrings("Keep this unsent text", app.compose.fields[4].value());
+    try std.testing.expect(app.compose_active);
+    // The local ownership lookup resolves the guard; it must never retry the
+    // provider upload just because the connection has been renewed.
+    try std.testing.expect(app.gmail_reload_pending);
+    try app.apply(.gmail_draft_info, "{\"ok\":true,\"data\":{\"draftId\":\"retained-draft\",\"outcome\":\"local\",\"link\":null}}");
+    try std.testing.expect(!app.compose.gmailPaused());
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
 test "local UI: saved draft updates omit frozen originals while preserving edited fields and file changes" {
