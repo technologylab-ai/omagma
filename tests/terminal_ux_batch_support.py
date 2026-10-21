@@ -131,13 +131,33 @@ def focused(terminal, label):
             or terminal.screen.reverse_cells[y][x])
 
 
-def focus_positions(terminal):
+def focus_scope(terminal, label):
+    """Use the innermost visible box around this action, not a background pane."""
+    position = terminal.screen.locate(label)
+    if position is None:
+        return None
+    y, x = position["row"], position["column"]
+    cells = terminal.screen.cells
+    left = next((i for i in range(x - 1, -1, -1) if cells[y][i] in "│┃║"), None)
+    right = next((i for i in range(x + len(label), terminal.screen.columns)
+                  if cells[y][i] in "│┃║"), None)
+    if left is None or right is None:
+        return None
+    top = next((i for i in range(y - 1, -1, -1)
+                if cells[i][left] in "╭┌╔" and cells[i][right] in "╮┐╗"), None)
+    bottom = next((i for i in range(y + 1, terminal.screen.rows)
+                   if cells[i][left] in "╰└╚" and cells[i][right] in "╯┘╝"), None)
+    return (top + 1, left + 1, bottom, right) if top is not None and bottom is not None else None
+
+
+def focus_positions(terminal, scope=None):
     # Text and clocks can redraw without acknowledging a Tab. Compare only
     # the visible focus cells, in both color and NO_COLOR terminals.
+    top, left, bottom, right = scope or (0, 0, terminal.screen.rows, terminal.screen.columns)
     return frozenset((y, x)
-                     for y, row in enumerate(terminal.screen.styles)
-                     for x, style in enumerate(row)
-                     if style[1] == SELECTED or terminal.screen.reverse_cells[y][x])
+                     for y in range(top, bottom)
+                     for x in range(left, right)
+                     if terminal.screen.styles[y][x][1] == SELECTED or terminal.screen.reverse_cells[y][x])
 
 
 def focus_button(terminal, label, backwards=False, limit=32):
@@ -148,9 +168,12 @@ def focus_button(terminal, label, backwards=False, limit=32):
     for _ in range(limit):
         if focused(terminal, label):
             return
-        previous = focus_positions(terminal)
+        # Cached Contacts/Mail behind a modal may repaint its own selected row.
+        # That is not acknowledgement of a Tab in this dialog.
+        scope = focus_scope(terminal, label)
+        previous = focus_positions(terminal, scope)
         terminal.send(BACKTAB if backwards else TAB)
-        terminal.until(lambda: focus_positions(terminal) != previous)
+        terminal.until(lambda: focus_positions(terminal, scope) != previous)
     require(False, f"action is not reachable with Tab/Shift+Tab: {label}")
 
 

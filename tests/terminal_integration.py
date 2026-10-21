@@ -26,6 +26,12 @@ FIXTURES = ROOT / "tests/fixtures/terminal"
 MANIFEST = json.loads((FIXTURES / "manifest.json").read_text())
 ACCOUNTS = MANIFEST["accounts"]
 MAX_FRAME = 8 * 1024 * 1024
+# These fixture observations may race the owned TUI's short cache write lease.
+# Provider reads require cacheOnly; local journal reads never contact Google.
+CACHED_READS = {"mail.list", "mail.read", "mail.thread", "mail.search", "mail.recipients",
+                "labels.list", "contacts.list", "contacts.search"}
+LOCAL_READS = {"cache.stats", "draft.list", "draft.read", "draft.gmail-info",
+               "operation.list", "queue.list", "reminder.list"}
 
 
 def require(condition, message):
@@ -174,15 +180,28 @@ class Client:
         return value
 
     def request(self, cmd, account=ACCOUNTS[0], ok=True, **params):
-        self.next_id += 1
-        request = {"id": f"test-{self.next_id}", "cmd": cmd, **params}
-        if account is not None:
-            request["account"] = account
-        self.raw(json.dumps(request, ensure_ascii=False).encode() + b"\n")
-        reply = self.receive()
-        require(reply.get("id") == request["id"], "CLI response correlation failed")
-        if account is not None:
-            require(reply.get("account") == account, "CLI response lost explicit account identity")
+        observe_cache = ok is True and (cmd in LOCAL_READS or
+                                       cmd in CACHED_READS and params.get("cacheOnly") is True)
+        deadline = time.monotonic() + 8  # One original reply budget, including retries.
+        for attempt in range(256):
+            self.next_id += 1
+            request = {"id": f"test-{self.next_id}", "cmd": cmd, **params}
+            if account is not None:
+                request["account"] = account
+            self.raw(json.dumps(request, ensure_ascii=False).encode() + b"\n")
+            reply = (self.receive(timeout=max(.001, deadline - time.monotonic()))
+                     if observe_cache else self.receive())
+            require(reply.get("id") == request["id"], "CLI response correlation failed")
+            if account is not None:
+                require(reply.get("account") == account, "CLI response lost explicit account identity")
+            error = reply.get("error")
+            if (observe_cache and reply.get("ok") is False and isinstance(error, dict)
+                    and error.get("code") == "CacheBusy" and attempt < 255
+                    and time.monotonic() < deadline):
+                time.sleep(min(.02, max(0, deadline - time.monotonic())))
+                if time.monotonic() < deadline:
+                    continue
+            break
         require(reply.get("ok") is ok, f"Unexpected outcome for {cmd}: {reply.get('error', {}).get('code', 'no error code')}")
         if not ok:
             error = reply.get("error", {})
