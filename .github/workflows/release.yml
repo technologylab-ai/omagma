@@ -133,6 +133,8 @@ jobs:
           python3 tests/terminal_html.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-html.json
           python3 tests/terminal_repaint.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-repaint.json
           python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
+      - name: Debug growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
       - name: Debug current terminal and agent feature acceptance
         run: |
           .verification-debug/bin/omagma build-info
@@ -178,6 +180,8 @@ jobs:
           .verification-safe/bin/transport_probe
           python3 tests/terminal_attachment_streams.py --probe .verification-safe/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-safe/bin/calendar_http_probe
+      - name: Safe growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
@@ -382,6 +386,8 @@ jobs:
           python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-debug/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-macos-debug/bin/calendar_http_probe
+      - name: Debug growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
       - name: Debug portable Markdown, invitation and command acceptance
         run: |
           python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
@@ -428,6 +434,8 @@ jobs:
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-safe/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-macos-safe/bin/calendar_http_probe
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
+      - name: Safe growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
       - name: Validate macOS archive and native executable

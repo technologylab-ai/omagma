@@ -315,22 +315,50 @@ def run(binary, directory):
 
 
 def malformed_frames(backend, control):
-    for header in (b"WRONGIPC" + bytes([1, 0, 0, 0]) + struct.pack("<I", 0),
-                   MAGIC + bytes([127, 0, 0, 0]) + struct.pack("<I", 0),
-                   MAGIC + bytes([1, 0, 0, 0]) + struct.pack("<I", 3 * 1024 * 1024 + 1),
-                   MAGIC + bytes([2, 0, 0, 0]) + struct.pack("<I", 1025)):
+    # Native compose records allow escaped source alternatives up to 12x35MiB.
+    # The former 3MiB+1 header is valid; without a body it must hit the arrival
+    # deadline, not the immediate malformed-header rejection below.
+    native_execute_limit = 12 * 35 * 1024 * 1024
+
+    def header(kind, length, magic=MAGIC, reserved=b"\0\0\0"):
+        return magic + bytes([kind]) + reserved + struct.pack("<I", length)
+
+    invalid = (
+        ("wrong magic", header(1, 0, magic=b"WRONGIPC")),
+        ("wrong version", header(1, 0, magic=b"OMAVIPC2")),
+        ("unknown kind", header(127, 0)),
+        ("reserved flags", header(1, 0, reserved=b"\1\0\0")),
+        ("native execute overflow", header(1, native_execute_limit + 1)),
+        ("empty password", header(2, 0)),
+        ("oversized password", header(2, 1025)),
+        ("nonempty status", header(4, 1)),
+        ("short recovery key", header(7, 31)),
+    )
+    for name, value in invalid:
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(2)
             peer.connect(str(backend))
-            peer.sendall(header)
-            require(peer.recv(1) == b"", "invalid frame was accepted or retained")
+            peer.sendall(value)
+            try:
+                closed = peer.recv(1) == b""
+            except TimeoutError as failure:
+                raise AssertionError(f"invalid {name} frame waited for a body instead of closing") from failure
+            require(closed, f"invalid {name} frame was accepted or retained")
     # One partial peer cannot occupy the control connection indefinitely.
-    with socket.socket(socket.AF_UNIX) as stalled:
-        stalled.settimeout(7)
-        stalled.connect(str(backend))
-        stalled.sendall(MAGIC[:4])
-        require(not control("status")["unlocked"], "stalled peer blocked status or unlocked the vault")
-        require(stalled.recv(1) == b"", "partial frame ignored its arrival deadline")
+    for name, value in (("partial header", MAGIC[:4]),
+                        ("largest native body missing", header(1, native_execute_limit))):
+        with socket.socket(socket.AF_UNIX) as stalled:
+            stalled.settimeout(7)
+            started = time.monotonic()
+            stalled.connect(str(backend))
+            stalled.sendall(value)
+            require(not control("status")["unlocked"], f"{name} blocked status or unlocked the vault")
+            require(time.monotonic() - started < 2, f"{name} delayed the independent control connection")
+            require(not select.select([stalled], [], [], 0)[0], f"valid {name} was rejected before its arrival deadline")
+            stalled.settimeout(max(.01, 7 - (time.monotonic() - started)))
+            require(stalled.recv(1) == b"", f"{name} ignored its arrival deadline")
+            require(4 <= time.monotonic() - started <= 7, f"{name} changed the five-second arrival deadline")
+    print("PASS native IPC header limits, independent status and five-second incomplete-frame cleanup", flush=True)
 
 
 def canceled_prompt(binary, backend, env):

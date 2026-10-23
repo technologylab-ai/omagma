@@ -453,11 +453,14 @@ const SendMemoryOracle = struct {
     writes: std.atomic.Value(usize) = .init(0),
     uploads: std.atomic.Value(usize) = .init(0),
     last_media_bytes: std.atomic.Value(usize) = .init(0),
+    last_mime_bytes: std.atomic.Value(usize) = .init(0),
     refreshes: std.atomic.Value(usize) = .init(0),
     drop: std.atomic.Value(bool) = .init(false),
     rsvp: bool = false,
     source: ?[]const u8 = null,
+    attachment_responses: ?[]const []const u8 = null,
     source_reads: std.atomic.Value(usize) = .init(0),
+    attachment_reads: std.atomic.Value(usize) = .init(0),
     fn run(self: *SendMemoryOracle) !void {
         while (true) {
             const stream = try self.listener.accept(io);
@@ -470,21 +473,54 @@ const SendMemoryOracle = struct {
     }
     // Decode a MIME part independently of the application's MIME parser.
     fn part(allocator: std.mem.Allocator, raw: []const u8, header: []const u8) ![]const u8 {
-        const offset = std.mem.indexOf(u8, raw, header) orelse return error.MissingSyntheticPart;
+        var cursor: usize = 0;
+        return partAfter(allocator, raw, header, &cursor);
+    }
+    fn partAfter(allocator: std.mem.Allocator, raw: []const u8, header: []const u8, cursor: *usize) ![]const u8 {
+        const offset = cursor.* + (std.mem.indexOf(u8, raw[cursor.*..], header) orelse return error.MissingSyntheticPart);
         const start = offset + (std.mem.indexOf(u8, raw[offset..], "\r\n\r\n") orelse return error.MissingSyntheticBody) + 4;
         const end = start + (std.mem.indexOf(u8, raw[start..], "\r\n--") orelse return error.MissingSyntheticBoundary);
-        var encoded: std.ArrayList(u8) = .empty;
-        for (raw[start..end]) |byte| if (byte != '\r' and byte != '\n') try encoded.append(allocator, byte);
-        const decoded = try allocator.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded.items));
-        try std.base64.standard.Decoder.decode(decoded, encoded.items);
+        // One exact upper-bound buffer and one copy per RFC base64 line. The
+        // oracle must not append every byte through a growing vector or scan
+        // the preceding 35 MiB anew for each of the 146 independent images.
+        const encoded = try allocator.alloc(u8, end - start);
+        var length: usize = 0;
+        var lines = std.mem.splitSequence(u8, raw[start..end], "\r\n");
+        while (lines.next()) |line| {
+            @memcpy(encoded[length..][0..line.len], line);
+            length += line.len;
+        }
+        const decoded = try allocator.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded[0..length]));
+        try std.base64.standard.Decoder.decode(decoded, encoded[0..length]);
+        cursor.* = end;
         return decoded;
+    }
+    fn attachmentResponse(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
+        var prefix_bytes: [64]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&prefix_bytes, "{{\"size\":{d},\"data\":\"", .{data.len});
+        const encoded_len = std.base64.url_safe_no_pad.Encoder.calcSize(data.len);
+        const response = try allocator.alloc(u8, prefix.len + encoded_len + 2);
+        @memcpy(response[0..prefix.len], prefix);
+        _ = std.base64.url_safe_no_pad.Encoder.encode(response[prefix.len..][0..encoded_len], data);
+        @memcpy(response[response.len - 2 ..], "\"}");
+        return response;
     }
     fn validateMime(self: *SendMemoryOracle, allocator: std.mem.Allocator, body: []const u8, multipart: bool) !void {
         var raw = body;
         if (multipart) {
             if (!self.rsvp) try std.testing.expect(std.mem.indexOf(u8, body, "\"threadId\":\"synthetic-thread\"") != null);
+            // Isolate RFC822 bytes independently of the application's upload
+            // builder. HTTP multipart metadata/delimiters are not MIME size.
+            const first_line_end = std.mem.indexOf(u8, body, "\r\n") orelse return error.MissingSyntheticBoundary;
+            const opening = body[0..first_line_end];
+            try std.testing.expect(std.mem.startsWith(u8, opening, "--"));
+            const suffix = try std.fmt.allocPrint(allocator, "\r\n{s}--\r\n", .{opening});
+            try std.testing.expect(std.mem.endsWith(u8, body, suffix));
             const header = "Content-Type: message/rfc822\r\n\r\n";
-            raw = body[(std.mem.indexOf(u8, body, header) orelse return error.MissingSyntheticMime) + header.len ..];
+            const start = (std.mem.indexOf(u8, body, header) orelse return error.MissingSyntheticMime) + header.len;
+            const end = body.len - suffix.len;
+            try std.testing.expect(start < end);
+            raw = body[start..end];
         } else {
             const value = try std.json.parseFromSliceLeaky(j.Value, allocator, body, .{});
             const encoded = try j.required(value, "raw");
@@ -492,6 +528,7 @@ const SendMemoryOracle = struct {
             try std.base64.url_safe_no_pad.Decoder.decode(decoded, encoded);
             raw = decoded;
         }
+        self.last_mime_bytes.store(raw.len, .release);
         if (self.rsvp) {
             try std.testing.expect(std.mem.indexOf(u8, raw, "From: <alias@example.test>\r\n") != null);
             try std.testing.expect(std.mem.indexOf(u8, raw, "To: <host@example.test>\r\n") != null);
@@ -510,9 +547,11 @@ const SendMemoryOracle = struct {
         const plain = try part(allocator, raw, "Content-Type: text/plain;");
         try std.testing.expect(std.mem.indexOf(u8, plain, "Authored synthetic opening") != null);
         if (!(std.mem.indexOf(u8, plain, "Original synthetic tail") != null)) return error.MissingOriginalPlainTail;
+        try std.testing.expectEqual(self.images.len, std.mem.count(u8, raw, "Content-ID: <image-"));
+        var cursor: usize = 0;
         for (self.images, 0..) |expected, index| {
             const header = try std.fmt.allocPrint(allocator, "Content-ID: <image-{d}@example.test>\r\n", .{index});
-            try std.testing.expectEqualSlices(u8, expected, try part(allocator, raw, header));
+            try std.testing.expectEqualSlices(u8, expected, try partAfter(allocator, raw, header, &cursor));
         }
     }
     fn respond(self: *SendMemoryOracle, stream: std.Io.net.Stream) !void {
@@ -541,9 +580,9 @@ const SendMemoryOracle = struct {
             if (std.mem.indexOf(u8, path, "/attachments/file-")) |at| {
                 const tail = path[at + "/attachments/file-".len ..];
                 const index = try std.fmt.parseInt(usize, tail[0 .. std.mem.indexOfScalar(u8, tail, '?') orelse tail.len], 10);
-                const data = self.images[index];
-                const encoded = try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(data.len));
-                response = try j.encodeAlloc(allocator, .{ .size = data.len, .data = std.base64.url_safe_no_pad.Encoder.encode(encoded, data) }, .{});
+                try std.testing.expect(index < self.images.len);
+                _ = self.attachment_reads.fetchAdd(1, .acq_rel);
+                response = if (self.attachment_responses) |responses| responses[index] else try attachmentResponse(allocator, self.images[index]);
             } else response = self.source.?;
         } else {
             try std.testing.expectEqual(std.http.Method.POST, request.head.method);
@@ -814,7 +853,12 @@ test "native send memory HTTP: RSVP spool preserves the verified alias and calen
 // The source is fetched through the real native provider adapter at every
 // stage. Repeated replies add seven screenshots, crossing 32,64 and128 files;
 // final wire approaches Gmail's35MiB ceiling while JSON carries only handles.
-test "native send memory HTTP: twenty further illustrated replies capture review save and upload near the MIME ceiling" {
+/// One persistent conversation, including every production capture and all
+/// accumulated local drafts/blobs. The mandatory native-send stress target
+/// gives this 21-stage sequence its own bounded deadline; ordinary correctness
+/// tests keep their existing per-test limit and do not depend on test order.
+pub fn growingNativeThreadScenario() !void {
+    const started = std.Io.Timestamp.now(io, .awake);
     const types = @import("terminal/types.zig");
     const Core = @import("terminal/core.zig").Session;
     var outer: std.heap.ArenaAllocator = .init(a);
@@ -838,6 +882,10 @@ test "native send memory HTTP: twenty further illustrated replies capture review
     defer env.deinit();
     try env.put("HOME", base);
     var images: [146][]const u8 = undefined;
+    var image_digests: [146][32]u8 = undefined;
+    var image_identities: std.AutoHashMap([32]u8, void) = .init(alloc);
+    defer image_identities.deinit();
+    var attachment_responses: [146][]const u8 = undefined;
     for (&images, 0..) |*image_bytes, index| {
         const bytes = try alloc.alloc(u8, 160000);
         // A valid synthetic PNG with a large ancillary text chunk. Every
@@ -851,12 +899,24 @@ test "native send memory HTTP: twenty further illustrated replies capture review
         const payload = bytes[prefix + 8 ..][0..payload_size];
         for (payload, 0..) |*byte, offset| byte.* = @intCast('A' + (offset + index) % 26);
         @memcpy(payload[0..10], "Synthetic\x00");
+        // The repeating alphabet alone aliases every26 images. Give every
+        // screenshot its own valid Latin-1 text identity before computingCRC.
+        var index_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &index_bytes, @intCast(index), .big);
+        @memcpy(payload[10..][0..8], &std.fmt.bytesToHex(index_bytes, .lower));
         const crc = std.hash.Crc32.hash(bytes[prefix + 4 ..][0 .. 4 + payload_size]);
         std.mem.writeInt(u32, bytes[prefix + 8 + payload_size ..][0..4], crc, .big);
         @memcpy(bytes[bytes.len - 12 ..], png[prefix..]);
         image_bytes.* = bytes;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &image_digests[index], .{});
+        try std.testing.expect(!(try image_identities.getOrPut(image_digests[index])).found_existing);
+        // Every round still downloads every selected image through the real
+        // HTTP adapter. Only the immutable provider fixture representation is
+        // reused, instead of re-encoding it for all 1,596 attachment GETs.
+        attachment_responses[index] = try SendMemoryOracle.attachmentResponse(alloc, bytes);
     }
-    var oracle: SendMemoryOracle = .{ .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }), .original = "", .images = &images };
+    try std.testing.expectEqual(@as(usize, 146), image_identities.count());
+    var oracle: SendMemoryOracle = .{ .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }), .original = "", .images = &images, .attachment_responses = &attachment_responses };
     defer oracle.listener.deinit(io);
     http.TestRoute.origin = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{oracle.listener.socket.address.getPort()});
     defer http.TestRoute.origin = null;
@@ -874,11 +934,13 @@ test "native send memory HTTP: twenty further illustrated replies capture review
     defer cap.allocator().free(held_ui);
     @memset(held_ui, 0xa5);
     const fixed_baseline = cap.snapshot().allocatorUsedBytes;
+    var expected_attachment_reads: usize = 0;
     for (0..21) |round| {
         var phase: std.heap.ArenaAllocator = .init(a);
         defer phase.deinit();
         const temp = phase.allocator();
         const count = 6 + 7 * round;
+        expected_attachment_reads += count;
         var suffix: std.Io.Writer.Allocating = .init(temp);
         for (0..count) |index| try suffix.writer.print("<img src=\"cid:image-{d}@example.test\">", .{index});
         try suffix.writer.writeAll("<p>Original synthetic tail</p></div>");
@@ -905,8 +967,8 @@ test "native send memory HTTP: twenty further illustrated replies capture review
         try std.testing.expectEqualStrings(html, j.text(original, "bodyHtml"));
         const resources = j.get(original, "resources").?.array.items;
         try std.testing.expectEqual(count, resources.len);
-        for (resources) |resource| {
-            try std.testing.expectEqual(@as(usize, 64), j.text(resource, "blobId").len);
+        for (resources, 0..) |resource, index| {
+            try std.testing.expectEqualStrings(&std.fmt.bytesToHex(image_digests[index], .lower), j.text(resource, "blobId"));
             try std.testing.expectEqual(@as(usize, 0), j.text(resource, "data").len);
         }
         const note = "Authored synthetic opening\n\nAnother reply retains every screenshot.\n\nAuthored synthetic tail";
@@ -915,15 +977,26 @@ test "native send memory HTTP: twenty further illustrated replies capture review
         const updated = try session.execute(temp, update);
         try std.testing.expect(try j.boolean(try std.json.parseFromSliceLeaky(j.Value, temp, updated, .{}), "ok", false));
         const reopened = try sendMemoryCall(session, temp, .{ .cmd = "draft.read", .account = account, .draftId = id });
-        try std.testing.expectEqualStrings(html, j.text(j.get(reopened, "original").?, "bodyHtml"));
+        const reopened_original = j.get(reopened, "original").?;
+        try std.testing.expectEqualStrings(html, j.text(reopened_original, "bodyHtml"));
+        const reopened_resources = j.get(reopened_original, "resources").?.array.items;
+        try std.testing.expectEqual(count, reopened_resources.len);
+        for (reopened_resources, 0..) |resource, index| try std.testing.expectEqualStrings(&std.fmt.bytesToHex(image_digests[index], .lower), j.text(resource, "blobId"));
         const preview = try sendMemoryCall(session, temp, .{ .cmd = "draft.preview", .account = account, .draftId = id });
         try std.testing.expect(std.mem.indexOf(u8, j.text(preview, "bodyHtml"), html) != null);
+        if (round % 5 == 0) std.debug.print("growing native progress round={d} resources={d} elapsedMs={d}\n", .{ round + 1, count, started.untilNow(io, .awake).toMilliseconds() });
         if (round == 20) {
             // Exercise the private standalone preview renderer without ever
             // launching a browser. Every retained image must be embedded.
             {
                 var store = try session.openStore(temp, account, false);
                 defer store.close();
+                var iterator = store.dir.iterate();
+                var persisted_blobs: usize = 0;
+                while (try iterator.next(io)) |entry| if (std.mem.startsWith(u8, entry.name, "blob-") and std.mem.endsWith(u8, entry.name, ".bin")) {
+                    persisted_blobs += 1;
+                };
+                try std.testing.expectEqual(count, persisted_blobs);
                 const loaded = try store.draft(id);
                 const prepared = try @import("terminal/markdown_mail.zig").prepare(temp, loaded);
                 const preview_file = @import("terminal/preview_file.zig");
@@ -935,12 +1008,16 @@ test "native send memory HTTP: twenty further illustrated replies capture review
             }
             const sent = try sendMemoryCall(session, temp, .{ .cmd = "draft.send", .account = account, .draftId = id, .operationId = "growing-thread-final-send" });
             try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+            try std.testing.expect(oracle.last_mime_bytes.load(.acquire) > 34 * 1024 * 1024);
+            try std.testing.expect(oracle.last_mime_bytes.load(.acquire) <= types.Limits.mime_upload_bytes);
             const repeated = try sendMemoryCall(session, temp, .{ .cmd = "draft.send", .account = account, .draftId = id, .operationId = "growing-thread-final-send" });
             try std.testing.expectEqualStrings("applied", j.text(repeated, "outcome"));
             const info = try sendMemoryCall(session, temp, .{ .cmd = "draft.gmail-info", .account = account, .draftId = id });
             const uploaded = try sendMemoryCall(session, temp, .{ .cmd = "draft.gmail-save", .account = account, .draftId = id, .expectedVersion = 0, .expectedDigest = j.text(info, "contentDigest") });
             try std.testing.expectEqualStrings("linked", j.text(uploaded, "outcome"));
-            try std.testing.expect(oracle.last_media_bytes.load(.acquire) > 34 * 1024 * 1024);
+            try std.testing.expect(oracle.last_mime_bytes.load(.acquire) > 34 * 1024 * 1024);
+            try std.testing.expect(oracle.last_mime_bytes.load(.acquire) <= types.Limits.mime_upload_bytes);
+            try std.testing.expect(oracle.last_media_bytes.load(.acquire) > oracle.last_mime_bytes.load(.acquire));
             try std.testing.expect(oracle.last_media_bytes.load(.acquire) < types.Limits.mime_upload_bytes + 4096);
             try std.testing.expectEqual(@as(usize, 2), oracle.writes.load(.acquire));
             try std.testing.expectEqual(@as(usize, 1), oracle.uploads.load(.acquire));
@@ -967,7 +1044,8 @@ test "native send memory HTTP: twenty further illustrated replies capture review
         try std.testing.expectEqual(@as(usize, 0), @import("terminal/send_memory.zig").snapshot().allocatorUsedBytes);
         try std.testing.expectEqual(fixed_baseline, cap.snapshot().allocatorUsedBytes);
         try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+        try std.testing.expectEqual(expected_attachment_reads, oracle.attachment_reads.load(.acquire));
         oracle.source = null;
     }
-    std.debug.print("growing native thread compiler={s} optimize={s} rounds=21 resources=146 decodedImages={d} mediaBytes={d} fixedPeak={d} transientPeak={d} posts={d}\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode), 146 * 160000, oracle.last_media_bytes.load(.acquire), cap.snapshot().allocatorPeakBytes, @import("terminal/send_memory.zig").snapshot().allocatorPeakBytes, oracle.writes.load(.acquire) });
+    std.debug.print("growing native thread compiler={s} optimize={s} rounds=21 resources=146 uniqueBlobs={d} decodedImages={d} mimeBytes={d} httpMediaBytes={d} fixedPeak={d} transientPeak={d} posts={d} attachmentGets={d} elapsedMs={d}\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode), image_identities.count(), 146 * 160000, oracle.last_mime_bytes.load(.acquire), oracle.last_media_bytes.load(.acquire), cap.snapshot().allocatorPeakBytes, @import("terminal/send_memory.zig").snapshot().allocatorPeakBytes, oracle.writes.load(.acquire), oracle.attachment_reads.load(.acquire), started.untilNow(io, .awake).toMilliseconds() });
 }

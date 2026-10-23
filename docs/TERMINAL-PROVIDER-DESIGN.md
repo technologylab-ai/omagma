@@ -108,7 +108,7 @@ Exercise account-scoped pagination/cache restart, complete body retrieval, HTML-
 
 Gmail inline text can understate its delivered byte count or omit a leading UTF-8 byte order mark while still counting those three bytes. The latter exception is restricted to inline UTF-8/base64 text leaves; actual decoded-byte budgets still apply, and files retain their integrity checks. Conflicting calendar parts leave the mail and files readable without enabling an ambiguous RSVP. Cached refusals carry a decoder revision: older failures are retried once on a writable cache open, and repeated refusals remain final. Read-only cache access never migrates an index. Restart older running clients after installing an updated decoder.
 
-`terminal/gmail.execute(io, allocator, config, account, cmd, request)` verifies an enabled configured account, exact credential/grant identity and Gmail profile before dispatch. Each operation owns one HTTP client. Ordinary jobs and uploads have a 30-second total deadline; explicit incoming file downloads have a 180-second total deadline. JSON requests retain joined 10-second deadlines within the remaining job budget. One explicit HTTP 401 permits one refresh/retry without resetting that budget; send timeouts, disconnects, server errors and malformed successful receipts yield an unknown outcome rather than an automatic send retry. Listing fetches at most 100 envelopes using METADATA; bodies and attachments are retrieved on demand. Thread reads reject more than 100 messages explicitly and sort successful results chronologically.
+`terminal/gmail.execute(io, allocator, config, account, cmd, request)` verifies an enabled configured account, exact credential/grant identity and Gmail profile before dispatch. Each operation owns one HTTP client. Ordinary jobs have a 30-second total deadline; selected native compose source/MIME transfers and explicit incoming file downloads use a 180-second total deadline. JSON requests retain joined 10-second deadlines within the remaining job budget. One explicit HTTP 401 permits one refresh/retry without resetting that budget; send timeouts, disconnects, server errors and malformed successful receipts yield an unknown outcome rather than an automatic send retry. Listing fetches at most 100 envelopes using METADATA; bodies and attachments are retrieved on demand. Thread reads reject more than 100 messages explicitly and sort successful results chronologically.
 
 Live contact writes invalidate and persist the local contacts cache before dispatch. After the provider validates an applied receipt, the executor returns that contact directly; it performs no additional cache decoding, cache allocation or disk write. The next contacts read refreshes the cache. If encoding a successful live mutation's final response fails, the executor reports `UnknownOutcome` rather than implying the write failed; that error survives even when the error JSON cannot be allocated. Ordinary read and fixture response allocation failures remain `OutOfMemory`. Unknown send journals and their recovery drafts remain available for reconciliation and are never automatically resubmitted.
 
@@ -120,22 +120,55 @@ Contacts upsert accepts `expectedEtag`, falling back to the contact DTO's etag. 
 
 Registry writes use atomic 0600 replacement. Reads reject final symlinks, nonregular files, group/other permissions and files larger than 64 KiB; they recheck the opened descriptor before bounded streaming parsing. The metadata contains client paths and capability choices even though tokens remain in Secret Service. Existing live configuration is not changed by validation.
 
-Google HTTP JSON request/response storage is caller-owned and capped at 3 MiB. Decoded normalized message DTOs can be larger because they contain both HTML and its plain fallback; those CLI/TUI results remain within the 64 MiB terminal heap budget. The TUI accepts response frames up to 32 MiB. The bar's 32 KiB form/512 KiB response policy remains intact. Decoded MIME bodies are capped at 2 MiB, complete received RFC messages at 3 MiB, MIME nesting at 16, parts at 128, parsed incoming file/resource descriptors at 49, outgoing recipients at 32, and calendar data at 128 KiB.
+Ordinary Google HTTP JSON request/response storage is caller-owned and capped
+at 3 MiB. Ordinary normalized message DTOs can be larger because they contain
+both HTML and its plain fallback; those results use the 64 MiB browsing heap
+and the TUI's 32 MiB ordinary response-frame limit. Ordinary decoded text bodies
+remain capped at 2 MiB, with 3 MiB for combined decoded content and raw MIME
+parsing. The bar's 32 KiB form/512 KiB response policy remains intact.
 
-Ordinary outgoing attachments allow 16 files and 25 MiB combined decoded bytes;
-retained original inline resources allow 32 and a separate 2 MiB. Small file
-DTOs use base64url bytes; larger files use immutable account-scoped handles.
+Selected native compose operations use an OS-backed allocator separate from
+that browsing heap. `gmail_decode.normalizeForCompose` allows a 35 MiB combined
+decoded source budget; authored source and each rendered alternative also have
+a 35 MiB cap. Source HTTP responses stream with a ceiling of padded base64 for
+35 MiB plus 2 MiB of metadata. Selected compose JSON request/response frames and
+stored mail/draft/outbox records allow up to 420 MiB to accommodate escaping and
+multiple alternatives. These are serialization ceilings, not reservations or
+a process-memory cap: allocations follow actual content, and temporary work
+is wiped and reclaimed when its operation ends. The command allowlist and
+derived bounds live in [send_memory.zig](../src/terminal/send_memory.zig).
+Ordinary reads and the portable browser retain their existing byte tiers.
+
+MIME nesting is limited to 16, total parts to 4,180 and incoming file/resource
+descriptors to 1,041. Outgoing recipients remain capped at 32, and calendar
+data at 128 KiB. The descriptor budget includes ordinary files, retained
+resources and a sender's generated signature image; it does not grant more
+outgoing ordinary-file slots.
+
+Ordinary outgoing attachments allow 16 files, and retained original inline
+resources allow 1,024. Native files and retained resources share 25 MiB of
+decoded bytes. The newly generated logo has its own 16 KiB internal allowance,
+uses neither count and still contributes to serialized MIME; previously
+received logos count among retained resources. Small file DTOs use base64url
+bytes, with a combined 2 MiB decoded allowance for inline file/resource data;
+larger files use immutable account-scoped handles. Native formatted captures
+store their resources as blobs from the first capture. The portable browser
+keeps its 2 MiB body/resource and 3 MiB request tiers. Native `.eml` forwarding
+streams original source up to 25 MiB, retaining sources above 2 MiB as a blob;
+smaller originals keep the portable inline representation.
+
 The encoder preserves binary octets and emits RFC 2231 UTF-8 filename
 continuations. Larger sends spool MIME privately, then stream a bounded
 multipart upload with its thread metadata. Complete outgoing MIME is limited to
-35 MiB and the outer HTTP upload stream to 36 MiB. Received file saves decode
-incrementally into private, atomic, no-clobber destinations, with a 50 MiB
+35 MiB (36,700,160 bytes) and the outer HTTP upload stream to 36 MiB. Received
+file saves decode incrementally into private, atomic, no-clobber destinations, with a 50 MiB
 decoded file bound. The attachment download wire budget is 69,970,604 bytes:
 padded base64 for 50 MiB plus 64 KiB of JSON framing. Cached attachment handles
-also obey account disk quotas. Explicit JSON requests still fit 3 MiB and text
-bodies stay within 2 MiB; unsupported sizes fail rather than truncating. The
-fixed HTTP workspace remains 8 MiB, the terminal heap remains capped at 64 MiB,
-and no terminal buffer is added to the bar's static reservation.
+also obey account disk quotas. Native private HTML previews stream escaped
+content and verified images under a 246 MiB ceiling, reserving their exact
+output size against that quota. Unsupported sizes fail rather than truncating.
+The fixed HTTP workspace remains 8 MiB, the ordinary terminal heap remains
+capped at 64 MiB, and no terminal buffer is added to the bar's static reservation.
 
 Incoming address lists use caller-owned heap slices capped at 1,024 participants per header, with no fixed stack array added. Address-header parsing is bounded at 16 KiB; MIME headers allow at most 256 fields within 32 KiB per entity/part header block, and individual header values are at most 8 KiB. Mailbox addresses remain bounded at 254 bytes and decoded display names at 256 bytes. Encoded display names are parsed structurally before RFC 2047 decoding, so raw encoded words may exceed the decoded-name limit without failing prematurely. Overflow is explicit; no list or identity is silently truncated. The parser supports its existing quoted phrases, comments, groups and empty groups; SMTPUTF8 addresses and unsupported charsets remain explicit errors, and complete obsolete RFC 5322 grammar is not claimed.
 
@@ -159,8 +192,10 @@ automatically, and batching never includes sending mail.
 
 Forwarding creates a local draft in the chosen original-content mode and copies
 existing ordinary attachments under the 16-file/25 MiB decoded and 35 MiB
-complete MIME limits. Large files use immutable account handles and streaming;
-retained original inline resources have a separate 32-resource/2 MiB cap.
+complete MIME limits. Large files use immutable account handles and streaming.
+Retained originals allow 1,024 resources; native resources share the 25 MiB
+decoded budget with ordinary files, while the portable browser keeps its
+2 MiB resource tier.
 A refused or failed attachment aborts explicitly
 rather than silently dropping files. Send-as discovery reads Gmail's configured
 identities; only the primary or verified aliases from that same account are
@@ -263,7 +298,7 @@ The automatic freshness window uses the matching Inbox view's `lastSyncStartedAt
 
 Each refresh store phase and each body validation/download/commit owns a separate arena. Entry storage grows amortized and reuses capacity after tail eviction; it does not copy the whole 2,000-entry array for every inserted message. Body-only attachments neither change metadata generations nor resurrect evicted/deleted IDs. Already valid immutable bodies are reused when labels change. Missing or same-account hash-damaged bodies are cache misses and may be refetched; wrong account/message/schema remains a hard integrity error. Displayed body availability checks actual files, and refresh validates existing bodies one at a time rather than trusting stale byte counters. Strict old-plus-new disk quota accounting remains. Oversized writes fail before destructive eviction, and replacement at a protected old tail does not evict newer mail around it. Message-scoped malformed MIME has an explicit refusal code and does not stall the mailbox checkpoint forever; transport, authentication, cancellation, allocation and cache failures still abort.
 
-Gmail inline plain/HTML leaves tolerate understated `body.size` metadata after complete base64url decoding: actual bytes may exceed the declared count, including a zero count. This is a narrow compatibility policy; Google's documented field still describes an exact byte count. It applies only with no external attachment, no filename or attachment disposition, and no child parts (an empty array counts as a leaf). Bodies shorter than their declaration, empty data with a positive declaration, invalid data, negative/oversized declarations and all existing actual-byte limits remain refused. External, attached, calendar and container bodies keep exact size checks; raw MIME and outgoing attachments retain their rules. Actual decoded bytes govern the unchanged 2 MiB leaf and plain/HTML limits and 3 MiB combined decoded limit, with account identity and cached SHA checks preserved. [Google MessagePartBody contract](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments).
+Gmail inline plain/HTML leaves tolerate understated `body.size` metadata after complete base64url decoding: actual bytes may exceed the declared count, including a zero count. This is a narrow compatibility policy; Google's documented field still describes an exact byte count. It applies only with no external attachment, no filename or attachment disposition, and no child parts (an empty array counts as a leaf). Bodies shorter than their declaration, empty data with a positive declaration, invalid data, negative/oversized declarations and all existing actual-byte limits remain refused. External, attached, calendar and container bodies keep exact size checks; raw MIME and outgoing attachments retain their rules. Actual decoded bytes govern ordinary reading's 2 MiB leaf and plain/HTML limits and 3 MiB combined decoded limit; selected native compose normalization uses the 35 MiB decoded tier. Account identity and cached SHA checks remain required. [Google MessagePartBody contract](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments).
 
 Cache search is separate from saved Gmail view provenance: `mail.search` with `cacheOnly:true` searches retained metadata and already downloaded plaintext with bounded AND/quoted/negative terms and metadata/body predicates. It returns K-mode account/query/label/generation cursors, `searchMode:"cache"`, `searchScope:"metadata-and-cached-bodies"`, bounded `searchMatches`, `highlightTerm`, `matchedCachedCount`, and `partial:true`. Body-reading cursors additionally bind retained body hashes, since prefetch residency can change matches without changing metadata generation. Each body is reclaimed before inspecting the next entry, and each iteration checks cancellation; no missing body is downloaded for search. Default server search remains Google's query language. Cached contacts require `contacts-read`, use local name/email matching, and expose `cacheReady` so downloaded-empty differs from not loaded; neither cached API requests OAuth nor starts a second network worker.
 

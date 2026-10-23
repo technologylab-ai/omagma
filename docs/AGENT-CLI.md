@@ -146,7 +146,16 @@ the account-scoped JSONL protocol. See [updates](UPDATES.md).
 {"version":1,"id":"list-1","ok":true,"account":"personal@example.com","data":{"messages":[],"nextCursor":null}}
 ```
 
-Errors use `ok:false,error:{code,message}`. id may be a string, integer or null. Limits are documented in [TERMINAL.md](TERMINAL.md); requests are at most 3 MiB and nesting 64. Optional string fields must be strings or omitted, not JSON null. Tokens never appear in this interface.
+Errors use `ok:false,error:{code,message}`. id may be a string, integer or null.
+Ordinary requests are at most 3 MiB; nesting is limited to 64. Selected native
+compose commands, including replies, forwards, draft editing/review and
+submission, allow up to 420 MiB of serialized JSON under the explicit
+[native compose policy](../src/terminal/send_memory.zig). This ceiling accounts
+for escaping and multiple text alternatives; storage grows with actual content,
+and body, attachment and outgoing MIME limits still apply. Portable browser
+requests retain the 3 MiB limit. See [all limits](TERMINAL.md#bounds-and-recovery).
+Optional string fields must be strings or omitted, not JSON null. Tokens never
+appear in this interface.
 
 Except `accounts.list`, **every command requires an explicit configured account**. Provider message/thread IDs can collide across accounts. Never reuse a cursor, draft ID, contact or operation from another account. `accounts.list` reports enabled accounts and locally configured capabilities; successful provider authorization is checked again before network access. Private config and grant registry are not message data.
 
@@ -256,12 +265,20 @@ Use the returned descriptor rather than inventing a handle or passing a cache
 path. `attachment.discard` refuses a handle still referenced by a draft or
 protected content. `size` remains an exact decoded byte count.
 
-Ordinary outgoing attachments allow 16 files and 25 MiB decoded total;
-retained original resources allow 32 and a separate 2 MiB. Body/source and
-rendered alternatives stay bounded to 2 MiB, JSON requests to 3 MiB and complete
-outgoing MIME to 35 MiB. All combined content must fit the applicable limits.
-Repeated `--attach-file FILE` uses inline base64 for a set no larger than 2 MiB
-and account storage for larger sets, preserving the bounded JSON interface.
+Ordinary outgoing attachments allow 16 files; retained original resources have
+a separate 1,024-item count. Native files and retained resources share a 25 MiB
+decoded budget. Native compose source and each rendered alternative allow up
+to 35 MiB, but complete outgoing MIME, including all alternatives, files,
+resources and the generated logo, must fit 35 MiB (36,700,160 bytes). The new
+logo has its own 16 KiB internal allowance and consumes no file/resource slot;
+logos retained from the original count as resources. All combined content must
+fit these limits. The portable browser keeps its 2 MiB text/resource tier.
+
+Inline `data` across files and original resources remains limited to 2 MiB of
+decoded bytes, even for a larger native compose request. Repeated
+`--attach-file FILE` uses inline base64 for a set no larger than 2 MiB and
+account storage for larger sets. Formatted native captures store their images
+as account blobs from the first capture.
 
 `mail.attachment` returns inline `data` for smaller content or a `blobId`
 descriptor for a larger received file. Empty/omitted data with a handle does not
@@ -270,7 +287,8 @@ caller's explicit new absolute path, with 0600 permissions and no overwrite or
 parent/leaf symlink traversal. Received files are individually bounded to
 50 MiB; cached attachment handles also obey account disk quotas. The file is
 decoded incrementally, so its content does not consume a whole JSON frame or
-raise the 2 MiB text-body limit. Saving does not require a mailbox mutation.
+raise the ordinary reader's 2 MiB text-body limit. Saving does not require a
+mailbox mutation.
 There is no `--output-file` flag. Existing `attachment.open`/`mail open-attachment`
 opens an already saved supported private file; it does not download a handle.
 
@@ -384,8 +402,10 @@ This explicitly opens the account's Chrome profile on a private generated file.
 The message is isolated in an opaque sandbox with scripts, forms, remote
 resources and navigation blocked; verified PNG/JPEG/GIF resources are inlined.
 It preserves the note/original's styles and tables, sends nothing and does not
-upload a Gmail draft. The artifact is owner-only, limited to 16 MiB, replaced
-on reuse and removed on local draft discard.
+upload a Gmail draft. The native artifact is owner-only and streamed, with a
+246 MiB ceiling for escaped HTML and inlined images. Its actual bytes count
+against the account disk quota; the ceiling is not a preallocation. It is
+replaced on reuse and removed on local draft discard.
 
 ```sh
 omagma draft preview --account personal@example.com --draft-id LOCAL_ID --browser
@@ -435,17 +455,24 @@ omagma mail forward --account personal@example.com --message-id PROVIDER_ID \
   --original --format markdown
 ```
 
-Original email source is limited to 2 MiB; encoded content must also fit the
-3 MiB request and ordinary draft bounds. Missing or oversized originals fail
-before saving a partial draft or sending mail. Embedded image bytes are
-retained; remote images still depend on the image server and recipient
-settings. Final styling depends on the receiving email client. An unknown send
-outcome protects the saved draft and must be checked before another submission.
-Captured original resources are separately limited to 32 items and 2 MiB;
-they do not consume the ordinary 16-file count. Incoming MIME bookkeeping
-accepts up to 49 file/resource descriptors, including related parts and the
-approved logo, within its separate 128-part parser bound. These parser limits
-do not expand outgoing ordinary-file or retained-resource quotas.
+Native formatted capture uses the 35 MiB compose text tier and can fetch a
+selected source that exceeds ordinary reader limits. A complete `.eml` source
+can be up to 25 MiB; sources above 2 MiB use an immutable account blob. Smaller
+originals remain inline. The `.eml` counts as one ordinary file and shares the
+decoded file budget; final encoded MIME must still fit 35 MiB. Portable browser
+originals retain their 2 MiB source/resource and 3 MiB request limits. Missing
+or oversized originals fail before saving a partial draft or sending mail.
+Embedded image bytes are retained; remote images still depend on the image
+server and recipient settings. Final styling depends on the receiving email
+client. An unknown send outcome protects the saved draft and must be checked
+before another submission.
+
+Captured originals allow 1,024 resources without consuming the ordinary
+16-file count. Native resources and ordinary files share the 25 MiB decoded
+budget. Incoming MIME bookkeeping accepts up to 1,041 file/resource descriptors,
+including related parts and the sender's generated logo, within a separate
+4,180-part parser bound. These parser limits do not expand quotas for outgoing
+ordinary files or retained resources.
 
 ## Local send queue and cancellation
 

@@ -98,6 +98,17 @@ pub fn build(b: *std.Build) void {
         correctness.dependOn(&guardedTestRun(b, terminal_test, test_watchdog).step);
     }
 
+    // This complete growing-store chain intentionally performs many large
+    // operations. Qualification gives this new stress target its own bounded
+    // deadline; ordinary correctness tests retain their existing timeout.
+    const send_stress = b.addTest(.{
+        .filters = &.{"native growing thread stress:"},
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/native_send_stress_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }),
+    });
+    send_stress.root_module.addOptions("build_options", options);
+    if (macos_sdk) |sdk| linkNativeKeychain(send_stress.root_module, sdk);
+    b.step("test-native-send-stress", "Verify a complete growing native mail chain near Gmail's size limit").dependOn(&guardedTestRun(b, send_stress, test_watchdog).step);
+
     const probes = b.step("probes", "Compile all standalone transport/auth/budget probes");
     for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "src/calendar_http_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
         const probe = b.addExecutable(.{

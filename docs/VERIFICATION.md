@@ -138,6 +138,11 @@ limit. They verify every image independently, reject oversized MIME before
 submission, and check uncertain receipts and scoped-memory cleanup. These
 correctness checks supplement the fixed browsing workloads; they do not impose
 the browsing heap ceiling on an explicitly expanded native compose operation.
+The complete 21-stage growing-store chain runs separately with
+`zig build test-native-send-stress --test-timeout 300s -Dtest-watchdog=true`,
+in both Debug and Safe on all four release platforms. Its dedicated deadline
+keeps the full chain intact on slower native runners; ordinary correctness
+tests retain their existing 120-second timeout.
 
 ## Received-message copy acceptance
 

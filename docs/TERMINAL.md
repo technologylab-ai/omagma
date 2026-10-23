@@ -303,8 +303,9 @@ Ctrl+T toggles hidden files. Oversized sets are refused before partially
 attaching them so you can correct the choice.
 
 `:detach NUMBER` or its **[x]** removes a file. The list shows selected count,
-individual sizes and the combined 25 MiB budget. Up to 16 ordinary files remain
-attached through saving, restart and editor return. Selected content is copied
+individual sizes and the 25 MiB decoded budget shared with retained original
+images. Up to 16 ordinary files remain attached through saving, restart and
+editor return. Selected content is copied
 to private account storage; later changes to the original path do not silently
 change the saved attachment. The outgoing MIME must also fit 35 MiB. Oversized
 content gets an explicit error; no file is silently truncated.
@@ -676,35 +677,49 @@ You can use your own accounts after consent, including sending a first message t
 | Retained mail per account | Default 2,000 entries / 256 MiB; configurable up to 10,000 / 1 GiB |
 | Display/result window | 32 in the TUI; up to 100 per CLI page |
 | Native conversation window | 20 message cards at a time; up to 1,000 member IDs; 4 MiB of loaded body DTOs per window |
-| Message body / draft source / each rendered alternative | 2 MiB |
-| Ordinary outgoing attachments | 16 files, 25 MiB combined decoded bytes |
-| Retained original inline resources | 32 resources; native resources and ordinary outgoing files share the 25 MiB decoded limit; browser resources retain a 2 MiB limit |
-| Original email (.eml) source | Native: up to the 25 MiB outgoing-file limit, stored as a blob; browser: 2 MiB |
-| Parsed incoming file/resource descriptors | 49 per message, within 128 MIME parts; streamed file content up to 50 MiB each; cached blobs also obey the account disk quota |
+| Ordinary received body | 2 MiB; ordinary MIME decoding has a 3 MiB combined decoded budget |
+| Compose source / each rendered alternative | Native Linux/macOS: 35 MiB, subject to the complete outgoing MIME limit; portable browser: 2 MiB |
+| Ordinary outgoing attachments | 16 files; native files and retained original resources share 25 MiB of decoded bytes |
+| Retained original inline resources | 1,024 resources, separate from the 16 ordinary-file slots; browser resources retain a 2 MiB limit |
+| Original email (.eml) source | Native: up to 25 MiB, with sources above 2 MiB stored as blobs; browser: 2 MiB |
+| Parsed incoming file/resource descriptors | 1,041 per message, within 4,180 MIME parts; streamed file content up to 50 MiB each; cached blobs also obey the account disk quota |
 | Outgoing recipients | 32 across To/Cc/Bcc |
 | Local drafts / undo receipts | 128 / 16 per account |
 | Cached contacts / operation journal | 1,024 / 1,000 per account |
 | Addresses per contact | 32; preserved through supported edits |
-| Serialized JSON request | 3 MiB; larger ordinary file bytes use account handles |
-| Complete outgoing MIME | 35 MiB, including body, resources and encoded ordinary files |
+| Serialized JSON | Ordinary requests: 3 MiB; selected native compose frames/records: 420 MiB serialization ceiling, allocated only for actual content |
+| Complete outgoing MIME | 35 MiB (36,700,160 bytes), including body, resources, logo and encoded ordinary files |
 | Find query / matches / scanned display text | 256 bytes / 256 / 2 MiB; a + marks a capped count |
 | Search history / named searches | 8 each per account; 4,096-byte queries and 96-byte names |
-| Browser preview / UI preferences | One preview per account, at most 16 MiB / at most 256 KiB private preferences |
+| Native outgoing HTML preview / UI preferences | One streamed preview per account, at most 246 MiB within the account disk quota / at most 256 KiB private preferences |
 | Queued send intents | 32 active, 128 retained records per account; delay 0–30 seconds |
+
+Native compose, reply/forward, draft review and submission use dynamic storage
+for the actual content, separate from the ordinary 64 MiB browsing heap.
+The 420 MiB serialization ceiling covers JSON escaping and multiple text
+alternatives; it is not a memory reservation or an outgoing-message allowance.
+A selected compose source can exceed the ordinary reader's body limit without
+expanding background reads. The portable browser keeps its 2 MiB text/resource
+tier and 3 MiB request limit.
 
 Large inline photos remain unloaded while reading: the reader shows image
 placeholders, and received-file controls can save their content within the
 50 MiB incoming limit. Native replies, reply-all and forwards retain larger
-embedded images as bounded attachment blobs. Those resources and ordinary
-outgoing files share the 25 MiB decoded limit. The browser keeps its smaller
+embedded images as immutable account attachment blobs from the first capture.
+Those resources and ordinary outgoing files share the 25 MiB decoded limit.
+The browser keeps its smaller
 2 MiB resource limit. The mode chooser checks known sizes before downloading
 content; the backend rechecks the fresh source before saving a draft.
-The final 35 MiB encoded-MIME limit still applies.
+The final 35 MiB encoded-MIME limit still applies. The newly generated Omagma
+logo has a separate 16 KiB allowance and consumes no ordinary file or retained
+resource slot, but counts toward encoded MIME. Logos already in the original
+count as retained resources and share the 25 MiB decoded budget.
 
-Inline JSON body/resource data must fit the request limit. Ordinary file
-handles avoid embedding large file bytes in that frame; the final encoded MIME
-still has its separate cap. Oversized or unavailable content fails before saving a
-partial draft or sending mail. Old mail is evicted under cache pressure;
+Inline JSON file/resource data remains limited to 2 MiB of decoded bytes in
+total; account handles carry larger content. Body text must fit its compose
+and request limits, and final encoded MIME has its separate cap. Oversized or
+unavailable content fails before saving a partial draft or sending mail.
+Old mail is evicted under cache pressure;
 local drafts, their retained originals and operation receipts are preserved.
 `cache.clear` removes cached mail without removing drafts, contacts or receipts.
 

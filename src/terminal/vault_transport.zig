@@ -116,19 +116,55 @@ pub fn readFrame(io: std.Io, a: std.mem.Allocator, stream: std.Io.net.Stream, li
     var read_buffer: [header_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &read_buffer);
     var reader = stream.reader(io, &read_buffer);
+    const memory = @import("send_memory.zig");
+    return readFrameReader(&reader.interface, a, if (memory.native) memory.allocator() else a, limit);
+}
+fn readFrameReader(reader: *std.Io.Reader, normal: std.mem.Allocator, expanded: std.mem.Allocator, limit: usize) !Frame {
     var bytes: [header_bytes]u8 = undefined;
-    try reader.interface.readSliceAll(&bytes);
+    defer std.crypto.secureZero(u8, &bytes);
+    try reader.readSliceAll(&bytes);
     const decoded = try decodeHeader(&bytes, limit);
-    // Allocate only after validation, and precisely to the advertised length.
-    const backing = if (decoded.kind == .execute and decoded.length > t.Limits.request_bytes) @import("send_memory.zig").allocator() else a;
-    const body = try backing.alloc(u8, decoded.length);
+    const backing = if (decoded.kind == .execute and decoded.length > t.Limits.request_bytes) expanded else normal;
+    const body = try readFrameBody(reader, backing, decoded.length);
     errdefer {
         std.crypto.secureZero(u8, body);
         backing.free(body);
     }
-    try reader.interface.readSliceAll(body);
     if (decoded.kind == .execute and body.len > @import("send_memory.zig").requestLimit(body)) return error.InvalidRequest;
     return .{ .kind = decoded.kind, .body = body, .backing = backing };
+}
+fn readFrameBody(reader: *std.Io.Reader, backing: std.mem.Allocator, length: usize) ![]u8 {
+    if (length <= t.Limits.request_bytes) {
+        const body = try backing.alloc(u8, length);
+        errdefer {
+            std.crypto.secureZero(u8, body);
+            backing.free(body);
+        }
+        try reader.readSliceAll(body);
+        return body;
+    }
+    // A peer can advertise a large valid frame and then send nothing. Grow
+    // only after bytes arrive, so its arrival deadline cannot force a huge
+    // allocation followed by wiping pages that never held received content.
+    var secure: @import("vault_allocator.zig").WipingAllocator = .{ .backing = backing };
+    const a = secure.allocator();
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(a);
+    var chunk: [16 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &chunk);
+    while (body.items.len < length) {
+        const wanted = @min(chunk.len, length - body.items.len);
+        if (try reader.readSliceShort(chunk[0..wanted]) != wanted) return error.EndOfStream;
+        const needed = body.items.len + wanted;
+        if (needed > body.capacity) {
+            const capacity = @min(length, @max(needed, body.capacity +| body.capacity / 2));
+            try body.ensureTotalCapacityPrecise(a, capacity);
+        }
+        body.appendSliceAssumeCapacity(chunk[0..wanted]);
+    }
+    // The temporary wiping wrapper has no allocation header and must not
+    // escape. The exact slice belongs to the original backing in Frame.
+    return body.toOwnedSlice(a);
 }
 pub fn writeFrame(io: std.Io, stream: std.Io.net.Stream, kind: Kind, body: []const u8, limit: usize) !void {
     const bytes = try encodeHeader(kind, body.len, limit);
@@ -323,6 +359,107 @@ test "vault transport: frame boundaries are shared and unknown commands are muta
     try std.testing.expectError(error.InvalidVaultPassword, decodeHeader(&(try encodeHeader(.unlock, 1025, request_limit)), request_limit));
     try std.testing.expectEqual(error.BackendStopped, disconnectError("mail.read"));
     for ([_][]const u8{ "draft.create", "attachment.import", "cache.clear", "queue.cancel", "future.command" }) |command| try std.testing.expectEqual(error.UnknownOutcome, disconnectError(command));
+}
+
+const FrameReadAudit = struct {
+    used: usize = 0,
+    peak: usize = 0,
+    allocations: usize = 0,
+    unwiped_free: bool = false,
+    limit: usize = 16 * 1024 * 1024,
+
+    fn allocator(self: *FrameReadAudit) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, length: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *FrameReadAudit = @ptrCast(@alignCast(context));
+        if (length > self.limit - self.used) return null;
+        const bytes = std.testing.allocator.rawAlloc(length, alignment, ra) orelse return null;
+        self.used += length;
+        self.peak = @max(self.peak, self.used);
+        self.allocations += 1;
+        return bytes;
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *FrameReadAudit = @ptrCast(@alignCast(context));
+        for (bytes) |byte| if (byte != 0) {
+            self.unwiped_free = true;
+            break;
+        };
+        self.used -= bytes.len;
+        std.testing.allocator.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "vault transport: largest missing frames allocate nothing and partial frames wipe only received storage" {
+    for ([_]Kind{ .execute, .response }) |kind| {
+        const limit = if (kind == .execute) request_limit else response_limit;
+        const header = try encodeHeader(kind, limit, limit);
+        var normal: FrameReadAudit = .{ .limit = 64 * 1024 };
+        var expanded: FrameReadAudit = .{ .limit = 64 * 1024 };
+        var empty = std.Io.Reader.fixed(&header);
+        try std.testing.expectError(error.EndOfStream, readFrameReader(&empty, normal.allocator(), expanded.allocator(), limit));
+        try std.testing.expectEqual(@as(usize, 0), normal.allocations + expanded.allocations);
+        const partial = try std.testing.allocator.alloc(u8, header.len + 16 * 1024 + 9);
+        defer std.testing.allocator.free(partial);
+        @memcpy(partial[0..header.len], &header);
+        @memset(partial[header.len..], 0x47);
+        var short = std.Io.Reader.fixed(partial);
+        try std.testing.expectError(error.EndOfStream, readFrameReader(&short, normal.allocator(), expanded.allocator(), limit));
+        try std.testing.expectEqual(@as(usize, 16 * 1024), normal.peak + expanded.peak);
+        try std.testing.expectEqual(@as(usize, 0), normal.used + expanded.used);
+        try std.testing.expect(!normal.unwiped_free and !expanded.unwiped_free);
+    }
+}
+
+test "vault transport: growing requests and responses preserve exact bytes original backing and command limits" {
+    if (!@import("send_memory.zig").native) return error.SkipZigTest;
+    const size = t.Limits.request_bytes + 257;
+    const wire = try std.testing.allocator.alloc(u8, header_bytes + size);
+    defer std.testing.allocator.free(wire);
+    const prefix = "{\"cmd\":\"draft.preview\",\"padding\":\"";
+    @memcpy(wire[header_bytes..][0..prefix.len], prefix);
+    @memset(wire[header_bytes + prefix.len .. wire.len - 2], 'x');
+    @memcpy(wire[wire.len - 2 ..], "\"}");
+    for ([_]Kind{ .execute, .response }) |kind| {
+        @memcpy(wire[0..header_bytes], &(try encodeHeader(kind, size, response_limit)));
+        var normal: FrameReadAudit = .{};
+        var expanded: FrameReadAudit = .{};
+        var reader = std.Io.Reader.fixed(wire);
+        var frame = try readFrameReader(&reader, normal.allocator(), expanded.allocator(), response_limit);
+        try std.testing.expectEqualSlices(u8, wire[header_bytes..], frame.body);
+        const owner = if (kind == .execute) &expanded else &normal;
+        const unused = if (kind == .execute) &normal else &expanded;
+        try std.testing.expectEqual(owner.allocator(), frame.backing.?);
+        try std.testing.expectEqual(size, owner.used);
+        try std.testing.expect(owner.allocations > 1);
+        try std.testing.expectEqual(@as(usize, 0), unused.allocations);
+        // Inspect every released growth block before the final high-level
+        // free: std.mem.Allocator.free may poison its bytes after deinit's
+        // explicit secureZero in Debug, before this audit sees rawFree.
+        try std.testing.expect(!owner.unwiped_free);
+        // The local wiping wrapper is gone: deinit must still use the caller's
+        // original backing, even when the supplied fallback differs.
+        frame.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), owner.used);
+    }
+    const ordinary = "{\"cmd\":\"mail.read\",\"padding\":\"";
+    @memcpy(wire[0..header_bytes], &(try encodeHeader(.execute, size, request_limit)));
+    @memcpy(wire[header_bytes..][0..ordinary.len], ordinary);
+    @memset(wire[header_bytes + ordinary.len .. wire.len - 2], 'x');
+    var audit: FrameReadAudit = .{};
+    // A caller-owned wiping backing observes the final cleanup below the
+    // allocator's Debug poison, just as native private backing does.
+    var secure: @import("vault_allocator.zig").WipingAllocator = .{ .backing = audit.allocator() };
+    var reader = std.Io.Reader.fixed(wire);
+    try std.testing.expectError(error.InvalidRequest, readFrameReader(&reader, secure.allocator(), secure.allocator(), request_limit));
+    try std.testing.expectEqual(@as(usize, 0), audit.used);
+    try std.testing.expect(!audit.unwiped_free);
+    var failing: FrameReadAudit = .{ .limit = 16 * 1024 };
+    reader = std.Io.Reader.fixed(wire);
+    try std.testing.expectError(error.OutOfMemory, readFrameReader(&reader, failing.allocator(), failing.allocator(), request_limit));
+    try std.testing.expectEqual(@as(usize, 0), failing.used);
+    try std.testing.expect(!failing.unwiped_free);
 }
 
 test "vault transport: envelope metadata uses bounded scratch for large escaped bodies" {
