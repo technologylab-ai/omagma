@@ -46,7 +46,11 @@ startup-reserved 72 MiB coalescing pool with a 64 MiB payload ceiling. Separate
 fixed reservations provide 16 MiB for one message's decoding workspace, 4 MiB
 for IO, 2 MiB for startup/environment data, and the existing 16 MiB backend
 storage. Sixteen IO workers and their requested 1 MiB stacks start before the
-runtime seals, including the daemon worker. Normal read/UI arenas subdivide
+runtime seals, including the daemon worker. The interactive vault relay uses
+the same ceiling: joined tasks can briefly retain their worker slots while an
+immediate foreground action starts, so the pool accommodates both. CLI-only
+vault relays retain their smaller four-worker pool. No
+workers are created after startup. Normal read/UI arenas subdivide
 and return this reserved storage without an allocator fallback. Native full-source
 capture for reply/forward, draft editing/reopening, preview, send staging/submission,
 RSVP mail and Gmail draft upload explicitly

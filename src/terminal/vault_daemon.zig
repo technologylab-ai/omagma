@@ -84,7 +84,10 @@ const Server = struct {
             };
             self.dispatch(&frame, &response, stream) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
-                const report = if (frame.kind == .execute and (err == error.Timeout or err == error.OutOfMemory or err == error.VaultOperationCanceled)) mutationFailure(frame.body, err) else err;
+                // executeFrame admits the operation before its observers. A
+                // later observer's concurrency failure cannot prove that the
+                // operation stopped before dispatch or durable mutation.
+                const report = if (frame.kind == .execute and (err == error.Timeout or err == error.OutOfMemory or err == error.ConcurrencyUnavailable or err == error.VaultOperationCanceled)) mutationFailure(frame.body, err) else err;
                 self.sendError(stream, &frame, report) catch |send_err| if (send_err == error.Canceled) return error.Canceled;
                 continue;
             };
@@ -563,7 +566,131 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, args: *std
 test "vault daemon: interrupted invitation reconciliation keeps unknown outcome" {
     try std.testing.expectEqual(error.Timeout, mutationFailure("{\"cmd\":\"invitation.inspect\"}", error.Timeout));
     try std.testing.expectEqual(error.Timeout, mutationFailure("{\"cmd\":\"invitation.inspect\",\"reconcile\":false}", error.Timeout));
-    for ([_]anyerror{ error.Timeout, error.OutOfMemory, error.VaultOperationCanceled }) |err| try std.testing.expectEqual(error.UnknownOutcome, mutationFailure("{\"cmd\":\"invitation.inspect\",\"reconcile\":true}", err));
+    for ([_]anyerror{ error.Timeout, error.OutOfMemory, error.ConcurrencyUnavailable, error.VaultOperationCanceled }) |err| try std.testing.expectEqual(error.UnknownOutcome, mutationFailure("{\"cmd\":\"invitation.inspect\",\"reconcile\":true}", err));
+}
+
+test "vault daemon: observer admission failure after dispatch is unknown without replay" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const j = @import("json.zig");
+    const Admission = struct {
+        // Only this owned server worker uses the adapter. Owner/provider I/O,
+        // the client and unrelated tests retain the original std.testing.io.
+        threadlocal var current: ?*@This() = null;
+        calls: usize = 0,
+        operation_start: ?*const fn (*const anyopaque) void = null,
+        operation_admissions: std.atomic.Value(usize) = .init(0),
+        completed_before_failure: usize = 0,
+        failures: usize = 0,
+
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            if (current) |self| {
+                self.calls += 1;
+                // worker first admits the frame-read and lane-acquisition
+                // deadline pairs. executeFrame then admits the operation and
+                // attempts its first observer. Complete the actual operation
+                // callback before failing that observer: no timing assumption
+                // or inline substitute for the encrypted command is involved.
+                if (self.calls == 5) self.operation_start = start;
+                // Count every matching callback admission, including any
+                // unexpected internal retry. The ordinal positions only
+                // locate the injected fault, not the no-replay assertion.
+                if (self.operation_start) |operation_start| {
+                    if (start == operation_start) _ = self.operation_admissions.fetchAdd(1, .release);
+                }
+                if (self.calls == 6) {
+                    group.await(std.testing.io) catch return error.ConcurrencyUnavailable;
+                    self.completed_before_failure += 1;
+                    self.failures += 1;
+                    return error.ConcurrencyUnavailable;
+                }
+            }
+            return std.testing.io.vtable.groupConcurrent(userdata, group, context, alignment, start);
+        }
+        fn run(self: *@This(), server: *Server) std.Io.Cancelable!void {
+            std.debug.assert(current == null);
+            current = self;
+            defer current = null;
+            return server.worker();
+        }
+    };
+
+    var random: [8]u8 = undefined;
+    try io.randomSecure(&random);
+    const root = try std.fmt.allocPrint(a, "{s}/omagma-observer-admission-{s}", .{ @import("vault_paths.zig").temporary_root, std.fmt.bytesToHex(random, .lower) });
+    defer a.free(root);
+    const directory = try @import("../keyring_file.zig").directory(io, root, true);
+    directory.close(io);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const path = try std.fmt.allocPrint(a, "{s}/vault", .{root});
+    defer a.free(path);
+    const socket = try std.fmt.allocPrint(a, "{s}/ipc/sock", .{root});
+    defer a.free(socket);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const owner = try a.create(Owner);
+    defer a.destroy(owner);
+    owner.* = try Owner.init(io, a, &env, path, .{ .fixtures = true });
+    defer owner.deinit();
+    var recovery: vt.RecoveryKey = .{ .bytes = @splat(0x62) };
+    defer recovery.wipe();
+    try owner.create("Synthetic observer admission password", &recovery);
+    const send = "{\"id\":\"submitted-once\",\"cmd\":\"mail.send\",\"account\":\"personal@example.com\",\"operationId\":\"observer-admission-send\",\"draft\":{\"to\":\"peer@example.test\",\"subject\":\"Synthetic observer admission\",\"bodyText\":\"One explicitly requested fixture submission.\"}}";
+    const read = "{\"id\":\"read-once\",\"cmd\":\"accounts.list\",\"account\":\"personal@example.com\"}";
+    var vtable = io.vtable.*;
+    vtable.groupConcurrent = Admission.concurrent;
+    const adapted: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const outgoing_before = @import("send_memory.zig").snapshot().allocatorUsedBytes;
+    for ([_]bool{ true, false }) |mutation| {
+        var listener = try transport.Listener.init(io, socket);
+        defer listener.deinit();
+        var admission: Admission = .{};
+        var server: Server = .{ .io = adapted, .a = a, .listener = &listener, .owner = owner };
+        var worker = try io.concurrent(Admission.run, .{ &admission, &server });
+        defer {
+            server.stopped.set(io);
+            worker.cancel(io) catch {};
+        }
+        var client: transport.Client = .{ .io = io, .socket_path = socket };
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const rejected = try std.json.parseFromSliceLeaky(j.Value, allocator, try client.request(allocator, .execute, if (mutation) send else read), .{});
+        try std.testing.expect(!j.get(rejected, "ok").?.bool);
+        try std.testing.expectEqualStrings(if (mutation) "submitted-once" else "read-once", j.text(rejected, "id"));
+        try std.testing.expectEqualStrings("personal@example.com", j.text(rejected, "account"));
+        try std.testing.expectEqualStrings(if (mutation) "UnknownOutcome" else "ConcurrencyUnavailable", j.text(j.get(rejected, "error").?, "code"));
+        // A subsequent real round trip through this sole worker joins the
+        // previous request's response, lane and transient-allocation cleanup.
+        _ = try client.request(allocator, .status, "");
+        try std.testing.expectEqual(outgoing_before, @import("send_memory.zig").snapshot().allocatorUsedBytes);
+        // Check the first RPC in isolation, before the test deliberately
+        // repeats it. Fixture send deduplication alone cannot prove this.
+        try std.testing.expectEqual(@as(usize, 1), admission.operation_admissions.load(.acquire));
+        if (mutation) {
+            // The caller lost its result, but the accepted operation receipt
+            // was committed. Reusing its operation ID returns that receipt;
+            // no second fixture submission is permitted or performed.
+            const replay = try std.json.parseFromSliceLeaky(j.Value, allocator, try client.request(allocator, .execute, send), .{});
+            try std.testing.expect(j.get(replay, "ok").?.bool);
+            try std.testing.expectEqualStrings("applied", j.text(j.get(replay, "data").?, "outcome"));
+            try std.testing.expectEqual(@as(usize, 2), admission.operation_admissions.load(.acquire));
+        }
+        const stats = try std.json.parseFromSliceLeaky(j.Value, allocator, try client.request(allocator, .execute, "{\"cmd\":\"cache.stats\",\"account\":\"personal@example.com\"}"), .{});
+        try std.testing.expect(j.get(stats, "ok").?.bool);
+        try std.testing.expectEqual(@as(i64, 1), try j.integer(j.get(stats, "data").?, "fixtureSends", 0));
+        server.stopped.set(io);
+        worker.cancel(io) catch {};
+        // cache.stats is one further explicit execute callback in both cases.
+        try std.testing.expectEqual(@as(usize, if (mutation) 3 else 2), admission.operation_admissions.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), admission.completed_before_failure);
+        try std.testing.expectEqual(@as(usize, 1), admission.failures);
+        try std.testing.expect(!server.network_lane.load(.acquire));
+        try std.testing.expect(!owner.occupied.load(.acquire));
+    }
+    try std.testing.expectEqual(error.BackendStopped, transport.disconnectError("accounts.list"));
+    try std.testing.expectEqual(error.UnknownOutcome, transport.disconnectError("mail.send"));
 }
 
 test "vault daemon: timed out and canceled lane acquisition retain exact ownership" {

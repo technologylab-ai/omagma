@@ -97,10 +97,14 @@ pub const Runtime = struct {
         return self.sealRelay(4);
     }
 
-    /// The interactive relay also owns terminal/signal waits and one UI job.
-    /// IPC deadline tasks must fit alongside them without adding provider work.
+    /// The interactive relay has three persistent waits. Threaded publishes
+    /// completion before returning workers to the pool, so a canceled refresh
+    /// can still occupy four slots while its successor needs four more (11 in
+    /// total, or 12 with autosave). Prestart the normal 16-worker ceiling to
+    /// leave headroom for that handoff.
+    /// This adds no provider work or worker allocation after startup.
     pub fn sealFrontend(self: *Runtime) !void {
-        return self.sealRelay(8);
+        return self.sealRelay(worker_count);
     }
 
     fn sealRelay(self: *Runtime, count: usize) !void {
@@ -264,4 +268,112 @@ test "fixed runtime: startup barrier waits for a delayed callback on every prest
     try std.testing.expectEqual(@as(usize, worker_count), completed.load(.acquire));
     try std.testing.expectEqual(pool, runtime.threaded.worker_threads.load(.acquire));
     try std.testing.expectEqual(@as(usize, worker_count), runtime.workerCount());
+}
+
+test "fixed runtime: frontend handoff admits the next read before joined workers return to the pool" {
+    const Retirement = struct {
+        backing: std.mem.Allocator,
+        io: std.Io,
+        remaining: std.atomic.Value(usize) = .init(0),
+        entered: std.atomic.Value(usize) = .init(0),
+        release: std.Io.Event = .unset,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, bytes: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.backing.rawAlloc(bytes, alignment, ra);
+        }
+        fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            var remaining = self.remaining.load(.acquire);
+            while (remaining > 0) {
+                remaining = self.remaining.cmpxchgWeak(remaining, remaining - 1, .acq_rel, .acquire) orelse {
+                    _ = self.entered.fetchAdd(1, .release);
+                    // Group completion has already reached its awaiter, but
+                    // Threaded decrements busy_count only after this free.
+                    self.release.waitUncancelable(self.io);
+                    break;
+                };
+            }
+            self.backing.rawFree(bytes, alignment, ra);
+        }
+    };
+    const Task = struct {
+        fn wait(io: std.Io, release: *std.Io.Event) void {
+            release.wait(io) catch {};
+        }
+        fn idle(runtime: *Runtime, wanted: usize) !void {
+            const io = runtime.io();
+            const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+            while (true) {
+                runtime.threaded.mutex.lockUncancelable(io);
+                const count = runtime.threaded.busy_count;
+                runtime.threaded.mutex.unlock(io);
+                if (count == wanted) return;
+                if (deadline.durationFromNow(io).raw.toNanoseconds() <= 0) return error.WorkerHandoffTimedOut;
+                std.Thread.yield() catch {};
+            }
+        }
+    };
+    for ([_]bool{ true, false }) |legacy_eight| {
+        var application: [8192]u8 align(16) = undefined;
+        var io_storage: [192 * 1024]u8 align(16) = undefined;
+        var startup: [4096]u8 = undefined;
+        var runtime: Runtime = .{};
+        try runtime.init(.{ .args = .{ .vector = &.{"frontend-handoff-test"} }, .environ = .empty }, .{
+            .application = &application,
+            .io = &io_storage,
+            .startup = &startup,
+        }, application.len);
+        defer runtime.deinit();
+        if (legacy_eight) try runtime.sealRelay(8) else try runtime.sealFrontend();
+        const io = runtime.io();
+        const pool = runtime.threaded.worker_threads.load(.acquire);
+        const worker_total = runtime.workerCount();
+        const baseline = runtime.io_meter.snapshot().allocatorUsedBytes;
+        var retirement: Retirement = .{ .backing = runtime.threaded.allocator, .io = io };
+        runtime.threaded.allocator = retirement.allocator();
+        // Keep this allocator stable through Runtime.deinit on error paths:
+        // joined groups may still be freeing their task storage.
+        // Three persistent waits: input, signals and cache/theme observation.
+        var permanent_release: std.Io.Event = .unset;
+        var permanent: std.Io.Group = .init;
+        defer permanent.cancel(io);
+        for (0..3) |_| try permanent.concurrent(io, Task.wait, .{ io, &permanent_release });
+        var previous_release: std.Io.Event = .unset;
+        var previous: std.Io.Group = .init;
+        defer previous.cancel(io);
+        for (0..4) |_| try previous.concurrent(io, Task.wait, .{ io, &previous_release });
+        retirement.remaining.store(4, .release);
+        defer retirement.release.set(io);
+        previous.cancel(io);
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+        while (retirement.entered.load(.acquire) != 4) {
+            if (deadline.durationFromNow(io).raw.toNanoseconds() <= 0) return error.RetirementGateTimedOut;
+            std.Thread.yield() catch {};
+        }
+        try Task.idle(&runtime, 7);
+        // Model the next UI read, IPC operation, IPC deadline and animation.
+        // Admission is attempted exactly once; the operation is never retried.
+        var next_release: std.Io.Event = .unset;
+        var next: std.Io.Group = .init;
+        defer next.cancel(io);
+        try next.concurrent(io, Task.wait, .{ io, &next_release });
+        if (legacy_eight) {
+            try std.testing.expectError(error.ConcurrencyUnavailable, next.concurrent(io, Task.wait, .{ io, &next_release }));
+        } else {
+            for (0..3) |_| try next.concurrent(io, Task.wait, .{ io, &next_release });
+            try Task.idle(&runtime, 11);
+        }
+        retirement.release.set(io);
+        next.cancel(io);
+        permanent.cancel(io);
+        try Task.idle(&runtime, 0);
+        try std.testing.expectEqual(baseline, runtime.io_meter.snapshot().allocatorUsedBytes);
+        try std.testing.expectEqual(pool, runtime.threaded.worker_threads.load(.acquire));
+        try std.testing.expectEqual(worker_total, runtime.workerCount());
+        try std.testing.expectEqual(@as(usize, if (legacy_eight) 8 else worker_count), worker_total);
+    }
 }
