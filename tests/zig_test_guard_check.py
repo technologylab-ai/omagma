@@ -199,11 +199,23 @@ class GuardTests(unittest.TestCase):
 
     def test_release_preserves_all_eight_unit_timeouts_and_opts_in(self):
         commands = [line for line in (ROOT / ".github/workflows/release.yml").read_text().splitlines()
-                    if "--test-timeout" in line]
+                    if "--test-timeout" in line and "test-native-send-stress" not in line]
         self.assertEqual(len(commands), 8)
         for command in commands:
             self.assertIn("--test-timeout 120s", command)
             self.assertIn("-Dtest-watchdog=true", command)
+
+    def test_release_runs_growing_stress_separately_on_both_native_matrices(self):
+        linux, macos = (ROOT / ".github/workflows/release.yml").read_text().split("  macos-build:", 1)
+        for matrix in (linux, macos):
+            commands = [line for line in matrix.splitlines() if "test-native-send-stress" in line]
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(sum("-Doptimize=debug" in command for command in commands), 1)
+            self.assertEqual(sum("-Doptimize=safe" in command for command in commands), 1)
+            for command in commands:
+                self.assertIn("--test-timeout 300s", command)
+                self.assertIn("-Dtarget=${{ matrix.target }}", command)
+                self.assertIn("-Dtest-watchdog=true", command)
 
 
     def test_maker_timeout_preserves_phase_markers_and_partial_output(self):
