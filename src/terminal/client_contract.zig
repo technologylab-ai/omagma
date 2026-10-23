@@ -10,7 +10,7 @@ pub fn readOnlyCommand(command: []const u8) bool {
     if (std.mem.eql(u8, command, "invitation.inspect")) return false;
     if (std.mem.eql(u8, command, "calendar.event-pending")) return true;
     if (cachedCommand(command)) return true;
-    for ([_][]const u8{ "accounts.list", "auth.status", "preferences.get", "labels.palette", "mail.label-state", "mail.triage-scope", "draft.list", "draft.read", "queue.list", "queue.status", "updates.check" }) |allowed| if (std.mem.eql(u8, command, allowed)) return true;
+    for ([_][]const u8{ "accounts.list", "auth.status", "preferences.get", "labels.palette", "mail.label-state", "mail.triage-scope", "mail.compose-source", "draft.list", "draft.read", "queue.list", "queue.status", "updates.check" }) |allowed| if (std.mem.eql(u8, command, allowed)) return true;
     return false;
 }
 pub fn readOnlyEnvelope(command: []const u8, reconcile: bool) bool {

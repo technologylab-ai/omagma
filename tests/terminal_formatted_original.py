@@ -18,8 +18,10 @@ from email.utils import getaddresses
 import hashlib
 from html.parser import HTMLParser
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 from build_info import read_build_info
@@ -181,7 +183,40 @@ class FormattedFixture(ProviderFixture):
         return super().options("--prefetch-bodies", "0", *extra)
 
 
-def check_snapshot(draft, account=ACCOUNTS[0]):
+def check_part_bytes(part, expected, *, client_dir=None, account=ACCOUNTS[0]):
+    """Check inline bytes or the exact account's private synthetic blob file."""
+    require(part["size"] == len(expected), "draft attachment changed its decoded size")
+    blob_id = part.get("blobId")
+    if not blob_id:
+        raw = base64.b64decode(part["data"] + "=" * (-len(part["data"]) % 4),
+                               altchars=b"-_", validate=True)
+        require(raw == expected, "draft attachment changed its inline bytes")
+        return
+    require(client_dir is not None, "blob verification requires the isolated client's directory")
+    require(isinstance(blob_id, str) and re.fullmatch(r"[0-9a-f]{64}", blob_id)
+            and not part["data"], "draft attachment has an invalid or mixed blob handle")
+    require(hashlib.sha256(expected).hexdigest() == blob_id,
+            "draft attachment's blob hash differs from the independent byte oracle")
+    account_hash = hashlib.sha256(account.encode()).hexdigest()
+    path = Path(client_dir) / "cache" / "fixtures" / account_hash / ("blob-" + blob_id + ".bin")
+    require(path.is_file() and not path.is_symlink(), "draft attachment has no regular account-owned blob file")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
+        info = os.fstat(source.fileno())
+        require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+                and info.st_size == len(expected), "draft attachment blob changed size or is not private")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < len(expected):
+            chunk = source.read(min(65536, len(expected) - offset))
+            require(chunk and chunk == expected[offset:offset + len(chunk)],
+                    "draft attachment blob changed or truncated its bytes")
+            digest.update(chunk)
+            offset += len(chunk)
+        require(source.read(1) == b"", "draft attachment blob has bytes beyond its declared size")
+        require(digest.hexdigest() == blob_id, "draft attachment blob failed its content hash")
+
+
+def check_snapshot(draft, account=ACCOUNTS[0], *, client_dir=None):
     original = draft.get("original")
     require(isinstance(original, dict) and original["version"] == 1, "formatted draft omitted versioned original snapshot")
     require(original["sourceMessageId"] == SOURCE_ID, "snapshot lost source message identity")
@@ -195,8 +230,8 @@ def check_snapshot(draft, account=ACCOUNTS[0]):
     require(len(actual) == len(original["resources"]) == 3, "snapshot lost or duplicated related resources")
     require(ORDINARY_CID not in actual, "unused CID ordinary file became a related resource")
     for cid, data in resource_bytes(account).items():
-        require(cid in actual and decoded(actual[cid]["data"]) == data and actual[cid]["size"] == len(data),
-                f"resource {cid} changed bytes, size or account")
+        require(cid in actual, f"snapshot omitted resource {cid}")
+        check_part_bytes(actual[cid], data, client_dir=client_dir, account=account)
     require(actual[NAMED_CID]["contentLocation"] == LOCATION, "related Content-Location was lost")
     for cid in (NAMED_CID, NAMELESS_CID):
         require(actual[cid]["disposition"] == "attachment", "snapshot rewrote the referenced image's original disposition")
@@ -313,14 +348,15 @@ def lifecycle(binary, directory):
                 if not forward:
                     params["all"] = True
                 draft = client.request(command, account, **params)
-                check_snapshot(draft, account)
+                check_snapshot(draft, account, client_dir=client.directory)
                 require(draft["bodyText"] == "", "formatted source was copied into editable note")
                 require(len(draft["attachments"]) == int(forward), "ordinary attachments were duplicated or copied into reply")
                 if forward:
                     ordinary = draft["attachments"][0]
                     require(ordinary.get("contentId") == ORDINARY_CID and ordinary.get("disposition") == "attachment" and
-                            ordinary["filename"] == "ordinary.bin" and decoded(ordinary["data"]) == attachment_bytes(account),
+                            ordinary["filename"] == "ordinary.bin",
                             "unused CID ordinary file was lost, hidden or changed")
+                    check_part_bytes(ordinary, attachment_bytes(account), client_dir=client.directory, account=account)
                 if not forward:
                     require(addresses(draft["to"]) == ["reply@example.test"] and
                             addresses(draft["cc"]) == ["teammate@example.test", "copied@example.test"],
@@ -341,7 +377,7 @@ def lifecycle(binary, directory):
                 updated.pop("original")
                 updated.pop("bodyFormat")
                 draft = client.request("draft.update", account, draftId=draft["id"], draft=updated)
-                check_snapshot(draft, account)
+                check_snapshot(draft, account, client_dir=client.directory)
                 preview = client.request("draft.preview", account, draftId=draft["id"])
                 check_preview(preview, account)
                 require(one_shot(client, "draft", "preview", ["--draft-id", draft["id"]], account=account) == preview,
@@ -374,7 +410,7 @@ def lifecycle(binary, directory):
         # frozen through autosave, restart, completed update and plain format.
         account = ACCOUNTS[2]
         recovery = client.request("mail.reply", account, messageId=SOURCE_ID, preserveFormatting=True, bodyFormat="plain")
-        snapshot = check_snapshot(recovery, account)
+        snapshot = check_snapshot(recovery, account, client_dir=client.directory)
         recovery_input = copy.deepcopy(recovery)
         recovery_input.pop("original")
         recovery_input.pop("bodyFormat")
@@ -477,7 +513,7 @@ def refusals(binary, directory):
         require(all(item.get("contentId") is None for item in legacy["attachments"]),
                 "legacy-cache fixture did not retain the old metadata shape")
         before = client.request("cache.stats")["fixtureCalls"]
-        check_snapshot(client.request("mail.reply", messageId=SOURCE_ID, preserveFormatting=True))
+        check_snapshot(client.request("mail.reply", messageId=SOURCE_ID, preserveFormatting=True), client_dir=client.directory)
         require(client.request("cache.stats")["fixtureCalls"] > before, "formatted capture reused incomplete legacy cached source")
     finished(client)
 

@@ -9,9 +9,7 @@ const mail_limits = @import("mail_limits.zig");
 pub const Note = struct { html: []const u8, plain: []const u8, logoOffset: usize };
 pub const Prepared = struct { html: []const u8, plain: []const u8, logoOffset: usize, resources: []const t.Attachment };
 const logo_content_id = "omagma-logo@omagma.invalid";
-const max_tokens = 32768;
 const max_tag_bytes = 16384;
-const max_encoding_tags = 32;
 const max_root_attributes = 256;
 const max_scope_depth = 64;
 const utf8_meta = "<meta charset=\"utf-8\">";
@@ -21,7 +19,7 @@ const Buffer = struct {
     a: std.mem.Allocator,
     bytes: std.ArrayList(u8) = .empty,
     fn append(self: *Buffer, value: []const u8) !void {
-        if (value.len > t.Limits.body_bytes - self.bytes.items.len) return error.RenderedBodyTooLarge;
+        if (value.len > t.Limits.compose_body_bytes - self.bytes.items.len) return error.RenderedBodyTooLarge;
         try self.bytes.appendSlice(self.a, value);
     }
     fn escaped(self: *Buffer, value: []const u8) !void {
@@ -57,16 +55,18 @@ pub fn validate(original: t.Original) !void {
 /// as an attachment may be embedded, while a PDF's unused CID proves nothing.
 /// Exact Content-Location URLs are recognized after HTML/CSS decoding; relative
 /// resolution, network access and URI-equivalence guesses are intentionally absent.
-pub fn resourceUsage(html: []const u8, resources: []const t.Attachment) !u64 {
-    if (resources.len > 64) return error.TooManyAttachments;
+pub const ResourceUsage = std.StaticBitSet(t.Limits.message_attachments);
+
+pub fn resourceUsage(html: []const u8, resources: []const t.Attachment) !ResourceUsage {
+    if (resources.len > t.Limits.message_attachments) return error.TooManyAttachments;
     try bodyText(html);
-    var used: u64 = 0;
+    var used: ResourceUsage = .empty;
     try scanReferences(html, resources, &used);
     return used;
 }
 
 pub const ResourcePlan = struct {
-    indices: [t.Limits.related_resources]u6 = undefined,
+    indices: [t.Limits.related_resources]usize = undefined,
     count: usize = 0,
     bytes: usize = 0,
 };
@@ -75,7 +75,8 @@ pub const ResourcePlan = struct {
 /// No allocation, file access or resource download occurs here. Explicit files
 /// are retained as related resources only when HTML actually references them;
 /// other identified resources are retained for opaque conditional markup too.
-/// Selected resources keep the 32-part and 2 MiB decoded aggregate limits.
+/// Portable adapters keep the 2 MiB decoded aggregate limit. Inline resources
+/// have their own count budget, independent of ordinary outgoing file slots.
 pub fn resourcePlan(html: []const u8, attachments: []const t.Attachment) !ResourcePlan {
     return resourcePlanWithLimit(html, attachments, t.Limits.body_bytes);
 }
@@ -85,11 +86,11 @@ pub fn resourcePlan(html: []const u8, attachments: []const t.Attachment) !Resour
 pub fn resourcePlanWithLimit(html: []const u8, attachments: []const t.Attachment, byte_limit: usize) !ResourcePlan {
     if (html.len == 0) return error.OriginalHtmlUnavailable;
     const usage = try resourceUsage(html, attachments);
-    _ = try scan(html);
+    _ = try scan(html, null);
     var plan: ResourcePlan = .{};
     for (attachments, 0..) |attachment, index| {
         const is_file = if (attachment.disposition) |value| std.ascii.eqlIgnoreCase(value, "attachment") else false;
-        const referenced = usage & (@as(u64, 1) << @as(u6, @intCast(index))) != 0;
+        const referenced = usage.isSet(index);
         const has_identity = attachment.contentId != null or attachment.contentLocation != null;
         if (!has_identity or (is_file and !referenced)) continue;
         if (plan.count == plan.indices.len) return error.TooManyAttachments;
@@ -102,7 +103,7 @@ pub fn resourcePlanWithLimit(html: []const u8, attachments: []const t.Attachment
         if (attachment.contentLocation) |location| {
             for (plan.indices[0..plan.count]) |previous| if (attachments[previous].contentLocation) |other| if (std.mem.eql(u8, location, other)) return error.AmbiguousContentId;
         }
-        plan.indices[plan.count] = @intCast(index);
+        plan.indices[plan.count] = index;
         plan.count += 1;
     }
     return plan;
@@ -148,7 +149,7 @@ pub fn prepare(a: std.mem.Allocator, note: Note, original: t.Original) !Prepared
 }
 
 fn bodyText(value: []const u8) !void {
-    if (value.len > t.Limits.body_bytes) return error.BodyTooLarge;
+    if (value.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(value) or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidOriginalHtml;
 }
 fn summaryText(value: []const u8, limit: usize) !void {
@@ -170,7 +171,7 @@ fn inspect(original: t.Original) !Envelope {
     if (original.to.len > mail_limits.incoming_recipients or original.cc.len > mail_limits.incoming_recipients) return error.InvalidOriginalHtml;
     for (original.to) |address| try mailbox(address);
     for (original.cc) |address| try mailbox(address);
-    const envelope = try scan(original.bodyHtml);
+    const envelope = try scan(original.bodyHtml, null);
     try validateReferences(original.bodyHtml, original.resources);
     return envelope;
 }
@@ -245,19 +246,30 @@ fn htmlLabel(out: *Buffer, label: []const u8) !void {
 const Envelope = struct {
     meta_at: usize = 0,
     note_at: usize = 0,
-    encoding_tags: [max_encoding_tags]Span = undefined,
-    encoding_count: usize = 0,
 
     fn copy(self: *const Envelope, out: *Buffer, input: []const u8, start: usize, end: usize) !void {
+        _ = self;
         if (start > end or end > input.len) return error.InvalidOriginalHtml;
-        var offset = start;
-        for (self.encoding_tags[0..self.encoding_count]) |tag| {
-            if (tag.end <= start or tag.start >= end) continue;
-            if (tag.start < offset or tag.end > end) return error.InvalidOriginalHtml;
-            try out.append(input[offset..tag.start]);
-            offset = tag.end;
-        }
-        try out.append(input[offset..end]);
+        if (start == end) return;
+        // Scan the same context again and stream removals, so repeated quoted
+        // documents cannot overflow a tiny fixed charset-tag table. Each pass
+        // advances through byte-bounded input; no source bytes are modified.
+        var range: CopyRange = .{ .out = out, .input = input, .start = start, .end = end, .offset = start };
+        _ = try scan(input, &range);
+        try out.append(input[range.offset..end]);
+    }
+};
+const CopyRange = struct {
+    out: *Buffer,
+    input: []const u8,
+    start: usize,
+    end: usize,
+    offset: usize,
+    fn omitEncoding(self: *CopyRange, tag: Span) !void {
+        if (tag.end <= self.start or tag.start >= self.end) return;
+        if (tag.start < self.offset or tag.end > self.end) return error.InvalidOriginalHtml;
+        try self.out.append(self.input[self.offset..tag.start]);
+        self.offset = tag.end;
     }
 };
 
@@ -462,16 +474,11 @@ fn cdataEnd(input: []const u8, start: usize) !usize {
     const end = std.mem.indexOfPos(u8, input, start + 9, "]]>") orelse return error.InvalidOriginalHtml;
     return end + 3;
 }
-fn countToken(count: *usize) !void {
-    if (count.* == max_tokens) return error.OriginalHtmlUnavailable;
-    count.* += 1;
-}
-fn templateEnd(input: []const u8, opener: Tag, tokens: *usize) !usize {
+fn templateEnd(input: []const u8, opener: Tag) !usize {
     var depth: usize = 1;
     var foreign_depth: usize = 0;
     var offset = opener.span.end;
     while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |start| {
-        try countToken(tokens);
         if (std.mem.startsWith(u8, input[start..], "<!--")) {
             offset = try commentEnd(input, start);
             continue;
@@ -510,17 +517,15 @@ fn templateEnd(input: []const u8, opener: Tag, tokens: *usize) !usize {
 /// Find a safe note insertion boundary, not a conforming HTML document.
 /// Received envelopes and body bytes pass through; browser recovery still
 /// handles duplicate roots/bodies, omitted tags and content after their ends.
-fn scan(input: []const u8) !Envelope {
+fn scan(input: []const u8, copy: ?*CopyRange) !Envelope {
     var result: Envelope = .{};
     const Phase = enum { before_head, in_head, after_head, body };
     var phase: Phase = .before_head;
     var meta_at: ?usize = null;
     var note_at: ?usize = null;
     var offset: usize = if (std.mem.startsWith(u8, input, "\xef\xbb\xbf")) 3 else 0;
-    var tokens: usize = 0;
     var foreign_depth: usize = 0;
     while (offset < input.len) {
-        try countToken(&tokens);
         if (std.mem.startsWith(u8, input[offset..], "<!--")) {
             offset = commentEnd(input, offset) catch |err| {
                 if (note_at != null and err == error.InvalidOriginalHtml) break;
@@ -603,7 +608,7 @@ fn scan(input: []const u8) !Envelope {
             phase = .body;
         }
         if (tag.is("template") and !tag.closing) {
-            offset = templateEnd(input, tag, &tokens) catch |err| {
+            offset = templateEnd(input, tag) catch |err| {
                 if (note_at != null and err == error.InvalidOriginalHtml) break;
                 return if (err == error.InvalidOriginalHtml) error.OriginalHtmlUnavailable else err;
             };
@@ -619,9 +624,7 @@ fn scan(input: []const u8) !Envelope {
         if (tag.is("meta") and !tag.closing) {
             const http_equiv = tag.attribute("http-equiv") orelse "";
             if (tag.attribute("charset") != null or std.ascii.eqlIgnoreCase(std.mem.trim(u8, http_equiv, " \t\r\n"), "content-type")) {
-                if (result.encoding_count == result.encoding_tags.len) return error.OriginalHtmlUnavailable;
-                result.encoding_tags[result.encoding_count] = tag.span;
-                result.encoding_count += 1;
+                if (copy) |range| try range.omitEncoding(tag.span);
             }
         }
         if (rawTag(tag)) {
@@ -642,13 +645,81 @@ fn scan(input: []const u8) !Envelope {
 fn validateReferences(input: []const u8, resources: []const t.Attachment) !void {
     try scanReferences(input, resources, null);
 }
-fn scanReferences(input: []const u8, resources: []const t.Attachment, used: ?*u64) !void {
+
+/// Borrowed sorted metadata keeps reference lookup logarithmic even when an
+/// accumulated chain repeats every old screenshot many times. No HTML or
+/// identity is rewritten; duplicate identities remain visible to validation.
+const ResourceLookup = struct {
+    const Identity = enum { contentId, contentLocation };
+    resources: []const t.Attachment,
+    ids: [t.Limits.message_attachments]usize = undefined,
+    id_count: usize = 0,
+    locations: [t.Limits.message_attachments]usize = undefined,
+    location_count: usize = 0,
+    seen_ids: ResourceUsage = .empty,
+    seen_locations: ResourceUsage = .empty,
+
+    fn init(resources: []const t.Attachment) !ResourceLookup {
+        if (resources.len > t.Limits.message_attachments) return error.TooManyAttachments;
+        var result: ResourceLookup = .{ .resources = resources };
+        for (resources, 0..) |resource, index| {
+            if (resource.contentId != null) {
+                result.ids[result.id_count] = index;
+                result.id_count += 1;
+            }
+            if (resource.contentLocation != null) {
+                result.locations[result.location_count] = index;
+                result.location_count += 1;
+            }
+        }
+        result.sort(.contentId, result.ids[0..result.id_count]);
+        result.sort(.contentLocation, result.locations[0..result.location_count]);
+        return result;
+    }
+
+    fn sort(self: *const ResourceLookup, comptime kind: Identity, indices: []usize) void {
+        const Order = struct {
+            fn less(resources: []const t.Attachment, first: usize, second: usize) bool {
+                return std.mem.lessThan(u8, @field(resources[first], @tagName(kind)).?, @field(resources[second], @tagName(kind)).?);
+            }
+        };
+        std.mem.sort(usize, indices, self.resources, Order.less);
+    }
+
+    fn mark(self: *ResourceLookup, comptime kind: Identity, value: []const u8, used: ?*ResourceUsage) bool {
+        const indices = switch (kind) {
+            .contentId => self.ids[0..self.id_count],
+            .contentLocation => self.locations[0..self.location_count],
+        };
+        var low: usize = 0;
+        var high = indices.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (std.mem.lessThan(u8, @field(self.resources[indices[mid]], @tagName(kind)).?, value)) low = mid + 1 else high = mid;
+        }
+        if (low == indices.len or !std.mem.eql(u8, @field(self.resources[indices[low]], @tagName(kind)).?, value)) return false;
+        if (used) |bits| {
+            // Mark every duplicate on the first occurrence. A repeated URL
+            // must not repeatedly walk a malicious duplicate-identity group.
+            const seen = switch (kind) {
+                .contentId => &self.seen_ids,
+                .contentLocation => &self.seen_locations,
+            };
+            if (!seen.isSet(indices[low])) {
+                seen.set(indices[low]);
+                while (low < indices.len and std.mem.eql(u8, @field(self.resources[indices[low]], @tagName(kind)).?, value)) : (low += 1) bits.set(indices[low]);
+            }
+        }
+        return true;
+    }
+};
+
+fn scanReferences(input: []const u8, resources: []const t.Attachment, used: ?*ResourceUsage) !void {
+    var lookup = try ResourceLookup.init(resources);
     var offset: usize = 0;
-    var tokens: usize = 0;
     var foreign_depth: usize = 0;
     var decoded: [max_tag_bytes]u8 = undefined;
     while (std.mem.indexOfScalarPos(u8, input, offset, '<')) |start| {
-        try countToken(&tokens);
         if (std.mem.startsWith(u8, input[start..], "<!--")) {
             offset = commentEnd(input, start) catch |err| {
                 if (err == error.InvalidOriginalHtml) break; // The remaining source is comment text.
@@ -680,24 +751,24 @@ fn scanReferences(input: []const u8, resources: []const t.Attachment, used: ?*u6
         }
         if (tag.closing) continue;
         for ([_][]const u8{ "src", "href", "background", "poster", "data", "xlink:href", "lowsrc" }) |name| {
-            if (tag.attribute(name)) |raw| try checkUrl(try htmlAttribute(raw, &decoded), resources, used);
+            if (tag.attribute(name)) |raw| try checkUrl(try htmlAttribute(raw, &decoded), &lookup, used);
         }
         if (tag.attribute("srcset")) |raw| {
             var candidates = std.mem.splitScalar(u8, try htmlAttribute(raw, &decoded), ',');
             while (candidates.next()) |candidate| {
                 const value = std.mem.trim(u8, candidate, " \t\r\n");
                 const end = std.mem.indexOfAny(u8, value, " \t\r\n") orelse value.len;
-                try checkUrl(value[0..end], resources, used);
+                try checkUrl(value[0..end], &lookup, used);
             }
         }
-        if (tag.attribute("style")) |raw| try cssReferences(try htmlAttribute(raw, &decoded), resources, used);
+        if (tag.attribute("style")) |raw| try cssReferences(try htmlAttribute(raw, &decoded), &lookup, used);
         if (foreign_depth == 0 and rawTag(tag)) {
             const closer = rawClose(input, tag) catch |err| {
                 if (err != error.InvalidOriginalHtml) return err;
-                if (tag.is("style")) try cssReferences(input[tag.span.end..], resources, used);
+                if (tag.is("style")) try cssReferences(input[tag.span.end..], &lookup, used);
                 break;
             };
-            if (tag.is("style")) try cssReferences(input[tag.span.end..closer.span.start], resources, used);
+            if (tag.is("style")) try cssReferences(input[tag.span.end..closer.span.start], &lookup, used);
             offset = closer.span.end;
         }
     }
@@ -708,14 +779,10 @@ fn hex(c: u8) ?u8 {
     if (c >= 'A' and c <= 'F') return c - 'A' + 10;
     return null;
 }
-fn checkUrl(raw: []const u8, resources: []const t.Attachment, used: ?*u64) !void {
+fn checkUrl(raw: []const u8, lookup: *ResourceLookup, used: ?*ResourceUsage) !void {
     const value = std.mem.trim(u8, raw, " \t\r\n");
     if (!std.ascii.startsWithIgnoreCase(value, "cid:")) {
-        if (value.len != 0) if (used) |bits| for (resources, 0..) |resource, index| {
-            if (resource.contentLocation) |location| if (std.mem.eql(u8, value, location)) {
-                bits.* |= @as(u64, 1) << @as(u6, @intCast(index));
-            };
-        };
+        if (value.len != 0) _ = lookup.mark(.contentLocation, value, used);
         return;
     }
     var buffer: [1024]u8 = undefined;
@@ -734,16 +801,7 @@ fn checkUrl(raw: []const u8, resources: []const t.Attachment, used: ?*u64) !void
         n += 1;
     }
     if (n == 0) return error.OriginalResourceUnavailable;
-    var matched = false;
-    for (resources, 0..) |resource, index| if (resource.contentId) |id| {
-        if (std.mem.eql(u8, buffer[0..n], id)) {
-            matched = true;
-            // Keep every match visible to the backend's existing duplicate-CID
-            // validation, rather than accidentally selecting the first part.
-            if (used) |bits| bits.* |= @as(u64, 1) << @as(u6, @intCast(index));
-        }
-    };
-    if (matched) return;
+    if (lookup.mark(.contentId, buffer[0..n], used)) return;
     return error.OriginalResourceUnavailable;
 }
 fn entity(value: []const u8) ?u21 {
@@ -858,7 +916,7 @@ fn badCssUrlEnd(input: []const u8, start: usize) usize {
     }
     return input.len;
 }
-fn cssReferences(input: []const u8, resources: []const t.Attachment, used: ?*u64) !void {
+fn cssReferences(input: []const u8, lookup: *ResourceLookup, used: ?*ResourceUsage) !void {
     // CSS syntax errors are not HTML splice errors. Ignore discarded/unfinished
     // CSS tokens, but require resources for recognized URLs. In particular, do
     // not mark unrelated CID attachments as used merely because CSS is broken.
@@ -925,13 +983,18 @@ fn cssReferences(input: []const u8, resources: []const t.Attachment, used: ?*u64
             }
             value = std.mem.trimEnd(u8, input[start..next], " \t\r\n");
         }
-        try checkUrl(try cssUrl(value, &decoded), resources, used);
+        try checkUrl(try cssUrl(value, &decoded), lookup, used);
         i = if (next < input.len) next + 1 else input.len;
     }
 }
 
 fn fixtureOriginal(html: []const u8) t.Original {
     return .{ .sourceMessageId = "synthetic-source", .from = .{ .address = "sender@example.test", .name = "Sender & <friend>" }, .to = &.{.{ .address = "recipient@example.test" }}, .subject = "A <table> & a picture", .date = "Mon, 05 Oct 2026 12:00:00 +0000", .bodyText = "Original plain text.", .bodyHtml = html };
+}
+
+fn expectUsage(expected: []const usize, actual: ResourceUsage) !void {
+    try std.testing.expectEqual(expected.len, actual.count());
+    for (expected) |index| try std.testing.expect(actual.isSet(index));
 }
 const fixture_note = "<div>New note<img src=\"cid:omagma-logo@omagma.invalid\"></div>";
 fn fixtureNote() Note {
@@ -968,7 +1031,7 @@ test "original mail: resource plan separates unloaded file metadata from bounded
     };
     const eligible = try resourcePlan(html, &resources);
     try std.testing.expectEqual(@as(usize, 1), eligible.count);
-    try std.testing.expectEqual(@as(u6, 1), eligible.indices[0]);
+    try std.testing.expectEqual(@as(usize, 1), eligible.indices[0]);
     try std.testing.expectEqual(@as(usize, 14 * 1024), eligible.bytes);
     var photo = resources[1];
     photo.size = 2 * 1024 * 1024;
@@ -981,13 +1044,12 @@ test "original mail: resource plan separates unloaded file metadata from bounded
     // A large explicit file becomes a resource when referenced, so it cannot
     // evade the preservation limit merely by using attachment disposition.
     try std.testing.expectError(error.AttachmentsTooLarge, resourcePlan("<img src='report.pptx'>", &resources));
-    var many: [33]t.Attachment = @splat(.{ .id = "conditional", .filename = "conditional.png", .size = 8, .disposition = "inline" });
-    var locations: [33][2]u8 = undefined;
+    var many: [t.Limits.related_resources + 1]t.Attachment = @splat(.{ .id = "conditional", .filename = "conditional.png", .size = 8, .disposition = "inline" });
+    var locations: [t.Limits.related_resources + 1][24]u8 = undefined;
     for (&many, 0..) |*item, index| {
-        locations[index] = .{ 'a' + @as(u8, @intCast(index / 10)), '0' + @as(u8, @intCast(index % 10)) };
-        item.contentLocation = &locations[index];
+        item.contentLocation = try std.fmt.bufPrint(&locations[index], "part-{d}.png", .{index});
     }
-    try std.testing.expectEqual(@as(usize, 32), (try resourcePlan("<p>Conditional resources</p>", many[0..32])).count);
+    try std.testing.expectEqual(t.Limits.related_resources, (try resourcePlan("<p>Conditional resources</p>", many[0..t.Limits.related_resources])).count);
     try std.testing.expectError(error.TooManyAttachments, resourcePlan("<p>Conditional resources</p>", &many));
     try std.testing.expectError(error.OriginalResourceUnavailable, resourcePlan("<img src='cid:missing@example.test'>", &resources));
     try std.testing.expectError(error.AmbiguousContentId, resourcePlan(html, &.{ resources[1], resources[1] }));
@@ -1093,7 +1155,7 @@ test "original mail: recoverable less-than attributes preserve body bytes and la
     var original = fixtureOriginal(source);
     original.resources = &resources;
     try validate(original);
-    try std.testing.expectEqual(@as(u64, 2), try resourceUsage(source, &resources));
+    try expectUsage(&.{1}, try resourceUsage(source, &resources));
     const result = try prepare(std.testing.allocator, fixtureNote(), original);
     defer std.testing.allocator.free(result.html);
     defer std.testing.allocator.free(result.plain);
@@ -1135,7 +1197,7 @@ test "original mail: incomplete body tails are preserved without appended closin
         defer std.testing.allocator.free(result.plain);
         try std.testing.expect(std.mem.endsWith(u8, result.html, "<p>Visible original</p>" ++ tail));
         try std.testing.expect(std.mem.indexOf(u8, result.html, "<body>" ++ fixture_note) != null);
-        try std.testing.expectEqual(@as(u64, 0), try resourceUsage(source, &.{}));
+        try expectUsage(&.{}, try resourceUsage(source, &.{}));
     }
 }
 
@@ -1152,10 +1214,16 @@ test "original mail: related resources stay borrowed and aggregate output remain
     const large = try a.alloc(u8, t.Limits.body_bytes);
     @memset(large, 'x');
     original.bodyText = large;
-    try std.testing.expectError(error.RenderedBodyTooLarge, prepare(a, fixtureNote(), original));
-    var too_many: Buffer = .{ .a = a };
-    for (0..max_encoding_tags + 1) |_| try too_many.append("<meta charset='ascii'>");
-    try std.testing.expectError(error.OriginalHtmlUnavailable, validate(fixtureOriginal(too_many.bytes.items)));
+    if (t.Limits.compose_body_bytes > t.Limits.body_bytes) {
+        try std.testing.expect((try prepare(a, fixtureNote(), original)).plain.len > t.Limits.body_bytes);
+    } else try std.testing.expectError(error.RenderedBodyTooLarge, prepare(a, fixtureNote(), original));
+    var repeated: Buffer = .{ .a = a };
+    for (0..80) |_| try repeated.append("<meta charset='ascii'>");
+    try repeated.append("<p>Source after many quoted encodings</p>");
+    const normalized = try prepare(a, fixtureNote(), fixtureOriginal(repeated.bytes.items));
+    try std.testing.expect(std.mem.indexOf(u8, normalized.html, "charset='ascii'") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, normalized.html, utf8_meta));
+    try std.testing.expect(std.mem.endsWith(u8, normalized.html, "<p>Source after many quoted encodings</p>"));
 }
 
 test "original mail: real CID references resolve attributes percent entities CSS and missing parts" {
@@ -1190,20 +1258,93 @@ test "original mail: usage separates referenced images from ordinary CID attachm
         "<img src='https://example.test/image?a=1&amp;b=2'>" ++
         "<p>cid:ordinary@example.test and cid:event@example.test are prose. &lt;img src='cid:ordinary@example.test'&gt;</p>" ++
         "<!-- <img src='cid:comment@example.test'> --><script>const image = '<img src=cid:script@example.test>';</script>";
-    try std.testing.expectEqual(@as(u64, 0b0001110), try resourceUsage(html, &resources));
-    try std.testing.expectEqual(@as(u64, 0), try resourceUsage("<p>cid:picture@example.test</p>", &resources));
+    try expectUsage(&.{ 1, 2, 3 }, try resourceUsage(html, &resources));
+    try expectUsage(&.{}, try resourceUsage("<p>cid:picture@example.test</p>", &resources));
     try std.testing.expectError(error.OriginalResourceUnavailable, resourceUsage("<img src='cid:missing@example.test'>", &resources));
     // The classification helper keeps duplicates visible for backend rejection.
     const duplicates = [_]t.Attachment{ resources[1], resources[1] };
-    try std.testing.expectEqual(@as(u64, 3), try resourceUsage("<img src='cid:picture@example.test'>", &duplicates));
+    try expectUsage(&.{ 0, 1 }, try resourceUsage("<img src='cid:picture@example.test'>", &duplicates));
 }
 
 test "original mail: usage bitset is bounded and includes the final resource slot" {
-    var resources: [65]t.Attachment = @splat(.{ .id = "part", .filename = "part.bin" });
-    resources[63].contentId = "last@example.test";
-    try std.testing.expectEqual(@as(u64, 1) << 63, try resourceUsage("<img src='cid:last@example.test'>", resources[0..64]));
+    var resources: [t.Limits.message_attachments + 1]t.Attachment = @splat(.{ .id = "part", .filename = "part.bin" });
+    resources[t.Limits.message_attachments - 1].contentId = "last@example.test";
+    try expectUsage(&.{t.Limits.message_attachments - 1}, try resourceUsage("<img src='cid:last@example.test'>", resources[0..t.Limits.message_attachments]));
     try std.testing.expectError(error.TooManyAttachments, resourceUsage("", &resources));
-    try std.testing.expectEqual(@as(u64, 0), try resourceUsage("<html><body>A</body></html><html><body>B</body></html>", &.{}));
+    try expectUsage(&.{}, try resourceUsage("<html><body>A</body></html><html><body>B</body></html>", &.{}));
+}
+
+test "original mail: growing resource counts preserve high CID CSS location and conditional identities" {
+    var resources: [t.Limits.message_attachments]t.Attachment = @splat(.{ .id = "ordinary", .filename = "document.pdf", .disposition = "attachment" });
+    resources[64] = .{ .id = "picture", .filename = "picture.png", .contentId = "picture@example.test", .disposition = "attachment", .size = 4 };
+    resources[129] = .{ .id = "background", .filename = "", .contentId = "background@example.test", .disposition = "attachment", .size = 5 };
+    resources[1023] = .{ .id = "located", .filename = "located.png", .contentLocation = "photo.png?a=1&b=2", .disposition = "attachment", .size = 6 };
+    resources[t.Limits.message_attachments - 1] = .{ .id = "conditional", .filename = "conditional.png", .contentId = "conditional@example.test", .disposition = "inline", .size = 7 };
+    const html = "<img src='CID:picture%40example.test'><style>.back{background:url(c\\69 d:background%40example.test)}</style>" ++
+        "<img src='photo.png?a=1&amp;b=2'><!--[if mso]><img src='cid:conditional@example.test'><![endif]-->";
+    try expectUsage(&.{ 64, 129, 1023 }, try resourceUsage(html, &resources));
+    const plan = try resourcePlan(html, &resources);
+    try std.testing.expectEqualSlices(usize, &.{ 64, 129, 1023, t.Limits.message_attachments - 1 }, plan.indices[0..plan.count]);
+    try std.testing.expectEqual(@as(usize, 22), plan.bytes);
+    // An exact location match cannot hide a subsequent duplicated CID group.
+    resources[64].contentLocation = "first.png";
+    resources[700] = resources[64];
+    resources[700].contentLocation = "second.png";
+    try expectUsage(&.{ 64, 700 }, try resourceUsage("<img src='first.png'><img src='cid:picture@example.test'>", &resources));
+    try std.testing.expectError(error.AmbiguousContentId, resourcePlan(html, &resources));
+    resources[700] = resources[1023];
+    try std.testing.expectError(error.AmbiguousContentId, resourcePlan(html, &resources));
+    resources[700] = .{ .id = "conditional-duplicate", .filename = "", .contentId = "conditional@example.test" };
+    try std.testing.expectError(error.AmbiguousContentId, resourcePlan(html, &resources));
+}
+
+test "original mail: twenty more replies retain every earlier screenshot and exact opaque body" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial_count = 65;
+    const added_per_reply = 6;
+    const resources = try a.alloc(t.Attachment, initial_count + 20 * added_per_reply);
+    resources[0] = .{ .id = "previous-signature", .filename = "logo.png", .contentId = logo_content_id, .size = 3, .data = "AAEC" };
+    var source: std.ArrayList(u8) = .empty;
+    const source_markup = "<table data-opaque='  unchanged &amp; exact  '><tr><td>Original screenshot discussion</td></tr></table><!--[if mso]><v:shape data-note='preserve'/><![endif]-->";
+    try source.appendSlice(a, source_markup);
+    for (resources[1..], 1..) |*resource, index| {
+        const id = try std.fmt.allocPrint(a, "screen-{d}@example.test", .{index});
+        resource.* = .{ .id = id, .filename = "screenshot.png", .mimeType = "image/png", .contentId = id, .size = 3, .data = "AAEC", .disposition = "attachment" };
+        if (index < initial_count) try source.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{id}));
+    }
+    for (0..21) |reply| {
+        const count = initial_count + reply * added_per_reply;
+        if (reply != 0) for (resources[count - added_per_reply .. count]) |resource| {
+            try source.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{resource.contentId.?}));
+        };
+        var original = fixtureOriginal(source.items);
+        original.resources = resources[0..count];
+        const plan = try resourcePlan(original.bodyHtml, original.resources);
+        try std.testing.expectEqual(count, plan.count);
+        const prepared = try prepare(a, fixtureNote(), original);
+        try std.testing.expectEqual(count, prepared.resources.len);
+        try std.testing.expect(std.mem.indexOf(u8, prepared.html, source_markup) != null);
+        const usage = try resourceUsage(prepared.html, prepared.resources);
+        try std.testing.expectEqual(count, usage.count());
+        for (prepared.resources, 0..) |resource, index| {
+            try std.testing.expect(usage.isSet(index));
+            try std.testing.expectEqualStrings("AAEC", resource.data);
+        }
+        source = .empty;
+        try source.appendSlice(a, prepared.html);
+    }
+}
+
+test "original mail: byte bounded scanner preserves a long repeated quote beyond old token quota" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try a.alloc(u8, 40000 * "<p>x</p>".len);
+    for (0..40000) |index| @memcpy(source[index * 8 ..][0..8], "<p>x</p>");
+    const prepared = try prepare(a, fixtureNote(), fixtureOriginal(source));
+    try std.testing.expect(std.mem.endsWith(u8, prepared.html, source));
 }
 
 test "original mail: shared attribute states retain punctuation adjacent values and first URL" {
@@ -1218,7 +1359,7 @@ test "original mail: shared attribute states retain punctuation adjacent values 
     defer std.testing.allocator.free(result.html);
     defer std.testing.allocator.free(result.plain);
     try std.testing.expect(std.mem.endsWith(u8, result.html, body ++ "</body/></html/>"));
-    try std.testing.expectEqual(@as(u64, 1), try resourceUsage(source, &resources));
+    try expectUsage(&.{0}, try resourceUsage(source, &resources));
     try std.testing.expectError(error.OriginalResourceUnavailable, resourceUsage(source, &.{}));
 }
 
@@ -1237,7 +1378,7 @@ test "original mail: head templates foreign CDATA and bogus declarations cannot 
     defer std.testing.allocator.free(result.plain);
     try std.testing.expect(std.mem.indexOf(u8, result.html, template) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.html, "<body class=actual>" ++ fixture_note) != null);
-    try std.testing.expectEqual(@as(u64, 1), try resourceUsage(source, &resources));
+    try expectUsage(&.{0}, try resourceUsage(source, &resources));
 }
 
 test "original mail: double escaped script text keeps fake envelopes and CIDs opaque" {
@@ -1251,7 +1392,7 @@ test "original mail: double escaped script text keeps fake envelopes and CIDs op
     defer std.testing.allocator.free(result.plain);
     try std.testing.expect(std.mem.indexOf(u8, result.html, script) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.html, "</head><body>" ++ fixture_note) != null);
-    try std.testing.expectEqual(@as(u64, 1), try resourceUsage(source, &resources));
+    try expectUsage(&.{0}, try resourceUsage(source, &resources));
 }
 
 test "original mail: malformed CSS preserves actual CID usage without absorbing ordinary attachments" {
@@ -1269,7 +1410,7 @@ test "original mail: malformed CSS preserves actual CID usage without absorbing 
     defer std.testing.allocator.free(result.html);
     defer std.testing.allocator.free(result.plain);
     try std.testing.expect(std.mem.indexOf(u8, result.html, ".b{color:red}/* unfinished cid:ordinary@example.test</style>") != null);
-    try std.testing.expectEqual(@as(u64, 2), try resourceUsage(source, &resources));
-    try std.testing.expectEqual(@as(u64, 0), try resourceUsage("<style>/* url(cid:ordinary@example.test)</style><p>Original</p>", &resources));
+    try expectUsage(&.{1}, try resourceUsage(source, &resources));
+    try expectUsage(&.{}, try resourceUsage("<style>/* url(cid:ordinary@example.test)</style><p>Original</p>", &resources));
     try std.testing.expectError(error.OriginalResourceUnavailable, resourceUsage("<style>.a{color:broken;background:url(cid:missing@example.test)}</style><p>Original</p>", &resources));
 }

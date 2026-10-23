@@ -69,6 +69,11 @@ pub fn profile(text: []const u8) !void {
 // A lexical preflight bounds nesting and token count before the allocating parser.
 // The parser below verifies grammar and rejects duplicate object fields.
 pub fn preflight(text: []const u8) !void {
+    return preflightWithTokenLimit(text, limits.max_tokens);
+}
+/// Native compose-source envelopes contain many retained MIME parts.
+/// Other consumers preserve the original global parser policy.
+pub fn preflightWithTokenLimit(text: []const u8, token_limit: usize) !void {
     var depth: usize = 0;
     var tokens: usize = 0;
     var in_string = false;
@@ -110,7 +115,7 @@ pub fn preflight(text: []const u8) !void {
                 }
             },
         }
-        if (tokens > limits.max_tokens) return error.JsonTooManyTokens;
+        if (tokens > token_limit) return error.JsonTooManyTokens;
     }
     if (in_string or depth != 0) return error.InvalidJson;
 }

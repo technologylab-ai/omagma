@@ -216,10 +216,14 @@ pub const Session = struct {
         return s.executeMode(out_allocator, raw, false);
     }
     fn executeMode(s: *Session, out_allocator: std.mem.Allocator, raw: []const u8, cached_only: bool) ![]const u8 {
-        var arena = std.heap.ArenaAllocator.init(s.allocator);
+        // Keep the Session and token cache on their original lifetime. Only
+        // this operation borrows expandable, wiped storage, and response bytes
+        // are copied to the caller before its arena is released on every exit.
+        var arena = std.heap.ArenaAllocator.init(@import("send_memory.zig").operationBacking(s.allocator, raw, cached_only));
         defer arena.deinit();
         const a = arena.allocator();
-        const request = if (raw.len > t.Limits.request_bytes or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = t.Limits.request_bytes }) catch null;
+        const request_limit = @import("send_memory.zig").requestLimit(raw);
+        const request = if (raw.len > request_limit or !boundedJson(raw)) null else std.json.parseFromSliceLeaky(Value, a, raw, .{ .allocate = .alloc_if_needed, .max_value_len = request_limit, .duplicate_field_behavior = .@"error" }) catch null;
         if (request == null or request.? != .object) return failure(out_allocator, .null, "", "InvalidRequest", "Expected a bounded JSON object");
         var req = request.?;
         if (cached_only) {
@@ -440,7 +444,7 @@ pub const Session = struct {
             return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), calendarJob, .{ s, a, req });
         }
         if (std.mem.startsWith(u8, cmd, "reminder.")) return s.followUps(a, address, req);
-        if (std.mem.startsWith(u8, cmd, "draft.gmail-")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), gmailDraftJob, .{ s, a, address, req });
+        if (std.mem.startsWith(u8, cmd, "draft.gmail-")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("send_memory.zig").seconds(cmd)), gmailDraftJob, .{ s, a, address, req });
         if (std.mem.eql(u8, cmd, "cache.activity") or (try j.boolean(req, "cacheOnly", false) and !std.mem.eql(u8, cmd, "invitation.inspect"))) return s.cachedDispatch(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.batch") or std.mem.eql(u8, cmd, "mail.undo")) return s.batchMail(a, address, req);
         if (std.mem.eql(u8, cmd, "mail.prefetch")) {
@@ -530,7 +534,10 @@ pub const Session = struct {
                 try store.save();
                 break :plain try preview.writePreviewWithStore(&store, a, prepared, header_draft);
             };
-            const target = try @import("../open_target.zig").makePreview(&s.config.accounts[index], written.path);
+            const target = if (store.vault) |vault|
+                try @import("../open_target.zig").makeVaultPreview(&s.config.accounts[index], written.path, vault.owner.key.vault_id, vault.entry.index.bytes)
+            else
+                try @import("../open_target.zig").makePreview(&s.config.accounts[index], written.path);
             if (!s.options.fixtures) try @import("../open_target.zig").launch(s.io, &s.config, &s.config.accounts[index], &target);
             return j.value(a, .{ .opened = !s.options.fixtures, .fixture = s.options.fixtures, .path = written.path, .url = target.url.slice(), .profile = target.profile_arg.slice() });
         }
@@ -546,7 +553,7 @@ pub const Session = struct {
             const fields = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.MissingField);
             if (fields.len != 5) return error.InvalidRecovery;
             for (fields, 0..) |field, i| if (field.len > (switch (i) {
-                4 => t.Limits.body_bytes,
+                4 => t.Limits.compose_body_bytes,
                 3 => mail_limits.subject_bytes,
                 else => mail_limits.header_value_bytes,
             }) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
@@ -595,7 +602,7 @@ pub const Session = struct {
             const aliases = if (!s.options.fixtures) try j.decode([]const []const u8, a, j.get(try s.remote(a, address, "accounts.aliases", req), "aliases") orelse return error.InvalidProviderResponse) else &.{};
             const d = try conversation_draft.reply(a, message, .{ .account = address, .aliases = aliases, .all = try j.boolean(req, "all", false), .format = format, .original = original });
             try validateDraft(d, false);
-            if (preserve) try conversation_source.validateFormatting(s.allocator, d);
+            if (preserve) try conversation_source.validateFormatting(@import("send_memory.zig").commandBacking(s.allocator, cmd), d);
             if (!store.lockHeld) try s.reopenBody(a, &store);
             return mail_value.borrowed(a, try store.putDraft(d, null));
         }
@@ -619,11 +626,20 @@ pub const Session = struct {
             try conversation_draft.requireBody(message);
             const prepared = if (omit) message else try s.prepareForwardAttachments(a, &store, req, message, preserve);
             var source: ConversationAttachments = .{ .session = s, .store = &store, .request = req };
-            const draft = try conversation_source.forward(a, prepared, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit, .temporary_allocator = s.allocator }, source.adapter());
+            const draft = try conversation_source.forward(a, prepared, .{ .format = format, .preserve_formatting = preserve, .omit_attachments = omit, .temporary_allocator = @import("send_memory.zig").commandBacking(s.allocator, cmd) }, source.adapter());
             if (!store.lockHeld) try s.reopenBody(a, &store);
             return mail_value.borrowed(a, try store.putDraft(draft, null));
         }
         if (std.mem.eql(u8, cmd, "mail.list") or std.mem.eql(u8, cmd, "mail.search") or std.mem.eql(u8, cmd, "mail.sync")) return s.listMail(a, &store, req);
+        if (std.mem.eql(u8, cmd, "mail.compose-source")) {
+            var message = try s.readMessage(a, &store, try j.required(req, "messageId"), req, false);
+            // The chooser needs identity metadata, not embedded file bytes.
+            // Preserve all options even if an ordinary source file is too
+            // large to forward; only the chosen reply/forward enforces that
+            // outgoing policy and captures its selected immutable resources.
+            message.attachments = try draft_summary.attachmentMetadata(a, message.attachments);
+            return mail_value.borrowed(a, message);
+        }
         if (std.mem.eql(u8, cmd, "mail.read")) return mail_value.borrowed(a, try s.read(a, &store, try j.required(req, "messageId"), req));
         if (std.mem.eql(u8, cmd, "mail.open")) {
             const id = j.text(req, "messageId");
@@ -1416,7 +1432,7 @@ pub const Session = struct {
     fn cacheStats(s: *Session, a: std.mem.Allocator, store: *storage.Store) !Value {
         const meter = if (s.meter) |m| m.snapshot() else null;
         const blobs = try store.blobStats();
-        return j.value(a, .{ .blobCount = blobs.count, .blobBytes = blobs.bytes, .blobBytesAreCiphertext = store.vault != null, .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .allocatorReservationBytes = if (meter) |m| m.allocatorReservationBytes else null, .backingRejectedAllocations = if (meter) |m| m.backingRejectedAllocations else null, .lastRejectedAllocationBytes = if (meter) |m| m.lastRejectedAllocationBytes else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try s.refreshActive(store.state.account), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
+        return j.value(a, .{ .blobCount = blobs.count, .blobBytes = blobs.bytes, .blobBytesAreCiphertext = store.vault != null, .metadataEntries = store.state.entries.len, .metadataLimit = store.options.metadata_limit, .diskBytes = try store.diskBytes(), .diskLimitBytes = store.options.disk_limit, .bodyLimitBytes = t.Limits.body_bytes, .runtimeReservationBytes = t.Limits.runtime_bytes, .terminalHeapLimitBytes = t.Limits.runtime_bytes, .outgoingTransient = @import("send_memory.zig").snapshot(), .fixedBackendReservationBytes = @import("../limits.zig").app_reservation, .allocatorUsedBytes = if (meter) |m| m.allocatorUsedBytes else null, .allocatorPeakBytes = if (meter) |m| m.allocatorPeakBytes else null, .rejectedAllocations = if (meter) |m| m.rejectedAllocations else null, .allocatorReservationBytes = if (meter) |m| m.allocatorReservationBytes else null, .backingRejectedAllocations = if (meter) |m| m.backingRejectedAllocations else null, .lastRejectedAllocationBytes = if (meter) |m| m.lastRejectedAllocationBytes else null, .fixtureCalls = store.state.fixtureCalls, .fixtureSends = store.state.fixtureSends, .fixtureProviderEntries = store.state.fixtureProvider.len, .fixtureProviderLimit = @as(usize, 1024), .refreshInProgress = try s.refreshActive(store.state.account), .historyId = store.state.historyId, .lastSyncAt = store.state.lastSyncAt, .syncCalls = store.state.syncCalls, .syncMetadataGets = store.state.syncMetadataGets, .syncListCalls = store.state.syncListCalls, .syncHistoryPages = store.state.syncHistoryPages, .syncBodyGets = store.state.syncBodyGets, .generation = store.state.generation });
     }
     fn cachedDispatch(s: *Session, a: std.mem.Allocator, address: []const u8, req: Value) !Value {
         const cmd = j.text(req, "cmd");
@@ -2180,7 +2196,7 @@ pub const Session = struct {
         } else if (!std.mem.eql(u8, name, "mail-read")) return error.PermissionDenied;
     }
     fn remote(s: *Session, a: std.mem.Allocator, address: []const u8, cmd: []const u8, req: Value) !Value {
-        return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeProgressWithAllocator, .{ s.io, a, s.allocator, &s.config, address, cmd, req, s.progress_sink });
+        return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("send_memory.zig").seconds(j.text(req, "cmd"))), @import("gmail.zig").executeProgressWithAllocator, .{ s.io, a, @import("send_memory.zig").commandBacking(s.allocator, j.text(req, "cmd")), &s.config, address, cmd, req, s.progress_sink });
     }
     fn fixture(s: *Session, a: std.mem.Allocator, address: []const u8) !Value {
         if (!s.options.fixtures) return error.LiveProviderNotReady;
@@ -2527,11 +2543,12 @@ pub const Session = struct {
             if (message.bodyHtmlAmbiguous) return error.AmbiguousOriginalHtml;
             _ = try @import("original_mail.zig").resourcePlanWithLimit(message.bodyHtml orelse return error.OriginalHtmlUnavailable, message.attachments, t.Limits.attachment_bytes);
         }
-        if (embedded <= t.Limits.body_bytes) return message;
+        if (!preserve and embedded <= t.Limits.body_bytes) return message;
         var prepared = message;
         const attachments = try a.dupe(t.Attachment, message.attachments);
-        // Both file categories keep exact identity metadata. Spill their
-        // bytes together when the aggregate embedded tier is exceeded.
+        // Every formatted capture externalizes resources from its first image,
+        // so an accumulating reply never grows JSON frames with image bytes.
+        // Ordinary forwards retain their existing small portable tier.
         for (attachments) |*attachment| if (attachment.blobId == null and attachment.size != 0) {
             var request = try j.copyObject(a, req);
             try request.object.put(a, "attachmentId", .{ .string = attachment.id });
@@ -2820,10 +2837,10 @@ pub const Session = struct {
         try s.capability(a, store.state.account, req, "mail-read");
         var fixture_source: ?Value = null;
         if (s.options.fixtures) {
-            if (try store.readOutbox(id)) |sent| return sent;
+            if (if (@import("send_memory.zig").command(j.text(req, "cmd"))) try store.readOutboxExpandedWithAllocator(a, id) else try store.readOutbox(id)) |sent| return sent;
             if (store.state.fixtureProvider.len != 0) fixture_source = try s.fixtureProviderSource(a, store);
         }
-        if (if (allow_cached) (try store.read(id)) orelse store.refusedMessage(id) else null) |cached| {
+        if (if (allow_cached) (if (@import("send_memory.zig").command(j.text(req, "cmd"))) try store.readExpandedWithAllocator(a, id) else try store.read(id)) orelse store.refusedMessage(id) else null) |cached| {
             var m = cached;
             if (store.find(id)) |entry| {
                 copyMembership(&m, entry.message);
@@ -2854,7 +2871,7 @@ pub const Session = struct {
         for (try array(source, "messages")) |v| if (std.mem.eql(u8, j.text(v, "id"), id)) {
             s.reportProgress(.bodies, 0, 1);
             try s.fixtureProgressGate(a, source, .bodies, 0);
-            var m = try s.normalize(a, source, v);
+            var m = if (@import("send_memory.zig").command(j.text(req, "cmd"))) try gmail_decode.normalizeForCompose(v, a, j.get(source, "externalBodies")) else try s.normalize(a, source, v);
             if (store.find(id)) |existing| {
                 copyMembership(&m, existing.message);
             }
@@ -3188,6 +3205,15 @@ pub const Session = struct {
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and (std.mem.eql(u8, operation.hash, &digest) or (draft.id.len > 0 and std.mem.eql(u8, operation.draftId, draft.id)))) return j.value(a, operation);
         if (store.state.operations.len == 1000) return error.OperationJournalFull;
         const prepared = try markdown_mail.prepare(a, draft);
+        // The RSVP's verified attendee may be a send-as alias. Keep this wire
+        // identity out of the canonical draft/fingerprint used by old receipts.
+        var wire_draft = draft;
+        if (calendar) |ics| {
+            var reply: invitation.Invitation = .{};
+            try invitation.parseReply(ics, store.state.account, try cachedAliases(a, store), &reply);
+            if (draft.to.len != 1 or draft.cc.len != 0 or draft.bcc.len != 0 or !std.ascii.eqlIgnoreCase(draft.to[0].address, reply.organizer.slice())) return error.InvalidInvitationRecipient;
+            wire_draft.from = .{ .address = try a.dupe(u8, reply.attendee.slice()) };
+        }
         // Persist uncertainty before dispatch, including on process failure.
         var operations: std.ArrayList(storage.Operation) = .empty;
         try operations.appendSlice(a, store.state.operations);
@@ -3198,7 +3224,7 @@ pub const Session = struct {
         defer if (spool) |*file| file.close();
         {
             var from: recipients.Mailbox = .{};
-            const sender = draft.from orelse t.Address{ .address = store.state.account };
+            const sender = wire_draft.from orelse t.Address{ .address = store.state.account };
             if (s.options.fixtures and !std.ascii.eqlIgnoreCase(sender.address, store.state.account)) {
                 const source = try s.fixture(a, store.state.account);
                 var verified = false;
@@ -3220,7 +3246,10 @@ pub const Session = struct {
             };
             const mime = @import("mime.zig");
             var compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = if (s.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(s.io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references };
-            if (@import("send_spool.zig").required(draft.attachments) or @import("send_spool.zig").required(prepared.resources)) {
+            // Production sends always consume this one validated MIME spool.
+            // Rebuilding the draft in the provider retained two renders plus
+            // MIME/base64/JSON copies inside the same operation arena.
+            if (!s.options.fixtures or @import("send_spool.zig").required(draft.attachments) or @import("send_spool.zig").required(prepared.resources)) {
                 spool = try @import("send_spool.zig").create(store, compose, draft.attachments, prepared.resources);
             } else {
                 compose.related = try mime.composeAttachments(prepared.resources, a);
@@ -3245,6 +3274,23 @@ pub const Session = struct {
                 }
             }
         }
+        // Small synthetic sends retain their exact wire oracle even when
+        // immutable blob handles selected the streaming implementation.
+        if (s.options.fixtures) if (spool) |*file| if (file.size <= @import("mime.zig").max_raw_bytes) {
+            var reader = try file.reader();
+            defer reader.close();
+            const raw = try a.alloc(u8, file.size);
+            var offset: usize = 0;
+            while (offset < raw.len) {
+                const count = try @import("send_spool.zig").Spool.Reader.read(&reader, raw[offset..]);
+                if (count == 0) return error.BodySizeMismatch;
+                offset += count;
+            }
+            var end: [1]u8 = undefined;
+            if (try @import("send_spool.zig").Spool.Reader.read(&reader, &end) != 0) return error.BodySizeMismatch;
+            const encoded = try a.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(raw.len));
+            fixture_raw = std.base64.url_safe_no_pad.Encoder.encode(encoded, raw);
+        };
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
         const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
         try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "", .sourceInvitationHash = if (calendar != null) j.text(req, "_sourceInvitationHash") else "", .invitationCalendarId = if (calendar != null) j.text(req, "calendarId") else "" });
@@ -3252,11 +3298,8 @@ pub const Session = struct {
         try store.save();
         var operation = &store.state.operations[store.state.operations.len - 1];
         if (!s.options.fixtures) {
-            var request = try j.copyObject(a, req);
-            try request.object.put(a, "draft", try j.value(a, draft));
-            if (calendar) |ics| try request.object.put(a, "preparedCalendar", .{ .string = ics });
             if (store.vault != null) store.release();
-            const result = (if (spool) |*file| @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), @import("gmail.zig").executeSpool, .{ s.io, a, &s.config, store.state.account, request, draft, file, operation.rfcMessageId }) else s.remote(a, store.state.account, if (calendar != null) "invitation.reply" else "mail.send", request)) catch |err| {
+            const result = @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(@import("send_memory.zig").seconds("mail.send")), @import("gmail.zig").executeSpool, .{ s.io, a, &s.config, store.state.account, req, wire_draft, &spool.?, operation.rfcMessageId }) catch |err| {
                 operation = s.reopenSendOperation(a, store, operation) catch |reopen_error| {
                     operation.errorCode = @errorName(reopen_error);
                     operation.outcome = "unknown";
@@ -3297,7 +3340,7 @@ pub const Session = struct {
             // are one example). A synthetic Sent message, like a provider
             // response, owns a new message-scoped identity for every part.
             for (sent_attachments.items, 0..) |*attachment, index| attachment.id = try std.fmt.allocPrint(a, "{s}-part-{d}", .{ operation.messageId, index });
-            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(prepared.plain, 240), .bodyText = prepared.plain, .bodyHtml = prepared.html, .bodySource = .plain, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = sent_attachments.items, .invitation = calendar, .fixtureRaw = fixture_raw };
+            const sent: t.Message = .{ .id = operation.messageId, .threadId = if (draft.threadId.len > 0) draft.threadId else operation.messageId, .from = wire_draft.from orelse t.Address{ .address = store.state.account }, .to = draft.to, .cc = draft.cc, .subject = draft.subject, .snippet = utf8Prefix(prepared.plain, 240), .bodyText = prepared.plain, .bodyHtml = prepared.html, .bodySource = .plain, .messageId = operation.rfcMessageId, .inReplyTo = draft.inReplyTo, .references = draft.references, .labels = &.{"SENT"}, .receivedAt = std.Io.Timestamp.now(s.io, .real).toMilliseconds(), .attachments = sent_attachments.items, .invitation = calendar, .fixtureRaw = fixture_raw };
             // Copy the receipt first: put() can grow the entries slice, never operations.
             store.putOutbox(sent) catch {
                 operation.outcome = "unknown";
@@ -3395,7 +3438,7 @@ pub fn boundedJson(raw: []const u8) bool {
             },
             ',', ':' => {
                 separators += 1;
-                if (separators > 65536) return false;
+                if (separators > @max(65536, 128 * t.Limits.message_attachments)) return false;
             },
             else => {},
         }
@@ -4183,7 +4226,7 @@ test "UX backend: formatted forward preserves 32 CID resources and an ordinary P
     too_many.attachments = &ordinary;
     try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
     too_many = draft;
-    const related: [33]t.Attachment = @splat(draft.original.?.resources[0]);
+    const related: [t.Limits.related_resources + 1]t.Attachment = @splat(draft.original.?.resources[0]);
     too_many.original.?.resources = &related;
     try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
 }

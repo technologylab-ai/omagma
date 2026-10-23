@@ -1,6 +1,7 @@
 // IndexedDB holds only current, bounded mail/contact snapshots. OAuth material,
 // session handles, native paths, drafts and provider JSON have no schema fields.
-export const CACHE_LIMITS = Object.freeze({ accounts: 3, messages: 300, contacts: 100, attachments: 49, snapshotBytes: 3 * 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
+// Match terminal/types.zig metadata counts; browser byte tiers stay separate.
+export const CACHE_LIMITS = Object.freeze({ accounts: 3, messages: 300, contacts: 100, relatedResources: 1024, attachments: 16 + 1024 + 1, snapshotBytes: 3 * 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
 const DATABASE = 'omagma-browser-cache-v1';
 const STORE = 'actors';
 const encoder = new TextEncoder();

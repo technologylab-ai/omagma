@@ -116,12 +116,56 @@ const Sink = struct {
         return consumed;
     }
 };
+
+/// MIME emits parts sequentially. Retain only descriptors between reads and
+/// keep one verified stream open, rather than one file per accumulated image.
+/// Each pass reopens the immutable blob and verifies size/hash through EOF.
+const SourcePool = struct {
+    store: *storage.Store,
+    active: ?*LazySource = null,
+    stream: ?blob.Stream = null,
+
+    fn close(self: *SourcePool) void {
+        if (self.stream) |*stream| stream.close();
+        self.stream = null;
+        self.active = null;
+    }
+};
+const LazySource = struct {
+    pool: *SourcePool,
+    attachment: t.Attachment,
+    complete: bool = false,
+
+    fn read(ctx: *anyopaque, out: []u8) !usize {
+        const self: *LazySource = @ptrCast(@alignCast(ctx));
+        if (out.len == 0 or self.complete) return 0;
+        const pool = self.pool;
+        if (pool.active) |active| {
+            if (active != self) return error.AttachmentStreamInUse;
+        } else {
+            pool.stream = try blob.Stream.init(pool.store, self.attachment);
+            pool.active = self;
+        }
+        const count = blob.Stream.read(&pool.stream.?, out) catch |err| {
+            pool.close();
+            return err;
+        };
+        if (count == 0) {
+            // Stream.read returns zero only after exact size/hash validation.
+            pool.close();
+            self.complete = true;
+        }
+        return count;
+    }
+};
+
 pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t.Attachment, related: []const t.Attachment) !Spool {
     const a = store.allocator;
     if (attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
-    const sources = try a.alloc(blob.Stream, attachments.len + related.len);
+    var pool: SourcePool = .{ .store = store };
+    defer pool.close();
+    const sources = try a.alloc(LazySource, attachments.len + related.len);
     var source_count: usize = 0;
-    defer for (sources[0..source_count]) |*source| source.close();
     const parts = try a.alloc(mime.Attachment, attachments.len + related.len);
     var cursor: usize = 0;
     for ([_][]const t.Attachment{ attachments, related }) |list| for (list) |attachment| {
@@ -129,9 +173,9 @@ pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t
         cursor += 1;
         if (attachment.blobId != null) {
             const source_index = source_count;
-            sources[source_index] = try blob.Stream.init(store, attachment);
+            sources[source_index] = .{ .pool = &pool, .attachment = attachment };
             source_count += 1;
-            part.* = .{ .filename = attachment.filename, .mime_type = attachment.mimeType, .content_id = if (attachment.contentId) |id| try mime.contentId(id) else "", .disposition = attachment.disposition orelse "", .content_location = attachment.contentLocation orelse "", .size = attachment.size, .source = .{ .ctx = &sources[source_index], .readFn = blob.Stream.read } };
+            part.* = .{ .filename = attachment.filename, .mime_type = attachment.mimeType, .content_id = if (attachment.contentId) |id| try mime.contentId(id) else "", .disposition = attachment.disposition orelse "", .content_location = attachment.contentLocation orelse "", .size = attachment.size, .source = .{ .ctx = &sources[source_index], .readFn = LazySource.read } };
         } else part.* = (try mime.composeAttachments(&.{attachment}, a))[0];
     };
     var compose = input;
@@ -146,7 +190,10 @@ pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t
     const count: usize = @intCast(counting.fullCount());
     if (count > t.Limits.mime_upload_bytes) return error.FormTooLarge;
     if (store.vault == null) try store.reserveBytes(count);
-    for (sources[0..source_count]) |*source| try source.reset();
+    for (sources[0..source_count]) |*source| {
+        if (!source.complete) return error.AttachmentChanged;
+        source.complete = false;
+    }
     if (store.vault != null) {
         var output: @import("vault_stream.zig").Writer = undefined;
         const handle = try store.beginVaultStream(&output, .send_spool, count);
@@ -176,4 +223,80 @@ pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t
     var digest: [32]u8 = undefined;
     sink.hasher.final(&digest);
     return .{ .io = store.io, .dir = store.dir, .file = file, .name = name, .size = count, .hash = std.fmt.bytesToHex(digest, .lower) };
+}
+
+test "growing chain spool: all inline resources stream beside ordinary files with bounded open descriptors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const bytes = [_]u8{ 0, 255, 7, 9 };
+    try tmp.dir.writeFile(io, .{ .sub_path = "screenshot.png", .data = &bytes, .flags = .{ .permissions = .fromMode(0o600) } });
+    const path = try tmp.dir.realPathFileAlloc(io, "screenshot.png", a);
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/spool", .{tmp.sub_path});
+    var store = try storage.Store.open(io, a, root, "fictional@example.test", .{ .fixtures = true });
+    defer store.close();
+    const picture = try blob.importFile(&store, path, "image/png");
+    const related = try a.alloc(t.Attachment, t.Limits.related_resources);
+    var html: std.ArrayList(u8) = .empty;
+    for (related, 0..) |*resource, index| {
+        resource.* = picture;
+        resource.contentId = try std.fmt.allocPrint(a, "screenshot-{d}@example.test", .{index});
+        try html.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{resource.contentId.?}));
+    }
+    const files: [t.Limits.attachments]t.Attachment = @splat(picture);
+    const recipients = @import("recipients.zig");
+    var envelope: recipients.Envelope = .{};
+    try recipients.parse("recipient@example.test", &envelope.to);
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("sender@example.test");
+    const compose: mime.Compose = .{ .from = sender, .envelope = &envelope, .subject = "Synthetic growing chain", .body = "All screenshots retained", .html = html.items, .message_id = "<growing@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000" };
+    var spool = try create(&store, compose, &files, related);
+    defer spool.close();
+    var reader = try spool.reader();
+    defer reader.close();
+    const raw = try a.alloc(u8, spool.size);
+    var offset: usize = 0;
+    while (offset < raw.len) {
+        const count = try Spool.Reader.read(&reader, raw[offset..]);
+        try std.testing.expect(count != 0);
+        offset += count;
+    }
+    var end: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try Spool.Reader.read(&reader, &end));
+    try std.testing.expect(reader.verified);
+    const parsed = try mime.parse(raw, a);
+    try std.testing.expectEqual(related.len + files.len, parsed.attachments.len);
+    for (parsed.attachments) |attachment| try std.testing.expectEqualSlices(u8, &bytes, attachment.data);
+    for (parsed.attachments[0..related.len], related) |attachment, resource| try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "<{s}>", .{resource.contentId.?}), attachment.content_id);
+}
+
+test "growing chain spool: lazy sources close on hash failure and reopen for each verified pass" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var store = try storage.Store.open(io, a, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/sources", .{tmp.sub_path}), "fictional@example.test", .{ .fixtures = true });
+    defer store.close();
+    const id = try a.dupe(u8, &storage.Store.hash("good"));
+    const filename = try blob.filename(a, id);
+    try store.dir.writeFile(io, .{ .sub_path = filename, .data = "good", .flags = .{ .permissions = .fromMode(0o600) } });
+    var pool: SourcePool = .{ .store = &store };
+    defer pool.close();
+    var source: LazySource = .{ .pool = &pool, .attachment = .{ .id = "test", .filename = "fixture.bin", .blobId = id, .size = 4 } };
+    var buffer: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try LazySource.read(&source, &buffer));
+    try std.testing.expect(pool.active != null);
+    try std.testing.expectEqualStrings("good", &buffer);
+    try std.testing.expectEqual(@as(usize, 0), try LazySource.read(&source, &buffer));
+    try std.testing.expect(source.complete and pool.active == null and pool.stream == null);
+    try store.dir.writeFile(io, .{ .sub_path = filename, .data = "evil", .flags = .{ .permissions = .fromMode(0o600) } });
+    source.complete = false;
+    try std.testing.expectEqual(@as(usize, 4), try LazySource.read(&source, &buffer));
+    try std.testing.expectError(error.AttachmentChanged, LazySource.read(&source, &buffer));
+    try std.testing.expect(!source.complete and pool.active == null and pool.stream == null);
 }

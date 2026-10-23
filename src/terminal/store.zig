@@ -8,7 +8,11 @@ const vault_storage = @import("vault_storage.zig");
 const vault_types = @import("vault_types.zig");
 const VaultObject = struct { name: []const u8, kind: vault_types.RecordKind, handle: []const u8 };
 const VaultIndex = struct { schema: u8 = 1, state: State, objects: []VaultObject = &.{} };
-pub const vault_object_limit = t.Limits.metadata_hard + 3 * 128 + 16;
+// Blob identity metadata scales independently of the 128 editable drafts.
+// Actual retained file bytes remain governed by the account disk quota.
+pub const blob_limit = 4096;
+pub const vault_object_limit = t.Limits.metadata_hard + 2 * 128 + blob_limit + 16;
+pub const mail_record_bytes = @import("send_memory.zig").record_bytes;
 pub const MigrationObject = @import("store_migration.zig").Object;
 fn vaultKind(name: []const u8) !vault_types.RecordKind {
     if (std.mem.eql(u8, name, "follow-ups.json") or std.mem.eql(u8, name, "fixture-gmail-drafts.json")) return .preferences;
@@ -453,7 +457,7 @@ pub const Store = struct {
     }
     pub fn migrationRecordLimit(s: *const Store, name: []const u8) !usize {
         return switch (try vaultKind(name)) {
-            .mail_body, .draft, .outbox => 4 * t.Limits.body_bytes,
+            .mail_body, .draft, .outbox => mail_record_bytes,
             .attachment => t.Limits.incoming_attachment_bytes,
             .operation_ledger, .cache_index, .preferences => s.documentLimit(name),
             else => error.MigrationSourceInvalid,
@@ -479,7 +483,7 @@ pub const Store = struct {
             if (named.found_existing or (try handles.getOrPut(object.handle.bytes)).found_existing) return error.MigrationSourceInvalid;
             named.value_ptr.* = index;
             if (object.kind == .attachment) blobs += 1;
-            if (blobs > 128) return error.AttachmentLimitExceeded;
+            if (blobs > blob_limit) return error.AttachmentLimitExceeded;
             try @import("store_migration.zig").verifyCiphertext(s, object);
             map[index] = .{ .name = try s.allocator.dupe(u8, object.name), .kind = object.kind, .handle = try s.allocator.dupe(u8, &object.handle.text()) };
         }
@@ -583,7 +587,7 @@ pub const Store = struct {
                 for (objects) |object| {
                     if (try vaultKind(object.name) != object.kind) return error.InvalidVaultIndex;
                     if (object.kind == .attachment) blob_count += 1;
-                    if (blob_count > 128) return error.AttachmentLimitExceeded;
+                    if (blob_count > blob_limit) return error.AttachmentLimitExceeded;
                     const handle = try vault_storage.Handle.parse(object.handle);
                     if (std.mem.eql(u8, &handle.bytes, &sealed.?.entry.index.bytes) or (try names.getOrPut(object.name)).found_existing or (try handles.getOrPut(object.handle)).found_existing) return error.InvalidVaultIndex;
                 }
@@ -636,7 +640,7 @@ pub const Store = struct {
         for (state.entries) |entry| {
             if (entry.bodyError.len > 64 or entry.message.bodyCacheError.len > 64 or entry.message.decodeWarning.len > 64) return error.CacheLimitExceeded;
             if (entry.bodyBlobIds) |ids| {
-                if (ids.len > 64) return error.CacheLimitExceeded;
+                if (ids.len > t.Limits.message_attachments) return error.CacheLimitExceeded;
                 for (ids) |id| try @import("draft_codec.zig").validateAttachmentHandle(id);
             }
         }
@@ -770,7 +774,7 @@ pub const Store = struct {
         const vault = try s.vaultReady();
         const kind = try vaultKind(name);
         const limit: usize = switch (kind) {
-            .mail_body, .draft, .outbox => 4 * t.Limits.body_bytes,
+            .mail_body, .draft, .outbox => mail_record_bytes,
             .attachment => t.Limits.incoming_attachment_bytes,
             .operation_ledger => 4 * 1024 * 1024,
             .cache_index => 8 * 1024 * 1024,
@@ -847,7 +851,7 @@ pub const Store = struct {
     pub fn adoptVaultBlob(s: *Store, name: []const u8, handle: vault_storage.Handle) !void {
         _ = try s.vaultReady();
         if (try vaultKind(name) != .attachment or s.vaultObject(name) != null) return error.InvalidVaultObject;
-        if (s.vaultBlobCount() >= 128) return error.AttachmentLimitExceeded;
+        if (s.vaultBlobCount() >= blob_limit) return error.AttachmentLimitExceeded;
         const next = try s.allocator.alloc(VaultObject, s.vaultObjects.len + 1);
         @memcpy(next[0..s.vaultObjects.len], s.vaultObjects);
         next[s.vaultObjects.len] = .{ .name = try s.allocator.dupe(u8, name), .kind = .attachment, .handle = try s.allocator.dupe(u8, &handle.text()) };
@@ -1117,7 +1121,7 @@ pub const Store = struct {
         if (s.blobReferenced(id)) return true;
         var changed = false;
         for (s.state.entries) |*entry| if (entry.bytes != 0 and entry.bodyBlobIds == null) {
-            var ids: [64][64]u8 = undefined;
+            var ids: [t.Limits.message_attachments][64]u8 = undefined;
             var count: usize = 0;
             {
                 var phase: std.heap.ArenaAllocator = .init(s.allocator);
@@ -1177,7 +1181,7 @@ pub const Store = struct {
     }
     pub fn put(s: *Store, message: t.Message, full: bool) !void {
         if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
-        if (message.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
+        if (message.bodyText.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
         // A conversation-wide response quota says nothing about previously
         // verified metadata. Preserve its full subject/envelope and any body.
         if (std.mem.eql(u8, message.bodyCacheError, "ThreadBodyBudgetExceeded") and s.find(message.id) != null) return;
@@ -1273,7 +1277,7 @@ pub const Store = struct {
     pub fn putBody(s: *Store, message: t.Message) !bool {
         if (message.bodyCacheError.len > 64 or message.decodeWarning.len > 64) return error.CacheLimitExceeded;
         var e = s.find(message.id) orelse return false;
-        if (message.bodyText.len > t.Limits.body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.body_bytes)) return error.BodyTooLarge;
+        if (message.bodyText.len > t.Limits.compose_body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.compose_body_bytes)) return error.BodyTooLarge;
         // Conversation aggregate quotas never make an individual body a final
         // refusal. An ordinary read/prefetch may still fetch it independently.
         if (std.mem.eql(u8, message.bodyCacheError, "ThreadBodyBudgetExceeded")) return false;
@@ -1294,7 +1298,7 @@ pub const Store = struct {
             return false;
         }
         const raw = try j.encodeAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
-        if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
+        if (raw.len > mail_record_bytes) return error.BodyTooLarge;
         const name = try s.fileName("mail", message.id);
         s.makeRoom(raw.len, name) catch |err| {
             if (err != error.DiskQuotaExceeded) return err;
@@ -1349,9 +1353,9 @@ pub const Store = struct {
         if (!hasCalendarAttachment(previous)) return false;
         if (!std.mem.eql(u8, previous.threadId, message.threadId)) return error.MessageIdentityMismatch;
         if (message.metadataPartial or message.bodyCacheError.len != 0) return false;
-        if (message.bodyText.len > t.Limits.body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.body_bytes)) return error.BodyTooLarge;
+        if (message.bodyText.len > t.Limits.compose_body_bytes or (message.bodyHtml != null and message.bodyHtml.?.len > t.Limits.compose_body_bytes)) return error.BodyTooLarge;
         const raw = try j.encodeAlloc(s.allocator, BodyRecord{ .account = s.state.account, .message = message }, .{});
-        if (raw.len > 4 * t.Limits.body_bytes) return error.BodyTooLarge;
+        if (raw.len > mail_record_bytes) return error.BodyTooLarge;
         const name = try s.fileName("mail", message.id);
         try s.makeRoom(raw.len, name);
         const entry = s.find(message.id) orelse return false;
@@ -1371,14 +1375,49 @@ pub const Store = struct {
         for (message.attachments) |part| if (@import("mime.zig").isCalendarPart(part.mimeType, part.filename)) return true;
         return false;
     }
+    fn composeOnly(metadata: t.Message) t.Message {
+        var message = metadata;
+        message.bodyText = "";
+        message.bodyHtml = null;
+        message.bodyCached = false;
+        message.bodyCacheError = "ComposeSourceRequired";
+        return message;
+    }
+    fn exceedsOrdinaryBody(message: t.Message) bool {
+        const html_size = if (message.bodyHtml) |html| html.len else 0;
+        if (message.bodyText.len > t.Limits.body_bytes or html_size > t.Limits.body_bytes) return true;
+        // MIME counts received parts before deriving a plain fallback from an
+        // HTML-only body. That fallback is not a second MIME alternative; the
+        // established ordinary reader accepts a full 2 MiB HTML source plus
+        // its derived text. Genuine plain/HTML alternatives count separately.
+        var total = if (message.bodySource == .html) @max(message.bodyText.len, html_size) else message.bodyText.len + html_size;
+        if (total > t.Limits.request_bytes) return true;
+        for (message.attachments) |part| if (part.data.len != 0) {
+            if (part.size > t.Limits.request_bytes - total) return true;
+            total += part.size;
+        };
+        return false;
+    }
     pub fn read(s: *Store, id: []const u8) !?t.Message {
         return s.readWithAllocator(s.allocator, id);
     }
     pub fn readWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
         const e = s.find(id) orelse return null;
+        // A compose capture may cache more source than the normal reader's
+        // fixed window. Keep its ID/envelope usable for Reply/Forward without
+        // eagerly expanding that whole record in a later ordinary read.
+        if (e.bytes > 4 * t.Limits.body_bytes) return composeOnly(e.message);
+        return s.readBoundedWithAllocator(allocator, id, false);
+    }
+    pub fn readExpandedWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
+        return s.readBoundedWithAllocator(allocator, id, true);
+    }
+    fn readBoundedWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8, expanded: bool) !?t.Message {
+        const limit = if (expanded) mail_record_bytes else 4 * t.Limits.body_bytes;
+        const e = s.find(id) orelse return null;
         if (e.bytes == 0) return null;
         const key = hash(id);
-        const raw = s.readRecord(allocator, try std.fmt.allocPrint(allocator, "mail-{s}.json", .{key}), 4 * t.Limits.body_bytes) catch |err| if (err == error.FileNotFound) return null else return err;
+        const raw = s.readRecord(allocator, try std.fmt.allocPrint(allocator, "mail-{s}.json", .{key}), limit) catch |err| if (err == error.FileNotFound) return null else return err;
         const digest = hash(raw);
         const record = try std.json.parseFromSliceLeaky(BodyRecord, allocator, raw, .{ .allocate = .alloc_if_needed });
         if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
@@ -1389,6 +1428,7 @@ pub const Store = struct {
             e.bodyDecoderRevision = 0;
             return null;
         }
+        if (!expanded and exceedsOrdinaryBody(record.message)) return composeOnly(e.message);
         return try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
     }
     pub fn putOutbox(s: *Store, message: t.Message) !void {
@@ -1420,10 +1460,20 @@ pub const Store = struct {
         return s.readOutboxWithAllocator(s.allocator, id);
     }
     pub fn readOutboxWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
+        return s.readOutboxBounded(allocator, id, false);
+    }
+    pub fn readOutboxExpandedWithAllocator(s: *Store, allocator: std.mem.Allocator, id: []const u8) !?t.Message {
+        return s.readOutboxBounded(allocator, id, true);
+    }
+    fn readOutboxBounded(s: *Store, allocator: std.mem.Allocator, id: []const u8, expanded: bool) !?t.Message {
         for (s.state.outbox) |m| if (std.mem.eql(u8, m.id, id)) {
-            const raw = try s.readRecord(allocator, try std.fmt.allocPrint(allocator, "outbox-{s}.json", .{hash(id)}), 4 * t.Limits.body_bytes);
+            const raw = s.readRecord(allocator, try std.fmt.allocPrint(allocator, "outbox-{s}.json", .{hash(id)}), if (expanded) mail_record_bytes else 4 * t.Limits.body_bytes) catch |err| {
+                if (!expanded and err == error.CacheLimitExceeded) return composeOnly(m);
+                return err;
+            };
             const record = try std.json.parseFromSliceLeaky(BodyRecord, allocator, raw, .{ .allocate = .alloc_if_needed });
             if (record.schema != 1 or !std.mem.eql(u8, record.account, s.state.account) or !std.mem.eql(u8, record.message.id, id)) return error.CacheIdentityMismatch;
+            if (!expanded and exceedsOrdinaryBody(record.message)) return composeOnly(m);
             var result = try @import("mail_display_fields.zig").canonicalizeMessageDisplay(allocator, record.message);
             result.labels = m.labels;
             result.unread = m.unread;
@@ -1446,7 +1496,7 @@ pub const Store = struct {
     }
     pub fn draft(s: *Store, id: []const u8) !t.Draft {
         for (s.state.drafts) |d| if (std.mem.eql(u8, d.id, id)) {
-            const raw = try s.readRecord(s.allocator, try s.fileName("draft", id), 4 * t.Limits.body_bytes);
+            const raw = try s.readRecord(s.allocator, try s.fileName("draft", id), mail_record_bytes);
             const result = try std.json.parseFromSliceLeaky(t.Draft, s.allocator, raw, .{ .allocate = .alloc_if_needed });
             if (!std.mem.eql(u8, result.id, id)) return error.CacheIdentityMismatch;
             return result;
@@ -1476,7 +1526,7 @@ pub const Store = struct {
         errdefer if (s.vault != null) {
             s.vaultFailed = true;
         };
-        if (input.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
+        if (input.bodyText.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
         if (!std.unicode.utf8ValidateSlice(input.bodyText)) return error.InvalidUtf8;
         var d = input;
         const related = if (d.original) |original| original.resources else &.{};
@@ -1495,13 +1545,14 @@ pub const Store = struct {
         };
         if (id != null and index == null) return error.DraftNotFound;
         if (index == null and s.state.drafts.len == 128) return error.DraftLimitExceeded;
-        var draft_value = try j.value(s.allocator, d);
+        var draft_value = try @import("mail_response_value.zig").borrowed(s.allocator, d);
         // Keep an unchanged legacy uncertain draft byte-for-byte compatible.
         if (d.bodyFormat == .plain) _ = draft_value.object.orderedRemove("bodyFormat");
         if (d.omittedAttachments == 0) _ = draft_value.object.orderedRemove("omittedAttachments");
         const raw = try j.encodeAlloc(s.allocator, draft_value, .{ .emit_null_optional_fields = false });
+        if (raw.len > mail_record_bytes) return error.BodyTooLarge;
         const name = try s.fileName("draft", d.id);
-        const previous = if (index != null) try s.readRecord(s.allocator, name, 4 * t.Limits.body_bytes) else null;
+        const previous = if (index != null) try s.readRecord(s.allocator, name, mail_record_bytes) else null;
         if (previous) |old| for (s.state.operations) |operation| {
             if (std.mem.eql(u8, operation.draftId, d.id) and std.mem.eql(u8, operation.outcome, "unknown") and !std.mem.eql(u8, old, raw)) return error.UnknownOutcome;
         };
@@ -2225,7 +2276,7 @@ test "mail display cache: native warm reads normalize legacy names without rewri
     const saved_hash = store.find(legacy.id).?.bodyHash;
     const generation = store.state.generation;
     const filename = try store.fileName("mail", legacy.id);
-    const original_file = try readPrivate(store.dir, std.testing.io, a, filename, 4 * t.Limits.body_bytes);
+    const original_file = try readPrivate(store.dir, std.testing.io, a, filename, mail_record_bytes);
     store.close();
     var cached = try Store.openCached(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
     defer cached.close();
@@ -2252,7 +2303,7 @@ test "mail display cache: native warm reads normalize legacy names without rewri
     try std.testing.expectEqualStrings(saved_hash, cached.find(legacy.id).?.bodyHash);
     try std.testing.expectEqualStrings("", cached.find(legacy.id).?.bodyError);
     try std.testing.expectEqual(generation, cached.state.generation);
-    try std.testing.expectEqualStrings(original_file, try readPrivate(cached.dir, std.testing.io, a, filename, 4 * t.Limits.body_bytes));
+    try std.testing.expectEqualStrings(original_file, try readPrivate(cached.dir, std.testing.io, a, filename, mail_record_bytes));
 }
 
 test "body repair preserves valid immutable bytes and rejects wrong-account data" {
@@ -2752,7 +2803,7 @@ test "older decoder refusals are retried once on writable opens and current refu
     try std.testing.expect(!retriedByNewerDecoder("MimeTooDeep", decoder_revision));
     // A cache migrated by an earlier revision retries only refusals that a
     // later revision accepts, once.
-    try std.testing.expectEqual(@as(u32, 4), decoder_revision);
+    try std.testing.expectEqual(@as(u32, 5), decoder_revision);
     for ([_][]const u8{ "AmbiguousCalendarPart", "InvalidEncodedWord", "InvalidQuotedPrintable" }) |code| {
         try std.testing.expect(retriedByNewerDecoder(code, 1));
         try std.testing.expect(!retriedByNewerDecoder(code, 2));
@@ -2816,4 +2867,71 @@ test "older decoder refusals are retried once on writable opens and current refu
     try std.testing.expectEqualStrings("BodySizeMismatch", store.find("mismatch").?.bodyError);
     try std.testing.expectEqualStrings("InvalidQuotedPrintable", store.find("older").?.bodyError);
     try std.testing.expectEqual(decoder_revision, store.state.decoderRevision);
+}
+
+test "native compose cache: enlarged original keeps ordinary reads bounded and expanded reads exact" {
+    if (!@import("send_memory.zig").native) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const base = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    const root = try std.fmt.allocPrint(a, "{s}/cache", .{base});
+    var store = try Store.open(std.testing.io, a, root, "self@example.test", .{ .fixtures = true });
+    defer store.close();
+    const plain = try a.alloc(u8, 5 * 1024 * 1024);
+    @memset(plain, 'x');
+    const html = try a.alloc(u8, 5 * 1024 * 1024);
+    @memset(html, 'y');
+    try store.put(.{ .id = "large-original", .threadId = "thread", .from = .{ .address = "reader@example.test" }, .bodyText = plain, .bodyHtml = html }, true);
+    try store.save();
+    var bytes: [4096]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&bytes);
+    const ordinary = (try store.readWithAllocator(fixed.allocator(), "large-original")).?;
+    try std.testing.expectEqualStrings("large-original", ordinary.id);
+    try std.testing.expectEqualStrings("ComposeSourceRequired", ordinary.bodyCacheError);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.bodyText.len);
+    const expanded = (try store.readExpandedWithAllocator(a, "large-original")).?;
+    try std.testing.expectEqualStrings(plain, expanded.bodyText);
+    try std.testing.expectEqualStrings(html, expanded.bodyHtml.?);
+    const smaller: t.Message = .{ .id = "under-raw-limit", .threadId = "thread", .bodyText = plain[0 .. 3 * 1024 * 1024], .bodyHtml = html[0 .. 3 * 1024 * 1024] };
+    try store.put(smaller, true);
+    try store.putOutbox(.{ .id = "fixture-large-original", .threadId = "thread", .bodyText = smaller.bodyText, .bodyHtml = smaller.bodyHtml });
+    try std.testing.expect(store.find(smaller.id).?.bytes < 4 * t.Limits.body_bytes);
+    try std.testing.expectEqualStrings("ComposeSourceRequired", (try store.readWithAllocator(a, smaller.id)).?.bodyCacheError);
+    try std.testing.expectEqualStrings("ComposeSourceRequired", (try store.readOutboxWithAllocator(a, "fixture-large-original")).?.bodyCacheError);
+    try std.testing.expectEqualStrings(smaller.bodyText, (try store.readExpandedWithAllocator(a, smaller.id)).?.bodyText);
+    try std.testing.expectEqualStrings(smaller.bodyHtml.?, (try store.readOutboxExpandedWithAllocator(a, "fixture-large-original")).?.bodyHtml.?);
+}
+
+test "native compose cache: HTML fallback preserves the ordinary MIME body budget" {
+    const bytes = try std.testing.allocator.alloc(u8, t.Limits.body_bytes + 1);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    // HTML-only decoding retains the original and a generated text fallback.
+    // A separately supplied text/plain alternative has different accounting.
+    var message: t.Message = .{ .id = "html-fallback", .threadId = "thread", .bodyText = bytes[0..t.Limits.body_bytes], .bodyHtml = bytes[0..t.Limits.body_bytes], .bodySource = .html };
+    try std.testing.expect(!Store.exceedsOrdinaryBody(message));
+    message.bodySource = .plain;
+    try std.testing.expect(Store.exceedsOrdinaryBody(message));
+    message.bodyText = bytes[0 .. t.Limits.request_bytes / 2];
+    message.bodyHtml = bytes[0 .. t.Limits.request_bytes / 2];
+    try std.testing.expect(!Store.exceedsOrdinaryBody(message));
+    message.bodyHtml = bytes[0 .. t.Limits.request_bytes / 2 + 1];
+    try std.testing.expect(Store.exceedsOrdinaryBody(message));
+    // The fallback exemption does not weaken the per-field ceiling or allow
+    // loaded attachment bytes beyond the ordinary decoded-message budget.
+    message.bodySource = .html;
+    message.bodyText = bytes[0..t.Limits.body_bytes];
+    message.bodyHtml = bytes;
+    try std.testing.expect(Store.exceedsOrdinaryBody(message));
+    message.bodyText = bytes;
+    message.bodyHtml = bytes[0..t.Limits.body_bytes];
+    try std.testing.expect(Store.exceedsOrdinaryBody(message));
+    message.bodyText = bytes[0..t.Limits.body_bytes];
+    message.attachments = &.{.{ .id = "synthetic", .filename = "synthetic.bin", .size = t.Limits.request_bytes - t.Limits.body_bytes, .data = "synthetic-loaded-marker" }};
+    try std.testing.expect(!Store.exceedsOrdinaryBody(message));
+    message.attachments = &.{.{ .id = "synthetic", .filename = "synthetic.bin", .size = t.Limits.request_bytes - t.Limits.body_bytes + 1, .data = "synthetic-loaded-marker" }};
+    try std.testing.expect(Store.exceedsOrdinaryBody(message));
 }

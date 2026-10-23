@@ -14,6 +14,30 @@ These are dated Linux x86_64 observations, not measurements of every later sourc
 
 Bar totals exclude Chrome and unrelated shell widgets. Terminal totals exclude the emulator, external editor and separately running bar. Large bodies and a full cache have separate workloads below. Allocation limits describe reserved or capped storage; they are not a prediction of resident RAM. Installing Omagma does not require running these measurement procedures.
 
+## Large native messages
+
+Ordinary browsing keeps its fixed memory pools. Native reply and forward
+preparation, composition, previews, sending and Gmail draft uploads can use
+separate, expandable OS-backed memory as the actual content grows. A large
+message may temporarily use more than 256 MiB. This does not reserve the
+worst-case size for every small message. Backend working memory is wiped and
+released when the operation finishes; original and preview buffers retained by
+the composer are released when replaced or closed.
+
+Inline images are retained as private content blobs and passed by handle.
+Sending streams a prepared MIME file instead of repeatedly rendering and
+encoding the original message. The final wire size, including MIME encoding,
+must fit Gmail's 35 MiB upload limit, published as `36700160` bytes in its
+[API discovery document](https://gmail.googleapis.com/$discovery/rest?version=v1).
+Message-size checks happen before submission. Unknown outcomes still protect
+the saved draft and never trigger an automatic resend.
+
+The `outgoingTransient` diagnostics account for expandable allocations
+separately from fixed-pool capacity. The historical measurements below retain
+their original versions and do not establish the peak of a large outgoing
+message. See [native memory ownership](TERMINAL-IMPLEMENTATION.md) for the
+allocation and cleanup policy.
+
 ## Published terminal workload, v0.2.6
 
 The published Linux x86_64 static-musl Safe executable, exact Zig 0.17.0,

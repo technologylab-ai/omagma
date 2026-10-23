@@ -11,12 +11,12 @@ const cache_storage = @import("store.zig");
 const blob = @import("attachment_blob.zig");
 
 pub const filename = "preview.html";
-// 25 MiB of image bytes become at most 34 MiB of base64; 2 MiB of
-// HTML can expand sixfold in srcdoc. Output streams to a private file.
-pub const max_file_bytes: usize = 48 * 1024 * 1024;
+// Escaped native HTML plus base64 images stream to a private file. This is
+// a byte ceiling, not a reservation; the store reserves exact output bytes.
+pub const max_file_bytes: usize = 6 * t.Limits.compose_body_bytes + 36 * 1024 * 1024;
 pub const Result = struct { path: []const u8 };
 const max_tag_bytes = 16384;
-const max_tokens = 65536;
+
 const csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; " ++
     "font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; " ++
     "worker-src 'none'; base-uri 'none'; form-action 'none'";
@@ -76,12 +76,14 @@ const Out = struct {
 
 /// Exact output budget without allocating another HTML copy. The backend
 /// can reserve this count instead of the maximum, preserving small caches.
-pub fn byteSize(prepared: markdown_mail.Prepared, draft: t.Draft) !usize {
-    return byteSizeWithStore(null, prepared, draft);
-}
-pub fn byteSizeWithStore(store: ?*cache_storage.Store, prepared: markdown_mail.Prepared, draft: t.Draft) !usize {
+pub fn byteSize(allocator: std.mem.Allocator, prepared: markdown_mail.Prepared, draft: t.Draft) !usize {
     var sink: std.Io.Writer.Discarding = .init(&.{});
-    try renderWithStore(&sink.writer, prepared, draft, store);
+    try renderWithStore(allocator, &sink.writer, prepared, draft, null);
+    return @intCast(sink.fullCount());
+}
+pub fn byteSizeWithStore(store: *cache_storage.Store, prepared: markdown_mail.Prepared, draft: t.Draft) !usize {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    try renderWithStore(store.allocator, &sink.writer, prepared, draft, store);
     return @intCast(sink.fullCount());
 }
 
@@ -116,14 +118,14 @@ fn writePreviewResolved(io: std.Io, allocator: std.mem.Allocator, account_store_
     const existing: ?std.Io.File.Stat = account_store_dir.statFile(io, filename, .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) null else return err;
     if (existing) |stat| if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.UnsafePreviewPath;
     const source = prepared.html orelse prepared.plain;
-    if (source.len > t.Limits.body_bytes or !std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidPreviewBody;
-    if (prepared.resources.len > 64 or draft.to.len + draft.cc.len + draft.bcc.len > t.Limits.recipients) return error.PreviewTooLarge;
+    if (source.len > t.Limits.compose_body_bytes or !std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidPreviewBody;
+    if (prepared.resources.len > t.Limits.message_attachments or draft.to.len + draft.cc.len + draft.bcc.len > t.Limits.recipients) return error.PreviewTooLarge;
     if (draft.subject.len > policy.subject_bytes) return error.InvalidPreviewHeading;
     var atomic = try account_store_dir.createFileAtomic(io, filename, .{ .permissions = .fromMode(0o600), .replace = true });
     defer atomic.deinit(io);
     var buffer: [8192]u8 = undefined;
     var writer = atomic.file.writer(io, &buffer);
-    try renderWithStore(&writer.interface, prepared, draft, store);
+    try renderWithStore(allocator, &writer.interface, prepared, draft, store);
     try writer.interface.flush();
     try atomic.file.sync(io);
     try atomic.replace(io);
@@ -149,13 +151,14 @@ fn addresses(out: *Out, values: []const t.Address) !void {
     }
 }
 
-pub fn render(writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft) !void {
-    return renderWithStore(writer, prepared, draft, null);
+pub fn render(allocator: std.mem.Allocator, writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft) !void {
+    return renderWithStore(allocator, writer, prepared, draft, null);
 }
-fn renderWithStore(writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft, store: ?*cache_storage.Store) !void {
+fn renderWithStore(allocator: std.mem.Allocator, writer: *std.Io.Writer, prepared: markdown_mail.Prepared, draft: t.Draft, store: ?*cache_storage.Store) !void {
     if (draft.subject.len > policy.subject_bytes) return error.InvalidPreviewHeading;
     var out: Out = .{ .writer = writer };
-    const context = try Context.initWithStore(prepared, store);
+    const context = try Context.initWithStore(allocator, prepared, store);
+    defer context.deinit(allocator);
     try out.raw("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"");
     try out.escaped(outer_csp);
     try out.raw("\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Outgoing preview</title><style>" ++
@@ -288,23 +291,27 @@ const Image = struct {
     mime: []const u8,
     encoded: ?[]const u8 = null,
     bytes: ?[]const u8 = null,
-    attachment: ?t.Attachment = null,
+    attachment: ?*const t.Attachment = null,
     store: ?*cache_storage.Store = null,
 };
 const Context = struct {
     prepared: markdown_mail.Prepared,
-    images: [64]?Image = @splat(null),
-    fn init(prepared: markdown_mail.Prepared) !Context {
-        return initWithStore(prepared, null);
+    images: []?Image,
+    fn init(allocator: std.mem.Allocator, prepared: markdown_mail.Prepared) !Context {
+        return initWithStore(allocator, prepared, null);
     }
-    fn initWithStore(prepared: markdown_mail.Prepared, store: ?*cache_storage.Store) !Context {
-        if (prepared.resources.len > 64) return error.PreviewTooLarge;
+    fn initWithStore(allocator: std.mem.Allocator, prepared: markdown_mail.Prepared, store: ?*cache_storage.Store) !Context {
+        if (prepared.resources.len > t.Limits.message_attachments) return error.PreviewTooLarge;
         const source = prepared.html orelse prepared.plain;
-        if (source.len > t.Limits.body_bytes or !std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidPreviewBody;
-        var result: Context = .{ .prepared = prepared };
+        if (source.len > t.Limits.compose_body_bytes or !std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidPreviewBody;
+        // The inventory grows with actual resources, never on the worker's
+        // stack. References borrow the immutable Prepared for this render.
+        const images = try allocator.alloc(?Image, prepared.resources.len);
+        errdefer allocator.free(images);
+        const result: Context = .{ .prepared = prepared, .images = images };
         // Verify retained bytes once even when one image is referenced many times.
         var total: usize = 0;
-        for (prepared.resources, 0..) |resource, index| {
+        for (prepared.resources, 0..) |*resource, index| {
             total = std.math.add(usize, total, resource.size) catch return error.PreviewTooLarge;
             if (total > t.Limits.attachment_bytes) return error.PreviewTooLarge;
             result.images[index] = if (resource.blobId != null)
@@ -314,13 +321,16 @@ const Context = struct {
         }
         return result;
     }
+    fn deinit(self: Context, allocator: std.mem.Allocator) void {
+        allocator.free(self.images);
+    }
 };
 fn rasterPrefix(mime: []const u8, bytes: []const u8) bool {
     return if (equal(mime, "image/png")) bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") else if (equal(mime, "image/jpeg")) bytes.len >= 3 and std.mem.eql(u8, bytes[0..3], "\xff\xd8\xff") else bytes.len >= 6 and (std.mem.eql(u8, bytes[0..6], "GIF87a") or std.mem.eql(u8, bytes[0..6], "GIF89a"));
 }
-fn verifiedBlobImage(store: *cache_storage.Store, attachment: t.Attachment) !?Image {
+fn verifiedBlobImage(store: *cache_storage.Store, attachment: *const t.Attachment) !?Image {
     const mime = rasterMime(attachment.mimeType) orelse return null;
-    var source = try blob.Stream.init(store, attachment);
+    var source = try blob.Stream.init(store, attachment.*);
     defer source.close();
     var prefix: [12]u8 = undefined;
     var prefix_len: usize = 0;
@@ -452,7 +462,7 @@ fn dataUrl(out: *Out, image: Image) !void {
     try out.escaped(image.mime);
     try out.escaped(";base64,");
     if (image.attachment) |attachment| {
-        var source = try blob.Stream.init(image.store.?, attachment);
+        var source = try blob.Stream.init(image.store.?, attachment.*);
         defer source.close();
         var bytes: [3072]u8 = undefined;
         var encoded: [4096]u8 = undefined;
@@ -564,7 +574,7 @@ fn childHtml(out: *Out, input: []const u8, context: *const Context) !void {
     var tokens: usize = 0;
     while (offset < input.len) {
         tokens += 1;
-        if (tokens > max_tokens) return error.PreviewTooComplex;
+        if (tokens > input.len) return error.PreviewTooComplex;
         if (std.mem.startsWith(u8, input[offset..], "<!--")) {
             const end = std.mem.indexOf(u8, input[offset + 4 ..], "-->") orelse return;
             offset += end + 7;
@@ -605,7 +615,7 @@ test "preview file: private replacement preserves tables and separates untrusted
     const file = try directory.openFile(io, filename, .{});
     defer file.close(io);
     try std.testing.expectEqual(@as(u32, 0o600), (try file.stat(io)).permissions.toMode() & 0o777);
-    try std.testing.expectEqual((try file.stat(io)).size, @as(u64, try byteSize(.{ .plain = "Original table", .html = html }, .{ .subject = "Quote \" </iframe><script>unsafe</script>" })));
+    try std.testing.expectEqual((try file.stat(io)).size, @as(u64, try byteSize(std.testing.allocator, .{ .plain = "Original table", .html = html }, .{ .subject = "Quote \" </iframe><script>unsafe</script>" })));
     const bytes = try std.testing.allocator.alloc(u8, 65536);
     defer std.testing.allocator.free(bytes);
     const output = try directory.readFile(io, filename, bytes);
@@ -630,10 +640,52 @@ test "preview file: raster signatures and CID decoding prevent mislabeled SVG da
     try std.testing.expect(verifiedImage("image/svg+xml", "iVBORw0KGgo=") == null);
     try std.testing.expect(verifiedImage("image/png", "iVBORw0KGgo=") != null);
     const resources = [_]t.Attachment{.{ .id = "image", .filename = "picture.png", .mimeType = "image/png", .data = "iVBORw0KGgo=", .contentId = "picture@example.test" }};
-    const context = try Context.init(.{ .plain = "", .resources = &resources });
+    const context = try Context.init(std.testing.allocator, .{ .plain = "", .resources = &resources });
+    defer context.deinit(std.testing.allocator);
     const image = imageFor("c\\69 d:picture&#64;example.test", null, &context);
     try std.testing.expect(image != null);
     try std.testing.expect(imageFor("CID:picture%40example.test", null, &context) != null);
+}
+
+test "preview file: thousand-image inventory renders on the native worker stack" {
+    if (!@import("send_memory.zig").native) return error.SkipZigTest;
+    const Work = struct {
+        fn start(failure: *?anyerror) void {
+            run() catch |err| {
+                failure.* = err;
+            };
+        }
+        fn run() !void {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const resources = try a.alloc(t.Attachment, t.Limits.related_resources);
+            var html: std.ArrayList(u8) = .empty;
+            try html.appendSlice(a, "<p>Complete original</p>");
+            for (resources, 0..) |*resource, index| {
+                const cid = try std.fmt.allocPrint(a, "image-{d}@example.test", .{index});
+                resource.* = .{ .id = cid, .filename = "screenshot.png", .mimeType = "image/png", .size = 8, .data = "iVBORw0KGgo=", .contentId = cid };
+                try html.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{cid}));
+            }
+            const prepared: markdown_mail.Prepared = .{ .plain = "Complete original", .html = html.items, .resources = resources };
+            var writer: std.Io.Writer.Allocating = .init(a);
+            defer writer.deinit();
+            try render(a, &writer.writer, prepared, .{ .subject = "Many screenshots" });
+            const output = writer.written();
+            try std.testing.expectEqual(@as(usize, t.Limits.related_resources), std.mem.count(u8, output, "data:image/png;base64,iVBORw0KGgo"));
+            try std.testing.expectEqual(output.len, try byteSize(a, prepared, .{ .subject = "Many screenshots" }));
+            var empty: [0]u8 = .{};
+            var failing: std.heap.FixedBufferAllocator = .init(&empty);
+            try std.testing.expectError(error.OutOfMemory, Context.init(failing.allocator(), prepared));
+            // Only the slice lives in Context: no count-dependent aggregate
+            // or by-value copies can consume the worker's one-MiB stack.
+            try std.testing.expect(@sizeOf(Context) < 256);
+        }
+    };
+    var failure: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{ .stack_size = @import("../fixed_runtime.zig").worker_stack_bytes }, Work.start, .{&failure});
+    thread.join();
+    if (failure) |err| return err;
 }
 
 test "mail metadata: preview retains full subject and long Unicode names" {
@@ -645,7 +697,7 @@ test "mail metadata: preview retains full subject and long Unicode names" {
     var name_bytes: [1023]u8 = undefined;
     for (0..341) |index| @memcpy(name_bytes[index * 3 ..][0..3], "界");
     const name = &name_bytes;
-    try render(&writer.writer, .{ .plain = "Note" }, .{ .subject = subject, .to = &.{.{ .address = "用户@例子.test", .name = name }} });
+    try render(std.testing.allocator, &writer.writer, .{ .plain = "Note" }, .{ .subject = subject, .to = &.{.{ .address = "用户@例子.test", .name = name }} });
     const output = writer.written();
     try std.testing.expect(std.mem.indexOf(u8, output, subject) != null);
     try std.testing.expect(std.mem.indexOf(u8, output, name) != null);

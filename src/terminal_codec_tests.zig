@@ -3,6 +3,9 @@ test {
     std.testing.refAllDecls(@import("mail_scratch_compatibility_tests.zig"));
     std.testing.refAllDecls(@import("terminal/recipients.zig"));
     std.testing.refAllDecls(@import("terminal/mime.zig"));
+    std.testing.refAllDecls(@import("terminal/original_mail.zig"));
+    std.testing.refAllDecls(@import("terminal/markdown_mail.zig"));
+    std.testing.refAllDecls(@import("terminal/decoder_policy.zig"));
     std.testing.refAllDecls(@import("terminal/html_document.zig"));
     std.testing.refAllDecls(@import("terminal/invitation.zig"));
     std.testing.refAllDecls(@import("terminal/gmail_decode.zig"));
@@ -64,10 +67,24 @@ test "synthetic MIME limit corpus fails with explicit bounded errors" {
         .{ .name = "sizeMismatch", .expected = error.BodySizeMismatch },
         .{ .name = "unsupportedCharset", .expected = error.UnsupportedCharset },
         .{ .name = "depth33", .expected = error.MimeTooDeep },
-        .{ .name = "parts513", .expected = error.TooManyMimeParts },
     }) |case| {
         var object: std.json.ObjectMap = .empty;
         try object.put(a, "payload", cases.get(case.name).?);
         try std.testing.expectError(case.expected, mime.parseGmail(.{ .object = object }, a));
     }
+    // The former 128-part refusal is now a readable accumulated chain.
+    var wrapped: std.json.Value = .{ .object = .empty };
+    try wrapped.object.put(a, "payload", cases.get("parts513").?);
+    const recovered = try mime.parseGmail(wrapped, a);
+    try std.testing.expectEqual(@as(usize, 513), std.mem.count(u8, recovered.body_text, "text"));
+    // Keep an explicit structural bound, including empty or tiny text parts.
+    var oversized = try @import("terminal/json.zig").copyObject(a, cases.get("parts513").?);
+    const prototype = oversized.object.get("parts").?.array.items[0];
+    const items = try a.alloc(std.json.Value, mime.max_parts);
+    @memset(items, prototype);
+    var oversized_parts: std.json.Array = .init(a);
+    try oversized_parts.appendSlice(items);
+    try oversized.object.put(a, "parts", .{ .array = oversized_parts });
+    try wrapped.object.put(a, "payload", oversized);
+    try std.testing.expectError(error.TooManyMimeParts, mime.parseGmail(wrapped, a));
 }

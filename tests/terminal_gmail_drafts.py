@@ -169,7 +169,7 @@ def native_pty(binary, root, captures):
         command(terminal, "gmail-draft")
         terminal.until(lambda: "Check Gmail draft" in terminal.text())
         terminal.send(b"jj\r")
-        terminal.until(lambda: "Import Gmail text as a new draft" in terminal.text())
+        terminal.until(lambda: "Import Gmail changes as a new draft" in terminal.text())
         terminal.send(b"jjj\r")
         terminal.until(lambda: "local copy · Gmail copy kept" in terminal.text())
         terminal.gap(.5)

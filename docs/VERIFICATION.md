@@ -122,6 +122,23 @@ When diagnosing a user report, distinguish cached reads from the fresh source
 read used to preserve formatting, and verify the executable actually running;
 repairing a cache with a candidate CLI does not replace a running older TUI.
 
+The native PTY gate includes `growing-composer`: a refused ordinary reader
+opens its full formatted reply source, preserves 146 inline images, edits a
+note over 2 MiB through an external editor, opens its HTML preview, saves,
+reopens, reviews and sends exactly once to the synthetic provider. The separate
+`unknown-send-reopen` case opens the protected recovery preview while proving
+that the original draft and receipt stay unchanged and Gmail upload stays
+blocked. These paths run on the application's real worker stacks. Encrypted
+private-socket tests also render the large draft through the daemon and verify
+the private export, unchanged source and cleanup.
+
+`native send memory HTTP:` tests exercise the production source/attachment
+transport and MIME uploader with 21 growing reply stages near Gmail's wire
+limit. They verify every image independently, reject oversized MIME before
+submission, and check uncertain receipts and scoped-memory cleanup. These
+correctness checks supplement the fixed browsing workloads; they do not impose
+the browsing heap ceiling on an explicitly expanded native compose operation.
+
 ## Received-message copy acceptance
 
 Received-message copy/editor acceptance uses `tests/terminal_reader_copy.py`

@@ -87,18 +87,39 @@ pub fn makeUrl(account: *const model.Account, raw: []const u8) !Target {
 /// Only the preview writer's canonical private account artifact reaches this
 /// adapter. General reader links remain HTTP(S)-only in makeUrl.
 pub fn makePreview(account: *const model.Account, path: []const u8) !Target {
-    try b.address(account.address.slice());
-    try b.profile(account.profile.slice());
-    if (!std.fs.path.isAbsolute(path) or path.len > 4096 or !std.unicode.utf8ValidateSlice(path) or !std.mem.eql(u8, std.fs.path.basename(path), "preview.html")) return error.InvalidPreviewPath;
-    for (path) |byte| if (byte < 32 or byte == 127 or byte == '\\') return error.InvalidPreviewPath;
-    var components = std.mem.splitScalar(u8, path, '/');
-    while (components.next()) |component| if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidPreviewPath;
+    try validatePreviewPath(account, path);
     const account_dir = std.fs.path.dirname(path) orelse return error.InvalidPreviewPath;
     const namespace = std.fs.path.dirname(account_dir) orelse return error.InvalidPreviewPath;
     if (!std.mem.eql(u8, std.fs.path.basename(namespace), "live") and !std.mem.eql(u8, std.fs.path.basename(namespace), "fixtures")) return error.InvalidPreviewPath;
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(account.address.slice(), &digest, .{});
     if (!std.mem.eql(u8, std.fs.path.basename(account_dir), &std.fmt.bytesToHex(digest, .lower))) return error.InvalidPreviewPath;
+    return previewTarget(account, path);
+}
+
+/// The encrypted store exports only this opaque, owner-only runtime artifact.
+/// The caller obtains both identifiers from the selected unlocked Store after
+/// writePrivateExport succeeds; ordinary account-cache paths keep their own
+/// account-hash check above.
+pub fn makeVaultPreview(account: *const model.Account, path: []const u8, vault_id: [16]u8, account_index: [32]u8) !Target {
+    try validatePreviewPath(account, path);
+    const directory = std.fs.path.dirname(path) orelse return error.InvalidPreviewPath;
+    var expected_bytes: [128]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_bytes, "omagma-preview-{s}-{s}", .{ std.fmt.bytesToHex(vault_id, .lower), std.fmt.bytesToHex(account_index, .lower) });
+    if (!std.mem.eql(u8, std.fs.path.basename(directory), expected)) return error.InvalidPreviewPath;
+    return previewTarget(account, path);
+}
+
+fn validatePreviewPath(account: *const model.Account, path: []const u8) !void {
+    try b.address(account.address.slice());
+    try b.profile(account.profile.slice());
+    if (!std.fs.path.isAbsolute(path) or path.len > 4096 or !std.unicode.utf8ValidateSlice(path) or !std.mem.eql(u8, std.fs.path.basename(path), "preview.html")) return error.InvalidPreviewPath;
+    for (path) |byte| if (byte < 32 or byte == 127 or byte == '\\') return error.InvalidPreviewPath;
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidPreviewPath;
+}
+
+fn previewTarget(account: *const model.Account, path: []const u8) !Target {
     var target: Target = .{};
     var writer = std.Io.Writer.fixed(&target.url.bytes);
     try writer.writeAll("file://");
@@ -155,6 +176,24 @@ test "UX backend: private preview target keeps account profile and encodes filen
     try std.testing.expectError(error.InvalidTarget, makeUrl(&account, target.url.slice()));
     try account.address.set("other@example.test");
     try std.testing.expectError(error.InvalidPreviewPath, makePreview(&account, path));
+}
+
+test "UX backend: encrypted preview target is bound to the selected vault and account handle" {
+    var account: model.Account = .{};
+    try account.address.set("work@example.test");
+    try account.profile.set("Profile 2");
+    const vault_id: [16]u8 = @splat(0x47);
+    const account_index: [32]u8 = @splat(0x58);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/private runtime #/omagma-preview-{s}-{s}/preview.html", .{ std.fmt.bytesToHex(vault_id, .lower), std.fmt.bytesToHex(account_index, .lower) });
+    defer std.testing.allocator.free(path);
+    const target = try makeVaultPreview(&account, path, vault_id, account_index);
+    try std.testing.expect(std.mem.startsWith(u8, target.url.slice(), "file:///tmp/private%20runtime%20%23/omagma-preview-"));
+    try std.testing.expectEqualStrings("--profile-directory=Profile 2", target.profile_arg.slice());
+    try std.testing.expectError(error.InvalidPreviewPath, makePreview(&account, path));
+    try std.testing.expectError(error.InvalidPreviewPath, makeVaultPreview(&account, path, @splat(0x49), account_index));
+    try std.testing.expectError(error.InvalidPreviewPath, makeVaultPreview(&account, path, vault_id, @splat(0x59)));
+    for ([_][]const u8{ "/tmp/preview.html", "relative/preview.html", "/tmp/../preview.html", "/tmp/preview.txt" }) |invalid| try std.testing.expectError(error.InvalidPreviewPath, makeVaultPreview(&account, invalid, vault_id, account_index));
+    try std.testing.expectError(error.InvalidTarget, makeUrl(&account, target.url.slice()));
 }
 test "account-specific Chrome argv and Message-ID fallback" {
     var a: model.Account = .{};

@@ -17,8 +17,13 @@ test {
 
 fn command(client: *transport.Client, allocator: std.mem.Allocator, request: anytype) !std.json.Value {
     const raw = try j.encodeAlloc(allocator, request, .{});
-    const response = try client.request(allocator, .execute, raw);
+    const response = client.request(allocator, .execute, raw) catch |err| {
+        std.debug.print("synthetic vault command {s} transport failure: {s}\n", .{ request.cmd, @errorName(err) });
+        return err;
+    };
     const value = try std.json.parseFromSliceLeaky(j.Value, allocator, response, .{});
+    if (!(value.object.get("ok") orelse return error.MissingResponse).bool)
+        std.debug.print("synthetic vault command {s} rejected: {s}\n", .{ request.cmd, j.text(j.get(value, "error") orelse .null, "code") });
     try std.testing.expect((value.object.get("ok") orelse return error.MissingResponse).bool);
     return value.object.get("data") orelse error.MissingResponse;
 }
@@ -39,6 +44,7 @@ test "vault daemon: create unlock account mail draft lock and restart through pr
     var env = std.process.Environ.Map.init(a);
     defer env.deinit();
     try env.put("HOME", root);
+    try env.put("XDG_RUNTIME_DIR", root);
     const owner = try a.create(owner_module.Owner);
     defer a.destroy(owner);
     owner.* = try owner_module.Owner.init(io, a, &env, path, .{ .fixtures = true });
@@ -115,12 +121,51 @@ test "vault daemon: create unlock account mail draft lock and restart through pr
     const draft = try command(&client, allocator, .{ .cmd = "draft.create", .account = "personal@example.com", .draft = .{ .subject = "Sealed draft", .bodyText = "Sealed draft body" } });
     const draft_id = try allocator.dupe(u8, j.text(draft, "id"));
     try std.testing.expect(draft_id.len != 0);
+    // Native compose frames and encrypted draft records grow by actual bytes.
+    // Escaping makes this ordinary4MiB text exceed both old3MiB IPC and8MiB
+    // stored-draft ceilings; the original command remains bounded by policy.
+    const large_note = try allocator.alloc(u8, 4 * 1024 * 1024);
+    for (large_note, 0..) |*byte, index| byte.* = "\n\t\\\""[index % 4];
+    const preview_tail = "Synthetic encrypted preview reaches the final body bytes.";
+    @memcpy(large_note[large_note.len - preview_tail.len ..], preview_tail);
+    const large_draft = try command(&client, allocator, .{ .cmd = "draft.create", .account = "personal@example.com", .acknowledgementOnly = true, .draft = .{ .subject = "Large sealed source", .bodyText = large_note } });
+    const large_id = try allocator.dupe(u8, j.text(large_draft, "id"));
+    const large_saved = try command(&client, allocator, .{ .cmd = "draft.read", .account = "personal@example.com", .draftId = large_id });
+    try std.testing.expectEqualStrings(large_note, j.text(large_saved, "bodyText"));
+    // Exercise the encrypted daemon worker's complete export path over IPC,
+    // including its native stack and private plaintext-export destination.
+    // Fixtures never launch a browser or contact a provider.
+    const draft_before_preview = try j.encodeAlloc(allocator, large_saved, .{});
+    const preview = try command(&client, allocator, .{ .cmd = "draft.open-preview", .account = "personal@example.com", .draftId = large_id });
+    try std.testing.expect(j.get(preview, "fixture").?.bool);
+    try std.testing.expect(!j.get(preview, "opened").?.bool);
+    const preview_path = j.text(preview, "path");
+    const preview_directory = std.fs.path.dirname(preview_path) orelse return error.MissingPreviewDirectory;
+    const preview_prefix = try std.fmt.allocPrint(allocator, "{s}/omagma-preview-", .{root});
+    try std.testing.expect(std.mem.startsWith(u8, preview_directory, preview_prefix));
+    defer std.Io.Dir.cwd().deleteTree(io, preview_directory) catch {};
+    try std.testing.expectEqualStrings(@import("terminal/preview_file.zig").filename, std.fs.path.basename(preview_path));
+    const preview_stat = try std.Io.Dir.cwd().statFile(io, preview_path, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(.file, preview_stat.kind);
+    try std.testing.expectEqual(@as(u32, 0o600), preview_stat.permissions.toMode() & 0o777);
+    const directory_stat = try std.Io.Dir.cwd().statFile(io, preview_directory, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(.directory, directory_stat.kind);
+    try std.testing.expectEqual(@as(u32, 0o700), directory_stat.permissions.toMode() & 0o777);
+    const rendered = try std.Io.Dir.cwd().readFileAlloc(io, preview_path, allocator, .limited(@import("terminal/preview_file.zig").max_file_bytes));
+    try std.testing.expect(rendered.len > large_note.len);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, preview_tail) != null);
+    const draft_after_preview = try command(&client, allocator, .{ .cmd = "draft.read", .account = "personal@example.com", .draftId = large_id });
+    try std.testing.expectEqualStrings(draft_before_preview, try j.encodeAlloc(allocator, draft_after_preview, .{}));
+    try std.Io.Dir.cwd().deleteTree(io, preview_directory);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, preview_directory, .{ .follow_symlinks = false }));
     _ = try client.request(allocator, .lock, "");
     try std.testing.expect(!owner.unlocked());
     for (owner.key.bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     _ = try client.request(allocator, .unlock, password);
     const reopened = try command(&client, allocator, .{ .cmd = "draft.read", .account = "personal@example.com", .draftId = draft_id });
     try std.testing.expectEqualStrings("Sealed draft body", j.text(reopened, "bodyText"));
+    const large_reopened = try command(&client, allocator, .{ .cmd = "draft.read", .account = "personal@example.com", .draftId = large_id });
+    try std.testing.expectEqualStrings(large_note, j.text(large_reopened, "bodyText"));
     _ = try client.request(allocator, .stop, "");
     try service.await(io);
     try std.testing.expect(!owner.unlocked());

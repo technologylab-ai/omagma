@@ -7,18 +7,20 @@ const platform = @import("../platform.zig");
 const private = @import("../keyring_file.zig");
 const native = @import("../native_file.zig");
 
-pub const request_limit = t.Limits.request_bytes;
-pub const response_limit = 32 * 1024 * 1024;
+pub const request_limit = @import("send_memory.zig").record_bytes;
+pub const response_limit = request_limit + 64 * 1024;
+pub const ordinary_response_limit = 32 * 1024 * 1024;
 pub const header_bytes = 16;
 pub const magic = "OMAVIPC1";
 pub const Kind = enum(u8) { execute = 1, unlock = 2, lock = 3, status = 4, stop = 5, password_change = 6, recovery_change = 7, recover = 8, response = 128 };
 pub const Frame = struct {
     kind: Kind,
     body: []u8,
+    backing: ?std.mem.Allocator = null,
     pub fn deinit(self: *Frame, a: std.mem.Allocator) void {
         // Unlock passwords and private message DTOs both have bounded lives.
         std.crypto.secureZero(u8, self.body);
-        a.free(self.body);
+        (self.backing orelse a).free(self.body);
         self.body = &.{};
     }
 };
@@ -118,13 +120,15 @@ pub fn readFrame(io: std.Io, a: std.mem.Allocator, stream: std.Io.net.Stream, li
     try reader.interface.readSliceAll(&bytes);
     const decoded = try decodeHeader(&bytes, limit);
     // Allocate only after validation, and precisely to the advertised length.
-    const body = try a.alloc(u8, decoded.length);
+    const backing = if (decoded.kind == .execute and decoded.length > t.Limits.request_bytes) @import("send_memory.zig").allocator() else a;
+    const body = try backing.alloc(u8, decoded.length);
     errdefer {
         std.crypto.secureZero(u8, body);
-        a.free(body);
+        backing.free(body);
     }
     try reader.interface.readSliceAll(body);
-    return .{ .kind = decoded.kind, .body = body };
+    if (decoded.kind == .execute and body.len > @import("send_memory.zig").requestLimit(body)) return error.InvalidRequest;
+    return .{ .kind = decoded.kind, .body = body, .backing = backing };
 }
 pub fn writeFrame(io: std.Io, stream: std.Io.net.Stream, kind: Kind, body: []const u8, limit: usize) !void {
     const bytes = try encodeHeader(kind, body.len, limit);
@@ -143,13 +147,13 @@ pub fn disconnectRequestError(meta: Metadata) anyerror {
 pub fn executionSeconds(command: []const u8) i64 {
     // OAuth owns a180-second consent deadline inside auth.run, followed by a
     // durable identity commit. Lock interrupts this class explicitly.
-    return if (std.mem.eql(u8, command, "auth.authorize")) 190 else 30;
+    return if (std.mem.eql(u8, command, "auth.authorize")) 190 else @import("send_memory.zig").seconds(command);
 }
 pub const Metadata = struct { id: std.json.Value = .null, account: []const u8 = "", command: []const u8 = "", vault_id: []const u8 = "", secret_field: bool = false, reconcile: bool = false };
 /// Read only the envelope with fixed scratch. Large body/recipient arrays are
 /// skipped without allocating copies, including during an OOM error response.
 pub fn requestMetadata(a: std.mem.Allocator, raw: []const u8) !Metadata {
-    if (raw.len > request_limit or !@import("core.zig").boundedJson(raw)) return error.InvalidRequest;
+    if (raw.len > @import("send_memory.zig").requestLimit(raw) or !@import("core.zig").boundedJson(raw)) return error.InvalidRequest;
     var scanner = std.json.Scanner.initCompleteInput(a, raw);
     defer scanner.deinit();
     if (try scanner.next() != .object_begin) return error.InvalidRequest;
@@ -301,7 +305,7 @@ pub const Client = struct {
         try validatePeer(stream);
         submitted.* = true;
         try writeFrame(self.io, stream, kind, body, request_limit);
-        var response = try readFrame(self.io, a, stream, response_limit);
+        var response = try readFrame(self.io, a, stream, if (kind == .execute and @import("send_memory.zig").request(body)) response_limit else ordinary_response_limit);
         errdefer response.deinit(a);
         if (response.kind != .response) return error.InvalidBackendFrame;
         output.* = response.body;

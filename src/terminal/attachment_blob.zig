@@ -51,7 +51,7 @@ pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []con
             try verify(store, descriptor);
             return descriptor;
         }
-        if (store.vaultBlobCount() >= 128) return error.AttachmentLimitExceeded;
+        if (store.vaultBlobCount() >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         var output: @import("vault_stream.zig").Writer = undefined;
         const handle = try store.beginVaultStream(&output, .attachment, size);
         defer output.deinit();
@@ -81,7 +81,7 @@ pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []con
         while (try iterator.next(store.io)) |entry| if (std.mem.startsWith(u8, entry.name, "blob-")) {
             blobs += 1;
         };
-        if (blobs >= 128) return error.AttachmentLimitExceeded;
+        if (blobs >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         try store.reserveBytes(size);
         var atomic = try store.dir.createFileAtomic(store.io, target, .{ .permissions = .fromMode(0o600), .replace = false });
         defer atomic.deinit(store.io);
@@ -327,7 +327,7 @@ pub const Incoming = struct {
             try verify(store, result);
             return result;
         }
-        if (store.vaultBlobCount() >= 128) return error.AttachmentLimitExceeded;
+        if (store.vaultBlobCount() >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         var source = try self.reader();
         defer source.close();
         var output: @import("vault_stream.zig").Writer = undefined;
@@ -353,7 +353,7 @@ pub const Incoming = struct {
         const target = try filename(store.allocator, id);
         const exists = store.dir.statFile(store.io, target, .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) null else return err;
         if (exists == null) {
-            if ((try store.blobStats()).count >= 128) return error.AttachmentLimitExceeded;
+            if ((try store.blobStats()).count >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         }
 
         self.dir.renamePreserve(self.name, store.dir, target, self.io) catch |err| {

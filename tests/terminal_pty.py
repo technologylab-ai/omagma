@@ -656,6 +656,30 @@ def exercise(terminal, action):
         with Client(terminal.binary, terminal.directory) as client:
             operations = client.request("operation.list")["operations"]
             require(len(operations) == 1 and operations[0]["outcome"] == "unknown", "uncertain TUI submission lacks one durable receipt")
+            original = client.request("draft.read", draftId=operations[0]["draftId"])
+        # Recovery must be usable from the actual protected composer, without
+        # granting permission to upload or send the uncertain message again.
+        terminal.send(b":")
+        terminal.until(lambda: "Command" in terminal.text().splitlines()[0]
+                       and "Compose" in terminal.text().splitlines()[0])
+        require("Reviewed synthetic PTY body." in terminal.text(),
+                "composer command hid the protected draft behind the inbox")
+        terminal.send(b"gmail-draft\r")
+        terminal.until(lambda: "Gmail upload blocked" in terminal.text())
+        require("Compose" in terminal.text().splitlines()[0] and "Drafts" in terminal.text(),
+                "blocked Gmail handoff did not retain the visible draft and recovery location")
+        terminal.send(b"p")
+        terminal.until(lambda: "Mock HTML preview validated" in terminal.text())
+        previews = list(terminal.directory.rglob("preview.html"))
+        require(len(previews) == 1 and "Reviewed synthetic PTY body." in previews[0].read_text(),
+                "protected recovery preview did not render the retained text into a real HTML file")
+        with Client(terminal.binary, terminal.directory) as client:
+            require(client.request("draft.read", draftId=original["id"]) == original,
+                    "protected preview or blocked Gmail handoff changed the original draft")
+            require(client.request("operation.list")["operations"] == operations,
+                    "recovery action changed the uncertain submission journal")
+            require(client.request("draft.gmail-info", draftId=original["id"]).get("link") is None,
+                    "blocked Gmail handoff created an upload link")
         terminal.send(b"q")
         terminal.until(lambda: "Mail ·" in terminal.text().splitlines()[2])
         terminal.send(b"h")
@@ -672,7 +696,9 @@ def exercise(terminal, action):
         result = terminal.finish()
         with Client(terminal.binary, terminal.directory) as client:
             require(client.request("operation.list")["operations"] == operations, "reopened uncertain draft generated a second submission")
-        result.update(unknownReceiptPersisted=True, reopenResubmitBlocked=True)
+        result.update(unknownReceiptPersisted=True, reopenResubmitBlocked=True,
+                      protectedHtmlPreviewVerified=True, gmailUploadBlocked=True,
+                      protectedDraftUnchanged=True, composerCommandKeepsContext=True)
         return result
     if action == "contact-create":
         terminal.until(lambda: "Ready" in terminal.text())
@@ -843,7 +869,7 @@ def main():
     cases = ["save", "cancel", "save-error", "interrupt", "mail-controls", "edit-sigterm", "attach-detach", "review-cancel",
              "review-send", "unknown-send-reopen", "contact-create", "rsvp-cancel", "account-page-navigation",
              "long-field-caret", "column-zero-caret", "save-incoming-attachment", "long-rsvp-review",
-             "utf8-fragments", "fifo-local-attachment", "fifo-editor-readback"]
+             "utf8-fragments", "fifo-local-attachment", "fifo-editor-readback", "growing-composer"]
     parser.add_argument("--case", action="append", choices=cases)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -856,6 +882,24 @@ def main():
         for name in args.case or cases:
             receipt = {"name": name}
             terminal = None
+            if name == "growing-composer":
+                # Keep the full native release PTY matrix exercising the large
+                # source/chooser/editor/reopen/send path on every platform.
+                from terminal_growing_composer import exercise as growing_composer
+                owned = Path(directory) / name
+                owned.mkdir(mode=0o700)
+                try:
+                    receipt.update(growing_composer(binary, owned), passed=True)
+                except Exception as error:
+                    receipt.update(passed=False, error=f"{type(error).__name__}: {error}")
+                    screen = owned / "last-screen.txt"
+                    if screen.exists():
+                        diagnostic = output.with_name(f"{output.stem}-{name}.txt")
+                        diagnostic.write_text(screen.read_text())
+                        receipt["diagnosticFile"] = diagnostic.name
+                report["cases"].append(receipt)
+                print(json.dumps(receipt), flush=True)
+                continue
             try:
                 extra = ("--fixture-scenario", "unknown-send") if name == "unknown-send-reopen" else ()
                 if name == "long-rsvp-review":

@@ -162,7 +162,7 @@ def lifecycle_one(binary, directory, forward):
             terminal.send(b"\r")
         wait_compose(terminal)
         initial = single_draft(binary, directory, fixture)
-        original = copy.deepcopy(check_snapshot(initial))
+        original = copy.deepcopy(check_snapshot(initial, client_dir=directory))
         require(initial["bodyText"] == "" and len(initial["attachments"]) == int(forward), "formatted composer copied source into note or duplicated files")
         require("Original layout" not in panel_text(terminal, "Compose"), "received source entered editable composer pane")
         stage = "note entry and preflight"
@@ -338,7 +338,7 @@ def queued(binary, directory):
         value = single_draft(binary, directory, fixture)
         require(value["original"]["sourceMessageId"] == SOURCE_ID and value["threadId"] == SOURCE_THREAD,
                 "queued formatted reply followed later cursor selection")
-        check_snapshot(value)
+        check_snapshot(value, client_dir=directory)
         return terminal.finish()
     except Exception:
         diagnose(terminal, "queued source identity")

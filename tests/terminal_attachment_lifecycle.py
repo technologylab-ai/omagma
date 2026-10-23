@@ -29,6 +29,7 @@ import traceback
 import zlib
 
 from build_info import read_build_info
+from terminal_formatted_original import check_part_bytes
 from terminal_integration import ACCOUNTS, Client, require
 
 
@@ -474,15 +475,16 @@ def gated_fresh_draft(client, fixture, cmd, **params):
     return reply["data"]
 
 
-def check_pressure_parts(parts, rows, inline=False):
+def check_pressure_parts(parts, rows, inline=False, *, client_dir):
     require(len(parts) == len(rows), "pressure draft lost or invented an attachment/resource")
     by_name = {part["filename"]: part for part in parts}
     require(len(by_name) == len(parts), "pressure draft duplicated a file identity")
     for row in rows:
         require(row["filename"] in by_name, "pressure draft omitted an expected file")
         part = by_name[row["filename"]]
-        require(part["size"] == row["size"] and part["mimeType"] == row["mimeType"]
-                and decode(part["data"]) == pressure_payload(row), "pressure draft changed attachment bytes/type/size")
+        require(part["size"] == row["size"] and part["mimeType"] == row["mimeType"],
+                "pressure draft changed attachment type/size")
+        check_part_bytes(part, pressure_payload(row), client_dir=client_dir)
         if inline:
             require(part["contentId"] == row["contentId"], "formatted snapshot changed an HTML resource reference")
 
@@ -560,8 +562,8 @@ def conversation_modes(binary, directory):
                         require(snapshot["sourceMessageId"] == message_id and snapshot["bodyText"] == original["plain"]
                                 and snapshot["bodyHtml"] == original["html"] and not draft["bodyText"],
                                 "formatted mode changed its frozen original or editable note")
-                        check_pressure_parts(snapshot["resources"], PRESSURE["attachments"][:2], inline=True)
-                        check_pressure_parts(draft["attachments"], PRESSURE["attachments"][2:] if forward else [])
+                        check_pressure_parts(snapshot["resources"], PRESSURE["attachments"][:2], inline=True, client_dir=client_dir)
+                        check_pressure_parts(draft["attachments"], PRESSURE["attachments"][2:] if forward else [], client_dir=client_dir)
                     elif raw_original:
                         require(len(draft["attachments"]) == 1 and draft["attachments"][0]["filename"].endswith(".eml")
                                 and decode(draft["attachments"][0]["data"]) == original["raw"], "RAW forward changed the exact original MIME")
@@ -570,7 +572,7 @@ def conversation_modes(binary, directory):
                         # identifying phrase remains the same in both formats.
                         require("Synthetic " + direction + " attachment discussion" in draft["bodyText"] and not draft.get("original"),
                                 "text mode lost the quoted source or invented an HTML snapshot")
-                        check_pressure_parts(draft["attachments"], PRESSURE["attachments"] if forward and not omit else [])
+                        check_pressure_parts(draft["attachments"], PRESSURE["attachments"] if forward and not omit else [], client_dir=client_dir)
                     require(draft.get("omittedAttachments", 0) == (4 if omit else 0), "explicit omitted-file warning changed")
                     stats = client.request("cache.stats")
                     require(stats["metadataEntries"] == count and stats["rejectedAllocations"] == 0
@@ -615,14 +617,7 @@ def large_forward_source(direction, sizes):
 
 
 def verify_draft_file(client_dir, part, raw):
-    require(part["size"] == len(raw), "forward changed a document's decoded size")
-    if part.get("blobId"):
-        require(not part["data"], "forward mixed inline bytes with a file handle")
-        candidates = list((client_dir / "cache").rglob("blob-" + part["blobId"] + ".bin"))
-        require(len(candidates) == 1, "forwarded document has no unique private backing file")
-        verify_file(candidates[0], raw)
-    else:
-        require(decode(part["data"]) == raw, "forward changed a document's bytes")
+    check_part_bytes(part, raw, client_dir=client_dir)
 
 
 def large_forwards(binary, directory):
@@ -924,23 +919,20 @@ def expected_parts(message, rows):
     return selected
 
 
-def capture_small_wire(client, draft, blobs, operation):
-    # Imported-file sends use a disposable spool and intentionally expose no
-    # fixtureRaw. Keep those sends' own retention checks, and separately send
-    # this small equivalent inline draft to inspect the actual emitted MIME.
-    # Blob content comes from the original import oracle, never the outbox DTO.
-    inline = copy.deepcopy(draft)
-    inline.pop("id", None)
-    for part in inline["attachments"] + (inline.get("original") or {}).get("resources", []):
-        if part.get("blobId"):
-            raw = blobs[part["blobId"]]
-            require(len(raw) == part["size"], "inline wire twin changed its reviewed file size")
-            part.update(data=encode(raw), blobId=None)
-    saved = client.request("draft.create", draft=inline)
-    receipt = client.request("draft.send", draftId=saved["id"], operationId=operation)
-    require(receipt["outcome"] == "applied", "small inline wire fixture did not apply")
-    sent = client.request("mail.read", messageId=receipt["messageId"])
-    require(sent.get("fixtureRaw"), "small inline fixture send omitted its actual MIME")
+def capture_small_wire(sent, rows):
+    # The small fixture capture is the actual native MIME spool, including
+    # blob-backed sources. Compare it with the independent file oracle before
+    # remapping that same wire through a cold, provider-shaped read session.
+    require(sent.get("fixtureRaw"), "small native fixture send omitted its actual MIME spool")
+    message = BytesParser(policy=policy.default).parsebytes(decode(sent["fixtureRaw"]))
+    require(all(not part.defects for part in message.walk()), "native fixture send produced malformed MIME")
+    seen = {}
+    for name, raw in rows:
+        occurrence = seen.get(name, 0)
+        matches = [part for part in message.walk() if not part.is_multipart() and part.get_filename() == name]
+        require(len(matches) > occurrence and matches[occurrence].get_payload(decode=True) == raw,
+                f"actual native MIME spool changed or omitted {name!r}")
+        seen[name] = occurrence + 1
     return sent
 
 
@@ -953,7 +945,8 @@ def drafts(binary, directory):
         first = imported(client, directory / "imports/one", "report.pdf", report, "application/pdf")
         second = imported(client, directory / "imports/two", "report.pdf", duplicate, "application/pdf")
         empty = imported(client, directory / "imports/empty", "empty café.txt", b"", "text/plain")
-        blobs = {first["blobId"]: report, second["blobId"]: duplicate, empty["blobId"]: b""}
+        for part, raw in ((first, report), (second, duplicate), (empty, b"")):
+            verify_draft_file(client.directory, part, raw)
         draft = client.request("draft.create", draft={"to": "recipient@example.test", "subject": "Three synthetic files",
                                "bodyText": "Review the attached files.", "attachments": [first, second, empty]})
         retained = client.request("draft.create", draft={"to": "later@example.test", "subject": "Retained shared file",
@@ -966,7 +959,7 @@ def drafts(binary, directory):
         require(receipt["outcome"] == "applied", "synthetic new composition did not apply")
         sent = client.request("mail.read", messageId=receipt["messageId"])
         rows = [("report.pdf", report), ("report.pdf", duplicate), ("empty café.txt", b"")]
-        submitted.append((capture_small_wire(client, draft, blobs, "lifecycle-wire-new"), rows))
+        submitted.append((capture_small_wire(sent, rows), rows))
         for index, (part, raw) in enumerate(expected_parts(sent, rows)):
             save(client, sent["id"], part, directory / f"local-sent-{index}.bin", raw)
         require(client.request("attachment.discard", blobId=first["blobId"], ok=False)["code"] == "AttachmentInUse",
@@ -988,9 +981,14 @@ def drafts(binary, directory):
             item = client.request("mail.forward" if forward else "mail.reply", **params)
             require(item.get("original") and len(item["original"]["resources"]) == 1,
                     "formatted original lost its independent inline resource")
+            resource = next(row for row in expected(message_id=FORMATTED) if row["contentId"])
+            verify_draft_file(client.directory, item["original"]["resources"][0], payload(resource))
             if forward:
                 require([part["filename"] for part in item["attachments"]] == ["café β notes.bin", "empty.txt"],
                         "forward dropped ordinary or empty files")
+                ordinary = [row for row in expected(message_id=FORMATTED) if not row["contentId"]]
+                for part, row in zip(item["attachments"], ordinary):
+                    verify_draft_file(client.directory, part, payload(row))
                 item["to"] = [{"address": "recipient@example.test"}]
             else:
                 require([value["address"] for value in item["to"]] == ["maya@example.test"] and
@@ -1003,7 +1001,6 @@ def drafts(binary, directory):
             if forward:
                 resource = next(row for row in expected(message_id=FORMATTED) if row["contentId"])
                 handle = imported(client, directory / "imports/resource", resource["filename"], payload(resource), "image/png")
-                blobs[handle["blobId"]] = payload(resource)
                 supported = copy.deepcopy(item)
                 supported["original"]["resources"][0].update(data="", blobId=handle["blobId"])
                 item = client.request("draft.update", draftId=item["id"], draft=supported)
@@ -1033,15 +1030,15 @@ def drafts(binary, directory):
             rows = [(resource["filename"], payload(resource)), ("report.pdf", report)]
             if forward:
                 rows += [(row["filename"], payload(row)) for row in expected(message_id=FORMATTED) if not row["contentId"]]
-            submitted.append((capture_small_wire(client, item, blobs, f"lifecycle-wire-formatted-{index}"), rows))
+            submitted.append((capture_small_wire(sent, rows), rows))
             require(client.request("draft.send", draftId=item["id"], operationId=f"lifecycle-formatted-{index}") == result,
                     "send receipt replay changed its outcome")
             client.restart()
             reopened = client.request("mail.read", messageId=sent["id"], cacheOnly=True)
             for part_number, (part, raw) in enumerate(expected_parts(reopened, rows)):
                 save(client, sent["id"], part, directory / f"formatted-restarted-{index}-{part_number}.bin", raw)
-        require(client.request("cache.stats")["fixtureSends"] == 6,
-                "lifecycle send count differs from three imported-file sends and three small wire captures")
+        require(client.request("cache.stats")["fixtureSends"] == 3,
+                "lifecycle send count differs from the three actual native submissions")
 
     # A new provider session receives Gmail-shaped MIME with unrelated IDs.
     # Never let fixture readOutbox or local immutable blobs stand in for Gmail.
@@ -1064,7 +1061,7 @@ def drafts(binary, directory):
                         "provider reread retained an imported/local attachment identity")
                 save(client, sent["id"], part, directory / f"provider-sent-{number}-{index}.bin", raw)
         no_writes(client)
-    return {"explicitFixtureSends": 6, "newForwardReplyAll": True, "coldProviderRemap": True,
+    return {"explicitFixtureSends": 3, "newForwardReplyAll": True, "coldProviderRemap": True,
             "retainedSharedDraft": True, "frozenOriginalResources": True}
 
 
@@ -1389,14 +1386,14 @@ def tui_forward(binary, directory):
                 require(snapshot["sourceMessageId"] == "pressure-" + direction and snapshot["bodyText"] == original["plain"]
                         and snapshot["bodyHtml"] == original["html"] and not draft["bodyText"],
                         "TUI forward captured another card or changed the protected original")
-                check_pressure_parts(snapshot["resources"], PRESSURE["attachments"][:2], inline=True)
-                check_pressure_parts(draft["attachments"], PRESSURE["attachments"][2:])
+                check_pressure_parts(snapshot["resources"], PRESSURE["attachments"][:2], inline=True, client_dir=client_dir)
+                check_pressure_parts(draft["attachments"], PRESSURE["attachments"][2:], client_dir=client_dir)
             elif mode == "original":
                 require(len(draft["attachments"]) == 1 and draft["attachments"][0]["filename"].endswith(".eml")
                         and decode(draft["attachments"][0]["data"]) == original["raw"], "TUI .eml forward changed its selected card's bytes")
             else:
                 require(marker.removesuffix(".") in draft["bodyText"] and not draft.get("original"), "TUI text forward lost the selected source quotation")
-                check_pressure_parts(draft["attachments"], PRESSURE["attachments"])
+                check_pressure_parts(draft["attachments"], PRESSURE["attachments"], client_dir=client_dir)
             require(client.request("cache.stats")["metadataEntries"] == count, "TUI forwarding dropped retained metadata")
             no_writes(client)
         outcomes.append({"metadataEntries": count, "direction": direction, "mode": mode,

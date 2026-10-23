@@ -12,9 +12,11 @@ pub const max_body_bytes = types.Limits.body_bytes;
 const utf8_bom = "\xef\xbb\xbf";
 pub const max_headers_bytes = mail_limits.headers_bytes;
 pub const max_headers = mail_limits.header_count;
-pub const max_parts = 128;
+/// Allow an alternative/related wrapper per retained part, plus body/envelope
+/// overhead. The aggregate part budget also bounds empty multipart trees.
+pub const max_parts = 4 * types.Limits.message_attachments + 16;
 pub const max_depth = 16;
-pub const max_attachments = types.Limits.attachments + types.Limits.related_resources + 1;
+pub const max_attachments = types.Limits.message_attachments;
 /// Calendar discovery uses the same bound as the invitation parser. Other
 /// attachment types remain governed by the ordinary attachment/body limits.
 pub const max_calendar_bytes = 128 * 1024;
@@ -66,19 +68,35 @@ pub fn parseGmail(message: std.json.Value, allocator: std.mem.Allocator) !Parsed
     return try parseGmailExternal(message, allocator, null);
 }
 fn parseGmailExternal(message: std.json.Value, allocator: std.mem.Allocator, external_bodies: ?std.json.Value) !ParsedMessage {
+    return parseGmailExternalMode(message, allocator, external_bodies, false);
+}
+fn parseGmailExternalMode(message: std.json.Value, allocator: std.mem.Allocator, external_bodies: ?std.json.Value, compose: bool) !ParsedMessage {
     const payload = try b.field(message, "payload");
     const headers = try gmailHeaders(payload, allocator);
     var result = try envelope(headers, allocator);
-    var context: Context = .{ .allocator = allocator, .external_bodies = external_bodies };
+    var context: Context = .{
+        .allocator = allocator,
+        .external_bodies = external_bodies,
+        .body_limit = if (compose) types.Limits.compose_body_bytes else types.Limits.body_bytes,
+        .decoded_limit = if (compose) @max(types.Limits.compose_body_bytes, max_raw_bytes) else max_raw_bytes,
+    };
     try context.gmailPart(payload, 0, false);
     try context.finish(&result);
     return result;
 }
 
 pub fn normalizeGmail(value: std.json.Value, allocator: std.mem.Allocator, externalBodies: ?std.json.Value) !types.Message {
+    return normalizeGmailMode(value, allocator, externalBodies, false);
+}
+/// Explicit selected-source compose work uses the native transient text tier;
+/// normal reader/cache normalization retains the original 2/3 MiB budgets.
+pub fn normalizeGmailForCompose(value: std.json.Value, allocator: std.mem.Allocator, externalBodies: ?std.json.Value) !types.Message {
+    return normalizeGmailMode(value, allocator, externalBodies, true);
+}
+fn normalizeGmailMode(value: std.json.Value, allocator: std.mem.Allocator, externalBodies: ?std.json.Value, compose: bool) !types.Message {
     const received = try b.integer(try b.field(value, "internalDate"));
     if (received < 0 or received > max_received_at_ms) return error.InvalidDate;
-    const parsed = try parseGmailExternal(value, allocator, externalBodies);
+    const parsed = try parseGmailExternalMode(value, allocator, externalBodies, compose);
     const id = try b.string(try b.field(value, "id"));
     const thread = try b.string(try b.field(value, "threadId"));
     try b.identifier(id);
@@ -493,6 +511,8 @@ fn sameCalendar(left: []const u8, right: []const u8) bool {
 
 const Context = struct {
     allocator: std.mem.Allocator,
+    body_limit: usize = types.Limits.body_bytes,
+    decoded_limit: usize = max_raw_bytes,
     parts: usize = 0,
     decoded: usize = 0,
     plain: std.ArrayList(u8) = .empty,
@@ -510,7 +530,7 @@ const Context = struct {
         if (self.parts > max_parts) return error.TooManyMimeParts;
     }
     fn accountBytes(self: *Context, size: usize) !void {
-        if (size > max_body_bytes or size > max_raw_bytes - self.decoded) return error.DecodedMessageTooLarge;
+        if (size > self.body_limit or size > self.decoded_limit - self.decoded) return error.DecodedMessageTooLarge;
         self.decoded += size;
     }
     fn add(self: *Context, headers: []const Header, mime_type: []const u8, filename: []const u8, data: []const u8, charset_alternative: bool) !void {
@@ -544,7 +564,7 @@ const Context = struct {
         }
         if (attached) return;
         if (std.ascii.eqlIgnoreCase(mime_type, "text/plain") or std.ascii.eqlIgnoreCase(mime_type, "text/html")) {
-            const text = convertCharset(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator) catch |err| {
+            const text = convertCharsetBounded(data, parameter(try header(headers, "Content-Type"), "charset") orelse "utf-8", self.allocator, self.body_limit) catch |err| {
                 // Only a text decoding refusal is recoverable here. Parsing,
                 // transfer validation, attachment handling, quotas and OOM
                 // keep their ordinary errors and never erase accepted parts.
@@ -554,7 +574,7 @@ const Context = struct {
             };
             const target = if (std.ascii.eqlIgnoreCase(mime_type, "text/plain")) &self.plain else &self.html;
             if (std.ascii.eqlIgnoreCase(mime_type, "text/html")) self.html_documents += 1;
-            if (text.len + @intFromBool(target.items.len != 0) > max_body_bytes - target.items.len) return error.BodyTooLarge;
+            if (text.len + @intFromBool(target.items.len != 0) > self.body_limit - target.items.len) return error.BodyTooLarge;
             if (target.items.len != 0) try target.append(self.allocator, '\n');
             try target.appendSlice(self.allocator, text);
             if (text.len != 0) self.supported_text_parts += 1;
@@ -629,7 +649,7 @@ const Context = struct {
         const filename = if (b.optional(part, "filename")) |v| try b.string(v) else "";
         if (isCalendarPart(mime_type, filename) and declared > max_calendar_bytes) return error.CalendarTooLarge;
         const inline_data = if (b.optional(body, "data")) |v| try b.string(v) else "";
-        const large = declared > max_body_bytes;
+        const large = declared > self.body_limit;
         // A large part may only remain an unloaded external descriptor, which
         // the reader shows as a file and B streams within the receive cap.
         // That includes inline photos referenced by Content-ID/Location and
@@ -666,7 +686,9 @@ const Context = struct {
             // Empty text bodies and multipart container metadata add nothing.
             if (child_count != 0 or !(try isAttached(headers, filename))) return;
         }
-        const decoded = try decodeBase64Url(data, self.allocator);
+        // Enforce the selected tier on actual encoded bytes before allocating,
+        // including Gmail's occasionally understated inline-text size field.
+        const decoded = try decodeBase64UrlBounded(data, self.allocator, self.body_limit);
         if (b.optional(body, "size") != null) {
             // Compatibility with understated Gmail inline-text metadata, not a
             // change to Google's documented byte-count contract. Complete,
@@ -701,9 +723,9 @@ const Context = struct {
         // htmlToText already returns owned sanitized text. A second sanitize
         // retained another full body in arena callers without changing bytes.
         result.body_text = if (self.plain.items.len > 0)
-            try sanitizeText(try self.plain.toOwnedSlice(self.allocator), self.allocator)
+            try sanitizeTextBounded(try self.plain.toOwnedSlice(self.allocator), self.allocator, self.body_limit)
         else
-            try htmlToText(result.body_html, self.allocator);
+            try htmlToTextBounded(result.body_html, self.allocator, self.body_limit);
         result.calendar = if (self.calendar_ambiguous) null else self.calendar;
         result.calendar_ambiguous = self.calendar_ambiguous;
         result.attachments = try self.attachments.toOwnedSlice(self.allocator);
@@ -774,10 +796,13 @@ fn filenameParameter(value: []const u8, name: []const u8, a: std.mem.Allocator) 
 }
 
 pub fn decodeBase64Url(data: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    return decodeBase64UrlBounded(data, allocator, max_body_bytes);
+}
+fn decodeBase64UrlBounded(data: []const u8, allocator: std.mem.Allocator, body_limit: usize) ![]const u8 {
     const source = std.mem.trimEnd(u8, data, "=");
     if (data.len - source.len > 2) return error.InvalidBase64;
     const len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(source) catch return error.InvalidBase64;
-    if (len > max_body_bytes) return error.BodyTooLarge;
+    if (len > body_limit) return error.BodyTooLarge;
     const out = try allocator.alloc(u8, len);
     std.base64.url_safe_no_pad.Decoder.decode(out, source) catch return error.InvalidBase64;
     return out;
@@ -871,7 +896,10 @@ const iso8859_2 = [128]u21{
 };
 
 pub fn convertCharset(data: []const u8, charset: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    if (data.len > max_body_bytes) return error.BodyTooLarge;
+    return convertCharsetBounded(data, charset, allocator, max_body_bytes);
+}
+fn convertCharsetBounded(data: []const u8, charset: []const u8, allocator: std.mem.Allocator, body_limit: usize) ![]const u8 {
+    if (data.len > body_limit) return error.BodyTooLarge;
     if (std.ascii.eqlIgnoreCase(charset, "utf-8") or charset.len == 0) {
         if (!std.unicode.utf8ValidateSlice(data)) return error.InvalidUtf8;
         return try allocator.dupe(u8, data);
@@ -906,7 +934,7 @@ pub fn convertCharset(data: []const u8, charset: []const u8, allocator: std.mem.
         if (cp == 0x110000) return error.InvalidCharsetData;
         var encoded: [4]u8 = undefined;
         const count = try std.unicode.utf8Encode(cp, &encoded);
-        if (count > max_body_bytes - output.items.len) return error.BodyTooLarge;
+        if (count > body_limit - output.items.len) return error.BodyTooLarge;
         try output.appendSlice(allocator, encoded[0..count]);
     }
     return try output.toOwnedSlice(allocator);
@@ -985,8 +1013,11 @@ pub fn sanitizeHeaderText(input: []const u8, allocator: std.mem.Allocator) ![]co
     return output;
 }
 pub fn sanitizeText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    return sanitizeTextBounded(input, allocator, max_body_bytes);
+}
+fn sanitizeTextBounded(input: []const u8, allocator: std.mem.Allocator, body_limit: usize) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
-    if (input.len > max_body_bytes) return error.BodyTooLarge;
+    if (input.len > body_limit) return error.BodyTooLarge;
     var output: std.ArrayList(u8) = .empty;
     // Sanitization can only remove bytes or normalize CR to a single LF.
     // Reserve once so a valid large body does not retain every growth buffer.
@@ -1045,7 +1076,10 @@ fn htmlAttribute(tag: []const u8, key: []const u8) ?[]const u8 {
 }
 
 pub fn htmlToText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    if (input.len > max_body_bytes) return error.BodyTooLarge;
+    return htmlToTextBounded(input, allocator, max_body_bytes);
+}
+fn htmlToTextBounded(input: []const u8, allocator: std.mem.Allocator, body_limit: usize) ![]const u8 {
+    if (input.len > body_limit) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
     var output: std.ArrayList(u8) = .empty;
     try output.ensureTotalCapacityPrecise(allocator, input.len);
@@ -1085,7 +1119,7 @@ pub fn htmlToText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
                         const href = htmlAttribute(tag[n..], "href");
                         link = if (href) |url| if (std.ascii.startsWithIgnoreCase(url, "https://") or std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "mailto:")) url else null else null;
                     } else if (link) |url| {
-                        if (url.len > 4096 or url.len + 3 > max_body_bytes - output.items.len) return error.BodyTooLarge;
+                        if (url.len > 4096 or url.len + 3 > body_limit - output.items.len) return error.BodyTooLarge;
                         try output.appendSlice(allocator, " (");
                         try output.appendSlice(allocator, url);
                         try output.append(allocator, ')');
@@ -1118,9 +1152,9 @@ pub fn htmlToText(input: []const u8, allocator: std.mem.Allocator) ![]const u8 {
         const c = input[pos];
         if (pre or !std.ascii.isWhitespace(c)) try output.append(allocator, c) else if (output.items.len > 0 and output.items[output.items.len - 1] != ' ' and output.items[output.items.len - 1] != '\n') try output.append(allocator, ' ');
         pos += 1;
-        if (output.items.len > max_body_bytes) return error.BodyTooLarge;
+        if (output.items.len > body_limit) return error.BodyTooLarge;
     }
-    return try sanitizeText(std.mem.trim(u8, output.items, " \r\n\t"), allocator);
+    return try sanitizeTextBounded(std.mem.trim(u8, output.items, " \r\n\t"), allocator, body_limit);
 }
 
 pub const ReplyHeaders = struct { in_reply_to: []const u8, references: []const u8 };
@@ -1273,7 +1307,7 @@ fn emitTextParts(writer: *std.Io.Writer, parts: []const []const u8) !void {
     if (used > 0) try emitBase64Line(writer, chunk[0..used]);
 }
 fn validateBody(body: []const u8) !void {
-    if (body.len > max_body_bytes) return error.BodyTooLarge;
+    if (body.len > types.Limits.compose_body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidUtf8;
     for (body) |c| if (c == 0) return error.InvalidBody;
 }
@@ -1306,7 +1340,7 @@ pub fn composeAttachments(input: []const types.Attachment, a: std.mem.Allocator)
     for (input, attachments) |item, *dest| {
         try validateAttachment(item.filename, item.mimeType);
         const decoded_size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(std.mem.trimEnd(u8, item.data, "=")) catch return error.InvalidBase64;
-        if (decoded_size > max_body_bytes - total) return error.AttachmentsTooLarge;
+        if (decoded_size > types.Limits.body_bytes - total) return error.AttachmentsTooLarge;
         if (item.size != decoded_size) return error.BodySizeMismatch;
         const data = try decodeBase64Url(item.data, a);
         total += data.len;
@@ -1946,6 +1980,78 @@ test "Gmail zero-byte attachments survive without inventing empty body or contai
     try @import("draft_codec.zig").validateDraft(.{ .attachments = normalized.attachments }, false);
     const truncated = try @import("json.zig").value(a, .{ .payload = .{ .mimeType = "application/octet-stream", .filename = "missing.bin", .body = .{ .size = 1, .data = "" } } });
     try std.testing.expectError(error.BodySizeMismatch, parseGmail(truncated, a));
+}
+
+test "growing chain MIME: incoming screenshots retain every descriptor through the shared source count" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = @import("json.zig");
+    const parts = try a.alloc(std.json.Value, max_attachments + 2);
+    parts[0] = try j.value(a, .{ .mimeType = "text/html", .body = .{ .size = 20, .data = "PHA-R3Jvd2luZyBjaGFpbjwvcD4" } });
+    for (parts[1..], 0..) |*part, index| {
+        const id = try std.fmt.allocPrint(a, "screenshot-{d}", .{index});
+        part.* = try j.value(a, .{
+            .partId = id,
+            .mimeType = "image/png",
+            .filename = "screenshot.png",
+            .headers = .{
+                .{ .name = "Content-Type", .value = "image/png" },
+                .{ .name = "Content-ID", .value = try std.fmt.allocPrint(a, "<{s}@example.test>", .{id}) },
+                .{ .name = "Content-Disposition", .value = "inline" },
+                .{ .name = "Content-Location", .value = try std.fmt.allocPrint(a, "images/{d}.png", .{index}) },
+            },
+            .body = .{ .size = 1024, .attachmentId = id },
+        });
+    }
+    for ([_]usize{ 65, 129, 257, 513, types.Limits.related_resources, max_attachments }) |count| {
+        const input = try j.value(a, .{ .id = "growing-chain", .threadId = "growing-chain", .internalDate = "42", .payload = .{ .mimeType = "multipart/related", .parts = parts[0 .. count + 1] } });
+        const message = try normalizeGmail(input, a, null);
+        try std.testing.expectEqual(count, message.attachments.len);
+        try std.testing.expectEqualStrings("<p>Growing chain</p>", message.bodyHtml.?);
+        for (message.attachments, 0..) |attachment, index| {
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "screenshot-{d}", .{index}), attachment.id);
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "screenshot-{d}@example.test", .{index}), attachment.contentId.?);
+            try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "images/{d}.png", .{index}), attachment.contentLocation.?);
+            try std.testing.expectEqual(@as(usize, 1024), attachment.size);
+            try std.testing.expectEqualStrings("", attachment.data);
+        }
+    }
+    const overflow = try j.value(a, .{ .payload = .{ .mimeType = "multipart/related", .parts = parts } });
+    try std.testing.expectError(error.TooManyAttachments, parseGmail(overflow, a));
+}
+
+test "growing chain MIME: over sixty four embedded images retain exact octets beside sixteen ordinary files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const related = try a.alloc(Attachment, 129);
+    var html: std.ArrayList(u8) = .empty;
+    for (related, 0..) |*resource, index| {
+        const cid = try std.fmt.allocPrint(a, "screenshot-{d}@example.test", .{index});
+        const bytes = try a.dupe(u8, &.{ 0, 255, @intCast(index) });
+        resource.* = .{ .filename = "screenshot.png", .mime_type = "image/png", .content_id = cid, .size = bytes.len, .data = bytes };
+        try html.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{cid}));
+    }
+    const files: [types.Limits.attachments]Attachment = @splat(.{ .filename = "ordinary.txt", .mime_type = "text/plain", .data = "ordinary bytes" });
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("sender@example.test");
+    var envelope_out: recipients.Envelope = .{};
+    try recipients.parse("recipient@example.test", &envelope_out.to);
+    const compose: Compose = .{ .from = sender, .envelope = &envelope_out, .subject = "Growing fictional chain", .body = "All screenshots retained", .html = html.items, .attachments = &files, .related = related, .message_id = "<growing@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000" };
+    const output = try a.alloc(u8, 256 * 1024);
+    const raw = try encode(compose, output);
+    const parsed = try parse(raw, a);
+    try std.testing.expectEqual(related.len + files.len, parsed.attachments.len);
+    for (parsed.attachments[0..related.len], related) |actual, expected| {
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "<{s}>", .{expected.content_id}), actual.content_id);
+        try std.testing.expectEqualSlices(u8, expected.data, actual.data);
+    }
+    for (parsed.attachments[related.len..]) |file| try std.testing.expectEqualStrings("ordinary bytes", file.data);
+    var too_many_files: [types.Limits.attachments + 1]Attachment = @splat(files[0]);
+    var invalid = compose;
+    invalid.attachments = &too_many_files;
+    try std.testing.expectError(error.TooManyAttachments, encode(invalid, output));
 }
 
 test "Gmail empty calendar files do not hide a nonempty invitation" {

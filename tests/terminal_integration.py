@@ -688,17 +688,24 @@ def set_private_fixture_body(client, data):
     client.restart()
 
 
-def quote_body_limit_rollback(client):
+def native_large_quote_retention(client):
     data = b"\n" * 800000
     set_private_fixture_body(client, data)
     message = client.request("mail.read", messageId="shared-msg-001")
     require(message["bodyText"].encode() == data, "valid newline-heavy source body was truncated")
-    before = client.request("draft.list")
-    error = client.request("mail.reply", messageId="shared-msg-001", all=False, ok=False)
-    require(error["code"] == "BodyTooLarge", "expanded reply did not report the decoded body limit")
-    require(client.request("draft.list") == before, "failed reply persisted an oversized orphan draft")
+    before = client.request("draft.list")["drafts"]
+    draft = client.request("mail.reply", messageId="shared-msg-001", all=False)
+    expected = "\n\n" + "> \n" * (len(data) + 1)
+    require(draft["bodyText"] == expected, "large native quote was refused or truncated at the reader's old limit")
+    require(len(draft["bodyText"].encode()) > 2 * 1024**2, "quote did not cross the former compose limit")
+    saved = client.request("draft.read", draftId=draft["id"])
+    require(saved["bodyText"] == expected, "large quoted draft did not survive persistence")
+    require(len(client.request("draft.list")["drafts"]) == len(before) + 1,
+            "large reply did not create exactly one local draft")
     require(client.request("mail.read", messageId="shared-msg-001")["unread"] is True,
-            "failed quote changed the original unread state")
+            "creating a large quote changed the original unread state")
+    client.evidence = {"sourceBytes": len(data), "quotedBytes": len(expected.encode()),
+                       "completeQuoteSavedAndReopened": True, "originalUnreadUnchanged": True}
 
 
 def decoded_body_boundary(client):
@@ -742,8 +749,15 @@ def mime_refusal_preserves_valid_cache(client):
     require(accepted["bodyText"] == "text" and not accepted["bodyCacheError"] and not accepted["metadataPartial"],
             "MIME at the documented nesting boundary was refused or changed")
     cases["depth17"] = nested_payload(17)
+    old_boundary = cases.pop("parts513")
+    accepted_parts = read_payload("parts513-now-supported", old_boundary)
+    require(not accepted_parts["bodyCacheError"] and not accepted_parts["metadataPartial"],
+            "expanded MIME part capacity still refuses the former boundary")
+    excessive_parts = copy.deepcopy(old_boundary)
+    excessive_parts["parts"] = [dict(old_boundary["parts"][0], partId=str(index)) for index in range(4180)]
+    cases["parts4181"] = excessive_parts  # root plus 4,180 children
     errors = {"declaredBodyOver2MiB": "BodyTooLarge", "sizeMismatch": "BodySizeMismatch",
-              "unsupportedCharset": "UnsupportedCharset", "depth17": "MimeTooDeep", "parts513": "TooManyMimeParts"}
+              "unsupportedCharset": "UnsupportedCharset", "depth17": "MimeTooDeep", "parts4181": "TooManyMimeParts"}
     for name, payload in cases.items():
         if name == "depth33":
             # The original 33 nested parts exceed 64 JSON envelope levels, so
@@ -1049,8 +1063,10 @@ def malformed_recovery(client):
 
 
 def oversized_request_recovery(client):
-    payload = {"id": "oversized", "account": ACCOUNTS[0], "cmd": "draft.create",
-               "draft": {"to": ["recipient@example.org"], "subject": "Over cap", "bodyText": "x" * (3 * 1024**2 + 1024)}}
+    # Expanded native compose commands have their own allowance; ordinary
+    # mailbox requests retain their smaller admission limit and stream recovery.
+    payload = {"id": "oversized", "account": ACCOUNTS[0], "cmd": "mail.list",
+               "padding": "x" * (3 * 1024**2 + 1024)}
     client.raw(json.dumps(payload).encode() + b"\n")
     rejected = client.receive()
     require(rejected.get("ok") is False, "oversized request was accepted")
@@ -1460,7 +1476,7 @@ CASES = [("pagination-account-isolation", pagination_and_isolation, None),
          ("outgoing-address-limits-unchanged", outgoing_address_limits_unchanged, None),
          ("incoming-header-count-and-budget", incoming_header_count_and_budget, None),
          ("gmail-inline-underdeclared-text", gmail_inline_underdeclared_text, None),
-         ("quote-body-limit-rollback", quote_body_limit_rollback, None),
+         ("native-large-quote-retention", native_large_quote_retention, None),
          ("decoded-body-boundary", decoded_body_boundary, None),
          ("mime-refusal-preserves-valid-cache", mime_refusal_preserves_valid_cache, None),
          ("optional-field-type-rejection", optional_field_type_rejection, None),

@@ -76,6 +76,90 @@ const Fixture = struct {
     }
 };
 
+test "vault mail: rich Gmail import retains related resources and rolls back newly published encrypted blobs" {
+    if (!@import("terminal/send_memory.zig").native) return error.SkipZigTest;
+    const j = @import("terminal/json.zig");
+    const links = @import("terminal/draft_link.zig");
+    const importer = @import("terminal/draft_gmail_import.zig");
+    const Session = struct {
+        account: *catalog.Account,
+        options: t.Options = .{ .fixtures = true },
+        pub fn openStore(self: *@This(), allocator: std.mem.Allocator, account: []const u8, readonly: bool) !Store {
+            if (!std.mem.eql(u8, account, self.account.entry.address())) return error.VaultIdentityMismatch;
+            return Store.openVault(io, allocator, self.account, self.options, readonly);
+        }
+    };
+    const account = "synthetic@example.test";
+    const png = @import("terminal/markdown_logo.zig").png;
+    const gif = "GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+    for ([_]bool{ false, true }) |race| {
+        var fixture: Fixture = undefined;
+        try fixture.init();
+        defer fixture.close();
+        const allocator = fixture.arena.allocator();
+        var session: Session = .{ .account = &fixture.first };
+        if (race) session.options.fixture_scenario = "gmail-draft-import-race";
+        var seed = try session.openStore(allocator, account, false);
+        defer seed.close();
+        const source = try seed.putDraft(.{ .subject = "SYNTHETIC PRIVATE local", .bodyText = "SYNTHETIC PRIVATE local source retained" }, null);
+        const digest = try links.contentDigest(allocator, source, account);
+        const link: links.Link = .{ .draftId = source.id, .phase = .linked, .remoteDraftId = "remote-draft", .remoteMessageId = "version-1", .attemptMessageId = "<upload@mail.invalid>", .uploadedDigest = &digest };
+        seed.state.draftLinks = try allocator.dupe(links.Link, &.{link});
+        try seed.save();
+        var incoming = try blob.Incoming.create(&seed, png.len);
+        try incoming.write(png);
+        try incoming.finish(png.len);
+        const existing = try incoming.commit(&seed, .{ .id = "existing", .filename = "existing.png", .mimeType = "image/png", .size = png.len });
+        incoming.close();
+        seed.close();
+        const png_data = std.base64.url_safe_no_pad.Encoder.encode(try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(png.len)), png);
+        const gif_data = std.base64.url_safe_no_pad.Encoder.encode(try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(gif.len)), gif);
+        const files = try allocator.alloc(t.Attachment, 66);
+        var html: std.ArrayList(u8) = .empty;
+        try html.appendSlice(allocator, "<html><body><p>SYNTHETIC PRIVATE remote original</p>");
+        for (files[0..65], 0..) |*file, index| {
+            const cid = try std.fmt.allocPrint(allocator, "image-{d}@example.test", .{index});
+            file.* = .{ .id = try std.fmt.allocPrint(allocator, "part-{d}", .{index}), .filename = try std.fmt.allocPrint(allocator, "image-{d}.{s}", .{ index, if (index == 0) @as([]const u8, "png") else "gif" }), .mimeType = if (index == 0) "image/png" else "image/gif", .size = if (index == 0) png.len else gif.len, .data = if (index == 0) png_data else gif_data, .contentId = cid, .disposition = "inline" };
+            try html.appendSlice(allocator, try std.fmt.allocPrint(allocator, "<img src='cid:{s}'>", .{cid}));
+        }
+        try html.appendSlice(allocator, "</body></html>");
+        files[65] = .{ .id = "ordinary", .filename = "report.pdf", .mimeType = "application/pdf", .size = 3, .data = "UERG", .disposition = "attachment" };
+        const headers = try j.value(allocator, .{ .{ .name = "From", .value = account }, .{ .name = "To", .value = "recipient@example.test" }, .{ .name = "Subject", .value = "SYNTHETIC PRIVATE remote" } });
+        const loaded: importer.Loaded = .{ .remote = .{ .draftId = "remote-draft", .messageId = "version-2" }, .draft = try importer.fromMessage(allocator, headers, .{ .id = "version-2", .threadId = "remote-thread", .from = .{ .address = account }, .to = &.{.{ .address = "recipient@example.test" }}, .subject = "SYNTHETIC PRIVATE remote", .bodyText = "SYNTHETIC PRIVATE full remote text", .bodyHtml = html.items, .attachments = files }, account) };
+        const baseline = @import("terminal/send_memory.zig").snapshot().allocatorUsedBytes;
+        const result = @import("terminal/draft_gmail_download.zig").run(&session, allocator, account, try j.value(allocator, .{ .expectedRemoteMessageId = "version-2" }), null, link, loaded, false);
+        try std.testing.expectEqual(baseline, @import("terminal/send_memory.zig").snapshot().allocatorUsedBytes);
+        try std.testing.expect(!fixture.first.workspace_pinned and fixture.first.reader_owner == null);
+        var store = try session.openStore(allocator, account, false);
+        defer store.close();
+        try std.testing.expectEqualStrings(source.bodyText, (try store.draft(source.id)).bodyText);
+        if (race) {
+            try std.testing.expectError(error.GmailDraftChanged, result);
+            try std.testing.expectEqual(@as(usize, 1), store.state.drafts.len);
+            try std.testing.expectEqual(@as(u64, 1), store.state.draftLinks[0].version);
+            try std.testing.expectEqual(@as(usize, 1), (try store.blobStats()).count);
+        } else {
+            const imported = try result;
+            const retained = try store.draft(imported.id);
+            try std.testing.expectEqualStrings("", retained.bodyText);
+            try std.testing.expectEqualStrings(html.items, retained.original.?.bodyHtml);
+            try std.testing.expectEqualStrings("SYNTHETIC PRIVATE full remote text", retained.original.?.bodyText);
+            try std.testing.expectEqual(@as(usize, 65), retained.original.?.resources.len);
+            try std.testing.expectEqual(@as(usize, 1), retained.attachments.len);
+            for (retained.original.?.resources, 0..) |file, index| {
+                try std.testing.expectEqualStrings(files[index].contentId.?, file.contentId.?);
+                try std.testing.expectEqual(@as(usize, 0), file.data.len);
+                try blob.verify(&store, file);
+            }
+            try std.testing.expectEqual(@as(usize, 2), store.state.draftLinks.len);
+            try std.testing.expectError(error.GmailCopyUnchecked, @import("terminal/draft_gmail_commands.zig").permitSend(&store, allocator, .null, retained, &(try links.contentDigest(allocator, retained, account))));
+        }
+        try blob.verify(&store, existing);
+        store.close();
+        try fixture.assertCiphertext();
+    }
+}
+
 test "vault mail: 25 MiB attachment and related image produce exact private MIME within bounded heap" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -156,6 +240,64 @@ test "vault mail: 25 MiB attachment and related image produce exact private MIME
     var neighbor = try Store.openVault(io, allocator, &fixture.second, options, false);
     defer neighbor.close();
     try std.testing.expectError(error.AttachmentHandleNotFound, blob.Stream.init(&neighbor, attachment));
+}
+
+test "growing chain spool: encrypted thousand image chain matches plaintext MIME with sequential readers" {
+    const fixture = try a.create(Fixture);
+    defer a.destroy(fixture);
+    try fixture.init();
+    defer fixture.close();
+    const allocator = fixture.arena.allocator();
+    const path = try fixture.input("screenshot.png", 41, "SYNTHETIC PRIVATE IMAGE");
+    var sealed_store = try Store.openVault(io, allocator, &fixture.first, options, false);
+    defer sealed_store.close();
+    const sealed_picture = try blob.importFile(&sealed_store, path, "image/png");
+    var plain_store = try Store.open(io, allocator, try std.fmt.allocPrint(allocator, "{s}/reference", .{fixture.base}), "reference@example.test", options);
+    defer plain_store.close();
+    const plain_picture = try blob.importFile(&plain_store, path, "image/png");
+    const sealed_parts = try allocator.alloc(t.Attachment, t.Limits.related_resources);
+    const plain_parts = try allocator.alloc(t.Attachment, t.Limits.related_resources);
+    var html: std.ArrayList(u8) = .empty;
+    for (sealed_parts, plain_parts, 0..) |*sealed, *plain, index| {
+        const cid = try std.fmt.allocPrint(allocator, "screenshot-{d}@example.test", .{index});
+        sealed.* = sealed_picture;
+        sealed.contentId = cid;
+        plain.* = plain_picture;
+        plain.contentId = cid;
+        try html.appendSlice(allocator, try std.fmt.allocPrint(allocator, "<img src='cid:{s}'>", .{cid}));
+    }
+    const recipients = @import("terminal/recipients.zig");
+    var envelope: recipients.Envelope = .{};
+    try recipients.parse("recipient@example.test", &envelope.to);
+    var sender: recipients.Mailbox = .{};
+    try sender.address.set("synthetic@example.test");
+    const compose: mime.Compose = .{ .from = sender, .envelope = &envelope, .subject = "SYNTHETIC PRIVATE chain", .body = "Every screenshot retained", .html = html.items, .message_id = "<growing-vault@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000" };
+    var encrypted = try spool.create(&sealed_store, compose, &.{}, sealed_parts);
+    defer encrypted.close();
+    try std.testing.expect(fixture.first.reader_owner == null);
+    var reference = try spool.create(&plain_store, compose, &.{}, plain_parts);
+    defer reference.close();
+    try std.testing.expectEqual(reference.size, encrypted.size);
+    try std.testing.expectEqualSlices(u8, &reference.hash, &encrypted.hash);
+    var reader = try encrypted.reader();
+    defer reader.close();
+    const raw = try allocator.alloc(u8, encrypted.size);
+    var offset: usize = 0;
+    while (offset < raw.len) {
+        const count = try spool.Spool.Reader.read(&reader, raw[offset..]);
+        try std.testing.expect(count != 0);
+        offset += count;
+    }
+    var end: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try spool.Spool.Reader.read(&reader, &end));
+    try std.testing.expect(reader.verified);
+    const parsed = try mime.parse(raw, allocator);
+    try std.testing.expectEqual(t.Limits.related_resources, parsed.attachments.len);
+    for (parsed.attachments, sealed_parts) |actual, expected| {
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator, "<{s}>", .{expected.contentId.?}), actual.content_id);
+        try std.testing.expectEqualStrings("SYNTHETIC PRIVATE IMAGE", actual.data[0.."SYNTHETIC PRIVATE IMAGE".len]);
+        try std.testing.expectEqual(@as(usize, 41), actual.data.len);
+    }
 }
 
 test "vault mail: raw upper bound download releases transaction preserves exact bytes and cleans interruptions" {
@@ -257,6 +399,7 @@ test "vault mail: tampered final ciphertext refuses stream before returning plai
 }
 
 test "vault mail: blob cap permits deduped downloads and small raw inspection but refuses new blobs" {
+    const blob_limit = @import("terminal/store.zig").blob_limit;
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.close();
@@ -264,21 +407,54 @@ test "vault mail: blob cap permits deduped downloads and small raw inspection bu
         var arena: std.heap.ArenaAllocator = .init(a);
         defer arena.deinit();
         const allocator = arena.allocator();
-        var store = if (sealed) try Store.openVault(io, allocator, &fixture.first, options, false) else try Store.open(io, allocator, try std.fmt.allocPrint(allocator, "{s}/cap-reference", .{fixture.base}), "reference@example.test", options);
+        const reference_root = try std.fmt.allocPrint(allocator, "{s}/cap-reference", .{fixture.base});
+        var store = if (sealed) try Store.openVault(io, allocator, &fixture.first, options, false) else try Store.open(io, allocator, reference_root, "reference@example.test", options);
         defer store.close();
-        var first: t.Attachment = undefined;
-        for (0..128) |index| {
-            const value: [1]u8 = .{@intCast(index)};
-            const input = try fixture.input("one-byte.bin", 1, &value);
-            const imported = try blob.importFile(&store, input, "application/octet-stream");
-            if (index == 0) first = imported;
+        const zero: [@sizeOf(u32)]u8 = @splat(0);
+        const input = try fixture.input("four-byte.bin", zero.len, &zero);
+        const first = try blob.importFile(&store, input, "application/octet-stream");
+        // Seed real, distinct content-addressed records in one batch. Reusing
+        // importFile for every slot would repeatedly copy and sync the entire
+        // growing encrypted index. Quota admission below still uses Incoming.
+        const previous = store.vaultObjects;
+        const objects = if (sealed) try allocator.alloc(@TypeOf(previous[0]), previous.len + blob_limit - 1) else previous;
+        if (sealed) @memcpy(objects[0..previous.len], previous);
+        const wire = try allocator.alloc(u8, try vault.sealedSize(zero.len));
+        var last = first;
+        for (1..blob_limit) |index| {
+            var value: [@sizeOf(u32)]u8 = undefined;
+            std.mem.writeInt(u32, &value, @intCast(index), .little);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(&value, &digest, .{});
+            const id = try allocator.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
+            const name = try blob.filename(allocator, id);
+            if (sealed) {
+                const handle = try storage.Handle.create(io);
+                const handle_text = handle.text();
+                const bytes = try crypto.sealRecord(io, &fixture.key, storage.binding(fixture.first.record(.attachment, handle), &handle_text), &value, wire, &fixture.workspace);
+                const file = try store.dir.createFile(io, &handle.filename(), .{ .exclusive = true, .permissions = .fromMode(0o600) });
+                defer file.close(io);
+                try file.writeStreamingAll(io, bytes);
+                objects[previous.len + index - 1] = .{ .name = name, .kind = .attachment, .handle = try allocator.dupe(u8, &handle_text) };
+            } else {
+                const file = try store.dir.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+                defer file.close(io);
+                try file.writeStreamingAll(io, &value);
+            }
+            last = .{ .id = id, .filename = "seed.bin", .mimeType = "application/octet-stream", .size = value.len, .blobId = id };
         }
-        try std.testing.expectEqual(@as(usize, 128), (try store.blobStats()).count);
+        if (sealed) store.vaultObjects = objects;
+        try store.save();
+        store.close();
+        store = if (sealed) try Store.openVault(io, allocator, &fixture.first, options, false) else try Store.open(io, allocator, reference_root, "reference@example.test", options);
+        try blob.verify(&store, first);
+        try blob.verify(&store, last);
+        try std.testing.expectEqual(@as(usize, blob_limit), (try store.blobStats()).count);
         {
-            var duplicate = try blob.Incoming.create(&store, 1);
+            var duplicate = try blob.Incoming.create(&store, zero.len);
             defer duplicate.close();
-            try duplicate.write("\x00");
-            try duplicate.finish(1);
+            try duplicate.write(&zero);
+            try duplicate.finish(zero.len);
             const reused = try duplicate.commit(&store, first);
             try std.testing.expectEqualStrings(first.blobId.?, reused.blobId.?);
         }
@@ -294,14 +470,16 @@ test "vault mail: blob cap permits deduped downloads and small raw inspection bu
             try std.testing.expectEqualStrings("Small raw at blob cap", inspected.subject);
         }
         {
-            var fresh = try blob.Incoming.create(&store, 1);
+            var value: [@sizeOf(u32)]u8 = undefined;
+            std.mem.writeInt(u32, &value, blob_limit, .little);
+            var fresh = try blob.Incoming.create(&store, value.len);
             defer fresh.close();
-            try fresh.write("\x80");
-            try fresh.finish(1);
-            try std.testing.expectError(error.AttachmentLimitExceeded, fresh.commit(&store, .{ .id = "new", .filename = "new.bin", .size = 1 }));
+            try fresh.write(&value);
+            try fresh.finish(value.len);
+            try std.testing.expectError(error.AttachmentLimitExceeded, fresh.commit(&store, .{ .id = "new", .filename = "new.bin", .size = value.len }));
         }
         const stats = try store.blobStats();
-        try std.testing.expectEqual(@as(usize, 128), stats.count);
-        try std.testing.expectEqual(if (sealed) 128 * try vault.sealedSize(1) else @as(usize, 128), stats.bytes);
+        try std.testing.expectEqual(@as(usize, blob_limit), stats.count);
+        try std.testing.expectEqual(blob_limit * (if (sealed) try vault.sealedSize(zero.len) else zero.len), stats.bytes);
     }
 }

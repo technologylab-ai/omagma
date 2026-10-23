@@ -68,7 +68,7 @@ pub fn decodeRecoveryDraftWithScratch(a: std.mem.Allocator, backing: std.mem.All
 pub fn validateRecoveryFields(fields: []const []const u8) !void {
     if (fields.len != 5) return error.InvalidRecovery;
     for (fields, 0..) |field, index| {
-        if (field.len > (if (index == 4) t.Limits.body_bytes else if (index == 3) mail_limits.subject_bytes else @as(usize, 64 * 1024)) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
+        if (field.len > (if (index == 4) t.Limits.compose_body_bytes else if (index == 3) mail_limits.subject_bytes else @as(usize, 64 * 1024)) or !std.unicode.utf8ValidateSlice(field)) return error.InvalidRecovery;
     }
 }
 fn decodeDraftAllocators(a: std.mem.Allocator, backing: ?std.mem.Allocator, v: Value) !t.Draft {
@@ -130,7 +130,7 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     }
     if (d.to.len + d.cc.len + d.bcc.len > t.Limits.recipients) return error.TooManyRecipients;
     if (send and d.to.len + d.cc.len + d.bcc.len == 0) return error.MissingRecipient;
-    if (d.bodyText.len > t.Limits.body_bytes) return error.BodyTooLarge;
+    if (d.bodyText.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(d.bodyText)) return error.InvalidUtf8;
     const related = if (d.original) |original| original.resources else &.{};
     if (d.attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;

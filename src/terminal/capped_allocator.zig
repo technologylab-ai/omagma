@@ -1,6 +1,7 @@
 const std = @import("std");
 /// Accounting and synchronization around one allocator. Native production
-/// backing storage is a fixed, reusable reservation with no upstream heap.
+/// normally uses a fixed reservation; outgoing transient storage has a separate
+/// meter and explicitly uses OS pages instead.
 pub const CappedAllocator = struct {
     backing: std.mem.Allocator,
     limit: usize,

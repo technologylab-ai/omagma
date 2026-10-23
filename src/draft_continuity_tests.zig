@@ -4,6 +4,7 @@ test {
     std.testing.refAllDecls(@import("terminal/draft_gmail.zig"));
     std.testing.refAllDecls(@import("terminal/draft_gmail_spool.zig"));
     std.testing.refAllDecls(@import("terminal/draft_gmail_import.zig"));
+    std.testing.refAllDecls(@import("terminal/draft_gmail_download.zig"));
     std.testing.refAllDecls(@import("terminal/auth.zig"));
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native guardian-PTY acceptance for readers, Markdown and file browsing.
+"""Native guardian-PTY acceptance for readers, composing and file browsing.
 
 Reuse the existing synthetic behavior/deadline oracles while preserving Darwin's
 controlling session until terminal restoration is observed. Linux /proc-based
@@ -22,18 +22,39 @@ import terminal_arrivals
 import terminal_html
 import terminal_markdown_compose
 import terminal_file_dialog
+import terminal_growing_composer
+import terminal_pty
 from terminal_integration import require
 from terminal_macos import DarwinTerminal
 from terminal_mouse_screen import MouseScreen
 
 CASES = ("gg-whole-cache", "accumulate-and-dismiss", "main-only-and-wheel",
          "anchor-later-window", "html-reader-ux", "markdown-new", "markdown-reply",
-         "markdown-forward", "file-browser-keyboard")
+         "markdown-forward", "file-browser-keyboard", "growing-composer",
+         "unknown-send-reopen")
 
 
 def guardian_mouse_start(binary, directory, fixture, extra=(), environment=None, columns=160, rows=40):
     return DarwinTerminal(binary, directory, extra=fixture.options(*extra), columns=columns, rows=rows,
                           screen_type=MouseScreen, environment={"NO_COLOR": None, "COLORTERM": "truecolor", **(environment or {})})
+
+
+def unknown_send_reopen(binary, directory):
+    """Use the shared receipt/recovery oracle with the Darwin session owner."""
+    directory.mkdir(mode=0o700)
+    preferences = directory / "fixture-ui.json"
+    preferences.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}) + "\n")
+    preferences.chmod(0o600)
+    terminal = DarwinTerminal(binary, directory, columns=100, rows=24,
+                              extra=("--fixture-scenario", "unknown-send", "--ui-file", str(preferences)))
+    try:
+        return terminal_pty.exercise(terminal, "unknown-send-reopen")
+    except Exception as failure:
+        failure.terminal_cells = {"currentCells": terminal.screen.lines(),
+                                  "exitCode": terminal.process.poll()}
+        raise
+    finally:
+        terminal.close()
 
 
 def main():
@@ -60,6 +81,7 @@ def main():
             patch.object(terminal_html, "Terminal", DarwinTerminal), \
             patch.object(terminal_markdown_compose, "start", guardian_mouse_start), \
             patch.object(terminal_file_dialog, "start", guardian_mouse_start), \
+            patch.object(terminal_growing_composer, "Terminal", DarwinTerminal), \
             tempfile.TemporaryDirectory(prefix="omagma-macos-features-") as temporary:
         # Darwin's default temporary path starts with the system /var symlink.
         # The file browser deliberately refuses every symlink component, so
@@ -70,7 +92,7 @@ def main():
             started = time.monotonic()
             try:
                 directory = root / case
-                if case.startswith("markdown-") or case == "file-browser-keyboard":
+                if case.startswith("markdown-") or case in ("file-browser-keyboard", "growing-composer"):
                     directory.mkdir(mode=0o700)
                 if case == "html-reader-ux":
                     result.update(terminal_html.reader_ux_case(binary, directory))
@@ -80,6 +102,10 @@ def main():
                     result.update(terminal_markdown_compose.conversation_case(binary, directory, case.removeprefix("markdown-")))
                 elif case == "file-browser-keyboard":
                     result.update(terminal_file_dialog.keyboard_case(binary, directory, None))
+                elif case == "growing-composer":
+                    result.update(terminal_growing_composer.exercise(binary, directory))
+                elif case == "unknown-send-reopen":
+                    result.update(unknown_send_reopen(binary, directory))
                 else:
                     terminal_arrivals.run(binary, directory, case)
                 result["passed"] = True
@@ -89,6 +115,10 @@ def main():
                     result["diagnostics"] = failure.diagnostics
                 elif hasattr(failure, "file_dialog_cells"):
                     result["diagnostics"] = failure.file_dialog_cells
+                elif hasattr(failure, "terminal_cells"):
+                    result["diagnostics"] = failure.terminal_cells
+                elif (directory / "last-screen.txt").is_file():
+                    result["diagnostics"] = {"currentCells": (directory / "last-screen.txt").read_text().splitlines()}
             result["elapsedSeconds"] = round(time.monotonic() - started, 4)
             receipt["cases"].append(result)
             args.output.write_text(json.dumps(receipt, indent=2) + "\n")

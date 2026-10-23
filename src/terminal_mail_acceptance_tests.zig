@@ -433,6 +433,80 @@ fn sessionCommand(a: std.mem.Allocator, session: *core.Session, request: anytype
     return j.get(response, "data") orelse error.MissingResponseData;
 }
 
+fn expectCapturedBytes(session: *core.Session, account: []const u8, attachment: t.Attachment, expected: []const u8) !void {
+    try std.testing.expectEqual(expected.len, attachment.size);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (!@import("terminal/send_memory.zig").native) {
+        const actual = try a.alloc(u8, expected.len);
+        try std.base64.url_safe_no_pad.Decoder.decode(actual, attachment.data);
+        return std.testing.expectEqualSlices(u8, expected, actual);
+    }
+    // Native capture persists immutable bytes instead of embedding base64 in
+    // the draft DTO. Reopen the real store and verify both identity and bytes.
+    const blob = @import("terminal/attachment_blob.zig");
+    try std.testing.expectEqualStrings("", attachment.data);
+    const id = attachment.blobId orelse return error.MissingCapturedBlob;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(expected, &digest, .{});
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(digest, .lower), id);
+    var store = try session.openStore(a, account, true);
+    defer store.close();
+    try blob.verify(&store, attachment);
+    var stream = try blob.Stream.init(&store, attachment);
+    defer stream.close();
+    var buffer: [31]u8 = undefined;
+    var offset: usize = 0;
+    while (true) {
+        const count = try blob.Stream.read(&stream, &buffer);
+        if (count == 0) break;
+        try std.testing.expect(count <= expected.len - offset);
+        try std.testing.expectEqualSlices(u8, expected[offset..][0..count], buffer[0..count]);
+        offset += count;
+    }
+    try std.testing.expectEqual(expected.len, offset);
+    try std.testing.expect(stream.verified);
+}
+
+fn stagedDraftMime(a: std.mem.Allocator, session: *core.Session, account: []const u8, draft_id: []const u8) !@import("terminal/mime.zig").ParsedMessage {
+    var store = try session.openStore(a, account, false);
+    defer store.close();
+    const draft = try store.draft(draft_id);
+    const before = try std.json.Stringify.valueAlloc(a, draft, .{});
+    // Exercise the production MIME spool with saved blob handles. This never
+    // submits mail or uploads a draft; the independent parser checks its wire.
+    var spool = try @import("terminal/draft_gmail_spool.zig").create(&store, draft, "<acceptance-preview@mail.invalid>");
+    defer spool.close();
+    var reader = try spool.reader();
+    defer reader.close();
+    const raw = try a.alloc(u8, spool.size);
+    var offset: usize = 0;
+    while (offset < raw.len) {
+        const count = try @import("terminal/send_spool.zig").Spool.Reader.read(&reader, raw[offset..]);
+        try std.testing.expect(count != 0);
+        offset += count;
+    }
+    var end: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try @import("terminal/send_spool.zig").Spool.Reader.read(&reader, &end));
+    try std.testing.expect(reader.verified);
+    try std.testing.expectEqualStrings(before, try std.json.Stringify.valueAlloc(a, try store.draft(draft_id), .{}));
+    const parsed = try @import("terminal/mime.zig").parse(raw, a);
+    try std.testing.expectEqual(@as(usize, 1), parsed.from.len);
+    try std.testing.expectEqualStrings(if (draft.from) |from| from.address else account, parsed.from[0].address);
+    try std.testing.expectEqualStrings(draft.subject, parsed.subject);
+    try std.testing.expectEqualStrings(draft.inReplyTo, parsed.in_reply_to);
+    try std.testing.expectEqualStrings(draft.references, parsed.references);
+    for ([_][]const t.Address{ draft.to, draft.cc, draft.bcc }, [_][]const @import("terminal/recipients.zig").IncomingMailbox{ parsed.to, parsed.cc, parsed.bcc }) |expected, actual| {
+        try std.testing.expectEqual(expected.len, actual.len);
+        for (expected, actual) |left, right| {
+            try std.testing.expectEqualStrings(left.address, right.address);
+            try std.testing.expectEqualStrings(left.name, right.name);
+        }
+    }
+    return parsed;
+}
+
 test "mail acceptance: read save preserve reply reply-all and forward retain original resources and envelope through draft reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -443,6 +517,8 @@ test "mail acceptance: read save preserve reply reply-all and forward retain ori
     const cache_root = try std.fmt.allocPrint(a, "{s}/draft-cache", .{root});
     const html = "<p>HTML café.</p><img src=\"cid:chart@example.test\">";
     const png_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI_ScLbtAAAAABJRU5ErkJggg";
+    var png_bytes: [70]u8 = undefined;
+    try std.base64.url_safe_no_pad.Decoder.decode(&png_bytes, png_data);
     var wire = try std.json.parseFromSliceLeaky(j.Value, a, delivered, .{});
     const headers = wire.object.getPtr("payload").?.object.getPtr("headers").?;
     try headers.array.items[1].object.put(a, "value", .{ .string = "personal@example.com, teammate@example.test" });
@@ -511,7 +587,7 @@ test "mail acceptance: read save preserve reply reply-all and forward retain ori
         try std.testing.expectEqual(@as(usize, 1), draft.original.?.resources.len);
         const resource = draft.original.?.resources[0];
         try std.testing.expectEqualStrings("chart@example.test", resource.contentId.?);
-        try std.testing.expectEqualStrings(png_data, resource.data);
+        try expectCapturedBytes(session, account, resource, &png_bytes);
         try std.testing.expectEqual(@as(usize, 70), resource.size);
         const forwarding = std.mem.eql(u8, action.command, "mail.forward");
         try std.testing.expectEqual(@as(usize, if (forwarding) 1 else 0), draft.attachments.len);
@@ -520,7 +596,7 @@ test "mail acceptance: read save preserve reply reply-all and forward retain ori
             try std.testing.expectEqualStrings("", draft.threadId);
             try std.testing.expectEqualStrings("", draft.inReplyTo);
             try std.testing.expectEqualStrings("Quarterly café.pptx", draft.attachments[0].filename);
-            try std.testing.expectEqualStrings("RmljdGlvbmFsIHNsaWRlcwo", draft.attachments[0].data);
+            try expectCapturedBytes(session, account, draft.attachments[0], "Fictional slides\n");
         } else {
             try std.testing.expectEqual(@as(usize, 1), draft.to.len);
             try std.testing.expectEqualStrings("replies@example.test", draft.to[0].address);
@@ -540,12 +616,45 @@ test "mail acceptance: read save preserve reply reply-all and forward retain ori
         try std.testing.expect(std.mem.indexOf(u8, j.text(preview, "plainText"), "Reviewed note") != null);
         const reopened = try core.decodeDraft(a, try sessionCommand(a, session, .{ .cmd = "draft.read", .account = account, .draftId = draft.id }));
         try std.testing.expectEqualStrings(html, reopened.original.?.bodyHtml);
-        const prepared = try @import("terminal/markdown_mail.zig").prepare(a, reopened);
-        const outgoing = try @import("terminal/mime.zig").composeAttachments(prepared.resources, a);
-        try std.testing.expectEqual(@as(usize, 1), outgoing.len);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(outgoing[0].data, &digest, .{});
-        try std.testing.expectEqualStrings("2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c", &std.fmt.bytesToHex(digest, .lower));
+        try std.testing.expectEqualStrings("**Reviewed note**", reopened.bodyText);
+        try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(a, draft.original, .{}), try std.json.Stringify.valueAlloc(a, reopened.original, .{}));
+        try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(a, draft.attachments, .{}), try std.json.Stringify.valueAlloc(a, reopened.attachments, .{}));
+        try std.testing.expectEqualStrings(draft.threadId, reopened.threadId);
+        try std.testing.expectEqualStrings(draft.inReplyTo, reopened.inReplyTo);
+        try std.testing.expectEqualStrings(draft.references, reopened.references);
+        for ([_][]const t.Address{ draft.to, draft.cc, draft.bcc }, [_][]const t.Address{ reopened.to, reopened.cc, reopened.bcc }) |expected, actual| try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(a, expected, .{}), try std.json.Stringify.valueAlloc(a, actual, .{}));
+        try expectCapturedBytes(session, account, reopened.original.?.resources[0], &png_bytes);
+        if (forwarding) try expectCapturedBytes(session, account, reopened.attachments[0], "Fictional slides\n");
+        const outgoing = try stagedDraftMime(a, session, account, reopened.id);
+        try std.testing.expectEqual(@as(usize, if (forwarding) 3 else 2), outgoing.attachments.len);
+        try std.testing.expect(std.mem.indexOf(u8, outgoing.body_html, html) != null);
+        const strong_at = std.mem.indexOf(u8, outgoing.body_html, "<strong ") orelse std.mem.indexOf(u8, outgoing.body_html, "<strong>") orelse return error.MissingStrongNote;
+        const strong_end = std.mem.indexOfScalarPos(u8, outgoing.body_html, strong_at, '>') orelse return error.InvalidStrongNote;
+        try std.testing.expect(std.mem.startsWith(u8, outgoing.body_html[strong_end + 1 ..], "Reviewed note</strong>"));
+        try std.testing.expect(std.mem.indexOf(u8, outgoing.body_text, "Reviewed note") != null);
+        var found_image = false;
+        var found_file = false;
+        for (outgoing.attachments) |part| {
+            if (std.mem.eql(u8, std.mem.trim(u8, part.content_id, "<> \t"), "chart@example.test")) {
+                try std.testing.expect(!found_image);
+                found_image = true;
+                try std.testing.expectEqualStrings("chart.png", part.filename);
+                try std.testing.expectEqualStrings("image/png", part.mime_type);
+                try std.testing.expectEqualStrings("inline", part.disposition);
+                try std.testing.expectEqualSlices(u8, &png_bytes, part.data);
+                var digest: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(part.data, &digest, .{});
+                try std.testing.expectEqualStrings("2640059609118b695c139804676372eca75c30d30e5906775902d13e44f5356c", &std.fmt.bytesToHex(digest, .lower));
+            } else if (std.mem.eql(u8, part.filename, "Quarterly café.pptx")) {
+                try std.testing.expect(forwarding and !found_file);
+                found_file = true;
+                try std.testing.expectEqualStrings("attachment", part.disposition);
+                try std.testing.expectEqualStrings("", part.content_id);
+                try std.testing.expectEqualStrings("Fictional slides\n", part.data);
+            }
+        }
+        try std.testing.expect(found_image);
+        try std.testing.expectEqual(forwarding, found_file);
     }
     const stats = try sessionCommand(a, session, .{ .cmd = "cache.stats", .account = account });
     try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", -1));
@@ -664,8 +773,24 @@ test "mail acceptance: unused identities on ordinary large files retain reading 
         try std.testing.expectEqual(@as(usize, 0), forwarded.original.?.resources.len);
         try std.testing.expectEqual(@as(usize, 1), forwarded.attachments.len);
         try std.testing.expectEqualStrings("report.pptx", forwarded.attachments[0].filename);
-        try std.testing.expectEqualStrings("RmljdGlvbmFsIHNsaWRlcwo", forwarded.attachments[0].data);
+        try expectCapturedBytes(session, account, forwarded.attachments[0], "Fictional slides\n");
         try std.testing.expectEqual(@as(usize, 17), forwarded.attachments[0].size);
+        const reopened_forward = try core.decodeDraft(a, try sessionCommand(a, session, .{ .cmd = "draft.read", .account = account, .draftId = forwarded.id }));
+        try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(a, forwarded, .{}), try std.json.Stringify.valueAlloc(a, reopened_forward, .{}));
+        try expectCapturedBytes(session, account, reopened_forward.attachments[0], "Fictional slides\n");
+        const outgoing = try stagedDraftMime(a, session, account, reopened_forward.id);
+        try std.testing.expectEqual(@as(usize, 2), outgoing.attachments.len);
+        try std.testing.expect(std.mem.indexOf(u8, outgoing.body_html, "<p>Hi</p>") != null);
+        var found_file = false;
+        for (outgoing.attachments) |part| if (std.mem.eql(u8, part.filename, "report.pptx")) {
+            try std.testing.expect(!found_file);
+            found_file = true;
+            try std.testing.expectEqualStrings("attachment", part.disposition);
+            try std.testing.expectEqualStrings("", part.content_id);
+            try std.testing.expectEqualStrings("", part.content_location);
+            try std.testing.expectEqualStrings("Fictional slides\n", part.data);
+        };
+        try std.testing.expect(found_file);
 
         // Materialized inline resources retain the small body budget; an
         // unloaded external descriptor no longer refuses ordinary reading.

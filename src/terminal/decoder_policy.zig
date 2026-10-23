@@ -36,6 +36,10 @@ const decoder_retries = [_]struct { revision: u32, code: []const u8 }{
     .{ .revision = 4, .code = "ReferencesTooLarge" },
     .{ .revision = 4, .code = "TooManyReferences" },
     .{ .revision = 4, .code = "UnsupportedCharset" },
+    // Long reply chains may retain up to 1024 inline resources. Revisit older
+    // descriptor/part refusals once with the corresponding wider MIME budget.
+    .{ .revision = 5, .code = "TooManyAttachments" },
+    .{ .revision = 5, .code = "TooManyMimeParts" },
 };
 pub const decoder_revision: u32 = decoder_retries[decoder_retries.len - 1].revision;
 
@@ -59,10 +63,15 @@ pub fn retriedByNewerDecoder(code: []const u8, recorded: u32) bool {
 }
 
 test "decoder policy: browser legacy eligibility excludes auth storage and unknown failures" {
-    for ([_][]const u8{ "UnsupportedCharset", "HeaderTooLarge", "MimeTooDeep", "BodySizeMismatch" }) |code| {
+    for ([_][]const u8{ "UnsupportedCharset", "HeaderTooLarge", "MimeTooDeep", "BodySizeMismatch", "TooManyAttachments", "TooManyMimeParts" }) |code| {
         try std.testing.expect(knownDecoderRefusal(code));
         try std.testing.expect(retriedByNewerDecoder(code, 0));
         try std.testing.expect(!retriedByNewerDecoder(code, decoder_revision));
     }
     for ([_][]const u8{ "", "NotConnected", "AuthenticationFailed", "PermissionDenied", "NetworkFailure", "DiskQuotaExceeded", "OutOfMemory", "UnknownFutureRefusal" }) |code| try std.testing.expect(!knownDecoderRefusal(code));
+    for ([_][]const u8{ "TooManyAttachments", "TooManyMimeParts" }) |code| {
+        try std.testing.expect(retriedByNewerDecoder(code, 4));
+        try std.testing.expect(!retriedByNewerDecoder(code, 5));
+    }
+    try std.testing.expect(!retriedByNewerDecoder("UnsupportedCharset", 4));
 }

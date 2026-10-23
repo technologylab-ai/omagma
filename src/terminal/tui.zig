@@ -128,7 +128,34 @@ fn messageUnread(message: Value) bool {
     return truth(get(message, "unread")) or messageHasLabel(message, "UNREAD");
 }
 fn composeFieldLimit(index: usize) usize {
-    return if (index == 4) types.Limits.body_bytes else if (index == 3) mail_limits.subject_bytes else mail_limits.header_value_bytes;
+    return if (index == 4) types.Limits.compose_body_bytes else if (index == 3) mail_limits.subject_bytes else mail_limits.header_value_bytes;
+}
+const send_memory = @import("send_memory.zig");
+const outgoing_native = send_memory.native and !browser_target;
+/// A native composer's authored source, retained original and local preview
+/// grow with the actual draft on wiped OS pages instead of the fixed UI heap.
+/// Their owner frees them on replacement or close. Browser builds keep the
+/// bounded fixed heap; this allocator is never exposed there.
+fn composeBacking(normal: Allocator) Allocator {
+    return if (comptime outgoing_native) send_memory.allocator() else normal;
+}
+/// Selected draft/send commands carry the complete authored source and
+/// original. Native jobs size their request and response by actual bytes up to
+/// the record ceiling; ordinary reads keep the fixed heap and normal caps.
+fn outgoingJobCommand(cmd: []const u8) bool {
+    return outgoing_native and (send_memory.command(cmd) or same(cmd, "draft.recovery-save") or same(cmd, "mail.compose-source"));
+}
+/// The terminal's semantic HTML view keeps its bounded ordinary limits. A
+/// validated outgoing note that exceeds only those limits is reviewed as its
+/// complete plain alternative with a notice; every other failure still blocks.
+fn semanticViewLimit(err: anyerror) bool {
+    return err == error.HtmlTooLarge or err == error.HtmlTooComplex or err == error.HtmlLayoutUnavailable;
+}
+fn encodeJobRequest(allocator: Allocator, request_value: anytype, outgoing: bool) ![]const u8 {
+    // Exact-size encoding avoids retaining arena growth copies of a large source.
+    const request = if (outgoing) try @import("json.zig").encodeAlloc(allocator, request_value, .{}) else try std.json.Stringify.valueAlloc(allocator, request_value, .{});
+    if (request.len > (if (outgoing) send_memory.record_bytes else types.Limits.request_bytes)) return error.RequestTooLarge;
+    return request;
 }
 fn draftExceedsPortableTransport(draft: types.Draft) bool {
     if (draft.from) |from| if (recipients.exceedsPortableTransport(from.address)) return true;
@@ -196,6 +223,7 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "BodySizeMismatch", .label = "Mail body is incomplete" },
         .{ .code = "BodyNotCached", .label = "Body is not cached · Enter downloads this message" },
         .{ .code = "MessageBodyUnavailable", .label = "Body unavailable · open in Gmail or forward the original .eml" },
+        .{ .code = "ComposeSourceRequired", .label = "Large original retained · Reply/Forward loads the complete source" },
         .{ .code = "CalendarTooLarge", .label = "Calendar part exceeds the supported size" },
         .{ .code = "JsonTooDeep", .label = "Mail structure exceeds the supported depth" },
         .{ .code = "JsonTooManyTokens", .label = "Mail structure exceeds the supported complexity" },
@@ -264,7 +292,7 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "ProviderRejected", .label = "Provider rejected the request" },
         .{ .code = "PathAlreadyExists", .label = "File already exists · choose another path" },
         .{ .code = "OperationPending", .label = "Wait for the current operation" },
-        .{ .code = "OutOfMemory", .label = "Operation exceeds the memory budget" },
+        .{ .code = "OutOfMemory", .label = "Not enough memory for this operation" },
     };
     for (labels) |label| if (same(code, label.code)) return label.label;
     return "Operation failed";
@@ -274,6 +302,19 @@ fn validDiagnosticCode(code: []const u8) bool {
     if (code.len == 0 or code.len > 64) return false;
     for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
     return true;
+}
+
+/// A queue receipt may carry a send failure on the entry or only on its
+/// nested journal operation. Only fixed backend error names are retained.
+fn sendReceiptCode(receipt: Value) []const u8 {
+    for ([_][]const u8{ text(get(receipt, "errorCode")), text(get(get(receipt, "operation"), "errorCode")) }) |code| if (validDiagnosticCode(code)) return code;
+    return "";
+}
+
+fn sendReceiptOperation(receipt: Value) []const u8 {
+    const id = text(get(receipt, "operationId"));
+    const chosen = if (id.len > 0) id else text(get(get(receipt, "operation"), "id"));
+    return if (chosen.len <= 256) chosen else "";
 }
 
 fn backMode(mode: Mode, previous: Mode, picker: bool) Mode {
@@ -300,7 +341,7 @@ fn refreshIsCurrent(result: Value, requested_at: i64) bool {
 fn bodyRefusal(message: Value) ?[]const u8 {
     const code = text(get(message, "bodyCacheError"));
     if (code.len == 0) return null;
-    for ([_][]const u8{ "MessageBudgetExceeded", "ThreadBodyBudgetExceeded", "BodyNotCached", "CalendarTooLarge", "JsonTooDeep", "JsonTooManyTokens" }) |known| if (same(code, known)) return known;
+    for ([_][]const u8{ "MessageBudgetExceeded", "ThreadBodyBudgetExceeded", "BodyNotCached", "ComposeSourceRequired", "CalendarTooLarge", "JsonTooDeep", "JsonTooManyTokens" }) |known| if (same(code, known)) return known;
     // Codes originate from the backend's named refusals. Only fixed labels
     // enter this UI path; a corrupt cache cannot inject provider text here.
     const known = [_][]const u8{
@@ -469,6 +510,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "o in normal reply/forward", .action = "Open the original mail in this account's browser profile", .requires = .open_urls },
     .{ .keys = "L / B in Original preview", .action = "Normal compose: choose original links or received files", .requires = .files },
     .{ .keys = ":receipt", .action = "Inspect the current draft's operation receipts" },
+    .{ .keys = "p in a protected draft", .action = "Open the saved draft's HTML preview; no edit, upload or resend", .requires = .open_urls },
     .{ .keys = "Esc / q in normal mode", .action = "Save the draft and go back" },
     .{ .keys = "d in normal compose", .action = "Review discarding this draft; Cancel keeps it" },
     .{ .keys = "Ctrl+C", .action = "Cancel work; idle drafts save/back, native mailbox quits" },
@@ -700,16 +742,43 @@ const Field = struct {
     cursor: usize = 0,
     history: edit_history.History = .{},
     undo_enabled: bool = false,
-    fn deinit(self: *Field, allocator: Allocator) void {
+    /// Set only for a loaded native compose body. Every byte and history
+    /// snapshot of that field then belongs to this allocator.
+    backing: ?Allocator = null,
+    fn owner(self: *const Field, allocator: Allocator) Allocator {
+        return self.backing orelse allocator;
+    }
+    fn deinit(self: *Field, allocator_in: Allocator) void {
+        const allocator = self.owner(allocator_in);
         self.history.deinit(allocator);
         self.bytes.deinit(allocator);
         self.* = .{};
     }
-    fn set(self: *Field, allocator: Allocator, input_value: []const u8) !void {
-        try self.assign(allocator, input_value);
-        self.history.clear(allocator);
+    fn set(self: *Field, allocator_in: Allocator, input_value: []const u8) !void {
+        try self.assign(allocator_in, input_value);
+        self.history.clear(self.owner(allocator_in));
     }
-    fn assign(self: *Field, allocator: Allocator, input_value: []const u8) !void {
+    /// Whole-text snapshots stay byte-bounded. Restoring copies the then
+    /// current text, so both sides of a mutation must fit one snapshot. A
+    /// larger legitimate source stays editable and history is cleared instead
+    /// of retaining copies that could never be restored.
+    fn recordUndo(self: *Field, allocator_in: Allocator, result_len: usize) !void {
+        const allocator = self.owner(allocator_in);
+        if (self.bytes.items.len > edit_history.max_snapshot_bytes or result_len > edit_history.max_snapshot_bytes) {
+            self.history.clear(allocator);
+            return;
+        }
+        try self.history.record(allocator, self.value(), self.cursor);
+    }
+    /// Text that grew past the snapshot ceiling without a recorded edit
+    /// (paste, editor or programmatic replacement) cannot be restored.
+    fn boundHistory(self: *Field, allocator_in: Allocator) bool {
+        if (self.bytes.items.len <= edit_history.max_snapshot_bytes) return true;
+        self.history.clear(self.owner(allocator_in));
+        return false;
+    }
+    fn assign(self: *Field, allocator_in: Allocator, input_value: []const u8) !void {
+        const allocator = self.owner(allocator_in);
         // Keep the previous value if the bounded allocator refuses growth.
         try self.bytes.ensureTotalCapacity(allocator, input_value.len);
         // Completion can borrow this unchanged field or one of its slices.
@@ -721,12 +790,13 @@ const Field = struct {
     fn value(self: *const Field) []const u8 {
         return self.bytes.items;
     }
-    fn insert(self: *Field, allocator: Allocator, value_in: []const u8, limit: usize) !void {
+    fn insert(self: *Field, allocator_in: Allocator, value_in: []const u8, limit: usize) !void {
+        const allocator = self.owner(allocator_in);
         if (value_in.len > limit -| self.bytes.items.len) return error.InputTooLarge;
         if (!std.unicode.utf8ValidateSlice(value_in)) return error.InvalidUtf8;
         if (value_in.len == 0) return;
         try self.bytes.ensureTotalCapacity(allocator, self.bytes.items.len + value_in.len);
-        if (self.undo_enabled) try self.history.record(allocator, self.value(), self.cursor);
+        if (self.undo_enabled) try self.recordUndo(allocator, self.bytes.items.len + value_in.len);
         try self.bytes.insertSlice(allocator, self.cursor, value_in);
         self.cursor += value_in.len;
     }
@@ -772,14 +842,14 @@ const Field = struct {
         if (key.matches(Key.left, .{})) self.cursor = self.previous() else if (key.matches(Key.right, .{})) self.cursor = self.next() else if (multiline and key.matches(Key.up, .{})) self.vertical(false) else if (multiline and key.matches(Key.down, .{})) self.vertical(true) else if ((key.matches(Key.home, .{}) or key.matches('a', .{ .ctrl = true }))) self.cursor = if (std.mem.lastIndexOfScalar(u8, self.bytes.items[0..self.cursor], '\n')) |index| index + 1 else 0 else if ((key.matches(Key.end, .{}) or key.matches('e', .{ .ctrl = true }))) self.cursor = std.mem.indexOfScalarPos(u8, self.bytes.items, self.cursor, '\n') orelse self.bytes.items.len else if (key.matches(Key.backspace, .{})) {
             const from = self.previous();
             const count = self.cursor - from;
-            if (count > 0 and self.undo_enabled) try self.history.record(allocator, self.value(), self.cursor);
+            if (count > 0 and self.undo_enabled) try self.recordUndo(allocator, self.bytes.items.len - count);
             std.mem.copyForwards(u8, self.bytes.items[from..], self.bytes.items[self.cursor..]);
             self.bytes.items.len -= count;
             self.cursor = from;
         } else if (key.matches(Key.delete, .{})) {
             const to = self.next();
             const count = to - self.cursor;
-            if (count > 0 and self.undo_enabled) try self.history.record(allocator, self.value(), self.cursor);
+            if (count > 0 and self.undo_enabled) try self.recordUndo(allocator, self.bytes.items.len - count);
             std.mem.copyForwards(u8, self.bytes.items[self.cursor..], self.bytes.items[to..]);
             self.bytes.items.len -= count;
         } else if (multiline and key.matches(Key.enter, .{})) try self.insert(allocator, "\n", limit) else if (multiline and key.matches(Key.tab, .{})) try self.insert(allocator, "    ", limit) else if (!key.mods.ctrl and !key.mods.alt and !key.mods.super) {
@@ -861,12 +931,31 @@ const Compose = struct {
         self.gmail_arena = null;
         self.gmail_link = null;
     }
+    /// Closing the composer returns its large draft-owned memory. The saved
+    /// local draft stays durable and reopening reloads it. Small identity and
+    /// receipt fields remain for status and outcome handling.
+    fn releaseOutgoing(self: *Compose, allocator: Allocator) void {
+        if (self.fields[4].backing != null) self.fields[4].deinit(allocator);
+        if (self.attachment_arena) |*arena| arena.deinit();
+        self.attachment_arena = null;
+        self.attachments = &.{};
+        if (self.original_arena) |*arena| arena.deinit();
+        self.original_arena = null;
+        self.original = null;
+        self.original_digest = @splat(0);
+    }
     fn mailboxes(allocator: Allocator, value: Value) ![]const u8 {
         return displayMailboxes(allocator, value, recipients.formatDisplay);
     }
     fn load(self: *Compose, allocator: Allocator, value_in: Value) !void {
         self.deinit(allocator);
         self.* = .{};
+        // A refused or partial draft keeps no composer pages.
+        errdefer {
+            self.deinit(allocator);
+            self.* = .{};
+        }
+        if (comptime outgoing_native) self.fields[4].backing = composeBacking(allocator);
         const omitted = integer(get(value_in, "omittedAttachments"));
         if (omitted < 0 or omitted > types.Limits.omitted_attachment_count) return error.InvalidAttachment;
         self.omitted_attachments = @intCast(omitted);
@@ -896,19 +985,28 @@ const Compose = struct {
         }
         const attachments = get(value_in, "attachments");
         if (attachments != .null) {
-            if (attachments != .array or attachments.array.items.len > 16) return error.TooManyAttachments;
-            self.attachment_arena = .init(allocator);
+            if (attachments != .array or attachments.array.items.len > types.Limits.attachments) return error.TooManyAttachments;
+            self.attachment_arena = .init(composeBacking(allocator));
             self.attachments = try std.json.parseFromValueLeaky([]const types.Attachment, self.attachment_arena.?.allocator(), attachments, .{ .allocate = .alloc_always });
         }
         const original = get(value_in, "original");
         if (original != .null) {
-            self.original_arena = .init(allocator);
+            self.original_arena = .init(composeBacking(allocator));
             const owned = self.original_arena.?.allocator();
             self.original = try std.json.parseFromValueLeaky(types.Original, owned, original, .{ .allocate = .alloc_always });
-            const identity = try std.json.Stringify.valueAlloc(allocator, self.original.?, .{});
-            defer allocator.free(identity);
-            std.crypto.hash.sha2.Sha256.hash(identity, &self.original_digest, .{});
+            self.original_digest = try originalDigest(self.original.?);
         }
+    }
+    /// Stream the canonical JSON identity into the hash. A long preserved
+    /// thread is never copied a second time just to name its preview cache.
+    fn originalDigest(original: types.Original) ![32]u8 {
+        var buffer: [4096]u8 = undefined;
+        var hashing: std.Io.Writer.Hashing(std.crypto.hash.sha2.Sha256) = .init(&buffer);
+        try std.json.Stringify.value(original, .{}, &hashing.writer);
+        try hashing.writer.flush();
+        var digest: [32]u8 = undefined;
+        hashing.hasher.final(&digest);
+        return digest;
     }
     fn addresses(allocator: Allocator, raw: []const u8) ![]types.Address {
         var list: recipients.List = .{};
@@ -959,11 +1057,13 @@ const Compose = struct {
         // The received original is immutable and already stored under this
         // draft ID. Both providers preserve it when this field is absent.
         if (self.id.value().len != 0) edited.original = null;
-        return @import("json.zig").value(allocator, edited);
+        // Borrow the composer's strings for this synchronous request encoding;
+        // a large authored source is not duplicated before serialization.
+        return @import("mail_response_value.zig").borrowed(allocator, edited);
     }
     fn replaceAttachments(self: *Compose, allocator: Allocator, input_attachments: []const types.Attachment) !void {
-        if (input_attachments.len > 16) return error.TooManyAttachments;
-        var arena: std.heap.ArenaAllocator = .init(allocator);
+        if (input_attachments.len > types.Limits.attachments) return error.TooManyAttachments;
+        var arena: std.heap.ArenaAllocator = .init(composeBacking(allocator));
         errdefer arena.deinit();
         const owned = try arena.allocator().alloc(types.Attachment, input_attachments.len);
         for (input_attachments, owned) |item, *copy| copy.* = .{
@@ -999,6 +1099,10 @@ const Job = struct {
     requested_at: i64 = 0,
     preferences_revision: u64 = 0,
     saved_attachment_open: bool = false,
+    protected_preview: bool = false,
+    /// A selected native draft/send command: its job_arena is OS-backed and
+    /// its own response may use the outgoing record ceiling.
+    outgoing: bool = false,
     calendar_join_open: bool = false,
     calendar_browser_open: bool = false,
     meeting_account: u8 = 0,
@@ -1029,6 +1133,8 @@ const App = struct {
     read_arena: std.heap.ArenaAllocator,
     contact_arena: std.heap.ArenaAllocator,
     job_arena: std.heap.ArenaAllocator,
+    /// True while job_arena's child is the native outgoing backing.
+    job_arena_outgoing: bool = false,
     frame: std.heap.ArenaAllocator,
     accounts: []const Value = &.{},
     account_index: usize = 0,
@@ -1303,6 +1409,12 @@ const App = struct {
     compose_preview_format: types.BodyFormat = .plain,
     compose_preview_error: ?anyerror = null,
     compose_preview_builds: usize = 0,
+    /// The validated outgoing HTML exceeds only the terminal viewer's
+    /// bounded semantic limits; review shows the complete plain alternative.
+    compose_preview_semantic_limited: bool = false,
+    /// Per-frame cleaned copies of a native compose body/plain alternative.
+    /// Like frame, it lives until the next draw; closing the composer frees it.
+    compose_frame: ?std.heap.ArenaAllocator = null,
     pending_contacts: bool = false,
     pending_cached_contacts: bool = false,
     folder: usize = 0,
@@ -1533,7 +1645,7 @@ const App = struct {
     bulk_save_items: std.ArrayList([]const u8) = .empty,
     bulk_save_position: usize = 0,
     bulk_save_written: usize = 0,
-    bulk_save_flags: [64]bool = @splat(false),
+    bulk_save_flags: [types.Limits.message_attachments]bool = @splat(false),
     selected_files: [16]Field = @splat(.{}),
     selected_file_count: usize = 0,
     pending_files: [16]Field = @splat(.{}),
@@ -1590,6 +1702,7 @@ const App = struct {
         if (self.contact_snapshot) |*arena| arena.deinit();
         self.help_query.deinit(self.allocator);
         self.clearComposePreview();
+        self.releaseComposeFrame();
         self.compose_source_subject.deinit(self.allocator);
         self.cache_watch.stop();
         self.recipient_account.deinit(self.allocator);
@@ -2770,7 +2883,15 @@ const App = struct {
     fn openGmailDraft(self: *App) !void {
         if (browser_target) return error.UnsupportedCommand;
         if (!self.compose_active or self.compose.id.value().len == 0) return error.DraftNotFound;
-        if (self.compose.unknown_outcome) return error.UnknownOutcome;
+        if (self.compose.unknown_outcome) {
+            // An unconfirmed send is never uploaded. Stay on the protected
+            // draft so the refusal is not mistaken for a lost draft.
+            self.mode = .compose;
+            self.say(true, "Gmail upload blocked · send outcome unknown · draft kept in Drafts{s}", .{if (self.capabilities.open_urls) @as([]const u8, " · p HTML preview") else ""});
+            self.status_kind = .unknown;
+            self.diagnostic("UnknownOutcome");
+            return;
+        }
         self.preemptReadOnly();
         if (self.job.future != null) return error.OperationPending;
         self.mode = .compose;
@@ -2796,7 +2917,7 @@ const App = struct {
             try self.uxRow(.{ .label = "Open Gmail Drafts", .index = 2 });
             if (permitted) {
                 try self.uxRow(.{ .label = if (link.?.phase == .unknown) "Check upload status" else "Check Gmail draft", .index = 3 });
-                if (link.?.phase != .unknown and self.gmail_remote_version.value().len > 0) try self.uxRow(.{ .label = "Import Gmail text as a new draft", .index = 5 });
+                if (link.?.phase != .unknown and self.gmail_remote_version.value().len > 0) try self.uxRow(.{ .label = "Import Gmail changes as a new draft", .index = 5 });
                 if (link.?.paused and link.?.phase != .unknown) try self.uxRow(.{ .label = if (same(self.gmail_draft_outcome.value(), "changed")) "Keep local copy + Gmail edits" else if (same(self.gmail_draft_outcome.value(), "missing")) "Keep local · I checked Gmail" else "Take back · keep Gmail copy", .index = 4 });
             }
         }
@@ -2851,7 +2972,7 @@ const App = struct {
         const inner = self.panel(area, 0, width, " Continue in Gmail ", true);
         const linked = self.compose.gmail_link;
         const permitted = self.hasCapability("mail-drafts") or self.hasCapability("mail-modify");
-        const explanation: []const u8 = if (!permitted) "Permission needed: add mail-drafts to this account's authorization (gmail.compose), or use its existing mail-modify grant. See Help (?) / Gmail drafts. Existing authorization remains usable until the new grant succeeds." else if (linked == null or linked.?.phase == .rejected) "Upload this saved draft once to Gmail, then continue on Gmail or your phone. Local edits and sending pause. Your local Markdown source, original formatting and files are retained. Nothing is sent." else if (linked.?.phase == .unknown) "Upload not confirmed. The Gmail copy may exist or may already have been sent. Check upload status or inspect Gmail; an empty search is not proof of failure. Omagma will not upload again. Local edits remain paused." else if (!linked.?.paused) "This local copy can be edited again. The Gmail copy was kept and may still be edited or sent there. Before sending locally, check Gmail and acknowledge the copy warning in Review send." else if (same(self.gmail_draft_outcome.value(), "changed")) "Gmail has newer edits. Import creates a new Plain draft with Gmail’s complete text, recipients and supported files; your original local source and Gmail copy stay intact. Keep local copy resumes the original source instead. Check both copies before sending." else if (same(self.gmail_draft_outcome.value(), "missing")) "Gmail draft is missing. It may have been sent or deleted; this is not delivery confirmation. Check Gmail Drafts and Sent first. Keeping the local copy enables editing, with a duplicate-send warning." else "Draft is available in Gmail. Local edits and sending are paused. Import creates a new Plain draft with complete text, recipients and files, preserving both existing copies. Take back rechecks Gmail and resumes this local source. No Gmail draft is deleted or overwritten.";
+        const explanation: []const u8 = if (!permitted) "Permission needed: add mail-drafts to this account's authorization (gmail.compose), or use its existing mail-modify grant. See Help (?) / Gmail drafts. Existing authorization remains usable until the new grant succeeds." else if (linked == null or linked.?.phase == .rejected) "Upload this saved draft once to Gmail, then continue on Gmail or your phone. Local edits and sending pause. Your local Markdown source, original formatting and files are retained. Nothing is sent." else if (linked.?.phase == .unknown) "Upload not confirmed. The Gmail copy may exist or may already have been sent. Check upload status or inspect Gmail; an empty search is not proof of failure. Omagma will not upload again. Local edits remain paused." else if (!linked.?.paused) "This local copy can be edited again. The Gmail copy was kept and may still be edited or sent there. Before sending locally, check Gmail and acknowledge the copy warning in Review send." else if (same(self.gmail_draft_outcome.value(), "changed")) "Gmail has newer edits. Import creates a new local draft. Text stays editable; many inline images keep their formatting as a protected original below a new note; your original local source and Gmail copy stay intact. Keep local copy resumes the original source instead. Check both copies before sending." else if (same(self.gmail_draft_outcome.value(), "missing")) "Gmail draft is missing. It may have been sent or deleted; this is not delivery confirmation. Check Gmail Drafts and Sent first. Keeping the local copy enables editing, with a duplicate-send warning." else "Draft is available in Gmail. Local edits and sending are paused. Import creates a new local draft, preserving both existing copies. Text stays editable; many inline images are kept as a protected original below a new note. Take back rechecks Gmail and resumes this local source. No Gmail draft is deleted or overwritten.";
         const description = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\nSubject: {s}\nFiles: {d}\n\n{s}\n", .{ self.account(), self.compose.fields[3].value(), self.compose.attachments.len, explanation });
         const count = self.uxCount();
         const content_height = inner.height -| @as(u16, @intCast(count + 2));
@@ -3744,7 +3865,7 @@ const App = struct {
             return true;
         }
         if (same(command, "preview-browser")) {
-            try self.saveDraft(.save_browser);
+            if (self.compose_active and self.compose.unknown_outcome) try self.openProtectedPreview() else try self.saveDraft(.save_browser);
             return true;
         }
         if (same(command, "add-contact")) {
@@ -3966,7 +4087,7 @@ const App = struct {
     fn runExtendedAction(self: *App, action: action_palette.Id) !void {
         switch (action) {
             .sender => try self.cycleComposeIdentity(),
-            .preview_browser => try self.saveDraft(.save_browser),
+            .preview_browser => if (self.compose_active and self.compose.unknown_outcome) try self.openProtectedPreview() else try self.saveDraft(.save_browser),
             .gmail_draft => try self.openGmailDraft(),
             .discard_draft => try self.openDiscardDraft(),
             .add_contact => try self.addCurrentSender(),
@@ -4798,9 +4919,16 @@ const App = struct {
         self.input_query_scope = scope;
         try self.input.set(self.allocator, self.query.value());
     }
+    /// Only the selected outgoing job's own response may exceed the ordinary
+    /// cap; cached and read responses parsed meanwhile keep response_limit.
+    fn responseLimit(self: *const App, response: []const u8) usize {
+        if (self.job.outgoing) if (self.job.response) |owned| if (owned.ptr == response.ptr and owned.len == response.len) return @max(response_limit, send_memory.record_bytes);
+        return response_limit;
+    }
     fn data(self: *App, allocator: Allocator, response: []const u8) !Value {
-        if (response.len > response_limit) return error.ResponseTooLarge;
-        const parsed = try std.json.parseFromSliceLeaky(Value, allocator, response, .{ .allocate = .alloc_always, .max_value_len = response_limit });
+        const limit = self.responseLimit(response);
+        if (response.len > limit) return error.ResponseTooLarge;
+        const parsed = try std.json.parseFromSliceLeaky(Value, allocator, response, .{ .allocate = .alloc_always, .max_value_len = limit });
         if (get(parsed, "ok") == .bool and !truth(get(parsed, "ok"))) {
             const code = text(get(get(parsed, "error"), "code"));
             self.sayError(if (code.len == 0) "OperationRejected" else code);
@@ -5244,12 +5372,27 @@ const App = struct {
             if (kind == .cached_search) self.pending_cached_list = true else if (kind == .refresh or kind == .list or kind == .drafts) self.pending_list = true else if (kind == .read or kind == .thread) self.pending_read = true else self.say(true, "Please wait for the current operation", .{});
             return;
         }
-        _ = self.job_arena.reset(.retain_capacity);
-        self.job = .{ .kind = kind, .update_snapshot = self.update_snapshot, .generation = self.generation, .selection_generation = self.selection_generation, .calendar_compose_generation = self.calendar_form_generation, .account_index = self.account_index, .contacts_generation = self.contacts_generation, .requested_at = Io.Timestamp.now(self.io, .real).toMilliseconds() };
+        const outgoing = if (comptime @hasField(@TypeOf(request_value), "cmd")) outgoingJobCommand(request_value.cmd) else false;
+        // A follow-up can borrow an identity from the completed response even
+        // when its backing is unchanged (e.g. Gmail import -> draft.read).
+        // Encode the complete next request before releasing any old pages.
+        var next: std.heap.ArenaAllocator = .init(if (outgoing) composeBacking(self.allocator) else self.allocator);
+        const request = encodeJobRequest(next.allocator(), request_value, outgoing) catch |err| {
+            next.deinit();
+            return err;
+        };
+        self.job_arena.deinit();
+        self.job_arena = next;
+        self.job_arena_outgoing = outgoing;
+        self.job = .{ .kind = kind, .update_snapshot = self.update_snapshot, .generation = self.generation, .selection_generation = self.selection_generation, .calendar_compose_generation = self.calendar_form_generation, .account_index = self.account_index, .contacts_generation = self.contacts_generation, .requested_at = Io.Timestamp.now(self.io, .real).toMilliseconds(), .outgoing = outgoing };
+        errdefer {
+            self.job.request = "";
+            self.job.response = null;
+            _ = self.job_arena.reset(.free_all);
+        }
         if (kind == .send or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
         if (unread_target) |target| try self.job.unread_target.set(target);
-        self.job.request = try std.json.Stringify.valueAlloc(self.job_arena.allocator(), request_value, .{});
-        if (self.job.request.len > types.Limits.request_bytes) return error.RequestTooLarge;
+        self.job.request = request;
         if (kind == .refresh or kind == .list) {
             const status = &self.sync[self.account_index];
             status.state = if (status.cache_ready) .refreshing else .fetching;
@@ -5703,7 +5846,9 @@ const App = struct {
                         self.pending_compose = .none;
                         return err;
                     };
-                    if (same(self.messageId(), self.pending_compose_id[0..self.pending_compose_id_len])) try self.replaceReader(false, response, false);
+                    // The native full source is for capture only; the bounded
+                    // reader keeps its own decoded view.
+                    if (!outgoing_native and same(self.messageId(), self.pending_compose_id[0..self.pending_compose_id_len])) try self.replaceReader(false, response, false);
                 }
             }
         } else if (((self.job.kind == .identities or self.job.kind == .labels_list or self.job.kind == .cached_search or self.job.kind == .recipient_cache or self.job.kind == .recipient_refresh or self.job.kind == .triage_scope or self.job.kind == .label_state or self.job.kind == .unread_navigation or self.job.kind == .queue_inspect or self.job.kind == .draft_operations) and self.job.account_index != self.account_index) or
@@ -5946,6 +6091,8 @@ const App = struct {
                     self.attachmentOpenFailed(code_buffer[0..code.len]);
                 }
                 if (self.pageLoadCurrent() and (kind == .list or kind == .cached_search or kind == .drafts)) self.rollbackPageLoad();
+                // markUnknown replaces the status diagnostic; keep the code as the receipt reason.
+                if ((kind == .send or kind == .grace_process) and self.status_error_len > 0) self.compose.operation_error.set(self.allocator, self.status_error_code[0..self.status_error_len]) catch {};
                 if (kind == .send or kind == .grace_process or kind == .invitation) self.markUnknown(kind);
                 if (kind == .list) self.syncFailed(self.job.account_index, self.status_error_code[0..self.status_error_len]);
                 if (kind == .contacts) self.contacts_state = if (same(self.status_error_code[0..self.status_error_len], "PermissionDenied")) .denied else .failed;
@@ -6029,6 +6176,7 @@ const App = struct {
                 if (self.compose_active and same(self.compose.id.value(), self.ux_target.value())) {
                     self.cancelAutosaveTimer();
                     self.clearGraceRecovery();
+                    self.clearComposePreview();
                     self.compose.deinit(self.allocator);
                     self.compose = .{};
                     self.compose_active = false;
@@ -6126,7 +6274,7 @@ const App = struct {
                             self.grace_due = integer(get(entry, "dueAtMs"));
                         } else {
                             self.compose.unknown_outcome = true;
-                            try self.compose.operation_id.set(self.allocator, text(get(entry, "operationId")));
+                            try self.retainSendReceipt(entry);
                         }
                     }
                 }
@@ -6202,8 +6350,9 @@ const App = struct {
                 self.cancelAutosaveTimer();
                 self.autosave_due = false;
                 self.clearGraceRecovery();
-                try self.compose.load(self.allocator, result);
+                // The replaced composer's preview is released even if loading fails.
                 self.clearComposePreview();
+                try self.compose.load(self.allocator, result);
                 self.compose_view = .rendered;
                 self.compose_preview_full = false;
                 self.compose_preview_scroll = 0;
@@ -6290,17 +6439,24 @@ const App = struct {
             .draft_operations => {
                 const result = try self.data(self.job_arena.allocator(), response);
                 if (get(result, "operations") != .array) return error.InvalidProviderResponse;
-                self.compose.unknown_outcome = false;
-                try self.compose.operation_id.set(self.allocator, "");
-                try self.compose.operation_error.set(self.allocator, "");
-                for (items(get(result, "operations"))) |operation| if (same(text(get(operation, "draftId")), self.compose.id.value())) {
-                    if (same(text(get(operation, "outcome")), "unknown")) {
-                        self.compose.unknown_outcome = true;
-                        try self.compose.operation_id.set(self.allocator, text(get(operation, "id")));
-                        try self.compose.operation_error.set(self.allocator, text(get(operation, "errorCode")));
-                        break;
-                    }
+                var uncertain: ?Value = null;
+                for (items(get(result, "operations"))) |operation| if (same(text(get(operation, "draftId")), self.compose.id.value()) and same(text(get(operation, "outcome")), "unknown")) {
+                    uncertain = operation;
+                    break;
                 };
+                self.compose.unknown_outcome = uncertain != null;
+                if (uncertain) |operation| {
+                    const id = text(get(operation, "id"));
+                    const code = text(get(operation, "errorCode"));
+                    // The journal may lack a code it failed to persist; keep the
+                    // reason already known for this same operation.
+                    const keep = code.len == 0 and id.len > 0 and same(id, self.compose.operation_id.value());
+                    if (!keep) try self.compose.operation_error.set(self.allocator, code);
+                    try self.compose.operation_id.set(self.allocator, id);
+                } else {
+                    try self.compose.operation_id.set(self.allocator, "");
+                    try self.compose.operation_error.set(self.allocator, "");
+                }
                 self.receipt_unknown = self.compose.unknown_outcome;
                 self.compose.unknown_outcome = true;
                 try self.start(.queue_inspect, .{ .cmd = "queue.list", .account = self.account() });
@@ -6317,7 +6473,7 @@ const App = struct {
                 const imported_id = text(get(result, "importedDraftId"));
                 if (imported_id.len > 0) {
                     self.closeUx();
-                    self.say(false, "Imported as a new Plain draft · original local and Gmail copies kept", .{});
+                    self.say(false, "{s} · original local and Gmail copies kept", .{if (truth(get(result, "importedOriginal"))) @as([]const u8, "Gmail formatting preserved as an original · write a new note above it") else "Imported as a new Plain draft"});
                     try self.start(.draft_read, .{ .cmd = "draft.read", .account = self.account(), .draftId = imported_id });
                 } else try self.presentGmailDraft();
             },
@@ -6336,7 +6492,7 @@ const App = struct {
                 }
                 if (kind == .save_back) {
                     self.clearGraceRecovery();
-                    self.compose_active = false;
+                    self.closeComposer();
                 }
                 if (kind == .save and self.editor_exit != null) {
                     const exit_code = self.editor_exit.?;
@@ -6385,7 +6541,7 @@ const App = struct {
                     } else self.sayFailure(if (kind == .send) "Submission rejected · draft retained" else "RSVP submission rejected", if (kind == .send) self.compose.operation_error.value() else self.invitation_operation_error.value());
                 } else {
                     self.mode = .browse;
-                    if (kind == .send) self.compose_active = false;
+                    if (kind == .send) self.closeComposer();
                     if (kind == .invitation) {
                         try self.loadInvitationCalendarSync(get(result, "calendarSync"));
                         const calendar_state = self.invitation_calendar_sync_state.slice();
@@ -6424,6 +6580,12 @@ const App = struct {
             },
             .open => {
                 self.action_notice = false;
+                if (self.job.protected_preview) {
+                    // Opening a preview resolves nothing; the uncertainty notice stays.
+                    self.say(true, "{s} · send outcome still unknown · draft unchanged", .{if (self.options.fixtures) @as([]const u8, "Mock HTML preview validated") else "HTML preview opened"});
+                    self.status_kind = .unknown;
+                    return;
+                }
                 if (self.job.calendar_browser_open) {
                     const result = try self.data(self.job_arena.allocator(), response);
                     try self.calendar.notice.set(if (truth(get(result, "fixture"))) "Google Calendar target validated · correct account Chrome profile" else "Opened Google Calendar in the event account's Chrome profile");
@@ -6772,12 +6934,16 @@ const App = struct {
                 self.compose_source_format_error = error.AmbiguousOriginalHtml;
                 break :preflight;
             }
-            if (values.len > 64) {
+            if (values.len > types.Limits.message_attachments) {
                 self.compose_source_format_error = error.TooManyAttachments;
                 break :preflight;
             }
-            var metadata: [64]types.Attachment = undefined;
-            for (values, metadata[0..values.len]) |value, *descriptor| {
+            // Descriptors borrow the message's strings; only this actual-length
+            // array is allocated, never a worst-case copy on the stack.
+            const backing = composeBacking(self.allocator);
+            const metadata = try backing.alloc(types.Attachment, values.len);
+            defer backing.free(metadata);
+            for (values, metadata) |value, *descriptor| {
                 const size = get(value, "size");
                 if (size != .integer or size.integer < 0 or @as(u64, @intCast(size.integer)) > std.math.maxInt(usize)) {
                     self.compose_source_format_error = error.InvalidAttachment;
@@ -6793,7 +6959,7 @@ const App = struct {
                     .contentLocation = if (get(value, "contentLocation") == .string) text(get(value, "contentLocation")) else null,
                 };
             }
-            const plan = original_mail.resourcePlanWithLimit(text(get(message, "bodyHtml")), metadata[0..values.len], self.capabilities.source_attachment_bytes) catch |err| {
+            const plan = original_mail.resourcePlanWithLimit(text(get(message, "bodyHtml")), metadata, self.capabilities.source_attachment_bytes) catch |err| {
                 self.compose_source_format_error = err;
                 break :preflight;
             };
@@ -6818,7 +6984,7 @@ const App = struct {
         self.compose_original = true;
         self.compose_source_mode = .choose;
         self.compose_source_ready = false;
-        if (same(self.reader_account.value(), self.account())) for (self.thread) |message| {
+        if (!outgoing_native and same(self.reader_account.value(), self.account())) for (self.thread) |message| {
             if (same(text(get(message, "id")), target)) {
                 try self.inspectComposeSource(message);
                 break;
@@ -6842,7 +7008,10 @@ const App = struct {
         self.pending_read = false;
         self.pending_thread = false;
         if (self.compose_source_mode == .choose) {
-            if (!self.compose_source_ready) {
+            // Native capture needs the complete source, never a bounded or
+            // refused reader body: always refresh it by ID before offering
+            // Keep formatting. Browser builds may reuse the pinned reader body.
+            if (!self.compose_source_ready and !outgoing_native) {
                 // A previous worker may just have supplied the pinned body.
                 if (same(self.reader_account.value(), self.account())) for (self.thread) |message| {
                     if (same(text(get(message, "id")), self.pending_compose_id[0..self.pending_compose_id_len])) {
@@ -6853,7 +7022,7 @@ const App = struct {
             }
             if (!self.compose_source_ready) {
                 self.compose_source_probe = true;
-                self.start(.read, .{ .account = self.pending_compose_account[0..self.pending_compose_account_len], .cmd = "mail.read", .messageId = self.pending_compose_id[0..self.pending_compose_id_len] }) catch |err| {
+                self.start(.read, .{ .account = self.pending_compose_account[0..self.pending_compose_account_len], .cmd = if (outgoing_native) @as([]const u8, "mail.compose-source") else "mail.read", .messageId = self.pending_compose_id[0..self.pending_compose_id_len] }) catch |err| {
                     self.compose_source_probe = false;
                     self.pending_compose = .none;
                     return err;
@@ -6995,6 +7164,16 @@ const App = struct {
             self.compose.body_scroll = 0;
         }
     }
+    /// Preview, original and native source pages live only while a composer
+    /// is open. Every close path returns them; the saved draft stays durable.
+    fn closeComposer(self: *App) void {
+        self.compose_active = false;
+        self.clearComposePreview();
+        // The next draw repaints every cell before rendering, so the previous
+        // frame's composer copies are no longer referenced.
+        self.releaseComposeFrame();
+        self.compose.releaseOutgoing(self.allocator);
+    }
     fn clearComposePreview(self: *App) void {
         if (self.compose_preview) |*prepared| prepared.deinit();
         self.compose_preview = null;
@@ -7005,6 +7184,23 @@ const App = struct {
         self.compose_preview_plain = "";
         self.compose_preview_digest = null;
         self.compose_preview_error = null;
+        self.compose_preview_semantic_limited = false;
+    }
+    fn releaseComposeFrame(self: *App) void {
+        if (self.compose_frame) |*arena| arena.deinit();
+        self.compose_frame = null;
+    }
+    /// Cleaned display copies of a large native source must not consume the
+    /// fixed frame heap. Browser builds keep using the frame arena.
+    fn composeFrameAllocator(self: *App) Allocator {
+        if (comptime !outgoing_native) return self.frame.allocator();
+        if (self.compose_frame == null) self.compose_frame = .init(composeBacking(self.allocator));
+        return self.compose_frame.?.allocator();
+    }
+    fn limitSemanticComposePreview(self: *App) void {
+        if (self.compose_preview) |*prepared| prepared.deinit();
+        self.compose_preview = null;
+        self.compose_preview_semantic_limited = true;
     }
     fn ensureComposePreview(self: *App) !void {
         const source = self.compose.fields[4].value();
@@ -7033,7 +7229,11 @@ const App = struct {
         };
     }
     fn buildComposePreview(self: *App, source: []const u8) !void {
-        self.compose_preview_arena = .init(self.allocator);
+        // The rendered note, plain alternative and semantic layouts belong to
+        // this revision. Replacement, a format/source change or closing the
+        // composer releases them through clearComposePreview.
+        const backing = composeBacking(self.allocator);
+        self.compose_preview_arena = .init(backing);
         const owned = self.compose_preview_arena.?.allocator();
         const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source, .original = self.compose.original });
         // Plain prepare borrows the editable field. Own it here so a later
@@ -7041,16 +7241,26 @@ const App = struct {
         self.compose_preview_plain = try owned.dupe(u8, output.plain);
         if (self.compose.original) |original| {
             const note = try markdown_mail.renderNote(owned, source, self.compose.body_format);
-            self.compose_preview = try html_view.Prepared.initGeneratedMarkdown(self.allocator, note.html);
+            self.compose_preview = try self.semanticComposePreview(backing, note.html);
             // Received markup never acquires trusted generated-Markdown token
             // classes. Rendering failure changes only this inert preview;
             // the retained original and validated outgoing HTML stay intact.
-            self.compose_original_preview = html_view.Prepared.init(self.allocator, original.bodyHtml) catch null;
-        } else if (output.html) |html| self.compose_preview = try html_view.Prepared.initGeneratedMarkdown(self.allocator, html);
+            self.compose_original_preview = html_view.Prepared.init(backing, original.bodyHtml) catch null;
+        } else if (output.html) |html| self.compose_preview = try self.semanticComposePreview(backing, html);
+    }
+    /// markdown_mail.prepare above has already validated the complete
+    /// outgoing message. Only the viewer's own bounded limits fall back.
+    fn semanticComposePreview(self: *App, backing: Allocator, generated: []const u8) !?html_view.Prepared {
+        return html_view.Prepared.initGeneratedMarkdown(backing, generated) catch |err| {
+            if (!semanticViewLimit(err)) return err;
+            self.compose_preview_semantic_limited = true;
+            return null;
+        };
     }
     fn requireComposePreview(self: *App) !void {
         try self.ensureComposePreview();
         if (self.compose_preview) |*prepared| prepared.ensure(80, .unicode) catch |err| {
+            if (semanticViewLimit(err)) return self.limitSemanticComposePreview();
             self.compose_preview_error = err;
             return err;
         };
@@ -7091,16 +7301,22 @@ const App = struct {
             const message = try std.fmt.allocPrint(self.frame.allocator(), "Preview unavailable: {s}\nSource retained · sending is blocked.\nCtrl+T explicitly switches to plain text.", .{@errorName(err)});
             return self.flowTone(win, message, offset, base_row, .warning);
         };
-        if (!plain_only) if (self.compose_preview) |*prepared| {
+        if (!plain_only) if (self.compose_preview) |*prepared| semantic: {
             if (win.width == 0) return base_row;
             prepared.ensure(@min(win.width, max_cols), win.screen.width_method) catch |err| {
+                if (semanticViewLimit(err)) {
+                    self.limitSemanticComposePreview();
+                    break :semantic;
+                }
                 self.compose_preview_error = err;
                 return self.flowTone(win, try std.fmt.allocPrint(self.frame.allocator(), "Preview unavailable: {s}\nSource retained · Ctrl+T chooses plain text.", .{@errorName(err)}), offset, base_row, .warning);
             };
             const rows = prepared.draw(win, offset, base_row, self.palette, self.mono);
             return if (self.compose.original != null) self.composeOriginalDraw(win, offset, rows) else rows;
         };
-        return self.flow(win, self.compose_preview_plain, offset, base_row);
+        var rows = base_row;
+        if (!plain_only and self.compose_preview_semantic_limited) rows = try self.flowTone(win, "Formatted view exceeds this terminal viewer's limits · showing the complete plain-text alternative · outgoing HTML is validated and unchanged\n\n", offset, rows, .warning);
+        return self.flowToneIn(self.composeFrameAllocator(), win, self.compose_preview_plain, offset, rows, .text);
     }
     fn composeOriginalDraw(self: *App, win: vaxis.Window, offset: usize, base_row: usize) !usize {
         const original = self.compose.original orelse return base_row;
@@ -7112,12 +7328,12 @@ const App = struct {
         if (self.compose_original_preview) |*prepared| {
             if (win.width != 0) {
                 prepared.ensure(@min(win.width, max_cols), win.screen.width_method) catch {
-                    return self.flow(win, original.bodyText, offset, rows);
+                    return self.flowToneIn(self.composeFrameAllocator(), win, original.bodyText, offset, rows, .text);
                 };
                 return prepared.draw(win, offset, rows, self.palette, self.mono);
             }
         }
-        return self.flow(win, original.bodyText, offset, rows);
+        return self.flowToneIn(self.composeFrameAllocator(), win, original.bodyText, offset, rows, .text);
     }
     fn composePreviewDraw(self: *App, win: vaxis.Window) !void {
         self.mouseArea(win, .compose_preview_scroll, 0);
@@ -7325,8 +7541,12 @@ const App = struct {
             suffix_at = insert_at + marker.len;
         }
         const marker = if (clean.len > 0) try std.fmt.allocPrint(self.frame.allocator(), "\n\n-- \n{s}\n\n", .{clean}) else "";
-        const changed = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s}", .{ body[0..insert_at], marker, body[suffix_at..] });
-        if (changed.len > types.Limits.body_bytes) return error.BodyTooLarge;
+        // A reply may quote a long thread. Build the changed source once in a
+        // scoped composer-backed buffer instead of the fixed frame heap.
+        if (insert_at + marker.len + (body.len - suffix_at) > types.Limits.compose_body_bytes) return error.BodyTooLarge;
+        var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer scratch.deinit();
+        const changed = try std.fmt.allocPrint(scratch.allocator(), "{s}{s}{s}", .{ body[0..insert_at], marker, body[suffix_at..] });
         const old_cursor = field.cursor;
         try field.set(self.allocator, changed);
         field.cursor = if (old_cursor <= insert_at) old_cursor else if (old_cursor >= suffix_at) insert_at + marker.len + (old_cursor - suffix_at) else insert_at + @min(old_cursor - insert_at, marker.len);
@@ -7422,7 +7642,7 @@ const App = struct {
             if (kind == .save_back) {
                 self.clearGraceRecovery();
                 self.mode = .browse;
-                self.compose_active = false;
+                self.closeComposer();
                 self.say(false, "Draft kept · local editing is paused in Gmail", .{});
                 try self.resumeMailboxReader();
                 return;
@@ -7434,8 +7654,8 @@ const App = struct {
             if (kind == .save_back) {
                 self.clearGraceRecovery();
                 self.mode = .browse;
-                self.compose_active = false;
-                self.say(true, "Outcome unknown · original recovery draft retained", .{});
+                self.closeComposer();
+                self.say(true, "Outcome unknown · protected draft kept in Drafts · check Gmail Sent before resending", .{});
                 try self.resumeMailboxReader();
             } else self.markUnknown(.send);
             return;
@@ -7457,6 +7677,17 @@ const App = struct {
             return;
         };
         try self.start(kind, .{ .account = self.account(), .cmd = "draft.update", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), draft_value), .acknowledgementOnly = true });
+    }
+    /// Renders the saved protected draft into the private HTML preview. The
+    /// composer is never saved first, so the draft stays exactly as submitted;
+    /// no send, upload or draft write is requested.
+    fn openProtectedPreview(self: *App) !void {
+        if (browser_target or !self.capabilities.open_urls) return error.LinksUnavailable;
+        if (!self.compose_active or !self.compose.unknown_outcome or self.compose.id.value().len == 0) return error.DraftNotFound;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        try self.start(.open, .{ .cmd = "draft.open-preview", .account = self.account(), .draftId = self.compose.id.value() });
+        self.job.protected_preview = true;
     }
     fn persistDraftAtExit(self: *App) !void {
         if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.unknown_outcome or self.compose.gmailPaused()) return;
@@ -8041,7 +8272,11 @@ const App = struct {
         defer self.allocator.free(id);
         try self.compose.operation_id.set(self.allocator, id);
         try self.compose.operation_error.set(self.allocator, "");
-        const gmail_digest = try @import("draft_link.zig").contentDigest(self.frame.allocator(), try self.compose.draft(self.frame.allocator()), self.account());
+        // The digest encodes the complete source and original once; keep that
+        // transient copy off the fixed frame heap and release it immediately.
+        var digest_arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer digest_arena.deinit();
+        const gmail_digest = try @import("draft_link.zig").contentDigest(digest_arena.allocator(), try self.compose.draft(digest_arena.allocator()), self.account());
         if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..] }) else {
             self.cancelAutosaveTimer();
             self.autosave_due = false;
@@ -8116,7 +8351,7 @@ const App = struct {
         }
         if (same(state, "applied")) {
             self.compose.unknown_outcome = false;
-            self.compose_active = false;
+            self.closeComposer();
             self.mode = .browse;
             self.sayAction(false, "Send complete · provider accepted", .{});
             try self.resumeMailboxReader();
@@ -8127,8 +8362,26 @@ const App = struct {
             self.say(false, "{s}", .{if (same(text(get(result, "errorCode")), "DraftChanged")) @as([]const u8, "Draft changed · send cancelled · review before sending again") else "Send cancelled · draft retained"});
         } else if (same(state, "rejected")) {
             self.mode = .compose;
-            self.sayFailure("Submission rejected · draft retained", text(get(result, "errorCode")));
-        } else self.markUnknown(.send);
+            self.sayFailure("Submission rejected · draft retained", sendReceiptCode(result));
+        } else {
+            // A retained-reason failure must not delay the protection itself.
+            self.retainSendReceipt(result) catch {};
+            self.markUnknown(.send);
+        }
+    }
+    /// Keeps the operation identity and reason of a send receipt. Blank or
+    /// malformed fields never erase a reason recorded earlier.
+    fn retainSendReceipt(self: *App, receipt: Value) !void {
+        const id = sendReceiptOperation(receipt);
+        if (id.len > 0) try self.compose.operation_id.set(self.allocator, id);
+        const code = sendReceiptCode(receipt);
+        if (code.len > 0) try self.compose.operation_error.set(self.allocator, code);
+    }
+    fn sendReasonText(self: *App) ![]const u8 {
+        const code = self.compose.operation_error.value();
+        if (code.len == 0) return "Not recorded · treat as possibly sent";
+        if (!validDiagnosticCode(code)) return humanError(code);
+        return std.fmt.allocPrint(self.frame.allocator(), "{s} ({s})", .{ humanError(code), code });
     }
     fn cancelGraceAtExit(self: *App) void {
         if (!self.grace_active or self.grace_queue.value().len == 0) return;
@@ -8178,7 +8431,7 @@ const App = struct {
             self.review_ready = false;
             self.compose.insert_mode = false;
             self.mode = .compose;
-            self.say(true, "Outcome unknown · {s} · :receipt checks · q keeps draft", .{if (self.compose.operation_error.value().len > 0) self.compose.operation_error.value() else "Unconfirmed"});
+            self.say(true, "Outcome unknown · {s} · draft kept in Drafts · :receipt checks · q keeps draft", .{if (validDiagnosticCode(self.compose.operation_error.value())) self.compose.operation_error.value() else "Unconfirmed"});
         } else {
             self.invitation_unknown = true;
             self.mode = .browse;
@@ -9030,15 +9283,17 @@ const App = struct {
         try self.vx.resetState(writer);
         try writer.flush();
         try std.posix.tcsetattr(self.tty.fd.handle, .FLUSH, self.tty.termios);
-        const result = editor.edit(self.io, self.allocator, self.environ, self.compose.fields[4].value(), self.tty.fd.handle, &self.cancellation);
+        // The readback becomes the body's storage, so it uses that field's owner.
+        const body_allocator = self.compose.fields[4].owner(self.allocator);
+        const result = editor.edit(self.io, body_allocator, self.environ, self.compose.fields[4].value(), self.tty.fd.handle, &self.cancellation);
         // Own readback before fallible terminal restoration, so even a restore
         // failure cannot leak its buffer or discard a valid editor change.
         // Transfer rather than copy: bounded allocator exhaustion cannot lose
         // a valid body whose private editor file has already been removed.
         if (result) |value_in| {
             const field = &self.compose.fields[4];
-            if (!same(field.value(), value_in.body)) field.history.record(self.allocator, field.value(), field.cursor) catch {};
-            field.bytes.deinit(self.allocator);
+            if (!same(field.value(), value_in.body)) field.recordUndo(body_allocator, value_in.body.len) catch {};
+            field.bytes.deinit(body_allocator);
             field.bytes = .fromOwnedSlice(value_in.body);
             field.cursor = value_in.body.len;
             self.compose.body_scroll = 0;
@@ -9103,6 +9358,7 @@ const App = struct {
             self.completion_dismissed = true;
             return;
         }
+        if (self.compose.unknown_outcome and key.matches('p', .{}) and self.capabilities.open_urls and !browser_target) return self.openProtectedPreview();
         if (self.compose.unknown_outcome and !(key.matches(Key.escape, .{}) or key.matches('q', .{}) or key.matches(':', .{}))) {
             self.markUnknown(.send);
             return;
@@ -9110,10 +9366,14 @@ const App = struct {
         for (&self.compose.fields) |*field| field.undo_enabled = true;
         if (key.matches('z', .{ .ctrl = true }) or key.matches('y', .{ .ctrl = true })) {
             const field = &self.compose.fields[self.compose.selected];
+            if (!field.boundHistory(self.allocator)) {
+                self.say(false, "Undo unavailable for text this large · source unchanged", .{});
+                return;
+            }
             const restored = if (key.matches('y', .{ .ctrl = true }))
-                try field.history.redo(self.allocator, field.value(), field.cursor)
+                try field.history.redo(field.owner(self.allocator), field.value(), field.cursor)
             else
-                try field.history.undo(self.allocator, field.value(), field.cursor);
+                try field.history.undo(field.owner(self.allocator), field.value(), field.cursor);
             if (restored) |snapshot| {
                 try field.assign(self.allocator, snapshot.text);
                 field.cursor = snapshot.cursor;
@@ -9319,7 +9579,7 @@ const App = struct {
         self.paste_history_field = null;
         if (self.mode == .compose and !self.compose.attachment_focus and !self.compose.unknown_outcome and !self.compose.gmailPaused() and !self.grace_active and self.compose.selected < self.compose.fields.len) {
             const field = &self.compose.fields[self.compose.selected];
-            if (field.history.record(self.allocator, field.value(), field.cursor)) {
+            if (field.recordUndo(self.allocator, field.value().len)) {
                 self.paste_history_field = self.compose.selected;
                 field.undo_enabled = false;
             } else |_| {}
@@ -9327,7 +9587,12 @@ const App = struct {
         self.paste = true;
     }
     fn pasteEnd(self: *App) void {
-        if (self.paste_history_field) |index| self.compose.fields[index].undo_enabled = true;
+        if (self.paste_history_field) |index| {
+            const field = &self.compose.fields[index];
+            field.undo_enabled = true;
+            // A paste that crossed the snapshot ceiling leaves no stale undo.
+            _ = field.boundHistory(self.allocator);
+        }
         self.paste_history_field = null;
         self.paste = false;
         self.paste_cr = false;
@@ -10017,17 +10282,28 @@ const App = struct {
         return self.flowTone(win, value_in, offset, base_row, .text);
     }
     fn flowTone(self: *App, win: vaxis.Window, value_in: []const u8, offset: usize, base_row: usize, tone: Tone) !usize {
-        const clean = try safe(self.frame.allocator(), value_in, true);
+        return self.flowToneIn(self.frame.allocator(), win, value_in, offset, base_row, tone);
+    }
+    /// The allocator must outlive the next render, like frame.
+    fn flowToneIn(self: *App, allocator: Allocator, win: vaxis.Window, value_in: []const u8, offset: usize, base_row: usize, tone: Tone) !usize {
+        const clean = try safe(allocator, value_in, true);
         return self.flowClean(win, clean, offset, base_row, tone, .{});
     }
     fn caretPosition(self: *App, win: vaxis.Window, raw: []const u8, raw_cursor: usize) !TextPosition {
-        const clean = try safe(self.frame.allocator(), raw, true);
-        const prefix = try safe(self.frame.allocator(), raw[0..@min(raw_cursor, raw.len)], true);
+        return self.caretPositionIn(self.frame.allocator(), win, raw, raw_cursor);
+    }
+    fn caretPositionIn(self: *App, allocator: Allocator, win: vaxis.Window, raw: []const u8, raw_cursor: usize) !TextPosition {
+        _ = self;
+        const clean = try safe(allocator, raw, true);
+        const prefix = try safe(allocator, raw[0..@min(raw_cursor, raw.len)], true);
         return text_layout.caret(clean, @min(prefix.len, clean.len), win.width, win.screen.width_method, .words);
     }
     fn flowCaret(self: *App, win: vaxis.Window, raw: []const u8, raw_cursor: usize, offset: usize) !usize {
-        const clean = try safe(self.frame.allocator(), raw, true);
-        const prefix = try safe(self.frame.allocator(), raw[0..@min(raw_cursor, raw.len)], true);
+        return self.flowCaretIn(self.frame.allocator(), win, raw, raw_cursor, offset);
+    }
+    fn flowCaretIn(self: *App, allocator: Allocator, win: vaxis.Window, raw: []const u8, raw_cursor: usize, offset: usize) !usize {
+        const clean = try safe(allocator, raw, true);
+        const prefix = try safe(allocator, raw[0..@min(raw_cursor, raw.len)], true);
         const rows = self.flowClean(win, clean, offset, 0, .text, .{});
         const caret = text_layout.caret(clean, @min(prefix.len, clean.len), win.width, win.screen.width_method, .words);
         if (caret.row >= offset and caret.row - offset < win.height and caret.column < win.width) {
@@ -11416,7 +11692,7 @@ const App = struct {
         const alias_action = left.child(.{ .x_off = alias_x, .width = alias_width, .height = 1 });
         if (self.capabilities.aliases) try self.line(alias_action, 0, "[f Alias]", if (self.compose.unknown_outcome or self.compose.gmailPaused()) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 3) .selected else .accent);
         if (self.capabilities.aliases and !self.compose.unknown_outcome and !self.compose.gmailPaused()) self.mouseArea(alias_action, .compose_from, 0);
-        if (self.compose.unknown_outcome) try self.line(left, 1, if (browser_target) "Send unconfirmed · recovery draft retained" else try std.fmt.allocPrint(self.frame.allocator(), "Operation: {s}", .{self.compose.operation_id.value()}), .warning);
+        if (self.compose.unknown_outcome) try self.line(left, 1, if (browser_target) "Send unconfirmed · recovery draft retained" else try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown · {s} · draft kept in Drafts", .{if (validDiagnosticCode(self.compose.operation_error.value())) self.compose.operation_error.value() else "reason not recorded"}), .warning);
         const original_note = self.compose.original != null or self.compose_source_mode == .attached or self.compose.omitted_attachments > 0;
         if (original_note and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.omitted_attachments > 0) "Text-only forward · original attachments are omitted" else if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", if (self.compose.omitted_attachments > 0) .warning else .muted);
         const header_row: usize = if (self.compose.unknown_outcome or original_note) 2 else 1;
@@ -11453,18 +11729,20 @@ const App = struct {
         const value_in = self.compose.fields[4].value();
         const cursor_at = self.compose.fields[4].cursor;
         const editing_body = self.compose.selected == 4 and self.compose.insert_mode;
+        // A long authored source is cleaned into composer-owned frame pages.
+        const body_frame = self.composeFrameAllocator();
         if (editing_body and body.width > 0 and body.height > 0) {
-            const caret = try self.caretPosition(body, value_in, cursor_at);
+            const caret = try self.caretPositionIn(body_frame, body, value_in, cursor_at);
             if (caret.row < self.compose.body_scroll) self.compose.body_scroll = caret.row;
             if (caret.row -| self.compose.body_scroll >= body.height) self.compose.body_scroll = caret.row + 1 - body.height;
         }
-        const body_lines = if (editing_body) try self.flowCaret(body, value_in, cursor_at, self.compose.body_scroll) else try self.flow(body, value_in, self.compose.body_scroll, 0);
+        const body_lines = if (editing_body) try self.flowCaretIn(body_frame, body, value_in, cursor_at, self.compose.body_scroll) else try self.flowToneIn(body_frame, body, value_in, self.compose.body_scroll, 0, .text);
         self.compose.body_scroll = @min(self.compose.body_scroll, body_lines -| @as(usize, body.height));
         try self.composeAttachmentsDraw(left, attachment_row, attachment_rows);
         if (split) {
             const right = self.panel(win, left_width, win.width - left_width, if (self.compose.unknown_outcome) " Submission receipt " else self.composePreviewTitle(), false);
             if (self.compose.unknown_outcome) {
-                const receipt = if (browser_target) @as([]const u8, "Send outcome is unconfirmed.\n\nCheck Sent in Gmail before any new send.\n\nRecovery draft is retained and protected; no automatic resend.") else try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown\nOperation: {s}\nReason: {s}\n\nThe original recovery draft is protected.\nNo edit or automatic resend.\n\n:receipt checks the journal.\nq keeps it and returns to mail.", .{ self.compose.operation_id.value(), self.compose.operation_error.value() });
+                const receipt = if (browser_target) @as([]const u8, "Send outcome is unconfirmed.\n\nCheck Sent in Gmail before any new send.\n\nRecovery draft is retained and protected; no automatic resend.") else try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown · it may have been sent\nOperation: {s}\nReason: {s}\n\nThis draft is kept in local Drafts.\nIt is protected: no edit or automatic resend.\nCheck Sent in Gmail before sending again.\n\n{s}:receipt checks the journal.\nq keeps it and returns to mail.", .{ if (self.compose.operation_id.value().len > 0) self.compose.operation_id.value() else "not recorded", try self.sendReasonText(), if (self.capabilities.open_urls) @as([]const u8, "p opens the formatted HTML preview.\n") else "" });
                 _ = try self.flow(right, receipt, 0, 0);
             } else try self.composePreviewDraw(right);
         }
@@ -11561,7 +11839,7 @@ const App = struct {
             .contacts => if (!self.capabilities.contacts_write) " j/k Move · / Search · Enter Choose recipient · Ctrl+R Refresh · Esc/q Back" else " j/k Move  / Search  n New  e Edit  ? Help  Esc/q Back",
             .label_manager => if (self.label_manager_page == .list) " n New · r Rename · d Delete · o Open · / Filter · Tab Controls · Ctrl+R Refresh · Esc/q Back" else if (self.label_manager_page == .delete) " Tab Controls · Enter Activate · y Delete · Esc Cancel · emails kept" else " Name · Tab Controls · Ctrl+S Save · Esc Cancel · q is text",
             .contact_edit => " Tab Controls · Enter Activate · Ctrl+S Save · Esc Contacts · q is text",
-            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
+            .compose => if (self.compose.gmailPaused()) " Paused in Gmail · g / :gmail-draft Status or takeback · q Back" else if (self.compose.unknown_outcome) (if (!self.capabilities.durable_drafts) " Unconfirmed send · Check Sent in Gmail · acknowledge before editing" else if (self.capabilities.open_urls) " Protected recovery draft · p HTML preview · :receipt Check · q Keep/back" else " Protected recovery draft · :receipt Check · q Keep/back") else if (self.compose.insert_mode) (if (self.compose.selected < 3) (if (self.capabilities.remote_recipients) " INSERT · Ctrl+Space Recipients · Up/Down · Enter Choose · Tab Field · Esc Normal" else " INSERT · Ctrl+N/P Recipient · Enter Choose · Tab Field · Esc Normal") else " INSERT · Ctrl+G Body top · Ctrl+A/E Line · Tab Field · Esc Normal · q is text") else " i Edit · e $EDITOR · a Contacts · Ctrl+G Top · A Attach · p Preview · Ctrl+T Format · Ctrl+D/U Scroll · Ctrl+S Review · Tab · q Back · ? Help",
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
@@ -15343,6 +15621,10 @@ const App = struct {
         self.calendar_week_title_count = 0;
         try self.ensureLoadingAnimation();
         _ = self.frame.reset(.retain_capacity);
+        if (self.compose_frame) |*arena| {
+            // An open composer reuses its display pages; a closed one has none.
+            if (self.compose_active) _ = arena.reset(.retain_capacity) else self.releaseComposeFrame();
+        }
         self.clearObsoleteStatus();
         self.mouse_hits.clear();
         self.meeting_rect = null;
@@ -15369,7 +15651,8 @@ const App = struct {
         try self.line(win, 0, try self.fittedGlobalHeader(win), .accent);
         try self.line(win, 1, try self.fitLine(win, try self.syncLine(), win.width), self.syncTone());
         const body = win.child(.{ .y_off = 2, .height = win.height -| 4 });
-        if (self.mode == .compose or self.mode == .review or self.mode == .attachment) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or (self.mode == .search and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
+        // A composer command keeps the draft visible behind its prompt.
+        if (self.mode == .compose or self.mode == .review or self.mode == .attachment or (self.mode == .command and self.previous_mode == .compose)) try self.composeDraw(body) else if (self.mode == .contacts or self.mode == .contact_edit or (self.mode == .search and self.previous_mode == .contacts)) try self.contactsDraw(body) else {
             const panes = layout.computeWithRatios(body.width, body.height, self.focus, self.reader_layout, self.expanded, try self.navigationWidth(body), self.ui_preferences.listWidthPercent, self.ui_preferences.listHeightPercent);
             if (panes.navigation) |rect| try self.navigationDraw(self.pane(body, rect, " Accounts / mailboxes ", self.focus == .navigation));
             if (panes.list) |rect| try self.listDraw(self.pane(body, rect, try self.listTitle(), self.focus == .list));
@@ -16546,6 +16829,490 @@ test "send grace UX: definite cancellation remains editable and unconfirmed undo
     app.compose.unknown_outcome = false;
     try app.apply(.grace_process, "malformed result");
     try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+const protected_send_body = "# Protected body\n\nWith **formatting**.";
+
+fn protectedSendSetup(app: *App) !void {
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\",\"capabilities\":[\"mail-read\",\"mail-drafts\",\"mail-send\"]}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    app.compose.body_format = .markdown;
+    try app.compose.id.set(app.allocator, "recovery-draft");
+    try app.compose.fields[0].set(app.allocator, "friend@example.test");
+    try app.compose.fields[4].set(app.allocator, protected_send_body);
+}
+
+fn protectedScreenText(allocator: Allocator, screen: *vaxis.Screen) ![]u8 {
+    var rendered: std.ArrayList(u8) = .empty;
+    errdefer rendered.deinit(allocator);
+    for (0..screen.height) |row| {
+        for (0..screen.width) |col| try rendered.appendSlice(allocator, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+        try rendered.append(allocator, '\n');
+    }
+    return rendered.toOwnedSlice(allocator);
+}
+
+fn protectedComposeText(app: *App, allocator: Allocator) ![]u8 {
+    var screen = try vaxis.Screen.init(allocator, .{ .cols = 160, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 160, .height = 40, .screen = &screen };
+    app.mouse_hits.clear();
+    try app.composeDraw(win);
+    return protectedScreenText(allocator, &screen);
+}
+
+test "send receipt UX: queued and nested receipt reasons survive without clearing protection" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try protectedSendSetup(&app);
+    const revision = app.compose.revision;
+    // The durable queue receipt carries the code on the entry; its nested
+    // journal operation has none.
+    try app.applyGraceResult("{\"ok\":true,\"data\":{\"queueId\":\"queue-1\",\"draftId\":\"recovery-draft\",\"operationId\":\"op-queued\",\"state\":\"unknown\",\"resumeRequired\":false,\"createdAtMs\":1,\"dueAtMs\":2,\"errorCode\":\"OutOfMemory\",\"operation\":{\"id\":\"op-queued\",\"hash\":\"digest\",\"outcome\":\"unknown\",\"draftId\":\"recovery-draft\",\"errorCode\":\"\"}}}");
+    try std.testing.expect(app.compose_active and app.compose.unknown_outcome and !app.review_ready);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqualStrings("op-queued", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "OutOfMemory") != null);
+    {
+        const rendered = try protectedComposeText(&app, a);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Operation: op-queued") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Reason: Not enough memory") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "(OutOfMemory)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Outcome unknown · OutOfMemory · draft kept in Drafts") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "kept in local Drafts") != null);
+    }
+
+    // Only the nested journal operation names the failure.
+    try app.compose.operation_id.set(a, "");
+    try app.compose.operation_error.set(a, "");
+    try app.applyGraceResult("{\"ok\":true,\"data\":{\"queueId\":\"queue-2\",\"draftId\":\"recovery-draft\",\"state\":\"submitting\",\"errorCode\":\"\",\"operation\":{\"id\":\"op-nested\",\"outcome\":\"unknown\",\"errorCode\":\"OutOfMemory\"}}}");
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings("op-nested", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+
+    // Blank or malformed later receipts never erase the recorded reason.
+    try app.applyGraceResult("{\"ok\":true,\"data\":{\"state\":\"unknown\",\"errorCode\":\"not a code\\u001b\"}}");
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings("op-nested", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+
+    try std.testing.expectEqualStrings(protected_send_body, app.compose.fields[4].value());
+    try std.testing.expectEqual(revision, app.compose.revision);
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "send receipt UX: journal reload and protocol errors keep a reason and blanks render an explicit fallback" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try protectedSendSetup(&app);
+    // operation.list found the unknown operation with a blank journal code;
+    // the queue entry still names it. Another draft's entry is ignored.
+    app.receipt_unknown = true;
+    try app.apply(.queue_inspect, "{\"ok\":true,\"data\":{\"queue\":[{\"queueId\":\"queue-1\",\"draftId\":\"recovery-draft\",\"operationId\":\"op-queued\",\"state\":\"unknown\",\"errorCode\":\"OutOfMemory\",\"operation\":{\"id\":\"op-queued\",\"outcome\":\"unknown\",\"errorCode\":\"\"}},{\"queueId\":\"queue-other\",\"draftId\":\"other-draft\",\"operationId\":\"op-other\",\"state\":\"unknown\",\"errorCode\":\"Timeout\"}]}}");
+    try std.testing.expect(app.compose.unknown_outcome and app.compose_active);
+    try std.testing.expectEqualStrings("op-queued", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+
+    // A rejected envelope keeps its code after markUnknown replaces the diagnostic.
+    try app.compose.operation_error.set(a, "");
+    try app.apply(.grace_process, "{\"ok\":false,\"error\":{\"code\":\"OutOfMemory\"}}");
+    try std.testing.expect(app.compose.unknown_outcome and app.status_kind == .unknown);
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+    try std.testing.expectEqualStrings("UnknownOutcome", app.status_error_code[0..app.status_error_len]);
+
+    // No receipt names a reason: the receipt says so instead of rendering blank.
+    try app.compose.operation_id.set(a, "");
+    try app.compose.operation_error.set(a, "");
+    app.receipt_unknown = true;
+    try app.apply(.queue_inspect, "{\"ok\":true,\"data\":{\"queue\":[{\"queueId\":\"queue-3\",\"draftId\":\"recovery-draft\",\"state\":\"submitting\"}]}}");
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings("", app.compose.operation_error.value());
+    {
+        const rendered = try protectedComposeText(&app, a);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Operation: not recorded") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Reason: Not recorded") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Outcome unknown · reason not recorded") != null);
+    }
+    try std.testing.expectEqualStrings(protected_send_body, app.compose.fields[4].value());
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "send receipt UX: receipt reload keeps a same-operation reason and clears stale ones" {
+    const a = std.testing.allocator;
+    const Transport = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+        fn call(ctx: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            if (std.mem.indexOf(u8, request, "\"queue.list\"") == null) return error.UnexpectedCommand;
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"queue\":[]}}");
+        }
+    };
+    const Reload = struct {
+        fn run(target: *App, operations: []const u8) !void {
+            try target.apply(.draft_operations, operations);
+            target.job.future.?.await(target.io);
+            target.job.future = null;
+        }
+    };
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    var transport: Transport = .{};
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    app.client = .{ .ctx = &transport, .callFn = Transport.call };
+    app.loop = loop;
+    defer app.deinit();
+    try protectedSendSetup(&app);
+    try app.compose.operation_id.set(a, "op-queued");
+    try app.compose.operation_error.set(a, "OutOfMemory");
+    app.markUnknown(.send);
+
+    // Same operation with a blank persisted code: the known reason survives
+    // the complete journal and queue reload.
+    try Reload.run(&app, "{\"ok\":true,\"data\":{\"operations\":[{\"id\":\"op-queued\",\"draftId\":\"recovery-draft\",\"outcome\":\"unknown\",\"errorCode\":\"\"}]}}");
+    try std.testing.expect(app.receipt_unknown and app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings("op-queued", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+    try app.apply(.queue_inspect, app.job.response.?);
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+
+    // A different uncertain operation does not inherit the earlier reason.
+    try Reload.run(&app, "{\"ok\":true,\"data\":{\"operations\":[{\"id\":\"op-later\",\"draftId\":\"recovery-draft\",\"outcome\":\"unknown\"}]}}");
+    try std.testing.expect(app.receipt_unknown);
+    try std.testing.expectEqualStrings("op-later", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("", app.compose.operation_error.value());
+
+    // No uncertain operation for this draft clears both; another draft's
+    // unknown entry and this draft's applied entry are not used.
+    try app.compose.operation_error.set(a, "OutOfMemory");
+    try Reload.run(&app, "{\"ok\":true,\"data\":{\"operations\":[{\"id\":\"op-other\",\"draftId\":\"other-draft\",\"outcome\":\"unknown\",\"errorCode\":\"Timeout\"},{\"id\":\"op-later\",\"draftId\":\"recovery-draft\",\"outcome\":\"applied\"}]}}");
+    try std.testing.expect(!app.receipt_unknown);
+    try std.testing.expectEqualStrings("", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("", app.compose.operation_error.value());
+    // The pending queue check still holds protection until it answers.
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings(protected_send_body, app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(usize, 3), transport.calls.load(.acquire));
+}
+
+test "send receipt UX: protected draft refuses Gmail upload and edits while preview reads only the saved draft" {
+    const a = std.testing.allocator;
+    const Transport = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+        fn call(ctx: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"opened\":false,\"fixture\":true,\"path\":\"preview.html\"}}");
+        }
+    };
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 160, .rows = 36, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    var transport: Transport = .{};
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    app.client = .{ .ctx = &transport, .callFn = Transport.call };
+    app.loop = loop;
+    app.vx = &vx;
+    defer app.deinit();
+    try protectedSendSetup(&app);
+    try app.compose.operation_id.set(a, "op-queued");
+    try app.compose.operation_error.set(a, "OutOfMemory");
+    app.markUnknown(.send);
+    const revision = app.compose.revision;
+
+    // The draft stays visible behind the command prompt.
+    try app.onComposeKey(.{ .codepoint = ':' });
+    try std.testing.expectEqual(Mode.command, app.mode);
+    try app.input.set(a, "gmail-draft");
+    try app.draw();
+    {
+        const rendered = try protectedScreenText(a, &vx.screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Submission receipt") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Accounts / mailboxes") == null);
+    }
+    // :gmail-draft is refused before any request and returns to the draft.
+    try app.onKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expect(app.job.future == null and app.ux_overlay == .none);
+    try std.testing.expect(app.compose.unknown_outcome and app.status_kind == .unknown);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Gmail upload blocked") != null);
+
+    // Editing, review, format and discard stay blocked.
+    for ([_]Key{ .{ .codepoint = 'i' }, .{ .codepoint = 'e' }, .{ .codepoint = 's', .mods = .{ .ctrl = true } }, .{ .codepoint = 't', .mods = .{ .ctrl = true } }, .{ .codepoint = 'd' } }) |key| try app.onComposeKey(key);
+    try std.testing.expect(!app.compose.insert_mode and app.compose.unknown_outcome and app.job.future == null);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expectEqual(types.BodyFormat.markdown, app.compose.body_format);
+    try std.testing.expectEqual(@as(usize, 0), transport.calls.load(.acquire));
+
+    // p renders the saved draft only: no save, upload or send precedes it.
+    try app.onComposeKey(.{ .codepoint = 'p' });
+    try std.testing.expect(app.job.future != null and app.job.kind == .open and app.job.protected_preview);
+    {
+        const request = try std.json.parseFromSlice(Value, a, app.job.request, .{});
+        defer request.deinit();
+        try std.testing.expectEqualStrings("draft.open-preview", text(get(request.value, "cmd")));
+        try std.testing.expectEqualStrings("recovery-draft", text(get(request.value, "draftId")));
+        try std.testing.expectEqualStrings("self@example.test", text(get(request.value, "account")));
+        try std.testing.expect(get(request.value, "draft") == .null);
+    }
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+    try app.apply(.open, app.job.response.?);
+    try std.testing.expect(app.compose.unknown_outcome and app.compose_active and app.status_kind == .unknown);
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "send outcome still unknown") != null);
+
+    // Without a browser the preview is refused and p remains protected.
+    app.capabilities.open_urls = false;
+    try std.testing.expectError(error.LinksUnavailable, app.onUxCommand("preview-browser"));
+    try app.onComposeKey(.{ .codepoint = 'p' });
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+    try std.testing.expectEqualStrings(protected_send_body, app.compose.fields[4].value());
+    try std.testing.expectEqualStrings("op-queued", app.compose.operation_id.value());
+    try std.testing.expectEqualStrings("OutOfMemory", app.compose.operation_error.value());
+    try std.testing.expectEqual(revision, app.compose.revision);
+}
+
+test "growing mail UI: formatted reply source accepts more than 64 inline screenshots beside an ordinary large file" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    try app.pinComposeTarget(.reply, "growing-source");
+    app.compose_intent = .reply;
+    const shots = 146;
+    var html: std.ArrayList(u8) = .empty;
+    try html.appendSlice(owned, "<div><p>Synthetic growing thread</p>");
+    const attachments = try owned.alloc(types.Attachment, shots + 1);
+    for (attachments[0..shots], 0..) |*attachment, index| {
+        try html.appendSlice(owned, try std.fmt.allocPrint(owned, "<p>Synthetic reply {d}</p><img src=\"cid:shot-{d}@example.test\">", .{ index, index }));
+        attachment.* = .{ .id = try std.fmt.allocPrint(owned, "shot-{d}", .{index}), .filename = try std.fmt.allocPrint(owned, "shot-{d}.png", .{index}), .mimeType = "image/png", .size = 4096, .contentId = try std.fmt.allocPrint(owned, "shot-{d}@example.test", .{index}), .disposition = "inline" };
+    }
+    try html.appendSlice(owned, "</div>");
+    // An unreferenced ordinary file is not an inline resource of a reply.
+    attachments[shots] = .{ .id = "report", .filename = "report.pdf", .mimeType = "application/pdf", .size = 40 * 1024 * 1024, .disposition = "attachment" };
+    var message: types.Message = .{ .id = "growing-source", .threadId = "growing-thread", .subject = "Synthetic growing thread", .bodyHtml = html.items, .attachments = attachments };
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, try std.json.Stringify.valueAlloc(owned, message, .{}), .{}));
+    try std.testing.expect(app.compose_source_ready and app.compose_source_html);
+    try std.testing.expect(app.compose_source_format_error == null);
+    try std.testing.expectEqual(@as(usize, shots), app.compose_source_resources);
+    try std.testing.expect(app.composeChoiceEnabled(0));
+    // The descriptor bound follows the message limit, not a fixed 64.
+    const many = try owned.alloc(types.Attachment, types.Limits.message_attachments + 1);
+    @memset(many, .{ .id = "part", .filename = "part.png", .mimeType = "image/png", .size = 1, .contentId = "part@example.test", .disposition = "inline" });
+    message.attachments = many;
+    try app.inspectComposeSource(try std.json.parseFromSliceLeaky(Value, owned, try std.json.Stringify.valueAlloc(owned, message, .{}), .{}));
+    try std.testing.expectEqual(error.TooManyAttachments, app.compose_source_format_error.?);
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "growing mail UI: retained original and preview use composer pages under fixed-heap pressure and free on protected close" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    // Hold the ordinary fixed heap to a small ceiling. The draft-owned source,
+    // original, preview and display copies must not draw from it.
+    var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = a, .limit = 2 * 1024 * 1024 };
+    var factory: CacheTestClient = .{};
+    var app = factory.app(cap.allocator());
+    defer app.deinit();
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    // A long authored list exceeds only the semantic viewer's bounded layout.
+    var note: std.ArrayList(u8) = .empty;
+    for (0..20000) |index| try note.appendSlice(owned, try std.fmt.allocPrint(owned, "- synthetic item {d}\n", .{index}));
+    var quoted_html: std.ArrayList(u8) = .empty;
+    var quoted_plain: std.ArrayList(u8) = .empty;
+    for (0..15000) |index| {
+        try quoted_html.appendSlice(owned, try std.fmt.allocPrint(owned, "<p>Synthetic quoted reply {d} with screenshot context.</p>", .{index}));
+        try quoted_plain.appendSlice(owned, try std.fmt.allocPrint(owned, "Synthetic quoted reply {d} with screenshot context.\n", .{index}));
+    }
+    const draft = try @import("json.zig").value(owned, .{ .id = "growing-draft", .to = &[_]types.Address{.{ .address = "peer@example.test" }}, .subject = "Re: Synthetic growing thread", .bodyText = note.items, .bodyFormat = "markdown", .threadId = "growing-thread", .inReplyTo = "<parent@example.test>", .original = types.Original{ .from = .{ .address = "peer@example.test" }, .subject = "Synthetic growing thread", .bodyText = quoted_plain.items, .bodyHtml = quoted_html.items } });
+    const before = send_memory.snapshot().allocatorUsedBytes;
+    try app.compose.load(app.allocator, draft);
+    app.compose_active = true;
+    app.mode = .compose;
+    try std.testing.expect(app.compose.fields[4].backing != null);
+    try std.testing.expectEqualStrings(note.items, app.compose.fields[4].value());
+    // Review is not blocked by the viewer limit; the authoritative prepare ran.
+    try app.requireComposePreview();
+    try std.testing.expect(app.compose_preview == null and app.compose_preview_semantic_limited and app.compose_preview_error == null);
+    try std.testing.expect(std.mem.indexOf(u8, app.compose_preview_plain, "synthetic item 19999") != null);
+    {
+        var screen = try vaxis.Screen.init(a, .{ .cols = 160, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 160, .height = 40, .screen = &screen };
+        try app.composeDraw(win);
+        const rendered = try markdownTestScreenText(a, &screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Formatted view exceeds") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "synthetic item 0") != null);
+    }
+    try std.testing.expect(send_memory.snapshot().allocatorUsedBytes > before + note.items.len);
+    // The protected draft stays unedited and is never uploaded or resubmitted.
+    app.markUnknown(.send);
+    for ([_]Key{ .{ .codepoint = 'i' }, .{ .codepoint = 'x', .text = "x" }, .{ .codepoint = 's', .mods = .{ .ctrl = true } } }) |key| try app.onComposeKey(key);
+    try app.openGmailDraft();
+    try app.saveDraft(.save);
+    try std.testing.expect(app.job.future == null and app.compose.unknown_outcome);
+    try std.testing.expectEqualStrings(note.items, app.compose.fields[4].value());
+    // Closing returns every composer page; the saved draft remains durable.
+    try app.saveDraft(.save_back);
+    try std.testing.expect(!app.compose_active and app.compose.original == null and app.compose_frame == null);
+    try std.testing.expectEqual(@as(usize, 0), app.compose.fields[4].value().len);
+    try std.testing.expectEqual(before, send_memory.snapshot().allocatorUsedBytes);
+    try std.testing.expectEqual(@as(usize, 0), cap.snapshot().rejectedAllocations);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "growing mail UI: selected outgoing jobs grow by actual bytes while ordinary jobs keep fixed caps" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    try std.testing.expect(outgoingJobCommand("draft.update") and outgoingJobCommand("draft.recovery-save") and outgoingJobCommand("mail.compose-source") and outgoingJobCommand("draft.read"));
+    try std.testing.expect(!outgoingJobCommand("mail.read") and !outgoingJobCommand("draft.list") and !outgoingJobCommand("contacts.list"));
+    var scratch: std.heap.ArenaAllocator = .init(a);
+    defer scratch.deinit();
+    const big = try scratch.allocator().alloc(u8, types.Limits.request_bytes + 4096);
+    @memset(big, 'x');
+    try std.testing.expectError(error.RequestTooLarge, encodeJobRequest(scratch.allocator(), .{ .cmd = "mail.search", .query = big }, false));
+    try std.testing.expect((try encodeJobRequest(scratch.allocator(), .{ .cmd = "draft.update", .bodyText = big }, true)).len > types.Limits.request_bytes);
+    const Transport = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+        fn call(ctx: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"big-draft\"}}");
+        }
+    };
+    var dummy_tty: vaxis.Tty = undefined;
+    var dummy_vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+    defer loop.deinit();
+    var transport: Transport = .{};
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    app.client = .{ .ctx = &transport, .callFn = Transport.call };
+    app.loop = loop;
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"self@example.test\"}]", .{}));
+    app.compose_active = true;
+    app.mode = .compose;
+    try app.compose.id.set(a, "big-draft");
+    try app.compose.fields[4].set(a, big);
+    const before = send_memory.snapshot().allocatorUsedBytes;
+    try app.saveDraft(.save);
+    try std.testing.expect(app.job.future != null and app.job.outgoing and app.job_arena_outgoing);
+    try std.testing.expect(app.job.request.len > types.Limits.request_bytes);
+    {
+        const request = try std.json.parseFromSlice(Value, a, app.job.request, .{ .max_value_len = send_memory.record_bytes });
+        defer request.deinit();
+        try std.testing.expectEqualStrings("draft.update", text(get(request.value, "cmd")));
+        try std.testing.expectEqual(big.len, text(get(get(request.value, "draft"), "bodyText")).len);
+    }
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    try std.testing.expect(send_memory.snapshot().allocatorUsedBytes > before);
+    // Only this job's own response may use the outgoing record ceiling.
+    try std.testing.expectEqual(@max(response_limit, send_memory.record_bytes), app.responseLimit(app.job.response.?));
+    try std.testing.expectEqual(response_limit, app.responseLimit("{\"ok\":true}"));
+    // The next outgoing job may borrow an ID from this response. Force the
+    // old arena to span chunks so resetting it first would invalidate the ID.
+    const previous = try app.data(app.job_arena.allocator(), app.job.response.?);
+    const borrowed_id = text(get(previous, "id"));
+    _ = try app.job_arena.allocator().alloc(u8, 256 * 1024);
+    try app.start(.draft_read, .{ .cmd = "draft.read", .account = app.account(), .draftId = borrowed_id });
+    {
+        const request = try std.json.parseFromSlice(Value, a, app.job.request, .{});
+        defer request.deinit();
+        try std.testing.expectEqualStrings("big-draft", text(get(request.value, "draftId")));
+    }
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    // An ordinary follow-up returns its arena to the fixed heap.
+    try app.start(.contacts, .{ .cmd = "contacts.list", .account = app.account() });
+    try std.testing.expect(!app.job.outgoing and !app.job_arena_outgoing);
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    try std.testing.expectEqual(response_limit, app.responseLimit(app.job.response.?));
+    try std.testing.expectEqual(before, send_memory.snapshot().allocatorUsedBytes);
+    try std.testing.expectEqual(@as(usize, 3), transport.calls.load(.acquire));
+    const invalid_target: [129]u8 = @splat('x');
+    try std.testing.expectError(error.CapacityExceeded, app.startTarget(.draft_read, .{ .cmd = "draft.read", .draftId = "big-draft" }, &invalid_target));
+    try std.testing.expect(app.job.future == null and app.job.request.len == 0 and app.job.response == null);
+    try std.testing.expectEqual(before, send_memory.snapshot().allocatorUsedBytes);
+}
+
+test "growing mail UI: undo clears instead of keeping snapshots that cross the ceiling" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    const near = try a.alloc(u8, edit_history.max_snapshot_bytes - 4);
+    defer a.free(near);
+    @memset(near, 'a');
+    const field = &app.compose.fields[4];
+    try field.set(a, near);
+    field.undo_enabled = true;
+    try field.insert(a, "b", composeFieldLimit(4));
+    try std.testing.expectEqual(@as(usize, 1), field.history.past_count);
+    // This edit's result exceeds one snapshot; nothing unrestorable remains.
+    try field.insert(a, "crossing", composeFieldLimit(4));
+    try std.testing.expectEqual(@as(usize, 0), field.history.past_count);
+    try app.onComposeKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+    try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Undo unavailable") != null);
+    try std.testing.expectEqual(near.len + 9, field.value().len);
+    // A paste that starts below the ceiling and ends above it.
+    try field.set(a, near);
+    app.pasteStart();
+    try std.testing.expectEqual(@as(usize, 1), field.history.past_count);
+    try field.insert(a, "pasted beyond the ceiling", composeFieldLimit(4));
+    app.pasteEnd();
+    try std.testing.expectEqual(@as(usize, 0), field.history.past_count);
+    try app.onComposeKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(near.len + 25, field.value().len);
+    // Below the ceiling again, ordinary undo resumes.
+    try field.set(a, "small");
+    try field.insert(a, "!", composeFieldLimit(4));
+    try app.onComposeKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqualStrings("small", field.value());
     try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
 }
 
@@ -18547,7 +19314,7 @@ test "foreground priority: explicit reads join refresh while active writes keep 
                 };
             } else {
                 try std.testing.expectEqual(@as(usize, 0), self.active.load(.acquire));
-                try std.testing.expect(same(cmd, "mail.read") or same(cmd, "mail.thread"));
+                try std.testing.expect(same(cmd, "mail.read") or same(cmd, "mail.compose-source") or same(cmd, "mail.thread"));
                 const field = if (same(cmd, "mail.thread")) "focusMessageId" else "messageId";
                 try std.testing.expectEqualStrings("foreground-target", text(get(parsed.value, field)));
                 _ = self.foreground.fetchAdd(1, .acq_rel);
@@ -18575,6 +19342,13 @@ test "foreground priority: explicit reads join refresh while active writes keep 
         app.client = .{ .ctx = &client, .callFn = Held.provider, .cachedFn = Held.local };
         app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
         try app.replaceList(.list, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"foreground-target\",\"threadId\":\"foreground-thread\"}],\"cached\":true,\"cacheReady\":true}}");
+        if (outgoing_native and action != .open) {
+            // A reader refusal is selectable source metadata, not evidence
+            // that the complete original lacks HTML. Fetch it by identity.
+            try app.replaceReader(true, "{\"ok\":true,\"data\":{\"messages\":[{\"id\":\"foreground-target\",\"threadId\":\"foreground-thread\",\"bodyCached\":false,\"bodyCacheError\":\"ComposeSourceRequired\"}],\"partial\":true}}", true);
+            try std.testing.expectEqual(@as(usize, 1), app.thread.len);
+            try std.testing.expectEqualStrings(app.account(), app.reader_account.value());
+        }
         app.focus = .list;
         try app.start(kind, .{ .cmd = if (kind == .refresh) "mail.refresh" else "mail.archive", .account = app.account() });
         try client.entered.waitTimeout(app.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(10) } });
@@ -19557,14 +20331,16 @@ test "markdown composer: preview refusal keeps source blocks dispatch and caches
     var client: CacheTestClient = .{};
     var app = client.app(a);
     defer app.deinit();
-    const over_limit = try a.alloc(u8, (markdown_mail.max_lines + 1) * 2);
+    // Native line admission follows source bytes; exceed a structural bound
+    // with a small source that remains valid when switched to plain text.
+    const nesting: [markdown_mail.max_depth + 2]u8 = @splat('>');
+    const over_limit = try std.mem.concat(a, u8, &.{ &nesting, " Keep exact source\n" });
     defer a.free(over_limit);
-    for (0..markdown_mail.max_lines + 1) |i| @memcpy(over_limit[i * 2 ..][0..2], "x\n");
     try app.compose.fields[0].set(a, "recipient@example.test");
     try app.compose.fields[4].set(a, over_limit);
     app.compose.body_format = .markdown;
-    try std.testing.expectError(error.MarkdownTooComplex, app.requireComposePreview());
-    try std.testing.expectError(error.MarkdownTooComplex, app.sendDraft());
+    try std.testing.expectError(error.MarkdownTooDeep, app.requireComposePreview());
+    try std.testing.expectError(error.MarkdownTooDeep, app.sendDraft());
     try std.testing.expectEqual(@as(usize, 1), app.compose_preview_builds);
     try std.testing.expectEqualStrings(over_limit, app.compose.fields[4].value());
     try std.testing.expect(app.job.future == null);
@@ -22302,7 +23078,7 @@ test "meeting notifications: pending reply and forward sources retain ownership 
         try std.testing.expect(!client.canceled.load(.acquire));
         try std.testing.expectEqual(@as(usize, 1), client.calls);
         const source = try client.request(&app, 0);
-        try std.testing.expectEqualStrings("mail.read", text(get(source, "cmd")));
+        try std.testing.expectEqualStrings(if (outgoing_native) "mail.compose-source" else "mail.read", text(get(source, "cmd")));
         try std.testing.expectEqualStrings("personal@example.test", text(get(source, "account")));
         try std.testing.expectEqualStrings("original-source", text(get(source, "messageId")));
         screen.clear();

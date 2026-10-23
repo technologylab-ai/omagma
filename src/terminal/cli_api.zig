@@ -101,7 +101,7 @@ pub fn requestSchema(a: std.mem.Allocator, catalogue: Catalogue, entry: Value, w
     try result.object.put(a, "title", .{ .string = name });
     try result.object.put(a, "description", .{ .string = j.text(entry, "summary") });
     try result.object.put(a, "x-omagma-version", .{ .string = @import("build_options").version });
-    try result.object.put(a, "x-max-request-bytes", .{ .integer = @import("types.zig").Limits.request_bytes });
+    try result.object.put(a, "x-max-request-bytes", .{ .integer = @intCast(if (@import("send_memory.zig").native and @import("send_memory.zig").command(name)) @import("send_memory.zig").record_bytes else @import("types.zig").Limits.request_bytes) });
     try result.object.put(a, "x-max-nesting", .{ .integer = 64 });
     for ([_][]const u8{ "capabilities", "notes" }) |key| if (j.get(entry, key)) |value| try result.object.put(a, if (std.mem.eql(u8, key, "notes")) "x-notes" else "x-capabilities", value);
     if (j.get(entry, "examples")) |examples| try result.object.put(a, "examples", examples);
@@ -126,7 +126,7 @@ pub fn schemas(io: std.Io, a: std.mem.Allocator, target: ?[]const u8) !void {
     } else {
         var variants: Value = .{ .array = .init(a) };
         for (catalogue.commands) |entry| try variants.array.append(try requestSchema(a, catalogue, entry, false));
-        var root = try j.value(a, .{ .@"$schema" = "https://json-schema.org/draft/2020-12/schema", .title = "Omagma public JSONL requests", .@"x-omagma-version" = @import("build_options").version, .@"x-max-request-bytes" = @import("types.zig").Limits.request_bytes, .@"x-max-nesting" = 64 });
+        var root = try j.value(a, .{ .@"$schema" = "https://json-schema.org/draft/2020-12/schema", .title = "Omagma public JSONL requests", .@"x-omagma-version" = @import("build_options").version, .@"x-max-request-bytes" = @import("send_memory.zig").record_bytes, .@"x-max-nesting" = 64 });
         try root.object.put(a, "oneOf", variants);
         try root.object.put(a, "$defs", catalogue.definitions);
         try writeSchema(&writer.interface, root);

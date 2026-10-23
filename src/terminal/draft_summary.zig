@@ -14,8 +14,8 @@ pub fn attachmentMetadata(a: std.mem.Allocator, input: []const t.Attachment) ![]
 /// Compact owned references protect file bytes independently of mutable
 /// metadata and summaries, which deliberately omit the original snapshot.
 pub fn blobReferences(a: std.mem.Allocator, attachments: []const t.Attachment) ![]const []const u8 {
-    if (attachments.len > 64) return error.TooManyAttachments;
-    var selected: [64][]const u8 = undefined;
+    if (attachments.len > t.Limits.message_attachments) return error.TooManyAttachments;
+    var selected: [t.Limits.message_attachments][]const u8 = undefined;
     var count: usize = 0;
     for (attachments) |attachment| if (attachment.blobId) |id| {
         try @import("draft_codec.zig").validateAttachmentHandle(id);

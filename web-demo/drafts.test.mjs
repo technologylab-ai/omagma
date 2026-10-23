@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserDraftError, DRAFT_LIMITS, validateDraftSnapshot, planDraftWrite, planDraftWrites, planDraftCleanup, createBrowserDrafts } from './drafts.mjs';
+import { CACHE_LIMITS } from './cache.mjs';
 const binding = { account: 'ada@example.test', clientId: 'synthetic.apps.googleusercontent.com', grantId: 'a'.repeat(64) };
 const draft = { id: 'synthetic-draft', subject: 'Retained draft', bodyText: 'Unsaved until the atomic commit', bodyFormat: 'markdown', to: [{ address: 'peer@example.test', name: 'Peer' }], attachments: [{ id: 'file', filename: 'note.txt', mimeType: 'text/plain', size: 3, data: 'YWJj' }], original: { bodyHtml: '<img src="cid:logo"><p>Literal source</p>', resources: [{ id: 'logo', filename: 'logo.png', mimeType: 'image/png', size: 3, data: 'YWJj', contentId: 'logo' }] } };
 const snapshot = (actor = binding, extra = {}) => ({ version: 1, revision: 1, ...actor, drafts: [structuredClone(draft)], operations: [], ...extra });
@@ -16,6 +17,26 @@ test('draft snapshots preserve literal originals, files, formats, and raw unfini
   original.drafts[0].recoveryFields[0] = 'x'.repeat(64 * 1024);
   original.drafts[0].recoveryFields[3] = 's'.repeat(16 * 1024 + 16);
   assert.deepEqual(validateDraftSnapshot(binding, original), original);
+});
+
+test('growing chains retain all inline resources without consuming ordinary file slots or widening byte tiers', () => {
+  const value = snapshot();
+  value.drafts[0].original.resources = Array.from({ length: CACHE_LIMITS.relatedResources }, (_, index) => ({ id: `screen-${index}`, filename: 'screen.png', mimeType: 'image/png', size: 3, data: 'AAEC', contentId: `screen-${index}@example.test` }));
+  value.drafts[0].original.bodyHtml = value.drafts[0].original.resources.map(file => `<img src="cid:${file.contentId}">`).join('');
+  value.drafts[0].attachments = Array.from({ length: 16 }, (_, index) => ({ ...draft.attachments[0], id: `file-${index}` }));
+  value.drafts[0].omittedAttachments = CACHE_LIMITS.attachments;
+  const restored = validateDraftSnapshot(binding, JSON.stringify(value));
+  assert.deepEqual(restored, value);
+  assert.equal(restored.drafts[0].original.resources.at(-1).data, 'AAEC');
+  const excess = structuredClone(value);
+  excess.drafts[0].original.resources.push({ ...value.drafts[0].original.resources[0], id: 'extra' });
+  assert.throws(() => validateDraftSnapshot(binding, excess), code('invalid'));
+  const oversized = structuredClone(value);
+  oversized.drafts[0].bodyText = 'x'.repeat(2 * 1024 * 1024 + 1);
+  assert.throws(() => validateDraftSnapshot(binding, oversized), code('invalid'));
+  const tooManyFiles = structuredClone(value);
+  tooManyFiles.drafts[0].attachments.push({ ...draft.attachments[0], id: 'file-17' });
+  assert.throws(() => validateDraftSnapshot(binding, tooManyFiles), code('invalid'));
 });
 
 test('every binding component is exact and metadata or credentials have no schema fields', () => {

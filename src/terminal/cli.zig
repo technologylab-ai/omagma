@@ -14,7 +14,7 @@ const HtmlMetrics = struct {
 pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []const u8, args: *std.process.Args.Iterator) !void {
     const cap = init.meter;
     const a = cap.allocator();
-    var setup = std.heap.ArenaAllocator.init(a);
+    var setup = std.heap.ArenaAllocator.init(commandBacking(a, mode, args));
     defer setup.deinit();
     const sa = setup.allocator();
     // Release status and upgrade guidance never initialize the mail session or
@@ -129,7 +129,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             continue;
         }
         if (eq(arg, "--body-stdin")) {
-            const bytes = try readStdin(io, sa, t.Limits.body_bytes);
+            const bytes = try readStdin(io, sa, t.Limits.compose_body_bytes);
             try draft.object.put(sa, "bodyText", .{ .string = bytes });
             has_draft = true;
             continue;
@@ -220,11 +220,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try attachment_paths.append(sa, v);
             has_draft = true;
         } else if (eq(arg, "--body-file")) {
-            const body = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.body_bytes);
+            const body = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.compose_body_bytes);
             try draft.object.put(sa, "bodyText", .{ .string = body });
             has_draft = true;
         } else if (eq(arg, "--draft-file") or eq(arg, "--contact-file") or eq(arg, "--event-file")) {
-            const raw = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, t.Limits.request_bytes);
+            const raw = try files.readBounded(io, sa, std.Io.Dir.cwd(), v, if (eq(arg, "--draft-file")) @import("send_memory.zig").record_bytes else t.Limits.request_bytes);
             if (!core.boundedJson(raw)) return error.InvalidRequest;
             const value = try std.json.parseFromSliceLeaky(j.Value, sa, raw, .{});
             try req.object.put(sa, if (eq(arg, "--draft-file")) "draft" else if (eq(arg, "--event-file")) "event" else "contact", value);
@@ -295,13 +295,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
     var input_buffer: [8192]u8 = undefined;
     var input = std.Io.File.stdin().reader(io, &input_buffer);
     while (true) {
-        var frame = std.heap.ArenaAllocator.init(a);
-        defer frame.deinit();
-        const fa = frame.allocator();
+        var frame_backing = a;
         var bytes: std.ArrayList(u8) = .empty;
         // Grow on the reclaiming allocator, not the reply arena: otherwise
         // older capacities can remain resident beside a large draft request.
-        defer bytes.deinit(a);
+        defer bytes.deinit(frame_backing);
         var oversized = false;
         var eof = false;
         while (true) {
@@ -310,15 +308,36 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
                 break;
             } else return err;
             if (byte == '\n') break;
-            if (bytes.items.len < t.Limits.request_bytes) try bytes.append(a, byte) else oversized = true;
+            if (bytes.items.len == t.Limits.request_bytes) {
+                // A large JSONL frame is staged outside the fixed pool before
+                // its command can be inspected; execute then enforces the
+                // command-specific allowance. Only actual bytes are retained.
+                var expanded: std.ArrayList(u8) = .empty;
+                const growing = @import("send_memory.zig").allocator();
+                try expanded.appendSlice(growing, bytes.items);
+                bytes.deinit(frame_backing);
+                bytes = expanded;
+                frame_backing = growing;
+            }
+            if (bytes.items.len < @import("send_memory.zig").record_bytes) try bytes.append(frame_backing, byte) else oversized = true;
         }
         if (eof and bytes.items.len == 0 and !oversized) break;
-        const response = try client.call(fa, if (oversized) "" else bytes.items);
+        var frame = std.heap.ArenaAllocator.init(@import("send_memory.zig").operationBacking(a, bytes.items, false));
+        defer frame.deinit();
+        const response = try client.call(frame.allocator(), if (oversized) "" else bytes.items);
         try output.interface.writeAll(response);
         try output.interface.writeByte('\n');
         try output.interface.flush();
         if (eof) break;
     }
+}
+fn commandBacking(normal: std.mem.Allocator, mode: []const u8, args: *std.process.Args.Iterator) std.mem.Allocator {
+    var scan = args.*;
+    const verb = scan.next() orelse return normal;
+    if (help_info.jsonAlias(mode, verb)) |alias| return @import("send_memory.zig").commandBacking(normal, alias);
+    var bytes: [128]u8 = undefined;
+    const command = std.fmt.bufPrint(&bytes, "{s}.{s}", .{ help_info.jsonFamily(mode), verb }) catch return normal;
+    return @import("send_memory.zig").commandBacking(normal, command);
 }
 // Help is handled before reading a body file or waiting for stdin. Iterator
 // copies borrow the same immutable argv, but retain their own position on POSIX.
@@ -383,7 +402,7 @@ fn valueOption(arg: []const u8) bool {
         "--body",              "--attach-file",      "--name",                 "--label-id",      "--confirm-name", "--body-file",
         "--draft-file",        "--event-file",       "--contact-file",         "--expected-etag", "--add-label",    "--remove-label",
         "--background-color",  "--text-color",       "--queue-id",             "--blob-id",       "--mime-type",    "--scope",
-        "--send-delay",        "--delay-seconds", "--next-attempt",
+        "--send-delay",        "--delay-seconds",    "--next-attempt",
     }) |candidate| if (eq(arg, candidate)) return true;
     return false;
 }

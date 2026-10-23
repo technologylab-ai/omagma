@@ -5,7 +5,11 @@ const std = @import("std");
 const t = @import("types.zig");
 const highlight = @import("markdown_highlight.zig");
 const original_mail = @import("original_mail.zig");
-pub const max_lines = 32768;
+const portable_max_lines = 32768;
+/// Every additional source line consumes a newline byte. Native compose work
+/// is bounded by source/output bytes and nesting, without a smaller line-count
+/// ceiling that rejects long quoted discussions. Storage grows by actual use.
+pub const max_lines = if (t.Limits.compose_body_bytes > t.Limits.body_bytes) t.Limits.compose_body_bytes + 1 else portable_max_lines;
 pub const max_depth = 12;
 pub const max_table_columns = 32;
 pub const logo_content_id = "omagma-logo@omagma.invalid";
@@ -29,7 +33,7 @@ const Buffer = struct {
     allocator: std.mem.Allocator,
     bytes: std.ArrayList(u8) = .empty,
     fn append(self: *Buffer, bytes: []const u8) !void {
-        if (bytes.len > t.Limits.body_bytes - self.bytes.items.len) return error.RenderedBodyTooLarge;
+        if (bytes.len > t.Limits.compose_body_bytes - self.bytes.items.len) return error.RenderedBodyTooLarge;
         try self.bytes.appendSlice(self.allocator, bytes);
     }
     fn escaped(self: *Buffer, bytes: []const u8) !void {
@@ -513,7 +517,7 @@ pub fn renderNote(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat
 }
 
 fn renderSource(a: std.mem.Allocator, source: []const u8, format: t.BodyFormat, standalone: bool) !Rendered {
-    if (source.len > t.Limits.body_bytes) return error.BodyTooLarge;
+    if (source.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
     if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidUtf8;
     for (source) |c| if ((c < 0x20 and c != '\n' and c != '\r' and c != '\t') or c == 0x7f) return error.InvalidBody;
     var lines: std.ArrayList(Line) = .empty;
@@ -827,13 +831,34 @@ test "markdown mail: output complexity depth controls and URL boundaries" {
     try std.testing.expectError(error.InvalidBody, render(a, "hello\x1b[31m"));
     const expanding = try a.alloc(u8, t.Limits.body_bytes / 2);
     @memset(expanding, '&');
-    try std.testing.expectError(error.RenderedBodyTooLarge, render(a, expanding));
-    const many_lines = try a.alloc(u8, max_lines + 1);
+    if (t.Limits.compose_body_bytes > t.Limits.body_bytes) {
+        try std.testing.expect((try render(a, expanding)).html.len > t.Limits.body_bytes);
+    } else try std.testing.expectError(error.RenderedBodyTooLarge, render(a, expanding));
+    const many_lines = try a.alloc(u8, portable_max_lines + 1);
     @memset(many_lines, '\n');
-    try std.testing.expectError(error.MarkdownTooComplex, render(a, many_lines));
+    if (t.Limits.compose_body_bytes > t.Limits.body_bytes) {
+        _ = try render(a, many_lines);
+    } else try std.testing.expectError(error.MarkdownTooComplex, render(a, many_lines));
     for ([_][]const u8{ "javascript:alert(1)", "data:image/png;base64,aaa", "file:///tmp/private", "//example.test", "https://example.test/\n" }) |url| try std.testing.expect(!safeUrl(url));
     try std.testing.expect(safeUrl("https://example.test/path"));
     try std.testing.expect(safeUrl("mailto:peer@example.test"));
+}
+
+test "growing chain Markdown: forty thousand short quoted lines use native byte budget and portable line guard" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const line = "> Fictional quoted line\n";
+    const source = try a.alloc(u8, 40000 * line.len);
+    for (0..40000) |index| @memcpy(source[index * line.len ..][0..line.len], line);
+    if (t.Limits.compose_body_bytes == t.Limits.body_bytes) {
+        try std.testing.expectError(error.MarkdownTooComplex, render(a, source));
+        return;
+    }
+    const rendered = try render(a, source);
+    try std.testing.expectEqual(@as(usize, 40000), std.mem.count(u8, rendered.plain, "Fictional quoted line"));
+    try std.testing.expectEqual(@as(usize, 40000), std.mem.count(u8, rendered.html, "Fictional quoted line"));
+    try std.testing.expect(rendered.html.len < t.Limits.compose_body_bytes);
 }
 
 test "markdown mail: allocated results have exact ownership and capped failures clean scratch" {

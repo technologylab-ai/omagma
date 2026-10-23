@@ -160,7 +160,7 @@ pub fn inventory(s: *Store, a: std.mem.Allocator) ![]Object {
         if (!same(before, try file.stat(s.io))) return error.MigrationSourceChanged;
         if (kind == .attachment) {
             blobs += 1;
-            if (blobs > 128) return error.AttachmentLimitExceeded;
+            if (blobs > @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
             if (!std.mem.eql(u8, entry.name[5..69], &std.fmt.bytesToHex(digest, .lower))) return error.MigrationSourceChanged;
         }
         try rows.append(a, .{ .name = try a.dupe(u8, entry.name), .kind = kind, .size = size, .sha256 = digest, .handle = try storage.Handle.create(s.io) });

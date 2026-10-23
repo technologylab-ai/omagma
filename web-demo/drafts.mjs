@@ -1,6 +1,6 @@
 // Private, bounded passive draft data. The shared WASM draft codec validates
 // restored mail after fresh PROFILE verification; nothing here renders HTML.
-import { cacheKey } from './cache.mjs';
+import { cacheKey, CACHE_LIMITS } from './cache.mjs';
 import { pendingSend } from './transport.mjs';
 export const DRAFT_LIMITS = Object.freeze({ actors: 3, drafts: 8, operations: 64, totalBytes: 8 * 1024 * 1024, draftBytes: 3 * 1024 * 1024 - 16 * 1024, snapshotBytes: 8 * 1024 * 1024 + 128 * 1024 });
 const DATABASE = 'omagma-browser-drafts-v1';
@@ -44,7 +44,7 @@ function original(value) {
   for (const key of ['to', 'cc']) list(value[key] ?? [], 1024, address);
   text(value.subject ?? '', 64 * 1024); text(value.date ?? '', 64 * 1024);
   text(value.bodyText ?? '', 2 * 1024 * 1024); text(value.bodyHtml ?? '', 2 * 1024 * 1024);
-  list(value.resources ?? [], 32, file);
+  list(value.resources ?? [], CACHE_LIMITS.relatedResources, file);
 }
 function draft(value) {
   record(value, ['id', 'from', 'recoveryFields', 'to', 'cc', 'bcc', 'subject', 'bodyText', 'bodyFormat', 'threadId', 'inReplyTo', 'references', 'attachments', 'original', 'omittedAttachments']);
@@ -60,7 +60,7 @@ function draft(value) {
   for (const key of ['threadId', 'inReplyTo', 'references']) text(value[key] ?? '', 64 * 1024);
   list(value.attachments ?? [], 16, file);
   if (value.original !== undefined && value.original !== null) original(value.original);
-  integer(value.omittedAttachments ?? 0, 64);
+  integer(value.omittedAttachments ?? 0, CACHE_LIMITS.attachments);
   const files = [...(value.attachments ?? []), ...(value.original?.resources ?? [])];
   if (files.reduce((sum, entry) => sum + entry.size, 0) > 2 * 1024 * 1024) limited();
   if (encodedSize(value) > DRAFT_LIMITS.draftBytes) limited();

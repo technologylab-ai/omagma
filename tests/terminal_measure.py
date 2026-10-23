@@ -107,6 +107,13 @@ def allocator_receipt(path):
                 "message decode exceeded its separate workspace")
         require(scratch["usedBytes"] == 0 and scratch["active"] is False,
                 "completed workload retained a message scratch lease")
+        outgoing = fixed["outgoingTransient"]
+        require(outgoing["osBacked"] is True and outgoing.get("allocatorLimitBytes") is None,
+                "outgoing operations lost their explicit transient allocation policy")
+        require(type(outgoing["allocatorPeakBytes"]) is int and outgoing["allocatorPeakBytes"] >= 0,
+                "invalid outgoing transient allocation peak")
+        require(outgoing["allocatorUsedBytes"] == 0 and outgoing["rejectedAllocations"] == 0,
+                "completed workload retained or refused outgoing transient allocations")
     return value
 
 

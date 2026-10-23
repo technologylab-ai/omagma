@@ -216,6 +216,10 @@ fn run(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map, co
     };
 }
 
+fn validateSnapshotSize(length: usize) !void {
+    if (length > types.Limits.compose_body_bytes + 64 * 1024) return error.InvalidEditorBody;
+}
+
 const Snapshot = struct {
     allocator: Allocator,
     parent: Io.Dir,
@@ -224,9 +228,9 @@ const Snapshot = struct {
     name: [46]u8,
 
     fn create(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map, text: []const u8) !Snapshot {
-        // This envelope+plaintext copy is allowed the existing request ceiling;
-        // its source body's own 2 MiB limit remains unchanged.
-        if (text.len > types.Limits.request_bytes or !std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidEditorBody;
+        // Allow the native body plus bounded textual envelope headers.
+        try validateSnapshotSize(text.len);
+        if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidEditorBody;
         const base = environ.get("XDG_RUNTIME_DIR") orelse "/tmp";
         if (!std.fs.path.isAbsolute(base)) return error.InvalidRuntimeDirectory;
         // /tmp is a system alias on macOS. Resolve that trusted base once, then
@@ -298,7 +302,7 @@ pub fn view(io: Io, allocator: Allocator, environ: *const std.process.Environ.Ma
 }
 
 pub fn edit(io: Io, allocator: Allocator, environ: *const std.process.Environ.Map, body: []const u8, tty_fd: std.posix.fd_t, cancellation: *Io.Event) !Result {
-    if (body.len > types.Limits.body_bytes or !std.unicode.utf8ValidateSlice(body)) return error.InvalidEditorBody;
+    if (body.len > types.Limits.compose_body_bytes or !std.unicode.utf8ValidateSlice(body)) return error.InvalidEditorBody;
     const command = try choose(io, environ);
     var nonce: [16]u8 = undefined;
     try io.randomSecure(&nonce);
@@ -332,13 +336,13 @@ pub fn edit(io: Io, allocator: Allocator, environ: *const std.process.Environ.Ma
         preserve = true;
         return err;
     };
-    if (stat.kind != .file or stat.nlink != 1 or stat.size > types.Limits.body_bytes) {
+    if (stat.kind != .file or stat.nlink != 1 or stat.size > types.Limits.compose_body_bytes) {
         preserve = true;
         return error.InvalidEditorBody;
     }
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
-    const updated = reader.interface.allocRemaining(allocator, .limited(types.Limits.body_bytes)) catch |err| {
+    const updated = reader.interface.allocRemaining(allocator, .limited(types.Limits.compose_body_bytes)) catch |err| {
         preserve = true;
         return err;
     };
@@ -410,7 +414,7 @@ test "received editor snapshot is private and removes replacements without follo
         try std.testing.expectEqual(@as(u32, 0o700), directory_stat.permissions.toMode() & 0o777);
         const file_stat = try temporary.dir.statFile(io, "message.txt", .{ .follow_symlinks = false });
         try std.testing.expectEqual(@as(u32, 0o600), file_stat.permissions.toMode() & 0o777);
-        const copied = try files.readBounded(io, allocator, temporary.dir, "message.txt", types.Limits.request_bytes);
+        const copied = try files.readBounded(io, allocator, temporary.dir, "message.txt", types.Limits.compose_body_bytes + 64 * 1024);
         defer allocator.free(copied);
         try std.testing.expectEqualStrings(original, copied);
         // Editors can leave other files or replace the initial file atomically.
@@ -475,8 +479,5 @@ test "received editor snapshot refuses invalid or oversized input before creatin
     defer environ.deinit();
     try std.testing.expectError(error.InvalidEditorBody, Snapshot.create(std.testing.io, allocator, &environ, &.{0xff}));
     try std.testing.expectError(error.InvalidEditorBody, Snapshot.create(std.testing.io, allocator, &environ, "text\x00hidden"));
-    const oversized = try allocator.alloc(u8, types.Limits.request_bytes + 1);
-    defer allocator.free(oversized);
-    @memset(oversized, 'x');
-    try std.testing.expectError(error.InvalidEditorBody, Snapshot.create(std.testing.io, allocator, &environ, oversized));
+    try std.testing.expectError(error.InvalidEditorBody, validateSnapshotSize(types.Limits.compose_body_bytes + 64 * 1024 + 1));
 }

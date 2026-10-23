@@ -41,13 +41,43 @@ account-scoped files. Defaults are the newest 2,000 metadata entries and 256 MiB
 account, with hard limits of 10,000 and 1 GiB. One response page contains at most
 100 messages; the TUI replaces 32-row windows. Missing recent bodies are prefetched
 with a default head of 32, configurable from 0 to 64, within those same quotas.
-An individual decoded body is at most 2 MiB. Application allocations reuse a
+Ordinary decoded reader bodies retain their 2 MiB limit. Application allocations reuse a
 startup-reserved 72 MiB coalescing pool with a 64 MiB payload ceiling. Separate
 fixed reservations provide 16 MiB for one message's decoding workspace, 4 MiB
 for IO, 2 MiB for startup/environment data, and the existing 16 MiB backend
 storage. Sixteen IO workers and their requested 1 MiB stacks start before the
-runtime seals, including the daemon worker. There is no application allocator
-fallback after sealing. Arenas subdivide and return this reserved storage.
+runtime seals, including the daemon worker. Normal read/UI arenas subdivide
+and return this reserved storage without an allocator fallback. Native full-source
+capture for reply/forward, draft editing/reopening, preview, send staging/submission,
+RSVP mail and Gmail draft upload explicitly
+use a separate OS-backed operation arena. It can grow beyond 256 MiB when
+necessary and is wiped and released on success, failure or joined cancellation;
+it never becomes a Session or access-token-cache allocator. Message, attachment,
+MIME and disk quotas remain enforced. Native source text/rendering can reach
+35 MiB; the final MIME spool is checked against Gmail's exact 35 MiB maximum
+before submission. Decoded files retain their combined 25 MiB limit, with at
+most 16 ordinary outgoing files and 1,024 retained related resources. Formatted
+captures save resources as immutable blobs from the first image, so further
+replies exchange handles instead of copying base64 screenshots through JSON.
+The native store supports 4,096 blobs under the same account disk quota. Larger
+source fetches grow from received bytes, and large native draft/IPC records
+have separate serialization ceilings rather than preallocated buffers. The
+ordinary reader can retain a source envelope without expanding an oversized
+cached body; the compose-source route fetches the complete original by ID.
+Selected source/media operations have a cancellable three-minute deadline.
+Gmail draft status, takeback and import use the same native draft allowance.
+Small imports remain complete editable plain-text copies without an added
+footer. When an illustrated remote copy exceeds ordinary file slots, native
+import preserves its HTML, plain alternative and related resources as a
+protected original below a new editable note, retaining ordinary files
+separately. The response marks this mode with `importedOriginal: true`; it does
+not claim the remote HTML is editable. The original local draft and remote
+Gmail copy remain intact. The final remote-version check precedes publication
+of the new local draft and its duplicate-send guard.
+Portable/browser body and JSON byte tiers remain unchanged. Production sends render once into a
+private MIME spool and stream it to Gmail without another render or JSON/base64
+copy. `outgoingTransient` in memory diagnostics reports these allocations
+separately; the 64 MiB figure applies to the normal fixed heap, not their sum.
 External libc/pthread, Keychain and subprocess internals remain outside this
 application-owned guarantee. Reservations describe capacity, not resident RSS
 or PSS; demand faults can make reserved pages resident later.

@@ -80,7 +80,7 @@ const Server = struct {
             var response: ?[]const u8 = null;
             defer if (response) |bytes| {
                 std.crypto.secureZero(u8, @constCast(bytes));
-                self.a.free(bytes);
+                @import("send_memory.zig").operationBacking(self.a, frame.body, false).free(bytes);
             };
             self.dispatch(&frame, &response, stream) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
@@ -136,7 +136,7 @@ const Server = struct {
         output.* = try transport.readFrame(io, a, stream, transport.request_limit);
     }
     fn executeInto(self: *Server, raw: []const u8, output: *?[]const u8) !void {
-        output.* = try self.owner.execute(self.a, raw);
+        output.* = try self.owner.execute(@import("send_memory.zig").operationBacking(self.a, raw, false), raw);
     }
     fn executeTimer(io: std.Io, seconds: i64) !void {
         try platform.seconds(seconds).sleep(io);

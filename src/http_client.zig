@@ -108,6 +108,11 @@ pub const Client = struct {
     /// Explicit incoming files share one longer, bounded job. Ordinary JSON
     /// requests retain their ten-second cap and retries retain this deadline.
     pub fn initAttachmentDownload(io: std.Io) !Client {
+        return initMailTransfer(io);
+    }
+    /// Native source capture and MIME uploads use the same cancellable media
+    /// deadline as large incoming files. Ordinary request deadlines stay fixed.
+    pub fn initMailTransfer(io: std.Io) !Client {
         var client = try init(io);
         client.job_deadline = .fromNow(io, platform.seconds(@import("attachment_limits.zig").download_seconds));
         return client;

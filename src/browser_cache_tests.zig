@@ -311,17 +311,18 @@ test "browser cache: a 300-message inventory exposes only the latest 30 matching
     try std.testing.expectEqual(@as(usize, 30), (try store.list(0, a, "INBOX", "")).len);
 }
 
-test "browser cache: 49 attachment descriptors survive while a fiftieth is rejected atomically" {
+test "browser cache: growing chain descriptors survive while count overflow is rejected atomically" {
     var store = cache.Store.init(std.testing.allocator);
     defer store.deinit();
     try store.bind(0, actor);
     try store.restore(0, fixture, false);
-    var files: [50]types.Attachment = undefined;
-    for (&files) |*file| file.* = .{ .id = "synthetic-attachment", .filename = "report.pdf" };
-    try store.saveRead(0, .{ .id = "mail-inbox", .threadId = "thread-inbox", .bodyText = "Attachment inventory.", .attachments = files[0..49] });
-    try std.testing.expectEqual(@as(usize, 49), (try store.read(0, "mail-inbox")).?.attachments.len);
+    const files = try std.testing.allocator.alloc(types.Attachment, types.Limits.message_attachments + 1);
+    defer std.testing.allocator.free(files);
+    for (files) |*file| file.* = .{ .id = "synthetic-attachment", .filename = "report.pdf" };
+    try store.saveRead(0, .{ .id = "mail-inbox", .threadId = "thread-inbox", .bodyText = "Attachment inventory.", .attachments = files[0..types.Limits.message_attachments] });
+    try std.testing.expectEqual(types.Limits.message_attachments, (try store.read(0, "mail-inbox")).?.attachments.len);
     const revision = store.revision(0);
-    try std.testing.expectError(error.InvalidBrowserCache, store.saveRead(0, .{ .id = "mail-inbox", .threadId = "thread-inbox", .bodyText = "Must not replace the prior read.", .attachments = &files }));
+    try std.testing.expectError(error.InvalidBrowserCache, store.saveRead(0, .{ .id = "mail-inbox", .threadId = "thread-inbox", .bodyText = "Must not replace the prior read.", .attachments = files }));
     try std.testing.expectEqual(revision, store.revision(0));
     try std.testing.expectEqualStrings("Attachment inventory.", (try store.read(0, "mail-inbox")).?.bodyText);
 }
@@ -891,23 +892,26 @@ test "browser cache: decoder upgrade retries only eligible older refusals and pr
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqual(@as(u32, 4), decoder_policy.decoder_revision);
+    try std.testing.expectEqual(@as(u32, 5), decoder_policy.decoder_revision);
     const refused_rows =
         \\[{"id":"charset","threadId":"thread","from":{"address":"peer@example.test","name":"Retained sender"},"subject":"Retained subject","snippet":"Retained preview","labels":["INBOX","UNREAD"],"unread":true,"receivedAt":3000,"bodyCached":true,"bodyCacheError":"UnsupportedCharset","decodeWarning":"UnsupportedCharset","metadataPartial":true},
         \\{"id":"auth","threadId":"auth-thread","bodyCacheError":"NotConnected"},
         \\{"id":"unknown","threadId":"unknown-thread","bodyCacheError":"UnknownFutureRefusal"},
         \\{"id":"unfixed","threadId":"unfixed-thread","bodyCacheError":"InvalidBase64"},
-        \\{"id":"quota","threadId":"quota-thread","bodyCacheError":"DiskQuotaExceeded"}]
+        \\{"id":"quota","threadId":"quota-thread","bodyCacheError":"DiskQuotaExceeded"},
+        \\{"id":"resources","threadId":"resource-thread","bodyCacheError":"TooManyAttachments"}]
     ;
     const legacy = try document(a, refused_rows, "[]", false);
-    for ([_]?u32{ null, 3, 4, 5 }) |recorded| {
+    for ([_]?u32{ null, 3, 4, 5, 6 }) |recorded| {
         var raw = try parse(a, legacy);
         if (recorded) |revision| try raw.object.put(a, "decoderRevision", .{ .integer = revision });
         var store = cache.Store.init(std.testing.allocator);
         defer store.deinit();
         try store.bind(0, actor);
         try store.restore(0, try std.json.Stringify.valueAlloc(a, raw, .{}), false);
-        const retry = recorded == null or recorded.? < decoder_policy.decoder_revision;
+        // Charset compatibility last changed in revision 4. The revision 5
+        // resource-count migration must not retry unrelated final refusals.
+        const retry = recorded == null or recorded.? < 4;
         if (retry) {
             try std.testing.expect(try store.read(0, "charset") == null);
             const row = store.retained(0)[0];
@@ -921,6 +925,9 @@ test "browser cache: decoder upgrade retries only eligible older refusals and pr
         try std.testing.expectEqualStrings("NotConnected", (try store.read(0, "auth")).?.bodyCacheError);
         try std.testing.expectEqualStrings("UnknownFutureRefusal", (try store.read(0, "unknown")).?.bodyCacheError);
         try std.testing.expectEqualStrings("DiskQuotaExceeded", (try store.read(0, "quota")).?.bodyCacheError);
+        if (recorded == null or recorded.? < 5) {
+            try std.testing.expect(try store.read(0, "resources") == null);
+        } else try std.testing.expectEqualStrings("TooManyAttachments", (try store.read(0, "resources")).?.bodyCacheError);
         if (recorded != null) try std.testing.expectEqualStrings("InvalidBase64", (try store.read(0, "unfixed")).?.bodyCacheError);
         const persisted = try snapshot(a, &store, 0);
         try std.testing.expectEqual(@as(i64, @max(recorded orelse 0, decoder_policy.decoder_revision)), try j.integer(try parse(a, persisted), "decoderRevision", 0));

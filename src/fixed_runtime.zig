@@ -1,5 +1,7 @@
 //! Native memory ownership. Static reservations are mapped with the executable;
-//! allocations only split/reuse those bytes. There is no upstream allocator.
+//! normal allocations only split/reuse those bytes, without upstream fallback.
+//! Native outgoing operations have an explicit, separately metered transient
+//! OS-backed arena; it is wiped and released before the operation returns.
 //! Threaded's task/process buffers share a separate reservation and its complete
 //! worker pool is created before seal(), never on an application operation.
 const std = @import("std");
@@ -141,6 +143,7 @@ pub const Runtime = struct {
         startupReservationBytes: usize,
         startupUsedBytes: usize,
         mailScratch: @import("mail_scratch.zig").Snapshot,
+        outgoingTransient: @import("terminal/send_memory.zig").Snapshot,
         workerThreads: usize,
         workerStackBytes: usize,
         upstreamAllocatorPresent: bool,
@@ -155,6 +158,7 @@ pub const Runtime = struct {
             .startupReservationBytes = self.startup.buffer.len,
             .startupUsedBytes = self.startup.end_index,
             .mailScratch = @import("mail_scratch.zig").snapshot(),
+            .outgoingTransient = @import("terminal/send_memory.zig").snapshot(),
             .workerThreads = self.workerCount(),
             .workerStackBytes = worker_stack_bytes,
             .upstreamAllocatorPresent = false,

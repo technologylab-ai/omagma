@@ -68,7 +68,7 @@ fn addresses(values: []const types.Address, incoming: bool) !void {
     for (values) |value| try address(value, incoming);
 }
 fn validateMessage(value: types.Message) !void {
-    if (value.id.len == 0 or value.attachments.len > 49 or value.labels.len > 128) return error.InvalidBrowserCache;
+    if (value.id.len == 0 or value.attachments.len > types.Limits.message_attachments or value.labels.len > 128) return error.InvalidBrowserCache;
     try bounded(value.id, 128);
     try bounded(value.threadId, 128);
     // Shared MIME decoding already distinguishes received header syntax from

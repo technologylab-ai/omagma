@@ -345,7 +345,7 @@
         "All identities and content handles remain scoped to the explicit account.",
         "Supply draft or draftId. If both are present, draft takes precedence; an invalid provided draft does not fall back to the saved draft.",
         "Result contains bodyFormat, exact bodyText source (or recoveryFields[4]), generated plainText and optional bodyHtml. Raw HTML in Markdown is escaped; external images/resources are never fetched.",
-        "Recipient emptiness and unfinished recovery are allowed for preview. Rendering and original-resource validation may refuse source that cannot fit the 2 MiB rendered/body bounds.",
+        "Recipient emptiness and unfinished recovery are allowed for preview. Native source and rendered alternatives are bounded to 35 MiB; portable/browser bodies remain 2 MiB. Final MIME and disk limits are checked separately.",
         "There is no JSONL browser boolean: use draft.open-preview with a saved draftId to launch the browser."
       ],
       "examples": [
@@ -460,7 +460,7 @@
         "Always inspect the durable outcome (applied, rejected or unknown), not only the outer ok. Reusing the same operationId and unchanged content returns its recorded receipt. Changed content with that ID fails OperationConflict.",
         "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
-        "At most 32 recipients, 16 ordinary files and 32 original resources. All decoded attachment bytes total at most 25 MiB; embedded bytes/resources total at most 2 MiB. Body/rendered alternatives are bounded to 2 MiB. Requests are at most 3 MiB; blob-backed outgoing MIME is at most 35 MiB. Small inline sends can hit the smaller JSON/base64 transport bound.",
+        "At most 32 recipients, 16 ordinary files and 1024 retained original resources. Decoded outgoing files total at most 25 MiB; embedded bytes remain 2 MiB, with native formatted sources externalized as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
         "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it."
       ],
@@ -741,7 +741,7 @@
       "notes": [
         "Creates a saved local draft and sends nothing. Reply planning honors Reply-To, aliases and original To/Cc; valid RFC Message-ID/References are required for threading.",
         "Default text reply may reuse a cached body. preserveFormatting:true always fetches fresh full provider source, then validates HTML and downloads only selected original resources.",
-        "Formatting preservation requires a unique available HTML body with resolvable CID resources: at most 32 resources and 2 MiB decoded resource bytes. Oversized/ambiguous originals fail explicitly; a plain-text reply may remain available.",
+        "Formatting preservation requires a unique available HTML body with resolvable CID resources: up to 1024 resources. Native capture retains images as immutable blobs under the 25 MiB outgoing file budget; portable embedded resources remain 2 MiB. Ambiguous or provider-oversized originals fail explicitly.",
         "Read/edit/preview the returned full Draft before draft.send or draft.queue. Keep draft.original unchanged while editing draft.bodyText."
       ],
       "examples": [
@@ -797,7 +797,7 @@
         "Creates a saved local draft with no recipients and no inherited threadId/In-Reply-To/References. Fill recipients and review before sending.",
         "Default text forwarding includes the original ordinary attachments. Missing/oversized files fail rather than being silently omitted; ordinary outgoing totals remain 16 files and 25 MiB.",
         "omitAttachments:true skips source file downloads and explicitly retains the omission warning; it never implies sending the draft.",
-        "preserveFormatting:true uses a fresh full read, a validated opaque Original snapshot (up to 32 related resources/2 MiB), and remaining ordinary files. It requires unambiguous supported HTML and resolvable local CID resources.",
+        "preserveFormatting:true uses a fresh full read and validated opaque Original snapshot with up to 1024 related resources. Native images use immutable blobs under the 25 MiB combined file budget; portable embedded resources remain 2 MiB. Remaining ordinary files retain their separate count limit. HTML must be unambiguous and local CID references resolvable.",
         "original:true downloads raw source and attaches unchanged original.eml. Native clients stream up to 25 MiB of decoded original MIME into a private file; the browser retains its 2 MiB source limit. It may use message/rfc822, message/global or application/octet-stream according to encoding safety. It does not reuse the text-reader rendering.",
         "No reply-all flag or recipient field is applied by mail.forward; use draft.update on the returned draft."
       ],
@@ -847,7 +847,7 @@
         "Always inspect the durable outcome (applied, rejected or unknown), not only the outer ok. Reusing the same operationId and unchanged content returns its recorded receipt. Changed content with that ID fails OperationConflict.",
         "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
-        "At most 32 recipients, 16 ordinary files and 32 original resources. All decoded attachment bytes total at most 25 MiB; embedded bytes/resources total at most 2 MiB. Body/rendered alternatives are bounded to 2 MiB. Requests are at most 3 MiB; blob-backed outgoing MIME is at most 35 MiB. Small inline sends can hit the smaller JSON/base64 transport bound.",
+        "At most 32 recipients, 16 ordinary files and 1024 retained original resources. Decoded outgoing files total at most 25 MiB; embedded bytes remain 2 MiB, with native formatted sources externalized as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands."
       ],
       "examples": [
@@ -2052,7 +2052,7 @@
       "type": "array",
       "minItems": 5,
       "maxItems": 5,
-      "description": "Exactly five raw UTF-8 composer strings in To, Cc, Bcc, Subject, Body order. recovery-save accepts incomplete recipients. The first four fields allow at most 16 KiB each and body 2 MiB; Subject must additionally satisfy the normal 4096-byte header validation. These are unsendable until a normal update clears recoveryFields.",
+      "description": "Exactly five raw UTF-8 composer strings in To, Cc, Bcc, Subject, Body order. recovery-save accepts incomplete recipients. The first four fields allow at most 16 KiB each and native body 35 MiB; Subject must additionally satisfy the normal 4096-byte header validation. These are unsendable until a normal update clears recoveryFields.",
       "prefixItems": [
         {
           "type": "string",
@@ -2078,7 +2078,7 @@
         {
           "type": "string",
           "description": "Raw body source, interpreted using bodyFormat.",
-          "maxLength": 2097152
+          "maxLength": 36700160
         }
       ]
     },
@@ -2112,11 +2112,8 @@
         },
         {
           "properties": {
-            "blobId": {
-              "type": "null"
-            },
             "size": {
-              "maximum": 2097152
+              "maximum": 26214400
             },
             "mimeType": {
               "not": {
@@ -2148,7 +2145,7 @@
           ]
         }
       ],
-      "description": "A fully loaded original HTML resource: inline base64url bytes only, never blobId. At least contentId or contentLocation is required; IDs/locations are unique within the original. message/* resource MIME types are unsupported. Combined resources remain at most 2 MiB and 32 parts."
+      "description": "A retained HTML resource: native account-owned immutable blob handle or validated inline base64url bytes. At least contentId or contentLocation is required; IDs/locations are unique. message/* types are unsupported. Up to 1024 resources share the 25 MiB outgoing file budget; embedded bytes remain limited to 2 MiB."
     },
     "Original": {
       "type": "object",
@@ -2208,15 +2205,15 @@
         },
         "bodyText": {
           "type": "string",
-          "description": "Received decoded plain-text alternative, at most 2 MiB UTF-8 bytes, without NUL.",
-          "maxLength": 2097152,
+          "description": "Received decoded plain-text alternative, native compose limit: 35 MiB UTF-8 bytes, without NUL.",
+          "maxLength": 36700160,
           "pattern": "^[^\\u0000]*$",
           "default": ""
         },
         "bodyHtml": {
           "type": "string",
-          "description": "Opaque received UTF-8 HTML, at most 2 MiB, without NUL. Retain exactly; every cid: reference must resolve to a supplied resource. Remote URLs are never fetched by preparing the draft.",
-          "maxLength": 2097152,
+          "description": "Opaque received UTF-8 HTML, native compose limit: 35 MiB, without NUL. Retain exactly; every cid: reference must resolve to a supplied resource. Remote URLs are never fetched by preparing the draft.",
+          "maxLength": 36700160,
           "pattern": "^[^\\u0000]*$",
           "default": ""
         },
@@ -2225,9 +2222,9 @@
           "items": {
             "$ref": "#/$defs/WriteOriginalResource"
           },
-          "maxItems": 32,
+          "maxItems": 1024,
           "default": [],
-          "description": "Fully loaded related resources. Combined decoded bytes at most 2 MiB; do not replace them with filesystem paths or blob handles."
+          "description": "Retained related resources. Native formatted capture returns immutable account-owned blob handles, never arbitrary paths. Combined decoded outgoing files are limited to25MiB; keep returned handles and CID/location identities unchanged."
         }
       },
       "required": []
@@ -2276,8 +2273,8 @@
         },
         "bodyText": {
           "type": "string",
-          "description": "Editable UTF-8 source or personal note above original. At most 2 MiB; plain is literal, markdown is rendered locally. Rendering and sending also reject NUL and enforce bounds on generated alternatives.",
-          "maxLength": 2097152,
+          "description": "Editable UTF-8 source or personal note above original. Native compose limit: 35 MiB; plain is literal, markdown is rendered locally. Rendering and sending also reject NUL and enforce bounds on generated alternatives.",
+          "maxLength": 36700160,
           "default": ""
         },
         "bodyFormat": {

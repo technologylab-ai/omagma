@@ -20,7 +20,7 @@ function code(expected) { return error => error instanceof BrowserCacheError && 
 
 // Literal transport DTO, kept independent of the JavaScript normalizer. WASM
 // emits every warning count even for a mail-only or complete contact snapshot.
-const wasmSnapshot = `{"version":1,"decoderRevision":4,"account":"ada@example.test","clientId":"synthetic.apps.googleusercontent.com","grantId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updatedAt":1791730000000,"messages":[{"id":"mail-1","threadId":"thread-1","from":{"address":"morgan@example.test","name":"Morgan"},"replyTo":[],"to":[],"cc":[],"subject":"Synthetic cached mail","snippet":"","bodyText":"A literal cached body.","bodyHtml":null,"bodyHtmlAmbiguous":false,"bodySource":"plain","messageId":"","references":"","inReplyTo":"","labels":["INBOX"],"receivedAt":0,"sentDate":null,"unread":false,"bodyCached":true,"bodyCacheError":"","decodeWarning":"","metadataPartial":false,"labelsVerified":true,"attachments":[]}],"contacts":[{"resourceName":"people/c1","etag":"synthetic-etag","name":"Morgan","emails":[{"address":"morgan@example.test","name":""}],"readWarnings":{"omittedContacts":0,"partialContacts":0,"omittedEmails":0,"omittedNames":0,"sanitizedNames":0,"omittedMetadata":0,"invalidFields":0}}],"contactsLoaded":true,"contactWarnings":{"omittedContacts":0,"partialContacts":0,"omittedEmails":0,"omittedNames":0,"sanitizedNames":0,"omittedMetadata":0,"invalidFields":0}}`;
+const wasmSnapshot = `{"version":1,"decoderRevision":5,"account":"ada@example.test","clientId":"synthetic.apps.googleusercontent.com","grantId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updatedAt":1791730000000,"messages":[{"id":"mail-1","threadId":"thread-1","from":{"address":"morgan@example.test","name":"Morgan"},"replyTo":[],"to":[],"cc":[],"subject":"Synthetic cached mail","snippet":"","bodyText":"A literal cached body.","bodyHtml":null,"bodyHtmlAmbiguous":false,"bodySource":"plain","messageId":"","references":"","inReplyTo":"","labels":["INBOX"],"receivedAt":0,"sentDate":null,"unread":false,"bodyCached":true,"bodyCacheError":"","decodeWarning":"","metadataPartial":false,"labelsVerified":true,"attachments":[]}],"contacts":[{"resourceName":"people/c1","etag":"synthetic-etag","name":"Morgan","emails":[{"address":"morgan@example.test","name":""}],"readWarnings":{"omittedContacts":0,"partialContacts":0,"omittedEmails":0,"omittedNames":0,"sanitizedNames":0,"omittedMetadata":0,"invalidFields":0}}],"contactsLoaded":true,"contactWarnings":{"omittedContacts":0,"partialContacts":0,"omittedEmails":0,"omittedNames":0,"sanitizedNames":0,"omittedMetadata":0,"invalidFields":0}}`;
 const zeroContactWarnings = { omittedContacts: 0, partialContacts: 0, omittedEmails: 0, omittedNames: 0, sanitizedNames: 0, omittedMetadata: 0, invalidFields: 0 };
 
 function memoryCacheDatabase() {
@@ -181,9 +181,9 @@ test('received protocol headers preserve literal CFWS and Unicode through persis
   assert.throws(() => validateCacheSnapshot(binding, snapshot(binding, { messages: [{ ...message, subject: 'Display\ttext' }] })), code('invalid'));
 });
 
-test('current inventory holds up to 300 distinct messages and 49 attachment metadata entries', () => {
+test('current inventory holds up to 300 distinct messages and a full growing chain attachment inventory', () => {
   const messages = Array.from({ length: 300 }, (_, index) => ({ ...message, id: `mail-${index}` }));
-  messages[0].attachments = Array.from({ length: 49 }, (_, index) => ({ id: `attachment-${index}`, filename: `inline-${index}.png`, mimeType: 'image/png', size: 12 }));
+  messages[0].attachments = Array.from({ length: CACHE_LIMITS.attachments }, (_, index) => ({ id: `attachment-${index}`, filename: `inline-${index}.png`, mimeType: 'image/png', size: 12 }));
   const result = validateCacheSnapshot(binding, snapshot(binding, { messages }));
   assert.equal(result.messages.length, CACHE_LIMITS.messages);
   assert.equal(result.messages[0].attachments.length, CACHE_LIMITS.attachments);

@@ -50,7 +50,7 @@ pub fn quote(a: std.mem.Allocator, body: []const u8) ![]const u8 {
     try bytes.appendSlice(a, "\n\n");
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |line| {
-        if (line.len + 3 > t.Limits.body_bytes - bytes.items.len) return error.BodyTooLarge;
+        if (line.len + 3 > t.Limits.compose_body_bytes - bytes.items.len) return error.BodyTooLarge;
         try bytes.appendSlice(a, "> ");
         try bytes.appendSlice(a, line);
         try bytes.append(a, '\n');
@@ -105,7 +105,7 @@ fn appendSpan(a: std.mem.Allocator, out: *std.ArrayList(u8), span: @import("html
         try out.appendSlice(a, target);
         try out.append(a, ')');
     };
-    if (out.items.len > t.Limits.body_bytes) return error.BodyTooLarge;
+    if (out.items.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
 }
 /// Literal semantic projection: never execute HTML or fetch remote resources.
 /// Preserve safe link targets when their labels would otherwise lose them.
@@ -130,7 +130,7 @@ pub fn plainText(a: std.mem.Allocator, message: t.Message) ![]const u8 {
             if (block.kind == .rule) try out.appendSlice(a, "---");
             for (block.spans) |span| try appendSpan(a, &out, span);
         }
-        if (out.items.len > t.Limits.body_bytes) return error.BodyTooLarge;
+        if (out.items.len > t.Limits.compose_body_bytes) return error.BodyTooLarge;
     }
     return out.items;
 }

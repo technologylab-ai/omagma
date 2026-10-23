@@ -78,6 +78,7 @@ pub const Session = struct {
     native: gmail.NetworkSession,
     pub fn init(self: *Session, io: std.Io, a: std.mem.Allocator, temporary: std.mem.Allocator, config: *const Config, account: []const u8, input: j.Value) !void {
         try self.native.initRequiringAnyCapabilityWithAllocator(io, a, temporary, config, account, "mail.read", input, &.{ "mail-drafts", "mail-modify" });
+        if (std.mem.eql(u8, j.text(input, "cmd"), "draft.gmail-import")) self.native.enableComposeSource();
     }
     pub fn close(self: *Session) void {
         self.native.close();

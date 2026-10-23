@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 
@@ -226,7 +227,30 @@ def panel_contains(terminal, title, literal):
         return False
 
 
-def preserved_original(draft, manifest, action):
+def attachment_bytes(directory, part):
+    """Verify this account's immutable fixture blob or its inline wire bytes."""
+    handle = part.get("blobId")
+    if handle:
+        require(isinstance(handle, str) and len(handle) == 64
+                and all(character in "0123456789abcdef" for character in handle),
+                "formatted attachment has an invalid immutable identity")
+        require(not part.get("data"), "blob-backed attachment duplicated its bytes inline")
+        account_key = hashlib.sha256(ACCOUNT.encode()).hexdigest()
+        path = directory / "cache" / "fixtures" / account_key / f"blob-{handle}.bin"
+        status = path.lstat()
+        require(stat.S_ISREG(status.st_mode) and stat.S_IMODE(status.st_mode) == 0o600
+                and stat.S_IMODE(path.parent.stat().st_mode) == 0o700,
+                "formatted attachment is not an account-scoped private regular file")
+        raw = path.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == handle,
+                "formatted attachment bytes differ from their immutable identity")
+    else:
+        raw = decode(part["data"])
+    require(len(raw) == part["size"], "formatted attachment byte count changed")
+    return raw
+
+
+def preserved_original(directory, draft, manifest, action):
     original = draft.get("original")
     require(isinstance(original, dict) and original["sourceMessageId"] == GOOD,
             f"{action} omitted the original source identity")
@@ -236,10 +260,12 @@ def preserved_original(draft, manifest, action):
     resources = original["resources"]
     require(len(resources) == 1, f"{action} lost or duplicated the referenced inline image")
     image = resources[0]
+    require(image.get("blobId") and not image.get("data"),
+            f"{action} did not retain its native original image as a compact blob handle")
     require(image["contentId"].strip("<>") == manifest["imageContentId"]
             and image["filename"] == manifest["imageFilename"]
             and image["size"] == manifest["imageDeclaredBytes"]
-            and decode(image["data"]) == base64.b64decode(manifest["imageExpectedBase64"]),
+            and attachment_bytes(directory, image) == base64.b64decode(manifest["imageExpectedBase64"]),
             f"{action} changed the original image's CID, metadata or bytes")
     if action == "forward":
         require(draft["to"] == draft["cc"] == draft["bcc"] == [], "forward inherited original recipients")
@@ -249,7 +275,7 @@ def preserved_original(draft, manifest, action):
         document = draft["attachments"][0]
         require(document["filename"] == manifest["documentFilename"]
                 and document["size"] == manifest["documentDecodedBytes"]
-                and decode(document["data"]) == manifest["documentExpected"].encode(),
+                and attachment_bytes(directory, document) == manifest["documentExpected"].encode(),
                 "forward changed the ordinary external document")
     else:
         require(draft["to"] == manifest["replyToExpected"]
@@ -277,7 +303,7 @@ def formatted_action(binary, directory, source, terminal, manifest, action, know
         new = [row for row in rows if row["id"] not in known_drafts]
         require(len(new) == 1, f"{action} chooser failed to create exactly one local draft")
         created = client.request("draft.read", draftId=new[0]["id"])
-        preserved_original(created, manifest, action)
+        preserved_original(directory, created, manifest, action)
         preview = client.request("draft.preview", draftId=created["id"])
         source_body = manifest["htmlExpected"].split("<body>", 1)[1].split("</body>", 1)[0]
         require(source_body in preview["bodyHtml"]
@@ -306,7 +332,7 @@ def formatted_action(binary, directory, source, terminal, manifest, action, know
     with Client(binary, directory, extra=source.options()) as client:
         saved = client.request("draft.read", draftId=created["id"])
         require(saved["bodyText"] == note, f"{action} lost the editable note when returning to the reader")
-        require(preserved_original(saved, manifest, action) == created["original"],
+        require(preserved_original(directory, saved, manifest, action) == created["original"],
                 f"{action} note edit changed the saved original")
         require(client.request("cache.stats")["fixtureSends"] == 0
                 and not client.request("operation.list")["operations"], f"{action} queued or submitted mail")

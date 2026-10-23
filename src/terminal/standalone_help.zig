@@ -327,7 +327,9 @@ const specs = [_]Spec{
     \\The backend reservation is 16 MiB. fixedMemory reports the separately
     \\reserved reusable application/IO pools, startup storage, worker stacks,
     \\allocator high-water marks and allocation refusals. The sealed native
-    \\runtime has no upstream allocator. Reservations are not measured RSS/PSS;
+    \\runtime's normal pools have no upstream fallback. outgoingTransient reports
+    \\the separate OS-backed outgoing preparation/send/upload arena, released
+    \\after each operation. Reservations are not measured RSS/PSS;
     \\physical pages become resident as the reserved bytes are touched.
     \\No mail/config/credential reads or network requests occur.
     \\

@@ -34,6 +34,8 @@ pub const Transport = struct {
     temporary_allocator: ?std.mem.Allocator = null,
     /// Trusted host read window; native retains up to100, browser up to30.
     thread_limit: usize = 100,
+    /// Only explicit native reply/forward source capture uses expandable decode.
+    compose_source: bool = false,
     /// Hosts that suspend during an HTTP request can use a pre-encoded body.
     /// Its allocation and size checks finish before recording send uncertainty.
     preparedRequestFn: ?*const fn (*anyopaque, std.mem.Allocator, std.http.Method, []const u8, []const u8) anyerror!j.Value = null,
@@ -75,6 +77,7 @@ const Network = struct {
     cache_binding: ?session_cache.Binding = null,
     cache_lease: ?session_cache.Lease = null,
     cache_index: usize = 0,
+    compose_source: bool = false,
     fn invalidate(self: *Network) void {
         if (self.cache) |cache| if (self.cache_lease) |lease| cache.invalidate(lease);
         self.cache_lease = null;
@@ -103,7 +106,10 @@ const Network = struct {
     }
     fn request(ctx: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
         const self: *Network = @ptrCast(@alignCast(ctx));
-        const json_body = if (body) |v| try std.json.Stringify.valueAlloc(a, v, .{}) else null;
+        if (comptime @import("send_memory.zig").native) {
+            if (self.compose_source and method == .GET and body == null) return self.requestComposeSource(a, url);
+        }
+        const json_body = if (body) |v| try j.encodeAlloc(a, v, .{}) else null;
         const mutating = method == .POST or method == .PATCH or method == .PUT or method == .DELETE;
         var response = self.client.requestTerminal(url, method, self.access, json_body, self.response) catch |err| {
             if (mutating and !localRequestError(err)) return error.UnknownOutcome;
@@ -119,8 +125,29 @@ const Network = struct {
         }
         return decodeResponse(a, method, url, response.status, response.body);
     }
+    fn requestComposeSource(self: *Network, a: std.mem.Allocator, url: []const u8) !j.Value {
+        // Grow for bytes actually received; a short reply never reserves a
+        // provider-sized buffer. The stream enforces the wire ceiling before
+        // data reaches this writer, including unknown Content-Length cases.
+        var bytes: std.Io.Writer.Allocating = .init(@import("send_memory.zig").allocator());
+        defer bytes.deinit();
+        var response = try self.client.requestTerminalDownload(url, self.access, &bytes.writer, @import("send_memory.zig").source_response_bytes, self.response);
+        if (response.status == 401) {
+            self.invalidate();
+            if (!self.refreshed_401) {
+                try self.refreshRead();
+                response = try self.client.requestTerminalDownload(url, self.access, &bytes.writer, @import("send_memory.zig").source_response_bytes, self.response);
+                if (response.status == 401) self.invalidate();
+            }
+        }
+        const source = if (response.status >= 200 and response.status <= 299) bytes.written() else response.body;
+        return decodeResponseSized(a, .GET, url, response.status, source, true);
+    }
 };
 pub fn decodeResponse(a: std.mem.Allocator, method: std.http.Method, url: []const u8, status: u16, bytes: []const u8) !j.Value {
+    return decodeResponseSized(a, method, url, status, bytes, false);
+}
+fn decodeResponseSized(a: std.mem.Allocator, method: std.http.Method, url: []const u8, status: u16, bytes: []const u8, compose_source: bool) !j.Value {
     const mutating = method == .POST or method == .PATCH or method == .PUT or method == .DELETE;
     switch (status) {
         200...299 => {},
@@ -140,8 +167,11 @@ pub fn decodeResponse(a: std.mem.Allocator, method: std.http.Method, url: []cons
     // success handling to sends, contacts, or other mutation methods.
     if (status == 204 and method == .DELETE and std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels/") and bytes.len == 0) return .null;
     if (bytes.len == 0) return if (mutating) error.UnknownOutcome else .null;
-    b.preflight(bytes) catch |err| return if (mutating) error.UnknownOutcome else err;
-    return std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = types.Limits.request_bytes }) catch |err| return if (mutating) error.UnknownOutcome else err;
+    const limit = if (compose_source) @import("send_memory.zig").source_response_bytes else types.Limits.request_bytes;
+    if (bytes.len > limit) return if (mutating) error.UnknownOutcome else error.ResponseTooLarge;
+    const mime_response = method == .GET and (std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/messages/") or std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/threads/") or std.mem.startsWith(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/drafts/"));
+    b.preflightWithTokenLimit(bytes, if (compose_source or mime_response) @max(32768, 128 * types.Limits.message_attachments) else 32768) catch |err| return if (mutating) error.UnknownOutcome else err;
+    return std.json.parseFromSliceLeaky(j.Value, a, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .max_value_len = limit }) catch |err| return if (mutating) error.UnknownOutcome else err;
 }
 fn localRequestError(err: anyerror) bool {
     return err == error.FormTooLarge or err == error.InvalidToken or err == error.InvalidUrl or err == error.InvalidHost or err == error.InsecureUrl or err == error.UrlTooLarge or err == error.ResponseBufferTooLarge or err == error.InvalidStreamMethod or err == error.InvalidContentType;
@@ -287,7 +317,7 @@ pub const NetworkSession = struct {
         // One absolute attachment deadline covers token refresh, the profile
         // check, the streamed download and its single 401 retry. Every other
         // command keeps the ordinary client deadline.
-        self.client = if (std.mem.eql(u8, cmd, "mail.attachment")) try http.Client.initAttachmentDownload(io) else try http.Client.init(io);
+        self.client = if (std.mem.eql(u8, cmd, "mail.attachment") or @import("send_memory.zig").command(j.text(request, "cmd"))) try http.Client.initMailTransfer(io) else try http.Client.init(io);
         errdefer self.client.deinit();
         const scopes: []const []const u8 = if (grant) |g| g.scopes else &.{oauth.readonly_scope};
         const capabilities: []const []const u8 = if (grant) |g| g.capabilities else &.{"mail-read"};
@@ -333,12 +363,15 @@ pub const NetworkSession = struct {
         self.token = self.network.access;
         self.initialized = true;
     }
+    pub fn enableComposeSource(self: *NetworkSession) void {
+        if (comptime @import("send_memory.zig").native) self.network.compose_source = true;
+    }
     pub fn transport(self: *NetworkSession) Transport {
         if (!self.initialized) {
             self.network = .{ .client = &self.client, .access = self.token, .access_storage = self.access, .desktop = &self.desktop, .refresh_token = self.refresh_token, .scopes = self.scopes, .response = self.response, .verified_account = self.verified_account };
             self.initialized = true;
         }
-        return .{ .context = &self.network, .requestFn = Network.request };
+        return .{ .context = &self.network, .requestFn = Network.request, .compose_source = self.network.compose_source };
     }
     /// A mutating upload never retries after 401. Invalidate its cached token
     /// so a later explicit operation reacquires authorization normally.
@@ -398,6 +431,8 @@ pub fn executeProgressWithAllocator(io: std.Io, a: std.mem.Allocator, temporary_
     var transport = session.transport();
     transport.temporary_allocator = temporary_allocator;
     transport.progress_sink = progress_sink;
+    transport.compose_source = @import("send_memory.zig").native and (std.mem.eql(u8, j.text(request, "cmd"), "mail.reply") or std.mem.eql(u8, j.text(request, "cmd"), "mail.forward") or std.mem.eql(u8, j.text(request, "cmd"), "mail.compose-source"));
+    session.network.compose_source = transport.compose_source;
     return try dispatchAuthorized(io, a, account, session.capabilities, transport, cmd, request);
 }
 
@@ -870,18 +905,18 @@ fn externalBodies(a: std.mem.Allocator, transport: Transport, id: []const u8, pa
         if (attachment.len > 0 and (calendar or inline_text)) {
             if (attachment.len > 1024) return error.InvalidAttachmentId;
             const declared = if (j.get(value, "size")) |size| try b.integer(size) else 0;
-            if (declared < 0 or declared > mime.max_body_bytes) return error.BodyTooLarge;
+            if (declared < 0 or declared > (if (transport.compose_source) types.Limits.compose_body_bytes else types.Limits.body_bytes)) return error.BodyTooLarge;
             if (calendar and declared > mime.max_calendar_bytes) return error.CalendarTooLarge;
             const declared_bytes: usize = @intCast(declared);
             if (!map.contains(attachment)) {
-                if (declared_bytes > mime.max_raw_bytes - budget.bytes) return error.DecodedMessageTooLarge;
+                if (declared_bytes > (if (transport.compose_source) types.Limits.compose_body_bytes else mime.max_raw_bytes) - budget.bytes) return error.DecodedMessageTooLarge;
                 const url = try std.fmt.allocPrint(a, "{s}/attachments/{s}", .{ try messageUrl(a, id, ""), try escaped(a, attachment) });
                 const response = try transport.request(a, .GET, url, null);
                 const encoded = try j.required(response, "data");
                 const decoded = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(std.mem.trimEnd(u8, encoded, "=")) catch return error.InvalidBase64;
-                if (decoded > mime.max_body_bytes) return error.BodyTooLarge;
+                if (decoded > (if (transport.compose_source) types.Limits.compose_body_bytes else types.Limits.body_bytes)) return error.BodyTooLarge;
                 if (calendar and decoded > mime.max_calendar_bytes) return error.CalendarTooLarge;
-                if (decoded > mime.max_raw_bytes - budget.bytes) return error.DecodedMessageTooLarge;
+                if (decoded > (if (transport.compose_source) types.Limits.compose_body_bytes else mime.max_raw_bytes) - budget.bytes) return error.DecodedMessageTooLarge;
                 budget.bytes += decoded;
                 try map.put(a, attachment, response);
             }
@@ -910,7 +945,7 @@ fn readValue(a: std.mem.Allocator, temporary: std.mem.Allocator, transport: Tran
     externalBodies(temporary, transport, j.text(value, "id"), j.get(value, "payload") orelse .null, &map, 0, &budget) catch |err| {
         return decode.refused(value, a, if (err == error.InvalidProviderResponse) error.MalformedMessage else err, true);
     };
-    return decode.normalize(value, a, .{ .object = map });
+    return if (transport.compose_source) decode.normalizeForCompose(value, a, .{ .object = map }) else decode.normalize(value, a, .{ .object = map });
 }
 /// Internal typed read for bounded cache prefetch. Authorization and provider
 /// identity checks match dispatchAuthorized, while large body strings avoid a
@@ -1053,7 +1088,7 @@ test "UX backend: media multipart keeps thread metadata and exact RFC822 bytes i
 /// Thread metadata belongs to the outer media multipart, outside RFC822 data.
 pub fn executeSpool(io: std.Io, a: std.mem.Allocator, config: *const Config, account: []const u8, request: j.Value, draft: types.Draft, spool: *const @import("send_spool.zig").Spool, rfc_id: []const u8) !j.Value {
     var session: NetworkSession = undefined;
-    try session.init(io, a, config, account, "mail.send", request);
+    try session.init(io, a, config, account, if (std.mem.eql(u8, j.text(request, "cmd"), "invitation.reply")) "invitation.reply" else "mail.send", request);
     defer session.close();
     const transport = session.transport();
     if (draft.from) |identity| if (!std.ascii.eqlIgnoreCase(identity.address, account)) {
@@ -1125,15 +1160,23 @@ fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport:
         if (!mime.validMessageId(draft.inReplyTo)) return error.MissingMessageId;
     }
     try minimumSendForm(draft);
-    const bytes = try a.alloc(u8, types.Limits.request_bytes);
     const attachments = try mime.composeAttachments(draft.attachments, a);
     const prepared = try @import("markdown_mail.zig").prepare(a, draft);
-    const raw = try mime.encode(.{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments }, bytes);
-    const encoded_size = std.base64.url_safe_no_pad.Encoder.calcSize(raw.len);
+    const compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments };
+    var count_buffer: [4096]u8 = undefined;
+    var counting = std.Io.Writer.Discarding.init(&count_buffer);
+    try mime.encodeTo(compose, &counting.writer);
+    const raw_size: usize = @intCast(counting.fullCount());
+    if (raw_size > mime.max_raw_bytes) return error.FormTooLarge;
+    const encoded_size = std.base64.url_safe_no_pad.Encoder.calcSize(raw_size);
     if (encoded_size > types.Limits.request_bytes - 1024) return error.FormTooLarge;
+    const raw = try mime.encode(compose, try a.alloc(u8, raw_size));
     const encoded = try a.alloc(u8, encoded_size);
-    const body = try j.value(a, .{ .raw = try mime.base64Url(raw, encoded), .threadId = if (draft.threadId.len > 0) draft.threadId else @as(?[]const u8, null) });
-    const json_bytes = if (transport.preparedRequestFn != null) try std.json.Stringify.valueAlloc(a, body, .{}) else null;
+    // PreparedSend must remain frozen even if its caller edits the source.
+    // The large encoded MIME is already owned here; copy only the small ID.
+    const thread_id: ?[]const u8 = if (draft.threadId.len > 0) try a.dupe(u8, draft.threadId) else null;
+    const body = try mail_value.borrowed(a, .{ .raw = try mime.base64Url(raw, encoded), .threadId = thread_id });
+    const json_bytes = if (transport.preparedRequestFn != null) try j.encodeAlloc(a, body, .{}) else null;
     if (json_bytes) |payload| if (payload.len > types.Limits.request_bytes) return error.FormTooLarge;
     return .{ .body = body, .encoded = json_bytes, .rfcMessageId = rfc_id };
 }
@@ -1556,6 +1599,11 @@ test "send preparation: frozen host body is ready before submission and oversize
     try std.testing.expectEqual(@as(usize, 0), oracle.sends);
     draft.subject = "Changed later";
     draft.bodyText = "Changed note";
+    var thread = "source-thread".*;
+    draft.threadId = &thread;
+    const typed_ready = try prepareDraftAuthorized(std.testing.io, a, "self@example.test", &.{"mail-send"}, transport, draft, "typed-prepared-fixture");
+    @memset(&thread, 'x');
+    try std.testing.expectEqualStrings("source-thread", j.text(typed_ready.body, "threadId"));
     const receipt = try sendPrepared(a, transport, ready);
     try std.testing.expectEqualStrings("applied", j.text(receipt, "outcome"));
     try std.testing.expectEqual(@as(usize, 1), oracle.sends);

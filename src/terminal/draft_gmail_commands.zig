@@ -8,7 +8,7 @@ const remote = @import("draft_gmail.zig");
 const storage = @import("store.zig");
 const auth = @import("auth.zig");
 const fixtures_document = "fixture-gmail-drafts.json";
-const FixtureRecord = struct { id: []const u8, messageId: []const u8, attempt: []const u8, draft: ?t.Draft = null };
+const FixtureRecord = struct { id: []const u8, messageId: []const u8, attempt: []const u8, draft: ?t.Draft = null, html: ?[]const u8 = null };
 const FixtureState = struct { account: []const u8, drafts: []FixtureRecord = &.{}, uploads: u64 = 0 };
 
 fn scenario(s: anytype, value: []const u8) bool {
@@ -85,7 +85,7 @@ fn fixtureCreate(s: anytype, a: std.mem.Allocator, account: []const u8, attempt:
     snapshot.attachments = files.items;
     snapshot.original = null;
     snapshot.recoveryFields = null;
-    records[state.drafts.len] = .{ .id = id, .messageId = message_id, .attempt = try a.dupe(u8, attempt), .draft = snapshot };
+    records[state.drafts.len] = .{ .id = id, .messageId = message_id, .attempt = try a.dupe(u8, attempt), .draft = snapshot, .html = prepared.html };
     state.drafts = records;
     state.uploads += 1;
     try store.writeDocument(fixtures_document, try j.encodeAlloc(a, state, .{}));
@@ -111,7 +111,17 @@ fn fixtureLoad(s: anytype, a: std.mem.Allocator, account: []const u8, link: link
     for (state.drafts) |item| if (std.mem.eql(u8, item.id, current.draftId)) {
         var draft = item.draft orelse return error.GmailDraftImportUnsupported;
         if (scenario(s, "gmail-draft-conflict")) draft.bodyText = try std.fmt.allocPrint(a, "Edited in Gmail\n\n{s}", .{draft.bodyText});
-        return .{ .remote = current, .draft = draft };
+        return .{ .remote = current, .draft = try @import("draft_gmail_import.zig").preserveIfNeeded(a, draft, .{
+            .id = current.messageId,
+            .threadId = draft.threadId,
+            .from = draft.from orelse .{ .address = account },
+            .to = draft.to,
+            .cc = draft.cc,
+            .subject = draft.subject,
+            .bodyText = draft.bodyText,
+            .bodyHtml = item.html,
+            .attachments = draft.attachments,
+        }) };
     };
     return error.GmailDraftChanged;
 }
@@ -155,7 +165,7 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
     const expected = try expectedVersion(req);
     try gate(s, a, account, req);
     var network: remote.Session = undefined;
-    if (!s.options.fixtures) try network.init(s.io, a, s.allocator, &s.config, account, req);
+    if (!s.options.fixtures) try network.init(s.io, a, @import("send_memory.zig").commandBacking(s.allocator, cmd), &s.config, account, req);
     defer if (!s.options.fixtures) network.close();
     var store = try s.openStore(a, account, false);
     defer store.close();
@@ -226,6 +236,7 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
         const retained = (try find(&store, id)).*;
         var value = try response(a, draft, account, retained, "imported", loaded.remote);
         try value.object.put(a, "importedDraftId", .{ .string = imported_draft.id });
+        try value.object.put(a, "importedOriginal", .{ .bool = imported_draft.original != null });
         return value;
     }
     var result: remote.Reconciled = undefined;

@@ -8,13 +8,25 @@ pub const Limits = struct {
     pub const thread_bytes: usize = 4 * 1024 * 1024;
     pub const metadata_batch_bytes: usize = 4 * 1024 * 1024;
     pub const attachments: usize = 16;
-    pub const related_resources: usize = 32;
+    /// Accumulated inline images are independent of user-added file slots.
+    /// Bound metadata work while allowing long screenshot-rich reply chains;
+    /// decoded-byte and encoded-MIME quotas still govern actual payload size.
+    pub const related_resources: usize = 1024;
+    /// Incoming descriptors include the sender's generated signature image.
+    pub const message_attachments: usize = attachments + related_resources + 1;
     /// Informational source files excluded from a text-only forward.
-    pub const omitted_attachment_count: usize = 64;
+    pub const omitted_attachment_count: usize = message_attachments;
     /// Combined decoded ordinary outgoing files. Incoming saves have their own cap.
     pub const attachment_bytes: usize = 25 * 1024 * 1024;
     pub const incoming_attachment_bytes: usize = @import("../attachment_limits.zig").incoming_bytes;
     pub const mime_upload_bytes: usize = 35 * 1024 * 1024;
+    /// Native compose work can use transient memory up to the provider's MIME
+    /// size ceiling. Browser/WASM keeps its smaller in-memory text allowance.
+    pub const native_body_bytes: usize = mime_upload_bytes;
+    pub const compose_body_bytes: usize = switch (@import("builtin").os.tag) {
+        .linux, .macos => native_body_bytes,
+        else => body_bytes,
+    };
     pub const page: usize = 100;
     pub const recipients: usize = 32;
     pub const metadata: usize = 2000;
