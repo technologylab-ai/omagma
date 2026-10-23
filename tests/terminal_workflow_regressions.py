@@ -54,6 +54,7 @@ RECEIPT_SUITES = {
     "terminal_invitation_notices": "--output",
     "terminal_invitation_reconcile": "--output",
     "terminal_foreground_priority": "--output",
+    "vault_migration": "--receipt",
 }
 
 

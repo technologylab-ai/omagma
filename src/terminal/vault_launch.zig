@@ -53,6 +53,10 @@ const Check = struct {
     fn probe(self: *Check) !bool {
         const bytes = self.client.request(self.a, .status, "") catch |err| switch (err) {
             error.FileNotFound, error.ConnectionRefused => return false,
+            // Our child binds before chmod publishes the private socket mode.
+            // Keep transport checks intact and wait only during our own launch;
+            // an unsafe pre-existing path must still fail before spawning.
+            error.UnsafeBackendSocket => if (self.pid != null) return false else return err,
             else => return err,
         };
         defer self.a.free(bytes);
@@ -73,3 +77,86 @@ const Check = struct {
         }
     }
 };
+
+test "vault launch: owned socket permissions become ready before the first status exchange" {
+    if (!@import("send_memory.zig").native) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.parent_dir.setFilePermissions(io, &temporary.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
+    const root = try temporary.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const path = try std.fmt.allocPrint(a, "{s}/socket", .{root});
+    defer a.free(path);
+    const expected: vt.Id = @splat(0x37);
+    var check: Check = .{ .io = io, .a = a, .client = .{ .io = io, .socket_path = path }, .expected = expected };
+    try std.testing.expect(!try check.probe()); // The child's socket is not bound yet.
+
+    var listener = try transport.Listener.init(io, path);
+    defer listener.deinit();
+    // Recreate the bind-before-chmod interval under the same private parent.
+    try temporary.dir.setFilePermissions(io, "socket", .fromMode(0o644), .{ .follow_symlinks = false });
+    try std.testing.expectError(error.UnsafeBackendSocket, check.probe());
+    // The test's own live PID supplies only the existing read-only liveness
+    // check. No detached child, credential, or process signal is needed.
+    check.pid = if (@import("builtin").os.tag == .linux) std.os.linux.getpid() else std.c.getpid();
+    try std.testing.expect(!try check.probe());
+    try std.testing.expectError(error.UnsafeBackendSocket, check.client.request(a, .status, ""));
+    try std.testing.expectError(error.Timeout, platform.deadline(io, .{ .clock = .awake, .raw = .fromMilliseconds(75) }, Check.wait, .{&check}));
+
+    const Peer = struct {
+        fn respond(server: *transport.Listener, id: vt.Id, requests: *std.atomic.Value(usize)) !void {
+            const peer_io = std.testing.io;
+            const peer_a = std.testing.allocator;
+            const stream = try server.server.accept(peer_io);
+            defer stream.close(peer_io);
+            var frame = try transport.readFrame(peer_io, peer_a, stream, transport.request_limit);
+            defer frame.deinit(peer_a);
+            try std.testing.expectEqual(transport.Kind.status, frame.kind);
+            try std.testing.expectEqual(@as(usize, 0), frame.body.len);
+            _ = requests.fetchAdd(1, .release);
+            var bytes: [128]u8 = undefined;
+            const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"}}}}", .{std.fmt.bytesToHex(id, .lower)});
+            try transport.writeFrame(peer_io, stream, .response, response, transport.response_limit);
+        }
+    };
+    var requests: std.atomic.Value(usize) = .init(0);
+    var peer = try io.concurrent(Peer.respond, .{ &listener, expected, &requests });
+    defer peer.cancel(io) catch {};
+    try temporary.dir.setFilePermissions(io, "socket", .fromMode(0o600), .{ .follow_symlinks = false });
+    try platform.deadline(io, platform.seconds(5), Check.wait, .{&check});
+    try peer.await(io);
+    // An earlier unsafe connect would have queued an extra/empty connection
+    // and failed the peer's framed-status check instead of reaching this count.
+    try std.testing.expectEqual(@as(usize, 1), requests.load(.acquire));
+}
+
+test "vault launch: unsafe path kinds never become trusted during owned readiness" {
+    if (!@import("send_memory.zig").native) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.parent_dir.setFilePermissions(io, &temporary.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
+    const root = try temporary.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const path = try std.fmt.allocPrint(a, "{s}/socket", .{root});
+    defer a.free(path);
+    const target = try temporary.dir.createFile(io, "target", .{ .permissions = .fromMode(0o600) });
+    target.close(io);
+    for ([_]bool{ false, true }) |symlink| {
+        if (symlink) {
+            try temporary.dir.symLink(io, "target", "socket", .{});
+        } else {
+            const file = try temporary.dir.createFile(io, "socket", .{ .permissions = .fromMode(0o600) });
+            file.close(io);
+        }
+        defer temporary.dir.deleteFile(io, "socket") catch {};
+        var check: Check = .{ .io = io, .a = a, .client = .{ .io = io, .socket_path = path }, .expected = @splat(0x37) };
+        try std.testing.expectError(error.UnsafeBackendSocket, check.probe());
+        check.pid = if (@import("builtin").os.tag == .linux) std.os.linux.getpid() else std.c.getpid();
+        try std.testing.expect(!try check.probe());
+        try std.testing.expectError(error.UnsafeBackendSocket, check.client.request(a, .status, ""));
+    }
+}

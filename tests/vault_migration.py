@@ -10,8 +10,10 @@ import select
 import shutil
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
+import traceback
 
 from vault_daemon import PASSWORD, displayed_recovery, prompt, require
 
@@ -27,7 +29,82 @@ def digest_parts(*parts):
     return hashlib.sha256(b''.join(part.encode() + b'\0' for part in parts)).hexdigest()
 
 
-def run(binary, root):
+class Evidence:
+    def __init__(self, path=None, build_info=None):
+        self.path = path
+        self.value = dict(buildInfo=build_info, syntheticOnly=True, liveWrites=False,
+                          events=[], passed=False)
+        self.save()
+
+    def save(self):
+        if self.path is not None:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.value, indent=2) + '\n')
+            self.path.chmod(0o600)
+
+    def process(self, stage, argv, **kwargs):
+        event = dict(stage=stage, argv=[str(arg) for arg in argv])
+        self.value['events'].append(event)
+        self.save()
+        began = time.monotonic()
+        try:
+            result = subprocess.run(argv, **kwargs)
+            event.update(exitCode=result.returncode,
+                         stdout=result.stdout.decode(errors='replace'),
+                         stderr=result.stderr.decode(errors='replace'))
+            return result
+        except BaseException as error:
+            event['error'] = repr(error)
+            raise
+        finally:
+            event['elapsedSeconds'] = round(time.monotonic() - began, 6)
+            self.save()
+
+
+def command_result(result):
+    return f'exit={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}'
+
+
+def listener_held(socket):
+    try:
+        lease = (socket.parent / 'daemon.lock').open('rb')
+    except FileNotFoundError:
+        return False
+    with lease:
+        try:
+            fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
+    return False
+
+
+def wait_stopped(socket):
+    # Socket removal precedes release of the listener lease. A new owner must
+    # not race that final shutdown step after the stop acknowledgement.
+    deadline = time.monotonic() + 5
+    while (socket.exists() or listener_held(socket)) and time.monotonic() < deadline:
+        time.sleep(.02)
+    require(not socket.exists() and not listener_held(socket), 'detached owned daemon did not release its listener')
+
+
+def cleanup_detached(binary, env, socket, start_pending, evidence):
+    # A failed start command can leave its successfully launched owner alive.
+    # Only use this test's private socket; detached PIDs are not safe kill handles.
+    if start_pending and not socket.exists():
+        deadline = time.monotonic() + 10
+        while not socket.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+    if socket.exists():
+        result = evidence.process('cleanup-stop',
+                                  [str(binary), 'vault', 'stop', '--socket', str(socket)],
+                                  env=env, capture_output=True, timeout=20)
+        require(result.returncode == 0, 'owned detached cleanup failed: ' + command_result(result))
+    wait_stopped(socket)
+
+
+def run(binary, root, evidence=None):
+    evidence = evidence or Evidence()
     env = dict(os.environ, HOME=str(root / 'home'), XDG_CONFIG_HOME=str(root / 'config'),
                XDG_CACHE_HOME=str(root / 'cache-home'))
     for name in ('HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME'):
@@ -259,17 +336,18 @@ def run(binary, root):
         preexisting.stderr.close()
 
     def control(verb):
-        result = subprocess.run([str(binary), 'vault', verb, '--socket', str(socket)], env=env,
-                                capture_output=True, timeout=20)
-        require(result.returncode == 0, 'control failed: ' + result.stderr.decode())
+        result = evidence.process('control-' + verb, [str(binary), 'vault', verb, '--socket', str(socket)],
+                                  env=env, capture_output=True, timeout=20)
+        require(result.returncode == 0, 'control failed: ' + command_result(result))
         value = json.loads(result.stdout)
         require(value['ok'], f'control {verb} refused')
         return value['data']
 
     def start(fixtures=True):
-        result = subprocess.run([str(binary), 'vault', 'start', *(['--fixtures'] if fixtures else []), '--vault-dir', str(vault), '--socket', str(socket)],
-                                env=env, capture_output=True, timeout=20)
-        require(result.returncode == 0, 'native detached start failed: ' + result.stderr.decode())
+        result = evidence.process('explicit-start',
+                                  [str(binary), 'vault', 'start', *(['--fixtures'] if fixtures else []), '--vault-dir', str(vault), '--socket', str(socket)],
+                                  env=env, capture_output=True, timeout=20)
+        require(result.returncode == 0, 'native detached start failed: ' + command_result(result))
 
     def remote(command, **fields):
         result = subprocess.run([str(binary), 'cli'], env=env, capture_output=True, timeout=30,
@@ -285,8 +363,8 @@ def run(binary, root):
 
     started = False
     try:
-        start()
         started = True
+        start()
         start()  # Matching owner makes repeated start idempotent.
         require(not control('status')['unlocked'], 'detached service retained local migration key')
         unlock()
@@ -303,29 +381,28 @@ def run(binary, root):
         require(remote('cache.stats')['fixtureSends'] == 1, 'explicit resumed send count changed')
         control('stop')
         started = False
-        deadline = time.monotonic() + 5
-        while socket.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
-        start()
+        wait_stopped(socket)
         started = True
+        start()
         require(not control('status')['unlocked'], 'restarted service retained unlocked key')
         unlock()
         require(remote('cache.stats')['fixtureSends'] == 1, 'restart replayed migrated intent')
         control('stop')
         started = False
-        deadline = time.monotonic() + 5
-        while socket.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
+        wait_stopped(socket)
         # Qualify the nonfixture read-only identity/cache routing with wholly
         # synthetic state and unavailable original paths. No provider request
         # or mutation is made in this phase.
         hidden_source = root / 'retained-source-unavailable'
         source.rename(hidden_source)
         try:
-            result = subprocess.run([str(binary), 'vault', 'start'], env=env, capture_output=True, timeout=20)
-            require(result.returncode == 0, 'activation marker did not supply default vault/socket for start')
             started = True
-            status = subprocess.run([str(binary), 'vault', 'status'], env=env, capture_output=True, check=True, timeout=10)
+            result = evidence.process('marker-start', [str(binary), 'vault', 'start'],
+                                      env=env, capture_output=True, timeout=20)
+            require(result.returncode == 0, 'activation marker did not supply default vault/socket for start: ' + command_result(result))
+            status = evidence.process('marker-status', [str(binary), 'vault', 'status'],
+                                      env=env, capture_output=True, timeout=10)
+            require(status.returncode == 0, 'marker-routed status failed: ' + command_result(status))
             require(not json.loads(status.stdout)['data']['unlocked'], 'marker-routed status missed locked owner')
             prompt(binary, ['vault', 'unlock'], env, [(b'Vault password: ', PASSWORD)])
             require(control('status')['unlocked'], 'marker-routed unlock missed owner')
@@ -338,12 +415,15 @@ def run(binary, root):
         finally:
             hidden_source.rename(source)
     finally:
-        if started:
-            control('stop')
-        deadline = time.monotonic() + 5
-        while socket.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
-        require(not socket.exists(), 'detached owned daemon did not stop')
+        failure = sys.exc_info()[1]
+        try:
+            cleanup_detached(binary, env, socket, started, evidence)
+        except BaseException as cleanup_error:
+            evidence.value['cleanupIncomplete'] = True
+            evidence.save()
+            if failure is None:
+                raise
+            failure.add_note('Owned daemon cleanup also failed: ' + repr(cleanup_error))
     # Reject unsafe discovery paths before launching a child.
     unsafe = root / 'unsafe-socket-parent'
     unsafe.mkdir(mode=0o755)
@@ -396,8 +476,10 @@ def run(binary, root):
         activated = prompt(binary, ['vault', 'activate', '--vault-dir', str(live_vault), '--socket', str(live_socket),
                                    '--allow-unavailable-source'], live_env, [(b'Vault password: ', PASSWORD)])
         require(b'unavailable-acknowledged' in activated, 'explicit source acknowledgement was not reported')
-        subprocess.run([str(binary), 'vault', 'start'], env=live_env, capture_output=True, check=True, timeout=20)
         live_started = True
+        result = evidence.process('live-marker-start', [str(binary), 'vault', 'start'],
+                                  env=live_env, capture_output=True, timeout=20)
+        require(result.returncode == 0, 'live activation marker start failed: ' + command_result(result))
         prompt(binary, ['vault', 'unlock'], live_env, [(b'Vault password: ', PASSWORD)])
         result = subprocess.run([str(binary), 'cli'], env=live_env, capture_output=True, check=True, timeout=20,
                                 input=json.dumps(dict(id='real-migration-path', cmd='draft.read', account=ACCOUNT,
@@ -405,26 +487,48 @@ def run(binary, root):
         require(json.loads(result.stdout)['data']['bodyText'] == 'SyntheticMigrationBody',
                 'nonfixture migration did not preserve source draft')
     finally:
-        if live_started:
-            subprocess.run([str(binary), 'vault', 'stop'], env=live_env, capture_output=True, check=True, timeout=20)
-        source_is_hidden = hidden_source.exists()
-        if source_is_hidden:
-            hidden_source.rename(source)
-        deadline = time.monotonic() + 5
-        while live_socket.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
-        require(not live_socket.exists(), 'live synthetic detached owner did not stop')
+        failure = sys.exc_info()[1]
+        try:
+            cleanup_detached(binary, live_env, live_socket, live_started, evidence)
+        except BaseException as cleanup_error:
+            evidence.value['cleanupIncomplete'] = True
+            evidence.save()
+            if failure is None:
+                raise
+            failure.add_note('Owned live daemon cleanup also failed: ' + repr(cleanup_error))
+        finally:
+            if hidden_source.exists():
+                hidden_source.rename(source)
     print('PASS synthetic migration: inventory, checkpoint/resume, incomplete gate, retained source, sealed identity/mail/blob/UI, explicit activation/start, paused sends and restart', flush=True)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True, type=Path)
+    parser.add_argument('--receipt', type=Path)
     args = parser.parse_args()
     binary = args.binary.resolve()
     info = subprocess.run([str(binary), 'build-info'], check=True, capture_output=True, text=True)
     print(info.stdout.strip(), flush=True)
+    if args.receipt is not None and args.receipt.exists():
+        parser.error('refusing to overwrite a migration receipt')
+    evidence = Evidence(args.receipt, json.loads(info.stdout))
     # Darwin's default per-user temporary path can exceed sockaddr_un before
     # the socket permission/child-exit cases reach their intended boundary.
-    with tempfile.TemporaryDirectory(prefix='omagma-vault-migration-', dir=str(Path('/tmp').resolve())) as root:
-        run(binary, Path(root).resolve())
+    root = Path(tempfile.mkdtemp(prefix='omagma-vault-migration-', dir=str(Path('/tmp').resolve()))).resolve()
+    try:
+        try:
+            run(binary, root, evidence)
+        finally:
+            if evidence.value.get('cleanupIncomplete'):
+                # Keep an owned fixture tree if its daemon could not be stopped;
+                # recursive removal must not race a live writer or hide the cause.
+                evidence.value['retainedFixtureRoot'] = str(root)
+            else:
+                shutil.rmtree(root)
+        evidence.value['passed'] = True
+    except BaseException:
+        evidence.value['failure'] = traceback.format_exc()
+        raise
+    finally:
+        evidence.save()

@@ -286,7 +286,9 @@ jobs:
       - name: Safe memory gate
         run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-memory.json
       - name: Safe background scheduling memory gate
-        run: python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-background.json
+        run: |
+          python3 tests/background_measure_check.py
+          python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-background.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-linux-${{ matrix.arch }}

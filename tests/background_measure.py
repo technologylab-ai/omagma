@@ -15,6 +15,37 @@ from measure import Sampler
 from build_info import read_build_info
 
 
+def fixture_ready(status, enabled_slots):
+    accounts = status.get("accounts", [])
+    if status.get("ok") is not True or len(accounts) != len(enabled_slots) or not any(enabled_slots):
+        return False
+    for account, enabled in zip(accounts, enabled_slots):
+        if account.get("enabled") is not enabled:
+            return False
+        if enabled and not (
+            account.get("state") in ("current", "loading")
+            and account.get("error") == ""
+            and type(account.get("checkedAt")) is int and account["checkedAt"] > 0
+            and type(account.get("generation")) is int and account["generation"] > 0
+            and isinstance(account.get("messages"), list) and len(account["messages"]) == 30
+        ):
+            return False
+    return True
+
+
+def fixture_readiness_sample(status):
+    # Counts and state only: never retain message data or account identities.
+    return {
+        "accounts": [dict(slot=slot, enabled=account["enabled"], state=account["state"],
+                          checkedAt=account["checkedAt"], generation=account["generation"],
+                          retainedRows=len(account["messages"]), error=account["error"])
+                     for slot, account in enumerate(status["accounts"])],
+        "refreshJobs": status["metrics"]["refreshJobs"],
+        "activeJobs": status["metrics"]["activeJobs"],
+        "pendingJobs": status["metrics"]["pendingJobs"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -44,11 +75,26 @@ def main():
         with Daemon(args.binary, args.config, extra, fixture_mode=args.fixtures) as daemon:
             daemon.hello()
             with Sampler(daemon.process.pid) as sampler:
+                if args.fixtures:
+                    enabled_slots = tuple(account.get("enabled", True) for account in config["accounts"])
+                    readiness = result["readiness"] = dict(attempts=0, first=[], recent=[], passed=False)
+                    readiness_began = time.monotonic()
                 def ready():
                     status = daemon.request("status")
                     if args.live:
                         return next(a for a in status["accounts"] if a["account"] == args.account)["state"] == "current" and status["metrics"]["activeJobs"] == 0 and status["metrics"]["pendingJobs"] == 0
-                    return all(a["state"] == "current" for a in status["accounts"] if a["enabled"])
+                    sample = fixture_readiness_sample(status)
+                    sample["elapsedSeconds"] = round(time.monotonic() - readiness_began, 6)
+                    readiness["attempts"] += 1
+                    if len(readiness["first"]) < 8:
+                        readiness["first"].append(sample)
+                    readiness["recent"].append(sample)
+                    del readiness["recent"][:-8]
+                    # Automatic refresh may already be loading the next version
+                    # of a successfully published cache. Requiring all accounts
+                    # to be idle simultaneously makes readiness depend on timing.
+                    readiness["passed"] = fixture_ready(status, enabled_slots)
+                    return readiness["passed"]
                 daemon.until(ready, 40)
                 initial = daemon.request("status")
                 events = daemon.event_count

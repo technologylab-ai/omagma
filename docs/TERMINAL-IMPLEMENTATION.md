@@ -49,8 +49,9 @@ storage. Sixteen IO workers and their requested 1 MiB stacks start before the
 runtime seals, including the daemon worker. The interactive vault relay uses
 the same ceiling: joined tasks can briefly retain their worker slots while an
 immediate foreground action starts, so the pool accommodates both. CLI-only
-vault relays retain their smaller four-worker pool. No
-workers are created after startup. Normal read/UI arenas subdivide
+vault relays retain their smaller four-worker pool. Vault controls use the
+16-worker ceiling for nested identity and transport deadlines and their
+retiring predecessors. No workers are created after startup. Normal read/UI arenas subdivide
 and return this reserved storage without an allocator fallback. Native full-source
 capture for reply/forward, draft editing/reopening, preview, send staging/submission,
 RSVP mail and Gmail draft upload explicitly

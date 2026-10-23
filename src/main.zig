@@ -170,7 +170,7 @@ fn app(minimal: std.process.Init.Minimal) !void {
         }
     }
     if (lean_client) {
-        if (std.mem.eql(u8, early_mode, "tui")) try runtime.sealFrontend() else try runtime.sealClient();
+        if (std.mem.eql(u8, early_mode, "tui")) try runtime.sealFrontend() else if (std.mem.eql(u8, early_mode, "vault")) try runtime.sealControl() else try runtime.sealClient();
     } else try runtime.seal();
     const init = runtime.context();
     const io = runtime.io();

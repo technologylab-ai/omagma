@@ -91,10 +91,19 @@ pub const Runtime = struct {
         self.phase = .sealed;
     }
 
-    /// Relays/control clients do no provider work. Keep their worker pool and
+    /// Relays do no provider work. Keep their worker pool and
     /// untouched static reservation small while preserving deadline support.
     pub fn sealClient(self: *Runtime) !void {
         return self.sealRelay(4);
+    }
+
+    /// Vault startup and marker-routed controls nest an identity deadline
+    /// around the transport deadline (four active tasks). Joined tasks can
+    /// still be retiring when the next phase begins. Use the normal native
+    /// ceiling for control handoffs, without growing the ordinary CLI relay
+    /// pool or creating any workers after startup is sealed.
+    pub fn sealControl(self: *Runtime) !void {
+        return self.sealRelay(worker_count);
     }
 
     /// The interactive relay has three persistent waits. Threaded publishes
