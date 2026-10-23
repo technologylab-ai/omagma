@@ -24,7 +24,7 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import MouseTerminal, click, point
 from terminal_reader_copy import clips
 from terminal_reader_editor import ReaderScreen
-from terminal_theme_picker import ThemeScreen
+from terminal_theme_picker import ThemeScreen, focused
 
 
 class CalendarScreen(ThemeScreen, ReaderScreen):
@@ -280,9 +280,13 @@ def source_priority(binary, directory, captures):
             return saved().get("preferred")
 
         def choose(terminal, index, label):
+            previous_frame = terminal.screen.completed_frames
             terminal.send(b"k" * 12 + b"j" * index)
-            terminal.until(lambda: label in terminal.text())
-            terminal.gap(.05)
+            # Every visible source already has its label and Priority status.
+            # Wait for the selected row in a new complete frame before using
+            # controls whose label/action depends on that exact source.
+            terminal.until(lambda: terminal.screen.completed_frames > previous_frame
+                           and focused(terminal, label, no_color=isinstance(terminal.screen, CalendarScreen)))
 
         def apply(terminal):
             click(terminal, *point(terminal, "[Enter Apply]"))
@@ -396,7 +400,8 @@ def source_priority(binary, directory, captures):
             require("C*" not in terminal.text(), "unreadable Priority appeared as an actually displayed source")
             terminal.send(b"g")
             choose(terminal, 2, "C Imported own calendar")
-            terminal.until(lambda: "* Priority · not shown · no read access" in terminal.text())
+            terminal.until(lambda: "* Priority · not shown · no read access" in terminal.text()
+                           and "[p Clear priority]" in terminal.text())
             click(terminal, *point(terminal, "[p Clear priority]"))
             terminal.until(lambda: "Priority cleared" in terminal.text())
             terminal.send(b"\x1b")

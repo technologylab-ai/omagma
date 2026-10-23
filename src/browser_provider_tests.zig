@@ -7,6 +7,7 @@ const cache = @import("browser_cache.zig");
 const live = @import("browser_live.zig");
 const t = @import("terminal/types.zig");
 const j = @import("terminal/json.zig");
+const decoder_policy = @import("terminal/decoder_policy.zig");
 const A = std.mem.Allocator;
 const Value = j.Value;
 const expect = std.testing.expect;
@@ -1679,7 +1680,9 @@ test "browser provider: decoder migration stays offline and a newly refused char
     try equal(@as(usize, 1), host.requests);
     const snapshot_buffer = try a.alloc(u8, cache.snapshot_limit);
     const persisted = try a.dupe(u8, try provider.cache.snapshot(0, snapshot_buffer));
-    try equal(@as(i64, 4), try j.integer(try parse(a, persisted), "decoderRevision", 0));
+    // Charset retry eligibility changed at revision 4; the saved receipt
+    // records the current shared policy, including later unrelated changes.
+    try equal(@as(i64, decoder_policy.decoder_revision), try j.integer(try parse(a, persisted), "decoderRevision", 0));
     try provider.cache.restore(0, persisted, false);
     const second = try data(try invoke(&provider, a, .{ .cmd = "mail.read", .account = account, .messageId = "charset" }, false));
     try strings("UnsupportedCharset", j.text(second, "bodyCacheError"));

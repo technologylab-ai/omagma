@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -15,11 +16,60 @@ import shlex
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 
 from build_info import read_build_info
 from terminal_integration import Client, FIXTURES
-from terminal_pty import Terminal, require
+from terminal_pty import Terminal, require, saved_compose_frame
+
+# These two operations process the complete multi-MiB fixture. A native Debug
+# run measured 12s for capture and 31s for HTML export, beyond the old 10s/30s
+# UI waits. Keep explicit slow-native margins here, not in Terminal.until or
+# the ordinary workflow waits; successful receipts retain each actual duration.
+CAPTURE_SECONDS = 60
+HTML_PREVIEW_SECONDS = 120
+
+
+class Stages:
+    """Retain the exact wait and completed work when a slow PTY check fails."""
+    def __init__(self):
+        self.started = time.monotonic()
+        self.current = "setup"
+        self.timings = []
+
+    @contextmanager
+    def step(self, name, timeout=None):
+        self.current = name
+        started = time.monotonic()
+        entry = {"stage": name, "startedSeconds": round(started - self.started, 4), "passed": False}
+        if timeout is not None:
+            entry["timeoutSeconds"] = timeout
+        self.timings.append(entry)
+        try:
+            yield
+            entry["passed"] = True
+        finally:
+            entry["elapsedSeconds"] = round(time.monotonic() - started, 4)
+
+    def receipt(self):
+        return {"stage": self.current, "elapsedSeconds": round(time.monotonic() - self.started, 4),
+                "stageTimings": self.timings}
+
+
+def persist_failure(failure, directory, output):
+    """Keep full JSON evidence where the native CI artifact glob retains it."""
+    data = getattr(failure, "growing_diagnostics", None)
+    if data is None:
+        saved = directory / "last-screen.json"
+        if not saved.is_file():
+            return {"traceback": traceback.format_exc()}
+        data = json.loads(saved.read_text())
+    destination = output.with_name(f"{output.stem}-growing-composer.vt.json")
+    destination.write_text(json.dumps(data, ensure_ascii=True, indent=2) + "\n")
+    destination.chmod(0o600)
+    return {**{key: value for key, value in data.items() if key != "escapedOutput"},
+            "escapedDiagnosticFile": destination.name}
 
 
 def encode(value):
@@ -73,46 +123,60 @@ def source_fixture(root):
 
 
 def exercise(binary, root):
-    fixtures, original_hash = source_fixture(root)
-    source = root / "editor-body.txt"
-    body = "Growing note " + "a" * (2 * 1024 * 1024 + 64) + "\nComplete note tail.\n"
-    source.write_text(body)
-    editor = root / "editor.py"
-    editor.write_text("from pathlib import Path\nimport sys\n"
-                      "Path(sys.argv[-1]).write_bytes(Path(sys.argv[1]).read_bytes())\n")
-    preferences = root / "ui.json"
-    preferences.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}))
-    preferences.chmod(0o600)
-    terminal = Terminal(binary, root, columns=160, rows=40, history_limit=1024 * 1024,
-                        extra=("--fixture-root", str(fixtures), "--ui-file", str(preferences)),
-                        environment={"EDITOR": shlex.join([sys.executable, str(editor), str(source)])})
+    stages = Stages()
+    terminal = None
+
+    def wait(name, predicate, *, keys=None, seconds=10):
+        with stages.step(name, seconds):
+            if keys is not None:
+                terminal.send(keys)
+            terminal.until(predicate, seconds=seconds)
+
     try:
-        terminal.until(lambda: "Growing chain source" in terminal.text() and "Ready" in terminal.text())
-        terminal.send(b"\r")
-        terminal.until(lambda: "Body unavailable" in terminal.text())
-        terminal.send(b"r")
-        terminal.until(lambda: "Keep formatting" in terminal.text())
-        require("unavailable" not in terminal.text().split("Keep formatting")[0].splitlines()[-1].lower(),
-                "large-source formatting choice remained disabled")
-        terminal.send(b"k")
-        terminal.until(lambda: "Compose" in terminal.text().splitlines()[0]
-                       and "original is protected" in terminal.text())
-        terminal.send(b"e")
-        terminal.until(lambda: "Editor returned" in terminal.text() and "Growing note" in terminal.text(), seconds=30)
-        terminal.send(b":preview-browser\r")
-        terminal.until(lambda: "Mock browser target validated" in terminal.text(), seconds=30)
-        previews = list(root.rglob("preview.html"))
-        require(len(previews) == 1 and "Complete note tail." in previews[0].read_text(),
-                "large ordinary composer preview did not preserve the authored HTML")
-        terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text(), seconds=30)
+        with stages.step("create-fixture"):
+            fixtures, original_hash = source_fixture(root)
+            source = root / "editor-body.txt"
+            body = "Growing note " + "a" * (2 * 1024 * 1024 + 64) + "\nComplete note tail.\n"
+            source.write_text(body)
+            editor = root / "editor.py"
+            editor.write_text("from pathlib import Path\nimport sys\n"
+                              "Path(sys.argv[-1]).write_bytes(Path(sys.argv[1]).read_bytes())\n")
+            preferences = root / "ui.json"
+            preferences.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}))
+            preferences.chmod(0o600)
+        with stages.step("start-terminal"):
+            terminal = Terminal(binary, root, columns=160, rows=40, history_limit=1024 * 1024,
+                                extra=("--fixture-root", str(fixtures), "--ui-file", str(preferences)),
+                                environment={"EDITOR": shlex.join([sys.executable, str(editor), str(source)])})
+        wait("initial-mail-list", lambda: "Growing chain source" in terminal.text() and "Ready" in terminal.text())
+        wait("bounded-reader-refusal", lambda: "Body unavailable" in terminal.text()
+             and "j/k Scroll" in terminal.text().splitlines()[-2], keys=b"\r")
+        wait("formatted-reply-choice", lambda: "Keep formatting" in terminal.text(), keys=b"r")
+        with stages.step("verify-formatting-choice"):
+            require("HTML · 146 embedded resources" in terminal.text()
+                    and "Keep formatting unavailable" not in terminal.text(),
+                    "large-source formatting choice did not retain all 146 resources")
+        wait("capture-formatted-original", lambda: "Compose" in terminal.text().splitlines()[0]
+             and "original is protected" in terminal.text() and saved_compose_frame(terminal),
+             keys=b"k", seconds=CAPTURE_SECONDS)
+        # The editor notice appears before its asynchronous draft save starts.
+        # Composer commands are ignored until that save has returned: require
+        # its observable receipt before requesting a preview, without retries.
+        wait("editor-return-and-save", lambda: "Editor returned" in terminal.text()
+             and "Growing note" in terminal.text() and saved_compose_frame(terminal),
+             keys=b"e", seconds=30)
+        wait("open-complete-html-preview", lambda: "Mock browser target validated" in terminal.text(),
+             keys=b":preview-browser\r", seconds=HTML_PREVIEW_SECONDS)
+        with stages.step("verify-complete-html-preview"):
+            previews = list(root.rglob("preview.html"))
+            require(len(previews) == 1 and "Complete note tail." in previews[0].read_text(),
+                    "large ordinary composer preview did not preserve the authored HTML")
+        wait("first-send-review", lambda: "Sending account:" in terminal.text(), keys=b"\x13", seconds=30)
         require("Preview unavailable" not in terminal.text(),
                 "semantic screen limit incorrectly prevented a valid long note from review")
-        terminal.send(b"n")
-        terminal.until(lambda: "Compose" in terminal.text().splitlines()[0])
-        terminal.send(b"q")
-        terminal.until(lambda: "Compose" not in terminal.text().splitlines()[0])
-        with Client(binary, root, extra=("--fixture-root", str(fixtures))) as client:
+        wait("return-from-review", lambda: "Compose" in terminal.text().splitlines()[0], keys=b"n")
+        wait("save-and-close-composer", lambda: "Compose" not in terminal.text().splitlines()[0], keys=b"q")
+        with stages.step("verify-saved-original-and-note"), Client(binary, root, extra=("--fixture-root", str(fixtures))) as client:
             summaries = client.request("draft.list")["drafts"]
             require(len(summaries) == 1, "large reply was not retained exactly once")
             draft = client.request("draft.read", draftId=summaries[0]["id"])
@@ -125,30 +189,40 @@ def exercise(binary, root):
             require(not draft["attachments"], "reply unexpectedly forwarded the ordinary PDF")
         # Reply returns to its reader context. Traverse reader -> list ->
         # sidebar before selecting local Drafts; a single h only reaches list.
-        terminal.send(b"hh")
-        terminal.until(lambda: "Accounts / mailboxes" in terminal.text())
-        terminal.send(b"jjjjj")
-        terminal.gap()
-        terminal.send(b"\r")
-        terminal.until(lambda: "Drafts" in terminal.text().splitlines()[0] and "Ready" in terminal.text())
-        terminal.send(b"\r")
-        terminal.until(lambda: "Compose" in terminal.text().splitlines()[0]
-                       and "Local draft · no mail sent" in terminal.text().splitlines()[1], seconds=30)
-        terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text(), seconds=30)
-        terminal.send(b"y")
-        terminal.until(lambda: "Saved by mock provider" in terminal.text(), seconds=30)
-        return {**terminal.finish(expected_sends=1), "sourceHtmlSha256": original_hash,
+        wait("open-mailbox-sidebar", lambda: "j/k Navigate" in terminal.text().splitlines()[-2], keys=b"hh")
+        with stages.step("select-drafts-folder"):
+            terminal.send(b"jjjjj")
+            terminal.gap()
+        wait("load-drafts-list", lambda: "Drafts" in terminal.text().splitlines()[0]
+             and "Re: Growing chain source" in terminal.text() and "Ready" in terminal.text(), keys=b"\r")
+        wait("reopen-saved-composer", lambda: "Compose" in terminal.text().splitlines()[0]
+             and "Local draft · no mail sent" in terminal.text().splitlines()[1], keys=b"\r", seconds=30)
+        wait("reopened-send-review", lambda: "Sending account:" in terminal.text(), keys=b"\x13", seconds=30)
+        wait("confirmed-fixture-send", lambda: "Saved by mock provider" in terminal.text(), keys=b"y", seconds=30)
+        with stages.step("verify-single-send-and-terminal-restoration"):
+            finished = terminal.finish(expected_sends=1)
+        return {**finished, **stages.receipt(), "sourceHtmlSha256": original_hash,
                 "inlineImagesPreserved": 146, "noteBytes": len(body.encode()),
                 "largeReaderRefusalStillAllowsFormattedReply": True,
                 "sourceOversizedOrdinaryFileNotForwarded": True,
                 "completeHtmlPreviewOpenedFromOrdinaryComposer": True,
                 "savedReopenedAndReviewed": True}
-    except Exception:
-        (root / "last-screen.txt").write_text(terminal.text())
+    except Exception as failure:
+        evidence = {"synthetic": True, **stages.receipt(), "traceback": traceback.format_exc()}
+        if terminal is not None:
+            evidence.update(currentCells=terminal.text().splitlines(),
+                            escapedOutput=bytes(terminal.output).decode("utf-8", errors="replace"),
+                            outputBytes=terminal.output_total, retainedOutputBytes=len(terminal.output),
+                            frameOpen=terminal.screen.frame_open, parserState=terminal.screen.state,
+                            exitCode=terminal.process.poll())
+            (root / "last-screen.txt").write_text(terminal.text())
+        failure.growing_diagnostics = evidence
+        (root / "last-screen.json").write_text(json.dumps(evidence, ensure_ascii=True, indent=2) + "\n")
+        (root / "last-screen.json").chmod(0o600)
         raise
     finally:
-        terminal.close()
+        if terminal is not None:
+            terminal.close()
 
 
 def main():
@@ -165,7 +239,7 @@ def main():
         shutil.rmtree(root)
     except Exception as error:
         report.update(passed=False, error=f"{type(error).__name__}: {error}",
-                      traceback=traceback.format_exc(), diagnosticDirectory=str(root))
+                      diagnosticDirectory=str(root), **persist_failure(error, root, args.output))
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report), flush=True)
     return 0 if report["passed"] else 1

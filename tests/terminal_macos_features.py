@@ -111,7 +111,9 @@ def main():
                 result["passed"] = True
             except Exception as failure:
                 result["error"] = f"{type(failure).__name__}: {failure}"
-                if isinstance(failure, terminal_html.HtmlFailure):
+                if case == "growing-composer":
+                    result.update(terminal_growing_composer.persist_failure(failure, directory, args.output))
+                elif isinstance(failure, terminal_html.HtmlFailure):
                     result["diagnostics"] = failure.diagnostics
                 elif hasattr(failure, "file_dialog_cells"):
                     result["diagnostics"] = failure.file_dialog_cells

@@ -885,18 +885,14 @@ def main():
             if name == "growing-composer":
                 # Keep the full native release PTY matrix exercising the large
                 # source/chooser/editor/reopen/send path on every platform.
-                from terminal_growing_composer import exercise as growing_composer
+                from terminal_growing_composer import exercise as growing_composer, persist_failure
                 owned = Path(directory) / name
                 owned.mkdir(mode=0o700)
                 try:
                     receipt.update(growing_composer(binary, owned), passed=True)
                 except Exception as error:
                     receipt.update(passed=False, error=f"{type(error).__name__}: {error}")
-                    screen = owned / "last-screen.txt"
-                    if screen.exists():
-                        diagnostic = output.with_name(f"{output.stem}-{name}.txt")
-                        diagnostic.write_text(screen.read_text())
-                        receipt["diagnosticFile"] = diagnostic.name
+                    receipt.update(persist_failure(error, owned, output))
                 report["cases"].append(receipt)
                 print(json.dumps(receipt), flush=True)
                 continue
