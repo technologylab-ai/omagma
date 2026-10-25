@@ -344,13 +344,16 @@ jobs:
             runner: macos-15
             machine: arm64
             target: aarch64-macos.13.0
+            job_timeout: 180
           - arch: x86_64
             runner: macos-15-intel
             machine: x86_64
             target: x86_64-macos.13.0
+            job_timeout: 240
     runs-on: ${{ matrix.runner }}
-    # Native Intel hosts also run the complete encrypted-vault and attachment suites.
-    timeout-minutes: 180
+    # Intel used 154 minutes before the added retained-history qualification.
+    # This job allowance does not change the individual test watchdogs.
+    timeout-minutes: ${{ matrix.job_timeout }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the declared native Zig compiler
