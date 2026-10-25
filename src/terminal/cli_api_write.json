@@ -153,14 +153,27 @@
       "cmd": "draft.list",
       "summary": "List this account's local draft summaries.",
       "capabilities": [],
-      "properties": {},
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 100
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Copy nextCursor from the preceding page. Omit to start at the first active draft."
+        }
+      },
       "required": [],
       "notes": [
         "Local account cache operation; no provider call and no mail is sent.",
         "All identities and content handles remain scoped to the explicit account.",
-        "Result data.drafts contains summaries: bodyText is empty and attachments omit content bytes; recoveryFields/original are omitted from this index. Use draft.read before editing or sending a saved draft.",
-        "At most 128 local drafts; this does not list Gmail server drafts.",
-        "Result gmailLinks describes each retained draft’s Gmail ownership, paused state and latest import, without provider access."
+        "Result data.drafts contains compact summaryOnly rows with recipient/file counts, not editable source bodies or file descriptors. Use draft.read before editing or sending a saved draft.",
+        "At most 128 active local drafts; this does not list Gmail server drafts. Each page contains at most limit rows within a 3 MiB encoded browsing budget; copy nonempty nextCursor verbatim to continue.",
+        "Result gmailLinks describes each retained draft’s Gmail ownership, paused state and latest import, without provider access.",
+        "Returns active work only. Settled sent sources are retained separately; use history.drafts for bounded pages and draft.read or draft.clone for an exact retained source."
       ],
       "examples": [
         {
@@ -216,7 +229,7 @@
         "Local account cache operation; no provider call and no mail is sent.",
         "All identities and content handles remain scoped to the explicit account.",
         "Fields may be empty while composing; sending later requires at least one recipient and a finished draft. A new local ID is generated, regardless of draft.id.",
-        "Attachment blob handles must already exist in this account and match their declared size. Limit: 128 saved drafts, subject to private cache disk quota."
+        "Attachment blob handles must already exist in this account and match their declared size. Limit: 128 active drafts, subject to private cache disk quota; settled accepted sources use retained history."
       ],
       "examples": [
         {
@@ -297,6 +310,15 @@
           "type": "boolean",
           "default": false,
           "description": "Return only the saved draft id. Stored fields, files and frozen originals are unchanged; omitted or false returns the full draft."
+        },
+        "forkIfSettled": {
+          "type": "boolean",
+          "default": false,
+          "description": "If draftId was already sent with a known applied receipt, save these local recovery fields under a fresh id and return forkedFrom. Uncertain or otherwise owned sources remain protected."
+        },
+        "copyFromDraftId": {
+          "$ref": "#/$defs/WriteIdentifier",
+          "description": "Explicitly preserve local recovery fields as a new draft after detecting another client’s edits to this source. Omit draftId and forkIfSettled; returns copiedFrom. The current saved source is unchanged."
         }
       },
       "required": [
@@ -307,7 +329,9 @@
         "All identities and content handles remain scoped to the explicit account.",
         "Omit draftId to create; provide it to replace an existing draft. Exactly five recoveryFields are required in To/Cc/Bcc/Subject/Body order. Recipient text may be unfinished; Subject remains a valid bounded header.",
         "Ordinary draft.to/cc/bcc, subject and bodyText are ignored by this operation: the raw fields provide their recovery equivalents. Other Draft fields, including from/threading/attachments/original/bodyFormat, are accepted.",
-        "Existing drafts preserve omitted bodyFormat/original. Changed content cancels a queued countdown; uncertainty protections still apply. A finished normal draft.update must clear recoveryFields before queueing/sending."
+        "Existing drafts preserve omitted bodyFormat/original. Changed content cancels a queued countdown; uncertainty protections still apply. A finished normal draft.update must clear recoveryFields before queueing/sending.",
+        "forkIfSettled and copyFromDraftId are explicit local recovery paths. They never send or upload, never modify the protected source and cannot bypass unknown, submitting, queued or paused Gmail ownership. Preserve the returned new id rather than continuing to edit the old identity.",
+        "If an unpaused source still has a kept Gmail copy, the new recovery draft inherits that warning atomically and requires a fresh send acknowledgement. The result includes gmailLink and contentDigest even with acknowledgementOnly:true; the original link stays unchanged and no Gmail import is recorded."
       ],
       "examples": [
         {
@@ -449,6 +473,13 @@
           "minLength": 64,
           "maxLength": 64,
           "description": "Exact current contentDigest from draft.gmail-info; required with acknowledgement."
+        },
+        "expectedContentDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Optional canonical saved-content digest returned by draft.measure. A changed draft is refused before staging or sending; use this to bind review to one exact saved source."
         }
       },
       "required": [
@@ -460,7 +491,7 @@
         "Always inspect the durable outcome (applied, rejected or unknown), not only the outer ok. Reusing the same operationId and unchanged content returns its recorded receipt. Changed content with that ID fails OperationConflict.",
         "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
-        "At most 32 recipients, 16 ordinary files and 1024 retained original resources. Decoded outgoing files total at most 25 MiB; embedded bytes remain 2 MiB, with native formatted sources externalized as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
+        "Native clients allow up to 500 recipients; ordinary files and included original resources share 1040 outgoing parts and 25 MiB decoded. At most 1024 original resources are retained. The browser demo keeps 32 recipients, 16 ordinary files and its 2 MiB embedded-resource tier; native formatted sources externalize resources as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands.",
         "A handed-off draft remains paused. Reclaimed/imported drafts require explicit Gmail-copy acknowledgement for the exact current content digest before queueing or sending; editing invalidates it."
       ],
@@ -503,6 +534,13 @@
           "minLength": 64,
           "maxLength": 64,
           "description": "Exact current contentDigest from draft.gmail-info; required with acknowledgement."
+        },
+        "expectedContentDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Optional canonical saved-content digest returned by draft.measure. A changed draft is refused before staging or sending; use this to bind review to one exact saved source."
         }
       },
       "required": [
@@ -795,9 +833,9 @@
       ],
       "notes": [
         "Creates a saved local draft with no recipients and no inherited threadId/In-Reply-To/References. Fill recipients and review before sending.",
-        "Default text forwarding includes the original ordinary attachments. Missing/oversized files fail rather than being silently omitted; ordinary outgoing totals remain 16 files and 25 MiB.",
+        "Default text forwarding includes the original ordinary attachments. Missing/oversized files fail rather than being silently omitted. Native ordinary files and included original resources share 1040 parts and 25 MiB decoded; the browser demo keeps 16 ordinary files.",
         "omitAttachments:true skips source file downloads and explicitly retains the omission warning; it never implies sending the draft.",
-        "preserveFormatting:true uses a fresh full read and validated opaque Original snapshot with up to 1024 related resources. Native images use immutable blobs under the 25 MiB combined file budget; portable embedded resources remain 2 MiB. Remaining ordinary files retain their separate count limit. HTML must be unambiguous and local CID references resolvable.",
+        "preserveFormatting:true uses a fresh full read and validated opaque Original snapshot with up to 1024 related resources. Native images use immutable blobs under the 25 MiB combined file budget; portable embedded resources remain 2 MiB. Included resources and ordinary files share the native part budget; the portable ordinary-file limit remains separate. HTML must be unambiguous and local CID references resolvable.",
         "original:true downloads raw source and attaches unchanged original.eml. Native clients stream up to 25 MiB of decoded original MIME into a private file; the browser retains its 2 MiB source limit. It may use message/rfc822, message/global or application/octet-stream according to encoding safety. It does not reuse the text-reader rendering.",
         "No reply-all flag or recipient field is applied by mail.forward; use draft.update on the returned draft."
       ],
@@ -836,6 +874,13 @@
         },
         "operationId": {
           "$ref": "#/$defs/WriteOperationId"
+        },
+        "expectedContentDigest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Optional canonical saved-content digest returned by draft.measure. A changed draft is refused before staging or sending; use this to bind review to one exact saved source."
         }
       },
       "required": [
@@ -847,7 +892,7 @@
         "Always inspect the durable outcome (applied, rejected or unknown), not only the outer ok. Reusing the same operationId and unchanged content returns its recorded receipt. Changed content with that ID fails OperationConflict.",
         "Never retry an unknown outcome automatically, including with a fresh operationId. Use operation.read/list and the recovery draftId to reconcile with the provider. A lost response can follow a successful send.",
         "Checks current account authorization and verified From identity, recipients, attachment content/hash, threading, original resources and final MIME limits before provider submission. A queued or uncertain matching draft/content is fenced.",
-        "At most 32 recipients, 16 ordinary files and 1024 retained original resources. Decoded outgoing files total at most 25 MiB; embedded bytes remain 2 MiB, with native formatted sources externalized as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
+        "Native clients allow up to 500 recipients; ordinary files and included original resources share 1040 outgoing parts and 25 MiB decoded. At most 1024 original resources are retained. The browser demo keeps 32 recipients, 16 ordinary files and its 2 MiB embedded-resource tier; native formatted sources externalize resources as immutable blobs. Native source/rendered alternatives are bounded to 35 MiB, and native sends stream exact MIME up to 35 MiB. Selected native compose requests use their published expanded frame limit; ordinary and portable requests remain 3 MiB.",
         "Direct sends retain a local recovery draft before recording submission uncertainty; operation receipts contain its draftId and stable RFC Message-ID. No arbitrary raw MIME, calendar or filesystem path field is exposed by these commands."
       ],
       "examples": [
@@ -1720,8 +1765,9 @@
       "required": [],
       "notes": [
         "Local account-cache lookup; no provider request or mutation. Returns data.operations with stable IDs, content hashes, kind, outcomes, error codes and any recovery-draft/message/label references.",
-        "Up to 1000 operation records are retained. These records cover sending/RSVP/label definitions, not every direct mailbox or contact write; mail.batch returns a separate undo receipt.",
-        "An outer ok:true only means the lookup succeeded. The operation outcome can be unknown; do not infer that mail was or was not sent."
+        "Up to 1000 active operation records are kept in the hot index; settled records move to paged history.operations and operation.read resolves either location. These cover sending/RSVP/label definitions, not every direct mailbox or contact write; mail.batch returns a separate undo receipt.",
+        "An outer ok:true only means the lookup succeeded. The operation outcome can be unknown; do not infer that mail was or was not sent.",
+        "Lists active work. Use history.operations for paginated settled receipts; old replay fences are retained independently of source content."
       ],
       "examples": [
         {
@@ -1748,7 +1794,8 @@
       "notes": [
         "Local account-cache lookup; no provider request. Unknown IDs fail OperationNotFound.",
         "Inspect outcome, errorCode, kind and recovery draftId/RFC Message-ID or label receipt fields. A retained unknown record fences repeated content and needs explicit reconciliation.",
-        "The operation ID must belong to this account; neither looking it up nor changing its spelling resolves an uncertain provider result."
+        "The operation ID must belong to this account; neither looking it up nor changing its spelling resolves an uncertain provider result.",
+        "Resolves active and archived permanent receipts, including after explicit retained-source deletion. Reusing an operation ID with different content is always a conflict."
       ],
       "examples": [
         {
@@ -1825,6 +1872,192 @@
           "expectedVersion": 1
         }
       ]
+    },
+    {
+      "cmd": "draft.measure",
+      "summary": "Count one saved draft’s encoded MIME for a reserved send identity without sending or creating a spool.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "operationId": {
+          "$ref": "#/$defs/WriteOperationId"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "draftId",
+        "operationId"
+      ],
+      "notes": [
+        "Local native operation. Reserve this operationId for the measured revision and use it for draft.queue or draft.send; boundary and branding CID widths then match the eventual MIME.",
+        "Returns contentDigest to pass as expectedContentDigest during staging/sending, plus revision and operationId for stale-result rejection.",
+        "An exact receipt reports bytes/maxBytes, includeOriginal, overLimit and sendable; withoutOriginalBytes is present when omission can be measured. Provably oversized rendered content reports exact:false and overLimit:true without inventing an exact byte count.",
+        "Independent recipient, decoded-file, part-count and encoded-MIME admission checks remain enforced. Measuring does not save or send."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.measure",
+          "account": "personal@example.com",
+          "draftId": "draft_1",
+          "operationId": "review_1",
+          "revision": 3
+        }
+      ]
+    },
+    {
+      "cmd": "draft.clone",
+      "summary": "Create a fresh editable draft from an exact retained sent source.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        }
+      },
+      "required": [
+        "draftId"
+      ],
+      "notes": [
+        "The retained source remains immutable. Returns a new local draft ID and preserves the original/source inclusion policy and file references.",
+        "Requires a settled sent source. Active unsent, queued, uncertain or Gmail-owned work cannot be cloned to bypass its protections; finish or resolve that workflow first.",
+        "A source explicitly deleted from retained history cannot be cloned. No mail is sent or uploaded."
+      ],
+      "examples": [
+        {
+          "cmd": "draft.clone",
+          "account": "personal@example.com",
+          "draftId": "draft_1"
+        }
+      ]
+    },
+    {
+      "cmd": "history.delete-source",
+      "summary": "Explicitly remove retained local source content while preserving permanent receipt and replay protection.",
+      "capabilities": [],
+      "properties": {
+        "draftId": {
+          "$ref": "#/$defs/WriteIdentifier"
+        },
+        "confirm": {
+          "type": "boolean",
+          "const": true
+        },
+        "discardFiles": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "draftId",
+        "confirm"
+      ],
+      "notes": [
+        "Only settled archived source content may be deleted. Active, pending, unknown and Gmail-owned drafts are protected.",
+        "Default removes the retained source JSON only. discardFiles:true also removes files no longer pinned by any active or archived source, cache body or outbox.",
+        "A durable tombstone and operation identity/content digest remain; old-ID replay cannot send a duplicate. Interrupted cleanup can be retried. This never changes Gmail mail."
+      ],
+      "examples": [
+        {
+          "cmd": "history.delete-source",
+          "account": "personal@example.com",
+          "draftId": "draft_1",
+          "confirm": true
+        }
+      ]
+    },
+    {
+      "cmd": "history.operations",
+      "summary": "Page through settled retained operations without loading the whole history.",
+      "capabilities": [],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 30
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [],
+      "notes": [
+        "Account-scoped immutable snapshot cursor; copy nextCursor verbatim for the next page. A blank cursor starts at the newest retained page.",
+        "Returns items, nextCursor and retained:true within a bounded encoded page. A large operation may be an identity/outcome summary with summaryOnly and readCommand; operation.read retrieves its exact receipt. Active work remains in existing list commands.",
+        "Explicit source-content deletion preserves receipts and replay fences. Missing or corrupt history fails closed."
+      ],
+      "examples": [
+        {
+          "cmd": "history.operations",
+          "account": "personal@example.com",
+          "limit": 30
+        }
+      ]
+    },
+    {
+      "cmd": "history.drafts",
+      "summary": "Page through settled retained drafts without loading the whole history.",
+      "capabilities": [],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 30
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [],
+      "notes": [
+        "Account-scoped immutable snapshot cursor; copy nextCursor verbatim for the next page. A blank cursor starts at the newest retained page.",
+        "Returns compact source summaries in items, nextCursor and retained:true within a bounded encoded page. draft.read retrieves the exact source. Active work remains in existing list commands.",
+        "Explicit source-content deletion preserves receipts and replay fences. Missing or corrupt history fails closed."
+      ],
+      "examples": [
+        {
+          "cmd": "history.drafts",
+          "account": "personal@example.com",
+          "limit": 30
+        }
+      ]
+    },
+    {
+      "cmd": "history.queues",
+      "summary": "Page through settled retained queues without loading the whole history.",
+      "capabilities": [],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 30
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [],
+      "notes": [
+        "Account-scoped immutable snapshot cursor; copy nextCursor verbatim for the next page. A blank cursor starts at the newest retained page.",
+        "Returns items, nextCursor and retained:true. Active drafts/operations/queues remain in their existing list commands.",
+        "Explicit source-content deletion preserves receipts and replay fences. Missing or corrupt history fails closed."
+      ],
+      "examples": [
+        {
+          "cmd": "history.queues",
+          "account": "personal@example.com",
+          "limit": 30
+        }
+      ]
     }
   ],
   "$defs": {
@@ -1873,7 +2106,7 @@
       ]
     },
     "Recipients": {
-      "description": "Recipient list: either one RFC address-list string or up to 32 entries, each an Address object or a bare addr-spec string. A string can contain quoted display names, groups and comments. Sending permits at most 32 total To+Cc+Bcc recipients. String parsing deduplicates addresses case-insensitively; do not depend on duplicate array entries.",
+      "description": "Recipient list: either one RFC address-list string or up to 500 entries, each an Address object or a bare addr-spec string. A string can contain quoted display names, groups and comments. Sending permits at most 500 total To+Cc+Bcc recipients. String parsing deduplicates addresses case-insensitively; do not depend on duplicate array entries.",
       "oneOf": [
         {
           "type": "string",
@@ -1881,7 +2114,7 @@
         },
         {
           "type": "array",
-          "maxItems": 32,
+          "maxItems": 500,
           "items": {
             "oneOf": [
               {
@@ -1933,7 +2166,7 @@
     },
     "Attachment": {
       "type": "object",
-      "description": "Outgoing attachment descriptor. Supply the full descriptor returned by attachment.import for a file handle, or id:\"\" plus filename/size/data for inline bytes. No arbitrary filesystem path is accepted here. At most 16 ordinary files; decoded inline bytes across ordinary attachments and original resources total at most 2 MiB. All attachments total at most 25 MiB; larger received handles cannot be sent unchanged.",
+      "description": "Outgoing attachment descriptor. Supply the full descriptor returned by attachment.import for a file handle, or id:\"\" plus filename/size/data for inline bytes. No arbitrary filesystem path is accepted here. At most 1,040 ordinary files; decoded inline bytes across ordinary attachments and original resources total at most 2 MiB. All attachments total at most 25 MiB; larger received handles cannot be sent unchanged.",
       "properties": {
         "id": {
           "type": "string",
@@ -2310,7 +2543,7 @@
           "items": {
             "$ref": "#/$defs/Attachment"
           },
-          "maxItems": 16,
+          "maxItems": 1040,
           "default": [],
           "description": "Ordinary outgoing files. Use attachment.import for larger content. Exact decoded bytes, account-owned blob handles and 25 MiB total are checked; inline decoded bytes plus original resources are limited to 2 MiB."
         },
@@ -2324,6 +2557,11 @@
             }
           ],
           "description": "Frozen original snapshot. Omission preserves it when updating an existing draft; explicit null removes it. Keep returned snapshots unchanged while editing bodyText."
+        },
+        "includeOriginal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the separately retained Original in outgoing MIME and previews. False keeps the complete original and its embedded-resource pins in this local draft for restoration; it does not remove arbitrary quoted text from bodyText. Legacy drafts default to true. Omitted updates preserve the saved policy."
         }
       },
       "required": []
@@ -2464,7 +2702,7 @@
           }
         }
       ],
-      "description": "A sendable complete draft: at least one actual recipient across To/Cc/Bcc, no unfinished recovery marker, at most 32 recipients total. All headers, MIME, verified From identity, original resources, blob hashes and final encoded size are checked before dispatch."
+      "description": "A sendable complete draft: at least one actual recipient across To/Cc/Bcc, no unfinished recovery marker, at most 500 recipients total. All headers, MIME, verified From identity, original resources, blob hashes and final encoded size are checked before dispatch."
     },
     "WriteContactAddress": {
       "type": "object",

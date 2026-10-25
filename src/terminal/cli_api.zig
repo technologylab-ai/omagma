@@ -32,7 +32,8 @@ pub fn load(a: std.mem.Allocator) !Catalogue {
             try definitions.object.put(a, field.key_ptr.*, field.value_ptr.*);
         }
     }
-    if (commands.items.len > 96 or definitions.object.count() > 64) return error.InvalidDiscoveryMetadata;
+    // Embedded metadata already has a compile-time byte bound. Its growing
+    // public command set must not invalidate discovery at an unrelated count.
     for (commands.items, 0..) |entry, index| {
         const name = try j.required(entry, "cmd");
         for (commands.items[0..index]) |old| if (std.mem.eql(u8, name, j.text(old, "cmd"))) return error.InvalidDiscoveryMetadata;

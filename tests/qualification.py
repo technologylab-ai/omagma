@@ -62,6 +62,42 @@ class Qualification(unittest.TestCase):
         self.assertIn("github-token: ${{ github.token }}", promotion)
         self.assertNotIn("pattern: release-*", promotion)
 
+    def test_native_draft_acceptance_is_required_in_each_release_mode(self):
+        suites = ("compose_actions", "draft_conflict", "draft_paging", "quote_policy",
+                  "reply_boundaries", "settled_recovery")
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        for os_name, matrix in zip(("linux", "macos"), release.split("  macos-build:", 1)):
+            for mode in ("debug", "safe"):
+                binary = (f"dist/omagma-{os_name}-${{{{ matrix.arch }}}}" if mode == "safe" else
+                          ".verification-debug/bin/omagma" if os_name == "linux" else
+                          ".verification-macos-debug/bin/omagma")
+                steps = [step for step in matrix.split("      - name:")
+                         if f"python3 tests/terminal_compose_actions.py --binary {binary}" in step]
+                self.assertEqual(len(steps), 1)
+                self.assertNotIn("if:", steps[0])
+                self.assertNotIn("continue-on-error", steps[0])
+                for suite in suites:
+                    self.assertIn(f"python3 tests/terminal_{suite}.py --binary {binary}", steps[0])
+        native = (ROOT / ".github/workflows/macos-native.yml").read_text()
+        for job in native.split("  native:", 1):
+            self.assertIn("for mode in debug safe; do", job)
+            for suite in suites:
+                self.assertEqual(job.count(f"python3 tests/terminal_{suite}.py --binary "), 1)
+
+    def test_new_pty_suites_use_the_owned_darwin_guardian_factory(self):
+        # Import all factories as Darwin without opening any PTY or desktop.
+        # This catches accidentally binding the raw Linux-only factory again.
+        import subprocess
+        code = """import importlib, sys
+sys.path.insert(0, 'tests')
+sys.platform = 'darwin'
+from terminal_macos import DarwinTerminal
+for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy', 'settled_recovery'):
+    module = importlib.import_module('terminal_' + name)
+    assert issubclass(module.MouseTerminal, DarwinTerminal), name
+"""
+        subprocess.run([sys.executable, "-B", "-c", code], cwd=ROOT, check=True, timeout=10)
+
     def test_exact_candidate_produces_only_fixed_provenance_outputs(self):
         result = verify(fixture())
         self.assertEqual(result, {"run_id": RUN_ID, "head_sha": SHA, "run_attempt": 2,

@@ -49,7 +49,8 @@ test "vault migration: imported queued sends require explicit resume or send-now
     try std.testing.expect(!try j.boolean(resumed, "resumeRequired", true));
     const sent = try request(session, a, .{ .cmd = "queue.process", .account = account, .queueId = queue_id });
     try std.testing.expectEqualStrings("applied", j.text(sent, "state"));
-    const next = try request(session, a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "imported-explicit-now", .delaySeconds = 30 });
+    const copied = try request(session, a, .{ .cmd = "draft.clone", .account = account, .draftId = j.text(draft, "id") });
+    const next = try request(session, a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(copied, "id"), .operationId = "imported-explicit-now", .delaySeconds = 30 });
     const next_id = j.text(next, "queueId");
     {
         var store = try session.openStore(a, account, false);
@@ -213,4 +214,71 @@ test "vault migration: explicit file capture preserves exact bound tokens withou
         defer std.crypto.secureZero(u8, &file_buffer);
         try std.testing.expectEqualStrings(bytes, try private_directory.readFile(io, path, &file_buffer));
     }
+}
+
+test "retained migration: paged copy resumes across an authenticated page boundary before publication" {
+    const io = std.testing.io;
+    const storage = @import("terminal/store.zig");
+    const migration = @import("terminal/vault_migration.zig");
+    const journal = @import("terminal/vault_migration_journal.zig");
+    const identity = @import("terminal/vault_migration_identity.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const cache = try std.fmt.allocPrint(a, "{s}/cache", .{path});
+    const options: @import("terminal/types.zig").Options = .{ .fixtures = true };
+    const config = try a.create(@import("config.zig").Config);
+    try config.defaults(path);
+    config.count = 1;
+    try config.accounts[0].address.set("paged@example.test");
+    {
+        var source = try storage.Store.open(io, a, cache, config.accounts[0].address.slice(), options);
+        defer source.close();
+        try source.save();
+        for (0..129) |index| {
+            const name = try std.fmt.allocPrint(a, "history-page-{s}.json", .{storage.Store.hash(try std.fmt.allocPrint(a, "owned-{d}", .{index}))});
+            const file = try source.dir.createFile(io, name, .{ .permissions = .fromMode(0o600) });
+            try file.writeStreamingAll(io, "{}");
+            file.close(io);
+        }
+    }
+    const identity_path = try std.fmt.allocPrint(a, "{s}/identity", .{path});
+    const identity_dir = try @import("keyring_file.zig").directory(io, identity_path, true);
+    defer identity_dir.close(io);
+    const config_bytes = try config.snapshot(a);
+    const grants_bytes = "{\"version\":1,\"accounts\":[]}";
+    for ([_][]const u8{ "config.json", "grants.json" }, [_][]const u8{ config_bytes, grants_bytes }) |name, contents| {
+        const file = try identity_dir.createFile(io, name, .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, contents);
+        file.close(io);
+    }
+    const metadata: identity.Metadata = .{ .config = config, .registry = .{}, .registry_bytes = grants_bytes, .source = .{ .config = try std.fmt.allocPrint(a, "{s}/config.json", .{identity_path}), .grants = try std.fmt.allocPrint(a, "{s}/grants.json", .{identity_path}), .cache = cache } };
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", path);
+    const Owner = @import("terminal/vault_owner.zig").Owner;
+    const owner = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(owner);
+    owner.* = try Owner.initForMigration(io, std.testing.allocator, &env, try std.fmt.allocPrint(a, "{s}/sealed", .{path}), options);
+    defer owner.deinit();
+    const captured = try identity.capture(io, a, metadata);
+    var recovery: @import("terminal/vault_types.zig").RecoveryKey = .{ .bytes = @splat(0x46) };
+    defer recovery.wipe();
+    try owner.createConfigured("Synthetic paged migration password", &recovery, captured.config);
+    try std.testing.expectError(error.VaultMigrationInterrupted, migration.copy(owner, a, metadata, captured, .{ .fixture_stop_after = 128 }));
+    try owner.lock();
+    try owner.unlock("Synthetic paged migration password");
+    try migration.copy(owner, a, metadata, captured, .{});
+    var log = try journal.Journal.open(io, a, owner.path, &owner.key, &owner.workspace, owner.catalog_owner.?.root.handle, false);
+    defer log.close();
+    const manifest = try log.readManifest(a);
+    try std.testing.expectEqual(@as(u8, 2), manifest.schema);
+    try std.testing.expectEqual(@as(usize, 129), manifest.objectCount());
+    try std.testing.expect((try log.readProgress(a, manifest)).verified);
+    var destination = try storage.Store.openMigrationDestination(io, a, &owner.catalog_owner.?, "paged@example.test", options);
+    defer destination.close();
+    try std.testing.expectEqual(@as(usize, 0), destination.vaultObjects.len);
 }

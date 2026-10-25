@@ -1,6 +1,31 @@
 //! Account-bound Calendar visibility and presentation. Provider snapshots keep
 //! their own source identities; this module only builds a bounded display view.
 const std = @import("std");
+
+/// Stable spreadsheet-style labels also work beyond the old two-letter range.
+pub fn shortLabel(a: std.mem.Allocator, index: usize) ![]const u8 {
+    var buffer: [16]u8 = undefined;
+    var start: usize = buffer.len;
+    var remaining = index;
+    while (true) {
+        start -= 1;
+        buffer[start] = @intCast('A' + remaining % 26);
+        if (remaining < 26) break;
+        remaining = remaining / 26 - 1;
+    }
+    return a.dupe(u8, buffer[start..]);
+}
+
+test "calendar sources: labels stay alphabetic and unique beyond 702 sources" {
+    for ([_]struct { usize, []const u8 }{ .{ 0, "A" }, .{ 25, "Z" }, .{ 26, "AA" }, .{ 701, "ZZ" }, .{ 702, "AAA" }, .{ 703, "AAB" } }) |case| {
+        const label = try shortLabel(std.testing.allocator, case[0]);
+        defer std.testing.allocator.free(label);
+        try std.testing.expectEqualStrings(case[1], label);
+    }
+    const largest = try shortLabel(std.testing.allocator, std.math.maxInt(usize));
+    defer std.testing.allocator.free(largest);
+    for (largest) |byte| try std.testing.expect(byte >= 'A' and byte <= 'Z');
+}
 const b = @import("../bounded.zig");
 const j = @import("json.zig");
 const t = @import("calendar_types.zig");
@@ -29,26 +54,42 @@ pub const SourceKey = struct {
     }
 };
 pub const Choice = struct {
-    account: b.Text(254) = .{},
-    calendar_id: b.Text(1024) = .{},
+    account: []const u8,
+    calendar_id: []const u8,
     visible: bool = true,
     color: ?Color = null,
     pub fn target(self: *const Choice) t.Target {
-        return .{ .account = self.account.slice(), .calendar_id = self.calendar_id.slice() };
+        return .{ .account = self.account, .calendar_id = self.calendar_id };
     }
 };
 pub const ChoiceWire = struct { account: []const u8, calendarId: []const u8, visible: bool = true, color: ?Color = null };
 pub const SourceKeyWire = struct { account: []const u8, calendarId: []const u8 };
 pub const Wire = struct { scope: Scope = .account, sources: []const ChoiceWire = &.{}, preferred: ?SourceKeyWire = null };
+/// Owned, compact overrides. Copying for a staged edit requires clone().
 pub const Selection = struct {
     scope: Scope = .account,
-    choices: [max_sources]?Choice = @splat(null),
+    choices: std.ArrayList(Choice) = .empty,
+    owner: ?std.mem.Allocator = null,
     preferred: ?SourceKey = null,
+    pub fn deinit(self: *Selection) void {
+        if (self.owner) |a| {
+            for (self.choices.items) |choice| {
+                a.free(choice.account);
+                a.free(choice.calendar_id);
+            }
+            self.choices.deinit(a);
+        }
+        self.* = .{};
+    }
+    pub fn clone(self: *const Selection, a: std.mem.Allocator) !Selection {
+        var result: Selection = .{ .scope = self.scope, .preferred = self.preferred };
+        errdefer result.deinit();
+        for (self.choices.items) |choice| try result.set(a, choice.target(), choice.visible, choice.color);
+        return result;
+    }
     pub fn isPreferred(self: *const Selection, source: t.Target) bool {
         return if (self.preferred) |key| key.target().eql(source) else false;
     }
-    /// Only records presentation preference; never enables or grants access.
-    /// Validation occurs before replacing an existing preference.
     pub fn setPreferred(self: *Selection, source: t.Target) !void {
         self.preferred = try SourceKey.init(source);
     }
@@ -56,7 +97,7 @@ pub const Selection = struct {
         self.preferred = null;
     }
     pub fn find(self: *const Selection, target: t.Target) ?*const Choice {
-        for (&self.choices) |*choice| if (choice.*) |*value| if (value.target().eql(target)) return value;
+        for (self.choices.items) |*choice| if (choice.target().eql(target)) return choice;
         return null;
     }
     pub fn selected(self: *const Selection, calendar: j.Value) bool {
@@ -68,35 +109,42 @@ pub const Selection = struct {
         if (self.find(target)) |choice| if (choice.color) |value| return value;
         return defaultColor(target);
     }
-    pub fn set(self: *Selection, target: t.Target, visible: bool, selected_color: ?Color) !void {
+    pub fn set(self: *Selection, allocator: std.mem.Allocator, target: t.Target, visible: bool, selected_color: ?Color) !void {
         try target.validate();
-        var free: ?usize = null;
-        for (&self.choices, 0..) |*choice, index| {
-            if (choice.*) |*value| {
-                if (value.target().eql(target)) {
-                    value.visible = visible;
-                    value.color = selected_color;
-                    return;
-                }
-            } else if (free == null) free = index;
-        }
-        var choice: Choice = .{ .visible = visible, .color = selected_color };
-        try choice.account.set(target.account);
-        try choice.calendar_id.set(target.calendar_id);
-        self.choices[free orelse return error.TooManyCalendarSources] = choice;
+        for (self.choices.items) |*choice| if (choice.target().eql(target)) {
+            choice.visible = visible;
+            choice.color = selected_color;
+            return;
+        };
+        if (self.choices.items.len == max_sources) return error.TooManyCalendarSources;
+        const a = self.owner orelse allocator;
+        const account = try a.dupe(u8, target.account);
+        errdefer a.free(account);
+        const calendar_id = try a.dupe(u8, target.calendar_id);
+        errdefer a.free(calendar_id);
+        try self.choices.append(a, .{ .account = account, .calendar_id = calendar_id, .visible = visible, .color = selected_color });
+        self.owner = a;
+    }
+    fn remove(self: *Selection, index: usize) void {
+        const choice = self.choices.orderedRemove(index);
+        const a = self.owner.?;
+        a.free(choice.account);
+        a.free(choice.calendar_id);
     }
     /// Only authoritative account discovery may remove saved overrides.
-    /// A missing/offline/partial list must never erase the user's choices.
     pub fn pruneAccount(self: *Selection, account: []const u8, entries: []const j.Value) void {
-        for (&self.choices) |*optional| if (optional.*) |choice| {
-            if (!std.ascii.eqlIgnoreCase(choice.account.slice(), account)) continue;
+        var index = self.choices.items.len;
+        while (index > 0) {
+            index -= 1;
+            const choice = self.choices.items[index];
+            if (!std.ascii.eqlIgnoreCase(choice.account, account)) continue;
             var found = false;
             for (entries) |entry| {
                 const target = jsonTarget(j.get(entry, "calendar") orelse continue) catch continue;
                 found = found or choice.target().eql(target);
             }
-            if (!found) optional.* = null;
-        };
+            if (!found) self.remove(index);
+        }
         if (self.preferred) |key| {
             if (!std.ascii.eqlIgnoreCase(key.account.slice(), account)) return;
             for (entries) |entry| {
@@ -113,35 +161,35 @@ pub const Selection = struct {
     }
     pub fn pruneConfiguredAccounts(self: *Selection, accounts: []const j.Value) void {
         if (accounts.len == 0) return;
-        for (&self.choices) |*optional| if (optional.*) |choice| {
+        var index = self.choices.items.len;
+        while (index > 0) {
+            index -= 1;
             var found = false;
-            for (accounts) |account| found = found or std.ascii.eqlIgnoreCase(choice.account.slice(), j.text(account, "address"));
-            if (!found) optional.* = null;
-        };
+            for (accounts) |account| found = found or std.ascii.eqlIgnoreCase(self.choices.items[index].account, j.text(account, "address"));
+            if (!found) self.remove(index);
+        }
         if (self.preferred) |key| {
             for (accounts) |account| if (std.ascii.eqlIgnoreCase(key.account.slice(), j.text(account, "address"))) return;
             self.clearPreferred();
         }
     }
 };
-pub fn fromWire(wire: Wire) !Selection {
+pub fn fromWire(a: std.mem.Allocator, wire: Wire) !Selection {
     if (wire.sources.len > max_sources) return error.TooManyCalendarSources;
     var result: Selection = .{ .scope = wire.scope };
+    errdefer result.deinit();
     for (wire.sources) |source| {
         const target: t.Target = .{ .account = source.account, .calendar_id = source.calendarId };
         if (result.find(target) != null) return error.DuplicateCalendarSource;
-        try result.set(target, source.visible, source.color);
+        try result.set(a, target, source.visible, source.color);
     }
     if (wire.preferred) |source| try result.setPreferred(.{ .account = source.account, .calendar_id = source.calendarId });
     return result;
 }
-pub fn toWire(selection: *const Selection, storage: *[max_sources]ChoiceWire) Wire {
-    var count: usize = 0;
-    for (&selection.choices) |*choice| if (choice.*) |*value| {
-        storage[count] = .{ .account = value.account.slice(), .calendarId = value.calendar_id.slice(), .visible = value.visible, .color = value.color };
-        count += 1;
-    };
-    return .{ .scope = selection.scope, .sources = storage[0..count], .preferred = if (selection.preferred) |*key| .{ .account = key.account.slice(), .calendarId = key.calendar_id.slice() } else null };
+pub fn toWire(a: std.mem.Allocator, selection: *const Selection) !Wire {
+    const storage = try a.alloc(ChoiceWire, selection.choices.items.len);
+    for (selection.choices.items, storage) |*choice, *wire| wire.* = .{ .account = choice.account, .calendarId = choice.calendar_id, .visible = choice.visible, .color = choice.color };
+    return .{ .scope = selection.scope, .sources = storage, .preferred = if (selection.preferred) |*key| .{ .account = key.account.slice(), .calendarId = key.calendar_id.slice() } else null };
 }
 pub fn defaultColor(target: t.Target) Color {
     var hash = std.hash.Wyhash.init(0);
@@ -390,18 +438,21 @@ test "calendar sources: visibility and themed colors stay account and calendar b
     const work = try j.value(temp, .{ .target = .{ .account = "work@example.test", .calendar_id = "holidays" }, .selected = true });
     const personal = try j.value(temp, .{ .target = .{ .account = "personal@example.test", .calendar_id = "holidays" }, .selected = true });
     var selection: Selection = .{};
-    try selection.set(try jsonTarget(work), false, .yellow);
+    defer selection.deinit();
+    try selection.set(a, try jsonTarget(work), false, .yellow);
     try std.testing.expect(!selection.selected(work));
     try std.testing.expect(selection.selected(personal));
     try std.testing.expectEqual(Color.yellow, selection.color(try jsonTarget(work)));
-    var storage: [max_sources]ChoiceWire = undefined;
-    const restored = try fromWire(toWire(&selection, &storage));
+    const wire = try toWire(a, &selection);
+    defer a.free(wire.sources);
+    var restored = try fromWire(a, wire);
+    defer restored.deinit();
     try std.testing.expect(!restored.selected(work));
     try std.testing.expectEqual(defaultColor(.{ .account = "WORK@example.test", .calendar_id = "primary" }), defaultColor(.{ .account = "work@example.test", .calendar_id = "primary" }));
     var palette: theme.Palette = .{};
     palette.yellow = .{ 1, 2, 3 };
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, &rgb(.yellow, palette));
-    try std.testing.expectError(error.DuplicateCalendarSource, fromWire(.{ .sources = &.{ .{ .account = "work@example.test", .calendarId = "same" }, .{ .account = "WORK@example.test", .calendarId = "same" } } }));
+    try std.testing.expectError(error.DuplicateCalendarSource, fromWire(std.testing.allocator, .{ .sources = &.{ .{ .account = "work@example.test", .calendarId = "same" }, .{ .account = "WORK@example.test", .calendarId = "same" } } }));
 }
 
 test "calendar sources: one preferred exact source owns its identity without changing visibility colour or scope" {
@@ -414,8 +465,9 @@ test "calendar sources: one preferred exact source owns its identity without cha
     const personal = try j.value(a, .{ .target = t.Target{ .account = "personal@example.test", .calendar_id = &calendar_id }, .selected = true });
     const expected: t.Target = .{ .account = "work@example.test", .calendar_id = "team/会議" };
     var selection: Selection = .{ .scope = .all_accounts };
-    try selection.set(expected, false, .orange);
-    try selection.set(try jsonTarget(personal), true, .green);
+    defer selection.deinit();
+    try selection.set(a, expected, false, .orange);
+    try selection.set(a, try jsonTarget(personal), true, .green);
     try selection.setPreferred(.{ .account = &account, .calendar_id = &calendar_id });
     @memset(&account, 'x');
     @memset(&calendar_id, 'x');
@@ -427,8 +479,10 @@ test "calendar sources: one preferred exact source owns its identity without cha
     try std.testing.expect(selection.selected(personal));
     try std.testing.expectEqual(Color.orange, selection.color(expected));
     try std.testing.expectEqual(Scope.all_accounts, selection.scope);
-    var storage: [max_sources]ChoiceWire = undefined;
-    const restored = try fromWire(toWire(&selection, &storage));
+    const wire = try toWire(a, &selection);
+    defer a.free(wire.sources);
+    var restored = try fromWire(a, wire);
+    defer restored.deinit();
     try std.testing.expect(restored.isPreferred(expected));
     try std.testing.expect(!restored.selected(work));
     try std.testing.expect(restored.selected(personal));
@@ -447,6 +501,7 @@ test "calendar sources: preferred identity validates bounds atomically and never
     account[1] = '@';
     const calendar_id: [1024]u8 = @splat('c');
     var selection: Selection = .{};
+    defer selection.deinit();
     try selection.setPreferred(.{ .account = &account, .calendar_id = &calendar_id });
     const long_account: [255]u8 = @splat('a');
     const long_calendar: [1025]u8 = @splat('c');
@@ -458,8 +513,8 @@ test "calendar sources: preferred identity validates bounds atomically and never
     try std.testing.expect(selection.isPreferred(.{ .account = &account, .calendar_id = &calendar_id }));
     try std.testing.expectEqual(@as(usize, 254), selection.preferred.?.account.len);
     try std.testing.expectEqual(@as(usize, 1024), selection.preferred.?.calendar_id.len);
-    try std.testing.expectError(error.InvalidAddress, fromWire(.{ .preferred = .{ .account = "missing-at", .calendarId = "primary" } }));
-    try std.testing.expectError(error.InvalidCalendarField, fromWire(.{ .preferred = .{ .account = "work@example.test", .calendarId = "" } }));
+    try std.testing.expectError(error.InvalidAddress, fromWire(std.testing.allocator, .{ .preferred = .{ .account = "missing-at", .calendarId = "primary" } }));
+    try std.testing.expectError(error.InvalidCalendarField, fromWire(std.testing.allocator, .{ .preferred = .{ .account = "work@example.test", .calendarId = "" } }));
 }
 
 test "calendar sources: preferred sources survive unavailable partial stale and hidden discovery but prune proven removals" {
@@ -468,7 +523,8 @@ test "calendar sources: preferred sources survive unavailable partial stale and 
     const a = arena.allocator();
     const target: t.Target = .{ .account = "work@example.test", .calendar_id = "shared" };
     var selection: Selection = .{};
-    try selection.set(target, false, .blue);
+    defer selection.deinit();
+    try selection.set(a, target, false, .blue);
     try selection.setPreferred(target);
     var response = try j.value(a, .{ .account = target.account, .complete = false, .calendars = @as([]const j.Value, &.{}) });
     selection.pruneDiscovered(response);
@@ -587,11 +643,12 @@ test "calendar sources: catalogue scope includes read-only holidays with indepen
     const list_work = try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{ .{ .calendar = work, .canRead = true }, .{ .calendar = holidays, .canRead = true, .canWrite = false } } });
     const list_personal = try j.value(a, .{ .account = "personal@example.test", .complete = false, .calendars = .{.{ .calendar = personal, .canRead = true }} });
     var selection: Selection = .{};
+    defer selection.deinit();
     const one = try catalogue(a, &selection, &.{ list_work, list_personal }, "work@example.test");
     try std.testing.expectEqual(@as(usize, 2), j.get(one, "calendars").?.array.items.len);
     try std.testing.expect(try j.boolean(one, "complete", false));
     selection.scope = .all_accounts;
-    try selection.set(try jsonTarget(holidays), false, null);
+    try selection.set(a, try jsonTarget(holidays), false, null);
     const all = try catalogue(a, &selection, &.{ list_work, list_personal }, "work@example.test");
     const entries = j.get(all, "calendars").?.array.items;
     try std.testing.expectEqual(@as(usize, 3), entries.len);
@@ -613,9 +670,9 @@ test "calendar sources: only complete valid fresh account discovery prunes retir
     const current: t.Target = .{ .account = "work@example.test", .calendar_id = "current" };
     const retired: t.Target = .{ .account = current.account, .calendar_id = "retired" };
     const offline: t.Target = .{ .account = "offline@example.test", .calendar_id = "keep" };
-    try selected.set(current, true, .green);
-    try selected.set(retired, false, .cyan);
-    try selected.set(offline, false, .magenta);
+    try selected.set(a, current, true, .green);
+    try selected.set(a, retired, false, .cyan);
+    try selected.set(a, offline, false, .magenta);
     var response = try j.value(a, .{ .account = current.account, .complete = false, .calendars = .{.{ .calendar = .{ .target = current }, .canRead = true }} });
     selected.pruneDiscovered(response);
     try std.testing.expect(selected.find(retired) != null);

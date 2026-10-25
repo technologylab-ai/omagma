@@ -34,6 +34,7 @@ var unassigned_reserve: [l.app_reservation - assigned_bytes]u8 = undefined;
 pub fn main(init: std.process.Init.Minimal) void {
     app(init) catch |err| {
         std.debug.print("omagma: {s}\n", .{@errorName(err)});
+        if (err == error.BackendProtocolMismatch) std.debug.print("{s}\n", .{@import("terminal/vault_transport.zig").mismatch_message});
         if (usageError(err)) {
             std.debug.print("Try omagma --help for available commands and options.\n", .{});
             contextHelpHint(init.args);
@@ -153,6 +154,14 @@ fn app(minimal: std.process.Init.Minimal) !void {
     var runtime: memory.Runtime = .{};
     try runtime.init(minimal, runtime_storage.buffers(), memory.application_limit);
     defer runtime.deinit();
+    if (std.mem.eql(u8, early_mode, "cli") or std.mem.eql(u8, early_mode, "agent") or std.mem.eql(u8, early_mode, "tui") or @import("terminal/cli_help.zig").knownFamily(early_mode)) {
+        var discovery_args = minimal.args.iterate();
+        _ = discovery_args.skip();
+        _ = discovery_args.skip();
+        var discovery_arena: std.heap.ArenaAllocator = .init(runtime.application_meter.allocator());
+        defer discovery_arena.deinit();
+        if (try @import("terminal/cli.zig").discovery(runtime.threaded.io(), discovery_arena.allocator(), early_mode, &discovery_args)) return;
+    }
     if (!lean_client and (std.mem.eql(u8, early_mode, "cli") or std.mem.eql(u8, early_mode, "agent") or std.mem.eql(u8, early_mode, "tui") or @import("terminal/cli_help.zig").knownFamily(early_mode))) {
         var fixture_scan = minimal.args.iterate();
         var fixtures = false;

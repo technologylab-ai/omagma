@@ -242,6 +242,157 @@ test "vault mail: 25 MiB attachment and related image produce exact private MIME
     try std.testing.expectError(error.AttachmentHandleNotFound, blob.Stream.init(&neighbor, attachment));
 }
 
+test "vault mail: history metadata reads preserve buffered encrypted output" {
+    const fixture = try a.create(Fixture);
+    defer a.destroy(fixture);
+    try fixture.init();
+    defer fixture.close();
+    const allocator = fixture.arena.allocator();
+    const path = try fixture.input("tiny.bin", 41, "SYNTHETIC PRIVATE FILE");
+    var store = try Store.openVault(io, allocator, &fixture.first, options, false);
+    defer store.close();
+    const attachment = try blob.importFile(&store, path, "application/octet-stream");
+    const raw = "Buffered MIME header\r\n\r\nExact authored note.";
+    const handle = block: {
+        var writer: @import("terminal/vault_stream.zig").Writer = undefined;
+        const handle = try store.beginVaultStream(&writer, .send_spool, raw.len);
+        defer writer.deinit();
+        try writer.interface.writeAll(raw[0..20]);
+        try std.testing.expectError(error.VaultBusy, fixture.first.read(allocator, .cache_index, fixture.first.entry.index, 8 * 1024 * 1024));
+        try std.testing.expectError(error.VaultBusy, fixture.first.write(.cache_index, fixture.first.entry.index, "must never publish", true));
+        try std.testing.expectError(error.VaultBusy, store.save());
+        var overlapping: @import("terminal/vault_stream.zig").Writer = undefined;
+        try std.testing.expectError(error.VaultBusy, store.beginVaultStream(&overlapping, .send_spool, 1));
+        try std.testing.expect(try @import("terminal/operation_history.zig").findBlob(&store, allocator, attachment.blobId.?) != null);
+        try writer.interface.writeAll(raw[20..]);
+        try writer.finish();
+        try std.testing.expect(fixture.first.writer_owner == null);
+        break :block handle;
+    };
+    var source: spool.Spool = .{ .io = io, .dir = fixture.first.directory.dir, .account = &fixture.first, .handle = handle, .size = raw.len, .hash = Store.hash(raw) };
+    defer source.close();
+    var reader = try source.reader();
+    defer reader.close();
+    // Shared scratch remains unavailable while a consumer pins the stream.
+    try std.testing.expectError(error.VaultBusy, fixture.first.read(allocator, .send_spool, handle, raw.len));
+    try std.testing.expectError(error.VaultBusy, fixture.first.write(.send_spool, handle, raw, true));
+    var output: [raw.len]u8 = undefined;
+    try std.testing.expectEqual(raw.len, try spool.Spool.Reader.read(&reader, &output));
+    try std.testing.expectEqualStrings(raw, &output);
+    var end: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try spool.Spool.Reader.read(&reader, &end));
+}
+
+test "vault mail: encrypted writer leases release on aborted and failed streams" {
+    const fixture = try a.create(Fixture);
+    defer a.destroy(fixture);
+    try fixture.init();
+    defer fixture.close();
+    var store = try Store.openVault(io, fixture.arena.allocator(), &fixture.first, options, false);
+    defer store.close();
+    for ([_]bool{ false, true }) |finish_early| {
+        var writer: @import("terminal/vault_stream.zig").Writer = undefined;
+        _ = try store.beginVaultStream(&writer, .send_spool, 4);
+        try writer.interface.writeAll("abc");
+        try std.testing.expect(fixture.first.writer_owner != null);
+        if (finish_early) {
+            try std.testing.expectError(error.VaultLengthMismatch, writer.finish());
+            try std.testing.expect(fixture.first.writer_owner == null);
+        }
+        writer.deinit();
+        try std.testing.expect(fixture.first.writer_owner == null);
+        try store.save();
+    }
+}
+
+test "vault mail: encrypted writer lease blocks other accounts after releasing its Store" {
+    const fixture = try a.create(Fixture);
+    defer a.destroy(fixture);
+    try fixture.init();
+    defer fixture.close();
+    var store = try Store.openVault(io, fixture.arena.allocator(), &fixture.first, options, false);
+    defer store.close();
+    var writer: @import("terminal/vault_stream.zig").Writer = undefined;
+    const handle = try store.beginVaultStream(&writer, .send_spool, 6);
+    defer writer.deinit();
+    try writer.interface.writeAll("before");
+    store.release();
+    try std.testing.expectError(error.VaultBusy, fixture.second.claim());
+    try writer.finish();
+    try fixture.second.claim();
+    fixture.second.release();
+    var source: spool.Spool = .{ .io = io, .dir = fixture.first.directory.dir, .account = &fixture.first, .handle = handle, .size = 6, .hash = Store.hash("before") };
+    defer source.close();
+    var reader = try source.reader();
+    defer reader.close();
+    var output: [6]u8 = undefined;
+    try std.testing.expectEqual(output.len, try spool.Spool.Reader.read(&reader, &output));
+    try std.testing.expectEqualStrings("before", &output);
+    var end: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try spool.Spool.Reader.read(&reader, &end));
+}
+
+test "vault mail: paged blob lookup preserves buffered encrypted MIME across many small files" {
+    const fixture = try a.create(Fixture);
+    defer a.destroy(fixture);
+    try fixture.init();
+    defer fixture.close();
+    const allocator = fixture.arena.allocator();
+    const path = try fixture.input("tiny.bin", 41, "SYNTHETIC PRIVATE FILE");
+    var sealed_store = try Store.openVault(io, allocator, &fixture.first, options, false);
+    defer sealed_store.close();
+    const sealed_file = try blob.importFile(&sealed_store, path, "application/octet-stream");
+    try std.testing.expectEqual(@as(usize, 0), sealed_store.vaultBlobCount());
+    var plain_store = try Store.open(io, allocator, try std.fmt.allocPrint(allocator, "{s}/reference", .{fixture.base}), "reference@example.test", options);
+    defer plain_store.close();
+    const plain_file = try blob.importFile(&plain_store, path, "application/octet-stream");
+    const sealed_parts = try allocator.alloc(t.Attachment, 256);
+    const plain_parts = try allocator.alloc(t.Attachment, sealed_parts.len);
+    for (sealed_parts, plain_parts, 0..) |*sealed, *plain, index| {
+        sealed.* = sealed_file;
+        plain.* = plain_file;
+        const name = try std.fmt.allocPrint(allocator, "file-{d}.bin", .{index});
+        sealed.filename = name;
+        plain.filename = name;
+    }
+    var sender: @import("terminal/recipients.zig").Mailbox = .{};
+    try sender.address.set("synthetic@example.test");
+    const compose: mime.Compose = .{ .from = sender, .destinations = .{ .to = &.{.{ .address = "recipient@example.test" }} }, .subject = "SYNTHETIC PRIVATE files", .body = "Exact authored note before every file.", .message_id = "<buffered-vault@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000" };
+    var encrypted = try spool.create(&sealed_store, compose, sealed_parts, &.{});
+    defer encrypted.close();
+    // More than one Sink flush, with history reads between writes to the
+    // partially buffered encryption chunk. The independent plain adapter is
+    // the exact wire oracle; comparing the pre-encryption hashes alone is not.
+    try std.testing.expect(encrypted.size > vault.chunk_bytes);
+    var reference = try spool.create(&plain_store, compose, plain_parts, &.{});
+    defer reference.close();
+    try std.testing.expectEqual(reference.size, encrypted.size);
+    const actual = try allocator.alloc(u8, encrypted.size);
+    const expected = try allocator.alloc(u8, reference.size);
+    for ([_]*spool.Spool{ &encrypted, &reference }, [_][]u8{ actual, expected }) |source, output| {
+        var reader = try source.reader();
+        defer reader.close();
+        var offset: usize = 0;
+        while (offset < output.len) {
+            const count = try spool.Spool.Reader.read(&reader, output[offset..]);
+            try std.testing.expect(count != 0);
+            offset += count;
+        }
+        var end: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 0), try spool.Spool.Reader.read(&reader, &end));
+        try std.testing.expect(reader.verified);
+    }
+    try std.testing.expectEqualSlices(u8, expected, actual);
+    const parsed = try mime.parse(actual, allocator);
+    try std.testing.expectEqualStrings(compose.message_id, parsed.message_id);
+    try std.testing.expectEqualStrings(compose.body, std.mem.trimEnd(u8, parsed.body_text, "\r\n"));
+    try std.testing.expectEqual(sealed_parts.len, parsed.attachments.len);
+    for (parsed.attachments, sealed_parts) |part, metadata| {
+        try std.testing.expectEqualStrings(metadata.filename, part.filename);
+        try std.testing.expectEqualStrings(sealed_file.blobId.?, &Store.hash(part.data));
+    }
+}
+
 test "growing chain spool: encrypted thousand image chain matches plaintext MIME with sequential readers" {
     const fixture = try a.create(Fixture);
     defer a.destroy(fixture);
@@ -398,7 +549,7 @@ test "vault mail: tampered final ciphertext refuses stream before returning plai
     try std.testing.expectError(error.VaultAuthenticationFailed, blob.verify(&store, attachment));
 }
 
-test "vault mail: blob cap permits deduped downloads and small raw inspection but refuses new blobs" {
+test "vault mail: legacy full blob maps permit deduplication and new paged blob identities" {
     const blob_limit = @import("terminal/store.zig").blob_limit;
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -476,10 +627,12 @@ test "vault mail: blob cap permits deduped downloads and small raw inspection bu
             defer fresh.close();
             try fresh.write(&value);
             try fresh.finish(value.len);
-            try std.testing.expectError(error.AttachmentLimitExceeded, fresh.commit(&store, .{ .id = "new", .filename = "new.bin", .size = value.len }));
+            const added = try fresh.commit(&store, .{ .id = "new", .filename = "new.bin", .size = value.len });
+            try blob.verify(&store, added);
+            if (sealed) try std.testing.expectEqual(previous.len + blob_limit - 1, store.vaultObjects.len);
         }
         const stats = try store.blobStats();
-        try std.testing.expectEqual(@as(usize, blob_limit), stats.count);
-        try std.testing.expectEqual(blob_limit * (if (sealed) try vault.sealedSize(zero.len) else zero.len), stats.bytes);
+        try std.testing.expectEqual(@as(usize, blob_limit + 1), stats.count);
+        try std.testing.expectEqual((blob_limit + 1) * (if (sealed) try vault.sealedSize(zero.len) else zero.len), stats.bytes);
     }
 }

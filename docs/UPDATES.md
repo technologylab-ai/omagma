@@ -36,6 +36,19 @@ Save your work and close Omagma before replacing it, then verify
 credentials, cached mail and local drafts live outside the release directory
 and stay in place. Pending sends remain paused after a restart.
 
+For 0.2.13, stop the vault daemon as well and upgrade all clients sharing a
+store together. Account indexes and Calendar invitation state upgrade to schema
+2 on subsequent writes; 0.2.12 and older cannot read that state. Keeping the old
+executable does not provide an in-place state downgrade. If you need a rollback
+point, back up the complete cache or vault before upgrading. That backup does
+not contain drafts or submission receipts created afterward. Do not clear local
+state to work around a version mismatch: drafts and submission history must
+stay with the matching application version. Incompatible vault clients and
+daemons refuse data operations while status, lock and stop remain available.
+If a daemon from the previous installation is still running, use the current
+executable to run `omagma vault stop`, `omagma vault start`, then
+`omagma vault unlock`.
+
 | Installation | Upgrade procedure |
 | --- | --- |
 | **Omarchy plugin from a Git checkout** | `omarchy plugin update io.github.technologylab_ai.omagma` updates the checkout. Rebuild the backend with that checkout's exact Zig pin, verify it, then rescan plugins. The plugin command updates source; it does not build or replace the backend. Preserve local changes. |

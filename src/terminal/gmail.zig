@@ -972,7 +972,7 @@ fn identities(a: std.mem.Allocator, transport: Transport) ![]const @import("stor
     // Its HTML signature is converted to bounded literal plaintext.
     const value = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs?fields=sendAs(sendAsEmail,displayName,signature,isPrimary,isDefault,verificationStatus)", null);
     const entries = try array(value, "sendAs");
-    if (entries.len > 32) return error.TooManyAliases;
+    if (entries.len > (if (types.Limits.native) @as(usize, 1024) else 32)) return error.TooManyAliases;
     var out: std.ArrayList(@import("store.zig").Identity) = .empty;
     for (entries) |entry| {
         const address = try j.required(entry, "sendAsEmail");
@@ -984,15 +984,55 @@ fn identities(a: std.mem.Allocator, transport: Transport) ![]const @import("stor
     }
     return try out.toOwnedSlice(a);
 }
-fn appendAddresses(list: *recipients.List, addresses: []const types.Address) !void {
-    if (addresses.len > 32) return error.TooManyRecipients;
-    for (addresses) |address| {
-        var mailbox: recipients.Mailbox = .{};
-        try mailbox.address.set(address.address);
-        try mailbox.name.set(address.name);
-        try list.append(mailbox);
-    }
+
+test "memory UX: native label collections beyond 512 and alias collections beyond 32 remain usable" {
+    if (!types.Limits.native) return error.SkipZigTest;
+    const Peer = struct {
+        writes: usize = 0,
+        fn request(raw: *anyopaque, a: std.mem.Allocator, method: std.http.Method, url: []const u8, body: ?j.Value) !j.Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (std.mem.indexOf(u8, url, "/settings/sendAs?") != null) {
+                try std.testing.expectEqual(std.http.Method.GET, method);
+                var entries: std.json.Array = .init(a);
+                for (0..40) |index| try entries.append(try j.value(a, .{ .sendAsEmail = try std.fmt.allocPrint(a, "alias-{d}@example.test", .{index}), .displayName = "Verified identity", .verificationStatus = "accepted" }));
+                var out = j.object(a);
+                try out.object.put(a, "sendAs", .{ .array = entries });
+                return out;
+            }
+            if (method == .POST) {
+                try std.testing.expectEqualStrings("https://gmail.googleapis.com/gmail/v1/users/me/labels", url);
+                try std.testing.expectEqualStrings("New after 600", j.text(body orelse return error.MissingField, "name"));
+                self.writes += 1;
+                return j.value(a, .{ .id = "Label_600", .name = "New after 600", .type = "user" });
+            }
+            try std.testing.expectEqual(std.http.Method.GET, method);
+            try std.testing.expect(std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)") or std.mem.eql(u8, url, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type)"));
+            var entries: std.json.Array = .init(a);
+            for (0..600) |index| try entries.append(try j.value(a, .{ .id = try std.fmt.allocPrint(a, "Label_{d}", .{index}), .name = try std.fmt.allocPrint(a, "Project {d}", .{index}), .type = "user" }));
+            var out = j.object(a);
+            try out.object.put(a, "labels", .{ .array = entries });
+            return out;
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var peer: Peer = .{};
+    const transport: Transport = .{ .context = &peer, .requestFn = Peer.request };
+    const listed = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "labels.list", j.object(a));
+    try std.testing.expectEqual(@as(usize, 600), (try array(listed, "labels")).len);
+    var resolver: LabelResolver = .{ .a = a, .transport = transport };
+    try std.testing.expectEqualStrings("Label_599", try resolver.resolve("Project 599"));
+    try std.testing.expectError(error.PermissionDenied, dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-read"}, transport, "labels.create", try j.value(a, .{ .name = "New after 600" })));
+    try std.testing.expectEqual(@as(usize, 0), peer.writes);
+    const created = try dispatchAuthorized(std.testing.io, a, "self@example.test", &.{"mail-modify"}, transport, "labels.create", try j.value(a, .{ .name = "New after 600" }));
+    try std.testing.expectEqualStrings("Label_600", j.text(j.get(created, "label").?, "id"));
+    try std.testing.expectEqual(@as(usize, 1), peer.writes);
+    const senders = try identities(a, transport);
+    try std.testing.expectEqual(@as(usize, 40), senders.len);
+    try std.testing.expectEqualStrings("alias-39@example.test", senders[39].address);
 }
+
 pub fn date(io: std.Io, a: std.mem.Allocator, calendar: bool) ![]const u8 {
     const now = std.Io.Timestamp.now(io, .real).toSeconds();
     if (now < 0) return error.InvalidDate;
@@ -1138,10 +1178,6 @@ fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport:
     hasher.final(&digest);
     const key = std.fmt.bytesToHex(digest, .lower);
     const rfc_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{key});
-    var envelope: recipients.Envelope = .{};
-    try appendAddresses(&envelope.to, draft.to);
-    try appendAddresses(&envelope.cc, draft.cc);
-    try appendAddresses(&envelope.bcc, draft.bcc);
     var from: recipients.Mailbox = .{};
     const chosen = if (draft.from) |identity| identity.address else account;
     if (draft.from) |identity| {
@@ -1162,7 +1198,7 @@ fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport:
     try minimumSendForm(draft);
     const attachments = try mime.composeAttachments(draft.attachments, a);
     const prepared = try @import("markdown_mail.zig").prepare(a, draft);
-    const compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments };
+    const compose: mime.Compose = .{ .from = from, .destinations = .{ .to = draft.to, .cc = draft.cc, .bcc = draft.bcc }, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .related = try mime.composeAttachments(prepared.resources, a), .calendar = calendar, .message_id = rfc_id, .date = try date(io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references, .attachments = attachments };
     var count_buffer: [4096]u8 = undefined;
     var counting = std.Io.Writer.Discarding.init(&count_buffer);
     try mime.encodeTo(compose, &counting.writer);
@@ -1186,7 +1222,7 @@ fn prepareSend(io: std.Io, a: std.mem.Allocator, account: []const u8, transport:
 /// and authored text can only increase the exact encoded size checked below.
 fn minimumSendForm(draft: types.Draft) !void {
     var minimum_raw: usize = 0;
-    const resources = if (draft.original) |original| original.resources else &.{};
+    const resources = if (draft.includeOriginal) (if (draft.original) |original| original.resources else &.{}) else &.{};
     for ([_][]const types.Attachment{ draft.attachments, resources }) |files| for (files) |file| {
         if (file.size > types.Limits.request_bytes) return error.FormTooLarge;
         const identity = std.ascii.eqlIgnoreCase(file.mimeType, "message/rfc822") or std.ascii.eqlIgnoreCase(file.mimeType, "message/global");
@@ -1702,7 +1738,7 @@ pub fn dispatchAuthorized(io: std.Io, a: std.mem.Allocator, account: []const u8,
     if (std.mem.eql(u8, cmd, "labels.list")) {
         const response = try transport.request(a, .GET, "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name,type,color)", null);
         const entries = try array(response, "labels");
-        if (entries.len > 512) return error.TooManyLabels;
+        if (entries.len > types.Limits.labels) return error.TooManyLabels;
         const labels = try a.alloc(@import("store.zig").Label, entries.len);
         for (entries, labels) |entry, *label| {
             const id = try j.required(entry, "id");
@@ -1883,7 +1919,7 @@ fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, req
     const definitions_value = j.get(response, "labels") orelse return error.InvalidProviderResponse;
     if (definitions_value != .array) return error.InvalidProviderResponse;
     const entries = definitions_value.array.items;
-    if (entries.len > 512) return error.TooManyLabels;
+    if (entries.len > types.Limits.labels) return error.TooManyLabels;
     const definitions = try a.alloc(@import("store.zig").Label, entries.len);
     for (entries, definitions) |entry, *definition| definition.* = try providerLabel(entry);
     for (definitions) |label| {
@@ -1897,7 +1933,7 @@ fn manageLabels(a: std.mem.Allocator, transport: Transport, cmd: []const u8, req
         if (!std.mem.eql(u8, old.name, confirmation)) return error.InvalidLabelConfirmation;
     } else {
         try label_collection.unique(definitions, final_name, id);
-        if (creating and definitions.len == 512) return error.TooManyLabels;
+        if (creating and definitions.len == types.Limits.labels) return error.TooManyLabels;
     }
     const url = if (creating) "https://gmail.googleapis.com/gmail/v1/users/me/labels" else try std.fmt.allocPrint(a, "https://gmail.googleapis.com/gmail/v1/users/me/labels/{s}", .{id});
     var body: ?j.Value = if (deleting) null else if (coloring) j.object(a) else try j.value(a, .{ .name = name });

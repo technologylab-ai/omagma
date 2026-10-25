@@ -51,7 +51,7 @@ pub fn execute(io: std.Io, a: std.mem.Allocator, client: t.Client, input: j.Valu
     }
     if (options.attachments.len != 0) {
         if (!eq(command, "draft.create") and !eq(command, "draft.update") and !eq(command, "draft.preview") and !eq(command, "mail.send")) return error.AttachmentsRequireDraftSource;
-        if (options.attachments.len > 16) return error.TooManyAttachments;
+        if (options.attachments.len > @import("types.zig").Limits.attachments) return error.TooManyAttachments;
         var total: u64 = 0;
         for (options.attachments) |path| {
             const file = try files.openRegular(io, a, .cwd(), path);

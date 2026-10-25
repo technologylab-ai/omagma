@@ -60,7 +60,7 @@ test "vault launch: nested identity deadlines tolerate joined control worker ret
                 try std.testing.expectEqual(transport.Kind.status, frame.kind);
                 _ = requests.fetchAdd(1, .release);
                 var bytes: [128]u8 = undefined;
-                const raw = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"}}}}", .{std.fmt.bytesToHex(id, .lower)});
+                const raw = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\",\"executionProtocol\":2}}}}", .{std.fmt.bytesToHex(id, .lower)});
                 try transport.writeFrame(test_io, stream, .response, raw, transport.response_limit);
             }
         }

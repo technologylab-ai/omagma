@@ -16,9 +16,7 @@ pub fn validateAttachmentHandle(id: []const u8) !void {
 pub fn decodeAddresses(a: std.mem.Allocator, v: Value) ![]const t.Address {
     var list: std.ArrayList(t.Address) = .empty;
     if (v == .string) {
-        var parsed: recipients.List = .{};
-        try recipients.parse(v.string, &parsed);
-        return @import("conversation_draft.zig").listAddresses(a, &parsed);
+        return recipients.parseOutgoing(a, v.string);
     }
     const values = try valueArray(v);
     if (values.len > t.Limits.recipients) return error.TooManyRecipients;
@@ -78,6 +76,7 @@ fn decodeDraftAllocators(a: std.mem.Allocator, backing: ?std.mem.Allocator, v: V
     };
     var draft = try j.decode(t.Draft, a, try j.value(a, .{ .id = j.text(v, "id"), .subject = j.text(v, "subject"), .bodyText = j.text(v, "bodyText"), .threadId = j.text(v, "threadId"), .inReplyTo = j.text(v, "inReplyTo"), .references = j.text(v, "references") }));
     draft.bodyFormat = try requestBodyFormat(v);
+    draft.includeOriginal = try j.boolean(v, "includeOriginal", true);
     const omitted = try j.integer(v, "omittedAttachments", 0);
     if (omitted < 0 or omitted > t.Limits.omitted_attachment_count) return error.TooManyAttachments;
     draft.omittedAttachments = @intCast(omitted);
@@ -134,35 +133,44 @@ pub fn validateDraft(d: t.Draft, send: bool) !void {
     if (!std.unicode.utf8ValidateSlice(d.bodyText)) return error.InvalidUtf8;
     const related = if (d.original) |original| original.resources else &.{};
     if (d.attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
+    if (send) try t.Limits.validateComposeParts(d.attachments.len, if (d.includeOriginal) related.len else 0);
     if (d.original) |original| try @import("original_mail.zig").validate(original);
     var attachment_bytes: usize = 0;
     var embedded_bytes: usize = 0;
-    for ([_][]const t.Attachment{ d.attachments, related }) |list| for (list) |attachment| {
-        if (attachment.filename.len == 0 or attachment.filename.len > mail_limits.filename_bytes or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
-        try recipients.validateHeader(attachment.filename);
-        try recipients.validateHeader(attachment.mimeType);
-        if (attachment.mimeType.len == 0 or attachment.mimeType.len > 128 or std.mem.indexOfScalar(u8, attachment.mimeType, '/') == null) return error.InvalidAttachment;
-        const n = if (attachment.blobId) |id| blk: {
-            try validateAttachmentHandle(id);
-            if (attachment.data.len != 0) return error.InvalidAttachmentHandle;
-            break :blk attachment.size;
-        } else std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(attachment.data) catch return error.InvalidAttachment;
-        attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
-        if (attachment_bytes > t.Limits.attachment_bytes or n != attachment.size) return error.InvalidAttachment;
-        if (attachment.blobId == null) {
-            embedded_bytes = std.math.add(usize, embedded_bytes, n) catch return error.BodyTooLarge;
-            if (embedded_bytes > t.Limits.body_bytes) return error.InvalidAttachment;
+    for ([_][]const t.Attachment{ d.attachments, related }, 0..) |list, group| {
+        // Omitted originals remain validated and durable, but do not consume
+        // the outgoing file budget while their inclusion is disabled.
+        if (group == 1 and (!d.includeOriginal or !send)) {
+            attachment_bytes = 0;
+            embedded_bytes = 0;
         }
-        // Validate every encoded byte without allocating a second binary copy.
-        for (attachment.data) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return error.InvalidAttachment;
-        try @import("mime.zig").validateAttachment(attachment.filename, attachment.mimeType);
-        if (attachment.contentId) |id| _ = try @import("mime.zig").contentId(id);
-        if (attachment.disposition) |value| if (!std.mem.eql(u8, value, "inline") and !std.mem.eql(u8, value, "attachment")) return error.InvalidDisposition;
-        if (attachment.contentLocation) |value| {
-            try recipients.validateHeader(value);
-            if (value.len == 0 or value.len > 2048) return error.InvalidContentLocation;
+        for (list) |attachment| {
+            if (attachment.filename.len == 0 or attachment.filename.len > mail_limits.filename_bytes or std.mem.indexOfAny(u8, attachment.filename, "/\\") != null) return error.InvalidAttachment;
+            try recipients.validateHeader(attachment.filename);
+            try recipients.validateHeader(attachment.mimeType);
+            if (attachment.mimeType.len == 0 or attachment.mimeType.len > 128 or std.mem.indexOfScalar(u8, attachment.mimeType, '/') == null) return error.InvalidAttachment;
+            const n = if (attachment.blobId) |id| blk: {
+                try validateAttachmentHandle(id);
+                if (attachment.data.len != 0) return error.InvalidAttachmentHandle;
+                break :blk attachment.size;
+            } else std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(attachment.data) catch return error.InvalidAttachment;
+            attachment_bytes = std.math.add(usize, attachment_bytes, n) catch return error.BodyTooLarge;
+            if (attachment_bytes > t.Limits.attachment_bytes or n != attachment.size) return error.InvalidAttachment;
+            if (attachment.blobId == null) {
+                embedded_bytes = std.math.add(usize, embedded_bytes, n) catch return error.BodyTooLarge;
+                if (embedded_bytes > t.Limits.body_bytes) return error.InvalidAttachment;
+            }
+            // Validate every encoded byte without allocating a second binary copy.
+            for (attachment.data) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return error.InvalidAttachment;
+            try @import("mime.zig").validateAttachment(attachment.filename, attachment.mimeType);
+            if (attachment.contentId) |id| _ = try @import("mime.zig").contentId(id);
+            if (attachment.disposition) |value| if (!std.mem.eql(u8, value, "inline") and !std.mem.eql(u8, value, "attachment")) return error.InvalidDisposition;
+            if (attachment.contentLocation) |value| {
+                try recipients.validateHeader(value);
+                if (value.len == 0 or value.len > 2048) return error.InvalidContentLocation;
+            }
         }
-    };
+    }
     for (related, 0..) |resource, index| {
         if (std.ascii.startsWithIgnoreCase(resource.mimeType, "message/")) return error.UnsupportedRelatedType;
         if (resource.contentId == null and resource.contentLocation == null) return error.MissingRelatedIdentity;
@@ -188,6 +196,9 @@ test "draft codec: incomplete recipients stay editable and send validation remai
     defer arena.deinit();
     const a = arena.allocator();
     const legacy = try decodeDraft(a, try j.value(a, .{ .subject = "Literal", .bodyText = "**plain source**" }));
+    const projected = try decodeDraft(a, try j.value(a, .{ .subject = "User source", .to = "peer@example.test", .summaryCounts = .{ .to = 500, .cc = 0, .bcc = 0, .attachments = 1040 } }));
+    try std.testing.expect(projected.summaryCounts == null);
+    try std.testing.expectEqual(@as(usize, 1), projected.to.len);
     try std.testing.expectEqual(t.BodyFormat.plain, legacy.bodyFormat);
     try std.testing.expectEqual(@as(usize, 0), legacy.omittedAttachments);
     try validateDraft(legacy, false);

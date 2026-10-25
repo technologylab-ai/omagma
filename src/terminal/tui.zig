@@ -28,6 +28,7 @@ const preferences = @import("preferences.zig");
 const calendar_sources = @import("calendar_sources.zig");
 const reader_tools = @import("reader_tools.zig");
 const text_layout = @import("text_layout.zig");
+const compose_text = @import("compose_text.zig");
 const html_view = @import("html_view.zig");
 const mime = @import("mime.zig");
 const markdown_mail = @import("markdown_mail.zig");
@@ -75,7 +76,7 @@ const LabelManagerPage = enum { list, create, rename, delete };
 const Tone = enum { text, subject, sender, muted, accent, selected, warning, fetching, current, offline };
 const CardBlock = struct { text: []const u8, tone: Tone = .text };
 const Focus = layout.Focus;
-const JobKind = enum { calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
+const JobKind = enum { calendar_guest_contacts, calendar_event_edit, calendar_event_review, calendar_event_apply, calendar_event_reconcile, calendar_event_pending, calendar_event_retry, calendar_event_abandon, meeting_calendars, meeting_agenda, meeting_open, gmail_draft_info, gmail_draft_action, save_gmail, follow_up_list, follow_up_write, preferences_save, calendar_list, calendar_agenda, calendar_event, calendar_plan, calendar_review, calendar_apply, calendar_reconcile, updates_load, updates_check, batch, undo, labels_list, label_write, label_receipt, label_state, label_color, triage_scope, unread_navigation, refresh, list, cached_search, recipient_cache, recipient_refresh, read, thread, drafts, draft_read, draft_discard, draft_operations, queue_inspect, compose, draft_measure, autosave, identities, save, save_review, save_back, save_browser, send, grace_stage, grace_resume, grace_process, grace_cancel, attachment_import, attachments_save, contacts, contact_write, mutation, invitation_inspect, invitation_reconcile, invitation, open, attachment_save };
 const SyncState = enum { fetching, refreshing, cached, current, offline, failed };
 const SyncStatus = struct {
     state: SyncState = .fetching,
@@ -86,7 +87,7 @@ const SyncStatus = struct {
 };
 const PendingCompose = enum { none, new, reply, reply_all, forward };
 const ComposeSourceMode = enum { choose, text, formatted, attached };
-const UxOverlay = enum { none, gmail_draft, follow_up, actions, scope, triage_review, aliases, history, saved, save_search, grace, discard, contact_addresses, label_colors, save_all, find };
+const UxOverlay = enum { none, draft_conflict, gmail_draft, follow_up, actions, scope, triage_review, aliases, history, saved, save_search, grace, discard, contact_addresses, label_colors, save_all, find };
 const UxRow = struct { label: []const u8, detail: []const u8 = "", value: []const u8 = "", index: usize = 0 };
 const ReceivedView = enum { automatic, plain, formatted };
 const ReaderChoice = struct {
@@ -200,6 +201,7 @@ fn humanError(code: []const u8) []const u8 {
         .{ .code = "CacheBusy", .label = "Cache is busy · try again" },
         .{ .code = "CacheChanged", .label = "Mail changed · try again" },
         .{ .code = "InvalidCursor", .label = "Mail changed · reload this view" },
+        .{ .code = "InvalidDraftCursor", .label = "Draft list changed · gg returns to the first page" },
         .{ .code = "CacheBoundaryGone", .label = "This cached boundary is no longer available" },
         .{ .code = "ThreadWindowChanged", .label = "Conversation changed · reopen the thread" },
         .{ .code = "ThreadWindowBoundary", .label = "No more messages in this direction" },
@@ -403,7 +405,7 @@ const HelpFeature = enum { always, native, files, attachments, editor, clipboard
 const HelpRow = struct { keys: []const u8 = "", action: []const u8 = "", section: []const u8 = "", requires: HelpFeature = .always };
 const help_rows = [_]HelpRow{
     .{ .keys = "b / :follow-up", .action = "Set a local follow-up date for the focused message · Today, Tomorrow or YYYY-MM-DD", .requires = .native },
-    .{ .keys = ":gmail-draft · Actions Continue in Gmail", .action = "Upload a saved local draft once and pause local edits; check status or take back while keeping Gmail's copy. Requires mail-drafts (gmail.compose) or mail-modify permission", .requires = .native },
+    .{ .keys = "g · Continue in Gmail · :gmail-draft", .action = "Review a Gmail handoff, then explicitly upload once and pause local edits; check status or take back while keeping Gmail's copy. Requires mail-drafts (gmail.compose) or mail-modify permission", .requires = .native },
     .{ .keys = "g in Review send after Gmail takeback", .action = "Check Gmail Drafts and Sent, then acknowledge the kept copy before sending locally. Any edit requires a fresh acknowledgement", .requires = .native },
     .{ .keys = ":follow-ups · Navigation Follow-ups", .action = "View this account's due and upcoming reminders · j/k Choose · Enter Open · b Edit · d Done", .requires = .native },
     .{ .keys = "Tab / Enter · Ctrl+S in Follow up", .action = "Choose a preset or save the date · Esc Cancel · Done removes only the local reminder; Gmail is unchanged", .requires = .native },
@@ -420,7 +422,7 @@ const help_rows = [_]HelpRow{
     .{ .keys = "c Color in Manage labels", .action = "Choose a custom label's Gmail-compatible background and text colors", .requires = .mail_changes },
     .{ .keys = "Ctrl+Z / Ctrl+Y in composer", .action = "Undo and redo native text edits, preserving cursor position" },
     .{ .keys = "f / :sender in composer", .action = "Choose a verified From identity without cycling blindly", .requires = .aliases },
-    .{ .keys = ":preview-browser", .action = "Open the outgoing email in a private sandboxed browser preview", .requires = .open_urls },
+    .{ .keys = "P · Preview in browser · :preview-browser", .action = "Save editable draft fields and open a private sandboxed browser preview; protected or Gmail-paused drafts preview the saved local copy", .requires = .open_urls },
     .{ .keys = "Space in attachment file list", .action = "Select several files across folders before attaching once", .requires = .files },
     .{ .keys = ":save-all DIRECTORY", .action = "Save received attachments privately without overwriting existing files", .requires = .files },
     .{ .keys = ":add-contact / :discard-draft / :spam / :unspam", .action = "Complete contact, local draft and Spam workflows with explicit actions", .requires = .mail_changes },
@@ -451,7 +453,9 @@ const help_rows = [_]HelpRow{
     .{ .keys = "q after a search", .action = "Clear the search and return to the mailbox" },
     .{ .keys = "J / K in the reader", .action = "Next or previous mail" },
     .{ .keys = "{ / } · t", .action = "Previous/next thread message; fold its body" },
-    .{ .keys = "Q / S", .action = "Fold quoted history or a standard signature" },
+    .{ .keys = "Q / S", .action = "Fold quoted history or a standard signature in the reader" },
+    .{ .keys = "Q in a reply composer", .action = "Reply without original / include it again; the exact original remains saved for Undo and restart" },
+    .{ .keys = "z in composer or review", .action = "Fold or expand retained original / long trailing quote in the preview; outgoing bytes are unchanged" },
     .{ .keys = "L / B", .action = "Choose a URL or received attachment", .requires = .files },
     .{ .keys = "j / k in the reader", .action = "Scroll the current message" },
     .{ .keys = "V in the reader", .action = "Move a text cursor to your starting point; V or Space then starts character selection", .requires = .clipboard },
@@ -740,6 +744,7 @@ fn safe(allocator: Allocator, input: []const u8, multiline: bool) ![]const u8 {
 const Field = struct {
     bytes: std.ArrayList(u8) = .empty,
     cursor: usize = 0,
+    version: u64 = 0,
     history: edit_history.History = .{},
     undo_enabled: bool = false,
     /// Set only for a loaded native compose body. Every byte and history
@@ -786,6 +791,7 @@ const Field = struct {
         std.mem.copyForwards(u8, self.bytes.allocatedSlice()[0..input_value.len], input_value);
         self.bytes.items.len = input_value.len;
         self.cursor = input_value.len;
+        self.version +%= 1;
     }
     fn value(self: *const Field) []const u8 {
         return self.bytes.items;
@@ -799,6 +805,7 @@ const Field = struct {
         if (self.undo_enabled) try self.recordUndo(allocator, self.bytes.items.len + value_in.len);
         try self.bytes.insertSlice(allocator, self.cursor, value_in);
         self.cursor += value_in.len;
+        self.version +%= 1;
     }
     fn previous(self: *const Field) usize {
         var iterator = vaxis.unicode.graphemeIterator(self.bytes.items);
@@ -846,12 +853,14 @@ const Field = struct {
             std.mem.copyForwards(u8, self.bytes.items[from..], self.bytes.items[self.cursor..]);
             self.bytes.items.len -= count;
             self.cursor = from;
+            if (count > 0) self.version +%= 1;
         } else if (key.matches(Key.delete, .{})) {
             const to = self.next();
             const count = to - self.cursor;
             if (count > 0 and self.undo_enabled) try self.recordUndo(allocator, self.bytes.items.len - count);
             std.mem.copyForwards(u8, self.bytes.items[self.cursor..], self.bytes.items[to..]);
             self.bytes.items.len -= count;
+            if (count > 0) self.version +%= 1;
         } else if (multiline and key.matches(Key.enter, .{})) try self.insert(allocator, "\n", limit) else if (multiline and key.matches(Key.tab, .{})) try self.insert(allocator, "    ", limit) else if (!key.mods.ctrl and !key.mods.alt and !key.mods.super) {
             if (key.text) |value_in| {
                 for (value_in) |c| if (c == 0 or c == 0x1b or (!multiline and (c == '\r' or c == '\n'))) return error.InvalidInput;
@@ -861,8 +870,10 @@ const Field = struct {
     }
 };
 
+const QuotedTail = struct { start: usize, lines: usize };
 const Compose = struct {
     fields: [5]Field = @splat(.{}),
+    display: compose_text.Cache = .{},
     body_format: types.BodyFormat = .plain,
     id: Field = .{},
     thread: Field = .{},
@@ -878,6 +889,11 @@ const Compose = struct {
     original: ?types.Original = null,
     original_arena: ?std.heap.ArenaAllocator = null,
     original_digest: [32]u8 = @splat(0),
+    original_lines: usize = 0,
+    quote_version: ?u64 = null,
+    quote_tail: ?QuotedTail = null,
+    quote_scans: usize = 0,
+    include_original: bool = true,
     selected: usize = 0,
     body_scroll: usize = 0,
     attachment_scroll: usize = 0,
@@ -893,6 +909,7 @@ const Compose = struct {
     new_draft: bool = false,
     insert_mode: bool = false,
     unknown_outcome: bool = false,
+    saved_changed: bool = false,
     gmail_link: ?@import("draft_link.zig").Link = null,
     gmail_arena: ?std.heap.ArenaAllocator = null,
     gmail_guard_unknown: bool = false,
@@ -911,6 +928,7 @@ const Compose = struct {
         if (self.gmailPaused()) self.insert_mode = false;
     }
     fn deinit(self: *Compose, allocator: Allocator) void {
+        self.display.deinit();
         for (&self.fields) |*field| field.deinit(allocator);
         self.id.deinit(allocator);
         self.thread.deinit(allocator);
@@ -935,6 +953,7 @@ const Compose = struct {
     /// local draft stays durable and reopening reloads it. Small identity and
     /// receipt fields remain for status and outcome handling.
     fn releaseOutgoing(self: *Compose, allocator: Allocator) void {
+        self.display.deinit();
         if (self.fields[4].backing != null) self.fields[4].deinit(allocator);
         if (self.attachment_arena) |*arena| arena.deinit();
         self.attachment_arena = null;
@@ -961,6 +980,9 @@ const Compose = struct {
         self.omitted_attachments = @intCast(omitted);
         const format = text(get(value_in, "bodyFormat"));
         if (format.len > 0) self.body_format = std.meta.stringToEnum(types.BodyFormat, format) orelse return error.InvalidBodyFormat;
+        const inclusion = get(value_in, "includeOriginal");
+        if (inclusion != .null and inclusion != .bool) return error.InvalidDraft;
+        self.include_original = if (inclusion == .bool) inclusion.bool else true;
         for ([_][]const u8{ "to", "cc", "bcc" }, 0..) |name, index| {
             const raw = try mailboxes(allocator, get(value_in, name));
             defer allocator.free(raw);
@@ -995,6 +1017,7 @@ const Compose = struct {
             const owned = self.original_arena.?.allocator();
             self.original = try std.json.parseFromValueLeaky(types.Original, owned, original, .{ .allocate = .alloc_always });
             self.original_digest = try originalDigest(self.original.?);
+            self.original_lines = std.mem.count(u8, self.original.?.bodyText, "\n") + 1;
         }
     }
     /// Stream the canonical JSON identity into the hash. A long preserved
@@ -1009,14 +1032,7 @@ const Compose = struct {
         return digest;
     }
     fn addresses(allocator: Allocator, raw: []const u8) ![]types.Address {
-        var list: recipients.List = .{};
-        try recipients.parse(raw, &list);
-        const result = try allocator.alloc(types.Address, list.count);
-        for (list.slice(), 0..) |*mailbox, index| result[index] = .{
-            .address = try allocator.dupe(u8, mailbox.address.slice()),
-            .name = try allocator.dupe(u8, mailbox.name.slice()),
-        };
-        return result;
+        return recipients.parseOutgoing(allocator, raw);
     }
     fn draft(self: *Compose, allocator: Allocator) !types.Draft {
         try recipients.validateHeader(self.fields[3].value());
@@ -1034,6 +1050,7 @@ const Compose = struct {
             .attachments = self.attachments,
             .omittedAttachments = self.omitted_attachments,
             .original = self.original,
+            .includeOriginal = self.include_original,
             .from = if (self.from.value().len == 0) null else .{ .address = self.from.value(), .name = self.from_name.value() },
         };
     }
@@ -1048,6 +1065,7 @@ const Compose = struct {
             .attachments = self.attachments,
             .omittedAttachments = self.omitted_attachments,
             .original = self.original,
+            .includeOriginal = self.include_original,
             .recoveryFields = fields,
             .bodyFormat = self.body_format,
         };
@@ -1095,18 +1113,26 @@ const Job = struct {
     account_index: usize = 0,
     contacts_generation: u64 = 0,
     draft_target: @import("../bounded.zig").Text(128) = .{},
+    measure_operation: @import("../bounded.zig").Text(128) = .{},
+    measure_revision: u64 = 0,
     unread_target: @import("../bounded.zig").Text(128) = .{},
     requested_at: i64 = 0,
     preferences_revision: u64 = 0,
     saved_attachment_open: bool = false,
     protected_preview: bool = false,
+    recovery_fork: bool = false,
+    recovery_return_to_mail: bool = false,
+    recovery_from_autosave: bool = false,
+    save_copy: bool = false,
+    reload_conflict: bool = false,
+    reload_revision: u64 = 0,
     /// A selected native draft/send command: its job_arena is OS-backed and
     /// its own response may use the outgoing record ceiling.
     outgoing: bool = false,
     calendar_join_open: bool = false,
     calendar_browser_open: bool = false,
     meeting_account: u8 = 0,
-    meeting_target: u8 = 0,
+    meeting_target: usize = 0,
     meeting_key: ?calendar_notifications.Key = null,
     progress: fetch_progress.Mailbox = .{},
     loading_rows: loading.Mailbox = .{},
@@ -1396,6 +1422,33 @@ const App = struct {
     compose_source_original_too_large: bool = false,
     compose_view: ComposeView = .rendered,
     compose_preview_full: bool = false,
+    compose_layout_width: u16 = 0,
+    /// Enabled native actions actually painted in the current composer frame.
+    compose_action_mask: u8 = 0,
+    /// Visible actions retain keyboard focus while a write temporarily disables them.
+    compose_action_drawn: u8 = 0,
+    compose_original_drawn: bool = false,
+    compose_fold_drawn: bool = false,
+    compose_original_folded: ?bool = null,
+    compose_policy_undo: ?bool = null,
+    compose_policy_redo: ?bool = null,
+    compose_policy_revision: u64 = 0,
+    compose_measure: struct {
+        pending: bool = false,
+        revision: u64 = 0,
+        operation: @import("../bounded.zig").Text(128) = .{},
+        measured_operation: @import("../bounded.zig").Text(128) = .{},
+        draft: @import("../bounded.zig").Text(128) = .{},
+        measured: bool = false,
+        exact: bool = false,
+        content_digest: @import("../bounded.zig").Text(64) = .{},
+        bytes: ?usize = null,
+        max_bytes: usize = 0,
+        without_original: ?usize = null,
+        over_limit: bool = false,
+        sendable: bool = false,
+        failure: @import("../bounded.zig").Text(64) = .{},
+    } = .{},
     compose_preview_scroll: usize = 0,
     compose_plain_scroll: usize = 0,
     compose_snapshot_scroll: usize = 0,
@@ -1405,7 +1458,10 @@ const App = struct {
     compose_preview: ?html_view.Prepared = null,
     compose_original_preview: ?html_view.Prepared = null,
     compose_preview_plain: []const u8 = "",
+    compose_preview_display: compose_text.Cache = .{},
+    compose_original_display: compose_text.Cache = .{},
     compose_preview_digest: ?[32]u8 = null,
+    compose_preview_key: ?struct { version: u64, format: types.BodyFormat, original: ?[32]u8, include_original: bool, folded_tail: bool } = null,
     compose_preview_format: types.BodyFormat = .plain,
     compose_preview_error: ?anyerror = null,
     compose_preview_builds: usize = 0,
@@ -1473,6 +1529,7 @@ const App = struct {
     paste_cr: bool = false,
     paste_history_field: ?usize = null,
     quit: bool = false,
+    exit_persistence: bool = false,
     pending_list: bool = false,
     pending_remote_list: bool = false,
     pending_cached_list: bool = false,
@@ -1646,9 +1703,9 @@ const App = struct {
     bulk_save_position: usize = 0,
     bulk_save_written: usize = 0,
     bulk_save_flags: [types.Limits.message_attachments]bool = @splat(false),
-    selected_files: [16]Field = @splat(.{}),
+    selected_files: std.ArrayList(Field) = .empty,
     selected_file_count: usize = 0,
-    pending_files: [16]Field = @splat(.{}),
+    pending_files: std.ArrayList(Field) = .empty,
     pending_file_count: usize = 0,
     pending_file_position: usize = 0,
     contact_snapshot: ?std.heap.ArenaAllocator = null,
@@ -1664,6 +1721,7 @@ const App = struct {
     zone: timezone.Zone = .{},
 
     fn deinit(self: *App) void {
+        self.meetings.deinit(self.allocator);
         if (self.follow_up_arena) |*arena| arena.deinit();
         self.gmail_draft_outcome.deinit(self.allocator);
         self.gmail_remote_version.deinit(self.allocator);
@@ -1672,6 +1730,7 @@ const App = struct {
         self.follow_up_subject.deinit(self.allocator);
         self.calendar_slots.deinit();
         self.calendar.deinit(self.allocator);
+        self.ui_preferences.calendar.deinit();
         self.calendar_query.deinit(self.allocator);
         self.calendar_date.deinit(self.allocator);
         for (&self.calendar_form_fields) |*field| field.deinit(self.allocator);
@@ -1697,8 +1756,10 @@ const App = struct {
         self.bulk_save_account.deinit(self.allocator);
         for (self.bulk_save_items.items) |item| self.allocator.free(item);
         self.bulk_save_items.deinit(self.allocator);
-        for (&self.selected_files) |*field| field.deinit(self.allocator);
-        for (&self.pending_files) |*field| field.deinit(self.allocator);
+        for (self.selected_files.items) |*field| field.deinit(self.allocator);
+        self.selected_files.deinit(self.allocator);
+        for (self.pending_files.items) |*field| field.deinit(self.allocator);
+        self.pending_files.deinit(self.allocator);
         if (self.contact_snapshot) |*arena| arena.deinit();
         self.help_query.deinit(self.allocator);
         self.clearComposePreview();
@@ -2051,7 +2112,7 @@ const App = struct {
         self.notice_rect = rect;
     }
     fn jumpFirstMail(self: *App) !void {
-        if (self.drafts_list or self.follow_ups_list) {
+        if (self.follow_ups_list) {
             self.selected = 0;
             self.top = 0;
             return;
@@ -2069,6 +2130,13 @@ const App = struct {
         self.selection_generation +%= 1;
         self.view_ready = false;
         self.first_mail_pending = true;
+        if (self.drafts_list) {
+            self.pending_page = false;
+            try self.next_cursor.set(self.allocator, "");
+            try self.previous_cursor.set(self.allocator, "");
+            try self.remote_cursor.set(self.allocator, "");
+            return self.reloadWithRefresh(false);
+        }
         const ready = self.loadCachedList("") catch |err| if (err == error.CacheBusy) false else return err;
         if (!ready and self.job.future == null) try self.reload();
     }
@@ -2973,7 +3041,8 @@ const App = struct {
         const linked = self.compose.gmail_link;
         const permitted = self.hasCapability("mail-drafts") or self.hasCapability("mail-modify");
         const explanation: []const u8 = if (!permitted) "Permission needed: add mail-drafts to this account's authorization (gmail.compose), or use its existing mail-modify grant. See Help (?) / Gmail drafts. Existing authorization remains usable until the new grant succeeds." else if (linked == null or linked.?.phase == .rejected) "Upload this saved draft once to Gmail, then continue on Gmail or your phone. Local edits and sending pause. Your local Markdown source, original formatting and files are retained. Nothing is sent." else if (linked.?.phase == .unknown) "Upload not confirmed. The Gmail copy may exist or may already have been sent. Check upload status or inspect Gmail; an empty search is not proof of failure. Omagma will not upload again. Local edits remain paused." else if (!linked.?.paused) "This local copy can be edited again. The Gmail copy was kept and may still be edited or sent there. Before sending locally, check Gmail and acknowledge the copy warning in Review send." else if (same(self.gmail_draft_outcome.value(), "changed")) "Gmail has newer edits. Import creates a new local draft. Text stays editable; many inline images keep their formatting as a protected original below a new note; your original local source and Gmail copy stay intact. Keep local copy resumes the original source instead. Check both copies before sending." else if (same(self.gmail_draft_outcome.value(), "missing")) "Gmail draft is missing. It may have been sent or deleted; this is not delivery confirmation. Check Gmail Drafts and Sent first. Keeping the local copy enables editing, with a duplicate-send warning." else "Draft is available in Gmail. Local edits and sending are paused. Import creates a new local draft, preserving both existing copies. Text stays editable; many inline images are kept as a protected original below a new note. Take back rechecks Gmail and resumes this local source. No Gmail draft is deleted or overwritten.";
-        const description = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\nSubject: {s}\nFiles: {d}\n\n{s}\n", .{ self.account(), self.compose.fields[3].value(), self.compose.attachments.len, explanation });
+        const omitted_original: []const u8 = if (self.compose.original != null and !self.compose.include_original) "\nImported Gmail copies contain only what was uploaded. To restore the omitted original, take back or open this original local draft.\n" else "";
+        const description = try std.fmt.allocPrint(self.frame.allocator(), "Account: {s}\nSubject: {s}\nFiles: {d}\n\n{s}\n{s}", .{ self.account(), self.compose.fields[3].value(), self.compose.attachments.len, explanation, omitted_original });
         const count = self.uxCount();
         const content_height = inner.height -| @as(u16, @intCast(count + 2));
         const content = inner.child(.{ .height = content_height });
@@ -3367,7 +3436,9 @@ const App = struct {
         if (value != .null) {
             if (value != .object) return error.InvalidPreferencesResponse;
             const bytes = try @import("json.zig").encodeAlloc(a, value, .{});
-            self.ui_preferences = try preferences.parse(a, bytes);
+            const parsed_preferences = try preferences.parse(self.allocator, bytes);
+            self.ui_preferences.calendar.deinit();
+            self.ui_preferences = parsed_preferences;
         }
         self.reader_layout = self.ui_preferences.readerLayout;
         self.remote_preferences_loaded = true;
@@ -3442,6 +3513,7 @@ const App = struct {
             self.say(true, "UI preferences fallback · {s}", .{@errorName(err)});
             return;
         };
+        self.ui_preferences.calendar.deinit();
         self.ui_preferences = saved;
         self.reader_layout = saved.readerLayout;
         self.preferences_warning = false;
@@ -3681,7 +3753,7 @@ const App = struct {
         self.ux_title = title;
         try self.ux_query.set(self.allocator, "");
         try self.ux_account.set(self.allocator, self.account());
-        self.ux_focus = if (kind == .discard or kind == .triage_review) 3 else if (kind == .scope) 1 else 0;
+        self.ux_focus = if (kind == .discard or kind == .triage_review or kind == .draft_conflict) 3 else if (kind == .scope) 1 else 0;
     }
     fn uxRow(self: *App, row: UxRow) !void {
         if (self.ux_rows.items.len == 128) return error.DialogLimitExceeded;
@@ -3695,7 +3767,7 @@ const App = struct {
         };
     }
     fn uxInput(self: *const App) bool {
-        return self.ux_overlay != .gmail_draft and self.ux_overlay != .scope and self.ux_overlay != .discard and self.ux_overlay != .triage_review;
+        return self.ux_overlay != .draft_conflict and self.ux_overlay != .gmail_draft and self.ux_overlay != .scope and self.ux_overlay != .discard and self.ux_overlay != .triage_review;
     }
     fn uxMatches(self: *const App, row: UxRow) bool {
         return !self.uxFilter() or self.ux_query.value().len == 0 or cache_query.find(row.label, self.ux_query.value()) != null or cache_query.find(row.detail, self.ux_query.value()) != null;
@@ -3766,6 +3838,11 @@ const App = struct {
         self.saveUiPreferences();
     }
     fn onUxCommand(self: *App, command: []const u8) !bool {
+        if (same(command, "resolve-draft") or same(command, "reload-draft") or same(command, "save-copy")) {
+            if (self.mode == .command) self.mode = self.previous_mode;
+            if (same(command, "resolve-draft")) try self.openDraftConflict() else if (same(command, "reload-draft")) try self.reloadChangedDraft() else try self.saveLocalDraftCopy();
+            return true;
+        }
         if (same(command, "meeting")) {
             if (self.mode == .command) self.mode = self.previous_mode;
             self.focusMeeting();
@@ -3865,7 +3942,7 @@ const App = struct {
             return true;
         }
         if (same(command, "preview-browser")) {
-            if (self.compose_active and self.compose.unknown_outcome) try self.openProtectedPreview() else try self.saveDraft(.save_browser);
+            try self.previewComposeInBrowser();
             return true;
         }
         if (same(command, "add-contact")) {
@@ -3892,6 +3969,13 @@ const App = struct {
             return error.AccountContextChanged;
         }
         const kind = self.ux_overlay;
+        if (kind == .draft_conflict) {
+            if (!same(self.ux_target.value(), self.compose.id.value())) return error.DraftChanged;
+            const copy = self.ux_selected == 0;
+            self.closeUx();
+            if (copy) try self.saveLocalDraftCopy() else try self.reloadChangedDraft();
+            return;
+        }
         if (kind == .gmail_draft) return self.activateGmailDraft();
         if (kind == .follow_up) return self.saveFollowUp(true);
         if (kind == .save_all) {
@@ -4063,7 +4147,7 @@ const App = struct {
         if (self.uxInput()) {
             try self.editLine(inner, 0, prompt, &self.ux_query, self.ux_focus == 0, if (self.ux_focus == 0) .selected else .text);
             self.mouseRows(inner, 0, 1, .dialog_action, 10);
-        } else try self.line(inner, 0, if (self.ux_overlay == .scope) "Choose what mail actions affect" else "Review the pinned target before confirming", .subject);
+        } else try self.line(inner, 0, if (self.ux_overlay == .draft_conflict) "Keep local text or load the saved version" else if (self.ux_overlay == .scope) "Choose what mail actions affect" else "Review the pinned target before confirming", .subject);
         try self.line(inner, 1, try self.fitLine(inner, self.ux_account.value(), inner.width), .muted);
         self.ux_height = inner.height -| 5;
         const count = self.uxCount();
@@ -4076,7 +4160,7 @@ const App = struct {
             try self.line(inner, position - first_position + 2, try self.fitLine(inner, label, inner.width), if (position == self.ux_selected) (if (self.ux_focus == 1) .selected else .subject) else .text);
             self.mouseRows(inner, position - first_position + 2, 1, .dialog_action, position + 100);
         }
-        const primary = if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
+        const primary = if (self.ux_overlay == .draft_conflict) "[Use choice]" else if (self.ux_overlay == .actions) "[Run]" else if (self.ux_overlay == .aliases or self.ux_overlay == .contact_addresses) "[Use]" else if (self.ux_overlay == .discard) "[Discard]" else if (self.ux_overlay == .triage_review) "[Confirm]" else if (self.ux_overlay == .save_search or self.ux_overlay == .grace or self.ux_overlay == .save_all) "[Save]" else if (self.ux_overlay == .find) "[Find]" else if (self.ux_overlay == .label_colors) "[Save color]" else "[Open]";
         if (inner.height >= 6) if (self.uxAt(self.ux_selected)) |selected_row| {
             try self.line(inner, inner.height - 3, try self.fitLine(inner, selected_row.detail, inner.width), .muted);
         };
@@ -5032,7 +5116,7 @@ const App = struct {
                 try self.next_cursor.set(self.allocator, "");
                 try self.remote_cursor.set(self.allocator, "");
             } else self.has_more_cached_before = false;
-            self.say(false, "{s} of {s}", .{ if (forward) "End" else "Start", if (self.cacheSearch()) "cached matches" else "cached mailbox" });
+            self.say(false, "{s} of {s}", .{ if (forward) "End" else "Start", if (self.drafts_list) "draft list" else if (self.cacheSearch()) "cached matches" else "cached mailbox" });
             return;
         }
         const same_view = self.view_ready and self.view_generation == self.generation;
@@ -5390,7 +5474,7 @@ const App = struct {
             self.job.response = null;
             _ = self.job_arena.reset(.free_all);
         }
-        if (kind == .send or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
+        if (draftSaveJob(kind) or kind == .draft_measure or kind == .send or kind == .grace_stage or kind == .draft_operations or kind == .queue_inspect or kind == .gmail_draft_info or kind == .gmail_draft_action) try self.job.draft_target.set(self.compose.id.value());
         if (unread_target) |target| try self.job.unread_target.set(target);
         self.job.request = request;
         if (kind == .refresh or kind == .list) {
@@ -5398,7 +5482,7 @@ const App = struct {
             status.state = if (status.cache_ready) .refreshing else .fetching;
             status.error_len = 0;
             self.say(false, "{s}", .{if (status.cache_ready) "Cached mail ready · fetching latest changes" else "Fetching mail…"});
-        } else if (kind != .preferences_save and !updateJob(kind) and !meetingJob(kind) and !self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
+        } else if (kind != .draft_measure and kind != .preferences_save and !updateJob(kind) and !meetingJob(kind) and !self.keepBackgroundDiagnostic(kind)) self.say(false, "{s}", .{switch (kind) {
             .cached_search => "Searching cached mail…",
             .recipient_cache => "Loading recent-mail recipients… · typing remains available",
             .recipient_refresh => "Updating recent sent-mail recipients… · typing remains available",
@@ -5639,7 +5723,7 @@ const App = struct {
         self.pending_thread = false;
         self.follow_ups_list = false;
         self.drafts_list = self.folder == 2;
-        if (self.drafts_list) return self.start(.drafts, .{ .account = self.account(), .cmd = "draft.list" });
+        if (self.drafts_list) return self.start(.drafts, .{ .account = self.account(), .cmd = "draft.list", .cursor = self.cursor.value(), .limit = @as(usize, types.Limits.page) });
         if (self.cacheSearch()) {
             _ = self.loadCachedList("") catch |err| if (err == error.CacheBusy) false else return err;
             return;
@@ -5760,7 +5844,14 @@ const App = struct {
             self.job.response = null;
             _ = self.job_arena.reset(.free_all);
         };
-        if (meetingJob(self.job.kind)) {
+        if (self.job.kind == .draft_measure) {
+            if (self.composeMeasureJobCurrent()) {
+                if (self.job.failure) |err| self.compose_measure.failure.set(@errorName(err)) catch {} else if (self.job.response) |response| self.apply(.draft_measure, response) catch |err| {
+                    self.compose_measure.failure.set(@errorName(err)) catch {};
+                };
+                self.compose_measure.pending = false;
+            }
+        } else if (meetingJob(self.job.kind)) {
             self.finishMeetingJob() catch {
                 if (self.job.kind == .meeting_agenda) self.meetings.fail(self.job.meeting_target);
             };
@@ -5861,6 +5952,12 @@ const App = struct {
             if (self.page_loading and self.page_loading_account == self.job.account_index and self.page_loading_generation == self.job.generation) self.completePageLoad();
             if (self.job.kind == .triage_scope) self.triage_waiting = false;
         } else if (self.job.failure) |err| {
+            if (err == error.ArchivedDraftReadOnly and try self.recoverSettledDraft(self.job.kind)) return;
+            if (err == error.ReviewedDraftChanged and self.job.kind == .grace_stage and self.compose_active and self.job.account_index == self.account_index and self.job.generation == self.generation and same(self.job.draft_target.slice(), self.compose.id.value())) {
+                self.savedDraftChanged();
+                self.mode = .compose;
+                return;
+            }
             if (self.job.kind == .gmail_draft_action) {
                 self.compose.gmail_guard_unknown = true;
                 self.gmail_reload_pending = true;
@@ -5902,6 +5999,7 @@ const App = struct {
                 return err;
             };
         }
+        if (self.exit_persistence) return;
         if (self.pending_contacts and self.contactsOpen()) try self.dispatchPending();
         if (self.job.future != null) return;
         try self.retryLocalCache();
@@ -5911,11 +6009,20 @@ const App = struct {
         // A provider may explicitly prove that preparation failed before any
         // submission. Handle that phase without allocating a receipt copy.
         if (self.job.failure) |failure| {
+            if (failure == error.ReviewedDraftChanged) {
+                self.client.sendReceipt(self.job.request, true);
+                if (self.job.account_index == self.account_index and self.job.generation == self.generation and self.compose_active and same(self.job.draft_target.slice(), self.compose.id.value())) {
+                    self.compose.unknown_outcome = false;
+                    self.savedDraftChanged();
+                    self.mode = .compose;
+                }
+                return;
+            }
             if (failure == error.SendNotStarted) {
                 self.client.sendReceipt(self.job.request, true);
                 if (self.job.account_index == self.account_index and self.job.generation == self.generation and self.compose_active and same(self.job.draft_target.slice(), self.compose.id.value())) {
                     self.compose.unknown_outcome = false;
-                    self.review_ready = false;
+                    self.retireComposeMeasure();
                     self.mode = .compose;
                     self.say(true, "Send did not start · draft retained · review again", .{});
                 }
@@ -6059,7 +6166,7 @@ const App = struct {
     }
     fn apply(self: *App, kind: JobKind, response: []const u8) !void {
         // Validate the envelope before replacing a valid cached view.
-        _ = self.data(self.job_arena.allocator(), response) catch |err| {
+        _ = if (kind == .draft_measure) @as(Value, .null) else self.data(self.job_arena.allocator(), response) catch |err| {
             if (kind == .grace_cancel) {
                 self.graceCancelUnconfirmed(if (err == error.OperationRejected) self.status_error_code[0..self.status_error_len] else @errorName(err));
                 return;
@@ -6074,6 +6181,14 @@ const App = struct {
                 self.gmail_reload_pending = true;
             }
             if (err == error.OperationRejected) {
+                if ((kind == .send or kind == .grace_stage) and same(self.status_error_code[0..self.status_error_len], "ReviewedDraftChanged")) {
+                    if (!self.compose_active or self.job.account_index != self.account_index or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value())) return error.SendContextChanged;
+                    self.compose.unknown_outcome = false;
+                    self.savedDraftChanged();
+                    self.mode = .compose;
+                    return;
+                }
+                if (same(self.status_error_code[0..self.status_error_len], "ArchivedDraftReadOnly") and try self.recoverSettledDraft(kind)) return;
                 if (kind == .follow_up_write and same(self.status_error_code[0..self.status_error_len], "FollowUpChanged")) {
                     self.loadFollowUps() catch {};
                     self.sayError("FollowUpChanged");
@@ -6189,13 +6304,15 @@ const App = struct {
             .attachment_import => {
                 const result = try self.data(self.job_arena.allocator(), response);
                 const attachment = try std.json.parseFromValueLeaky(types.Attachment, self.frame.allocator(), result, .{ .allocate = .alloc_always });
-                var selected_attachments: [16]types.Attachment = undefined;
-                if (self.compose.attachments.len >= selected_attachments.len) return error.TooManyAttachments;
+                if (self.compose.attachments.len >= types.Limits.attachments) return error.TooManyAttachments;
+                const related_count = if (self.compose.include_original) (if (self.compose.original) |original| original.resources.len else 0) else 0;
+                try types.Limits.validateComposeParts(self.compose.attachments.len + 1, related_count);
+                const selected_attachments = try self.frame.allocator().alloc(types.Attachment, self.compose.attachments.len + 1);
                 @memcpy(selected_attachments[0..self.compose.attachments.len], self.compose.attachments);
                 selected_attachments[self.compose.attachments.len] = attachment;
                 var aggregate: usize = 0;
                 for (selected_attachments[0 .. self.compose.attachments.len + 1]) |item| aggregate = std.math.add(usize, aggregate, item.size) catch return error.AttachmentsTooLarge;
-                if (self.compose.original) |original| for (original.resources) |item| {
+                if (if (self.compose.include_original) self.compose.original else null) |original| for (original.resources) |item| {
                     aggregate = std.math.add(usize, aggregate, item.size) catch return error.AttachmentsTooLarge;
                 };
                 if (aggregate > types.Limits.attachment_bytes) {
@@ -6253,6 +6370,7 @@ const App = struct {
                 self.grace_recovery = false;
                 self.grace_pending.store(false, .release);
                 self.mode = .compose;
+                self.retireComposeMeasure();
                 self.say(false, "Send cancelled · draft retained", .{});
                 if (self.grace_close) self.quit = true;
             },
@@ -6342,6 +6460,14 @@ const App = struct {
                 try self.replaceReader(kind == .thread, response, false);
             },
             .compose, .draft_read => {
+                if (kind == .draft_read and self.job.reload_conflict) {
+                    if (!self.compose_active or self.job.account_index != self.account_index or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value())) return;
+                    if (self.compose.revision != self.job.reload_revision or self.compose.revision != self.compose.saved_revision) {
+                        self.savedDraftChanged();
+                        try self.openDraftConflict();
+                        return;
+                    }
+                }
                 if (kind == .draft_read) self.compose_intent = .none;
                 const result = self.data(self.job_arena.allocator(), response) catch |err| {
                     if (err == error.OperationRejected) return;
@@ -6353,8 +6479,13 @@ const App = struct {
                 // The replaced composer's preview is released even if loading fails.
                 self.clearComposePreview();
                 try self.compose.load(self.allocator, result);
+                self.compose_measure = .{};
+                self.requestComposeMeasure();
                 self.compose_view = .rendered;
                 self.compose_preview_full = false;
+                self.compose_original_folded = null;
+                self.compose_policy_undo = null;
+                self.compose_policy_redo = null;
                 self.compose_preview_scroll = 0;
                 self.compose_plain_scroll = 0;
                 self.compose_snapshot_scroll = 0;
@@ -6430,10 +6561,46 @@ const App = struct {
                 }
                 if (!self.keepBackgroundDiagnostic(.identities)) self.say(false, "Verified sending identities ready · f chooses From", .{});
             },
+            .draft_measure => {
+                if (!self.composeMeasureJobCurrent()) return;
+                // This background diagnostic must not replace an explicit
+                // preview/save notice when unfinished addresses prevent sizing.
+                const envelope = try std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{});
+                if (get(envelope, "ok") == .bool and !truth(get(envelope, "ok"))) {
+                    const code = text(get(get(envelope, "error"), "code"));
+                    if (validDiagnosticCode(code)) try self.compose_measure.failure.set(code);
+                    return;
+                }
+                const result = get(envelope, "data");
+                if (!self.compose_active or !same(self.job.draft_target.slice(), self.compose.id.value()) or !same(self.compose_measure.draft.slice(), self.compose.id.value()) or self.compose_measure.revision != self.compose.revision or self.compose.saved_revision != self.compose.revision or !same(text(get(result, "operationId")), self.compose_measure.operation.slice()) or get(result, "revision") != .integer or integer(get(result, "revision")) != self.compose.revision) return;
+                if (self.compose_measure.content_digest.len != 64 or !same(text(get(result, "contentDigest")), self.compose_measure.content_digest.slice())) {
+                    self.savedDraftChanged();
+                    return error.DraftChanged;
+                }
+                const exact = truth(get(result, "exact"));
+                const over_limit = truth(get(result, "overLimit"));
+                if (get(result, "maxBytes") != .integer or integer(get(result, "maxBytes")) <= 0) return error.SizeUnavailable;
+                if (exact) {
+                    if (get(result, "bytes") != .integer or integer(get(result, "bytes")) < 0) return error.SizeUnavailable;
+                } else if (!over_limit or get(result, "bytes") != .null or !renderedSizeFailure(text(get(result, "admissionError")))) return error.SizeUnavailable;
+                self.compose_measure.bytes = if (exact) @intCast(integer(get(result, "bytes"))) else null;
+                self.compose_measure.max_bytes = @intCast(integer(get(result, "maxBytes")));
+                self.compose_measure.exact = exact;
+                self.compose_measure.measured = true;
+                self.compose_measure.measured_operation = self.compose_measure.operation;
+                self.compose_measure.pending = false;
+                self.compose_measure.over_limit = over_limit;
+                self.compose_measure.sendable = exact and !over_limit and truth(get(result, "sendable"));
+                self.compose_measure.without_original = if (get(result, "withoutOriginalBytes") == .integer and integer(get(result, "withoutOriginalBytes")) >= 0) @intCast(integer(get(result, "withoutOriginalBytes"))) else null;
+                self.compose_measure.failure = .{};
+                const admission = text(get(result, "admissionError"));
+                if (validDiagnosticCode(admission)) try self.compose_measure.failure.set(admission);
+            },
             .autosave => {
                 const result = try self.data(self.job_arena.allocator(), response);
                 try self.compose.id.set(self.allocator, text(get(result, "id")));
                 self.compose.saved_revision = self.autosave_revision;
+                self.requestComposeMeasure();
                 self.say(false, "{s}", .{if (self.compose.revision == self.compose.saved_revision) (if (self.capabilities.durable_drafts) "Draft saved locally · no mail sent" else "Draft saved in this tab · reload/disconnect discards it") else "Earlier changes saved · newer edits pending"});
             },
             .draft_operations => {
@@ -6478,12 +6645,15 @@ const App = struct {
                 } else try self.presentGmailDraft();
             },
             .save, .save_review, .save_back, .save_browser, .save_gmail => {
+                if (self.job.save_copy) return self.acceptLocalDraftCopy(response);
+                if (self.job.recovery_fork) return self.acceptRecoveredFork(response);
                 const result = self.data(self.job_arena.allocator(), response) catch |err| {
                     if (err == error.OperationRejected) return;
                     return err;
                 };
                 try self.compose.id.set(self.allocator, text(get(result, "id")));
                 self.compose.saved_revision = self.autosave_revision;
+                self.requestComposeMeasure();
                 self.mode = if (kind == .save_review) .review else if (kind == .save_back) .browse else .compose;
                 if (kind == .save_review) {
                     self.gmail_send_ack = false;
@@ -6533,7 +6703,10 @@ const App = struct {
                 if (!same(outcome, "applied") and !same(outcome, "rejected")) {
                     self.markUnknown(kind);
                 } else if (same(outcome, "rejected")) {
-                    if (kind == .send) self.compose.unknown_outcome = false else self.invitation_unknown = false;
+                    if (kind == .send) {
+                        self.compose.unknown_outcome = false;
+                        self.retireComposeMeasure();
+                    } else self.invitation_unknown = false;
                     self.mode = if (kind == .send) .compose else .browse;
                     if (kind == .send and same(self.compose.operation_error.value(), "SendCanceledBeforeSubmission")) {
                         self.review_ready = false;
@@ -6581,9 +6754,11 @@ const App = struct {
             .open => {
                 self.action_notice = false;
                 if (self.job.protected_preview) {
-                    // Opening a preview resolves nothing; the uncertainty notice stays.
-                    self.say(true, "{s} · send outcome still unknown · draft unchanged", .{if (self.options.fixtures) @as([]const u8, "Mock HTML preview validated") else "HTML preview opened"});
-                    self.status_kind = .unknown;
+                    if (self.compose.unknown_outcome) {
+                        // Opening a preview resolves nothing; uncertainty stays.
+                        self.say(true, "{s} · send outcome still unknown · draft unchanged", .{if (self.options.fixtures) @as([]const u8, "Mock HTML preview validated") else "HTML preview opened"});
+                        self.status_kind = .unknown;
+                    } else self.sayAction(false, "Local copy opened · Gmail may be newer", .{});
                     return;
                 }
                 if (self.job.calendar_browser_open) {
@@ -6694,12 +6869,20 @@ const App = struct {
         const received = get(self.messages[if (forward) self.messages.len - 1 else 0], "receivedAt");
         self.pending_page_received_at = if (received == .integer) received.integer else 0;
         self.pending_page = true;
-        self.say(false, "{s} page queued · cached mail remains usable", .{if (forward) "Next" else "Previous"});
+        self.say(false, "{s} page queued · {s} remain usable", .{ if (forward) @as([]const u8, "Next") else "Previous", if (self.drafts_list) @as([]const u8, "drafts") else "cached messages" });
     }
     fn consumePendingPage(self: *App) !void {
         if (!self.pending_page) return;
         if (self.pending_page_account != self.account_index or self.pending_page_generation != self.generation or self.mode != .browse) {
             self.pending_page = false;
+            return;
+        }
+        if (self.drafts_list) {
+            const forward = self.pending_page_forward;
+            const automatic = self.pending_page_automatic;
+            self.pending_page = false;
+            self.pending_page_automatic = false;
+            if (automatic) try self.scrollWindow(forward) else try self.page(forward);
             return;
         }
         var boundary: ?usize = null;
@@ -6738,6 +6921,12 @@ const App = struct {
     }
     fn scrollWindow(self: *App, forward: bool) !void {
         if (self.follow_ups_list) return;
+        if (self.drafts_list) {
+            try self.page(forward);
+            if (self.pageLoadCurrent()) self.page_select_nearest = true;
+            if (self.pending_page) self.pending_page_automatic = true;
+            return;
+        }
         try self.cacheWindow(forward, true, null);
     }
     fn dispatchWindowProvider(self: *App) !void {
@@ -6801,6 +6990,7 @@ const App = struct {
         self.generation +%= 1;
         self.page_loading_generation = self.generation;
         self.pending_page = false;
+        self.pending_page_automatic = false;
         self.pending_read = false;
         self.pending_thread = false;
         _ = try self.loadCachedList("");
@@ -6811,7 +7001,7 @@ const App = struct {
         }
         if (self.page_loading) self.say(false, "Loading {s} cached mail…", .{if (forward) "older" else "newer"});
     }
-    fn page(self: *App, forward: bool) !void {
+    fn page(self: *App, forward: bool) anyerror!void {
         if (self.follow_ups_list) return self.move(forward, self.mail_page_size);
         if (!forward) {
             const previous = if (self.previous_cursor.value().len > 0) self.previous_cursor.value() else if (self.previous_cursors.items.len > 0) self.previous_cursors.items[self.previous_cursors.items.len - 1] else "";
@@ -6884,7 +7074,7 @@ const App = struct {
                 try self.preview(false);
             }
         }
-        if (self.page_loading) self.say(false, "Loading {s} mail page…", .{if (forward) "next" else "previous"});
+        if (self.page_loading) self.say(false, "Loading {s} {s} page…", .{ if (forward) @as([]const u8, "next") else "previous", if (self.drafts_list) @as([]const u8, "draft") else "mail" });
     }
     fn composeNew(self: *App, reply_all: ?bool) !void {
         self.clearContactComposeIntent();
@@ -7142,7 +7332,7 @@ const App = struct {
             error.AmbiguousOriginalHtml => "Several HTML bodies · choose Text quote",
             error.AmbiguousContentId => "Several images share a reference · choose Text quote",
             error.OriginalResourceUnavailable, error.InvalidContentId => "Original images are unavailable · choose Text quote",
-            error.BodyTooLarge => "Original HTML exceeds 2 MiB · choose Text quote",
+            error.BodyTooLarge => std.fmt.comptimePrint("Original HTML exceeds {d} MiB · choose Text quote", .{types.Limits.compose_body_bytes / (1024 * 1024)}),
             else => "Original formatting is unavailable · choose Text quote",
         };
         if (index == 0 and self.compose_intent == .forward and self.compose_source_forward_over_quota) return "Forward files exceed this platform's limit · Text quote omits files";
@@ -7168,6 +7358,7 @@ const App = struct {
     /// is open. Every close path returns them; the saved draft stays durable.
     fn closeComposer(self: *App) void {
         self.compose_active = false;
+        self.compose_measure = .{};
         self.clearComposePreview();
         // The next draw repaints every cell before rendering, so the previous
         // frame's composer copies are no longer referenced.
@@ -7175,6 +7366,8 @@ const App = struct {
         self.compose.releaseOutgoing(self.allocator);
     }
     fn clearComposePreview(self: *App) void {
+        self.compose_preview_display.deinit();
+        self.compose_original_display.deinit();
         if (self.compose_preview) |*prepared| prepared.deinit();
         self.compose_preview = null;
         if (self.compose_original_preview) |*prepared| prepared.deinit();
@@ -7183,6 +7376,7 @@ const App = struct {
         self.compose_preview_arena = null;
         self.compose_preview_plain = "";
         self.compose_preview_digest = null;
+        self.compose_preview_key = null;
         self.compose_preview_error = null;
         self.compose_preview_semantic_limited = false;
     }
@@ -7204,25 +7398,35 @@ const App = struct {
     }
     fn ensureComposePreview(self: *App) !void {
         const source = self.compose.fields[4].value();
+        const key: @typeInfo(@TypeOf(self.compose_preview_key)).optional.child = .{ .version = self.compose.fields[4].version, .format = self.compose.body_format, .original = if (self.compose.original != null) self.compose.original_digest else null, .include_original = self.compose.include_original, .folded_tail = self.quotedTail() != null and self.originalFolded() };
+        if (self.compose_preview_key) |previous| if (std.meta.eql(previous, key)) {
+            if (self.compose_preview_error) |err| return err;
+            return;
+        };
         var digest: [32]u8 = undefined;
         var identity = std.crypto.hash.sha2.Sha256.init(.{});
         identity.update(source);
         identity.update(if (self.compose.original != null) "\x00original\x00" else "\x00no-original\x00");
+        identity.update(if (self.compose.include_original) "\x00included\x00" else "\x00excluded\x00");
+        identity.update(if (key.folded_tail) "\x00folded\x00" else "\x00expanded\x00");
         if (self.compose.original != null) identity.update(&self.compose.original_digest);
         identity.final(&digest);
         if (self.compose_preview_digest) |previous| {
             if (self.compose_preview_format == self.compose.body_format and std.mem.eql(u8, &previous, &digest)) {
+                self.compose_preview_key = key;
                 if (self.compose_preview_error) |err| return err;
                 return;
             }
         }
         self.clearComposePreview();
         self.compose_preview_digest = digest;
+        self.compose_preview_key = key;
         self.compose_preview_format = self.compose.body_format;
         self.compose_preview_builds += 1;
         self.buildComposePreview(source) catch |err| {
             self.clearComposePreview();
             self.compose_preview_digest = digest;
+            self.compose_preview_key = key;
             self.compose_preview_format = self.compose.body_format;
             self.compose_preview_error = err;
             return err;
@@ -7235,17 +7439,18 @@ const App = struct {
         const backing = composeBacking(self.allocator);
         self.compose_preview_arena = .init(backing);
         const owned = self.compose_preview_arena.?.allocator();
-        const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source, .original = self.compose.original });
+        const output = try markdown_mail.prepare(owned, .{ .bodyFormat = self.compose.body_format, .bodyText = source, .original = self.compose.original, .includeOriginal = self.compose.include_original });
         // Plain prepare borrows the editable field. Own it here so a later
         // field reallocation can never invalidate a retained preview.
         self.compose_preview_plain = try owned.dupe(u8, output.plain);
-        if (self.compose.original) |original| {
+        if (self.compose.original != null and self.compose.include_original) {
             const note = try markdown_mail.renderNote(owned, source, self.compose.body_format);
             self.compose_preview = try self.semanticComposePreview(backing, note.html);
-            // Received markup never acquires trusted generated-Markdown token
-            // classes. Rendering failure changes only this inert preview;
-            // the retained original and validated outgoing HTML stay intact.
-            self.compose_original_preview = html_view.Prepared.init(backing, original.bodyHtml) catch null;
+        } else if (self.quotedTail()) |tail| {
+            if (self.originalFolded() and self.compose.body_format == .markdown) {
+                const note = try markdown_mail.render(owned, source[0..tail.start]);
+                self.compose_preview = try self.semanticComposePreview(backing, note.html);
+            } else if (output.html) |html| self.compose_preview = try self.semanticComposePreview(backing, html);
         } else if (output.html) |html| self.compose_preview = try self.semanticComposePreview(backing, html);
     }
     /// markdown_mail.prepare above has already validated the complete
@@ -7273,6 +7478,98 @@ const App = struct {
         try self.composerChanged();
         if (self.compose.original != null) self.say(false, "Note: {s} · original unchanged", .{if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text"}) else self.say(false, "{s} · source unchanged · Ctrl+S reviews outgoing mail", .{if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else "Plain text"});
     }
+    fn originalPolicyUnlocked(self: *const App) bool {
+        return self.compose_active and self.compose.original != null and (self.compose_intent == .reply or self.compose_intent == .reply_all) and !self.compose.unknown_outcome and !self.compose.gmailPaused() and !self.grace_active and !self.grace_recovery;
+    }
+    fn originalPolicyMutable(self: *const App) bool {
+        return self.originalPolicyUnlocked() and (self.job.future == null or readOnlyJob(self.job.kind));
+    }
+    fn setOriginalIncluded(self: *App, included: bool, remember: bool) !void {
+        if (self.compose.original == null) {
+            self.say(false, "Quote is part of your note · edit it to shorten", .{});
+            return;
+        }
+        if (!self.originalPolicyMutable()) {
+            self.say(true, "{s}", .{if (self.compose_intent == .forward) @as([]const u8, "Forward keeps its original · z only folds the view") else if (self.compose.gmailPaused()) "Original locked · paused in Gmail · g Status" else "Original locked · send pending or outcome unknown"});
+            return;
+        }
+        if (self.compose.include_original == included) return;
+        const previous = self.compose.include_original;
+        self.compose.include_original = included;
+        try self.composerChanged();
+        if (remember) {
+            self.compose_policy_undo = previous;
+            self.compose_policy_redo = null;
+        }
+        self.compose_policy_revision = self.compose.revision;
+        if (included) {
+            self.validateOriginalReinclusion() catch |err| {
+                self.sayAction(true, "Original included · {s} · reduce files or Q to omit before Send", .{@errorName(err)});
+                return;
+            };
+        }
+        self.sayAction(false, "{s}", .{if (included) @as([]const u8, "Original included · sent with your note") else "Original omitted · kept in draft · Q or Ctrl+Z restores"});
+    }
+    fn validateOriginalReinclusion(self: *const App) !void {
+        const original = self.compose.original orelse return;
+        try types.Limits.validateComposeParts(self.compose.attachments.len, original.resources.len);
+        var total: u64 = 0;
+        for ([_][]const types.Attachment{ self.compose.attachments, original.resources }) |list| for (list) |attachment| {
+            if (attachment.size > types.Limits.attachment_bytes -| total) return error.AttachmentsTooLarge;
+            total += attachment.size;
+        };
+    }
+    fn quotedTail(self: *App) ?QuotedTail {
+        if (self.compose.original != null) return null;
+        if (self.compose.quote_version == self.compose.fields[4].version) return self.compose.quote_tail;
+        self.compose.quote_version = self.compose.fields[4].version;
+        self.compose.quote_scans += 1;
+        const body = self.compose.fields[4].value();
+        var quote_start = body.len;
+        var count: usize = 0;
+        var end = body.len;
+        while (end > 0) {
+            if (body[end - 1] == '\n') end -= 1;
+            const at = if (std.mem.lastIndexOfScalar(u8, body[0..end], '\n')) |index| index + 1 else 0;
+            const quote_line = std.mem.trimStart(u8, body[at..end], " \t");
+            if (!std.mem.startsWith(u8, quote_line, ">")) break;
+            quote_start = at;
+            count += 1;
+            end = at;
+        }
+        self.compose.quote_tail = if (count > 12) .{ .start = quote_start, .lines = count } else null;
+        return self.compose.quote_tail;
+    }
+    fn originalFolded(self: *App) bool {
+        if (self.compose_original_folded) |folded| return folded;
+        if (self.compose.original) |original| return original.bodyText.len > 2048 or self.compose.original_lines > 13 or original.bodyHtml.len > 4096;
+        return self.quotedTail() != null;
+    }
+    fn canFoldOriginal(self: *App) bool {
+        return self.compose.original != null or self.quotedTail() != null;
+    }
+    fn foldControlAvailable(self: *App) bool {
+        return self.canFoldOriginal() and (self.compose.original == null or self.compose.include_original or self.compose_view == .original);
+    }
+    fn toggleOriginalFold(self: *App) void {
+        if (!self.canFoldOriginal()) return;
+        if (self.compose.unknown_outcome) {
+            self.say(false, "Saved original protected · P opens the local preview", .{});
+            return;
+        }
+        if (self.compose.original != null and !self.compose.include_original) self.compose_view = .original;
+        if (self.mode == .compose and self.compose_layout_width > 0 and self.compose_layout_width < 90) {
+            self.compose_preview_full = true;
+            self.compose.insert_mode = false;
+            self.compose.attachment_focus = false;
+            self.dialog_focus.reset(.preview, 6);
+        }
+        self.compose_original_folded = !self.originalFolded();
+        self.compose_preview_scroll = 0;
+        self.compose_plain_scroll = 0;
+        self.compose_snapshot_scroll = 0;
+        self.say(false, "{s} {s} · outgoing unchanged", .{ if (self.compose.original != null) @as([]const u8, "Original") else "Quoted text", if (self.originalFolded()) @as([]const u8, "folded in preview") else "expanded in preview" });
+    }
     fn cycleComposePreview(self: *App) void {
         const narrow = self.vx.window().width < 90;
         if (narrow and !self.compose_preview_full) {
@@ -7291,15 +7588,35 @@ const App = struct {
     }
     fn composePreviewTitle(self: *const App) []const u8 {
         return switch (self.compose_view) {
-            .rendered => if (self.compose.original != null or self.compose.body_format == .markdown) " Outgoing preview · HTML + plain text " else " Draft preview · plain text ",
+            .rendered => if ((self.compose.original != null and self.compose.include_original) or self.compose.body_format == .markdown) " Outgoing preview · HTML + plain text " else " Draft preview · plain text ",
             .original => if (self.compose.original != null) " Original message · saved snapshot " else " Original message ",
             .plain => " Plain-text alternative ",
         };
     }
     fn composeOutgoingDraw(self: *App, win: vaxis.Window, offset: usize, base_row: usize, plain_only: bool) !usize {
         self.ensureComposePreview() catch |err| {
+            if (renderedSizeFailure(@errorName(err))) return self.flowTone(win, "Rendered message exceeds the outgoing limit.\nComplete source retained · Send unavailable.\nReturn to the draft to shorten your note or explicitly omit the reply's original.\n", offset, base_row, .warning);
             const message = try std.fmt.allocPrint(self.frame.allocator(), "Preview unavailable: {s}\nSource retained · sending is blocked.\nCtrl+T explicitly switches to plain text.", .{@errorName(err)});
             return self.flowTone(win, message, offset, base_row, .warning);
+        };
+        if (!plain_only and self.originalFolded()) if (self.quotedTail()) |tail| {
+            var rows = base_row;
+            var semantic_ready = false;
+            if (self.compose_preview) |*prepared| semantic_note: {
+                if (win.width == 0) return base_row;
+                prepared.ensure(@min(win.width, max_cols), win.screen.width_method) catch |err| {
+                    if (semanticViewLimit(err)) {
+                        self.limitSemanticComposePreview();
+                        break :semantic_note;
+                    }
+                    self.compose_preview_error = err;
+                    return self.flowTone(win, try std.fmt.allocPrint(self.frame.allocator(), "Preview unavailable: {s}\nSource retained · Ctrl+T chooses plain text.", .{@errorName(err)}), offset, base_row, .warning);
+                };
+                rows = prepared.draw(win, offset, rows, self.palette, self.mono);
+                semantic_ready = true;
+            }
+            if (!semantic_ready) rows = try self.composeCachedTextDraw(&self.compose_preview_display, win, self.compose.fields[4].value()[0..tail.start], offset, rows);
+            return self.foldedQuoteDraw(win, offset, rows, self.compose.fields[4].value()[tail.start..], tail.lines);
         };
         if (!plain_only) if (self.compose_preview) |*prepared| semantic: {
             if (win.width == 0) return base_row;
@@ -7312,28 +7629,91 @@ const App = struct {
                 return self.flowTone(win, try std.fmt.allocPrint(self.frame.allocator(), "Preview unavailable: {s}\nSource retained · Ctrl+T chooses plain text.", .{@errorName(err)}), offset, base_row, .warning);
             };
             const rows = prepared.draw(win, offset, base_row, self.palette, self.mono);
+            if (self.compose.original != null and !self.compose.include_original) return self.flowTone(win, "\nOriginal omitted · retained in draft · not sent\n", offset, rows, .muted);
             return if (self.compose.original != null) self.composeOriginalDraw(win, offset, rows) else rows;
         };
         var rows = base_row;
         if (!plain_only and self.compose_preview_semantic_limited) rows = try self.flowTone(win, "Formatted view exceeds this terminal viewer's limits · showing the complete plain-text alternative · outgoing HTML is validated and unchanged\n\n", offset, rows, .warning);
-        return self.flowToneIn(self.composeFrameAllocator(), win, self.compose_preview_plain, offset, rows, .text);
+        if (self.compose.original != null) {
+            if (!self.compose.include_original) rows = try self.flowTone(win, "Original omitted · retained in draft · not sent\n\n", offset, rows, .muted);
+            if ((plain_only or self.compose_preview == null) and self.compose.include_original and self.originalFolded()) {
+                const original = self.compose.original.?;
+                // prepare appends the exact retained plaintext last. Fold that
+                // suffix while leaving the actual outgoing note/headers visible.
+                const prefix = self.compose_preview_plain[0 .. self.compose_preview_plain.len - original.bodyText.len];
+                rows = try self.composeCachedTextDraw(&self.compose_preview_display, win, prefix, offset, rows);
+                return self.foldedQuoteDraw(win, offset, rows, original.bodyText, self.compose.original_lines);
+            }
+        }
+        if (self.originalFolded()) if (self.quotedTail()) |tail| {
+            rows = try self.composeCachedTextDraw(&self.compose_preview_display, win, self.compose.fields[4].value()[0..tail.start], offset, rows);
+            return self.foldedQuoteDraw(win, offset, rows, self.compose.fields[4].value()[tail.start..], tail.lines);
+        };
+        return self.composeCachedTextDraw(&self.compose_preview_display, win, self.compose_preview_plain, offset, rows);
     }
     fn composeOriginalDraw(self: *App, win: vaxis.Window, offset: usize, base_row: usize) !usize {
         const original = self.compose.original orelse return base_row;
         const header = try std.fmt.allocPrint(self.frame.allocator(), "\n── Original message · protected ──\nFrom: {s} <{s}>\nDate: {s}\nSubject: {s}\nEmbedded resources: {d} · saved snapshot\n", .{ original.from.name, original.from.address, original.date, original.subject, original.resources.len });
         var rows = try self.flowTone(win, header, offset, base_row, .muted);
+        if (self.originalFolded()) return self.foldedQuoteDraw(win, offset, rows, original.bodyText, self.compose.original_lines);
+        if (self.compose_original_preview == null and original.bodyHtml.len > 0) self.compose_original_preview = html_view.Prepared.init(composeBacking(self.allocator), original.bodyHtml) catch null;
         for (original.resources) |resource| {
             rows = try self.flowTone(win, try std.fmt.allocPrint(self.frame.allocator(), "▣ {s} · embedded\n", .{resource.filename}), offset, rows, .muted);
         }
         if (self.compose_original_preview) |*prepared| {
             if (win.width != 0) {
                 prepared.ensure(@min(win.width, max_cols), win.screen.width_method) catch {
-                    return self.flowToneIn(self.composeFrameAllocator(), win, original.bodyText, offset, rows, .text);
+                    return self.composeCachedTextDraw(&self.compose_original_display, win, original.bodyText, offset, rows);
                 };
                 return prepared.draw(win, offset, rows, self.palette, self.mono);
             }
         }
-        return self.flowToneIn(self.composeFrameAllocator(), win, original.bodyText, offset, rows, .text);
+        return self.composeCachedTextDraw(&self.compose_original_display, win, original.bodyText, offset, rows);
+    }
+    fn composeCachedTextDraw(self: *App, cache: *compose_text.Cache, win: vaxis.Window, source: []const u8, offset: usize, base_row: usize) !usize {
+        try cache.ensure(composeBacking(self.allocator), source, self.compose.fields[4].version, win.width, win.screen.width_method);
+        var iterator = cache.viewport(offset -| base_row);
+        while (iterator.next()) |glyph| {
+            const row = base_row + glyph.position.row;
+            if (row < offset) continue;
+            if (row - offset >= win.height) break;
+            if (glyph.columns > win.width) continue;
+            win.writeCell(glyph.position.column, @intCast(row - offset), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = self.style(.text) });
+        }
+        return base_row + cache.rows;
+    }
+    fn foldedQuoteDraw(self: *App, win: vaxis.Window, offset: usize, base_row: usize, source: []const u8, lines: usize) !usize {
+        var end: usize = 0;
+        var count: usize = 0;
+        while (end < source.len and end < 512 and count < 3) : (end += 1) if (source[end] == '\n') {
+            count += 1;
+        };
+        while (end > 0 and end < source.len and source[end] & 0xc0 == 0x80) end -= 1;
+        var rows = try self.flowTone(win, source[0..end], offset, base_row, .muted);
+        const label = try std.fmt.allocPrint(self.frame.allocator(), "\n… {d} lines retained · z Expand\nFolding changes this view only.\n", .{lines});
+        rows = try self.flowTone(win, label, offset, rows, .muted);
+        return rows;
+    }
+    fn composeOriginalControlsDraw(self: *App, win: vaxis.Window, row: u16, narrow: bool) !void {
+        if (row >= win.height or !self.canFoldOriginal()) return;
+        const has_original = self.compose.original != null;
+        const label: []const u8 = if (has_original) (if (self.compose.include_original) "Included" else "Omitted") else "Quote";
+        try self.line(win, row, label, .muted);
+        var x: u16 = @intCast(label.len + 1);
+        if (has_original and self.compose_intent != .forward) {
+            const policy_label: []const u8 = if (win.width >= 62) (if (self.compose.include_original) (if (self.compose.insert_mode) "[  Reply without original]" else "[Q Reply without original]") else (if (self.compose.insert_mode) "[  Include original]" else "[Q Include original]")) else if (self.compose.include_original) (if (self.compose.insert_mode) "[  Omit]" else "[Q Omit]") else (if (self.compose.insert_mode) "[  Include]" else "[Q Include]");
+            if (x + policy_label.len <= win.width) {
+                const focused = if (narrow) self.dialog_focus.index == 5 else self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 6;
+                x = try self.actionButton(win, row, x, policy_label, focused, self.originalPolicyMutable(), .compose_original_policy, 0);
+                self.compose_original_drawn = true;
+            }
+        }
+        const fold_label: []const u8 = if (self.originalFolded()) (if (self.compose.insert_mode) "[  Expand]" else "[z Expand]") else (if (self.compose.insert_mode) "[  Fold]" else "[z Fold]");
+        if (self.foldControlAvailable() and x + fold_label.len <= win.width) {
+            const focused = if (narrow) self.dialog_focus.index == 6 else self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 7;
+            _ = try self.actionButton(win, row, x, fold_label, focused, true, .compose_original_fold, 0);
+            self.compose_fold_drawn = true;
+        }
     }
     fn composePreviewDraw(self: *App, win: vaxis.Window) !void {
         self.mouseArea(win, .compose_preview_scroll, 0);
@@ -7342,6 +7722,14 @@ const App = struct {
             self.dialog_focus.ensure(.preview, 0);
             const x = try self.actionButton(win, 0, 0, "[Preview p]", self.dialog_focus.index == 1, true, .compose_preview_toggle, 0);
             _ = try self.actionButton(win, 0, x, "[Back]", self.dialog_focus.index == 2, true, .compose_preview_back, 0);
+            try self.composeOriginalControlsDraw(win, 1, true);
+        } else if (self.compose.original == null and self.quotedTail() != null) {
+            const x = try self.actionButton(win, 0, 0, if (self.compose.insert_mode) "[  Preview]" else "[p Preview]", self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2, true, .compose_preview_toggle, 0);
+            const label = if (self.originalFolded()) (if (self.compose.insert_mode) "[  Expand quote]" else "[z Expand quote]") else if (self.compose.insert_mode) "[  Fold quote]" else "[z Fold quote]";
+            if (x + label.len <= win.width) {
+                _ = try self.actionButton(win, 0, x, label, self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 7, true, .compose_original_fold, 0);
+                self.compose_fold_drawn = true;
+            }
         } else try self.line(win, 0, if (self.compose.insert_mode or self.compose.attachment_focus) "Preview · Esc returns to normal controls" else if (self.compose_view == .original and self.compose.original == null and win.width >= 48) "p Preview · Ctrl+D/U Scroll · L Links · B Files" else if (win.width >= 34) "p Next preview · Ctrl+D/U Scroll" else "p Next preview", .accent);
         const body = win.child(.{ .y_off = @min(@as(u16, 2), win.height) });
         if (self.compose_view == .original and self.compose.original == null) return self.readerDraw(body);
@@ -7403,8 +7791,14 @@ const App = struct {
         self.gmail_send_ack = false;
         self.completion_dismissed = false;
         self.review_ready = false;
+        self.compose_measure = .{};
         self.compose.revision +%= 1;
         self.compose.completion_selected = 0;
+        if (self.compose.saved_changed) {
+            self.compose_measure.failure.set("DraftChanged") catch unreachable;
+            self.say(false, "Local edits kept · saved draft changed · :resolve-draft", .{});
+            return;
+        }
         self.say(false, "Draft changed · autosave pending · no mail sent", .{});
         try self.armAutosave();
     }
@@ -7419,6 +7813,11 @@ const App = struct {
         return @intCast(std.math.clamp(deadline - now, 0, 1500));
     }
     fn autosaveDraft(self: *App) !void {
+        if (self.compose.saved_changed) {
+            self.cancelAutosaveTimer();
+            self.autosave_due = false;
+            return;
+        }
         if (self.compose.gmailPaused()) return;
         self.cancelAutosaveTimer();
         if (self.paste) {
@@ -7620,7 +8019,83 @@ const App = struct {
             try self.start(.recipient_refresh, .{ .account = self.account(), .cmd = "mail.list", .label = "SENT", .limit = @as(usize, 32) });
             return true;
         }
+        if (!browser_target and self.compose_measure.pending and self.compose_active and !self.compose.saved_changed and !self.compose.unknown_outcome and !self.compose.gmailPaused() and self.compose.revision == self.compose.saved_revision and !self.grace_active and !self.grace_recovery) {
+            self.startComposeMeasure() catch |err| {
+                // A background diagnostic must neither exit the editor nor
+                // leave an empty receipt labelled as an active calculation.
+                self.compose_measure = .{};
+                self.compose_measure.failure.set(@errorName(err)) catch {};
+                self.review_ready = false;
+                return false;
+            };
+            return true;
+        }
         return false;
+    }
+    fn startComposeMeasure(self: *App) !void {
+        self.compose_measure = .{};
+        var scratch: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer scratch.deinit();
+        const local = try self.compose.draft(scratch.allocator());
+        const digest = try @import("draft_link.zig").contentDigest(scratch.allocator(), local, self.account());
+        try self.compose_measure.content_digest.set(&digest);
+        const id = try self.operationId(self.frame.allocator());
+        try self.compose_measure.operation.set(id);
+        try self.compose_measure.draft.set(self.compose.id.value());
+        self.compose_measure.revision = self.compose.revision;
+        try self.start(.draft_measure, .{ .account = self.account(), .cmd = "draft.measure", .draftId = self.compose.id.value(), .operationId = id, .revision = self.compose.revision });
+        self.job.measure_operation = self.compose_measure.operation;
+        self.job.measure_revision = self.compose.revision;
+    }
+    fn requestComposeMeasure(self: *App) void {
+        if (!browser_target and !self.compose.saved_changed and !self.composeMeasureCurrent()) self.compose_measure.pending = true;
+    }
+    fn composeMeasureJobCurrent(self: *const App) bool {
+        return self.compose_active and self.job.account_index == self.account_index and self.compose_measure.operation.len != 0 and same(self.job.draft_target.slice(), self.compose.id.value()) and same(self.compose_measure.draft.slice(), self.compose.id.value()) and self.compose_measure.revision == self.compose.revision and self.job.measure_revision == self.compose.revision and same(self.job.measure_operation.slice(), self.compose_measure.operation.slice());
+    }
+    fn retireComposeMeasure(self: *App) void {
+        self.compose_measure = .{};
+        self.compose_measure.failure.set("ReviewRequired") catch unreachable;
+        self.review_ready = false;
+    }
+    fn composeMeasureCurrent(self: *const App) bool {
+        return self.compose_measure.measured and same(self.compose_measure.measured_operation.slice(), self.compose_measure.operation.slice()) and self.compose_measure.revision == self.compose.revision and self.compose.saved_revision == self.compose.revision and same(self.compose_measure.draft.slice(), self.compose.id.value());
+    }
+    fn composeSizeLabel(self: *App, exact: bool) ![]const u8 {
+        if (self.compose.saved_changed) return "Saved draft changed elsewhere · :resolve-draft";
+        if (!self.composeMeasureCurrent() and (self.compose.unknown_outcome or self.compose.gmailPaused() or self.grace_active or self.grace_recovery)) return "Saved local copy · size not measured";
+        if (!self.composeMeasureCurrent()) {
+            const failure = self.compose_measure.failure.slice();
+            if (same(failure, "DraftChanged")) return "Saved draft changed · reopen before Send";
+            if (same(failure, "ReviewRequired")) return "Message size: review again before Send";
+            if (failure.len > 0) return std.fmt.allocPrint(self.frame.allocator(), "Message size unavailable: {s}", .{failure});
+            if (!self.compose_measure.pending and self.compose_measure.operation.len == 0 and self.compose.revision == self.compose.saved_revision) return "Message size: review to calculate";
+            return if (self.compose.revision != self.compose.saved_revision) "Message size: saving changes…" else "Message size: calculating…";
+        }
+        const limit = self.compose_measure.max_bytes;
+        if (!self.compose_measure.exact) return if (exact) std.fmt.allocPrint(self.frame.allocator(), "MIME exceeds {d} bytes · exact size unavailable\n", .{limit}) else std.fmt.allocPrint(self.frame.allocator(), "MIME > {d} MiB · too large", .{limit / (1024 * 1024)});
+        const bytes = self.compose_measure.bytes.?;
+        if (exact) return std.fmt.allocPrint(self.frame.allocator(), "MIME: {d} / {d} bytes · exact{s}\n", .{ bytes, limit, if (self.compose_measure.over_limit) @as([]const u8, " · OVER LIMIT") else "" });
+        const tenth_mib = (bytes * 10 + (1024 * 1024 - 1)) / (1024 * 1024);
+        const limit_tenth = (limit * 10) / (1024 * 1024);
+        return std.fmt.allocPrint(self.frame.allocator(), "MIME: {d}.{d} / {d}.{d} MiB{s}", .{ tenth_mib / 10, tenth_mib % 10, limit_tenth / 10, limit_tenth % 10, if (self.compose_measure.over_limit) @as([]const u8, " · TOO LARGE") else if (bytes >= limit - limit / 5) " · near limit" else "" });
+    }
+    fn renderedSizeFailure(code: []const u8) bool {
+        return same(code, "RenderedBodyTooLarge") or same(code, "BodyTooLarge");
+    }
+    fn validateComposeReview(self: *App) !void {
+        var arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer arena.deinit();
+        const draft = try self.compose.draft(arena.allocator());
+        try @import("core.zig").validateDraft(draft, false);
+        if (draft.to.len + draft.cc.len + draft.bcc.len == 0) {
+            self.mode = .compose;
+            self.compose.selected = 0;
+            self.compose.attachment_focus = false;
+            self.compose.insert_mode = true;
+            return error.MissingRecipient;
+        }
+        self.compose_portable_warning = draftExceedsPortableTransport(draft);
     }
     fn validateComposeSend(self: *App) !void {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -7637,7 +8112,193 @@ const App = struct {
         };
         self.compose_portable_warning = draftExceedsPortableTransport(draft);
     }
+    fn savedDraftChanged(self: *App) void {
+        self.compose.saved_changed = true;
+        self.cancelAutosaveTimer();
+        self.autosave_due = false;
+        self.retireComposeMeasure();
+        self.compose_measure.failure.set("DraftChanged") catch unreachable;
+        self.gmail_send_ack = false;
+        self.say(true, "Saved draft changed elsewhere · local text kept · :resolve-draft", .{});
+    }
+    fn openDraftConflict(self: *App) !void {
+        if (!self.compose_active or !self.compose.saved_changed) return error.DraftRequired;
+        try self.beginUx(.draft_conflict, " Saved draft changed elsewhere · choose a local resolution ");
+        try self.ux_target.set(self.allocator, self.compose.id.value());
+        try self.uxRow(.{ .label = "Save local copy", .detail = "Keep this exact text and original as a new draft; the other draft stays unchanged" });
+        try self.uxRow(.{ .label = "Reload saved draft", .detail = if (self.compose.revision == self.compose.saved_revision) "Replace this unchanged view with the current saved draft" else "Local edits are unsaved: save a local copy first" });
+    }
+    fn reloadChangedDraft(self: *App) !void {
+        if (!self.compose_active or !self.compose.saved_changed) return error.DraftRequired;
+        if (self.compose.revision != self.compose.saved_revision) {
+            self.say(true, "Local edits are unsaved · choose Save local copy before reloading", .{});
+            return;
+        }
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        self.closeUx();
+        self.review_ready = false;
+        self.gmail_send_ack = false;
+        self.mode = .compose;
+        self.compose.insert_mode = false;
+        try self.start(.draft_read, .{ .account = self.account(), .cmd = "draft.read", .draftId = self.compose.id.value() });
+        self.job.reload_conflict = true;
+        self.job.reload_revision = self.compose.revision;
+        try self.job.draft_target.set(self.compose.id.value());
+    }
+    fn saveLocalDraftCopy(self: *App) !void {
+        if (browser_target or !self.compose_active or !self.compose.saved_changed) return error.DraftRequired;
+        if (self.compose.unknown_outcome or self.compose.gmailPaused() or self.grace_active or self.grace_recovery) return error.UnknownOutcome;
+        self.preemptReadOnly();
+        if (self.job.future != null) return error.OperationPending;
+        self.cancelAutosaveTimer();
+        self.autosave_due = false;
+        var arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer arena.deinit();
+        var fields: [5][]const u8 = undefined;
+        var copy = self.compose.recovery(&fields);
+        copy.id = "";
+        var snapshot = try @import("mail_response_value.zig").borrowed(arena.allocator(), copy);
+        // A copy is the exact local snapshot, including absence of an original.
+        // Omission would ask the backend to inherit the other client's source.
+        if (copy.original == null) try snapshot.object.put(arena.allocator(), "original", .null);
+        self.autosave_revision = self.compose.revision;
+        try self.start(.save, .{ .account = self.account(), .cmd = "draft.recovery-save", .copyFromDraftId = self.compose.id.value(), .draftId = "", .draft = snapshot, .acknowledgementOnly = true });
+        self.job.save_copy = true;
+        self.mode = .compose;
+        self.review_ready = false;
+        self.closeUx();
+    }
+    fn localCopyAcknowledged(envelope: Value, expected_account: []const u8, old_id: []const u8) bool {
+        const result = get(envelope, "data");
+        const id = text(get(result, "id"));
+        return truth(get(envelope, "ok")) and same(text(get(envelope, "account")), expected_account) and same(text(get(result, "copiedFrom")), old_id) and id.len > 0 and id.len <= 128 and !same(id, old_id);
+    }
+    /// Prepare every owned value before changing the source identity. Link
+    /// strings outlive worker scratch; the commit below only swaps ownership.
+    fn adoptRecoveryIdentity(self: *App, result: Value) !void {
+        const id = text(get(result, "id"));
+        const raw_digest = get(result, "contentDigest");
+        if (raw_digest != .null and raw_digest != .string) return error.DraftPersistenceFailed;
+        const digest = text(raw_digest);
+        if (digest.len != 0) {
+            if (digest.len != 64) return error.DraftPersistenceFailed;
+            for (digest) |byte| if (!std.ascii.isHex(byte)) return error.DraftPersistenceFailed;
+        }
+        var staged_arena: ?std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(self.allocator);
+        defer if (staged_arena) |*arena| arena.deinit();
+        const raw_link = get(result, "gmailLink");
+        const staged_link: ?@import("draft_link.zig").Link = if (raw_link == .null) null else std.json.parseFromValueLeaky(@import("draft_link.zig").Link, staged_arena.?.allocator(), raw_link, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.DraftPersistenceFailed;
+        if (staged_link) |inherited| {
+            inherited.validate() catch return error.DraftPersistenceFailed;
+            if (!same(inherited.draftId, id) or inherited.paused or (inherited.phase != .linked and inherited.phase != .missing) or inherited.version != 1 or inherited.sendAcknowledgedDigest.len != 0 or inherited.lastImportedDraftId.len != 0 or inherited.lastImportedMessageId.len != 0) return error.DraftPersistenceFailed;
+        }
+        var staged_id: Field = .{};
+        defer staged_id.deinit(self.allocator);
+        var staged_digest: Field = .{};
+        defer staged_digest.deinit(self.allocator);
+        try staged_id.set(self.allocator, id);
+        try staged_digest.set(self.allocator, digest);
+        staged_id.version = self.compose.id.version +% 1;
+        staged_digest.version = self.gmail_content_digest.version +% 1;
+
+        // No allocation or validation can fail after the first live swap.
+        std.mem.swap(Field, &self.compose.id, &staged_id);
+        std.mem.swap(Field, &self.gmail_content_digest, &staged_digest);
+        std.mem.swap(?std.heap.ArenaAllocator, &self.compose.gmail_arena, &staged_arena);
+        self.compose.gmail_link = staged_link;
+        self.compose.gmail_guard_unknown = false;
+        self.compose.operation_id.deinit(self.allocator);
+        self.compose.operation_error.deinit(self.allocator);
+        self.gmail_draft_outcome.deinit(self.allocator);
+        self.gmail_remote_version.deinit(self.allocator);
+    }
+    fn acceptLocalDraftCopy(self: *App, response: []const u8) !void {
+        if (!self.compose_active or self.job.account_index != self.account_index or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value())) return error.DraftChanged;
+        self.gmail_send_ack = false;
+        self.gmail_review_ready = false;
+        self.review_ready = false;
+        self.compose_measure = .{};
+        const envelope = std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{}) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.DraftPersistenceFailed;
+        if (!localCopyAcknowledged(envelope, self.account(), self.compose.id.value())) return error.DraftPersistenceFailed;
+        try self.adoptRecoveryIdentity(get(envelope, "data"));
+        self.gmail_reload_pending = false;
+        self.gmail_review_ready = false;
+        self.gmail_send_ack = false;
+        self.compose.saved_changed = false;
+        self.compose.saved_revision = self.autosave_revision;
+        self.compose_measure = .{};
+        self.review_ready = false;
+        self.mode = .compose;
+        if (self.compose.revision != self.compose.saved_revision and !self.exit_persistence) self.autosave_due = true;
+        self.say(false, "Local edits saved as a new draft · other draft unchanged · review before Send", .{});
+    }
+    fn draftSaveJob(kind: JobKind) bool {
+        return switch (kind) {
+            .autosave, .save, .save_review, .save_back, .save_browser, .save_gmail => true,
+            else => false,
+        };
+    }
+    /// Another process may have sent this saved source while this view still
+    /// owns newer edits. Only the backend can prove that a recovery fork is
+    /// safe; never turn an uncertain send or remote-owned draft into a copy.
+    fn recoverSettledDraft(self: *App, kind: JobKind) !bool {
+        if (browser_target or !draftSaveJob(kind) or self.job.recovery_fork or self.job.future != null or !self.compose_active or self.compose.id.value().len == 0 or self.job.account_index != self.account_index or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value()) or self.compose.unknown_outcome or self.compose.gmailPaused() or self.grace_active or self.grace_recovery) return false;
+        self.cancelAutosaveTimer();
+        self.autosave_due = false;
+        self.review_ready = false;
+        self.gmail_send_ack = false;
+        self.compose_measure = .{};
+        if (kind != .autosave) self.mode = .compose;
+        var arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer arena.deinit();
+        var fields: [5][]const u8 = undefined;
+        self.autosave_revision = self.compose.revision;
+        try self.start(.save, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = self.compose.id.value(), .draft = try self.compose.updateValue(arena.allocator(), self.compose.recovery(&fields)), .acknowledgementOnly = true, .forkIfSettled = true });
+        self.job.recovery_fork = true;
+        self.job.recovery_return_to_mail = kind == .save_back;
+        self.job.recovery_from_autosave = kind == .autosave;
+        self.say(false, "Previous draft sent elsewhere · preserving edits locally…", .{});
+        return true;
+    }
+    fn recoveredForkAcknowledged(envelope: Value, expected_account: []const u8, old_id: []const u8) bool {
+        const result = get(envelope, "data");
+        const id = text(get(result, "id"));
+        return truth(get(envelope, "ok")) and same(text(get(envelope, "account")), expected_account) and same(text(get(result, "forkedFrom")), old_id) and id.len > 0 and id.len <= 128 and !same(id, old_id);
+    }
+    fn acceptRecoveredFork(self: *App, response: []const u8) !void {
+        if (!self.compose_active or self.job.account_index != self.account_index or self.job.generation != self.generation or !same(self.job.draft_target.slice(), self.compose.id.value())) return error.DraftChanged;
+        self.gmail_send_ack = false;
+        self.gmail_review_ready = false;
+        self.review_ready = false;
+        self.compose_measure = .{};
+        const envelope = std.json.parseFromSliceLeaky(Value, self.job_arena.allocator(), response, .{}) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.DraftPersistenceFailed;
+        if (!recoveredForkAcknowledged(envelope, self.account(), self.compose.id.value())) return error.DraftPersistenceFailed;
+        try self.adoptRecoveryIdentity(get(envelope, "data"));
+        self.gmail_reload_pending = false;
+        self.gmail_review_ready = false;
+        self.gmail_send_ack = false;
+        self.receipt_unknown = false;
+        self.compose.unknown_outcome = false;
+        self.review_ready = false;
+        self.compose_measure = .{};
+        self.compose.saved_revision = self.autosave_revision;
+        if (!self.job.recovery_from_autosave) {
+            self.compose.insert_mode = false;
+            self.mode = .compose;
+        }
+        if (self.compose.revision != self.compose.saved_revision and !self.exit_persistence) self.autosave_due = true;
+        self.clearGraceRecovery();
+        if (self.job.recovery_return_to_mail and self.compose.revision == self.compose.saved_revision) {
+            self.mode = .browse;
+            self.closeComposer();
+            if (self.folder == 2) self.pending_list = true;
+            try self.resumeMailboxReader();
+        }
+        self.say(false, "Previous draft sent elsewhere; edits saved as a new draft", .{});
+    }
     fn saveDraft(self: *App, kind: JobKind) !void {
+        if (self.compose.saved_changed) return self.openDraftConflict();
         if (self.compose.gmailPaused()) {
             if (kind == .save_back) {
                 self.clearGraceRecovery();
@@ -7661,8 +8322,10 @@ const App = struct {
             return;
         }
         if (kind == .save_review) {
-            try self.validateComposeSend();
-            try self.requireComposePreview();
+            try self.validateComposeReview();
+            self.requireComposePreview() catch |err| {
+                if (browser_target or !renderedSizeFailure(@errorName(err))) return err;
+            };
         }
         self.preemptReadOnly();
         self.cancelAutosaveTimer();
@@ -7683,24 +8346,85 @@ const App = struct {
     /// no send, upload or draft write is requested.
     fn openProtectedPreview(self: *App) !void {
         if (browser_target or !self.capabilities.open_urls) return error.LinksUnavailable;
-        if (!self.compose_active or !self.compose.unknown_outcome or self.compose.id.value().len == 0) return error.DraftNotFound;
+        if (!self.compose_active or (!self.compose.unknown_outcome and !self.compose.gmailPaused()) or self.compose.id.value().len == 0) return error.DraftNotFound;
         self.preemptReadOnly();
         if (self.job.future != null) return error.OperationPending;
         try self.start(.open, .{ .cmd = "draft.open-preview", .account = self.account(), .draftId = self.compose.id.value() });
         self.job.protected_preview = true;
     }
+    fn previewComposeInBrowser(self: *App) !void {
+        if (browser_target or !self.capabilities.open_urls) return error.LinksUnavailable;
+        if (self.compose.unknown_outcome or self.compose.gmailPaused()) return self.openProtectedPreview();
+        return self.saveDraft(.save_browser);
+    }
     fn persistDraftAtExit(self: *App) !void {
         if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.unknown_outcome or self.compose.gmailPaused()) return;
+        // Only the local save/recovery acknowledgement matters at exit. Do
+        // not launch fresh size measurements or unrelated background reads.
+        self.exit_persistence = true;
+        defer self.exit_persistence = false;
         // A signal/EOF can arrive while text insertion or the picker is open.
         // Preserve valid edited fields through the same local draft operation.
-        try self.saveDraft(.save);
-        if (self.job.future) |*future| future.await(self.io);
-        // Capture the save acknowledgement before finish frees its response
-        // or dispatches another job. A retained editor warning is UI state,
-        // not evidence that the local save failed.
-        const saved = self.draftSaveConfirmed();
-        try self.finish();
-        if (!saved) return error.DraftPersistenceFailed;
+        if (self.compose.saved_changed) try self.saveLocalDraftCopy() else try self.saveDraft(.save);
+        // One refused update may start an explicit local recovery fork. Wait
+        // for its acknowledgement too before allowing signal/EOF to exit.
+        for (0..2) |_| {
+            if (self.job.future) |*future| future.await(self.io);
+            const saved = self.draftSaveConfirmed();
+            try self.finish();
+            if (saved) return;
+            if (self.job.future == null or !self.job.recovery_fork) break;
+        }
+        return error.DraftPersistenceFailed;
+    }
+    /// A failed frame/input/pending operation can leave edits newer than the
+    /// last autosave. Join every producer before a final synchronous recovery
+    /// write; neither the exhausted UI heap nor another UI worker is needed.
+    /// This path never applies a receipt, dispatches follow-ups or submits mail.
+    fn preserveDraftAfterFailure(self: *App) !void {
+        if (browser_target) return;
+        self.loop.stop();
+        self.cache_watch.stop();
+        self.cancelAutosaveTimer();
+        const pending = if (self.job.future != null) @as(?JobKind, self.job.kind) else null;
+        self.cancelJob();
+        // A submitted/queued/Gmail-owned draft already has a durable snapshot.
+        // Cancellation is not proof that its write did not reach the backend.
+        if (pending) |kind| switch (kind) {
+            .send => {
+                self.client.sendReceipt(self.job.request, false);
+                self.markUnknown(.send);
+                return;
+            },
+            .grace_process => {
+                self.markUnknown(.send);
+                return;
+            },
+            .grace_stage, .grace_resume, .grace_cancel, .gmail_draft_action => return,
+            else => {},
+        };
+        if (!self.compose_active or self.compose.id.value().len == 0 or self.compose.revision == self.compose.saved_revision or self.compose.unknown_outcome or self.compose.gmailPaused() or self.grace_active or self.grace_recovery) return;
+        self.job.request = "";
+        self.job.response = null;
+        _ = self.job_arena.reset(.free_all);
+        var arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
+        defer arena.deinit();
+        const a = arena.allocator();
+        var fields: [5][]const u8 = undefined;
+        var retained = self.compose.recovery(&fields);
+        if (self.compose.saved_changed) retained.id = "";
+        var snapshot = if (self.compose.saved_changed) try @import("mail_response_value.zig").borrowed(a, retained) else try self.compose.updateValue(a, retained);
+        if (self.compose.saved_changed and retained.original == null) try snapshot.object.put(a, "original", .null);
+        const request = try encodeJobRequest(a, .{ .account = self.account(), .cmd = "draft.recovery-save", .draftId = if (self.compose.saved_changed) @as([]const u8, "") else self.compose.id.value(), .copyFromDraftId = if (self.compose.saved_changed) @as(?[]const u8, self.compose.id.value()) else null, .draft = snapshot, .acknowledgementOnly = true, .forkIfSettled = !self.compose.saved_changed }, outgoing_native);
+        const response = try self.client.call(a, request);
+        if (response.len > response_limit) return error.DraftPersistenceFailed;
+        const envelope = try std.json.parseFromSliceLeaky(Value, a, response, .{ .allocate = .alloc_if_needed, .max_value_len = response_limit });
+        const owner = text(get(envelope, "account"));
+        const same_id = same(text(get(get(envelope, "data"), "id")), self.compose.id.value());
+        if (self.compose.saved_changed) {
+            if (!localCopyAcknowledged(envelope, self.account(), self.compose.id.value())) return error.DraftPersistenceFailed;
+        } else if (!truth(get(envelope, "ok")) or (owner.len != 0 and !same(owner, self.account())) or (!same_id and !recoveredForkAcknowledged(envelope, self.account(), self.compose.id.value()))) return error.DraftPersistenceFailed;
+        self.compose.saved_revision = self.compose.revision;
     }
     fn draftSaveConfirmed(self: *App) bool {
         if (self.job.kind != .save or !self.job.done.load(.acquire) or self.job.failure != null or self.job.account_index != self.account_index) return false;
@@ -7711,6 +8435,8 @@ const App = struct {
         const acknowledged_account = text(get(result, "account"));
         if (acknowledged_account.len != 0 and !same(acknowledged_account, self.account())) return false;
         const id = text(get(get(result, "data"), "id"));
+        if (self.job.save_copy) return localCopyAcknowledged(result, self.account(), self.compose.id.value());
+        if (self.job.recovery_fork) return recoveredForkAcknowledged(result, self.account(), self.compose.id.value());
         return id.len != 0 and same(id, self.compose.id.value());
     }
     fn canEditAttachments(self: *const App) bool {
@@ -7735,7 +8461,7 @@ const App = struct {
     fn beginFileDialog(self: *App, mode: file_dialog.Mode, path: []const u8) void {
         self.file_browser.reset();
         self.selected_file_count = 0;
-        for (&self.selected_files) |*field| {
+        for (self.selected_files.items) |*field| {
             field.bytes.clearRetainingCapacity();
             field.cursor = 0;
         }
@@ -7771,8 +8497,15 @@ const App = struct {
         self.path_candidates.reset();
     }
     fn fileDialogMarked(self: *const App, path: []const u8) ?usize {
-        for (self.selected_files[0..self.selected_file_count], 0..) |*field, index| if (same(field.value(), path)) return index;
+        for (self.selected_files.items[0..self.selected_file_count], 0..) |*field, index| if (same(field.value(), path)) return index;
         return null;
+    }
+    fn ensureFileFields(self: *App, fields: *std.ArrayList(Field), count: usize) !void {
+        if (count > types.Limits.attachments) return error.TooManyAttachments;
+        if (count <= fields.items.len) return;
+        const old_len = fields.items.len;
+        try fields.resize(self.allocator, count);
+        @memset(fields.items[old_len..], .{});
     }
     fn toggleFileDialogMark(self: *App, index: usize, field: *Field) !void {
         if (self.mode != .attachment or index >= self.file_browser.entries.len) return;
@@ -7780,13 +8513,14 @@ const App = struct {
         if (entry.directory) return;
         try self.fileDialogSelect(index, field);
         if (self.fileDialogMarked(entry.path)) |marked| {
-            for (marked..self.selected_file_count - 1) |slot| std.mem.swap(Field, &self.selected_files[slot], &self.selected_files[slot + 1]);
+            for (marked..self.selected_file_count - 1) |slot| std.mem.swap(Field, &self.selected_files.items[slot], &self.selected_files.items[slot + 1]);
             self.selected_file_count -= 1;
-            self.selected_files[self.selected_file_count].bytes.clearRetainingCapacity();
-            self.selected_files[self.selected_file_count].cursor = 0;
+            self.selected_files.items[self.selected_file_count].bytes.clearRetainingCapacity();
+            self.selected_files.items[self.selected_file_count].cursor = 0;
         } else {
-            if (self.selected_file_count + self.compose.attachments.len >= self.selected_files.len) return error.TooManyAttachments;
-            try self.selected_files[self.selected_file_count].set(self.allocator, entry.path);
+            if (self.selected_file_count + self.compose.attachments.len >= types.Limits.attachments) return error.TooManyAttachments;
+            try self.ensureFileFields(&self.selected_files, self.selected_file_count + 1);
+            try self.selected_files.items[self.selected_file_count].set(self.allocator, entry.path);
             self.selected_file_count += 1;
         }
         try self.file_browser_error.set(self.allocator, "");
@@ -7794,8 +8528,8 @@ const App = struct {
     fn attachFileSelection(self: *App) !void {
         if (!self.canEditAttachments()) return error.OperationPending;
         if (self.selected_file_count == 0) return error.InvalidFilePath;
-        const related = if (self.compose.original) |original| original.resources else &.{};
-        if (self.compose.attachments.len + self.selected_file_count > self.pending_files.len) return error.TooManyAttachments;
+        const related = if (if (self.compose.include_original) self.compose.original else null) |original| original.resources else &.{};
+        try types.Limits.validateComposeParts(self.compose.attachments.len + self.selected_file_count, related.len);
         var combined: u64 = 0;
         for ([_][]const types.Attachment{ self.compose.attachments, related }) |list| for (list) |attachment| {
             combined += attachment.size;
@@ -7803,14 +8537,15 @@ const App = struct {
         // Validate the complete explicit set before starting any import. Each
         // import then pins immutable bytes, so later source changes cannot
         // alter an attachment that has already been retained by the draft.
-        for (self.selected_files[0..self.selected_file_count]) |*field| {
+        for (self.selected_files.items[0..self.selected_file_count]) |*field| {
             const file = try files.openRegular(self.io, self.allocator, Io.Dir.cwd(), field.value());
             defer file.close(self.io);
             const stat = try file.stat(self.io);
             if (stat.size > types.Limits.attachment_bytes -| combined) return error.AttachmentsTooLarge;
             combined += stat.size;
         }
-        for (self.selected_files[0..self.selected_file_count], 0..) |*field, index| try self.pending_files[index].set(self.allocator, field.value());
+        try self.ensureFileFields(&self.pending_files, self.selected_file_count);
+        for (self.selected_files.items[0..self.selected_file_count], 0..) |*field, index| try self.pending_files.items[index].set(self.allocator, field.value());
         self.pending_file_count = self.selected_file_count;
         self.pending_file_position = 0;
         try self.importNextFile();
@@ -8021,11 +8756,11 @@ const App = struct {
         if (!receiving) {
             var combined: u64 = 0;
             for (self.compose.attachments) |attachment| combined += attachment.size;
-            if (self.compose.original) |original| for (original.resources) |attachment| {
+            if (if (self.compose.include_original) self.compose.original else null) |original| for (original.resources) |attachment| {
                 combined += attachment.size;
             };
             var unavailable = false;
-            for (self.selected_files[0..self.selected_file_count]) |*selected_file| {
+            for (self.selected_files.items[0..self.selected_file_count]) |*selected_file| {
                 const selected_input = files.openRegular(self.io, self.frame.allocator(), Io.Dir.cwd(), selected_file.value()) catch {
                     unavailable = true;
                     continue;
@@ -8134,15 +8869,34 @@ const App = struct {
         try self.line(inner, inner.height - 1, if (self.path_candidates.truncated) "First matches · scan limit reached · Esc Back" else "Tab Next match · Enter Attach · Esc Back", .muted);
     }
     fn composeControlEnabled(self: *const App, index: usize) bool {
+        if (index == self.compose.attachments.len + 4) return self.compose_action_mask & 1 != 0;
+        if (index == self.compose.attachments.len + 5) return self.compose_action_mask & 2 != 0;
+        if (index == self.compose.attachments.len + 6) return self.compose_original_drawn and self.originalPolicyMutable();
+        if (index == self.compose.attachments.len + 7) return self.compose_fold_drawn;
+        if (self.compose.unknown_outcome) return false;
+        if (self.compose.gmailPaused()) return index == self.compose.attachments.len + 2;
         if (index == 0) return self.capabilities.attachments and self.capabilities.files;
         if (index <= self.compose.attachments.len) return self.capabilities.attachments;
         if (index == self.compose.attachments.len + 1) return self.capabilities.markdown;
         if (index == self.compose.attachments.len + 2) return true;
         return index == self.compose.attachments.len + 3 and self.capabilities.aliases;
     }
+    fn composeControlFocusable(self: *const App, index: usize) bool {
+        if (index == self.compose.attachments.len + 6) return self.compose_original_drawn and self.originalPolicyUnlocked();
+        if (index == self.compose.attachments.len + 4) return self.compose_action_drawn & 1 != 0;
+        if (index == self.compose.attachments.len + 5) return self.compose_action_drawn & 2 != 0;
+        return self.composeControlEnabled(index);
+    }
+    // Keep stable control IDs while placing source controls before the footer.
+    fn composeControlOrder(self: *const App, index: usize) usize {
+        const base = self.compose.attachments.len;
+        if (index == base + 4 or index == base + 5) return index + 2;
+        if (index == base + 6 or index == base + 7) return index - 2;
+        return index;
+    }
     fn adjacentComposeControl(self: *const App, from: usize, backwards: bool) ?usize {
-        const count = self.compose.attachments.len + 4;
-        var index = from;
+        const count = self.compose.attachments.len + 8;
+        var index = self.composeControlOrder(from);
         while (true) {
             if (backwards) {
                 if (index == 0) return null;
@@ -8151,14 +8905,15 @@ const App = struct {
                 index += 1;
                 if (index >= count) return null;
             }
-            if (self.composeControlEnabled(index)) return index;
+            const control = self.composeControlOrder(index);
+            if (self.composeControlFocusable(control)) return control;
         }
     }
     fn focusComposeAttachments(self: *App, cursor: usize) void {
         if (!self.compose.attachment_focus) self.compose.attachment_return_insert = self.compose.insert_mode;
-        const wanted = @min(cursor, self.compose.attachments.len + 3);
+        const wanted = @min(cursor, self.compose.attachments.len + 7);
         self.compose.attachment_focus = true;
-        self.compose.attachment_cursor = if (self.composeControlEnabled(wanted)) wanted else self.adjacentComposeControl(wanted, false) orelse self.adjacentComposeControl(wanted, true) orelse wanted;
+        self.compose.attachment_cursor = if (self.composeControlFocusable(wanted)) wanted else self.adjacentComposeControl(wanted, false) orelse self.adjacentComposeControl(wanted, true) orelse wanted;
         self.compose.insert_mode = false;
     }
     fn leaveComposeAttachments(self: *App, field: usize, restore_insert: bool) void {
@@ -8167,7 +8922,7 @@ const App = struct {
         self.compose.insert_mode = restore_insert and self.compose.attachment_return_insert;
     }
     fn onComposeAttachmentKey(self: *App, key: Key) !void {
-        const count = self.compose.attachments.len + 3;
+        const count = self.compose.attachments.len + 7;
         self.compose.attachment_cursor = @min(self.compose.attachment_cursor, count);
         if (key.matches(Key.escape, .{}) or key.matches('q', .{})) return self.leaveComposeAttachments(4, false);
         if (key.matches(Key.tab, .{})) {
@@ -8178,12 +8933,16 @@ const App = struct {
             if (self.adjacentComposeControl(self.compose.attachment_cursor, true)) |index| self.compose.attachment_cursor = index else self.leaveComposeAttachments(4, true);
             return;
         }
+        if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 6 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.setOriginalIncluded(!self.compose.include_original, true);
+        if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 7 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.toggleOriginalFold();
+        if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 4 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.previewComposeInBrowser();
+        if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 5 and self.composeControlEnabled(self.compose.attachment_cursor)) return self.openGmailDraft();
         if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('n', .{ .ctrl = true })) self.compose.attachment_cursor = self.adjacentComposeControl(self.compose.attachment_cursor, false) orelse self.compose.attachment_cursor else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('p', .{ .ctrl = true })) self.compose.attachment_cursor = self.adjacentComposeControl(self.compose.attachment_cursor, true) orelse self.compose.attachment_cursor else if (key.matches('A', .{}) or key.matches('a', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == 0)) try self.promptAttachment() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 1) try self.toggleComposeFormat() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 2) self.cycleComposePreview() else if (key.matches(Key.enter, .{}) and self.compose.attachment_cursor == self.compose.attachments.len + 3) try self.cycleComposeIdentity() else if (self.compose.attachment_cursor > 0 and self.compose.attachment_cursor <= self.compose.attachments.len and (key.matches(Key.enter, .{}) or key.matches('x', .{}))) try self.detachAttachment(self.compose.attachment_cursor - 1);
     }
     fn detachAttachment(self: *App, index: usize) !void {
         if (!self.canEditAttachments()) return;
         if (index >= self.compose.attachments.len) return error.InvalidAttachment;
-        var retained: [16]types.Attachment = undefined;
+        const retained = try self.frame.allocator().alloc(types.Attachment, self.compose.attachments.len - 1);
         var count: usize = 0;
         for (self.compose.attachments, 0..) |item, attachment_index| if (attachment_index != index) {
             retained[count] = item;
@@ -8204,14 +8963,19 @@ const App = struct {
         if (browser_target) return error.FileAccessUnavailable;
         if (!self.capabilities.files) return error.FileAccessUnavailable;
         if (!self.canEditAttachments()) return error.OperationPending;
-        if (self.compose.attachments.len == 16) return error.TooManyAttachments;
+        if (self.compose.attachments.len >= types.Limits.attachments) return error.TooManyAttachments;
         const file = try files.openRegular(self.io, self.allocator, Io.Dir.cwd(), path);
         defer file.close(self.io);
         const stat = try file.stat(self.io);
         var combined: usize = 0;
         for (self.compose.attachments) |attachment| combined += attachment.size;
+        if (if (self.compose.include_original) self.compose.original else null) |original| {
+            try types.Limits.validateComposeParts(self.compose.attachments.len + 1, original.resources.len);
+            for (original.resources) |attachment| combined += attachment.size;
+        }
         if (stat.size > types.Limits.attachment_bytes -| combined) return error.AttachmentsTooLarge;
-        try self.pending_files[0].set(self.allocator, path);
+        try self.ensureFileFields(&self.pending_files, 1);
+        try self.pending_files.items[0].set(self.allocator, path);
         self.pending_file_count = 1;
         self.pending_file_position = 0;
         try self.importNextFile();
@@ -8220,7 +8984,7 @@ const App = struct {
         if (self.pending_file_position >= self.pending_file_count) return;
         if (!self.canEditAttachments()) return error.OperationPending;
         self.preemptReadOnly();
-        try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files[self.pending_file_position].value() });
+        try self.start(.attachment_import, .{ .cmd = "attachment.import", .account = self.account(), .path = self.pending_files.items[self.pending_file_position].value() });
         self.say(false, "Importing attachment {d}/{d}…", .{ self.pending_file_position + 1, self.pending_file_count });
     }
     fn saveIncomingAttachment(self: *App, arguments_in: []const u8) !void {
@@ -8258,6 +9022,7 @@ const App = struct {
         return platform.operationId(self.io, allocator, self.operation_nonce, &self.operation_sequence);
     }
     fn sendDraft(self: *App) !void {
+        if (self.compose.saved_changed) return self.openDraftConflict();
         if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
         if (self.gmailCopyWarning() and !self.gmail_send_ack) return error.GmailCopyUnchecked;
         if (self.compose.unknown_outcome) {
@@ -8267,20 +9032,29 @@ const App = struct {
         try self.validateComposeSend();
         try self.requireComposePreview();
         if (!self.review_ready) return error.DraftReviewRequired;
-        self.review_ready = false;
-        const id = try self.operationId(self.allocator);
-        defer self.allocator.free(id);
-        try self.compose.operation_id.set(self.allocator, id);
-        try self.compose.operation_error.set(self.allocator, "");
+        if (!browser_target and !self.composeMeasureCurrent()) {
+            self.requestComposeMeasure();
+            _ = try self.dispatchComposer();
+            self.say(false, "Calculating exact size · review it before Send", .{});
+            return;
+        }
+        if (!browser_target and (self.compose_measure.over_limit or !self.compose_measure.sendable)) return error.MessageTooLarge;
         // The digest encodes the complete source and original once; keep that
         // transient copy off the fixed frame heap and release it immediately.
         var digest_arena: std.heap.ArenaAllocator = .init(composeBacking(self.allocator));
         defer digest_arena.deinit();
         const gmail_digest = try @import("draft_link.zig").contentDigest(digest_arena.allocator(), try self.compose.draft(digest_arena.allocator()), self.account());
-        if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..] }) else {
+        if (!browser_target and !same(&gmail_digest, self.compose_measure.content_digest.slice())) return error.DraftChanged;
+        const expected_digest: ?[]const u8 = if (browser_target) null else self.compose_measure.content_digest.slice();
+        self.review_ready = false;
+        const id = if (!browser_target) try self.allocator.dupe(u8, self.compose_measure.operation.slice()) else try self.operationId(self.allocator);
+        defer self.allocator.free(id);
+        try self.compose.operation_id.set(self.allocator, id);
+        try self.compose.operation_error.set(self.allocator, "");
+        if (!self.capabilities.send_queue or self.ui_preferences.sendGraceSeconds == 0) try self.start(.send, .{ .account = self.account(), .cmd = "draft.send", .draftId = self.compose.id.value(), .operationId = id, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..], .expectedContentDigest = expected_digest }) else {
             self.cancelAutosaveTimer();
             self.autosave_due = false;
-            try self.start(.grace_stage, .{ .account = self.account(), .cmd = "draft.queue", .draftId = self.compose.id.value(), .operationId = id, .delaySeconds = self.ui_preferences.sendGraceSeconds, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..] });
+            try self.start(.grace_stage, .{ .account = self.account(), .cmd = "draft.queue", .draftId = self.compose.id.value(), .operationId = id, .delaySeconds = self.ui_preferences.sendGraceSeconds, .acknowledgeGmailCopy = self.gmail_send_ack, .gmailCopyDigest = gmail_digest[0..], .expectedContentDigest = expected_digest });
         }
     }
     fn pausedGraceForCompose(self: *const App) bool {
@@ -8358,9 +9132,11 @@ const App = struct {
         } else if (same(state, "canceled")) {
             self.grace_recovery = false;
             self.compose.unknown_outcome = false;
+            self.retireComposeMeasure();
             self.mode = .compose;
             self.say(false, "{s}", .{if (same(text(get(result, "errorCode")), "DraftChanged")) @as([]const u8, "Draft changed · send cancelled · review before sending again") else "Send cancelled · draft retained"});
         } else if (same(state, "rejected")) {
+            self.retireComposeMeasure();
             self.mode = .compose;
             self.sayFailure("Submission rejected · draft retained", sendReceiptCode(result));
         } else {
@@ -8597,7 +9373,7 @@ const App = struct {
     fn readOnlyJob(kind: JobKind) bool {
         return switch (kind) {
             .follow_up_list, .calendar_guest_contacts, .calendar_list, .calendar_agenda, .calendar_event, .calendar_plan, .calendar_review, .calendar_event_edit, .calendar_event_review, .calendar_event_pending, .updates_load, .updates_check, .meeting_calendars, .meeting_agenda => true,
-            .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
+            .draft_measure, .refresh, .list, .cached_search, .recipient_cache, .recipient_refresh, .read, .thread, .drafts, .draft_read, .draft_operations, .queue_inspect, .contacts, .invitation_inspect, .identities, .autosave, .labels_list, .label_receipt, .triage_scope, .label_state, .unread_navigation => true,
             else => false,
         };
     }
@@ -8605,6 +9381,7 @@ const App = struct {
         if (self.cancelMeetingRead()) return;
         if (self.job.future == null or !readOnlyJob(self.job.kind)) return;
         const index = self.job.account_index;
+        if (self.job.kind == .draft_measure) self.requestComposeMeasure();
         const refresh = self.job.kind == .refresh;
         if (self.calendar.open and self.job.kind == .calendar_agenda and self.calendar.source_loading) {
             self.calendar.resume_sources = true;
@@ -8749,11 +9526,11 @@ const App = struct {
             }
             const previous = self.selected;
             if (self.pending_page and down != self.pending_page_forward) self.pending_page = false;
-            if (down and self.messages.len > 0 and previous +| amount >= self.messages.len and !self.drafts_list and !self.follow_ups_list) {
+            if (down and self.messages.len > 0 and previous +| amount >= self.messages.len and (!self.drafts_list or self.next_cursor.value().len > 0) and !self.follow_ups_list) {
                 try self.scrollWindow(true);
                 return;
             }
-            if (!down and self.messages.len > 0 and amount > previous and !self.drafts_list and !self.follow_ups_list) {
+            if (!down and self.messages.len > 0 and amount > previous and (!self.drafts_list or self.previous_cursor.value().len > 0 or self.previous_cursors.items.len > 0) and !self.follow_ups_list) {
                 try self.scrollWindow(false);
                 return;
             }
@@ -9226,6 +10003,19 @@ const App = struct {
             .compose_preview_back => {
                 if (self.mode == .compose and wheel == null) self.compose_preview_full = false;
             },
+            .compose_browser_preview, .compose_gmail => {
+                if (self.mode != .compose or wheel != null) return;
+                const index: usize = if (hit.kind == .compose_browser_preview) 0 else 1;
+                if (self.compose_action_mask & (@as(u8, 1) << @intCast(index)) == 0) return;
+                if (self.compose_preview_full and self.vx.window().width < 90) self.dialog_focus.index = 3 + index else self.focusComposeAttachments(self.compose.attachments.len + 4 + index);
+                if (index == 0) try self.previewComposeInBrowser() else try self.openGmailDraft();
+            },
+            .compose_original_policy, .compose_original_fold => {
+                if ((self.mode != .compose and self.mode != .review) or wheel != null) return;
+                const policy = hit.kind == .compose_original_policy;
+                if (self.mode == .review) self.dialog_focus.index = 3 else if (self.compose_preview_full and self.vx.window().width < 90) self.dialog_focus.index = if (policy) 5 else 6 else self.focusComposeAttachments(self.compose.attachments.len + (if (policy) @as(usize, 6) else 7));
+                if (policy) try self.setOriginalIncluded(!self.compose.include_original, true) else self.toggleOriginalFold();
+            },
             .compose_preview_scroll => {
                 if (self.mode != .compose) return;
                 if (wheel) |down| self.scrollReader(down, 3) else if (self.compose.original != null) self.say(false, "Original is protected · only your note is editable", .{});
@@ -9267,6 +10057,23 @@ const App = struct {
             },
         }
     }
+    fn acceptEditorResult(self: *App, value_in: editor.Result) void {
+        const body_allocator = self.compose.fields[4].owner(self.allocator);
+        const field = &self.compose.fields[4];
+        if (!same(field.value(), value_in.body)) field.recordUndo(body_allocator, value_in.body.len) catch {};
+        field.bytes.deinit(body_allocator);
+        field.bytes = .fromOwnedSlice(value_in.body);
+        field.cursor = value_in.body.len;
+        field.version +%= 1;
+        self.compose.body_scroll = 0;
+        self.compose.revision +%= 1;
+        self.compose_measure = .{};
+        self.review_ready = false;
+        self.gmail_send_ack = false;
+        self.compose.selected = 4;
+        self.compose.insert_mode = false;
+        self.editor_exit = value_in.exit_code;
+    }
     fn runEditor(self: *App) !void {
         if (self.compose.gmailPaused()) return error.DraftPausedInGmail;
         if (browser_target) return error.EditorUnavailable;
@@ -9291,16 +10098,7 @@ const App = struct {
         // Transfer rather than copy: bounded allocator exhaustion cannot lose
         // a valid body whose private editor file has already been removed.
         if (result) |value_in| {
-            const field = &self.compose.fields[4];
-            if (!same(field.value(), value_in.body)) field.recordUndo(body_allocator, value_in.body.len) catch {};
-            field.bytes.deinit(body_allocator);
-            field.bytes = .fromOwnedSlice(value_in.body);
-            field.cursor = value_in.body.len;
-            self.compose.body_scroll = 0;
-            self.compose.revision +%= 1;
-            self.compose.selected = 4;
-            self.compose.insert_mode = false;
-            self.editor_exit = value_in.exit_code;
+            self.acceptEditorResult(value_in);
         } else |_| {}
         // Restore even when the child cannot start, fails or is interrupted.
         _ = try vaxis.Tty.makeRaw(self.tty.fd.handle);
@@ -9323,10 +10121,56 @@ const App = struct {
             try self.finish();
         }
     }
+    fn previewControlOrder(index: usize) usize {
+        return switch (index) {
+            3, 4 => index + 2,
+            5, 6 => index - 2,
+            else => index,
+        };
+    }
+    fn onComposePreviewKey(self: *App, key: Key) !void {
+        self.dialog_focus.ensure(.preview, 0);
+        if (tabDirection(key)) |backwards| {
+            self.dialog_focus.index = previewControlOrder(self.dialog_focus.index);
+            self.dialog_focus.move(backwards, 7, 0b111 | (@as(u8, if (self.compose_original_drawn and self.originalPolicyUnlocked()) 1 else 0) << 3) | (@as(u8, if (self.compose_fold_drawn) 1 else 0) << 4) | (self.compose_action_drawn << 5));
+            self.dialog_focus.index = previewControlOrder(self.dialog_focus.index);
+        } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 5) {
+            try self.setOriginalIncluded(!self.compose.include_original, true);
+        } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 6) {
+            self.toggleOriginalFold();
+        } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3 and self.compose_action_mask & 1 != 0) {
+            try self.previewComposeInBrowser();
+        } else if (key.matches(Key.enter, .{}) and self.dialog_focus.index == 4 and self.compose_action_mask & 2 != 0) {
+            try self.openGmailDraft();
+        } else if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) self.compose_preview_full = false else if (key.matches('p', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) self.cycleComposePreview() else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('d', .{ .ctrl = true })) {
+            self.dialog_focus.index = 0;
+            self.scrollReader(true, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
+        } else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('u', .{ .ctrl = true })) {
+            self.dialog_focus.index = 0;
+            self.scrollReader(false, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
+        }
+    }
     fn onComposeKey(self: *App, key: Key) !void {
+        if (!self.compose.insert_mode and key.matches('z', .{})) return self.toggleOriginalFold();
+        if (!self.compose.insert_mode and (key.matches('Q', .{}) or key.matches('q', .{ .shift = true }))) return self.setOriginalIncluded(!self.compose.include_original, true);
         if (self.job.future != null and !readOnlyJob(self.job.kind)) {
             if (key.matches('q', .{}) or key.matches(Key.escape, .{})) self.say(false, "Draft operation pending · wait for its result", .{});
             return;
+        }
+        // Printable shortcuts belong to normal mode. Click or Tab+Enter is
+        // still explicit while editing; P and g themselves remain input data.
+        if (!self.compose.insert_mode) {
+            if (key.matches('P', .{}) or key.matches('p', .{ .shift = true })) return self.previewComposeInBrowser();
+            if (key.matches('g', .{})) return self.openGmailDraft();
+        }
+        if ((self.compose.gmailPaused() or self.compose.unknown_outcome) and !self.compose.insert_mode) {
+            if (self.compose_preview_full and !self.compose.unknown_outcome and self.vx.window().width < 90) return self.onComposePreviewKey(key);
+            if (self.compose.attachment_focus and (tabDirection(key) != null or key.matches(Key.enter, .{}) or key.matches(Key.escape, .{}) or key.matches('q', .{}))) return self.onComposeAttachmentKey(key);
+            if (tabDirection(key)) |backwards| {
+                const first = if (backwards) self.adjacentComposeControl(self.compose.attachments.len + 8, true) else self.adjacentComposeControl(self.compose.attachments.len, false);
+                if (first) |index| self.focusComposeAttachments(index);
+                return;
+            }
         }
         if (self.compose.gmailPaused()) {
             if (key.matches('p', .{})) return self.cycleComposePreview();
@@ -9365,6 +10209,20 @@ const App = struct {
         }
         for (&self.compose.fields) |*field| field.undo_enabled = true;
         if (key.matches('z', .{ .ctrl = true }) or key.matches('y', .{ .ctrl = true })) {
+            const redo = key.matches('y', .{ .ctrl = true });
+            const policy = if (redo) self.compose_policy_redo else self.compose_policy_undo;
+            if (policy) |included| if (self.compose_policy_revision == self.compose.revision and self.originalPolicyMutable()) {
+                const previous = self.compose.include_original;
+                try self.setOriginalIncluded(included, false);
+                if (redo) {
+                    self.compose_policy_undo = previous;
+                    self.compose_policy_redo = null;
+                } else {
+                    self.compose_policy_redo = previous;
+                    self.compose_policy_undo = null;
+                }
+                return;
+            };
             const field = &self.compose.fields[self.compose.selected];
             if (!field.boundHistory(self.allocator)) {
                 self.say(false, "Undo unavailable for text this large · source unchanged", .{});
@@ -9390,19 +10248,7 @@ const App = struct {
             self.compose.body_scroll = 0;
             return;
         }
-        if (self.compose_preview_full and self.vx.window().width < 90) {
-            self.dialog_focus.ensure(.preview, 0);
-            if (tabDirection(key)) |backwards| {
-                self.dialog_focus.move(backwards, 3, 0b111);
-            } else if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) self.compose_preview_full = false else if (key.matches('p', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) self.cycleComposePreview() else if (key.matches('j', .{}) or key.matches(Key.down, .{}) or key.matches('d', .{ .ctrl = true })) {
-                self.dialog_focus.index = 0;
-                self.scrollReader(true, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
-            } else if (key.matches('k', .{}) or key.matches(Key.up, .{}) or key.matches('u', .{ .ctrl = true })) {
-                self.dialog_focus.index = 0;
-                self.scrollReader(false, if (key.mods.ctrl) @max(self.compose_preview_height / 2, 1) else 1);
-            }
-            return;
-        }
+        if (self.compose_preview_full and self.vx.window().width < 90) return self.onComposePreviewKey(key);
         if (self.compose.attachment_focus) return self.onComposeAttachmentKey(key);
         if (!self.compose.insert_mode) {
             if (key.matches('p', .{})) {
@@ -9447,7 +10293,7 @@ const App = struct {
         } else if (key.matches(Key.tab, .{})) {
             if (self.compose.selected == 4) self.focusComposeAttachments(0) else self.compose.selected += 1;
         } else if (key.matches(Key.tab, .{ .shift = true })) {
-            if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 3) else self.compose.selected -= 1;
+            if (self.compose.selected == 0) self.focusComposeAttachments(self.compose.attachments.len + 5) else self.compose.selected -= 1;
         } else if (self.compose.insert_mode) {
             const matches = self.composeCompletions();
             if (self.compose.selected < 3 and matches.len == 0 and (key.matches('n', .{ .ctrl = true }) or key.matches('p', .{ .ctrl = true }))) {
@@ -9493,14 +10339,16 @@ const App = struct {
         if (tabDirection(key)) |backwards| {
             const copy_warning = self.mode == .review and self.gmailCopyWarning();
             const enabled: u8 = if (self.mode == .invitation) self.invitationControlMask() else if (self.job.future == null) (if (copy_warning) @as(u8, 0b111) else 0b11) else 0b01;
-            self.dialog_focus.move(backwards, if (self.mode == .invitation) 8 else if (copy_warning) 3 else 2, enabled);
+            self.dialog_focus.move(backwards, if (self.mode == .invitation) 8 else if (self.mode == .review and self.compose_fold_drawn) 4 else if (copy_warning) 3 else 2, enabled | @as(u8, if (self.mode == .review and self.compose_fold_drawn) 8 else 0));
             return;
         }
         if (key.matches(Key.escape, .{}) or key.matches('q', .{}) or (self.mode != .invitation and key.matches('n', .{})) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 0)) {
+            if (self.mode == .review) self.compose.insert_mode = false;
             self.mode = backMode(self.mode, self.previous_mode, self.picker);
             return;
         }
         if (self.mode == .review) {
+            if (key.matches('z', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) return self.toggleOriginalFold();
             if (self.gmailCopyWarning() and (key.matches('g', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2))) {
                 self.gmail_send_ack = !self.gmail_send_ack;
                 return;
@@ -10122,6 +10970,9 @@ const App = struct {
         }
         return @min(widest, 36);
     }
+    fn rowHasAttachments(value: Value) bool {
+        return (get(value, "attachmentCount") == .integer and integer(get(value, "attachmentCount")) > 0) or items(get(value, "attachments")).len > 0;
+    }
     fn draftRowName(value: Value) []const u8 {
         const link = get(value, "gmailLink");
         if (link == .null or same(text(get(link, "phase")), "rejected")) return "Draft";
@@ -10146,7 +10997,7 @@ const App = struct {
             const raw_subject = text(get(value_in, "subject"));
             const subject = (try mail_display.decodePreview(self.frame.allocator(), raw_subject)) orelse raw_subject;
             const shown_sender = try self.fitLine(win, if (self.drafts_list) draftRowName(value_in) else sender_text, @min(content_width / 3, 22));
-            const line_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s} {s} · {s}{s}", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " ", if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) @as([]const u8, "*") else " ", shown_sender, if (items(get(value_in, "attachments")).len > 0) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
+            const line_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}{s} {s} · {s}{s}", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " ", if (messageHasLabel(value_in, "STARRED") or truth(get(value_in, "starred"))) @as([]const u8, "*") else " ", shown_sender, if (rowHasAttachments(value_in)) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
             var appearance = self.listStyle(.subject, selected);
             appearance.bold = messageUnread(value_in);
             _ = item.child(.{ .width = content_width }).printSegment(.{ .text = try self.fitLine(win, line_text, content_width), .style = appearance }, .{ .wrap = .none });
@@ -10167,7 +11018,7 @@ const App = struct {
         const gutter_width: u16 = @min(@as(u16, 3), win.width);
         const gutter = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s} ", .{ if (self.mail_selection.contains(text(get(value_in, "id")))) @as([]const u8, "✓") else " ", if (messageUnread(value_in)) @as([]const u8, "●") else " " });
         _ = item.child(.{ .height = 1, .width = gutter_width }).printSegment(.{ .text = gutter, .style = self.listStyle(.accent, selected) }, .{ .wrap = .none });
-        const subject_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (items(get(value_in, "attachments")).len > 0) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
+        const subject_text = try std.fmt.allocPrint(self.frame.allocator(), "{s}{s}", .{ if (rowHasAttachments(value_in)) @as([]const u8, "📎 ") else "", if (subject.len == 0) @as([]const u8, "(no subject)") else subject });
         var subject_style = self.listStyle(.subject, selected);
         subject_style.bold = messageUnread(value_in);
         subject_style.italic = false;
@@ -11638,14 +12489,82 @@ const App = struct {
             self.mouseRows(popup, index - top + 1, 1, .compose_completion, index);
         }
     }
-    fn composeDraw(self: *App, win: vaxis.Window) !void {
+    /// Native actions own their rows below the complete composer, including
+    /// the narrow full-preview page. They never compete with body controls.
+    fn composeActionsDraw(self: *App, win: vaxis.Window) !u16 {
+        self.compose_action_mask = 0;
+        self.compose_action_drawn = 0;
+        if (browser_target or !self.compose_active or self.compose.id.value().len == 0 or win.height < 2) return 0;
+        const show_browser = self.capabilities.open_urls;
+        const show_gmail = !self.compose.unknown_outcome;
+        if (!show_browser and !show_gmail) return 0;
+        const normal_browser = "[P Preview in browser]";
+        const normal_gmail = if (self.compose.gmailPaused()) "[g Gmail status]" else "[g Continue in Gmail]";
+        const width_needed = (if (show_browser) normal_browser.len else @as(usize, 0)) + (if (show_gmail) normal_gmail.len else @as(usize, 0)) + (if (show_browser and show_gmail) @as(usize, 2) else 0);
+        // The usual 38-column terminal keeps two complete labels and five
+        // body rows. A short terminal uses compact labels on one row instead.
+        const two_rows = width_needed > win.width and show_browser and show_gmail and win.height >= 18;
+        const compact = width_needed > win.width and !two_rows;
+        const rows: u16 = if (two_rows) 2 else 1;
+        const browser_label: []const u8 = if (compact) (if (self.compose.insert_mode) "[  Browser]" else "[P Browser]") else if (self.compose.insert_mode) "[  Preview in browser]" else normal_browser;
+        const gmail_label: []const u8 = if (compact) (if (self.compose.insert_mode) "[  Gmail]" else "[g Gmail]") else if (self.compose.insert_mode) (if (self.compose.gmailPaused()) "[  Gmail status]" else "[  Continue in Gmail]") else normal_gmail;
+        const enabled = self.job.future == null or readOnlyJob(self.job.kind);
+        const narrow_preview = self.compose_preview_full and win.width < 90 and !self.compose.unknown_outcome;
+        var x: u16 = 0;
+        const row = win.height - rows;
+        if (show_browser and browser_label.len <= win.width) {
+            const focused = if (narrow_preview) self.dialog_focus.context == .preview and self.dialog_focus.index == 3 else self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 4;
+            x = try self.actionButton(win, row, 0, browser_label, focused, enabled, .compose_browser_preview, 0);
+            self.compose_action_drawn |= 1;
+            if (enabled) self.compose_action_mask |= 1;
+        }
+        const gmail_row = row + @as(u16, if (two_rows) 1 else 0);
+        if (two_rows) x = 0;
+        if (show_gmail and x + gmail_label.len <= win.width) {
+            const focused = if (narrow_preview) self.dialog_focus.context == .preview and self.dialog_focus.index == 4 else self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 5;
+            _ = try self.actionButton(win, gmail_row, x, gmail_label, focused, enabled, .compose_gmail, 0);
+            self.compose_action_drawn |= 2;
+            if (enabled) self.compose_action_mask |= 2;
+        }
+        return rows;
+    }
+    fn composeDraw(self: *App, full: vaxis.Window) !void {
+        self.compose_layout_width = full.width;
+        self.compose_original_drawn = false;
+        self.compose_fold_drawn = false;
+        defer {
+            if (self.compose.attachment_focus and self.compose.attachment_cursor >= self.compose.attachments.len + 6 and !self.composeControlFocusable(self.compose.attachment_cursor)) self.leaveComposeAttachments(4, false);
+            if (self.dialog_focus.context == .preview and ((self.dialog_focus.index == 5 and !(self.compose_original_drawn and self.originalPolicyUnlocked())) or (self.dialog_focus.index == 6 and !self.compose_fold_drawn))) self.dialog_focus.index = 2;
+        }
+        self.compose_action_mask = 0;
+        self.compose_action_drawn = 0;
+        const action_rows = if (self.mode == .review) 0 else try self.composeActionsDraw(full);
+        const meter_rows: u16 = if (!browser_target and self.mode != .review and self.compose_active and self.compose.id.value().len > 0 and full.height >= 18) 1 else 0;
+        if (meter_rows != 0) try self.line(full, full.height -| action_rows -| 1, try self.composeSizeLabel(false), if (self.composeMeasureCurrent() and (self.compose_measure.over_limit or self.compose_measure.bytes.? >= self.compose_measure.max_bytes - self.compose_measure.max_bytes / 5)) .warning else .muted);
+        // Only a hidden control loses focus. A pending write keeps its drawn
+        // button selected for the next deliberate activation after completion.
+        if (self.compose.attachment_focus and self.compose.attachment_cursor > self.compose.attachments.len + 3 and self.compose.attachment_cursor < self.compose.attachments.len + 6 and !self.composeControlFocusable(self.compose.attachment_cursor)) self.leaveComposeAttachments(4, false);
+        if (self.dialog_focus.context == .preview and self.dialog_focus.index >= 3 and self.dialog_focus.index <= 4 and self.compose_action_drawn & (@as(u8, 1) << @intCast(@min(self.dialog_focus.index - 3, 1))) == 0) self.dialog_focus.index = 2;
+        const win = full.child(.{ .height = full.height -| action_rows -| meter_rows });
         if (self.mode == .review) {
             self.dialog_focus.ensure(.send, 0);
             self.mouse_hits.clear();
             const inner = self.panel(win, 0, win.width, " Review send · explicit confirmation ", true);
-            const content = inner.child(.{ .height = inner.height -| 2 });
-            const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
+            const content = inner.child(.{ .height = inner.height -| @as(u16, if (self.canFoldOriginal()) 3 else 2) });
+            const review = try std.fmt.allocPrint(self.frame.allocator(), "Sending account: {s}\nFrom: {s}\nTo: {s}\nCc: {s}\nBcc: {s}\nSubject: {s}\nFormat: {s}\nThread: {s}\n\n", .{ self.account(), if (self.compose.from.value().len > 0) self.compose.from.value() else self.account(), self.compose.fields[0].value(), self.compose.fields[1].value(), self.compose.fields[2].value(), self.compose.fields[3].value(), if (self.compose.body_format == .markdown) @as([]const u8, "Markdown → HTML + plain text") else if (self.compose.original != null and self.compose.include_original) "Plain note + original HTML" else "Plain text", self.compose.thread.value() });
             var rows = try self.flow(content, review, self.compose_preview_scroll, 0);
+            if (!browser_target) {
+                rows = try self.flowTone(content, try self.composeSizeLabel(true), self.compose_preview_scroll, rows, if (self.composeMeasureCurrent() and !self.compose_measure.sendable) .warning else .muted);
+                if (self.composeMeasureCurrent()) {
+                    if (self.compose_measure.without_original) |smaller| {
+                        if (self.compose.include_original and self.compose_intent != .forward and (self.compose_measure.bytes == null or smaller < self.compose_measure.bytes.?)) {
+                            const reduction = if (self.compose_measure.bytes) |bytes| try std.fmt.allocPrint(self.frame.allocator(), "Back → Q Reply without original: {d} bytes (saves {d})\n", .{ smaller, bytes - smaller }) else try std.fmt.allocPrint(self.frame.allocator(), "Back → Q Reply without original: {d} bytes\n", .{smaller});
+                            rows = try self.flowTone(content, reduction, self.compose_preview_scroll, rows, .muted);
+                        }
+                    }
+                    if (!self.compose_measure.sendable) rows = try self.flowTone(content, "Send unavailable · Back to reduce files or quoted content. Your complete draft is retained.\n\n", self.compose_preview_scroll, rows, .warning);
+                }
+            }
             if (self.gmailCopyWarning()) rows = try self.flowTone(content, if (self.gmail_send_ack) "[x] I checked Gmail Drafts and Sent; I understand sending here may duplicate a message sent there.\n\n" else "[ ] Gmail copy kept: it may have been edited or sent there. Check Gmail Drafts and Sent. Press g to acknowledge before sending this exact local content.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose_portable_warning) rows = try self.flowTone(content, "Address exceeds portable SMTP limits · Gmail may reject delivery.\n\n", self.compose_preview_scroll, rows, .warning);
             if (self.compose.omitted_attachments > 0) rows = try self.flowTone(content, "Text-only forward: original attachments are omitted.\n\n", self.compose_preview_scroll, rows, .warning);
@@ -11653,7 +12572,7 @@ const App = struct {
                 rows = try self.flowTone(content, if (!self.capabilities.attachments) "⚠ Your note mentions an attachment; no files are attached.\nAttachments are unavailable here. Back lets you revise the note.\n\n" else if (!self.capabilities.files) "⚠ Your note mentions an attachment; no files are attached.\nBack lets you revise the note.\n\n" else "⚠ Your note mentions an attachment; no files are attached.\nBack returns to the draft so you can add them.\n\n", self.compose_preview_scroll, rows, .warning);
             }
             if (self.compose.original) |original| {
-                const detail = try std.fmt.allocPrint(self.frame.allocator(), "Your note: {s} · branded\nOriginal: HTML retained · {d} embedded resources\nAttachments: {d} ordinary files\nMail apps may display the original differently.\n\n", .{ if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text", original.resources.len, self.compose.attachments.len });
+                const detail = try std.fmt.allocPrint(self.frame.allocator(), "Your note: {s}{s}\nOriginal: {s} · {d} embedded resources retained\nAttachments: {d} ordinary files\nMail apps may display the original differently.\n\n", .{ if (self.compose.body_format == .markdown) @as([]const u8, "Markdown") else "plain text", if (self.compose.include_original or self.compose.body_format == .markdown) @as([]const u8, " · branded") else "", if (self.compose.include_original) @as([]const u8, "included") else "OMITTED · not sent", original.resources.len, self.compose.attachments.len });
                 rows = try self.flowTone(content, detail, self.compose_preview_scroll, rows, .muted);
             } else if (self.compose_source_mode == .attached) {
                 rows = try self.flowTone(content, "Original attached as .eml · opens in the recipient's mail app.\n\n", self.compose_preview_scroll, rows, .muted);
@@ -11667,8 +12586,13 @@ const App = struct {
             self.compose_preview_height = content.height;
             self.compose_preview_scroll = @min(self.compose_preview_scroll, rows -| @as(usize, content.height));
             if (inner.height > 1) {
+                const fold_label = if (self.compose.original == null) (if (self.originalFolded()) "[z Expand quote]" else "[z Fold quote]") else if (self.originalFolded()) "[z Expand original]" else "[z Fold original]";
+                if (self.foldControlAvailable() and inner.height > 2 and fold_label.len <= inner.width) {
+                    _ = try self.actionButton(inner, inner.height - 3, 0, fold_label, self.dialog_focus.index == 3, true, .compose_original_fold, 0);
+                    self.compose_fold_drawn = true;
+                }
                 const x = try self.actionButton(inner, inner.height - 2, 0, "[Back]", self.dialog_focus.index == 0, true, .dialog_action, 0);
-                const next = try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome and (!self.gmailCopyWarning() or self.gmail_send_ack), .dialog_action, 1);
+                const next = try self.actionButton(inner, inner.height - 2, x, "[y Send]", self.dialog_focus.index == 1, self.job.future == null and !self.compose.unknown_outcome and (browser_target or (self.composeMeasureCurrent() and self.compose_measure.sendable and !self.compose_measure.over_limit)) and (!self.gmailCopyWarning() or self.gmail_send_ack), .dialog_action, 1);
                 if (self.gmailCopyWarning()) _ = try self.actionButton(inner, inner.height - 2, next, if (self.gmail_send_ack) "[g Acknowledged]" else "[g I checked Gmail]", self.dialog_focus.index == 2, self.job.future == null, .dialog_action, 2);
                 try self.line(inner, inner.height - 1, "Tab Controls · Enter Activate · j/k Scroll · Esc/q Back", .muted);
                 self.review_ready = true;
@@ -11682,8 +12606,8 @@ const App = struct {
             return;
         }
         const left_width = if (split) win.width * 3 / 5 else win.width;
-        const state_title = if (self.compose.gmailPaused()) "paused in Gmail · :gmail-draft" else if (self.gmailCopyWarning()) "local copy · Gmail copy kept" else if (self.compose.unknown_outcome) "protected recovery draft" else if (!self.capabilities.durable_drafts) "session memory · not sent" else if (self.job.future != null and self.job.kind == .autosave) "saving locally…" else if (self.compose.revision != self.compose.saved_revision) "autosave pending" else "saved locally · not sent";
-        const original_title: []const u8 = if (self.compose.original != null) " · formatted original" else if (self.compose_source_mode == .attached) " · original attached" else "";
+        const state_title = if (self.compose.gmailPaused()) "paused in Gmail · g Status" else if (self.gmailCopyWarning()) "local copy · Gmail copy kept" else if (self.compose.unknown_outcome) "protected recovery draft" else if (!self.capabilities.durable_drafts) "session memory · not sent" else if (self.job.future != null and self.job.kind == .autosave) "saving locally…" else if (self.compose.revision != self.compose.saved_revision) "autosave pending" else "saved locally · not sent";
+        const original_title: []const u8 = if (self.compose.omitted_attachments > 0) " · original files omitted" else if (self.compose.original != null) " · formatted original" else if (self.compose_source_mode == .attached) " · original attached" else "";
         const title = try std.fmt.allocPrint(self.frame.allocator(), " Compose · {s}{s} · {s} ", .{ self.composeIntentLabel(), original_title, state_title });
         const left = self.panel(win, 0, left_width, title, true);
         const alias_width: u16 = if (!self.capabilities.aliases) 0 else @min(@as(u16, 9), left.width);
@@ -11694,7 +12618,8 @@ const App = struct {
         if (self.capabilities.aliases and !self.compose.unknown_outcome and !self.compose.gmailPaused()) self.mouseArea(alias_action, .compose_from, 0);
         if (self.compose.unknown_outcome) try self.line(left, 1, if (browser_target) "Send unconfirmed · recovery draft retained" else try std.fmt.allocPrint(self.frame.allocator(), "Outcome unknown · {s} · draft kept in Drafts", .{if (validDiagnosticCode(self.compose.operation_error.value())) self.compose.operation_error.value() else "reason not recorded"}), .warning);
         const original_note = self.compose.original != null or self.compose_source_mode == .attached or self.compose.omitted_attachments > 0;
-        if (original_note and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.omitted_attachments > 0) "Text-only forward · original attachments are omitted" else if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", if (self.compose.omitted_attachments > 0) .warning else .muted);
+        if (original_note and self.compose.original == null and !self.compose.unknown_outcome) try self.line(left, 1, if (self.compose.omitted_attachments > 0) "Text-only forward · original attachments are omitted" else if (self.compose.original != null) "Write your note · original is protected" else "Write your note · original is attached as .eml", if (self.compose.omitted_attachments > 0) .warning else .muted);
+        if (!self.compose.unknown_outcome and self.compose.original != null) try self.composeOriginalControlsDraw(left, 1, false);
         const header_row: usize = if (self.compose.unknown_outcome or original_note) 2 else 1;
         for ([_][]const u8{ "To", "Cc", "Bcc", "Subject" }, 0..) |name, index| {
             const field = &self.compose.fields[index];
@@ -11713,30 +12638,40 @@ const App = struct {
             const format_area = body_label.child(.{ .x_off = body_label.width -| preview_width -| format_width, .width = format_width });
             const preview_area = body_label.child(.{ .x_off = body_label.width -| preview_width, .width = preview_width });
             try self.line(format_area, 0, if (self.compose.body_format == .markdown) "[Plain Ctrl+T]" else "[Markdown Ctrl+T]", if (self.compose.gmailPaused()) .muted else if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 1) .selected else .accent);
-            try self.line(preview_area, 0, "[Preview p]", if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2) .selected else .accent);
+            try self.line(preview_area, 0, if (self.compose.original == null and self.quotedTail() != null) (if (self.compose.insert_mode) "[    View]" else "[p/z View]") else "[Preview p]", if (self.compose.attachment_focus and self.compose.attachment_cursor == self.compose.attachments.len + 2) .selected else .accent);
             if (!self.compose.gmailPaused()) self.mouseArea(format_area, .compose_format, 0);
             self.mouseArea(preview_area, .compose_preview_toggle, 0);
         }
         const end_row = left.height;
         // Keep recent files visible without turning the composer into a file
         // manager. Ordinary terminal sizes retain at least five body rows.
-        const attachment_rows: usize = @min(self.compose.attachments.len, @min(3, end_row -| 14));
+        const attachment_rows: usize = @min(self.compose.attachments.len, @min(3, end_row -| (body_row + 7)));
         const attachment_row = end_row -| (attachment_rows + 1);
         const body = left.child(.{ .y_off = @intCast(body_row + 1), .height = @intCast(attachment_row -| (body_row + 1)) });
         self.mouseArea(body, .compose_field, 4);
-        // Measure the same sanitized graphemes and wrapping as the renderer.
-        // Newline counts alone cannot keep a long single paragraph's caret in view.
+        // Sanitize/layout once per body revision. Sparse checkpoints let caret
+        // movement and viewport repaint reuse that result without full copies.
         const value_in = self.compose.fields[4].value();
         const cursor_at = self.compose.fields[4].cursor;
         const editing_body = self.compose.selected == 4 and self.compose.insert_mode;
-        // A long authored source is cleaned into composer-owned frame pages.
-        const body_frame = self.composeFrameAllocator();
+        try self.compose.display.ensure(composeBacking(self.allocator), value_in, self.compose.fields[4].version, body.width, body.screen.width_method);
+        const caret = self.compose.display.caret(value_in, cursor_at);
         if (editing_body and body.width > 0 and body.height > 0) {
-            const caret = try self.caretPositionIn(body_frame, body, value_in, cursor_at);
             if (caret.row < self.compose.body_scroll) self.compose.body_scroll = caret.row;
             if (caret.row -| self.compose.body_scroll >= body.height) self.compose.body_scroll = caret.row + 1 - body.height;
         }
-        const body_lines = if (editing_body) try self.flowCaretIn(body_frame, body, value_in, cursor_at, self.compose.body_scroll) else try self.flowToneIn(body_frame, body, value_in, self.compose.body_scroll, 0, .text);
+        var source = self.compose.display.viewport(self.compose.body_scroll);
+        while (source.next()) |glyph| {
+            if (glyph.position.row < self.compose.body_scroll) continue;
+            if (glyph.position.row - self.compose.body_scroll >= body.height) break;
+            if (glyph.columns > body.width) continue;
+            body.writeCell(glyph.position.column, @intCast(glyph.position.row - self.compose.body_scroll), .{ .char = .{ .grapheme = glyph.text, .width = @intCast(@min(glyph.columns, 255)) }, .style = self.style(.text) });
+        }
+        if (editing_body and caret.row >= self.compose.body_scroll and caret.row - self.compose.body_scroll < body.height and caret.column < body.width) {
+            body.setCursorShape(.block);
+            body.showCursor(caret.column, @intCast(caret.row - self.compose.body_scroll));
+        }
+        const body_lines = if (editing_body) @max(self.compose.display.rows, caret.row + 1) else self.compose.display.rows;
         self.compose.body_scroll = @min(self.compose.body_scroll, body_lines -| @as(usize, body.height));
         try self.composeAttachmentsDraw(left, attachment_row, attachment_rows);
         if (split) {
@@ -12767,7 +13702,7 @@ const App = struct {
                 try selected_entries.array.append(selected_entry);
             }
             try selected_result.object.put(self.frame.allocator(), "calendars", selected_entries);
-            try self.meetings.calendars(account_index, address, selected_result);
+            try self.meetings.calendars(self.allocator, account_index, address, selected_result);
             // A fresh bounded list may legitimately be incomplete on every
             // request; retrying it rapidly cannot repair that limit.
             if (get(result, "complete") == .bool and !truth(get(result, "cached")) and !truth(get(result, "stale")))
@@ -13795,11 +14730,17 @@ const App = struct {
         if (!changed) for (next_entries, previous_entries) |next, previous| {
             if (!(try calendar_sources.jsonTarget(get(next, "calendar"))).eql(try calendar_sources.jsonTarget(get(previous, "calendar")))) changed = true;
         };
+        var catalogue_document: calendar_ui.Document = .{};
+        errdefer catalogue_document.deinit();
+        try catalogue_document.replace(self.allocator, result);
+        try self.calendar.resizeSources(self.allocator, next_entries.len);
         if (changed) {
-            for (&self.calendar.source_snapshots) |*document| document.deinit();
+            for (self.calendar.source_snapshots) |*document| document.deinit();
+            @memset(self.calendar.source_errors, .{});
             self.calendar.request_window = null;
         }
-        try self.calendar.calendars.replace(self.allocator, result);
+        self.calendar.calendars.deinit();
+        self.calendar.calendars = catalogue_document;
         self.calendar.picker = @min(self.calendar.picker, self.calendarEntries().len -| 1);
     }
     fn calendarNextAccount(self: *App) !bool {
@@ -13831,12 +14772,15 @@ const App = struct {
         try self.calendar.notice.set("Loading account calendars…");
     }
     fn calendarMergeSnapshots(self: *App) !void {
+        try self.calendar.resizeSources(self.allocator, self.calendarEntries().len);
         const window = self.calendar.request_window orelse return;
         var selected_identity: ?calendar_slot.Identity = null;
         if (self.calendarEventAt(self.calendar.selected)) |event| {
             if (calendar_slot.Identity.init(event)) |identity| selected_identity = try identity.copy(self.frame.allocator()) else |_| {}
         }
-        var inputs: [calendar_sources.max_sources]calendar_sources.Input = undefined;
+        var merge_arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer merge_arena.deinit();
+        const inputs = try merge_arena.allocator().alloc(calendar_sources.Input, self.calendarEntries().len);
         var count: usize = 0;
         for (self.calendarEntries(), 0..) |entry, index| {
             if (!self.calendarSourceVisible(entry)) continue;
@@ -13845,7 +14789,7 @@ const App = struct {
             inputs[count] = .{ .calendar = calendar, .snapshot = if (document.value == .null) null else get(document.value, "snapshot"), .refresh_error = self.calendar.source_errors[index].slice(), .catalogue_stale = truth(get(entry, "source_stale")) or truth(get(document.value, "cached")), .color = self.ui_preferences.calendar.color(try calendar_sources.jsonTarget(calendar)) };
             count += 1;
         }
-        const merged = try calendar_sources.merge(self.frame.allocator(), inputs[0..count], window, &self.calendar.zone);
+        const merged = try calendar_sources.merge(merge_arena.allocator(), inputs[0..count], window, &self.calendar.zone);
         try self.calendar.agenda.replace(self.allocator, merged);
         self.calendar.ready = true;
         var retained_selection = false;
@@ -13924,7 +14868,12 @@ const App = struct {
             }
         }
         if (self.job.kind == .calendar_agenda and self.calendar.source_loading) {
+            try self.calendar.resizeSources(self.allocator, self.calendarEntries().len);
             const index = self.calendar.source_cursor -| 1;
+            if (index >= self.calendar.source_errors.len) {
+                self.calendar.source_loading = false;
+                return false;
+            }
             try self.calendar.source_errors[index].set(code[0..@min(code.len, 128)]);
             if (std.mem.indexOf(u8, code, "Permission") != null or std.mem.indexOf(u8, code, "Grant") != null or std.mem.indexOf(u8, code, "Authorization") != null) self.calendar.source_snapshots[index].deinit();
             const more = try self.calendarNextSource();
@@ -14011,7 +14960,7 @@ const App = struct {
         }
         self.calendar.picker = index;
         if (self.calendar.source_message.len == 0) {
-            self.calendar.pending_selection = null;
+            self.calendar.clearPendingSelection();
             self.calendar.selection_dirty = false;
             try self.calendar.account.set(target.account);
             self.calendar.single_source = true;
@@ -14049,6 +14998,7 @@ const App = struct {
     }
     fn loadCalendarAgenda(self: *App, cache_only: bool) !void {
         if (self.calendar.calendar_id.len == 0) return;
+        try self.calendar.resizeSources(self.allocator, self.calendarEntries().len);
         self.preemptReadOnly();
         if (self.job.future != null) return error.OperationPending;
         self.calendar.resume_sources = false;
@@ -14058,7 +15008,7 @@ const App = struct {
         // A new window never displays an older period as if it were current.
         const previous = self.calendar.request_window;
         if (previous == null or previous.?.start_ms != window.start_ms or previous.?.end_ms != window.end_ms or !same(previous.?.time_zone, window.time_zone)) {
-            for (&self.calendar.source_snapshots) |*document| document.deinit();
+            for (self.calendar.source_snapshots) |*document| document.deinit();
             self.calendar.agenda.deinit();
             self.calendar.ready = false;
             self.calendar.selection_initialized = false;
@@ -14066,7 +15016,7 @@ const App = struct {
             self.calendar.week_reveal_selected = false;
         }
         self.calendar.request_window = window;
-        self.calendar.source_errors = @splat(.{});
+        @memset(self.calendar.source_errors, .{});
         self.calendar.source_cursor = 0;
         self.calendar.sources_cache_only = cache_only;
         self.calendar.source_loading = true;
@@ -14189,6 +15139,7 @@ const App = struct {
                 const snap = get(result, "snapshot");
                 const index = self.calendar.source_cursor -| 1;
                 if (index >= self.calendarEntries().len) return error.InvalidCalendarResponse;
+                try self.calendar.resizeSources(self.allocator, self.calendarEntries().len);
                 const requested_window = self.calendar.request_window orelse return error.CalendarWindowMismatch;
                 calendar_sources.validateSnapshot(self.frame.allocator(), .{ .calendar = get(self.calendarEntries()[index], "calendar"), .snapshot = snap }, requested_window) catch |err| {
                     if (!try self.calendarSourceFailed(@errorName(err))) try self.calendarFailure(@errorName(err));
@@ -14207,11 +15158,12 @@ const App = struct {
                 try compact_snapshot.object.put(self.frame.allocator(), "events", compact_events);
                 try compact.object.put(self.frame.allocator(), "snapshot", compact_snapshot);
                 var retained_bytes: usize = 0;
-                for (&self.calendar.source_snapshots, 0..) |*document, other| if (other != index) {
+                for (self.calendar.source_snapshots, 0..) |*document, other| if (other != index) {
                     retained_bytes += document.bytes;
                 };
-                const compact_bytes = try std.json.Stringify.valueAlloc(self.frame.allocator(), compact, .{});
-                if (compact_bytes.len + retained_bytes > 8 * 1024 * 1024) {
+                var compact_count: std.Io.Writer.Discarding = .init(&.{});
+                try std.json.Stringify.value(compact, .{}, &compact_count.writer);
+                if (compact_count.fullCount() + retained_bytes > 8 * 1024 * 1024) {
                     try self.calendar.source_errors[index].set("CalendarDisplayLimit");
                 } else {
                     try self.calendar.source_snapshots[index].replace(self.allocator, compact);
@@ -14519,7 +15471,7 @@ const App = struct {
     }
     fn calendarLoadCardZone(self: *App) !void {
         if (browser_target) return error.NativeOnly;
-        if (self.calendar.card.arena) |*arena| {
+        if (self.calendar.card.arena) |arena| {
             const owned = arena.allocator();
             const description = try calendar_ui.descriptionText(owned, text(get(self.calendar.card.value, "description")), text(get(self.calendar.card.value, "join_url")));
             if (self.calendar.card.value == .object) try self.calendar.card.value.object.put(owned, "display_description", .{ .string = description });
@@ -14600,7 +15552,7 @@ const App = struct {
                 try self.calendar.notice.set("Choose at least one readable calendar · Space selects");
                 return;
             }
-            const saved = self.ui_preferences.calendar;
+            var saved = self.ui_preferences.calendar;
             self.ui_preferences.calendar = pending.*;
             self.saveUiPreferences();
             if (self.preferences_warning) {
@@ -14608,7 +15560,8 @@ const App = struct {
                 try self.calendar.notice.set("Calendar selection could not be saved · Esc cancels");
                 return;
             }
-            self.calendar.pending_selection = null;
+            self.calendar.pending_selection = null; // ownership transferred
+            saved.deinit();
             self.meetings.list_after = @splat(0);
             try self.calendarRebuildCatalogue();
         }
@@ -14632,11 +15585,11 @@ const App = struct {
             return;
         }
         const target = try calendar_sources.jsonTarget(calendar);
-        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = try self.ui_preferences.calendar.clone(self.allocator);
         const pending = &self.calendar.pending_selection.?;
         const old = pending.find(target);
         const old_color = if (old) |choice| choice.color else null;
-        try pending.set(target, !selected, old_color);
+        try pending.set(self.allocator, target, !selected, old_color);
         self.calendar.selection_dirty = true;
         try self.calendarRebuildCatalogue();
         try self.calendar.notice.set(if (!selected and !readable) "Selection restored · no read access; this calendar is not shown" else "Space Show/hide · Enter Apply · Esc cancels unsaved selection");
@@ -14645,10 +15598,10 @@ const App = struct {
         if (self.calendar.source_message.len > 0 or self.calendar.picker >= self.calendarEntries().len) return;
         const calendar = get(self.calendarEntries()[self.calendar.picker], "calendar");
         const target = try calendar_sources.jsonTarget(calendar);
-        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = try self.ui_preferences.calendar.clone(self.allocator);
         const pending = &self.calendar.pending_selection.?;
         const next: calendar_sources.Color = @fromBackingInt(@as(u3, @intCast((@as(usize, @backingInt(pending.color(target))) + 1) % 8)));
-        try pending.set(target, pending.selected(calendar), next);
+        try pending.set(self.allocator, target, pending.selected(calendar), next);
         self.calendar.selection_dirty = true;
         try self.calendarRebuildCatalogue();
         try self.calendar.notice.set("c changes color · Enter Apply · Esc cancels unsaved selection");
@@ -14669,7 +15622,7 @@ const App = struct {
         if (previous) |key| for (self.calendarEntries()) |candidate| {
             if (key.target().eql(try calendar_sources.jsonTarget(get(candidate, "calendar")))) previous_listed = true;
         };
-        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = try self.ui_preferences.calendar.clone(self.allocator);
         const pending = &self.calendar.pending_selection.?;
         if (clear) pending.clearPreferred() else try pending.setPreferred(source);
         self.calendar.selection_dirty = true;
@@ -14688,7 +15641,7 @@ const App = struct {
             try self.calendar.notice.set("Account scope waits for the current operation · Esc cancels");
             return;
         }
-        if (self.calendar.pending_selection == null) self.calendar.pending_selection = self.ui_preferences.calendar;
+        if (self.calendar.pending_selection == null) self.calendar.pending_selection = try self.ui_preferences.calendar.clone(self.allocator);
         const pending = &self.calendar.pending_selection.?;
         pending.scope = if (pending.scope == .account) .all_accounts else .account;
         self.calendar.single_source = false;
@@ -14701,7 +15654,7 @@ const App = struct {
         self.calendar.resume_lists = false;
         self.calendar.list_for_picker = false;
         self.calendar.listing_all = false;
-        self.calendar.pending_selection = null;
+        self.calendar.clearPendingSelection();
         self.calendar.selection_dirty = false;
         try self.calendarRebuildCatalogue();
         self.calendar.focus = null;
@@ -14767,7 +15720,7 @@ const App = struct {
                 self.calendar.focus = null;
                 self.calendar.scroll = 0;
                 if (self.calendar.source_message.len == 0) {
-                    self.calendar.pending_selection = self.ui_preferences.calendar;
+                    self.calendar.pending_selection = try self.ui_preferences.calendar.clone(self.allocator);
                     self.calendar.selection_dirty = false;
                 }
                 try self.calendar.notice.set(if (self.calendar.source_message.len > 0) "Choose a destination · Enter Review invitation" else "Space Show/hide · p Priority · Enter Apply · o Only this · a Account scope · c Color");
@@ -15057,8 +16010,7 @@ const App = struct {
         for (self.calendarEntries(), 0..) |entry, index| {
             const source = calendar_sources.jsonTarget(get(entry, "calendar")) catch continue;
             if (!source.eql(target)) continue;
-            if (index < 26) return self.frame.allocator().dupe(u8, &.{@as(u8, @intCast('A' + index))});
-            return self.frame.allocator().dupe(u8, &.{ @as(u8, @intCast('A' + index / 26 - 1)), @as(u8, @intCast('A' + index % 26)) });
+            return calendar_sources.shortLabel(self.frame.allocator(), index);
         }
         return "?";
     }
@@ -15737,6 +16689,10 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
         .mono = if (environ.get("NO_COLOR")) |value_in| value_in.len > 0 else false,
     };
     defer app.deinit();
+    // Normal exit persists below. Unexpected rendering/input/allocation errors
+    // must preserve the same editable fields before deinit releases them. Keep
+    // the original failure even when the independent recovery attempt fails.
+    errdefer app.preserveDraftAfterFailure() catch |err| std.log.err("Terminal draft recovery failed: {s}", .{@errorName(err)});
     app.zone = timezone.load(io, allocator, environ) catch |err| switch (err) {
         error.Canceled, error.OutOfMemory => return err,
         else => .{ .unavailable = true },
@@ -15772,7 +16728,9 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     try loop.installResizeHandler();
     try vx.enterAltScreen(tty.writer());
     if (tty.getWinsize()) |size| try app.resize(size) else |_| {}
-    _ = app.loadCachedList("") catch |err| blk: {
+    if (app.folder == 2) {
+        try app.reloadWithRefresh(false);
+    } else _ = app.loadCachedList("") catch |err| blk: {
         app.sayFailure("Cache unavailable", @errorName(err));
         break :blk false;
     };
@@ -15786,7 +16744,7 @@ pub fn run(io: Io, allocator: Allocator, client: types.Client, options: types.Op
     // screen before terminal capability negotiation or any provider fetch.
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
     try setMouseReporting(&vx, tty.writer(), !options.no_mouse);
-    try app.refreshMailbox();
+    if (!app.drafts_list) try app.refreshMailbox();
     main_loop: while (!app.quit and received_signal.load(.acquire) == 0) {
         app.finish() catch |err| app.sayError(@errorName(err));
         app.adoptBackgroundCache() catch {};
@@ -18421,6 +19379,299 @@ test "compose attachments: protected recovery and pending writes block local att
     try std.testing.expectEqual(@as(usize, 0), client.provider_calls);
 }
 
+test "compose actions: complete labels and keyboard focus survive narrow split and full preview layouts" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    for ([_][2]u16{ .{ 38, 24 }, .{ 64, 24 }, .{ 90, 30 }, .{ 120, 40 }, .{ 180, 50 } }) |size| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var vx: vaxis.Vaxis = undefined;
+        vx.screen = try vaxis.Screen.init(a, .{ .cols = size[0], .rows = size[1], .x_pixel = 0, .y_pixel = 0 });
+        defer vx.screen.deinit(a);
+        app.vx = &vx;
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.mode = .compose;
+        app.compose_active = true;
+        app.compose.selected = 4;
+        try app.compose.id.set(a, "action-draft");
+        try app.compose.fields[4].set(a, "Exact body\nSecond line\nThird line\nFourth line\nFifth line");
+        try app.compose.replaceAttachments(a, &.{
+            .{ .id = "one", .filename = "one.txt", .size = 1 },
+            .{ .id = "two", .filename = "two.txt", .size = 1 },
+            .{ .id = "three", .filename = "three.txt", .size = 1 },
+        });
+        const win = vx.window().child(.{ .y_off = 2, .height = size[1] - 4 });
+        try app.composeDraw(win);
+        const rendered = try markdownTestScreenText(a, &vx.screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "[P Preview in browser]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "[g Continue in Gmail]") != null);
+        try std.testing.expectEqual(@as(u8, 3), app.compose_action_mask);
+        var buttons: usize = 0;
+        var body_height: usize = 0;
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+            if (hit.kind == .compose_field and hit.index == 4) body_height = hit.rect.height;
+            if (hit.kind != .compose_browser_preview and hit.kind != .compose_gmail) continue;
+            buttons += 1;
+            try std.testing.expect(hit.rect.x + hit.rect.width <= size[0]);
+            try std.testing.expect(hit.rect.y + hit.rect.height <= size[1] - 2);
+            for (app.mouse_hits.areas[0..app.mouse_hits.count]) |other| {
+                if (other.kind != .compose_attachment_add and other.kind != .compose_attachment_remove and other.kind != .compose_field) continue;
+                try std.testing.expect(other.rect.y + other.rect.height <= hit.rect.y);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 2), buttons);
+        try std.testing.expect(body_height >= 5);
+        // Preserve the existing attachment/format/preview/Alias order, then
+        // visit the new actions before wrapping back to the text fields.
+        for (0..app.compose.attachments.len + 6) |index| {
+            try app.onComposeKey(.{ .codepoint = Key.tab });
+            try std.testing.expect(app.compose.attachment_focus);
+            try std.testing.expectEqual(index, app.compose.attachment_cursor);
+        }
+        try app.onComposeKey(.{ .codepoint = Key.tab });
+        try std.testing.expect(!app.compose.attachment_focus and app.compose.selected == 0);
+        var remaining = app.compose.attachments.len + 6;
+        while (remaining > 0) {
+            remaining -= 1;
+            try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expectEqual(remaining, app.compose.attachment_cursor);
+        }
+        try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+        try std.testing.expect(!app.compose.attachment_focus and app.compose.selected == 4);
+        if (size[0] < 90) {
+            app.compose_preview_full = true;
+            app.dialog_focus.reset(.preview, 0);
+            app.mouse_hits.clear();
+            vx.screen.clear();
+            try app.composeDraw(win);
+            try std.testing.expectEqual(@as(u8, 3), app.compose_action_mask);
+            for (1..5) |index| {
+                try app.onComposeKey(.{ .codepoint = Key.tab });
+                try std.testing.expectEqual(index, app.dialog_focus.index);
+            }
+            try app.onComposeKey(.{ .codepoint = Key.tab });
+            try std.testing.expectEqual(@as(usize, 0), app.dialog_focus.index);
+            try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            try std.testing.expectEqual(@as(usize, 4), app.dialog_focus.index);
+        }
+        try std.testing.expectEqualStrings("Exact body\nSecond line\nThird line\nFourth line\nFifth line", app.compose.fields[4].value());
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    }
+}
+
+test "compose actions: insert letters stay text and guarded controls have no hidden focus" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 64, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.mode = .compose;
+    app.compose_active = true;
+    try app.compose.id.set(a, "action-draft");
+    for ([_]usize{ 0, 3, 4 }) |field| {
+        app.compose.selected = field;
+        app.compose.insert_mode = true;
+        try app.onComposeKey(.{ .codepoint = 'P', .text = "P" });
+        try app.onComposeKey(.{ .codepoint = 'g', .text = "g" });
+        try std.testing.expectEqualStrings("Pg", app.compose.fields[field].value());
+        try std.testing.expect(app.job.future == null);
+    }
+    try app.composeDraw(vx.window());
+    const rendered = try markdownTestScreenText(a, &vx.screen);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "[  Preview in browser]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "[  Continue in Gmail]") != null);
+    app.compose.insert_mode = false;
+    app.compose.unknown_outcome = true;
+    app.mouse_hits.clear();
+    vx.screen.clear();
+    try app.composeDraw(vx.window());
+    try std.testing.expectEqual(@as(u8, 1), app.compose_action_mask);
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.kind != .compose_gmail);
+    try app.onComposeKey(.{ .codepoint = Key.tab });
+    try std.testing.expectEqual(app.compose.attachments.len + 4, app.compose.attachment_cursor);
+    try app.onComposeKey(.{ .codepoint = 'g' });
+    try std.testing.expect(app.job.future == null and app.compose.unknown_outcome);
+    app.capabilities.open_urls = false;
+    app.mouse_hits.clear();
+    try app.composeDraw(vx.window());
+    try std.testing.expectEqual(@as(u8, 0), app.compose_action_mask);
+    try std.testing.expect(!app.compose.attachment_focus);
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.kind != .compose_browser_preview and hit.kind != .compose_gmail);
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "compose actions: keys mouse and Enter recover unfinished recipients before browser preview and only review Gmail" {
+    if (browser_target) return error.SkipZigTest;
+    const Transport = struct {
+        calls: usize = 0,
+        fn call(ctx: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const request = try std.json.parseFromSlice(Value, a, raw, .{});
+            defer request.deinit();
+            try std.testing.expectEqualStrings("action-draft", text(get(request.value, "draftId")));
+            const cmd = text(get(request.value, "cmd"));
+            if (same(cmd, "draft.measure")) return a.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"InvalidRecipients\"}}");
+            defer self.calls += 1;
+            switch (self.calls) {
+                0 => {
+                    try std.testing.expectEqualStrings("draft.recovery-save", cmd);
+                    const fields = items(get(get(request.value, "draft"), "recoveryFields"));
+                    try std.testing.expectEqualStrings("unfinished recipient <", text(fields[0]));
+                    try std.testing.expectEqualStrings("Exact preview body", text(fields[4]));
+                    return a.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"action-draft\"}}");
+                },
+                1, 3 => {
+                    try std.testing.expectEqualStrings("draft.open-preview", cmd);
+                    try std.testing.expect(get(request.value, "draft") == .null);
+                    return a.dupe(u8, "{\"ok\":true,\"data\":{\"fixture\":true,\"opened\":false}}");
+                },
+                2 => {
+                    try std.testing.expectEqualStrings("draft.gmail-info", cmd);
+                    return a.dupe(u8, "{\"ok\":true,\"data\":{\"draftId\":\"action-draft\",\"contentDigest\":\"fixture\"}}");
+                },
+                else => return error.UnexpectedMutation,
+            }
+        }
+    };
+    const Activation = enum { key, shifted_key, enter, mouse, preview_enter };
+    const a = std.testing.allocator;
+    for ([_]Activation{ .key, .shifted_key, .enter, .mouse, .preview_enter }) |activation| {
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        vx.screen = try vaxis.Screen.init(a, .{ .cols = if (activation == .preview_enter) 64 else 120, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer vx.screen.deinit(a);
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        var transport: Transport = .{};
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        app.loop = loop;
+        app.vx = &vx;
+        app.client = .{ .ctx = &transport, .callFn = Transport.call };
+        defer app.deinit();
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\",\"capabilities\":[\"mail-drafts\"]}]", .{}));
+        app.mode = .compose;
+        app.compose_active = true;
+        app.compose.selected = 4;
+        app.compose_preview_full = activation == .preview_enter;
+        try app.compose.id.set(a, "action-draft");
+        try app.compose.fields[0].set(a, "unfinished recipient <");
+        try app.compose.fields[4].set(a, "Exact preview body");
+        app.compose.revision = 1;
+        try app.composeDraw(vx.window());
+        switch (activation) {
+            .key => try app.onComposeKey(.{ .codepoint = 'P' }),
+            .shifted_key => try app.onComposeKey(.{ .codepoint = 'p', .mods = .{ .shift = true } }),
+            .enter => {
+                for (0..5) |_| try app.onComposeKey(.{ .codepoint = Key.tab });
+                try std.testing.expectEqual(@as(usize, 4), app.compose.attachment_cursor);
+                try app.onComposeKey(.{ .codepoint = Key.enter });
+            },
+            .preview_enter => {
+                for (0..3) |_| try app.onComposeKey(.{ .codepoint = Key.tab });
+                try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
+                try app.onComposeKey(.{ .codepoint = Key.enter });
+            },
+            .mouse => {
+                const hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                    if (hit.kind == .compose_browser_preview) break hit;
+                } else return error.MissingBrowserButton;
+                try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+            },
+        }
+        try std.testing.expectEqual(JobKind.save_browser, app.job.kind);
+        // Draw the pending write frame before applying its result. Temporary
+        // disablement must not turn a subsequent Enter into Body edit or Back.
+        try std.testing.expect(app.job.future != null);
+        app.mouse_hits.clear();
+        try app.composeDraw(vx.window());
+        try std.testing.expectEqual(@as(u8, 0), app.compose_action_mask);
+        try std.testing.expectEqual(@as(u8, 3), app.compose_action_drawn);
+        for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.kind != .compose_browser_preview and hit.kind != .compose_gmail);
+        if (activation == .enter or activation == .mouse) try std.testing.expect(app.compose.attachment_focus and app.compose.attachment_cursor == 4);
+        if (activation == .preview_enter) try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
+        app.job.future.?.await(app.io);
+        try app.finish();
+        try std.testing.expectEqual(JobKind.open, app.job.kind);
+        app.job.future.?.await(app.io);
+        try app.finish();
+        if (app.job.future != null and app.job.kind == .draft_measure) {
+            app.job.future.?.await(app.io);
+            try app.finish();
+        }
+        try std.testing.expectEqual(@as(usize, 2), transport.calls);
+        try app.composeDraw(vx.window());
+        if (activation == .enter or activation == .mouse) try std.testing.expect(app.compose.attachment_focus and app.compose.attachment_cursor == 4);
+        if (activation == .preview_enter) try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
+        // Autosave is explicitly preemptible: actions stay enabled as well as
+        // focused. A completed future still exercises its pending UI frame.
+        {
+            app.job.kind = .autosave;
+            app.job.future = .{ .any_future = null, .result = {} };
+            defer app.job.future = null;
+            app.mouse_hits.clear();
+            try app.composeDraw(vx.window());
+            try std.testing.expectEqual(@as(u8, 3), app.compose_action_mask);
+            var autosave_actions: usize = 0;
+            for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                if (hit.kind == .compose_browser_preview or hit.kind == .compose_gmail) autosave_actions += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 2), autosave_actions);
+            if (activation == .enter or activation == .mouse) try std.testing.expect(app.compose.attachment_focus and app.compose.attachment_cursor == 4);
+            if (activation == .preview_enter) try std.testing.expectEqual(@as(usize, 3), app.dialog_focus.index);
+        }
+        try std.testing.expectEqualStrings("unfinished recipient <", app.compose.fields[0].value());
+        try std.testing.expectEqualStrings("Exact preview body", app.compose.fields[4].value());
+        try app.onComposeKey(.{ .codepoint = 'g' });
+        try std.testing.expectEqual(JobKind.gmail_draft_info, app.job.kind);
+        app.job.future.?.await(app.io);
+        try app.finish();
+        try std.testing.expectEqual(UxOverlay.gmail_draft, app.ux_overlay);
+        try std.testing.expectEqual(@as(usize, 3), transport.calls);
+        try std.testing.expectEqual(@as(usize, 0), app.ux_selected);
+        try std.testing.expectEqual(@as(usize, 0), app.uxAt(app.ux_selected).?.index);
+        try std.testing.expectEqual(@as(usize, 1), app.uxAt(1).?.index); // Upload is available, but never the default.
+        try app.onUxKey(.{ .codepoint = 'g' });
+        try std.testing.expectEqual(UxOverlay.gmail_draft, app.ux_overlay);
+        try std.testing.expectEqual(@as(usize, 0), app.ux_selected);
+        try app.onUxKey(.{ .codepoint = Key.enter });
+        try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(@as(usize, 3), transport.calls);
+        try app.compose.replaceGmailLink(a, try readerInvitationTestValue(app.frame.allocator(), "{\"draftId\":\"action-draft\",\"attemptMessageId\":\"<fixture@example.test>\",\"uploadedDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"phase\":\"unknown\",\"paused\":true}"));
+        const revision = app.compose.revision;
+        app.mouse_hits.clear();
+        vx.screen.clear();
+        try app.composeDraw(vx.window());
+        const paused = try markdownTestScreenText(a, &vx.screen);
+        defer a.free(paused);
+        try std.testing.expect(std.mem.indexOf(u8, paused, "[g Gmail status]") != null);
+        try app.onComposeKey(.{ .codepoint = 'P' });
+        try std.testing.expectEqual(JobKind.open, app.job.kind);
+        app.job.future.?.await(app.io);
+        try app.finish();
+        try std.testing.expectEqual(@as(usize, 4), transport.calls);
+        try std.testing.expect(app.compose.gmailPaused());
+        try std.testing.expectEqual(revision, app.compose.revision);
+        try std.testing.expect(std.mem.indexOf(u8, app.status[0..app.status_len], "Gmail may be newer") != null);
+        try std.testing.expect(app.status_len <= 38 + 1); // One extra UTF-8 byte for the middle dot.
+        if (activation == .enter or activation == .mouse) {
+            try app.onComposeKey(.{ .codepoint = Key.escape });
+            try std.testing.expect(!app.compose.attachment_focus and app.compose_active and app.compose.gmailPaused());
+        }
+    }
+}
+
 test "compose attachments: Tab reaches Add and every remove button without changing field contents" {
     var client: CacheTestClient = .{};
     var app = client.app(std.testing.allocator);
@@ -19920,6 +21171,309 @@ test "editor persistence: exit save uses operation acknowledgement rather than r
     }
 }
 
+test "native settled recovery: refused saves fork current raw edits without continuing old actions" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Recovery = struct {
+        calls: usize = 0,
+        transport_error: bool,
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            const cmd = text(get(request, "cmd"));
+            try std.testing.expect(same(cmd, "draft.update") or same(cmd, "draft.recovery-save"));
+            try std.testing.expectEqualStrings("sent-source", text(get(request, "draftId")));
+            if (!truth(get(request, "forkIfSettled"))) {
+                if (self.transport_error) return error.ArchivedDraftReadOnly;
+                return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"ArchivedDraftReadOnly\"}}");
+            }
+            try std.testing.expectEqualStrings("draft.recovery-save", cmd);
+            const draft = get(request, "draft");
+            const fields = items(get(draft, "recoveryFields"));
+            try std.testing.expectEqual(@as(usize, 5), fields.len);
+            try std.testing.expectEqualStrings("Unfinished recipient <", text(fields[0]));
+            try std.testing.expectEqualStrings("Newest unsaved note 🌋\nExact bytes", text(fields[4]));
+            try std.testing.expect(!truth(get(draft, "includeOriginal")));
+            try std.testing.expect(get(draft, "original") == .null);
+            return allocator.dupe(u8, "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"recovered-local\",\"forkedFrom\":\"sent-source\"}}");
+        }
+    };
+    for ([_]JobKind{ .autosave, .save_review, .save_back, .save_browser, .save_gmail, .save }) |kind| for ([_]bool{ false, true }) |transport_error| {
+        var recovery: Recovery = .{ .transport_error = transport_error };
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client = .{ .ctx = &recovery, .callFn = Recovery.call };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .compose;
+        app.compose.revision = 1;
+        app.compose.include_original = false;
+        app.compose.original = .{ .bodyText = "Exact original", .bodyHtml = "<p>Exact original</p>" };
+        app.compose.gmail_link = .{ .draftId = "sent-source", .phase = .missing, .paused = false, .attemptMessageId = "<old@example.test>", .uploadedDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+        try app.compose.id.set(a, "sent-source");
+        try app.compose.operation_id.set(a, "old-reviewed-operation");
+        try app.compose.fields[0].set(a, "Unfinished recipient <");
+        try app.compose.fields[4].set(a, "Newest unsaved note 🌋\nExact bytes");
+        app.review_ready = true;
+        app.gmail_review_ready = true;
+        app.gmail_send_ack = true;
+        app.compose_measure.measured = true;
+        if (kind == .autosave) {
+            app.compose.insert_mode = true;
+            app.compose.selected = 4;
+        }
+        const expected_mode: Mode = if (kind == .autosave and transport_error) .command else .compose;
+        if (kind == .save) {
+            // Signal/EOF must wait for the refused update's recovery write.
+            try app.persistDraftAtExit();
+        } else {
+            if (kind == .autosave) try app.autosaveDraft() else try app.start(kind, .{ .cmd = "draft.update", .account = app.account(), .draftId = app.compose.id.value() });
+            app.mode = if (kind == .save_review) .review else expected_mode;
+            app.job.future.?.await(app.io);
+            try app.finish();
+            try std.testing.expect(app.job.future != null and app.job.recovery_fork);
+            try std.testing.expectEqual(expected_mode, app.mode);
+            if (kind == .autosave) try std.testing.expect(app.compose.insert_mode);
+            try std.testing.expect(!app.review_ready and !app.compose_measure.measured);
+            app.job.future.?.await(app.io);
+            try app.finish();
+        }
+        try std.testing.expectEqual(@as(usize, 2), recovery.calls);
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqualStrings("recovered-local", app.compose.id.value());
+        try std.testing.expect(app.compose.operation_id.value().len == 0 and app.compose.gmail_link == null);
+        try std.testing.expect(!app.review_ready and !app.gmail_review_ready and !app.gmail_send_ack and !app.compose_measure.measured);
+        try std.testing.expectEqualStrings("Previous draft sent elsewhere; edits saved as a new draft", app.status[0..app.status_len]);
+        if (kind == .save_back) {
+            try std.testing.expect(!app.compose_active and app.mode == .browse);
+        } else {
+            try std.testing.expect(app.compose_active and app.mode == expected_mode);
+            try std.testing.expectEqual(app.compose.revision, app.compose.saved_revision);
+            try std.testing.expectEqualStrings("Newest unsaved note 🌋\nExact bytes", app.compose.fields[4].value());
+            try std.testing.expectEqualStrings("Exact original", app.compose.original.?.bodyText);
+            try std.testing.expect(!app.compose.include_original);
+            if (kind == .autosave) {
+                try std.testing.expect(app.compose.insert_mode);
+                // Returning from a background save cannot reinterpret typing
+                // as Save/Back, original-policy changes, or Gmail actions.
+                app.mode = .compose;
+                for ("qQg") |letter| try app.onComposeKey(.{ .codepoint = letter, .text = &.{letter} });
+                try std.testing.expectEqualStrings("Newest unsaved note 🌋\nExact bytesqQg", app.compose.fields[4].value());
+                try std.testing.expect(!app.compose.include_original and app.ux_overlay == .none and app.job.future == null);
+            }
+        }
+    };
+}
+
+test "native settled recovery: fatal acknowledgement identity and protected drafts never fork" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Recovery = struct {
+        response: []const u8,
+        calls: usize = 0,
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            try std.testing.expectEqualStrings("draft.recovery-save", text(get(request, "cmd")));
+            try std.testing.expect(truth(get(request, "forkIfSettled")));
+            try std.testing.expectEqualStrings("Exact unsaved note", text(items(get(get(request, "draft"), "recoveryFields"))[4]));
+            return allocator.dupe(u8, self.response);
+        }
+    };
+    const cases = [_][]const u8{
+        "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"new-local\",\"forkedFrom\":\"sent-source\"}}",
+        "{\"ok\":true,\"account\":\"other@example.test\",\"data\":{\"id\":\"new-local\",\"forkedFrom\":\"sent-source\"}}",
+        "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"new-local\",\"forkedFrom\":\"other-source\"}}",
+        "{\"ok\":true,\"data\":{\"id\":\"new-local\",\"forkedFrom\":\"sent-source\"}}",
+        "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"new-local\"}}",
+    };
+    for (cases, 0..) |response, index| {
+        var recovery: Recovery = .{ .response = response };
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client = .{ .ctx = &recovery, .callFn = Recovery.call };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .compose;
+        app.compose.revision = 1;
+        try app.compose.id.set(a, "sent-source");
+        try app.compose.fields[4].set(a, "Exact unsaved note");
+        if (index == 0) try app.preserveDraftAfterFailure() else try std.testing.expectError(error.DraftPersistenceFailed, app.preserveDraftAfterFailure());
+        try std.testing.expectEqual(@as(usize, 1), recovery.calls);
+        try std.testing.expectEqual(@as(u64, if (index == 0) 1 else 0), app.compose.saved_revision);
+        // Recovery survives even when updating/drawing this UI is impossible.
+        try std.testing.expectEqualStrings("sent-source", app.compose.id.value());
+        try std.testing.expectEqualStrings("Exact unsaved note", app.compose.fields[4].value());
+    }
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.compose_active = true;
+    try app.compose.id.set(a, "protected-source");
+    try app.job.draft_target.set("protected-source");
+    for (0..7) |guard| {
+        app.compose.unknown_outcome = guard == 0;
+        app.compose.gmail_guard_unknown = guard == 1;
+        app.grace_active = guard == 2;
+        app.grace_recovery = guard == 3;
+        app.job.account_index = if (guard == 4) 1 else 0;
+        app.job.generation = if (guard == 5) app.generation + 1 else app.generation;
+        app.job.recovery_fork = guard == 6;
+        try std.testing.expect(!(try app.recoverSettledDraft(.autosave)));
+    }
+    app.grace_active = false;
+    app.grace_recovery = false;
+    try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+}
+
+test "native failure recovery: exhausted pending and frame allocations preserve exact draft fields" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const Phase = enum { pending, draw };
+    const Recovery = struct {
+        calls: usize = 0,
+        reject: bool = false,
+        fn call(ctx: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const parsed = try std.json.parseFromSlice(Value, allocator, request, .{});
+            defer parsed.deinit();
+            const value = parsed.value;
+            try std.testing.expectEqualStrings("draft.recovery-save", text(get(value, "cmd")));
+            try std.testing.expectEqualStrings("personal@example.test", text(get(value, "account")));
+            try std.testing.expectEqualStrings("local-draft", text(get(value, "draftId")));
+            try std.testing.expect(truth(get(value, "acknowledgementOnly")));
+            const draft = get(value, "draft");
+            const fields = items(get(draft, "recoveryFields"));
+            try std.testing.expectEqual(@as(usize, 5), fields.len);
+            try std.testing.expectEqualStrings("Unfinished recipient <", text(fields[0]));
+            try std.testing.expectEqualStrings("Exact subject 🌋", text(fields[3]));
+            try std.testing.expectEqualStrings("Unsaved text\nKeep every byte 🌋", text(fields[4]));
+            try std.testing.expect(get(draft, "original") == .null);
+            if (self.reject) return error.CacheBusy;
+            return allocator.dupe(u8, "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"local-draft\"}}");
+        }
+        fn fail(app: *App, phase: Phase) !void {
+            // The same unwind boundary as run(), with actual failing work.
+            errdefer app.preserveDraftAfterFailure() catch {};
+            switch (phase) {
+                .pending => try app.dispatchPending(),
+                .draw => try app.draw(),
+            }
+        }
+    };
+    const a = std.testing.allocator;
+    for ([_]Phase{ .pending, .draw }) |phase| for ([_]bool{ false, true }) |reject| {
+        const before = send_memory.snapshot().allocatorUsedBytes;
+        var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+        var recovery: Recovery = .{ .reject = reject };
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        vx.screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer vx.screen.deinit(a);
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        app.loop = loop;
+        app.vx = &vx;
+        app.client = .{ .ctx = &recovery, .callFn = Recovery.call };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.mode = .compose;
+        app.compose_active = true;
+        app.compose.revision = 1;
+        app.autosave_due = phase == .pending;
+        try app.compose.id.set(a, "local-draft");
+        try app.compose.fields[0].set(a, "Unfinished recipient <");
+        try app.compose.fields[3].set(a, "Exact subject 🌋");
+        try app.compose.fields[4].set(a, "Unsaved text\nKeep every byte 🌋");
+        app.frame.deinit();
+        app.frame = .init(failing.allocator());
+        app.allocator = failing.allocator();
+        defer app.allocator = a;
+        try std.testing.expectError(error.OutOfMemory, Recovery.fail(&app, phase));
+        try std.testing.expectEqual(@as(usize, 1), recovery.calls);
+        try std.testing.expectEqual(@as(u64, if (reject) 0 else 1), app.compose.saved_revision);
+        try std.testing.expectEqualStrings("Unsaved text\nKeep every byte 🌋", app.compose.fields[4].value());
+        try std.testing.expect(app.job.future == null);
+        try std.testing.expectEqual(before, send_memory.snapshot().allocatorUsedBytes);
+    };
+}
+
+test "native failure recovery: joins interrupted send and never rewrites protected draft" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const Held = struct {
+        io: Io,
+        entered: Io.Event = .unset,
+        release: Io.Event = .unset,
+        canceled: std.atomic.Value(bool) = .init(false),
+        calls: usize = 0,
+        refused: usize = 0,
+        fn call(ctx: *anyopaque, _: Allocator, _: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            self.entered.set(self.io);
+            self.release.wait(self.io) catch |err| {
+                self.canceled.store(err == error.Canceled, .release);
+                return err;
+            };
+            return error.UnexpectedCompletion;
+        }
+        fn receipt(ctx: *anyopaque, request: []const u8, accepted: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!accepted and std.mem.indexOf(u8, request, "draft.send") != null) self.refused += 1;
+        }
+    };
+    const a = std.testing.allocator;
+    var held: Held = .{ .io = std.testing.io };
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    app.client = .{ .ctx = &held, .callFn = Held.call, .sendReceiptFn = Held.receipt };
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.mode = .review;
+    app.compose_active = true;
+    try app.compose.id.set(a, "protected-draft");
+    try app.compose.fields[4].set(a, "Already reviewed snapshot");
+    try app.start(.send, .{ .cmd = "draft.send", .account = app.account(), .draftId = app.compose.id.value() });
+    try held.entered.waitTimeout(app.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(10) } });
+    try app.preserveDraftAfterFailure();
+    try std.testing.expect(held.canceled.load(.acquire));
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expect(app.compose.unknown_outcome);
+    try std.testing.expectEqual(@as(usize, 1), held.calls);
+    try std.testing.expectEqual(@as(usize, 1), held.refused);
+    try app.preserveDraftAfterFailure();
+    try std.testing.expectEqual(@as(usize, 1), held.calls);
+}
+
 test "status polish: queued recipient cache loading preserves same-context diagnostic and help only" {
     const CachedRecipients = struct {
         fn call(_: *anyopaque, allocator: Allocator, request: []const u8) ![]const u8 {
@@ -21001,6 +22555,7 @@ test "formatted composer: received classes stay untrusted and snapshot preview s
         trusted_keyword = trusted_keyword or span.style.code_token == .keyword;
     };
     try std.testing.expect(trusted_keyword);
+    _ = try app.composeOriginalDraw(vx.window(), 0, 0);
     for (app.compose_original_preview.?.document.blocks) |block| for (block.spans) |span| {
         try std.testing.expectEqual(@import("html_document.zig").CodeToken.none, span.style.code_token);
         try std.testing.expectEqual(@import("html_document.zig").FooterStyle.none, span.style.footer);
@@ -21327,11 +22882,33 @@ test "local UI: send receipt consumers acknowledge only after safe application a
 test "local UI: paste coalesces autosave until the complete literal body is present" {
     const a = std.testing.allocator;
     const Observer = struct {
-        calls: std.atomic.Value(usize) = .init(0),
-        fn call(ctx: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+        const expected_body: [512]u8 = @splat('x');
+        saves: std.atomic.Value(usize) = .init(0),
+        measures: std.atomic.Value(usize) = .init(0),
+        unexpected: std.atomic.Value(usize) = .init(0),
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            _ = self.calls.fetchAdd(1, .monotonic);
-            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"paste-draft\"}}");
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            try std.testing.expectEqualStrings("self@example.test", text(get(request, "account")));
+            try std.testing.expectEqualStrings("paste-draft", text(get(request, "draftId")));
+            const command = text(get(request, "cmd"));
+            if (same(command, "draft.recovery-save")) {
+                const fields = items(get(get(request, "draft"), "recoveryFields"));
+                try std.testing.expectEqual(@as(usize, 5), fields.len);
+                try std.testing.expectEqualStrings(&expected_body, text(fields[4]));
+                try std.testing.expectEqual(@as(usize, 0), self.saves.fetchAdd(1, .release));
+                return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"paste-draft\"}}");
+            }
+            if (same(command, "draft.measure")) {
+                // A completed save requests a read-only size diagnostic. It
+                // must observe the one complete paste, never a partial write.
+                try std.testing.expectEqual(@as(usize, 1), self.saves.load(.acquire));
+                try std.testing.expectEqual(@as(usize, 0), self.measures.fetchAdd(1, .release));
+                const digest = try @import("draft_link.zig").contentDigest(allocator, .{ .bodyText = &expected_body }, "self@example.test");
+                return std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = .{ .operationId = text(get(request, "operationId")), .revision = integer(get(request, "revision")), .contentDigest = digest[0..], .exact = true, .bytes = 1000, .maxBytes = 2000, .sendable = false, .admissionError = "MissingRecipient" } }, .{});
+            }
+            _ = self.unexpected.fetchAdd(1, .release);
+            return error.UnexpectedProviderCall;
         }
     };
     var observer: Observer = .{};
@@ -21358,14 +22935,29 @@ test "local UI: paste coalesces autosave until the complete literal body is pres
         try app.autosaveDraft();
         try std.testing.expect(app.job.future == null);
     }
-    try std.testing.expectEqual(@as(usize, 0), observer.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), observer.saves.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), observer.measures.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), observer.unexpected.load(.acquire));
     try std.testing.expect(app.autosave_due);
     app.pasteEnd();
     try app.autosaveDraft();
     app.job.future.?.await(app.io);
+    if (app.job.failure) |err| return err;
     try app.finish();
-    try std.testing.expectEqual(@as(usize, 1), observer.calls.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 512), app.compose.fields[4].value().len);
+    if (!browser_target) {
+        try std.testing.expectEqual(JobKind.draft_measure, app.job.kind);
+        app.job.future.?.await(app.io);
+        if (app.job.failure) |err| return err;
+        try app.finish();
+        try std.testing.expect(app.composeMeasureCurrent());
+    }
+    try app.autosaveDraft();
+    try app.dispatchPending();
+    try std.testing.expect(app.job.future == null);
+    try std.testing.expectEqual(@as(usize, 1), observer.saves.load(.acquire));
+    try std.testing.expectEqual(@as(usize, if (browser_target) 0 else 1), observer.measures.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), observer.unexpected.load(.acquire));
+    try std.testing.expectEqualStrings(&Observer.expected_body, app.compose.fields[4].value());
     try std.testing.expectEqual(app.compose.revision, app.compose.saved_revision);
 }
 
@@ -22427,6 +24019,7 @@ test "invitation UX: themed card pins identity and uncertain outcomes above scro
 }
 
 fn meetingTestReady(app: *App) !void {
+    try app.meetings.ensureTargets(app.allocator, 1);
     app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\",\"capabilities\":[\"mail-read\"]},{\"address\":\"work@example.test\",\"capabilities\":[\"calendar-read\"]}]"));
     app.meeting_enabled = true;
     app.meeting_now = 1791962400000;
@@ -23220,6 +24813,7 @@ test "calendar sources: progressive merge pins exact account calendar event and 
     const work = try readerInvitationTestValue(app.frame.allocator(),
         \\{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"stale":false,"events":[{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"same-event","summary":"Work occurrence","start":{"kind":"instant","value":10000},"end":{"kind":"instant","value":20000}}]}}
     );
+    if (app.calendar.source_snapshots.len < 2) try app.calendar.resizeSources(a, @max(2, app.calendarEntries().len));
     try app.calendar.source_snapshots[1].replace(a, work);
     try app.calendarMergeSnapshots();
     try std.testing.expectEqualStrings("work@example.test", text(get(get(app.calendarEventAt(app.calendar.selected).?, "target"), "account")));
@@ -23255,7 +24849,7 @@ test "calendar sources: picker edits a pending copy and Esc rollback leaves pers
     );
     try app.calendar.source_lists[0].replace(a, list);
     try app.calendarRebuildCatalogue();
-    app.calendar.pending_selection = app.ui_preferences.calendar;
+    app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
     try app.calendarToggleSource();
     const calendar = get(app.calendarEntries()[0], "calendar");
     try std.testing.expect(app.ui_preferences.calendar.selected(calendar));
@@ -23317,7 +24911,7 @@ test "calendar sources: discovery disables Apply consistently and Cancel cannot 
             \\{"account":"personal@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"personal@example.test","calendar_id":"primary"},"summary":"Personal","selected":true,"time_zone":"UTC"}}]}
         ));
         try app.calendarRebuildCatalogue();
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         app.calendar.pending_selection.?.scope = .all_accounts;
         try app.start(.calendar_list, .{ .cmd = "calendar.list", .account = "work@example.test" });
         try client.waitEntered();
@@ -23393,11 +24987,12 @@ test "calendar sources: unreadable desired sources can be hidden without changin
             \\{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"canWrite":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"shared-calendar"},"summary":"Own calendar","selected":true,"time_zone":"UTC"}}]}
         );
         const imported_target: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "shared-calendar" };
-        try app.ui_preferences.calendar.set(imported_target, initially_selected, .orange);
+        try app.ui_preferences.calendar.set(a, imported_target, initially_selected, .orange);
         try app.calendar.source_lists[0].replace(a, imported);
         try app.calendar.source_lists[1].replace(a, owned);
         try app.calendarRebuildCatalogue();
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.clearPendingSelection();
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"sources\":[{}]}"));
         var screen = try vaxis.Screen.init(a, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
         defer screen.deinit(a);
@@ -23442,18 +25037,21 @@ test "calendar sources: unreadable desired sources can be hidden without changin
         // Persist the exact pending choice through the existing preference
         // codec. A later successful grant/provider-selected=true cannot undo
         // the explicit false or hide the same ID in its owning account.
+        app.ui_preferences.calendar.deinit();
         app.ui_preferences.calendar = app.calendar.pending_selection.?;
         app.calendar.pending_selection = null;
         const encoded = try preferences.encode(a, &app.ui_preferences);
         defer a.free(encoded);
+        app.ui_preferences.calendar.deinit();
         app.ui_preferences = try preferences.parse(a, encoded);
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.clearPendingSelection();
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         app.calendar.selection_dirty = false;
         try app.onCalendarKey(.{ .codepoint = ' ' });
         try std.testing.expect(!app.calendar.selection_dirty);
         try std.testing.expect(!app.calendarSelection().selected(get(app.calendarEntries()[0], "calendar")));
         try std.testing.expect(std.mem.indexOf(u8, app.calendar.notice.slice(), "stays unchecked") != null);
-        app.calendar.pending_selection = null;
+        app.calendar.clearPendingSelection();
         var restored = try @import("json.zig").copyObject(app.frame.allocator(), imported);
         var restored_entry = try @import("json.zig").copyObject(app.frame.allocator(), items(get(imported, "calendars"))[0]);
         try restored_entry.object.put(app.frame.allocator(), "canRead", .{ .bool = true });
@@ -23479,7 +25077,7 @@ test "calendar sources: Priority stages exact source intent with keyboard mouse 
         app.mono = mono;
         app.accounts = items(try readerInvitationTestValue(app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]"));
         app.ui_preferences.calendar.scope = .all_accounts;
-        try app.ui_preferences.calendar.set(hidden_target, false, .green);
+        try app.ui_preferences.calendar.set(a, hidden_target, false, .green);
         app.calendar.open = true;
         app.calendar.page = .calendars;
         try app.calendar.account.set("personal@example.test");
@@ -23490,7 +25088,8 @@ test "calendar sources: Priority stages exact source intent with keyboard mouse 
             \\{"account":"work@example.test","complete":true,"calendars":[{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"shared"},"summary":"Other account","selected":true,"time_zone":"UTC"}}]}
         ));
         try app.calendarRebuildCatalogue();
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.clearPendingSelection();
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         try app.onCalendarKey(.{ .codepoint = 'p' });
         try std.testing.expect(app.calendarSelection().isPreferred(target_a));
         try std.testing.expect(!app.calendarSelection().isPreferred(other_target));
@@ -23534,14 +25133,16 @@ test "calendar sources: Priority stages exact source intent with keyboard mouse 
         try std.testing.expectEqual(calendar_sources.Color.green, app.calendarSelection().color(hidden_target));
         // A new unreadable Priority is refused without creating dirty state;
         // clearing an applied Priority after access loss is always possible.
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.clearPendingSelection();
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         app.calendar.selection_dirty = false;
         app.calendar.picker = 2;
         try app.onCalendarKey(.{ .codepoint = 'p' });
         try std.testing.expect(!app.calendar.selection_dirty and app.calendarSelection().preferred == null);
         try std.testing.expectEqualStrings("No read access · cannot be Priority", app.calendar.notice.slice());
         try app.ui_preferences.calendar.setPreferred(blocked_target);
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.clearPendingSelection();
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         try app.onCalendarKey(.{ .codepoint = 'p' });
         try std.testing.expect(app.calendarSelection().preferred == null and app.ui_preferences.calendar.isPreferred(blocked_target));
         // Failure to persist must leave the applied Priority unchanged.
@@ -23553,7 +25154,7 @@ test "calendar sources: Priority stages exact source intent with keyboard mouse 
         try std.testing.expect(app.calendarSelection().isPreferred(target_a));
         try std.testing.expect(app.job.future == null);
         // Applied legends mark only the exact visible source, in NO_COLOR too.
-        app.calendar.pending_selection = null;
+        app.calendar.clearPendingSelection();
         try app.ui_preferences.calendar.setPreferred(target_a);
         screen.clear();
         try app.calendarLegend(win, 0);
@@ -23561,7 +25162,7 @@ test "calendar sources: Priority stages exact source intent with keyboard mouse 
         defer a.free(legend);
         try std.testing.expect(std.mem.indexOf(u8, legend, "A*") != null);
         try std.testing.expect(std.mem.indexOf(u8, legend, "D*") == null);
-        try app.ui_preferences.calendar.set(target_a, false, null);
+        try app.ui_preferences.calendar.set(a, target_a, false, null);
         screen.clear();
         try app.calendarLegend(win, 0);
         const hidden_legend = try markdownTestScreenText(a, &screen);
@@ -23610,7 +25211,8 @@ test "calendar sources: local picker staging and Cancel stay usable without touc
         const replacement: @import("calendar_types.zig").Target = .{ .account = "personal@example.test", .calendar_id = "other" };
         try app.ui_preferences.calendar.setPreferred(original);
         try app.calendarRebuildCatalogue();
-        app.calendar.pending_selection = app.ui_preferences.calendar;
+        app.calendar.clearPendingSelection();
+        app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
         try app.start(kind, .{ .cmd = "synthetic-held-durable-operation", .account = "personal@example.test" });
         try client.waitEntered();
         try app.onCalendarKey(.{ .codepoint = Key.down });
@@ -23682,7 +25284,8 @@ test "calendar sources: picker mouse toggles pending boxes and renders applied v
     );
     try app.calendar.source_lists[0].replace(a, list);
     try app.calendarRebuildCatalogue();
-    app.calendar.pending_selection = app.ui_preferences.calendar;
+    app.calendar.clearPendingSelection();
+    app.calendar.pending_selection = try app.ui_preferences.calendar.clone(a);
     try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"sources\":[{}]}"));
     var screen = try vaxis.Screen.init(a, .{ .cols = 104, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(a);
@@ -23720,7 +25323,7 @@ test "calendar sources: actual event and legend rendering avoid theme error alia
     try app.calendar.calendars.replace(a, values);
     try app.calendar.agenda.replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"sources\":[{},{}]}"));
     const event = try readerInvitationTestValue(app.frame.allocator(), "{\"target\":{\"account\":\"personal@example.test\",\"calendar_id\":\"primary\"}}");
-    try app.ui_preferences.calendar.set(try calendar_sources.jsonTarget(event), true, .magenta);
+    try app.ui_preferences.calendar.set(a, try calendar_sources.jsonTarget(event), true, .magenta);
     app.palette.magenta = app.palette.red;
     var screen = try vaxis.Screen.init(a, .{ .cols = 80, .rows = 3, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(a);
@@ -23838,6 +25441,7 @@ test "calendar sources: catalogue reordering invalidates source-position snapsho
     );
     try app.calendar.source_lists[0].replace(a, before);
     try app.calendarRebuildCatalogue();
+    if (app.calendar.source_snapshots.len < 2) try app.calendar.resizeSources(a, @max(2, app.calendarEntries().len));
     try app.calendar.source_snapshots[0].replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"source\":\"a\"}}"));
     try app.calendar.source_snapshots[1].replace(a, try readerInvitationTestValue(app.frame.allocator(), "{\"snapshot\":{\"source\":\"b\"}}"));
     app.calendar.request_window = .{ .start_ms = 0, .end_ms = 86400000, .time_zone = "UTC" };
@@ -23881,6 +25485,7 @@ test "calendar sources: malformed raw agenda events retain the old source and co
         const old = try readerInvitationTestValue(app.frame.allocator(),
             \\{"snapshot":{"target":{"account":"work@example.test","calendar_id":"primary"},"window":{"start_ms":0,"end_ms":86400000,"time_zone":"UTC"},"fetched_at_ms":100,"complete":true,"events":[{"target":{"account":"work@example.test","calendar_id":"primary"},"id":"retained-event","summary":"Retained event","start":{"kind":"instant","value":1000},"end":{"kind":"instant","value":2000}}]}}
         );
+        if (app.calendar.source_snapshots.len < 2) try app.calendar.resizeSources(a, @max(2, app.calendarEntries().len));
         try app.calendar.source_snapshots[0].replace(a, old);
         var malformed = try @import("json.zig").copyObject(app.frame.allocator(), get(old, "snapshot"));
         if (shape == 0) {
@@ -24166,7 +25771,7 @@ test "meeting notifications: discovery retries failures promptly but retains aut
         defer app.cancelJob();
         try meetingFlowReady(&app, &client, loop);
         app.meetings.records = @splat(null);
-        if (case.target_after == null) app.meetings.targets = @splat(.{});
+        if (case.target_after == null) app.meetings.deinit(app.allocator);
         app.meetings.list_after[1] = 0;
         const civil_now = app.meeting_now;
         try app.dispatchMeetings();
@@ -24857,4 +26462,1231 @@ test "calendar slots: scrolled chooser writes its earlier hint once with no stal
     const end = win.gwidth(expected);
     try std.testing.expectEqualStrings("k", screen.readCell(@intCast(end - 1), 2).?.char.grapheme);
     for (end..win.width) |column| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(column), 2).?.char.grapheme);
+}
+
+test "quoted history: folding and reversible policy preserve exact source across save and restart" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    const draft: types.Draft = .{ .id = "quote-draft", .threadId = "reply-thread", .bodyText = "My exact note", .bodyFormat = .markdown, .to = &.{.{ .address = "peer@example.test" }}, .original = .{ .bodyText = "First\nSecond\nThird\nFourth\nFifth\nSixth\nSeventh\nEighth\nNinth\nTenth\nEleventh\nTwelfth\nThirteenth\nLAST_ORIGINAL_LINE", .bodyHtml = "<p>LAST_ORIGINAL_LINE<img src=\"cid:picture\"></p>", .resources = &.{.{ .id = "image", .filename = "picture.png", .size = 1, .data = "AA", .mimeType = "image/png", .contentId = "picture" }} } };
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    try app.compose.load(a, try @import("json.zig").value(arena.allocator(), draft));
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose_intent = .reply;
+    app.compose.insert_mode = false;
+    try std.testing.expect(app.originalFolded());
+    const before = try app.compose.draft(arena.allocator());
+    const complete = try markdown_mail.prepare(arena.allocator(), before);
+    try app.onComposeKey(.{ .codepoint = 'z' });
+    try std.testing.expect(!app.originalFolded());
+    try std.testing.expectEqual(@as(u64, 0), app.compose.revision);
+    const unfolded = try markdown_mail.prepare(arena.allocator(), try app.compose.draft(arena.allocator()));
+    try std.testing.expectEqualStrings(complete.html.?, unfolded.html.?);
+    try std.testing.expectEqualStrings(complete.plain, unfolded.plain);
+    try app.onComposeKey(.{ .codepoint = 'Q' });
+    try std.testing.expect(!app.compose.include_original);
+    const excluded = try markdown_mail.prepare(arena.allocator(), try app.compose.draft(arena.allocator()));
+    try std.testing.expect(excluded.resources.len == 0);
+    try std.testing.expect(std.mem.indexOf(u8, excluded.html.?, "LAST_ORIGINAL_LINE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, excluded.plain, "LAST_ORIGINAL_LINE") == null);
+    try std.testing.expectEqualStrings(draft.original.?.bodyHtml, app.compose.original.?.bodyHtml);
+    try std.testing.expectEqualStrings("AA", app.compose.original.?.resources[0].data);
+    const update = try app.compose.updateValue(arena.allocator(), try app.compose.draft(arena.allocator()));
+    try std.testing.expect(get(update, "includeOriginal") == .bool and !truth(get(update, "includeOriginal")));
+    try std.testing.expect(get(update, "original") == .null);
+    try app.onComposeKey(.{ .codepoint = 'z', .mods = .{ .ctrl = true } });
+    try std.testing.expect(app.compose.include_original);
+    try app.onComposeKey(.{ .codepoint = 'y', .mods = .{ .ctrl = true } });
+    try std.testing.expect(!app.compose.include_original);
+    var restarted: Compose = .{};
+    defer restarted.deinit(a);
+    try restarted.load(a, try @import("json.zig").value(arena.allocator(), try app.compose.draft(arena.allocator())));
+    try std.testing.expect(!restarted.include_original);
+    try std.testing.expectEqualStrings(draft.original.?.bodyHtml, restarted.original.?.bodyHtml);
+    restarted.include_original = true;
+    const restored = try markdown_mail.prepare(arena.allocator(), try restarted.draft(arena.allocator()));
+    try std.testing.expectEqualStrings(complete.html.?, restored.html.?);
+    try std.testing.expectEqualStrings(complete.plain, restored.plain);
+    try std.testing.expectEqual(@as(usize, 1), restored.resources.len);
+    for (0..6) |protected| {
+        app.job.kind = .send;
+        app.job.future = if (protected == 5) .{ .any_future = null, .result = {} } else null;
+        defer app.job.future = null;
+        app.compose.gmail_guard_unknown = protected == 4;
+        app.compose.unknown_outcome = protected == 0;
+        app.grace_active = protected == 1;
+        app.grace_recovery = protected == 2;
+        app.compose_intent = if (protected == 3) .forward else .reply;
+        const revision = app.compose.revision;
+        try app.onComposeKey(.{ .codepoint = 'Q' });
+        try std.testing.expect(!app.compose.include_original);
+        try std.testing.expectEqual(revision, app.compose.revision);
+        const folded = app.originalFolded();
+        try app.onComposeKey(.{ .codepoint = 'z' });
+        try std.testing.expectEqual(if (protected == 0) folded else !folded, app.originalFolded());
+    }
+}
+
+test "quoted history: visible policy and folding controls work at narrow and split widths and INSERT remains text" {
+    const a = std.testing.allocator;
+    for ([_][2]u16{ .{ 38, 24 }, .{ 64, 24 }, .{ 90, 30 }, .{ 120, 40 }, .{ 180, 50 } }) |size| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        var vx: vaxis.Vaxis = undefined;
+        vx.screen = try vaxis.Screen.init(a, .{ .cols = size[0], .rows = size[1], .x_pixel = 0, .y_pixel = 0 });
+        defer vx.screen.deinit(a);
+        app.vx = &vx;
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        try app.compose.load(a, try @import("json.zig").value(app.frame.allocator(), types.Draft{ .id = "quote-controls", .threadId = "reply-thread", .bodyText = "Exact note", .original = .{ .bodyText = "First line\nSecond line", .bodyHtml = "<p>First line<br>Second line</p>" } }));
+        app.mode = .compose;
+        app.compose_active = true;
+        app.compose_intent = .reply;
+        app.compose.selected = 4;
+        app.compose.insert_mode = false;
+        const win = vx.window().child(.{ .y_off = 2, .height = size[1] - 4 });
+        for (0..2) |preview| {
+            if (preview != 0 and size[0] >= 90) continue;
+            app.compose.include_original = true;
+            app.compose_preview_full = preview != 0;
+            app.compose.attachment_focus = false;
+            app.dialog_focus.reset(.preview, 0);
+            app.mouse_hits.clear();
+            try app.composeDraw(win);
+            try std.testing.expect(app.compose_original_drawn and app.compose_fold_drawn);
+            var controls: usize = 0;
+            for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .compose_original_policy or hit.kind == .compose_original_fold) {
+                controls += 1;
+                try std.testing.expect(hit.rect.x + hit.rect.width <= size[0]);
+                try std.testing.expect(hit.rect.y + hit.rect.height <= size[1] - 2);
+            };
+            try std.testing.expectEqual(@as(usize, 2), controls);
+            const tabs: usize = if (preview == 0) 5 else 3;
+            for (0..tabs) |_| try app.onComposeKey(.{ .codepoint = Key.tab });
+            if (preview == 0) try std.testing.expectEqual(@as(usize, 6), app.compose.attachment_cursor) else try std.testing.expectEqual(@as(usize, 5), app.dialog_focus.index);
+            const before = app.compose.include_original;
+            try app.onComposeKey(.{ .codepoint = Key.enter });
+            try std.testing.expect(before != app.compose.include_original);
+            app.mouse_hits.clear();
+            try app.composeDraw(win);
+            try std.testing.expect(!app.compose_fold_drawn);
+            // Restoring the original makes its fold control meaningful again.
+            try app.onComposeKey(.{ .codepoint = Key.enter });
+            app.mouse_hits.clear();
+            try app.composeDraw(win);
+            try std.testing.expect(app.compose_fold_drawn);
+            try app.onComposeKey(.{ .codepoint = Key.tab });
+            const folded = app.originalFolded();
+            const revision = app.compose.revision;
+            try app.onComposeKey(.{ .codepoint = Key.enter });
+            try std.testing.expect(folded != app.originalFolded());
+            try std.testing.expectEqual(revision, app.compose.revision);
+            const now_preview = preview != 0 or size[0] < 90;
+            if (now_preview) try std.testing.expect(app.compose_preview_full);
+            app.mouse_hits.clear();
+            try app.composeDraw(win);
+            try app.onComposeKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+            if (!now_preview) try std.testing.expectEqual(@as(usize, 6), app.compose.attachment_cursor) else try std.testing.expectEqual(@as(usize, 5), app.dialog_focus.index);
+            const policy_hit = for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+                if (hit.kind == .compose_original_policy) break hit;
+            } else return error.MissingPolicyButton;
+            const before_mouse = app.compose.include_original;
+            try app.onMouse(.{ .col = @intCast(policy_hit.rect.x), .row = @intCast(policy_hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+            try std.testing.expect(before_mouse != app.compose.include_original);
+            {
+                app.job.kind = .save_browser;
+                app.job.future = .{ .any_future = null, .result = {} };
+                defer app.job.future = null;
+                app.mouse_hits.clear();
+                try app.composeDraw(win);
+                if (!now_preview) try std.testing.expect(app.compose.attachment_focus and app.compose.attachment_cursor == 6) else try std.testing.expectEqual(@as(usize, 5), app.dialog_focus.index);
+                for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| try std.testing.expect(hit.kind != .compose_original_policy);
+                const retained = app.compose.include_original;
+                try app.onComposeKey(.{ .codepoint = Key.enter });
+                try std.testing.expectEqual(retained, app.compose.include_original);
+            }
+        }
+        app.compose_preview_full = false;
+        app.compose.attachment_focus = false;
+        app.compose.selected = 4;
+        app.compose.insert_mode = true;
+        const included = app.compose.include_original;
+        try app.onComposeKey(.{ .codepoint = 'Q', .text = "Q" });
+        try app.onComposeKey(.{ .codepoint = 'z', .text = "z" });
+        try std.testing.expectEqualStrings("Exact noteQz", app.compose.fields[4].value());
+        try std.testing.expectEqual(included, app.compose.include_original);
+    }
+}
+
+test "quoted history: exact size receipt rejects stale revisions and displays reductions without changing source" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.compose_active = true;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    try app.compose.fields[0].set(a, "peer@example.test");
+    try app.compose.fields[4].set(a, "Exact body kept");
+    try app.compose.id.set(a, "size-draft");
+    try app.compose_measure.draft.set("size-draft");
+    try app.compose_measure.operation.set("size-operation");
+    try app.compose_measure.content_digest.set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    try app.job.draft_target.set("size-draft");
+    try app.job.measure_operation.set("size-operation");
+    app.job.measure_revision = 2;
+    app.compose.revision = 2;
+    app.compose.saved_revision = 2;
+    app.compose_measure.revision = 2;
+    const stale = "{\"ok\":true,\"data\":{\"exact\":true,\"operationId\":\"size-operation\",\"contentDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":1,\"bytes\":100,\"maxBytes\":200,\"sendable\":true}}";
+    try app.apply(.draft_measure, stale);
+    try std.testing.expect(!app.composeMeasureCurrent());
+    const current = "{\"ok\":true,\"data\":{\"exact\":true,\"operationId\":\"size-operation\",\"contentDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":2,\"bytes\":210,\"maxBytes\":200,\"withoutOriginalBytes\":80,\"overLimit\":true,\"sendable\":false}}";
+    try app.apply(.draft_measure, current);
+    try std.testing.expect(app.composeMeasureCurrent() and app.compose_measure.over_limit and !app.compose_measure.sendable);
+    try std.testing.expectEqual(@as(?usize, 80), app.compose_measure.without_original);
+    try std.testing.expectEqualStrings("MIME: 210 / 200 bytes · exact · OVER LIMIT\n", try app.composeSizeLabel(true));
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 120, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    app.mode = .review;
+    try app.composeDraw(vx.window());
+    var back_available = false;
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| {
+        try std.testing.expect(hit.kind != .dialog_action or hit.index != 1);
+        back_available = back_available or (hit.kind == .dialog_action and hit.index == 0);
+    }
+    try std.testing.expect(back_available and app.review_ready);
+    try std.testing.expectError(error.MessageTooLarge, app.sendDraft());
+    try std.testing.expect(app.job.future == null and app.compose.operation_id.value().len == 0);
+    try std.testing.expectEqualStrings("Exact body kept", app.compose.fields[4].value());
+    try app.onConfirmationKey(.{ .codepoint = Key.enter });
+    try std.testing.expectEqual(Mode.compose, app.mode);
+    try std.testing.expect(!app.compose.insert_mode);
+    const proof = "{\"ok\":true,\"data\":{\"exact\":false,\"operationId\":\"size-operation\",\"contentDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":2,\"bytes\":null,\"maxBytes\":200,\"withoutOriginalBytes\":80,\"overLimit\":true,\"sendable\":false,\"admissionError\":\"RenderedBodyTooLarge\"}}";
+    try app.apply(.draft_measure, proof);
+    try std.testing.expect(app.composeMeasureCurrent() and !app.compose_measure.exact and app.compose_measure.bytes == null);
+    try std.testing.expectEqualStrings("MIME exceeds 200 bytes · exact size unavailable\n", try app.composeSizeLabel(true));
+    app.mode = .review;
+    try app.composeDraw(vx.window());
+    const overflow_review = try markdownTestScreenText(a, &vx.screen);
+    defer a.free(overflow_review);
+    try std.testing.expect(std.mem.indexOf(u8, overflow_review, "without original: 80 bytes") != null);
+    app.compose.insert_mode = true;
+    for (app.mouse_hits.areas[0..app.mouse_hits.count]) |hit| if (hit.kind == .dialog_action and hit.index == 0) {
+        try app.onMouse(.{ .col = @intCast(hit.rect.x), .row = @intCast(hit.rect.y), .type = .press, .button = .left, .mods = .{} });
+        break;
+    };
+    try std.testing.expect(app.mode == .compose and !app.compose.insert_mode);
+    app.compose_measure.measured = false;
+    try app.compose_measure.content_digest.set("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    try std.testing.expectError(error.DraftChanged, app.apply(.draft_measure, current));
+    try std.testing.expect(!app.composeMeasureCurrent());
+    try app.composerChanged();
+    try std.testing.expect(!app.composeMeasureCurrent());
+    try std.testing.expectEqual(@as(usize, 0), app.compose_measure.operation.len);
+    try std.testing.expectEqualStrings("Saved draft changed elsewhere · :resolve-draft", try app.composeSizeLabel(false));
+    try std.testing.expect(app.compose.saved_changed and !app.autosave_due);
+}
+
+test "quoted history: native composer files and recipient descriptors scale by actual selection" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    try std.testing.expectEqual(@as(usize, 0), app.selected_files.capacity);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_files.capacity);
+    try app.ensureFileFields(&app.selected_files, 40);
+    try app.ensureFileFields(&app.pending_files, 40);
+    for (0..40) |index| {
+        const path = try std.fmt.allocPrint(a, "synthetic-{d}.txt", .{index});
+        defer a.free(path);
+        try app.selected_files.items[index].set(a, path);
+        try app.pending_files.items[index].set(a, path);
+    }
+    const attachments = try a.alloc(types.Attachment, 40);
+    defer a.free(attachments);
+    for (attachments, 0..) |*attachment, index| attachment.* = .{ .id = app.selected_files.items[index].value(), .filename = app.pending_files.items[index].value(), .size = 1, .data = "AA" };
+    try app.compose.replaceAttachments(a, attachments);
+    try std.testing.expectEqual(@as(usize, 40), app.compose.attachments.len);
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(a);
+    for (0..80) |index| {
+        const address = try std.fmt.allocPrint(a, "{s}recipient-{d}@example.test", .{ if (index == 0) @as([]const u8, "") else ", ", index });
+        defer a.free(address);
+        try raw.appendSlice(a, address);
+    }
+    const addresses = try Compose.addresses(a, raw.items);
+    defer recipients.deinitIncoming(addresses, a);
+    try std.testing.expectEqual(@as(usize, 80), addresses.len);
+    try std.testing.expectEqualStrings("recipient-79@example.test", addresses[79].address);
+}
+
+test "quoted history: redraws reuse full-body sanitized views and only walk visible rows" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 160, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    var text_in: std.ArrayList(u8) = .empty;
+    defer text_in.deinit(a);
+    for (0..8192) |_| try text_in.appendSlice(a, "Body 界 é text and Unicode 👩‍💻\n");
+    try app.compose.fields[4].set(a, text_in.items);
+    app.mode = .compose;
+    app.compose_active = true;
+    app.compose.selected = 4;
+    app.compose.insert_mode = true;
+    try app.composeDraw(vx.window());
+    const body_builds = app.compose.display.text_builds;
+    const preview_builds = app.compose_preview_display.text_builds;
+    const layout_builds = app.compose.display.layout_builds;
+    const prepared_builds = app.compose_preview_builds;
+    const retained_bytes = send_memory.snapshot().allocatorUsedBytes;
+    const quote_scans = app.compose.quote_scans;
+    for (0..8) |index| {
+        _ = app.frame.reset(.free_all);
+        app.releaseComposeFrame();
+        app.mouse_hits.clear();
+        app.compose.fields[4].cursor = text_in.items.len - (index + 1) * 64;
+        try app.composeDraw(vx.window());
+    }
+    try std.testing.expectEqual(body_builds, app.compose.display.text_builds);
+    try std.testing.expectEqual(preview_builds, app.compose_preview_display.text_builds);
+    try std.testing.expectEqual(layout_builds, app.compose.display.layout_builds);
+    try std.testing.expectEqual(prepared_builds, app.compose_preview_builds);
+    try std.testing.expectEqual(quote_scans, app.compose.quote_scans);
+    try std.testing.expectEqual(retained_bytes, send_memory.snapshot().allocatorUsedBytes);
+    try std.testing.expectEqualStrings(text_in.items, app.compose.fields[4].value());
+    const caret = app.compose.display.caret(app.compose.fields[4].value(), app.compose.fields[4].cursor);
+    try std.testing.expect(caret.row >= app.compose.body_scroll);
+}
+
+test "quoted history: trailing authored quote folds only the preview and full plain alternative expands exactly" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 64, .rows = 30, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(a);
+    try source.appendSlice(a, "My authored reply\n\n");
+    for (0..15) |_| try source.appendSlice(a, "> retained quote line\n");
+    try source.appendSlice(a, "> LAST_AUTHORED_QUOTE\n");
+    try app.compose.fields[4].set(a, source.items);
+    app.compose_active = true;
+    app.mode = .compose;
+    try std.testing.expect(app.originalFolded());
+    try std.testing.expectEqual(@as(usize, 16), app.quotedTail().?.lines);
+    _ = try app.composeOutgoingDraw(vx.window(), 0, 0, true);
+    const folded = try markdownTestScreenText(a, &vx.screen);
+    defer a.free(folded);
+    try std.testing.expect(std.mem.indexOf(u8, folded, "16 lines retained") != null);
+    try std.testing.expect(std.mem.indexOf(u8, folded, "LAST_AUTHORED_QUOTE") == null);
+    try app.onComposeKey(.{ .codepoint = 'Q' });
+    try std.testing.expectEqual(@as(u64, 0), app.compose.revision);
+    try app.onComposeKey(.{ .codepoint = 'z' });
+    vx.screen.clear();
+    _ = try app.composeOutgoingDraw(vx.window(), 0, 0, true);
+    const expanded = try markdownTestScreenText(a, &vx.screen);
+    defer a.free(expanded);
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "LAST_AUTHORED_QUOTE") != null);
+    try std.testing.expectEqualStrings(source.items, app.compose_preview_plain);
+    try std.testing.expectEqualStrings(source.items, app.compose.fields[4].value());
+    try std.testing.expectEqual(@as(u64, 0), app.compose.revision);
+}
+
+test "quoted history: send and queue pin the measured canonical content and reject unreviewed local bytes" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Transport = struct {
+        fn call(_: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"PermissionDenied\"}}");
+        }
+    };
+    for ([_]bool{ false, true }) |queued| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var dummy_tty: vaxis.Tty = undefined;
+        var dummy_vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &dummy_tty, &dummy_vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client.callFn = Transport.call;
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .review;
+        app.review_ready = true;
+        app.capabilities.send_queue = true;
+        app.ui_preferences.sendGraceSeconds = if (queued) 5 else 0;
+        try app.compose.id.set(a, "measured-draft");
+        try app.compose.fields[0].set(a, "peer@example.test");
+        try app.compose.fields[4].set(a, "Reviewed exact body");
+        try app.compose_measure.draft.set("measured-draft");
+        try app.compose_measure.operation.set("measured-operation");
+        try app.compose_measure.measured_operation.set("measured-operation");
+        app.compose_measure.measured = true;
+        app.compose_measure.exact = true;
+        app.compose_measure.sendable = true;
+        app.compose_measure.bytes = 100;
+        app.compose_measure.max_bytes = 200;
+        var arena: std.heap.ArenaAllocator = .init(a);
+        defer arena.deinit();
+        const digest = try @import("draft_link.zig").contentDigest(arena.allocator(), try app.compose.draft(arena.allocator()), app.account());
+        try app.compose_measure.content_digest.set(&digest);
+        // Defend even an edit path that failed to advance the UI revision.
+        try app.compose.fields[4].set(a, "Unreviewed replacement");
+        try std.testing.expectError(error.DraftChanged, app.sendDraft());
+        try std.testing.expect(app.job.future == null and app.compose.operation_id.value().len == 0 and app.review_ready);
+        try app.compose.fields[4].set(a, "Reviewed exact body");
+        try app.sendDraft();
+        app.job.future.?.await(app.io);
+        const request = try std.json.parseFromSlice(Value, a, app.job.request, .{});
+        defer request.deinit();
+        try std.testing.expectEqualStrings(if (queued) "draft.queue" else "draft.send", text(get(request.value, "cmd")));
+        try std.testing.expectEqualStrings("measured-operation", text(get(request.value, "operationId")));
+        try std.testing.expectEqualStrings(&digest, text(get(request.value, "expectedContentDigest")));
+        app.job.future = null;
+    }
+}
+
+test "quoted history: measuring editing and settled retry cannot reuse an old exact receipt" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Transport = struct {
+        fn call(_: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"PermissionDenied\"}}");
+        }
+    };
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    defer app.deinit();
+    app.client.callFn = Transport.call;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.compose_active = true;
+    app.mode = .review;
+    try app.compose.id.set(a, "receipt-lifetime");
+    try app.compose.fields[0].set(a, "peer@example.test");
+    try app.compose.fields[4].set(a, "Old reviewed source");
+    try app.compose_measure.draft.set("receipt-lifetime");
+    try app.compose_measure.operation.set("old-operation");
+    try app.compose_measure.measured_operation.set("old-operation");
+    app.compose_measure.measured = true;
+    app.compose_measure.exact = true;
+    app.compose_measure.sendable = true;
+    app.compose_measure.bytes = 42;
+    app.compose_measure.without_original = 12;
+    app.review_ready = true;
+    app.gmail_send_ack = true;
+    try std.testing.expect(app.composeMeasureCurrent());
+    const version = app.compose.fields[4].version;
+    const editor_bytes = try app.compose.fields[4].owner(a).dupe(u8, "New editor source 界");
+    app.acceptEditorResult(.{ .body = editor_bytes, .exit_code = 0 });
+    try std.testing.expect(app.compose.fields[4].version != version);
+    try std.testing.expect(!app.composeMeasureCurrent() and !app.review_ready and !app.gmail_send_ack);
+    try std.testing.expect(app.compose_measure.bytes == null and app.compose_measure.operation.len == 0);
+    app.compose.saved_revision = app.compose.revision;
+    // Simulate a stale receipt surviving an unexpected caller's revision edit.
+    app.compose_measure.bytes = 42;
+    app.compose_measure.exact = true;
+    app.compose_measure.measured = true;
+    app.compose_measure.without_original = 12;
+    app.requestComposeMeasure();
+    try std.testing.expect(try app.dispatchComposer());
+    try std.testing.expect(!app.composeMeasureCurrent());
+    try std.testing.expect(app.compose_measure.bytes == null and app.compose_measure.without_original == null and !app.compose_measure.exact);
+    try std.testing.expectEqualStrings("Message size: calculating…", try app.composeSizeLabel(true));
+    const first_operation = app.compose_measure.operation;
+    app.requestComposeMeasure(); // y during measurement only defers the same request.
+    try std.testing.expect(app.compose_measure.pending);
+    const response = try std.json.Stringify.valueAlloc(a, .{ .ok = true, .data = .{ .exact = true, .operationId = first_operation.slice(), .contentDigest = app.compose_measure.content_digest.slice(), .revision = app.compose.revision, .bytes = 180, .maxBytes = 200, .sendable = true, .overLimit = false } }, .{});
+    defer a.free(response);
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    try app.apply(.draft_measure, response);
+    try std.testing.expect(app.composeMeasureCurrent() and !app.compose_measure.pending);
+    try std.testing.expect(!(try app.dispatchComposer()));
+    try std.testing.expectEqualStrings(first_operation.slice(), app.compose_measure.operation.slice());
+    try app.compose_measure.measured_operation.set("another-operation");
+    try std.testing.expect(!app.composeMeasureCurrent());
+    app.compose_measure.measured_operation = first_operation;
+    // Cancellation proves this operation settled; the next review needs a new ID.
+    try app.applyGraceResult("{\"ok\":true,\"data\":{\"state\":\"canceled\"}}");
+    try std.testing.expect(!app.composeMeasureCurrent() and app.compose_measure.operation.len == 0);
+    app.requestComposeMeasure();
+    try std.testing.expect(try app.dispatchComposer());
+    const second_operation = app.compose_measure.operation;
+    try std.testing.expect(!same(first_operation.slice(), second_operation.slice()));
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    // A completion tied to an older operation cannot overwrite the new request.
+    app.job.measure_operation = first_operation;
+    try app.apply(.draft_measure, "{\"ok\":false,\"error\":{\"code\":\"OutOfMemory\"}}");
+    try std.testing.expectEqual(@as(usize, 0), app.compose_measure.failure.len);
+    try std.testing.expectEqualStrings(second_operation.slice(), app.compose_measure.operation.slice());
+    app.compose.unknown_outcome = true;
+    app.requestComposeMeasure();
+    try std.testing.expect(!(try app.dispatchComposer()));
+    try std.testing.expectEqualStrings(second_operation.slice(), app.compose_measure.operation.slice());
+}
+
+test "quoted history: reopened formatted forward keeps forward intent and cannot omit its source" {
+    const a = std.testing.allocator;
+    const Transport = struct {
+        fn call(_: *anyopaque, allocator: Allocator, _: []const u8) ![]const u8 {
+            return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"PermissionDenied\"}}");
+        }
+    };
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    defer app.deinit();
+    app.client.callFn = Transport.call;
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var draft = try @import("conversation_draft.zig").forward(arena.allocator(), .{ .id = "source-message", .threadId = "source-thread", .subject = "Forward retained source" }, .{ .original = .{ .bodyText = "Complete source", .bodyHtml = "<p>Complete source</p>" } });
+    draft.id = "saved-forward";
+    const response = try std.json.Stringify.valueAlloc(arena.allocator(), .{ .ok = true, .data = draft }, .{});
+    try app.apply(.draft_read, response);
+    try std.testing.expectEqual(PendingCompose.forward, app.compose_intent);
+    try std.testing.expect(!app.originalPolicyUnlocked());
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    app.compose.unknown_outcome = false; // Inspection establishes no pending operation.
+    const revision = app.compose.revision;
+    try app.onComposeKey(.{ .codepoint = 'Q' });
+    try std.testing.expect(app.compose.include_original);
+    try std.testing.expectEqual(revision, app.compose.revision);
+    try std.testing.expectEqualStrings("Complete source", app.compose.original.?.bodyText);
+}
+
+test "native draft paging: compact summaries navigate all 128 drafts and open exact full source" {
+    if (browser_target) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Transport = struct {
+        drafts: []const types.Draft,
+        list_calls: usize = 0,
+        reject_cursor: bool = false,
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            const cmd = text(get(request, "cmd"));
+            if (same(cmd, "draft.list")) {
+                self.list_calls += 1;
+                const cursor = text(get(request, "cursor"));
+                if (self.reject_cursor and cursor.len > 0) return allocator.dupe(u8, "{\"ok\":false,\"error\":{\"code\":\"InvalidDraftCursor\"}}");
+                const result = try @import("draft_summary.zig").list(allocator, self.drafts, &.{}, cursor, @intCast(integer(get(request, "limit"))));
+                return std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = result }, .{});
+            }
+            if (same(cmd, "draft.read")) {
+                for (self.drafts) |draft| if (same(draft.id, text(get(request, "draftId")))) return std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = draft }, .{});
+                return error.DraftNotFound;
+            }
+            return error.ProviderMustNotRun;
+        }
+        fn accept(app: *App) !void {
+            app.job.future.?.await(app.io);
+            app.job.future = null;
+            if (app.job.failure) |err| return err;
+            try app.apply(.drafts, app.job.response.?);
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    const filenames = try owned.alloc(u8, mail_limits.filename_bytes);
+    @memset(filenames, 'f');
+    const attachment_set = try owned.alloc(types.Attachment, types.Limits.attachments);
+    for (attachment_set) |*file| file.* = .{ .id = "file", .filename = filenames, .mimeType = "text/plain", .size = 1, .data = "YQ" };
+    const drafts = try owned.alloc(types.Draft, 128);
+    for (drafts, 0..) |*draft, index| draft.* = .{ .id = try std.fmt.allocPrint(owned, "draft-{d:0>3}", .{index}), .subject = try std.fmt.allocPrint(owned, "Complete draft subject {d}", .{index}), .bodyText = "Exact authored source", .to = &.{.{ .address = "peer@example.test" }}, .attachments = attachment_set };
+    var transport: Transport = .{ .drafts = drafts };
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 90, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    app.vx = &vx;
+    app.client = .{ .ctx = &transport, .callFn = Transport.call };
+    defer app.deinit();
+    app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+    app.zone = try timezone.Zone.fromPosix("UTC0");
+    app.folder = 2;
+    app.mode = .browse;
+    app.focus = .list;
+    try app.reloadWithRefresh(false);
+    try Transport.accept(&app);
+    try std.testing.expectEqual(@as(usize, 100), app.messages.len);
+    try std.testing.expectEqualStrings("D:draft-099", app.next_cursor.value());
+    try std.testing.expect(app.job.response.?.len < 64 * 1024);
+    for (app.messages) |row| {
+        try std.testing.expect(get(row, "attachments") == .null and get(row, "to") == .null and get(row, "bodyText") == .null);
+        try std.testing.expectEqual(@as(i64, @intCast(types.Limits.attachments)), integer(get(row, "attachmentCount")));
+    }
+    for ([_]preferences.Density{ .comfortable, .compact }) |density| {
+        app.ui_preferences.density = density;
+        vx.screen.clear();
+        try app.drawMailRow(vx.window(), 0, 0);
+        const rendered = try markdownTestScreenText(a, &vx.screen);
+        defer a.free(rendered);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "📎") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "Complete draft subject 0") != null);
+    }
+    // Every row is reachable by the ordinary j/k movement, including the
+    // automatic page boundary. No descriptor/body is loaded while navigating.
+    for (0..128) |index| {
+        try std.testing.expectEqualStrings(drafts[index].id, app.messageId());
+        if (index != 127) {
+            try app.move(true, 1);
+            if (app.job.future != null) try Transport.accept(&app);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 28), app.messages.len);
+    try std.testing.expectEqual(@as(usize, 2), transport.list_calls);
+    try std.testing.expectEqual(@as(usize, 0), app.next_cursor.value().len);
+    try app.move(true, 8);
+    try std.testing.expectEqualStrings("draft-127", app.messageId());
+    try std.testing.expect(app.job.future == null);
+    // Explicit Previous/Next controls reuse the same cursor stack.
+    try app.page(false);
+    try Transport.accept(&app);
+    try std.testing.expectEqualStrings("draft-000", app.messageId());
+    try app.page(true);
+    try Transport.accept(&app);
+    try std.testing.expectEqualStrings("draft-100", app.messageId());
+    try app.move(false, 1);
+    try Transport.accept(&app);
+    try std.testing.expectEqualStrings("draft-099", app.messageId());
+    // A pending write queues the draft page without entering mail-cache paths.
+    {
+        app.job.kind = .save;
+        app.job.future = .{ .any_future = null, .result = {} };
+        defer app.job.future = null;
+        try app.move(true, 1);
+        try std.testing.expect(app.pending_page and app.pending_page_automatic);
+    }
+    try app.consumePendingPage();
+    try Transport.accept(&app);
+    try std.testing.expectEqualStrings("draft-100", app.messageId());
+    app.selected = 27;
+    try app.enter();
+    app.job.future.?.await(app.io);
+    app.job.future = null;
+    if (app.job.failure) |err| return err;
+    const full = try app.data(owned, app.job.response.?);
+    try std.testing.expectEqualStrings("draft-127", text(get(full, "id")));
+    try std.testing.expectEqualStrings("Exact authored source", text(get(full, "bodyText")));
+    try std.testing.expectEqual(attachment_set.len, items(get(full, "attachments")).len);
+    try std.testing.expectEqualStrings(filenames, text(get(items(get(full, "attachments"))[0], "filename")));
+    // gg resets the entire cursor chain, not just the visible page selection.
+    try app.jumpFirstMail();
+    try Transport.accept(&app);
+    try std.testing.expectEqualStrings("draft-000", app.messageId());
+    try std.testing.expect(app.cursor.value().len == 0 and app.previous_cursors.items.len == 0);
+    transport.reject_cursor = true;
+    app.selected = 99;
+    try app.move(true, 1);
+    try Transport.accept(&app);
+    try std.testing.expectEqualStrings("draft-099", app.messageId());
+    try std.testing.expect(!app.page_loading and app.cursor.value().len == 0);
+    try std.testing.expectEqualStrings("InvalidDraftCursor", app.status_error_code[0..app.status_error_len]);
+}
+
+test "quoted history: background measurement setup errors remain bounded diagnostics" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |long_id| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .compose;
+        var excessive: [129]u8 = @splat('d');
+        try app.compose.id.set(a, if (long_id) &excessive else "measuring-source");
+        try app.compose.fields[0].set(a, "peer@example.test");
+        try app.compose.fields[4].set(a, "Exact source survives diagnostic failure 🌋");
+        app.operation_nonce = "nonce";
+        var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+        if (!long_id) {
+            app.frame.deinit();
+            app.frame = .init(failing.allocator());
+        }
+        app.requestComposeMeasure();
+        try std.testing.expect(!(try app.dispatchComposer()));
+        try std.testing.expect(app.compose_measure.failure.len > 0);
+        if (!long_id) try std.testing.expectEqualStrings("OutOfMemory", app.compose_measure.failure.slice());
+        try std.testing.expect(app.job.future == null and !app.compose_measure.pending and !app.compose_measure.measured);
+        try std.testing.expect(app.compose_measure.operation.len == 0);
+        app.frame.deinit();
+        app.frame = .init(a);
+        try std.testing.expect(std.mem.indexOf(u8, try app.composeSizeLabel(true), "unavailable") != null);
+        try std.testing.expectEqualStrings("Exact source survives diagnostic failure 🌋", app.compose.fields[4].value());
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+    }
+}
+
+test "quoted history: Markdown trailing quote toggles formatted cache both ways without editing" {
+    const a = std.testing.allocator;
+    var factory: CacheTestClient = .{};
+    var app = factory.app(a);
+    defer app.deinit();
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = try vaxis.Screen.init(a, .{ .cols = 90, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer vx.screen.deinit(a);
+    app.vx = &vx;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(a);
+    try source.appendSlice(a, "**Exact authored note**\n\n");
+    for (0..15) |_| try source.appendSlice(a, "> retained line\n");
+    try source.appendSlice(a, "> MARKDOWN_QUOTE_SENTINEL\n");
+    try app.compose.fields[4].set(a, source.items);
+    app.compose.body_format = .markdown;
+    app.compose_active = true;
+    app.mode = .compose;
+    app.compose_layout_width = 90;
+    const version = app.compose.fields[4].version;
+    for (0..3) |pass| {
+        if (pass != 0) try app.onComposeKey(.{ .codepoint = 'z' });
+        vx.screen.clear();
+        _ = try app.composeOutgoingDraw(vx.window(), 0, 0, false);
+        const visible = try markdownTestScreenText(a, &vx.screen);
+        defer a.free(visible);
+        try std.testing.expectEqual(pass == 1, std.mem.indexOf(u8, visible, "MARKDOWN_QUOTE_SENTINEL") != null);
+        try std.testing.expectEqual(@as(usize, pass + 1), app.compose_preview_builds);
+        try std.testing.expectEqual(version, app.compose.fields[4].version);
+        try std.testing.expectEqualStrings(source.items, app.compose.fields[4].value());
+        try std.testing.expectEqual(@as(u64, 0), app.compose.revision);
+    }
+}
+
+test "quoted history: direct reviewed-content rejection retires identity without unknown outcome" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |transport_error| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .review;
+        try app.compose.id.set(a, "reviewed-draft");
+        app.job.kind = .send;
+        app.job.generation = app.generation;
+        try app.job.draft_target.set("reviewed-draft");
+        app.job.request = "{}";
+        try app.compose_measure.operation.set("must-retire");
+        app.compose_measure.measured = true;
+        app.review_ready = true;
+        if (transport_error) app.job.failure = error.ReviewedDraftChanged else app.job.response = "{\"ok\":false,\"error\":{\"code\":\"ReviewedDraftChanged\"}}";
+        try app.finishSend();
+        try std.testing.expect(!app.compose.unknown_outcome and app.compose.saved_changed);
+        try std.testing.expect(app.compose_measure.operation.len == 0 and !app.review_ready and app.mode == .compose);
+    }
+}
+
+test "quoted history: concurrent saved change keeps local edits until explicit reload or independent copy" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Route = enum { manual, exit, fatal };
+    const Remote = struct {
+        copies: usize = 0,
+        reads: usize = 0,
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            const cmd = text(get(request, "cmd"));
+            if (same(cmd, "draft.measure")) return std.json.Stringify.valueAlloc(allocator, .{ .ok = true, .data = .{ .operationId = text(get(request, "operationId")), .revision = integer(get(request, "revision")), .contentDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .exact = true, .bytes = 100, .maxBytes = 200, .sendable = true } }, .{});
+            if (same(cmd, "draft.read")) {
+                self.reads += 1;
+                return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"shared-source\",\"bodyText\":\"Other client current source\",\"to\":[{\"address\":\"peer@example.test\"}]}}");
+            }
+            if (same(cmd, "operation.list")) return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"operations\":[]}}");
+            if (!same(cmd, "draft.recovery-save")) return error.UnexpectedWrite;
+            self.copies += 1;
+            try std.testing.expectEqualStrings("", text(get(request, "draftId")));
+            try std.testing.expectEqualStrings("shared-source", text(get(request, "copyFromDraftId")));
+            try std.testing.expect(!truth(get(request, "forkIfSettled")));
+            const copy = get(request, "draft");
+            try std.testing.expectEqualStrings("", text(get(copy, "id")));
+            try std.testing.expectEqualStrings("Newest LOCAL note 🌋", text(items(get(copy, "recoveryFields"))[4]));
+            try std.testing.expectEqualStrings("Exact retained original", text(get(get(copy, "original"), "bodyText")));
+            try std.testing.expect(!truth(get(copy, "includeOriginal")));
+            return allocator.dupe(u8, "{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"independent-copy\",\"copiedFrom\":\"shared-source\"}}");
+        }
+    };
+    for ([_]Route{ .manual, .exit, .fatal }) |route| {
+        var remote: Remote = .{};
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client = .{ .ctx = &remote, .callFn = Remote.call };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .compose;
+        try app.compose.id.set(a, "shared-source");
+        try app.compose.fields[0].set(a, "peer@example.test");
+        try app.compose.fields[4].set(a, "Original local view");
+        app.compose.original = .{ .bodyText = "Exact retained original" };
+        app.compose.include_original = false;
+        app.requestComposeMeasure();
+        try std.testing.expect(try app.dispatchComposer());
+        app.job.future.?.await(app.io);
+        try app.finish();
+        try std.testing.expect(app.compose.saved_changed and !app.compose.unknown_outcome);
+        try std.testing.expect(std.mem.indexOf(u8, try app.composeSizeLabel(true), "changed elsewhere") != null);
+        try app.compose.fields[4].set(a, "Newest LOCAL note 🌋");
+        try app.composerChanged();
+        try app.autosaveDraft();
+        try app.reloadChangedDraft();
+        try std.testing.expect(app.job.future == null and remote.copies == 0 and remote.reads == 0);
+        try app.saveDraft(.save_review);
+        try std.testing.expectEqual(UxOverlay.draft_conflict, app.ux_overlay);
+        try std.testing.expectEqualStrings("Save local copy", app.ux_rows.items[0].label);
+        try std.testing.expectEqualStrings("Reload saved draft", app.ux_rows.items[1].label);
+        app.closeUx();
+        switch (route) {
+            .manual => {
+                try app.saveLocalDraftCopy();
+                app.job.future.?.await(app.io);
+                try app.finish();
+            },
+            .exit => try app.persistDraftAtExit(),
+            .fatal => try app.preserveDraftAfterFailure(),
+        }
+        try std.testing.expectEqual(@as(usize, 1), remote.copies);
+        try std.testing.expectEqualStrings("Newest LOCAL note 🌋", app.compose.fields[4].value());
+        try std.testing.expectEqual(app.compose.revision, app.compose.saved_revision);
+        if (route == .fatal) continue;
+        try std.testing.expectEqualStrings("independent-copy", app.compose.id.value());
+        try std.testing.expect(!app.compose.saved_changed and !app.review_ready and !app.composeMeasureCurrent());
+        // A clean explicit reload replaces this view; normal receipt lookup
+        // still protects the freshly loaded draft before local editing.
+        try app.compose.id.set(a, "shared-source");
+        app.savedDraftChanged();
+        try app.reloadChangedDraft();
+        app.job.future.?.await(app.io);
+        app.job.future = null;
+        try app.apply(.draft_read, app.job.response.?);
+        try std.testing.expectEqualStrings("Other client current source", app.compose.fields[4].value());
+        try std.testing.expect(!app.compose.saved_changed and app.compose.unknown_outcome);
+        try std.testing.expectEqual(@as(usize, 1), remote.reads);
+        app.cancelJob();
+    }
+}
+
+test "native settled recovery: fork and copy acknowledgements preserve typing and save newer edits" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Save = struct {
+        calls: usize = 0,
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            try std.testing.expectEqualStrings("draft.recovery-save", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("new-local", text(get(request, "draftId")));
+            try std.testing.expect(!truth(get(request, "forkIfSettled")) and get(request, "copyFromDraftId") == .null);
+            try std.testing.expectEqualStrings("Latest local text 🌋", text(items(get(get(request, "draft"), "recoveryFields"))[4]));
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"new-local\"}}");
+        }
+    };
+    for ([_]bool{ false, true }) |copy| {
+        var save: Save = .{};
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client = .{ .ctx = &save, .callFn = Save.call };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .compose;
+        app.compose.insert_mode = true;
+        app.compose.selected = 4;
+        app.compose.revision = 2;
+        app.compose.saved_revision = 0;
+        app.compose.saved_changed = copy;
+        app.autosave_revision = 1; // The completed snapshot predates current edits.
+        try app.compose.id.set(a, "old-source");
+        try app.compose.fields[4].set(a, "Latest local text 🌋");
+        app.job.kind = .save;
+        app.job.generation = app.generation;
+        try app.job.draft_target.set("old-source");
+        app.job.recovery_from_autosave = !copy;
+        if (copy) try app.acceptLocalDraftCopy("{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"new-local\",\"copiedFrom\":\"old-source\"}}") else try app.acceptRecoveredFork("{\"ok\":true,\"account\":\"personal@example.test\",\"data\":{\"id\":\"new-local\",\"forkedFrom\":\"old-source\"}}");
+        try std.testing.expect(app.compose.insert_mode and app.mode == .compose and app.autosave_due);
+        try std.testing.expectEqual(@as(u64, 1), app.compose.saved_revision);
+        try std.testing.expectEqual(@as(u64, 2), app.compose.revision);
+        try std.testing.expect(!app.compose.saved_changed and !app.review_ready);
+        try std.testing.expect(try app.dispatchComposer());
+        try std.testing.expectEqual(JobKind.autosave, app.job.kind);
+        app.job.future.?.await(app.io);
+        app.job.future = null;
+        if (app.job.failure) |err| return err;
+        try app.apply(.autosave, app.job.response.?);
+        try std.testing.expectEqual(@as(usize, 1), save.calls);
+        try std.testing.expectEqual(app.compose.revision, app.compose.saved_revision);
+        try std.testing.expect(app.compose.insert_mode and app.mode == .compose);
+    }
+}
+
+test "quoted history: explicit reload rejects edits and changed source before applying its response" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Read = struct {
+        calls: usize = 0,
+        fn call(ctx: *anyopaque, allocator: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const request = try std.json.parseFromSliceLeaky(Value, allocator, raw, .{});
+            try std.testing.expectEqualStrings("draft.read", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("shared-source", text(get(request, "draftId")));
+            return allocator.dupe(u8, "{\"ok\":true,\"data\":{\"id\":\"shared-source\",\"bodyText\":\"Other client current source\"}}");
+        }
+    };
+    const Changed = enum { revision, draft, account, generation };
+    for ([_]Changed{ .revision, .draft, .account, .generation }) |changed| {
+        var read: Read = .{};
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        var tty: vaxis.Tty = undefined;
+        var vx: vaxis.Vaxis = undefined;
+        const loop = try a.create(Loop);
+        defer a.destroy(loop);
+        loop.init(std.testing.io, a, &tty, &vx);
+        defer loop.deinit();
+        app.loop = loop;
+        defer app.deinit();
+        app.client = .{ .ctx = &read, .callFn = Read.call };
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"},{\"address\":\"work@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = .compose;
+        app.compose.insert_mode = true;
+        app.compose.selected = 4;
+        try app.compose.id.set(a, "shared-source");
+        try app.compose.fields[4].set(a, "Exact local text 🌋");
+        app.savedDraftChanged();
+        try app.reloadChangedDraft();
+        try std.testing.expect(!app.compose.insert_mode and app.job.reload_conflict);
+        try std.testing.expectEqual(app.compose.revision, app.job.reload_revision);
+        // Deliver real editing keys before the owned worker's result is applied.
+        // The clean-at-launch check alone cannot protect this new revision.
+        try app.onComposeKey(.{ .codepoint = 'i', .text = "i" });
+        for ("qQg") |letter| try app.onComposeKey(.{ .codepoint = letter, .text = &.{letter} });
+        switch (changed) {
+            .revision => {},
+            .draft => try app.compose.id.set(a, "newly-opened-source"),
+            .account => app.account_index = 1,
+            .generation => app.generation += 1,
+        }
+        app.job.future.?.await(app.io);
+        app.job.future = null;
+        if (app.job.failure) |err| return err;
+        try app.apply(.draft_read, app.job.response.?);
+        try std.testing.expectEqual(@as(usize, 1), read.calls);
+        try std.testing.expectEqualStrings("Exact local text 🌋qQg", app.compose.fields[4].value());
+        try std.testing.expect(app.compose.saved_changed and app.compose.insert_mode and app.job.future == null);
+        if (changed == .revision) {
+            try std.testing.expectEqual(UxOverlay.draft_conflict, app.ux_overlay);
+            try std.testing.expectEqualStrings("Save local copy", app.ux_rows.items[0].label);
+        } else try std.testing.expectEqual(UxOverlay.none, app.ux_overlay);
+    }
+}
+
+test "native settled recovery: fresh IDs retain Gmail copy warnings without acknowledgement or focus changes" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const uploaded_digest: [64]u8 = @splat('a');
+    const current_digest: [64]u8 = @splat('b');
+    const Link = @import("draft_link.zig").Link;
+    for ([_]bool{ false, true }) |copy| for ([_]bool{ false, true }) |with_link| for ([_]bool{ false, true }) |newer| {
+        var factory: CacheTestClient = .{};
+        var app = factory.app(a);
+        defer app.deinit();
+        app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+        app.compose_active = true;
+        app.mode = if (!copy and newer) .command else .compose;
+        const expected_mode = app.mode;
+        app.compose.insert_mode = true;
+        app.compose.selected = 4;
+        app.compose.revision = if (newer) 2 else 1;
+        app.autosave_revision = 1;
+        app.compose.saved_changed = copy;
+        app.gmail_send_ack = true; // Never carry the old source's acknowledgement.
+        app.gmail_review_ready = true;
+        try app.compose.id.set(a, "old-source");
+        try app.compose.fields[0].set(a, "peer@example.test");
+        try app.compose.fields[4].set(a, "Current local note 🌋");
+        try app.gmail_content_digest.set(a, &uploaded_digest);
+        app.job.kind = .save;
+        app.job.generation = app.generation;
+        try app.job.draft_target.set("old-source");
+        app.job.recovery_from_autosave = !copy;
+        const inherited: Link = .{
+            .draftId = "new-local",
+            .phase = .linked,
+            .remoteDraftId = "existing-gmail-copy",
+            .remoteMessageId = "existing-remote-version",
+            .attemptMessageId = "<original-upload@example.test>",
+            .uploadedDigest = &uploaded_digest,
+            .version = 1,
+            .paused = false,
+        };
+        const response = try std.json.Stringify.valueAlloc(app.job_arena.allocator(), .{ .ok = true, .account = "personal@example.test", .data = .{
+            .id = "new-local",
+            .copiedFrom = if (copy) @as(?[]const u8, "old-source") else null,
+            .forkedFrom = if (copy) @as(?[]const u8, null) else "old-source",
+            .gmailLink = if (with_link) @as(?Link, inherited) else null,
+            .contentDigest = if (with_link) @as(?[]const u8, &current_digest) else null,
+        } }, .{});
+        if (copy) try app.acceptLocalDraftCopy(response) else try app.acceptRecoveredFork(response);
+        // Returned strings must belong to the composer after worker scratch dies.
+        _ = app.job_arena.reset(.free_all);
+        try std.testing.expectEqualStrings("new-local", app.compose.id.value());
+        try std.testing.expectEqualStrings("Current local note 🌋", app.compose.fields[4].value());
+        try std.testing.expectEqual(expected_mode, app.mode);
+        try std.testing.expect(app.compose.insert_mode and !app.compose.gmailPaused());
+        try std.testing.expect(!app.gmail_send_ack and !app.gmail_review_ready and !app.gmail_reload_pending);
+        try std.testing.expect(!app.review_ready and !app.composeMeasureCurrent());
+        try std.testing.expectEqual(@as(u64, 1), app.compose.saved_revision);
+        try std.testing.expectEqual(@as(u64, if (newer) 2 else 1), app.compose.revision);
+        try std.testing.expectEqual(newer, app.autosave_due);
+        try std.testing.expectEqual(with_link, app.gmailCopyWarning());
+        try std.testing.expect(app.job.future == null and app.ux_overlay == .none);
+        if (with_link) {
+            const kept = app.compose.gmail_link.?;
+            try std.testing.expectEqualStrings("new-local", kept.draftId);
+            try std.testing.expectEqualStrings("existing-gmail-copy", kept.remoteDraftId);
+            try std.testing.expectEqualStrings("existing-remote-version", kept.remoteMessageId);
+            try std.testing.expectEqualStrings(&uploaded_digest, kept.uploadedDigest);
+            try std.testing.expectEqualStrings(&current_digest, app.gmail_content_digest.value());
+            try std.testing.expectEqual(@as(u64, 1), kept.version);
+            try std.testing.expect(kept.sendAcknowledgedDigest.len == 0 and kept.lastImportedDraftId.len == 0 and kept.lastImportedMessageId.len == 0);
+            try std.testing.expectError(error.GmailCopyUnchecked, app.sendDraft());
+        } else {
+            try std.testing.expect(app.compose.gmail_link == null and app.gmail_content_digest.value().len == 0);
+        }
+        app.mode = .review;
+        var screen = try vaxis.Screen.init(a, .{ .cols = 64, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(a);
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 64, .height = 40, .screen = &screen };
+        try app.composeDraw(win);
+        const visible = try markdownTestScreenText(a, &screen);
+        defer a.free(visible);
+        try std.testing.expectEqual(with_link, std.mem.indexOf(u8, visible, "Gmail copy kept:") != null);
+        try std.testing.expectEqual(with_link, std.mem.indexOf(u8, visible, "[g I checked Gmail]") != null);
+        if (with_link) {
+            try app.onConfirmationKey(.{ .codepoint = 'g' });
+            try std.testing.expect(app.gmail_send_ack and app.job.future == null);
+            try app.onConfirmationKey(.{ .codepoint = Key.escape });
+            try app.onComposeKey(.{ .codepoint = 'i', .text = "i" });
+            try app.onComposeKey(.{ .codepoint = 'q', .text = "q" });
+            try std.testing.expectEqualStrings("Current local note 🌋q", app.compose.fields[4].value());
+            try std.testing.expect(!app.gmail_send_ack and app.gmailCopyWarning());
+            try std.testing.expectError(error.GmailCopyUnchecked, app.sendDraft());
+        }
+        try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+        try std.testing.expect(app.job.future == null and app.ux_overlay == .none);
+    };
+}
+
+test "native settled recovery: invalid and allocation-failed acknowledgements preserve source identity" {
+    if (!outgoing_native) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Probe = struct {
+        const digest: [64]u8 = @splat('a');
+        const Invalid = enum { none, mismatched_id, malformed_link, invalid_link, paused, unknown, old_ack, imported, old_version, short_digest, nonhex_digest, nonstring_digest };
+        fn setup(app: *App, allocator: Allocator, copy: bool) !void {
+            app.accounts = items(try std.json.parseFromSliceLeaky(Value, app.account_arena.allocator(), "[{\"address\":\"personal@example.test\"}]", .{}));
+            app.compose_active = true;
+            app.mode = .command;
+            app.compose.insert_mode = true;
+            app.compose.selected = 4;
+            app.compose.revision = 2;
+            app.compose.saved_revision = 0;
+            app.compose.saved_changed = copy;
+            app.autosave_revision = 1;
+            app.gmail_send_ack = true;
+            app.gmail_review_ready = true;
+            app.review_ready = true;
+            app.compose_measure.measured = true;
+            try app.compose_measure.operation.set("old-measured-operation");
+            try app.compose.id.set(allocator, "old-source");
+            try app.compose.operation_id.set(allocator, "old-source-operation");
+            try app.compose.fields[4].set(allocator, "Exact unsaved local note 🌋");
+            try app.gmail_content_digest.set(allocator, &digest);
+            const raw_link = try @import("json.zig").value(app.frame.allocator(), @import("draft_link.zig").Link{
+                .draftId = "old-source",
+                .phase = .linked,
+                .remoteDraftId = "old-remote",
+                .remoteMessageId = "old-version",
+                .attemptMessageId = "<old-upload@example.test>",
+                .uploadedDigest = &digest,
+                .sendAcknowledgedDigest = &digest,
+                .version = 7,
+                .paused = false,
+            });
+            try app.compose.replaceGmailLink(allocator, raw_link);
+            app.job.kind = .save;
+            app.job.generation = app.generation;
+            try app.job.draft_target.set("old-source");
+            app.job.recovery_from_autosave = !copy;
+        }
+        fn response(allocator: Allocator, copy: bool, invalid: Invalid) ![]const u8 {
+            var scratch: std.heap.ArenaAllocator = .init(allocator);
+            defer scratch.deinit();
+            const temp = scratch.allocator();
+            const envelope = try @import("json.zig").value(temp, .{ .ok = true, .account = "personal@example.test", .data = .{
+                .id = "new-local",
+                .copiedFrom = if (copy) @as(?[]const u8, "old-source") else null,
+                .forkedFrom = if (copy) @as(?[]const u8, null) else "old-source",
+                .contentDigest = digest[0..],
+                .gmailLink = @import("draft_link.zig").Link{
+                    .draftId = "new-local",
+                    .phase = .linked,
+                    .remoteDraftId = "new-remote",
+                    .remoteMessageId = "new-version",
+                    .attemptMessageId = "<new-upload@example.test>",
+                    .uploadedDigest = &digest,
+                    .paused = false,
+                },
+            } });
+            // Value maps share this owned temporary storage; mutations update
+            // the encoded envelope without retaining pointers into the App.
+            var data = get(envelope, "data");
+            var inherited = get(data, "gmailLink");
+            switch (invalid) {
+                .none => {},
+                .mismatched_id => try inherited.object.put(temp, "draftId", .{ .string = "other-source" }),
+                .malformed_link => try data.object.put(temp, "gmailLink", .{ .integer = 4 }),
+                .invalid_link => try inherited.object.put(temp, "remoteMessageId", .{ .string = "" }),
+                .paused => try inherited.object.put(temp, "paused", .{ .bool = true }),
+                .unknown => try inherited.object.put(temp, "phase", .{ .string = "unknown" }),
+                .old_ack => try inherited.object.put(temp, "sendAcknowledgedDigest", .{ .string = digest[0..] }),
+                .imported => try inherited.object.put(temp, "lastImportedDraftId", .{ .string = "other-import" }),
+                .old_version => try inherited.object.put(temp, "version", .{ .integer = 7 }),
+                .short_digest => try data.object.put(temp, "contentDigest", .{ .string = "short" }),
+                .nonhex_digest => try data.object.put(temp, "contentDigest", .{ .string = "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg" }),
+                .nonstring_digest => try data.object.put(temp, "contentDigest", .{ .integer = 12 }),
+            }
+            return std.json.Stringify.valueAlloc(allocator, envelope, .{});
+        }
+        fn accept(app: *App, copy: bool, raw: []const u8) !void {
+            if (copy) try app.acceptLocalDraftCopy(raw) else try app.acceptRecoveredFork(raw);
+        }
+        fn unchanged(app: *App, copy: bool) !void {
+            try std.testing.expectEqualStrings("old-source", app.compose.id.value());
+            try std.testing.expectEqualStrings("old-source-operation", app.compose.operation_id.value());
+            try std.testing.expectEqualStrings("Exact unsaved local note 🌋", app.compose.fields[4].value());
+            const kept = app.compose.gmail_link.?;
+            try std.testing.expectEqualStrings("old-source", kept.draftId);
+            try std.testing.expectEqualStrings("old-remote", kept.remoteDraftId);
+            try std.testing.expectEqualStrings("old-version", kept.remoteMessageId);
+            try std.testing.expectEqual(@as(u64, 7), kept.version);
+            try std.testing.expectEqualStrings(&digest, kept.sendAcknowledgedDigest);
+            try std.testing.expectEqualStrings(&digest, app.gmail_content_digest.value());
+            try std.testing.expect(app.compose.insert_mode and app.mode == .command and !app.autosave_due);
+            try std.testing.expectEqual(copy, app.compose.saved_changed);
+            try std.testing.expectEqual(@as(u64, 2), app.compose.revision);
+            try std.testing.expectEqual(@as(u64, 0), app.compose.saved_revision);
+            try std.testing.expect(!app.gmail_send_ack and !app.gmail_review_ready and !app.review_ready);
+            try std.testing.expect(!app.compose_measure.measured and app.compose_measure.operation.len == 0);
+            try std.testing.expect(app.job.future == null and app.ux_overlay == .none);
+        }
+    };
+    for ([_]bool{ false, true }) |copy| {
+        for (std.enums.values(Probe.Invalid)) |invalid| {
+            if (invalid == .none) continue;
+            var factory: CacheTestClient = .{};
+            var app = factory.app(a);
+            defer app.deinit();
+            try Probe.setup(&app, a, copy);
+            const raw = try Probe.response(a, copy, invalid);
+            defer a.free(raw);
+            try std.testing.expectError(error.DraftPersistenceFailed, Probe.accept(&app, copy, raw));
+            try Probe.unchanged(&app, copy);
+            try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+        }
+        for ([_]bool{ false, true }) |fail_envelope| {
+            var exhausted = false;
+            for (0..64) |failure_index| {
+                var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = failure_index, .resize_fail_index = 0 });
+                var factory: CacheTestClient = .{};
+                var app = factory.app(a);
+                defer app.deinit();
+                try Probe.setup(&app, a, copy);
+                const raw = try Probe.response(a, copy, .none);
+                defer a.free(raw);
+                if (fail_envelope) {
+                    app.job_arena.deinit();
+                    app.job_arena = .init(failing.allocator());
+                } else app.allocator = failing.allocator();
+                defer app.allocator = a;
+                Probe.accept(&app, copy, raw) catch |err| {
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    try std.testing.expect(failing.has_induced_failure);
+                    try Probe.unchanged(&app, copy);
+                    continue;
+                };
+                try std.testing.expect(!failing.has_induced_failure);
+                try std.testing.expect(failure_index >= if (fail_envelope) @as(usize, 1) else 3);
+                try std.testing.expectEqualStrings("new-local", app.compose.id.value());
+                try std.testing.expectEqualStrings("new-local", app.compose.gmail_link.?.draftId);
+                try std.testing.expectEqualStrings("new-remote", app.compose.gmail_link.?.remoteDraftId);
+                try std.testing.expect(app.compose.insert_mode and app.autosave_due and app.gmailCopyWarning());
+                try std.testing.expect(!app.gmail_send_ack and !app.gmail_review_ready and !app.review_ready);
+                try std.testing.expectEqual(@as(u64, 1), app.compose.saved_revision);
+                try std.testing.expectEqual(@as(usize, 0), factory.provider_calls);
+                exhausted = true;
+                break;
+            }
+            try std.testing.expect(exhausted);
+        }
+    }
 }

@@ -26,6 +26,7 @@ import vault_activation_routing
 PASSWORD = b"Synthetic vault acceptance password"
 ACCOUNT = "personal@example.com"
 MAGIC = b"OMAVIPC1"
+EXECUTION_MAGIC = b"OMAVIPC2"
 
 
 def require(condition, message):
@@ -232,7 +233,7 @@ def run(binary, directory):
             stalled_response.settimeout(2)
             stalled_response.connect(str(backend))
             frame = json.dumps(dict(id="stalled-response", cmd="draft.read", account=ACCOUNT, draftId=pending["id"])).encode()
-            stalled_response.sendall(MAGIC + bytes([1, 0, 0, 0]) + struct.pack("<I", len(frame)) + frame)
+            stalled_response.sendall(EXECUTION_MAGIC + bytes([1, 0, 0, 0]) + struct.pack("<I", len(frame)) + frame)
             time.sleep(.1)
             require(control("status")["unlocked"], "stalled response blocked control")
             before_lock = time.monotonic()
@@ -307,6 +308,7 @@ def run(binary, directory):
             if daemon.returncode != 0:
                 print(f"fixture daemon exit={daemon.returncode}: {daemon.stderr.read().decode(errors='replace')}", file=sys.stderr)
     print("PASS vault owned-PTY init/unlock, encrypted mail/draft/blob/send/Calendar/batch, lock and restart")
+    protocol_generation(binary, directory, env)
     disconnects(binary, directory, env)
     import vault_conversation_paths
     vault_conversation_paths.run(binary, directory, env)
@@ -320,12 +322,13 @@ def malformed_frames(backend, control):
     # deadline, not the immediate malformed-header rejection below.
     native_execute_limit = 12 * 35 * 1024 * 1024
 
-    def header(kind, length, magic=MAGIC, reserved=b"\0\0\0"):
+    def header(kind, length, magic=None, reserved=b"\0\0\0"):
+        magic = magic or (EXECUTION_MAGIC if kind in (1, 2, 6, 7, 8) else MAGIC)
         return magic + bytes([kind]) + reserved + struct.pack("<I", length)
 
     invalid = (
         ("wrong magic", header(1, 0, magic=b"WRONGIPC")),
-        ("wrong version", header(1, 0, magic=b"OMAVIPC2")),
+        ("wrong version", header(1, 0, magic=b"OMAVIPC3")),
         ("unknown kind", header(127, 0)),
         ("reserved flags", header(1, 0, reserved=b"\1\0\0")),
         ("native execute overflow", header(1, native_execute_limit + 1)),
@@ -346,7 +349,9 @@ def malformed_frames(backend, control):
             require(closed, f"invalid {name} frame was accepted or retained")
     # One partial peer cannot occupy the control connection indefinitely.
     for name, value in (("partial header", MAGIC[:4]),
-                        ("largest native body missing", header(1, native_execute_limit))):
+                        ("largest native body missing", header(1, native_execute_limit)),
+                        ("legacy body stalled during metadata", header(1, 1 << 20, magic=MAGIC) + b'{"draft":{"bodyText":"'),
+                        ("legacy malformed body stalled during drain", header(1, 1 << 20, magic=MAGIC) + b'not-json')):
         with socket.socket(socket.AF_UNIX) as stalled:
             stalled.settimeout(7)
             started = time.monotonic()
@@ -358,7 +363,11 @@ def malformed_frames(backend, control):
             stalled.settimeout(max(.01, 7 - (time.monotonic() - started)))
             require(stalled.recv(1) == b"", f"{name} ignored its arrival deadline")
             require(4 <= time.monotonic() - started <= 7, f"{name} changed the five-second arrival deadline")
-    print("PASS native IPC header limits, independent status and five-second incomplete-frame cleanup", flush=True)
+        reclaimed = time.monotonic()
+        require(not control("lock")["unlocked"] and not control("status")["unlocked"],
+                f"{name} left a blocked worker or changed lock state")
+        require(time.monotonic() - reclaimed < 2, f"{name} did not release its worker for lock/status")
+    print("PASS native and legacy IPC header limits, independent status and five-second incomplete-frame cleanup", flush=True)
 
 
 def canceled_prompt(binary, backend, env):
@@ -393,6 +402,73 @@ def canceled_prompt(binary, backend, env):
         os.close(descriptor)
 
 
+def protocol_generation(binary, directory, env):
+    """A real new CLI against a synthetic old peer must submit no data frame."""
+    peer_dir = directory / "legacy-protocol-peer"
+    peer_dir.mkdir(mode=0o700)
+    legacy_env = dict(env)
+    for key, name in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache")):
+        selected = peer_dir / name
+        selected.mkdir(mode=0o700)
+        legacy_env[key] = str(selected)
+    path = peer_dir / "s"
+    for mode in ("execute", "status", "lock", "stop"):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(path))
+        path.chmod(0o600)
+        listener.listen(1)
+        seen, failures = [], []
+
+        def old_peer():
+            try:
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(5)
+                    header = b""
+                    while len(header) != 16:
+                        part = connection.recv(16 - len(header))
+                        require(part, "missing legacy control header")
+                        header += part
+                    expected = {"execute": 4, "status": 4, "lock": 3, "stop": 5}[mode]
+                    require(header == MAGIC + bytes([expected, 0, 0, 0]) + struct.pack("<I", 0),
+                            "new client transmitted protected data to the old peer")
+                    seen.append(expected)
+                    payload = b'{"ok":true,"data":{"unlocked":true}}'
+                    connection.sendall(MAGIC + bytes([128, 0, 0, 0]) + struct.pack("<I", len(payload)) + payload)
+            except BaseException as failure:
+                failures.append(failure)
+
+        thread = threading.Thread(target=old_peer, daemon=True)
+        thread.start()
+        request = dict(id="legacy-backend", account=ACCOUNT, cmd="draft.send",
+                       draftId="unsent", operationId="never-sent", expectedContentDigest="a" * 64)
+        try:
+            arguments = (["cli", "--backend", str(path)] if mode == "execute"
+                         else ["vault", mode, "--socket", str(path)])
+            result = subprocess.run([str(binary), *arguments], env=legacy_env,
+                                    input=(json.dumps(request) + "\n").encode() if mode == "execute" else b"",
+                                    capture_output=True, timeout=10)
+            thread.join(timeout=5)
+            require(not thread.is_alive() and not failures, f"old peer failed: {failures}")
+            require(len(seen) == 1, "old peer received extra requests")
+            response = json.loads(result.stdout)
+            if mode == "execute":
+                require(response["id"] == request["id"] and response["account"] == ACCOUNT,
+                        "protocol refusal lost request correlation")
+                require(response["ok"] is False and response["error"]["code"] == "BackendProtocolMismatch",
+                        "old daemon mismatch became a send or unknown outcome")
+                for instruction in ("omagma vault stop", "omagma vault start", "omagma vault unlock"):
+                    require(instruction in response["error"]["message"], "protocol refusal omitted upgrade advice")
+            else:
+                require(result.returncode == 0 and response["ok"] is True,
+                        f"legacy {mode} stopped working during upgrade")
+        finally:
+            listener.close()
+            thread.join(timeout=5)
+            path.unlink()
+    print("PASS explicit --backend old peer refuses before data submission; status/lock/stop remain usable")
+
+
 def disconnects(binary, directory, env):
     peer_dir = directory / "drop-peer"
     peer_dir.mkdir(mode=0o700)
@@ -406,12 +482,22 @@ def disconnects(binary, directory, env):
         counts = []
 
         def drop():
+            # Semantic preflight is read-only. Only the subsequent execute
+            # counts as an admitted request for the uncertainty oracle.
+            connection, _ = listener.accept()
+            with connection:
+                status = b""
+                while len(status) != 16:
+                    status += connection.recv(16 - len(status))
+                require(status == MAGIC + bytes([4, 0, 0, 0]) + struct.pack("<I", 0), "missing protocol preflight")
+                payload = b'{"ok":true,"data":{"executionProtocol":2}}'
+                connection.sendall(MAGIC + bytes([128, 0, 0, 0]) + struct.pack("<I", len(payload)) + payload)
             connection, _ = listener.accept()
             with connection:
                 header = b""
                 while len(header) != 16:
                     header += connection.recv(16 - len(header))
-                require(header[:8] == MAGIC, "client changed IPC magic")
+                require(header[:8] == EXECUTION_MAGIC, "client lost protected IPC generation")
                 remaining = struct.unpack("<I", header[12:])[0]
                 while remaining:
                     part = connection.recv(min(65536, remaining))

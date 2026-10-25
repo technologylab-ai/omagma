@@ -28,6 +28,93 @@ fn command(client: *transport.Client, allocator: std.mem.Allocator, request: any
     return value.object.get("data") orelse error.MissingResponse;
 }
 
+test "vault protocol: old clients cannot mutate current daemon and current clients retain normal dispatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    const vault = try std.fmt.allocPrint(allocator, "{s}/vault", .{root});
+    const socket = try std.fmt.allocPrint(allocator, "{s}/socket", .{root});
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const owner = try a.create(owner_module.Owner);
+    defer a.destroy(owner);
+    owner.* = try owner_module.Owner.init(io, a, &env, vault, .{ .fixtures = true });
+    defer owner.deinit();
+    var recovery: @import("terminal/vault_types.zig").RecoveryKey = .{ .bytes = @splat(0x53) };
+    defer recovery.wipe();
+    const password = "Synthetic protocol upgrade password";
+    try owner.create(password, &recovery);
+    var service = try io.concurrent(daemon.serve, .{ io, a, owner, socket });
+    defer service.cancel(io) catch {};
+    var client: transport.Client = .{ .io = io, .socket_path = socket };
+    var connected = false;
+    for (0..200) |_| {
+        _ = client.request(allocator, .status, "") catch {
+            try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(10) }).sleep(io);
+            continue;
+        };
+        connected = true;
+        break;
+    }
+    try std.testing.expect(connected);
+    const Legacy = struct {
+        fn request(path: []const u8, kind: transport.Kind, body: []const u8, memory: std.mem.Allocator) !j.Value {
+            const address = try std.Io.net.UnixAddress.init(path);
+            const stream = try address.connect(io);
+            defer stream.close(io);
+            var header = try transport.encodeHeader(kind, body.len, transport.request_limit);
+            @memcpy(header[0..8], "OMAVIPC1");
+            var writer = stream.writer(io, &.{});
+            try writer.interface.writeAll(&header);
+            try writer.interface.writeAll(body);
+            try writer.interface.flush();
+            var response = try transport.readFrame(io, memory, stream, transport.ordinary_response_limit);
+            defer response.deinit(memory);
+            return std.json.parseFromSliceLeaky(j.Value, memory, response.body, .{ .allocate = .alloc_always });
+        }
+    };
+    for ([_][]const u8{
+        "{\"id\":\"legacy-create\",\"account\":\"personal@example.com\",\"cmd\":\"draft.create\",\"draft\":{\"bodyText\":\"Must never be saved\"}}",
+        "{\"id\":42,\"account\":\"personal@example.com\",\"cmd\":\"draft.send\",\"operationId\":\"never-dispatched\"}",
+    }) |body| {
+        const response = try Legacy.request(socket, .execute, body, allocator);
+        const request = try std.json.parseFromSliceLeaky(j.Value, allocator, body, .{});
+        try std.testing.expectEqualDeep(j.get(request, "id").?, j.get(response, "id").?);
+        try std.testing.expectEqualStrings("personal@example.com", j.text(response, "account"));
+        try std.testing.expectEqualStrings("BackendProtocolMismatch", j.text(j.get(response, "error").?, "code"));
+        try std.testing.expect(std.mem.indexOf(u8, j.text(j.get(response, "error").?, "message"), "omagma vault stop") != null);
+    }
+    const empty = try command(&client, allocator, .{ .cmd = "draft.list", .account = "personal@example.com" });
+    try std.testing.expectEqual(@as(usize, 0), j.get(empty, "drafts").?.array.items.len);
+    const stats = try command(&client, allocator, .{ .cmd = "cache.stats", .account = "personal@example.com" });
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", 0));
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureCalls", 0));
+    const current = try command(&client, allocator, .{ .cmd = "draft.create", .account = "personal@example.com", .draft = .{ .subject = "Current protocol", .bodyText = "Exact new content" } });
+    const saved = try command(&client, allocator, .{ .cmd = "draft.read", .account = "personal@example.com", .draftId = j.text(current, "id") });
+    try std.testing.expectEqualStrings("Exact new content", j.text(saved, "bodyText"));
+    _ = try Legacy.request(socket, .lock, "", allocator);
+    try std.testing.expect(!owner.unlocked());
+    const refused_unlock = try Legacy.request(socket, .unlock, password, allocator);
+    try std.testing.expectEqualStrings("BackendProtocolMismatch", j.text(j.get(refused_unlock, "error").?, "code"));
+    try std.testing.expect(!owner.unlocked());
+    var wrong_owner = client;
+    wrong_owner.expected_vault_id = @splat(0xff);
+    try std.testing.expectError(error.VaultIdentityMismatch, wrong_owner.request(allocator, .unlock, password));
+    try std.testing.expect(!owner.unlocked());
+    _ = try client.request(allocator, .unlock, password);
+    try std.testing.expect(owner.unlocked());
+    const old_status = try Legacy.request(socket, .status, "", allocator);
+    try std.testing.expect(j.get(j.get(old_status, "data").?, "unlocked").?.bool);
+    _ = try Legacy.request(socket, .stop, "", allocator);
+    try service.await(io);
+    try std.testing.expect(!owner.unlocked());
+}
+
 test "vault daemon: create unlock account mail draft lock and restart through private socket" {
     std.debug.print("vault daemon compiler={s} mode={s} target={s}-{s}\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode), @tagName(@import("builtin").os.tag), @tagName(@import("builtin").cpu.arch) });
     var random: [12]u8 = undefined;

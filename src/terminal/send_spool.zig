@@ -159,11 +159,13 @@ const LazySource = struct {
     }
 };
 
-pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t.Attachment, related: []const t.Attachment) !Spool {
-    const a = store.allocator;
+const Prepared = struct {
+    sources: []LazySource,
+    source_count: usize,
+    parts: []mime.Attachment,
+};
+fn prepare(a: std.mem.Allocator, pool: *SourcePool, attachments: []const t.Attachment, related: []const t.Attachment) !Prepared {
     if (attachments.len > t.Limits.attachments or related.len > t.Limits.related_resources) return error.TooManyAttachments;
-    var pool: SourcePool = .{ .store = store };
-    defer pool.close();
     const sources = try a.alloc(LazySource, attachments.len + related.len);
     var source_count: usize = 0;
     const parts = try a.alloc(mime.Attachment, attachments.len + related.len);
@@ -173,14 +175,39 @@ pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t
         cursor += 1;
         if (attachment.blobId != null) {
             const source_index = source_count;
-            sources[source_index] = .{ .pool = &pool, .attachment = attachment };
+            sources[source_index] = .{ .pool = pool, .attachment = attachment };
             source_count += 1;
             part.* = .{ .filename = attachment.filename, .mime_type = attachment.mimeType, .content_id = if (attachment.contentId) |id| try mime.contentId(id) else "", .disposition = attachment.disposition orelse "", .content_location = attachment.contentLocation orelse "", .size = attachment.size, .source = .{ .ctx = &sources[source_index], .readFn = LazySource.read } };
         } else part.* = (try mime.composeAttachments(&.{attachment}, a))[0];
     };
+    return .{ .sources = sources, .source_count = source_count, .parts = parts };
+}
+/// Exact encoded size with the same immutable sources and headers as send.
+/// This reads/verifies one blob at a time and creates no output file.
+pub fn measure(store: *storage.Store, input: mime.Compose, attachments: []const t.Attachment, related: []const t.Attachment) !usize {
+    var pool: SourcePool = .{ .store = store };
+    defer pool.close();
+    const prepared = try prepare(store.allocator, &pool, attachments, related);
     var compose = input;
-    compose.attachments = parts[0..attachments.len];
-    compose.related = parts[attachments.len..];
+    compose.attachments = prepared.parts[0..attachments.len];
+    compose.related = prepared.parts[attachments.len..];
+    var buffer: [32 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buffer);
+    var counting = std.Io.Writer.Discarding.init(&buffer);
+    try mime.measureTo(compose, &counting.writer);
+    return @intCast(counting.fullCount());
+}
+
+pub fn create(store: *storage.Store, input: mime.Compose, attachments: []const t.Attachment, related: []const t.Attachment) !Spool {
+    const a = store.allocator;
+    var pool: SourcePool = .{ .store = store };
+    defer pool.close();
+    const prepared = try prepare(a, &pool, attachments, related);
+    const sources = prepared.sources;
+    const source_count = prepared.source_count;
+    var compose = input;
+    compose.attachments = prepared.parts[0..attachments.len];
+    compose.related = prepared.parts[attachments.len..];
     // First pass counts the exact encoded size without allocating the MIME.
     // It also validates all source hashes before reserving disk or networking.
     var buffer: [32 * 1024]u8 = undefined;
@@ -246,7 +273,7 @@ test "growing chain spool: all inline resources stream beside ordinary files wit
         resource.contentId = try std.fmt.allocPrint(a, "screenshot-{d}@example.test", .{index});
         try html.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{resource.contentId.?}));
     }
-    const files: [t.Limits.attachments]t.Attachment = @splat(picture);
+    const files: [t.Limits.portable_attachments]t.Attachment = @splat(picture);
     const recipients = @import("recipients.zig");
     var envelope: recipients.Envelope = .{};
     try recipients.parse("recipient@example.test", &envelope.to);

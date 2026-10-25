@@ -71,6 +71,7 @@ def one_shot(client, family, verb, arguments=(), account=ACCOUNTS[0], stdin=b"",
 def invitations(binary, directory):
     source = InvitationFixture(directory)
     with Client(binary, directory / "client", extra=source.options()) as client:
+        expected_operations = {}
         for case in ("named-calendar", "named-application", "named-octet"):
             flags = ["--message-id", "invite-" + case]
             inspected = one_shot(client, "invitations", "inspect", flags)
@@ -83,6 +84,7 @@ def invitations(binary, directory):
                 result = one_shot(client, "invitations", "reply",
                                   [*flags, "--status", status, "--operation-id", operation_id])
                 require(result["outcome"] == "applied", "one-shot fixture RSVP did not apply")
+                expected_operations[operation_id] = result
                 reply_identity(result, case, ACCOUNTS[0], status, operation_id)
                 before = client.request("cache.stats")
                 require(client.request("invitation.reply", **parameters) == result,
@@ -150,7 +152,14 @@ def invitations(binary, directory):
                              (["--message-id", "invite-named-calendar", "--status", "accepted"], "MissingField")):
             one_shot(client, "invitations", "reply", flags, error=error)
         require(client.request("cache.stats")["fixtureSends"] == 9, "invalid one-shot RSVP sent a response")
-        require(len(client.request("operation.list")["operations"]) == 9, "invalid RSVP created a journal entry")
+        retained = client.request("history.operations")
+        operations = client.request("operation.list")["operations"] + retained["items"]
+        require(not retained["nextCursor"] and len(operations) == 9
+                and {operation["id"]: operation for operation in operations} == expected_operations,
+                "invalid RSVP added a receipt or settlement lost/duplicated an original receipt")
+        for operation_id, expected in expected_operations.items():
+            require(client.request("operation.read", operationId=operation_id) == expected,
+                    "active/retained RSVP lookup changed the original receipt")
     finished(client)
 
 
@@ -315,9 +324,32 @@ def attachments(binary, directory):
         one_shot(client, "mail", "attachment", ["--message-id", "shared-msg-003", "--attachment-id", attachment_id,
                  "--output-file", str(directory / "invented.txt")], error="UnknownOption")
         require(not (directory / "invented.txt").exists(), "invented output-file flag wrote a file")
-        many = [item for _ in range(17) for item in ("--attach-file", str(files[0][0]))]
-        one_shot(client, "mail", "compose", many, error="TooManyAttachments")
-        require(client.request("cache.stats")["fixtureSends"] == 1, "invalid attachment input submitted mail")
+        tiny_files = [(directory / f"tiny-capacity-{index:04}.bin", index.to_bytes(2, "big") + b"\x00tiny\xff")
+                      for index in range(1040)]
+        for path, contents in tiny_files:
+            path.write_bytes(contents)
+            path.chmod(0o600)
+        many = [item for path, _ in tiny_files for item in ("--attach-file", str(path))]
+        capacity = one_shot(client, "mail", "compose", ["--to", "recipient@example.test",
+                            "--subject", "Native1040-file boundary", "--body", "Exact tiny files.", *many])
+        require(len(capacity["attachments"]) == 1040
+                and all(item["filename"] == path.name and item["mimeType"] == "application/octet-stream"
+                        and decoded(item) == contents
+                        for item, (path, contents) in zip(capacity["attachments"], tiny_files)),
+                "native1040-file boundary lost exact file descriptors or bytes")
+        read_saved_draft(client, capacity)
+        before_drafts = client.request("draft.list")
+        before_operations = client.request("operation.list")
+        before_history = client.request("history.operations")
+        before_stats = client.request("cache.stats")
+        one_shot(client, "mail", "compose", [*many, "--attach-file", str(tiny_files[0][0])], error="TooManyAttachments")
+        require(client.request("draft.list") == before_drafts
+                and client.request("operation.list") == before_operations
+                and client.request("history.operations") == before_history,
+                "1041-file refusal changed saved drafts or receipts")
+        stats = client.request("cache.stats")
+        require(stats["fixtureCalls"] == before_stats["fixtureCalls"] and stats["fixtureSends"] == 1,
+                "attachment capacity checks contacted the provider or submitted mail")
     finished(client)
 
 

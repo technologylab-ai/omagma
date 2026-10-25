@@ -76,15 +76,16 @@ pub fn fromMessage(a: std.mem.Allocator, headers: j.Value, message: t.Message, a
 }
 pub fn preserveIfNeeded(a: std.mem.Allocator, input: t.Draft, message: t.Message) !t.Draft {
     var draft = input;
-    if (!@import("send_memory.zig").native or draft.attachments.len <= t.Limits.attachments) return draft;
+    if (!@import("send_memory.zig").native or draft.attachments.len <= t.Limits.portable_attachments) return draft;
     // The small import's one extra slot is reserved for a generated logo whose
     // identity AND bytes are checked after download. Preserve that contract.
     if (draft.attachments.len == t.Limits.attachments + 1) {
         for (draft.attachments) |file| if (brandingCandidate(file)) return draft;
     }
-    const html = message.bodyHtml orelse return error.GmailDraftImportUnsupported;
+    const html = message.bodyHtml orelse return if (draft.attachments.len <= t.Limits.attachments) draft else error.GmailDraftImportUnsupported;
     const original_mail = @import("original_mail.zig");
     const plan = try original_mail.resourcePlanWithLimit(html, message.attachments, t.Limits.attachment_bytes);
+    if (plan.count == 0 and draft.attachments.len <= t.Limits.attachments) return draft;
     if (message.attachments.len - plan.count > t.Limits.attachments) return error.GmailDraftImportUnsupported;
     const resources = try a.alloc(t.Attachment, plan.count);
     var selected: original_mail.ResourceUsage = .empty;
@@ -238,14 +239,14 @@ test "Gmail draft import: illustrated native copies preserve complete source and
     try std.testing.expectEqual(@as(usize, 1), draft.attachments.len);
     try std.testing.expectEqualStrings("ordinary", draft.attachments[0].id);
     var small = message;
-    small.attachments = files[0..t.Limits.attachments];
+    small.attachments = files[0..t.Limits.portable_attachments];
     const plain = try fromMessage(a, headers, small, "self@example.test");
     try std.testing.expect(plain.original == null);
     try std.testing.expectEqual(.plain, plain.bodyFormat);
     try std.testing.expectEqualStrings(message.bodyText, plain.bodyText);
     var refused = message;
     refused.bodyHtml = null;
-    try std.testing.expectError(error.GmailDraftImportUnsupported, fromMessage(a, headers, refused, "self@example.test"));
+    try std.testing.expectEqual(@as(usize, 130), (try fromMessage(a, headers, refused, "self@example.test")).attachments.len);
     files[128].contentId = files[0].contentId;
     try std.testing.expectError(error.OriginalResourceUnavailable, fromMessage(a, headers, message, "self@example.test"));
     files[128].contentId = "image-128@example.test";

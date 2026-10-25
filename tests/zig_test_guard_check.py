@@ -199,7 +199,8 @@ class GuardTests(unittest.TestCase):
 
     def test_release_preserves_all_eight_unit_timeouts_and_opts_in(self):
         commands = [line for line in (ROOT / ".github/workflows/release.yml").read_text().splitlines()
-                    if "--test-timeout" in line and "test-native-send-stress" not in line]
+                    if "--test-timeout" in line and "test-native-send-stress" not in line
+                    and "test-native-history-stress" not in line]
         self.assertEqual(len(commands), 8)
         for command in commands:
             self.assertIn("--test-timeout 120s", command)
@@ -217,6 +218,53 @@ class GuardTests(unittest.TestCase):
                 self.assertIn("-Dtarget=${{ matrix.target }}", command)
                 self.assertIn("-Dtest-watchdog=true", command)
 
+
+    def test_retained_history_stress_is_mandatory_in_both_modes_and_native_matrices(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        linux, macos = release.split("  macos-build:", 1)
+        for matrix in (linux, macos):
+            steps = matrix.split("      - name:")
+            stress = [step for step in steps if "run: zig build test-native-history-stress " in step]
+            self.assertEqual(len(stress), 2)
+            self.assertEqual(sum("-Doptimize=debug" in step for step in stress), 1)
+            self.assertEqual(sum("-Doptimize=safe" in step for step in stress), 1)
+            for step in stress:
+                self.assertNotIn("if:", step, "History qualification must not be conditional")
+                self.assertNotIn("continue-on-error", step)
+                self.assertIn("--test-timeout 1200s", step)
+                self.assertIn("-Dtarget=${{ matrix.target }}", step)
+                self.assertIn("-Dtest-watchdog=true", step)
+        native = (ROOT / ".github/workflows/macos-native.yml").read_text()
+        for job in native.split("  native:", 1):
+            self.assertIn("for mode in debug safe; do", job)
+            commands = [line for line in job.splitlines() if "zig build test-native-history-stress " in line]
+            self.assertEqual(len(commands), 1)
+            self.assertIn('-Doptimize="$mode"', commands[0])
+            self.assertIn("--test-timeout 1200s", commands[0])
+            self.assertIn("-Dtest-watchdog=true", commands[0])
+            ordinary = [line for line in job.splitlines() if "zig build test probes " in line]
+            self.assertEqual(len(ordinary), 1)
+            self.assertIn("--test-timeout 120s", ordinary[0])
+
+    def test_history_stress_runs_only_the_five_extracted_lifecycles(self):
+        wrapper = (ROOT / "src/native_history_stress_tests.zig").read_text()
+        self.assertEqual(wrapper.count('test "native history stress:'), 5)
+        self.assertEqual(wrapper.count("try mail.retainedSendLifecycle("), 4)
+        self.assertIn("try calendar.thousandCalendarIdentityScenario();", wrapper)
+        http = (ROOT / "src/session_cache_integration_tests.zig").read_text()
+        calendar = (ROOT / "src/calendar_identity_history_tests.zig").read_text()
+        self.assertIn("pub fn retainedSendLifecycle(", http)
+        self.assertIn("pub fn thousandCalendarIdentityScenario()", calendar)
+        self.assertNotIn('test "retained history HTTP: 1001', http)
+        self.assertNotIn('test "retained blobs HTTP: 4097', http)
+        self.assertNotIn('test "calendar identity history: 1001', calendar)
+        build = (ROOT / "build.zig").read_text()
+        ordinary = build.split('const correctness =', 1)[1].split('const send_stress =', 1)[0]
+        self.assertNotIn("native_history_stress_tests.zig", ordinary)
+        stress = build.split('const history_stress =', 1)[1].split('const probes =', 1)[0]
+        self.assertIn('.filters = &.{"native history stress:"}', stress)
+        self.assertIn('b.path("src/native_history_stress_tests.zig")', stress)
+        self.assertIn('guardedTestRun(b, history_stress, test_watchdog)', stress)
 
     def test_maker_timeout_preserves_phase_markers_and_partial_output(self):
         failure = subprocess.TimeoutExpired(["synthetic-maker"], 180,

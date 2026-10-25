@@ -11,10 +11,30 @@ pub const request_limit = @import("send_memory.zig").record_bytes;
 pub const response_limit = request_limit + 64 * 1024;
 pub const ordinary_response_limit = 32 * 1024 * 1024;
 pub const header_bytes = 16;
+// Control/status framing remains usable during an upgrade. Protected requests
+// have a semantic generation independent of the application version: old
+// daemons reject this magic before any data operation can be dispatched.
 pub const magic = "OMAVIPC1";
+pub const execution_magic = "OMAVIPC2";
+pub const execution_protocol: u8 = 2;
+pub const mismatch_message = "Vault backend uses an incompatible execution protocol. Finish pending work and use the current executable to run omagma vault stop, omagma vault start, then omagma vault unlock; keep the existing vault and cache.";
+pub fn protectedKind(kind: Kind) bool {
+    return switch (kind) {
+        .execute, .unlock, .password_change, .recovery_change, .recover => true,
+        .lock, .status, .stop, .response => false,
+    };
+}
+pub fn errorMessage(err: anyerror) []const u8 {
+    return if (err == error.BackendProtocolMismatch) mismatch_message else @errorName(err);
+}
+pub fn requireExecutionProtocol(data: std.json.Value) !void {
+    const generation = @import("json.zig").get(data, "executionProtocol") orelse return error.BackendProtocolMismatch;
+    if (generation != .integer or generation.integer != execution_protocol) return error.BackendProtocolMismatch;
+}
 pub const Kind = enum(u8) { execute = 1, unlock = 2, lock = 3, status = 4, stop = 5, password_change = 6, recovery_change = 7, recover = 8, response = 128 };
 pub const Frame = struct {
     kind: Kind,
+    generation: u8 = execution_protocol,
     body: []u8,
     backing: ?std.mem.Allocator = null,
     pub fn deinit(self: *Frame, a: std.mem.Allocator) void {
@@ -95,22 +115,24 @@ pub const Listener = struct {
 pub fn encodeHeader(kind: Kind, length: usize, limit: usize) ![header_bytes]u8 {
     if (length > limit or length > std.math.maxInt(u32)) return error.BackendFrameTooLarge;
     var bytes: [header_bytes]u8 = @splat(0);
-    @memcpy(bytes[0..8], magic);
+    @memcpy(bytes[0..8], if (protectedKind(kind)) execution_magic else magic);
     bytes[8] = @backingInt(kind);
     std.mem.writeInt(u32, bytes[12..16], @intCast(length), .little);
     return bytes;
 }
-pub const Header = struct { kind: Kind, length: usize };
+pub const Header = struct { kind: Kind, length: usize, generation: u8 };
 pub fn decodeHeader(bytes: *const [header_bytes]u8, limit: usize) !Header {
-    if (!std.mem.eql(u8, bytes[0..8], magic) or bytes[9] != 0 or bytes[10] != 0 or bytes[11] != 0) return error.InvalidBackendFrame;
+    const generation: u8 = if (std.mem.eql(u8, bytes[0..8], execution_magic)) execution_protocol else if (std.mem.eql(u8, bytes[0..8], magic)) 1 else return error.InvalidBackendFrame;
+    if (bytes[9] != 0 or bytes[10] != 0 or bytes[11] != 0) return error.InvalidBackendFrame;
     const kind = std.enums.fromInt(Kind, bytes[8]) orelse return error.InvalidBackendFrame;
+    if (!protectedKind(kind) and generation != 1) return error.InvalidBackendFrame;
     const length = std.mem.readInt(u32, bytes[12..16], .little);
     if (length > limit) return error.BackendFrameTooLarge;
     if ((kind == .unlock or kind == .password_change) and (length == 0 or length > @import("vault_types.zig").max_password_bytes)) return error.InvalidVaultPassword;
     if (kind == .recovery_change and length != 32) return error.InvalidRecoveryKey;
     if (kind == .recover and (length <= 32 or length > 32 + @import("vault_types.zig").max_password_bytes)) return error.InvalidVaultPassword;
     if ((kind == .lock or kind == .status or kind == .stop) and length != 0) return error.InvalidBackendFrame;
-    return .{ .kind = kind, .length = length };
+    return .{ .kind = kind, .length = length, .generation = generation };
 }
 pub fn readFrame(io: std.Io, a: std.mem.Allocator, stream: std.Io.net.Stream, limit: usize) !Frame {
     var read_buffer: [header_bytes]u8 = undefined;
@@ -124,6 +146,7 @@ fn readFrameReader(reader: *std.Io.Reader, normal: std.mem.Allocator, expanded: 
     defer std.crypto.secureZero(u8, &bytes);
     try reader.readSliceAll(&bytes);
     const decoded = try decodeHeader(&bytes, limit);
+    if (protectedKind(decoded.kind) and decoded.generation != execution_protocol) return readIncompatibleFrame(reader, normal, decoded);
     const backing = if (decoded.kind == .execute and decoded.length > t.Limits.request_bytes) expanded else normal;
     const body = try readFrameBody(reader, backing, decoded.length);
     errdefer {
@@ -131,7 +154,66 @@ fn readFrameReader(reader: *std.Io.Reader, normal: std.mem.Allocator, expanded: 
         backing.free(body);
     }
     if (decoded.kind == .execute and body.len > @import("send_memory.zig").requestLimit(body)) return error.InvalidRequest;
-    return .{ .kind = decoded.kind, .body = body, .backing = backing };
+    return .{ .kind = decoded.kind, .generation = decoded.generation, .body = body, .backing = backing };
+}
+// Legacy bodies are never materialized or dispatched. Keep only correlation
+// metadata so old clients can display the explicit refusal, even for large
+// drafts; a malformed body still cannot turn into a data operation.
+fn readIncompatibleFrame(reader: *std.Io.Reader, a: std.mem.Allocator, header: Header) !Frame {
+    var buffer: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buffer);
+    var limited = reader.limited(.limited(header.length), &buffer);
+    var scratch: [8192]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+    var scanner = std.json.Reader.init(fixed.allocator(), &limited.interface);
+    defer scanner.deinit();
+    const meta = if (header.kind == .execute) incompatibleMetadata(&scanner, fixed.allocator()) catch |err| switch (err) {
+        error.SyntaxError, error.UnexpectedEndOfInput, error.ValueTooLong, error.InvalidRequest, error.InvalidCharacter, error.Overflow => Metadata{},
+        // Socket cancellation is a one-shot ReadFailed. Propagate it (and
+        // allocation failures) without another read which could block again.
+        else => return err,
+    } else Metadata{};
+    var drain_buffer: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &drain_buffer);
+    var discard: std.Io.Writer.Discarding = .init(&drain_buffer);
+    _ = try limited.interface.streamRemaining(&discard.writer);
+    const body = try @import("json.zig").encodeAlloc(a, .{ .id = meta.id, .account = meta.account, .cmd = meta.command }, .{});
+    return .{ .kind = header.kind, .generation = header.generation, .body = body, .backing = a };
+}
+fn incompatibleMetadata(scanner: *std.json.Reader, a: std.mem.Allocator) !Metadata {
+    if (try scanner.next() != .object_begin) return error.InvalidRequest;
+    var meta: Metadata = .{};
+    while (true) {
+        const key_token = try scanner.nextAllocMax(a, .alloc_always, 128);
+        if (key_token == .object_end) break;
+        const key = switch (key_token) {
+            .string, .allocated_string => |value| value,
+            else => return error.InvalidRequest,
+        };
+        if (std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "account") or std.mem.eql(u8, key, "cmd")) {
+            const value = try scanner.nextAllocMax(a, .alloc_always, 256);
+            if (std.mem.eql(u8, key, "id")) {
+                meta.id = switch (value) {
+                    .string, .allocated_string => |text| .{ .string = text },
+                    .number, .allocated_number => |text| .{ .integer = try std.fmt.parseInt(i64, text, 10) },
+                    .null => .null,
+                    else => return error.InvalidRequest,
+                };
+            } else {
+                const text = switch (value) {
+                    .string, .allocated_string => |text| text,
+                    else => return error.InvalidRequest,
+                };
+                if (std.mem.eql(u8, key, "account")) meta.account = text else meta.command = text;
+            }
+        } else try scanner.skipValue();
+        // Allocated metadata is short-lived fixed scratch. Free key storage
+        // where possible; neither payload strings nor arrays are retained.
+        if (key_token == .allocated_string) a.free(key_token.allocated_string);
+    }
+    if (try scanner.next() != .end_of_document) return error.InvalidRequest;
+    return meta;
 }
 fn readFrameBody(reader: *std.Io.Reader, backing: std.mem.Allocator, length: usize) ![]u8 {
     if (length <= t.Limits.request_bytes) {
@@ -283,7 +365,14 @@ pub const Client = struct {
                 error.FileNotFound, error.ConnectionRefused => error.BackendRequired,
                 else => err,
             };
-            return @import("json.zig").encodeAlloc(a, .{ .version = @as(u8, 1), .id = meta.id, .ok = false, .account = meta.account, .@"error" = .{ .code = @errorName(report), .message = if (report == error.UnknownOutcome) "Outcome is unknown; do not automatically retry" else @errorName(report) } }, .{});
+            return failure(a, meta, report);
+        };
+    }
+    fn failure(a: std.mem.Allocator, meta: Metadata, report: anyerror) ![]const u8 {
+        return @import("json.zig").encodeAlloc(a, .{ .version = @as(u8, 1), .id = meta.id, .ok = false, .account = meta.account, .@"error" = .{ .code = @errorName(report), .message = if (report == error.UnknownOutcome) "Outcome is unknown; do not automatically retry" else errorMessage(report) } }, .{}) catch |err| {
+            // Allocation failure while reporting an admitted mutation must
+            // not replace the warning already established by the exchange.
+            return if (report == error.UnknownOutcome) error.UnknownOutcome else err;
         };
     }
     fn execute(self: *Client, a: std.mem.Allocator, raw: []const u8) ![]const u8 {
@@ -331,20 +420,40 @@ pub const Client = struct {
     }
     fn exchange(self: *Client, a: std.mem.Allocator, kind: Kind, body: []const u8, submitted: *bool, output: *?[]const u8) !void {
         _ = try decodeHeader(&(try encodeHeader(kind, body.len, request_limit)), request_limit);
-        var directory = try pathDirectory(self.io, self.socket_path, false);
-        defer directory.close(self.io);
-        const stat = try directory.statFile(self.io, std.fs.path.basename(self.socket_path), .{ .follow_symlinks = false });
-        if (stat.kind != .unix_domain_socket or stat.permissions.toMode() & 0o077 != 0) return error.UnsafeBackendSocket;
-        const address = try std.Io.net.UnixAddress.init(self.socket_path);
-        const stream = try address.connect(self.io);
+        if (protectedKind(kind)) try self.checkExecutionProtocol(a);
+        const stream = try self.connect();
         defer stream.close(self.io);
-        try validatePeer(stream);
         submitted.* = true;
         try writeFrame(self.io, stream, kind, body, request_limit);
         var response = try readFrame(self.io, a, stream, if (kind == .execute and @import("send_memory.zig").request(body)) response_limit else ordinary_response_limit);
         errdefer response.deinit(a);
         if (response.kind != .response) return error.InvalidBackendFrame;
         output.* = response.body;
+    }
+    fn checkExecutionProtocol(self: *Client, a: std.mem.Allocator) !void {
+        const stream = try self.connect();
+        defer stream.close(self.io);
+        try writeFrame(self.io, stream, .status, "", request_limit);
+        var response = try readFrame(self.io, a, stream, 4096);
+        defer response.deinit(a);
+        if (response.kind != .response) return error.InvalidBackendFrame;
+        var arena: std.heap.ArenaAllocator = .init(a);
+        defer arena.deinit();
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), response.body, .{ .allocate = .alloc_if_needed });
+        const data = @import("json.zig").get(value, "data") orelse return error.InvalidBackendFrame;
+        if (self.expected_vault_id) |id| if (!std.mem.eql(u8, @import("json.zig").text(data, "vaultId"), &std.fmt.bytesToHex(id, .lower))) return error.VaultIdentityMismatch;
+        try requireExecutionProtocol(data);
+    }
+    fn connect(self: *Client) !std.Io.net.Stream {
+        var directory = try pathDirectory(self.io, self.socket_path, false);
+        defer directory.close(self.io);
+        const stat = try directory.statFile(self.io, std.fs.path.basename(self.socket_path), .{ .follow_symlinks = false });
+        if (stat.kind != .unix_domain_socket or stat.permissions.toMode() & 0o077 != 0) return error.UnsafeBackendSocket;
+        const address = try std.Io.net.UnixAddress.init(self.socket_path);
+        const stream = try address.connect(self.io);
+        errdefer stream.close(self.io);
+        try validatePeer(stream);
+        return stream;
     }
 };
 
@@ -517,4 +626,198 @@ test "vault transport: invitation reconciliation disconnect retains mutation unc
     try std.testing.expectEqual(error.UnknownOutcome, disconnectError("invitation.inspect"));
     var client: Client = .{ .io = std.testing.io, .socket_path = "/missing/vault/socket" };
     try std.testing.expectError(error.CacheUnsupported, Client.cached(&client, std.testing.allocator, "{\"cmd\":\"invitation.inspect\",\"reconcile\":true}"));
+}
+
+test "post-dispatch receipt: vault error encoding cannot replace unknown mutation outcome" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const meta: Metadata = .{ .id = .{ .string = "request-7" }, .account = "self@example.test", .command = "draft.send" };
+    try std.testing.expectError(error.UnknownOutcome, Client.failure(failing.allocator(), meta, error.UnknownOutcome));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectError(error.OutOfMemory, Client.failure(failing.allocator(), meta, error.BackendRequired));
+    try std.testing.expectError(error.OutOfMemory, Client.failure(failing.allocator(), .{ .command = "mail.read" }, error.BackendStopped));
+    const bytes = try Client.failure(std.testing.allocator, meta, error.UnknownOutcome);
+    defer std.testing.allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    const json = @import("json.zig");
+    try std.testing.expectEqualStrings("request-7", json.text(parsed.value, "id"));
+    try std.testing.expectEqualStrings(meta.account, json.text(parsed.value, "account"));
+    try std.testing.expectEqualStrings("UnknownOutcome", json.text(json.get(parsed.value, "error").?, "code"));
+}
+
+test "vault protocol: protected headers reject old daemon parsing while controls remain compatible" {
+    for ([_]Kind{ .execute, .unlock, .password_change, .recovery_change, .recover, .lock, .status, .stop, .response }) |kind| {
+        const length: usize = switch (kind) {
+            .unlock, .password_change => 1,
+            .recovery_change => 32,
+            .recover => 33,
+            else => 0,
+        };
+        const header = try encodeHeader(kind, length, request_limit);
+        try std.testing.expectEqualStrings(if (protectedKind(kind)) execution_magic else magic, header[0..8]);
+        // Public v0.2.12 requires OMAVIPC1 before it decodes or dispatches any
+        // command; this independent check also covers a swap after preflight.
+        try std.testing.expectEqual(!protectedKind(kind), std.mem.eql(u8, header[0..8], "OMAVIPC1"));
+        var legacy = header;
+        @memcpy(legacy[0..8], "OMAVIPC1");
+        try std.testing.expectEqual(@as(u8, 1), (try decodeHeader(&legacy, request_limit)).generation);
+    }
+}
+
+test "vault protocol: legacy bodies retain only bounded refusal metadata and never payload" {
+    const a = std.testing.allocator;
+    const prefix = "{\"draft\":{\"bodyText\":\"";
+    const suffix = "\"},\"id\":\"legacy-request\",\"account\":\"self@example.test\",\"cmd\":\"draft.create\"}";
+    const body_size = prefix.len + 1024 * 1024 + suffix.len;
+    const wire = try a.alloc(u8, header_bytes + body_size);
+    defer a.free(wire);
+    @memcpy(wire[0..header_bytes], &(try encodeHeader(.execute, body_size, request_limit)));
+    @memcpy(wire[0..8], "OMAVIPC1");
+    @memcpy(wire[header_bytes..][0..prefix.len], prefix);
+    @memset(wire[header_bytes + prefix.len ..][0 .. 1024 * 1024], 'x');
+    @memcpy(wire[wire.len - suffix.len ..], suffix);
+    var reader: std.Io.Reader = .fixed(wire);
+    var small: [1024]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&small);
+    var frame = try readFrameReader(&reader, fixed.allocator(), std.testing.failing_allocator, request_limit);
+    defer frame.deinit(fixed.allocator());
+    try std.testing.expectEqual(@as(u8, 1), frame.generation);
+    try std.testing.expect(frame.body.len < 256);
+    var metadata_storage: [4096]u8 = undefined;
+    var metadata_allocator: std.heap.FixedBufferAllocator = .init(&metadata_storage);
+    const meta = try requestMetadata(metadata_allocator.allocator(), frame.body);
+    try std.testing.expectEqualStrings("legacy-request", meta.id.string);
+    try std.testing.expectEqualStrings("self@example.test", meta.account);
+    try std.testing.expectEqualStrings("draft.create", meta.command);
+    try std.testing.expectError(error.EndOfStream, reader.takeByte());
+    for ([_][]const u8{ "{", "not-json", "{\"id\":{}}" }) |bad| {
+        var bytes: [128]u8 = undefined;
+        @memcpy(bytes[0..header_bytes], &(try encodeHeader(.execute, bad.len, request_limit)));
+        @memcpy(bytes[0..8], "OMAVIPC1");
+        @memcpy(bytes[header_bytes..][0..bad.len], bad);
+        var invalid: std.Io.Reader = .fixed(bytes[0 .. header_bytes + bad.len]);
+        var refused = try readFrameReader(&invalid, a, std.testing.failing_allocator, request_limit);
+        defer refused.deinit(a);
+        try std.testing.expectEqual(@as(u8, 1), refused.generation);
+    }
+}
+
+test "vault protocol: canceled legacy metadata reads propagate without a second socket read" {
+    const Failing = struct {
+        reader: std.Io.Reader,
+        reads: usize = 0,
+        fn stream(input: *std.Io.Reader, _: *std.Io.Writer, _: std.Io.Limit) std.Io.Reader.StreamError!usize {
+            const self: *@This() = @fieldParentPtr("reader", input);
+            self.reads += 1;
+            // Stream.Reader translates the socket's one-shot Canceled into
+            // ReadFailed. Any second call would block again on a real peer.
+            return if (self.reads == 1) error.ReadFailed else error.EndOfStream;
+        }
+    };
+    const prefix = "{\"draft\":{\"bodyText\":\"";
+    var bytes: [header_bytes + prefix.len]u8 = undefined;
+    @memcpy(bytes[0..header_bytes], &(try encodeHeader(.execute, 1024 * 1024, request_limit)));
+    @memcpy(bytes[0..8], "OMAVIPC1");
+    @memcpy(bytes[header_bytes..], prefix);
+    var input: Failing = .{ .reader = .{ .vtable = &.{ .stream = Failing.stream }, .buffer = &bytes, .seek = 0, .end = bytes.len } };
+    if (readFrameReader(&input.reader, std.testing.allocator, std.testing.failing_allocator, request_limit)) |frame| {
+        var owned = frame;
+        owned.deinit(std.testing.allocator);
+        return error.TestExpectedReadFailure;
+    } else |err| try std.testing.expectEqual(error.ReadFailed, err);
+    try std.testing.expectEqual(@as(usize, 1), input.reads);
+}
+
+test "vault protocol: new client refuses old peers before execute but keeps status lock and stop" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const path = try std.fmt.allocPrint(a, "{s}/socket", .{root});
+    defer a.free(path);
+    var listener = try Listener.init(io, path);
+    defer listener.deinit();
+    const Peer = struct {
+        fn run(server: *Listener, seen: *std.atomic.Value(usize)) !void {
+            const peer_io = std.testing.io;
+            for ([_]Kind{ .status, .status, .status, .lock, .stop }) |expected| {
+                const stream = try server.server.accept(peer_io);
+                defer stream.close(peer_io);
+                var buffer: [16]u8 = undefined;
+                var input = stream.reader(peer_io, &.{});
+                try input.interface.readSliceAll(&buffer);
+                try std.testing.expectEqualStrings("OMAVIPC1", buffer[0..8]);
+                try std.testing.expectEqual(@backingInt(expected), buffer[8]);
+                try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, buffer[12..16], .little));
+                _ = seen.fetchAdd(1, .release);
+                try writeFrame(peer_io, stream, .response, "{\"ok\":true,\"data\":{\"unlocked\":true}}", response_limit);
+            }
+        }
+    };
+    var seen: std.atomic.Value(usize) = .init(0);
+    var peer = try io.concurrent(Peer.run, .{ &listener, &seen });
+    defer peer.cancel(io) catch {};
+    var client: Client = .{ .io = io, .socket_path = path };
+    const refused = try client.client().call(a, "{\"id\":\"old-peer\",\"account\":\"self@example.test\",\"cmd\":\"draft.send\"}");
+    defer a.free(refused);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "BackendProtocolMismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "omagma vault stop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "old-peer") != null);
+    try std.testing.expectError(error.BackendProtocolMismatch, client.request(a, .unlock, "never transmitted"));
+    for ([_]Kind{ .status, .lock, .stop }) |kind| {
+        const bytes = try client.request(a, kind, "");
+        a.free(bytes);
+    }
+    try peer.await(io);
+    try std.testing.expectEqual(@as(usize, 5), seen.load(.acquire));
+}
+
+test "vault protocol: daemon swap after preflight still cannot dispatch new semantics to an old peer" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const path = try std.fmt.allocPrint(a, "{s}/socket", .{root});
+    defer a.free(path);
+    var listener = try Listener.init(io, path);
+    defer listener.deinit();
+    const Peer = struct {
+        fn run(server: *Listener, dispatches: *std.atomic.Value(usize)) !void {
+            const peer_io = std.testing.io;
+            {
+                const stream = try server.server.accept(peer_io);
+                defer stream.close(peer_io);
+                var frame = try readFrame(peer_io, std.testing.allocator, stream, request_limit);
+                defer frame.deinit(std.testing.allocator);
+                try std.testing.expectEqual(Kind.status, frame.kind);
+                try writeFrame(peer_io, stream, .response, "{\"ok\":true,\"data\":{\"executionProtocol\":2}}", response_limit);
+            }
+            // The next connection is handled using the old daemon's exact
+            // magic check, as if it replaced the daemon after status returned.
+            const stream = try server.server.accept(peer_io);
+            defer stream.close(peer_io);
+            var input = stream.reader(peer_io, &.{});
+            var header: [header_bytes]u8 = undefined;
+            try input.interface.readSliceAll(&header);
+            if (std.mem.eql(u8, header[0..8], "OMAVIPC1")) _ = dispatches.fetchAdd(1, .release);
+            try std.testing.expectEqualStrings("OMAVIPC2", header[0..8]);
+            try std.testing.expectEqual(@as(u8, 1), header[8]);
+        }
+    };
+    var dispatches: std.atomic.Value(usize) = .init(0);
+    var peer = try io.concurrent(Peer.run, .{ &listener, &dispatches });
+    defer peer.cancel(io) catch {};
+    var client: Client = .{ .io = io, .socket_path = path };
+    // The client cannot prove what a disconnected peer did after submission;
+    // its ordinary uncertainty rule remains intact, while the oracle proves
+    // that an old parser cannot possibly reach dispatch with the new frame.
+    try std.testing.expectError(error.UnknownOutcome, client.request(a, .execute, "{\"cmd\":\"draft.send\"}"));
+    try peer.await(io);
+    try std.testing.expectEqual(@as(usize, 0), dispatches.load(.acquire));
 }

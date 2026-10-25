@@ -6,7 +6,7 @@ pub const max_recipients = 32;
 pub const max_incoming_recipients = policy.incoming_recipients;
 /// Inbound names are decoded by MIME after mailbox grammar is parsed. Slices
 /// are caller-owned heap storage; incoming lists never enlarge outgoing stacks.
-pub const IncomingMailbox = struct { address: []const u8, name: []const u8 };
+pub const IncomingMailbox = @import("types.zig").Address;
 pub const Mailbox = struct { address: b.Text(policy.outgoing_address_bytes) = .{}, name: b.Text(policy.display_name_bytes) = .{} };
 pub const List = struct {
     items: [max_recipients]Mailbox = @splat(.{}),
@@ -28,6 +28,101 @@ pub const List = struct {
     }
 };
 pub const Envelope = struct { to: List = .{}, cc: List = .{}, bcc: List = .{} };
+
+/// Compact, allocator-owned descriptors for native compose. The old fixed
+/// List remains available to small portable callers; it never grows on stack.
+pub fn parseOutgoing(a: std.mem.Allocator, raw: []const u8) ![]IncomingMailbox {
+    const Sink = struct {
+        allocator: std.mem.Allocator,
+        list: std.ArrayList(IncomingMailbox) = .empty,
+        fn appendToken(self: *@This(), value: []const u8) !void {
+            const parsed = try mailbox(value);
+            for (self.list.items) |item| if (sameAddress(item.address, parsed.address.slice())) return;
+            if (self.list.items.len == @import("types.zig").Limits.recipients) return error.TooManyRecipients;
+            const address = try self.allocator.dupe(u8, parsed.address.slice());
+            errdefer self.allocator.free(address);
+            const name = try self.allocator.dupe(u8, parsed.name.slice());
+            errdefer self.allocator.free(name);
+            try self.list.append(self.allocator, .{ .address = address, .name = name });
+        }
+    };
+    var sink: Sink = .{ .allocator = a };
+    errdefer {
+        for (sink.list.items) |item| {
+            a.free(item.address);
+            a.free(item.name);
+        }
+        sink.list.deinit(a);
+    }
+    try scan(raw, &sink);
+    return sink.list.toOwnedSlice(a);
+}
+
+pub const OwnedEnvelope = struct {
+    to: []const IncomingMailbox = &.{},
+    cc: []const IncomingMailbox = &.{},
+    pub fn deinit(self: OwnedEnvelope, a: std.mem.Allocator) void {
+        deinitIncoming(self.to, a);
+        deinitIncoming(self.cc, a);
+    }
+};
+/// Select all external recipients before cloning any output. Aliases affect
+/// self-exclusion only; they never consume the outgoing recipient allowance.
+pub fn replyAddresses(a: std.mem.Allocator, account: []const u8, aliases: []const []const u8, from: IncomingMailbox, reply_to: []const IncomingMailbox, to: []const IncomingMailbox, cc: []const IncomingMailbox, all: bool) !OwnedEnvelope {
+    try validateAddress(account);
+    for (aliases) |alias| try validateAddress(alias);
+    const Builder = struct {
+        a: std.mem.Allocator,
+        account: []const u8,
+        aliases: []const []const u8,
+        to: std.ArrayList(IncomingMailbox) = .empty,
+        cc: std.ArrayList(IncomingMailbox) = .empty,
+        fn add(self: *@This(), target: *std.ArrayList(IncomingMailbox), source: []const IncomingMailbox) !void {
+            for (source) |item| {
+                if (isSelf(item.address, self.account, self.aliases)) continue;
+                var duplicate = false;
+                for ([_][]const IncomingMailbox{ self.to.items, self.cc.items }) |list| for (list) |old| {
+                    duplicate = duplicate or sameAddress(item.address, old.address);
+                };
+                if (duplicate) continue;
+                try validateAddress(item.address);
+                try validateHeader(item.name);
+                if (item.name.len > policy.display_name_bytes) return error.RecipientTooLarge;
+                if (self.to.items.len + self.cc.items.len == @import("types.zig").Limits.recipients) return error.TooManyRecipients;
+                try target.append(self.a, item);
+            }
+        }
+        fn copy(self: *@This(), input: []const IncomingMailbox) ![]IncomingMailbox {
+            const result = try self.a.alloc(IncomingMailbox, input.len);
+            var copied: usize = 0;
+            errdefer {
+                for (result[0..copied]) |item| {
+                    self.a.free(item.address);
+                    self.a.free(item.name);
+                }
+                self.a.free(result);
+            }
+            for (input, result) |item, *out| {
+                const address = try self.a.dupe(u8, item.address);
+                errdefer self.a.free(address);
+                out.* = .{ .address = address, .name = try self.a.dupe(u8, item.name) };
+                copied += 1;
+            }
+            return result;
+        }
+    };
+    var builder: Builder = .{ .a = a, .account = account, .aliases = aliases };
+    defer builder.to.deinit(a);
+    defer builder.cc.deinit(a);
+    const sender = if (reply_to.len != 0) reply_to else &.{from};
+    try builder.add(&builder.to, sender);
+    if (builder.to.items.len == 0) try builder.add(&builder.to, to) else if (all) try builder.add(&builder.cc, to);
+    if (all) try builder.add(&builder.cc, cc);
+    if (builder.to.items.len + builder.cc.items.len == 0) return error.MissingReplyRecipient;
+    const output_to = try builder.copy(builder.to.items);
+    errdefer deinitIncoming(output_to, a);
+    return .{ .to = output_to, .cc = try builder.copy(builder.cc.items) };
+}
 
 pub fn validateHeader(value: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;

@@ -23,10 +23,17 @@ jobs:
         run: |
           set -e
           for mode in debug safe; do
-            zig build test probes -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --prefix ".verification-linux-$mode"
+            zig build test probes -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --prefix ".verification-linux-$mode" --test-timeout 120s -Dtest-watchdog=true
+            zig build test-native-history-stress -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
             zig build -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --prefix ".verification-linux-$mode"
             python3 tests/calendar_native_http.py --probe ".verification-linux-$mode/bin/calendar_http_probe"
             python3 tests/terminal_integration.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode"
+            python3 tests/terminal_compose_actions.py --binary ".verification-linux-$mode/bin/omagma"
+            python3 tests/terminal_draft_conflict.py --binary ".verification-linux-$mode/bin/omagma"
+            python3 tests/terminal_draft_paging.py --binary ".verification-linux-$mode/bin/omagma"
+            python3 tests/terminal_quote_policy.py --binary ".verification-linux-$mode/bin/omagma"
+            python3 tests/terminal_reply_boundaries.py --binary ".verification-linux-$mode/bin/omagma"
+            python3 tests/terminal_settled_recovery.py --binary ".verification-linux-$mode/bin/omagma"
           done
       - name: Linux first-use mail, Calendar and vault workflows
         run: |
@@ -60,12 +67,19 @@ jobs:
           zig version
           uname -m
           for mode in debug safe; do
-            zig build test probes -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode" --summary all
+            zig build test probes -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode" --summary all --test-timeout 120s -Dtest-watchdog=true
+            zig build test-native-history-stress -Doptimize="$mode" -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
             zig build -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode"
             binary=".verification-macos-$mode/bin/omagma"
             "$binary" build-info
             "$binary" probe-keyring
             python3 tests/terminal_integration.py --binary "$binary" --build-mode "$mode"
+            python3 tests/terminal_compose_actions.py --binary "$binary"
+            python3 tests/terminal_draft_conflict.py --binary "$binary"
+            python3 tests/terminal_draft_paging.py --binary "$binary"
+            python3 tests/terminal_quote_policy.py --binary "$binary"
+            python3 tests/terminal_reply_boundaries.py --binary "$binary"
+            python3 tests/terminal_settled_recovery.py --binary "$binary"
             python3 tests/terminal_macos.py --binary "$binary"
             python3 tests/terminal_transport.py --binary "$binary" --build-mode "$mode"
             python3 tests/launch_macos.py --binary "$binary"

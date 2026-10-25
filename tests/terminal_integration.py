@@ -31,7 +31,8 @@ MAX_FRAME = 8 * 1024 * 1024
 CACHED_READS = {"mail.list", "mail.read", "mail.thread", "mail.search", "mail.recipients",
                 "labels.list", "contacts.list", "contacts.search"}
 LOCAL_READS = {"cache.stats", "draft.list", "draft.read", "draft.gmail-info",
-               "operation.list", "queue.list", "reminder.list"}
+               "operation.list", "operation.read", "queue.list", "queue.read", "reminder.list",
+               "history.operations", "history.drafts", "history.queues"}
 
 
 def require(condition, message):
@@ -343,11 +344,20 @@ def draft_and_send(client):
     require(after["fixtureSends"] == before["fixtureSends"] + 1, "send replay made an additional provider send")
     client.request("mail.send", operationId="fixture-known-send", draft={"to": [{"address": "other@example.org"}],
                                                                          "subject": "Different operation content", "bodyText": "Different."}, ok=False)
-    require(client.request("draft.discard", draftId=draft_id)["discarded"] is True,
-            "completed local draft could not be discarded")
-    client.request("draft.read", draftId=draft_id, ok=False)
-    require(client.request("operation.read", operationId="fixture-known-send") == sent,
-            "discarding a completed draft erased its operation receipt")
+    read_saved_draft(client, changed)
+    require(client.request("draft.discard", draftId=draft_id, ok=False)["code"] == "ArchivedDraftReadOnly",
+            "discard changed an immutable accepted source")
+    deleted = client.request("history.delete-source", draftId=draft_id, confirm=True)
+    require(deleted["deleted"] is True and deleted["receiptPreserved"] is True,
+            "explicit source deletion did not preserve the receipt fence")
+    require(client.request("draft.read", draftId=draft_id, ok=False)["code"] == "ArchivedSourceDeleted",
+            "deleted accepted source was still readable")
+    client.restart()
+    require(client.request("operation.read", operationId="fixture-known-send") == sent
+            and client.request("draft.send", draftId=draft_id, operationId="fixture-known-send") == sent,
+            "source deletion or restart lost the original receipt/replay fence")
+    require(cache_limits(client, ACCOUNTS[0])["fixtureSends"] == after["fixtureSends"],
+            "replaying a deleted source submitted mail again")
 
 
 def header_injection(client):
@@ -422,13 +432,16 @@ def incoming_recipient_over32(client):
         reply = client.request("mail.reply", account, messageId=full["id"], all=False)
         require(addresses(reply["to"]) == [case["normalReplyRecipient"]] and addresses(reply["cc"]) == [],
                 "ordinary reply unnecessarily copied the oversized incoming recipient list")
-        before = client.request("draft.list", account)
-        rejected = client.request("mail.reply", account, messageId=full["id"], all=True, ok=False)
-        require(rejected["code"] == "TooManyRecipients", "reply-all silently truncated an oversized outgoing envelope")
-        require(client.request("draft.list", account) == before, "failed wide reply-all created or modified a local draft")
+        reply_all = client.request("mail.reply", account, messageId=full["id"], all=True)
+        expected_cc = [address for address in case["expectedAddresses"]
+                       if address not in (account, case["normalReplyRecipient"])]
+        require(addresses(reply_all["to"]) == [case["normalReplyRecipient"]]
+                and addresses(reply_all["cc"]) == expected_cc and not reply_all.get("bcc"),
+                "reply-all truncated, duplicated, or crossed wide-header participants")
+        read_saved_draft(client, reply_all, account)
         require(cache_limits(client, account)["fixtureSends"] == 0, "wide-header planning submitted mail")
     client.evidence = {"incomingRecipientsPerAccount": 34, "ordinaryReplyRecipients": 1,
-                       "replyAllRefusedWithoutTruncation": True, "accountsChecked": 3}
+                       "replyAllPreservedWithoutTruncation": True, "accountsChecked": 3}
 
 
 def incoming_reply_to_local65(client):
@@ -452,14 +465,15 @@ def incoming_reply_to_local65(client):
 
 
 def outgoing_address_limits_unchanged(client):
-    recipients32 = [f"boundary-{i:02}@example.org" for i in range(32)]
+    recipients500 = [f"boundary-{i:03}@example.org" for i in range(500)]
     local64 = "a" * 64 + "@example.org"
     local65 = "b" * 65 + "@example.org"
     address512 = "c" * 500 + "@example.org"
     address513 = "d" * 501 + "@example.org"
     for account in ACCOUNTS:
-        boundary = client.request("draft.create", account, draft={"to": recipients32, "subject": "Fictional32-recipient boundary", "bodyText": "Synthetic draft only."})
-        require(addresses(boundary["to"]) == recipients32, "valid32-recipient outgoing boundary was changed")
+        boundary = client.request("draft.create", account, draft={"to": recipients500, "subject": "Fictional500-recipient boundary", "bodyText": "Synthetic draft only."})
+        require(addresses(boundary["to"]) == recipients500, "valid500-recipient outgoing boundary was changed")
+        read_saved_draft(client, boundary, account)
         address_boundary = client.request("draft.create", account, draft={"to": [local64], "subject": "Fictional64-byte local boundary", "bodyText": "Synthetic draft only."})
         require(addresses(address_boundary["to"]) == [local64], "valid64-byte local-part outgoing boundary was changed")
         for accepted in (local65, address512, "用户@例子.test"):
@@ -468,7 +482,7 @@ def outgoing_address_limits_unchanged(client):
         drafts = client.request("draft.list", account)
         operations = client.request("operation.list", account)
         calls = cache_limits(client, account)["fixtureCalls"]
-        for suffix, to, code in [("many", recipients32 + ["boundary-33@example.org"], "TooManyRecipients"),
+        for suffix, to, code in [("many", recipients500 + ["boundary-500@example.org"], "TooManyRecipients"),
                                   ("long", [address513], "InvalidAddress")]:
             draft = {"to": to, "subject": "Fictional invalid outgoing boundary", "bodyText": "Never dispatch."}
             rejected = client.request("draft.create", account, draft=draft, ok=False)
@@ -479,7 +493,7 @@ def outgoing_address_limits_unchanged(client):
         require(client.request("operation.list", account) == operations, "rejected outgoing boundary created a submission journal")
         metrics = cache_limits(client, account)
         require(metrics["fixtureCalls"] == calls and metrics["fixtureSends"] == 0, "invalid outgoing boundary reached the provider")
-    client.evidence = {"outgoingRecipientLimit": 32, "outgoingAddressBytes": 512,
+    client.evidence = {"outgoingRecipientLimit": 500, "outgoingAddressBytes": 512,
                        "invalidBoundaryHasNoProviderOrJournalSideEffect": True, "accountsChecked": 3}
 
 
@@ -565,7 +579,7 @@ def gmail_inline_underdeclared_text(client):
     def cached_identity(account, vector):
         directory = client.directory / "cache/fixtures" / hashlib.sha256(account.encode()).hexdigest()
         state = json.loads((directory / "index.json").read_bytes())
-        require(state["schema"] == 1 and state["account"] == account, "inline prefetch cache crossed accounts")
+        require(state["schema"] == 2 and state["account"] == account, "inline prefetch cache crossed accounts or missed its schema upgrade")
         entry = next(e for e in state["entries"] if e["message"]["id"] == vector["messageId"])
         path = directory / ("mail-" + hashlib.sha256(vector["messageId"].encode()).hexdigest() + ".json")
         raw = path.read_bytes()

@@ -148,10 +148,10 @@ test "composer completion: full mailbox preserves Unicode commas quotes and late
     const result = try replaceCandidate(allocator, raw, range, .{ .address = "jo@example.test", .name = "Jörg, \"Jo\" \\ Example" });
     defer allocator.free(result);
     try std.testing.expectEqualStrings("first@example.test, \"Jörg, \\\"Jo\\\" \\\\ Example\" <jo@example.test>, last@example.test", result);
-    var parsed: recipients.List = .{};
-    try recipients.parse(result, &parsed);
-    try std.testing.expectEqual(@as(u8, 3), parsed.count);
-    try std.testing.expectEqualStrings("Jörg, \"Jo\" \\ Example", parsed.items[1].name.slice());
+    const parsed = try recipients.parseOutgoing(allocator, result);
+    defer recipients.deinitIncoming(parsed, allocator);
+    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+    try std.testing.expectEqualStrings("Jörg, \"Jo\" \\ Example", parsed[1].name);
     try std.testing.expectError(error.HeaderInjection, replaceCandidate(allocator, "Jo", token("Jo", 2), .{ .address = "jo@example.test", .name = "Jo\nBcc: bad@example.test" }));
 }
 

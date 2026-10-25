@@ -108,7 +108,10 @@ test "vault Store migration: 25 MiB copy resumes planned handles and preserves e
     try std.testing.expectError(error.FileNotFound, source.dir.statFile(io, "refresh.lock", .{}));
     const source_json = try j.encodeAlloc(scratch, source.state, .{});
     const plan = try source.migrationObjects(scratch);
-    try std.testing.expectEqual(@as(usize, 6), plan.len);
+    // The blob lookup page/index and active source pin are owned records,
+    // while only the four legacy cache/document records enter the flat map.
+    try std.testing.expectEqual(@as(usize, 9), plan.len);
+    try std.testing.expectEqual(@as(usize, 4), Store.migrationMappedCount(plan));
     const target_json = try j.encodeAlloc(scratch, try source.migrationTargetState(scratch), .{});
     try std.testing.expect(!source.state.sendQueue[0].resumeRequired);
     var destination = try Store.openMigrationDestination(io, scratch, &fixture.owner, account, options);

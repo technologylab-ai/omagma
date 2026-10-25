@@ -121,6 +121,10 @@ survive restart and support read-only checks, explicitly confirmed
 identical-request retry and uncertainty archival. The TUI adds agenda/day/week
 views and a guest picker using the destination account's Contacts; CLI callers
 supply guest emails. See the [Calendar event guide](CALENDAR-EVENTS.md).
+Native Calendar persistence pages settled invitation identities and operation
+receipts instead of expiring UID/version or cancellation protection after 256
+events. Pending reviews and uncertain claims remain in the bounded active
+document. The browser demo retains its smaller storage tier.
 Permanent mail deletion and contact deletion remain unavailable. Label support
 includes listing, assigning/removing existing labels and creating, renaming,
 coloring or deleting custom definitions. Shared target resolution and membership
@@ -203,8 +207,8 @@ Send lines such as:
 | draft.create / update | draft with bodyText source and optional bodyFormat plain/markdown; update also requires draftId |
 | draft.preview | draft or draftId; bodyFormat, exact bodyText source, rendered plainText and optional bodyHtml; local preview without saving or sending |
 | draft.open-preview | draftId; writes a bounded private sandboxed HTML preview and explicitly opens this account's Chrome profile; sends no mail |
-| draft.recovery-save | draft.recoveryFields exact five raw fields To/Cc/Bcc/Subject/Body, optional draftId; incomplete local recovery that cannot be sent |
-| draft.list / read / send / discard | read/send/discard require draftId; send also requires operationId |
+| draft.recovery-save | draft.recoveryFields exact five raw fields To/Cc/Bcc/Subject/Body, optional draftId; incomplete local recovery that cannot be sent; explicit forkIfSettled/copyFromDraftId preserve local edits under a new ID |
+| draft.list / read / send / discard | list pages compact active summaries with limit/cursor; read/send/discard require draftId; send also requires operationId |
 | draft.queue | draftId, operationId, optional delaySeconds 0..30 (default 10); stages a durable unsent intent and returns queueId/dueAtMs/state |
 | queue.list / read / cancel / resume / process | read/cancel/resume/process require queueId; resume accepts delaySeconds; process requires due time or wait:true; no automatic processing after restart |
 | attachment.import / discard | import takes path and optional mimeType, returning immutable account blobId metadata; discard takes blobId and refuses referenced content |
@@ -265,9 +269,10 @@ Use the returned descriptor rather than inventing a handle or passing a cache
 path. `attachment.discard` refuses a handle still referenced by a draft or
 protected content. `size` remains an exact decoded byte count.
 
-Ordinary outgoing attachments allow 16 files; retained original resources have
-a separate 1,024-item count. Native files and retained resources share a 25 MiB
-decoded budget. Native compose source and each rendered alternative allow up
+Native ordinary files and included original resources share 1,040 outgoing
+parts and a 25 MiB decoded budget. Up to 1,024 original resources can be
+retained. The browser demo keeps 16 ordinary files. Native compose source and
+each rendered alternative allow up
 to 35 MiB, but complete outgoing MIME, including all alternatives, files,
 resources and the generated logo, must fit 35 MiB (36,700,160 bytes). The new
 logo has its own 16 KiB internal allowance and consumes no file/resource slot;
@@ -526,7 +531,7 @@ their recovery draft and require receipt/provider inspection, not a new send.
 
 Every send/RSVP needs a stable operationId chosen by the caller. Omagma persists an unknown receipt before dispatch and derives a stable RFC Message-ID from account+operationId. Repeating the **same account, identity and semantic content** returns the recorded receipt without another provider call. For ordinary mail sends, a new identity for the same unresolved draft/content also returns the existing unknown receipt, preventing accidental duplicate submission through a reopened draft. For an unresolved invitation RSVP, a new operationId instead returns `UnknownOutcome`; replay the original ID to read its existing receipt. Reusing it for different content gives OperationConflict. This is a local duplicate guard, not a server-side idempotency guarantee.
 
-Outcomes: applied=provider accepted, rejected=known failure, unknown=possibly applied. **Do not retry unknown with a new ID.** Inspect operation.read and the provider's Sent folder before asking the user how to proceed. Direct sends also preserve a local recovery draft before dispatch. `draft.discard` removes a local draft and its regenerable preview, but refuses protected pending/submitting/unknown sends. Cancel an unsent queued intent before discarding or editing its draft. Applied/rejected drafts may be explicitly discarded to free the 128-draft quota. Cache clear does not erase the journal. A full journal stops new sends; it never silently discards uncertain receipts. RSVP replay ignores its varying DTSTAMP but compares the semantic response.
+Outcomes: applied=provider accepted, rejected=known failure, unknown=possibly applied. **Do not retry unknown with a new ID.** Inspect operation.read and the provider's Sent folder before asking the user how to proceed. Direct sends also preserve a local recovery draft before dispatch. `draft.discard` removes a local draft and its regenerable preview, but refuses protected pending/submitting/unknown sends. Cancel an unsent queued intent before discarding or editing its draft. Settled accepted sources and receipts move to paged retained history instead of consuming active draft slots or a lifetime 1,000-receipt journal. Active pending/unknown work remains protected. Cache clear preserves history and replay fences. Actual disk-quota exhaustion must be resolved before a new provider write; it never silently discards uncertain receipts. RSVP replay ignores its varying DTSTAMP but compares the semantic response.
 
 The receipt's `messageId` is the provider resource ID; use it with `mail.read`
 when available. Its `rfcMessageId` is the submitted Internet Message-ID, which
@@ -666,3 +671,64 @@ Use --body-file or --body-stdin to keep content out of argv. --draft-file/--cont
 For interactive keys see [terminal mail](TERMINAL.md). Developer architecture and
 verification live in [developer references](DEVELOPMENT.md); ordinary use does
 not require replaying that qualification workflow.
+
+
+### Bind review to one saved source
+
+`draft.measure` counts encoded outgoing MIME without sending or creating a
+spool. Supply the saved `draftId` and an `operationId` reserved for that review.
+Keep its returned `contentDigest` and pass it as `expectedContentDigest` to
+`draft.send` or `draft.queue`, with the same operation ID. If another client
+changes the saved sender, body, original-inclusion policy or files, the request
+fails with `ReviewedDraftChanged` before staging or dispatch. Fetch and review
+the new source rather than retrying a stale approval.
+
+An exact size receipt has `exact:true` and `bytes`. A rendering that is already
+proven larger than the send limit reports `exact:false`, `bytes:null` and
+`overLimit:true`; no exact number is invented. `withoutOriginalBytes` is
+returned when that alternative can be measured. `includeOriginal:false` omits
+only the separately retained original from outgoing MIME; the source and its
+files stay in the local draft for restoration. It does not strip arbitrary
+quoted text from the editable note.
+
+### Page through retained history
+
+`draft.list` returns compact active summaries, including `summaryOnly:true`,
+recipient counts and attachment counts. It accepts `limit` 1–100 (default 100)
+and `cursor`; each page also obeys an encoded browsing budget. Copy a nonempty
+`nextCursor` verbatim, and use `draft.read` for the full source before editing.
+
+`history.operations`, `history.drafts` and `history.queues` return `items`,
+`nextCursor` and `retained:true`; request 1–100 rows and copy the cursor verbatim.
+Pages obey an encoded byte budget as well as the row limit. An unusually large
+operation may appear as an identity/outcome summary with `summaryOnly` and
+`readCommand`; use that command to retrieve the exact receipt. Existing list
+commands show active work. Exact archived receipts remain
+available through `operation.read`. `draft.read` retrieves a retained source;
+`draft.clone` creates a fresh editable copy. A new operation ID cannot send an
+archived immutable source directly. Cloning requires a settled sent source;
+active unsent, queued, uncertain or Gmail-owned work remains protected.
+
+Explicit `history.delete-source` with `confirm:true` deletes settled source
+content, leaving its permanent receipt and content fingerprint. Optional
+`discardFiles:true` also removes unreferenced files. The operation is local and
+does not delete provider mail. Unknown, pending or otherwise owned active drafts
+remain protected. Old-ID replay after content deletion returns the recorded
+receipt and never creates another provider write.
+
+### Preserve local edits after another client changes a draft
+
+Use `draft.recovery-save` with `forkIfSettled:true` and the old `draftId` when a
+known applied send has made that source immutable. A successful fork returns a
+new `id` and `forkedFrom`; the sent source remains unchanged.
+
+For an explicit local copy after detecting concurrent edits, omit `draftId`
+and pass `copyFromDraftId` with the exact local recovery snapshot. The result
+returns a new `id` and `copiedFrom`. Neither path sends or uploads, and neither
+can bypass unknown, queued, submitting or paused Gmail ownership. Keep the new
+identity. Finish the recovery fields through a normal update before sending.
+An unpaused source with a kept Gmail copy passes that warning to the new recovery
+draft atomically and clears any previous send acknowledgement. The response
+includes `gmailLink` and `contentDigest`, including with `acknowledgementOnly`.
+The original link remains unchanged; the local copy is not recorded as a Gmail
+import. Finish editing and obtain a fresh acknowledgement before sending.

@@ -68,10 +68,13 @@ class Runner:
         self.invalid_config.chmod(0o600)
         self.calls = 0
 
-    def run(self, arguments, stdin=b"", without_home=False, catalogue=False):
+    def run(self, arguments, stdin=b"", without_home=False, without_configuration=False, catalogue=False):
         environment = dict(self.environment)
         if without_home:
             environment.pop("HOME", None)
+        if without_configuration:
+            for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
+                environment.pop(key, None)
         result = subprocess.run([str(self.binary), *arguments], input=stdin, capture_output=True,
                                 cwd=self.directory, env=environment, timeout=8, preexec_fn=no_core_dump)
         self.calls += 1
@@ -127,6 +130,11 @@ def options(runner):
 
 
 def help_paths(runner):
+    for arguments in (["tui", "--help"], ["cli", "--help"], ["agent", "-h"],
+                      ["mail", "read", "--help"], ["cli", "--schema", "draft.measure"]):
+        result = runner.run(arguments, without_configuration=True)
+        require(result.returncode == 0 and result.stdout and not result.stderr,
+                "discovery resolved account/vault paths without HOME or XDG directories")
     for arguments in ([], ["--help"], ["help"], ["-h"]):
         result = runner.run(arguments, without_home=True)
         require(result.returncode == 0 and not result.stderr and b"omagma" in result.stdout,
@@ -229,6 +237,7 @@ cache.stats cache.clear cache.activity cache.refresh-status
 browser.open auth.status auth.authorize auth.revoke
 draft.list draft.read draft.create draft.update draft.recovery-save draft.preview draft.open-preview
 draft.discard draft.send draft.queue
+draft.clone draft.measure history.delete-source history.drafts history.operations history.queues
 draft.gmail-info draft.gmail-save draft.gmail-status draft.gmail-take-back draft.gmail-import
 queue.list queue.read queue.cancel queue.resume queue.process queue.send-now
 attachment.import attachment.discard attachment.open

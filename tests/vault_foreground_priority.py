@@ -118,7 +118,7 @@ class Service:
         peer.settimeout(10)
         peer.connect(str(self.backend))
         raw = json.dumps(dict(id="owned-refresh", cmd=command, account=ACCOUNTS[0], **fields)).encode()
-        peer.sendall(MAGIC + bytes([1, 0, 0, 0]) + struct.pack("<I", len(raw)) + raw)
+        peer.sendall(b"OMAVIPC2" + bytes([1, 0, 0, 0]) + struct.pack("<I", len(raw)) + raw)
         return peer
 
     def gate(self, completed=None):

@@ -57,7 +57,7 @@ Enter activates the focused button. Lists retain their selected row when you
 move focus to an action. Send, Trash and invitation review start on Back or
 Cancel, so an unprompted Enter does not submit a change. Keyboard focus has a
 visible highlight, including the compose Alias, Add, attachment removal,
-format and preview controls.
+format, inline preview, **Preview in browser** and **Continue in Gmail** controls.
 
 Ctrl+P on the mailbox screen, or `:actions`, opens a searchable action palette
 for this account and view. Type an action name, use Ctrl+N/P or the result list
@@ -181,9 +181,39 @@ In **Keep formatting**, only your note is editable. Its usual Markdown
 rendering and Omagma footer appear above a read-only original. Switching your
 note to Plain leaves the original HTML intact. The draft owns that original
 and its embedded image data, so they survive saving, restarting and eviction
-of the source mail from the cache. Outgoing preview and send review include
-the retained original, with the same content used for sending. Received
-regular attachments accompany Keep formatting and Text quote forwards.
+of the source mail from the cache. Received regular attachments accompany
+Keep formatting and Text quote forwards.
+
+A formatted reply has an **Original included / omitted** row. **Q Reply without
+original** omits the retained original and its embedded resources from outgoing
+HTML, plain text, browser preview and Gmail handoff. **Q Include original**
+restores them exactly; the saved draft keeps the complete source and resources
+through autosave and restart. Ctrl+Z immediately undoes that policy change and
+Ctrl+Y reapplies it. The note and ordinary attachments are unchanged. This
+choice applies to replies; forwards keep their original. Pending or uncertain
+sends, queued drafts and drafts paused in Gmail cannot change this choice.
+
+**z Fold / Expand** changes only the terminal preview. Long originals start
+folded, with an excerpt and an explicit reminder that the full content is kept.
+Long trailing `>` text quotations can also be folded in the preview; they remain
+part of the editable body and outgoing message. Review supports the same view
+control. On narrow screens, z opens the full preview so the change is visible.
+Folding never changes sent bytes or hides content in the browser preview. Q and z remain literal text in INSERT mode; click or Tab/Enter
+activates their visible controls.
+
+The native composer shows the saved revision's MIME size. Review displays exact
+bytes, the provider limit, and the size without the original when available.
+Editing invalidates the count until autosave and measurement finish. The measured
+content is checked again before sending; another process changing the saved
+draft requires a new review. A cancelled or rejected send also requires a fresh
+review and operation identity. Incomplete addresses can make exact size unavailable.
+If a rendered alternative already exceeds the provider limit, review reports
+that proven overflow without claiming an exact byte count; the complete source
+stays saved. Near-limit and over-limit drafts
+remain saved; Send is unavailable until the complete message fits. Use Back to
+revise the note, remove ordinary files, or explicitly omit a reply's original.
+Back returns to normal controls, so Q can select that explicit reduction.
+No text or images are removed automatically.
 
 **Attach original (.eml)** includes the original headers and contained
 attachments; those contained files are not duplicated as separate outgoing
@@ -232,7 +262,18 @@ into one Undo step within the bounded history. The text history stays in memory
 and is not recovered after restart; it does not rewrite the protected
 original or provide an attachment/sender undo stack.
 
-Changes save locally after a pause, including unfinished addresses. An unfinished recovery draft must be corrected before review and sending. Drafts appear under **Drafts** and survive restart; they are local Omagma drafts, not Gmail's web draft folder.
+Changes save locally after a pause, including unfinished addresses. An unfinished recovery draft must be corrected before review and sending. Drafts appear under **Drafts** and survive restart; they are local Omagma drafts, not Gmail's web draft folder. The list loads compact pages; j/k crosses page boundaries, Next/Previous moves between pages, and gg returns to the first page. Opening a draft loads its complete recipients, files and source.
+
+If another Omagma process sends the saved draft while this composer has newer
+edits, those edits are saved as a new local draft. The sent source stays intact,
+and sending the recovered draft requires a fresh review. Uncertain submissions,
+queued sends and drafts owned by Gmail remain protected.
+
+When a size check or send review detects changes saved by another process,
+autosave pauses for this view. `:resolve-draft` offers **Save local copy** and
+**Reload saved draft**. Reload refuses unsaved local edits; saving a copy keeps
+the complete local text, original and files under a new ID without changing the
+other draft. Exiting with unresolved local edits preserves an independent copy.
 
 At 90 columns or more, the composer shows the outgoing rendered preview beside
 the editable source. In normal mode, `p` switches between that preview, the
@@ -254,12 +295,22 @@ Plain mode sends the editable source literally; a Keep formatting draft still
 includes its retained original HTML below that note. The native preview shows
 the outgoing content; final styling follows the receiving email client.
 
-`:preview-browser` saves the current draft and explicitly opens its outgoing
+The composer’s **Preview in browser** button (`P` in normal mode, or
+`:preview-browser`) saves the current draft and explicitly opens its outgoing
 HTML in the account's Chrome profile. The private preview keeps tables, styles
 and verified inline raster images inside an isolated sandbox. Scripts, forms,
 remote fetches and source navigation are blocked; remote pictures remain
 absent. This does not send or upload a Gmail draft. One private preview file per
-account is replaced on reuse and removed by local draft discard.
+account is replaced on reuse and removed by local draft discard. Unfinished
+recipient fields are saved for recovery and do not prevent previewing the body.
+For a protected send or a draft paused in Gmail, preview opens the saved local
+copy without changing it; Gmail may have newer edits.
+
+The browser and Gmail buttons stay below the composer in both split and narrow
+views, including the full inline preview. Tab/Shift+Tab reaches each available
+button and Enter activates it. In INSERT, `P` and `g` remain literal text; the
+buttons omit those shortcut letters until normal mode returns. Lowercase `p`
+continues to switch the inline preview.
 
 `e` edits the body with `$EDITOR`, then `$VISUAL`, then available nvim/vi/nano. In a Keep formatting draft, the editor receives only your note; the retained original and embedded images remain read-only. Fixed quoted arguments are passed directly without a shell. It temporarily takes over the terminal and restores the TUI afterward. `--editor-mode auto|takeover` uses this behavior; `embedded` is unsupported. No tmux is required. Saving the editor, pasting or autosaving never sends mail.
 
@@ -303,9 +354,10 @@ Ctrl+T toggles hidden files. Oversized sets are refused before partially
 attaching them so you can correct the choice.
 
 `:detach NUMBER` or its **[x]** removes a file. The list shows selected count,
-individual sizes and the 25 MiB decoded budget shared with retained original
-images. Up to 16 ordinary files remain attached through saving, restart and
-editor return. Selected content is copied
+individual sizes and the 25 MiB decoded budget shared with included original
+images. Native file sets use the shared 1,040-part budget (ordinary files plus
+included original resources); the browser supports 16 ordinary files. Files
+remain attached through saving, restart and editor return. Selected content is copied
 to private account storage; later changes to the original path do not silently
 change the saved attachment. The outgoing MIME must also fit 35 MiB. Oversized
 content gets an explicit error; no file is silently truncated.
@@ -604,7 +656,8 @@ List previews decode escaped punctuation such as `&#39;`. The reader can repair 
 | Ctrl+Z / Ctrl+Y in compose | Native text undo / redo |
 | f / :sender in compose | Verified From chooser |
 | p in normal compose | Outgoing preview / original context / plain alternative |
-| :preview-browser in compose | Save and explicitly open the sandboxed outgoing browser preview |
+| P / Preview in browser / :preview-browser in normal compose | Save and explicitly open the sandboxed outgoing browser preview |
+| g / Continue in Gmail / :gmail-draft in normal compose | Open Gmail handoff review or status; upload requires a further explicit choice |
 | Tab/Shift+Tab, Enter in normal compose | Focus fields/controls; edit a field or activate a control |
 | Ctrl+S / :send in compose | Open outgoing send review |
 | y in send review | Confirm the reviewed draft and start the local send countdown |
@@ -679,20 +732,22 @@ You can use your own accounts after consent, including sending a first message t
 | Native conversation window | 20 message cards at a time; up to 1,000 member IDs; 4 MiB of loaded body DTOs per window |
 | Ordinary received body | 2 MiB; ordinary MIME decoding has a 3 MiB combined decoded budget |
 | Compose source / each rendered alternative | Native Linux/macOS: 35 MiB, subject to the complete outgoing MIME limit; portable browser: 2 MiB |
-| Ordinary outgoing attachments | 16 files; native files and retained original resources share 25 MiB of decoded bytes |
-| Retained original inline resources | 1,024 resources, separate from the 16 ordinary-file slots; browser resources retain a 2 MiB limit |
+| Ordinary outgoing attachments | Native: files plus included original resources share 1,040 parts and 25 MiB decoded; browser: 16 files |
+| Retained original inline resources | Up to 1,024; included resources share the native outgoing part/byte budgets; browser resources retain a 2 MiB limit |
 | Original email (.eml) source | Native: up to 25 MiB, with sources above 2 MiB stored as blobs; browser: 2 MiB |
 | Parsed incoming file/resource descriptors | 1,041 per message, within 4,180 MIME parts; streamed file content up to 50 MiB each; cached blobs also obey the account disk quota |
-| Outgoing recipients | 32 across To/Cc/Bcc |
-| Local drafts / undo receipts | 128 / 16 per account |
-| Cached contacts / operation journal | 1,024 / 1,000 per account |
+| Outgoing recipients | Native: 500 across To/Cc/Bcc; browser: 32 |
+| Active local drafts / undo receipts | 128 editable or protected drafts / 16 undo receipts per account; settled sent sources move to paged retained history |
+| Cached contacts | 1,024 per account |
+| Active operation work | 1,000 protected/pending entries per account; settled receipts move to paged history and retain replay protection |
+| Calendar invitation work | 256 active reviews/identities; native settled identity/version and operation fences move to paged history, within the account disk quota |
 | Addresses per contact | 32; preserved through supported edits |
 | Serialized JSON | Ordinary requests: 3 MiB; selected native compose frames/records: 420 MiB serialization ceiling, allocated only for actual content |
 | Complete outgoing MIME | 35 MiB (36,700,160 bytes), including body, resources, logo and encoded ordinary files |
 | Find query / matches / scanned display text | 256 bytes / 256 / 2 MiB; a + marks a capped count |
 | Search history / named searches | 8 each per account; 4,096-byte queries and 96-byte names |
 | Native outgoing HTML preview / UI preferences | One streamed preview per account, at most 246 MiB within the account disk quota / at most 256 KiB private preferences |
-| Queued send intents | 32 active, 128 retained records per account; delay 0–30 seconds |
+| Queued send intents | 32 active; settled records move to paged history; delay 0–30 seconds |
 
 Native compose, reply/forward, draft review and submission use dynamic storage
 for the actual content, separate from the ordinary 64 MiB browsing heap.
@@ -762,8 +817,10 @@ editing or completion) so two clients cannot silently overwrite one another.
 
 ## Continue a draft in Gmail
 
-In a saved native draft, open the command palette's **Continue in Gmail** or
-use `:gmail-draft`. This account needs `mail-drafts` authorization
+In a saved native draft, choose the visible **Continue in Gmail** button, press
+`g` in normal mode, open the command palette’s **Continue in Gmail**, or use
+`:gmail-draft`. Opening this review does not upload or send anything. When local
+editing is paused, the composer labels the button **Gmail status**. This account needs `mail-drafts` authorization
 (`gmail.compose`), or its existing `mail-modify` grant. Adding permission is an
 explicit authorization step; the old grant stays usable until consent succeeds.
 The handoff uploads one MIME draft, including recipients, Bcc, sender and files,
@@ -778,7 +835,7 @@ draft. Import preserves To/Cc/Bcc and supported files, uses Plain text, and does
 not append another quote or footer. It rechecks the remote version after
 fetching the content. The original local draft and Gmail draft both remain.
 Unsupported, ambiguous, or oversized content stays in Gmail; Omagma refuses a
-partial import. Normal outgoing limits apply: 16 files and 25 MiB decoded files.
+partial import. Normal outgoing part, recipient and byte limits apply, including the 25 MiB decoded file budget.
 
 Before sending a reclaimed or imported copy, check Gmail and acknowledge the
 copy warning in Review send. The acknowledgement belongs to the exact reviewed
@@ -794,3 +851,47 @@ Provider operations require the current `expectedVersion`; upload also requires
 on `draft.send` / `draft.queue` require `acknowledgeGmailCopy: true` and the
 current `gmailCopyDigest`. Omagma never updates or deletes the Gmail draft as
 part of this workflow.
+
+
+### Retained sent sources and operation history
+
+Accepted sends move their immutable local source and settled receipt out of the
+active draft index. Sending regularly does not consume all 128 active draft
+slots or stop at 1,000 lifetime receipts. Pending, unknown, queued and unresolved
+Gmail or Calendar work stays protected and is never discarded to make space.
+
+The native CLI exposes bounded pages through `history.drafts`,
+`history.operations` and `history.queues` (`limit` 1–100 and the returned
+`nextCursor`). `operation.read` still resolves old identities after restart.
+`draft.read` opens an exact retained source; `draft.clone` makes a new editable
+copy without changing the archived source.
+
+The active Drafts list also pages compact recipient/file counts, so browsing
+many drafts does not reload their full recipient lists or attachment metadata.
+If another client changes a saved draft while the composer contains local
+edits, preserve those edits as a separate local recovery copy or reload the
+saved source when the local view is clean. If another client already sent the
+source, recovery uses a new local ID and leaves the sent version intact.
+
+Retained content counts toward the account’s configured disk quota. An explicit
+`history.delete-source` request with `confirm:true` removes settled source
+content; `discardFiles:true` also removes files no longer referenced by any
+active or retained source, cache body or outbox. Permanent receipt/content
+fingerprints remain, so deleting source content cannot make an old operation
+send again. Cache clear preserves these records. Corrupt or missing history
+blocks the affected operation instead of permitting an unsafe retry.
+
+Native storage reads existing account indexes and upgrades them to schema 2 on
+subsequent writes. Calendar invitation state likewise upgrades on its next
+write. Omagma 0.2.12 and older reject the newer state; replacing the executable
+with an older version does not downgrade it. Close clients and stop the vault
+daemon before upgrading, then use the same version for every client sharing
+the store. Incompatible vault clients and daemons refuse data operations before
+dispatch. Status, lock and stop remain usable; use the current executable for
+`omagma vault stop`, `omagma vault start` and `omagma vault unlock` after an
+upgrade. Do not clear local state to work around a version mismatch: it holds
+drafts and submission history. The vault encryption format and application
+password remain unchanged.
+
+Browser Calendar remains a separate tech demo; these native storage and
+composer improvements do not turn it into a supported everyday client.

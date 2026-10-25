@@ -11,14 +11,15 @@ pub fn delay(request: j.Value) !i64 {
 pub fn find(store: *storage.Store, id: []const u8) !*storage.QueuedSend {
     try bounded.identifier(id);
     for (store.state.sendQueue) |*entry| if (std.mem.eql(u8, entry.queueId, id)) return entry;
+    if (try @import("operation_history.zig").get(store, store.allocator, .queue, id)) |record| {
+        const retained = try store.allocator.create(storage.QueuedSend);
+        retained.* = record.queue;
+        return retained;
+    }
     return error.QueueNotFound;
 }
 pub fn receipt(a: std.mem.Allocator, store: *storage.Store, entry: storage.QueuedSend) !j.Value {
-    var operation: ?storage.Operation = null;
-    for (store.state.operations) |candidate| if (std.mem.eql(u8, candidate.id, entry.operationId)) {
-        operation = candidate;
-        break;
-    };
+    const operation = try store.findOperation(a, entry.operationId);
     return j.value(a, .{
         .queueId = entry.queueId,
         .draftId = entry.draftId,
@@ -32,6 +33,7 @@ pub fn receipt(a: std.mem.Allocator, store: *storage.Store, entry: storage.Queue
     });
 }
 pub fn stage(store: *storage.Store, draft_id: []const u8, operation_id: []const u8, digest: []const u8, now_ms: i64, delay_ms: i64) !*storage.QueuedSend {
+    try store.compactHistory();
     try bounded.identifier(draft_id);
     if (operation_id.len == 0 or operation_id.len > 256) return error.InvalidOperationId;
     try @import("recipients.zig").validateHeader(operation_id);
@@ -39,6 +41,13 @@ pub fn stage(store: *storage.Store, draft_id: []const u8, operation_id: []const 
         if (!std.mem.eql(u8, entry.draftId, draft_id) or !std.mem.eql(u8, entry.hash, digest)) return error.OperationConflict;
         return entry;
     };
+    if (try @import("operation_history.zig").queueOperation(store, store.allocator, operation_id)) |entry| {
+        if (!std.mem.eql(u8, entry.draftId, draft_id) or !std.mem.eql(u8, entry.hash, digest)) return error.OperationConflict;
+        const retained = try store.allocator.create(storage.QueuedSend);
+        retained.* = entry;
+        return retained;
+    }
+    if (try store.findOperation(store.allocator, operation_id) != null) return error.OperationConflict;
     for (store.state.operations) |operation| {
         if (std.mem.eql(u8, operation.id, operation_id)) return error.OperationConflict;
         if (std.mem.eql(u8, operation.outcome, "unknown") and (std.mem.eql(u8, operation.draftId, draft_id) or std.mem.eql(u8, operation.hash, digest))) return error.UnknownOutcome;
@@ -52,16 +61,8 @@ pub fn stage(store: *storage.Store, draft_id: []const u8, operation_id: []const 
     }
     if (active >= 32) return error.SendQueueFull;
     var entries: std.ArrayList(storage.QueuedSend) = .empty;
-    // Only terminal history can be evicted. Unknown/submitting intents remain
-    // fenced even after a process crash and must never turn back into pending.
-    var evict = store.state.sendQueue.len >= 128;
-    for (store.state.sendQueue) |entry| {
-        if (evict and (entry.state == .canceled or entry.state == .applied or entry.state == .rejected)) {
-            evict = false;
-            continue;
-        }
-        try entries.append(store.allocator, entry);
-    }
+    if (store.state.sendQueue.len >= 128) return error.SendQueueFull;
+    try entries.appendSlice(store.allocator, store.state.sendQueue);
     const entry: storage.QueuedSend = .{
         .queueId = try store.nextId("queue"),
         .draftId = draft_id,

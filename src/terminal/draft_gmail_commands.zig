@@ -81,7 +81,7 @@ fn fixtureCreate(s: anytype, a: std.mem.Allocator, account: []const u8, attempt:
     snapshot.bodyFormat = .plain;
     var files: std.ArrayList(t.Attachment) = .empty;
     try files.appendSlice(a, draft.attachments);
-    if (draft.original) |original| try files.appendSlice(a, original.resources);
+    try files.appendSlice(a, prepared.resources);
     snapshot.attachments = files.items;
     snapshot.original = null;
     snapshot.recoveryFields = null;
@@ -129,6 +129,21 @@ fn response(a: std.mem.Allocator, draft: t.Draft, account: []const u8, link: ?li
     const digest = try links.contentDigest(a, draft, account);
     return j.value(a, .{ .draftId = draft.id, .contentDigest = digest[0..], .link = link, .outcome = outcome, .remote = got, .remoteChanged = if (link) |selected| if (got) |value| !std.mem.eql(u8, selected.remoteMessageId, value.messageId) else false else false, .remoteMissing = got == null and !std.mem.eql(u8, outcome, "local") });
 }
+fn finishCreate(a: std.mem.Allocator, store: *storage.Store, draft: t.Draft, initial: links.Link, receipt: ?remote.Remote, failure: ?anyerror, now_ms: i64) !j.Value {
+    const retained = find(store, draft.id) catch return error.UnknownOutcome;
+    if (retained.version != initial.version or !std.mem.eql(u8, retained.attemptMessageId, initial.attemptMessageId)) return error.UnknownOutcome;
+    var link = initial;
+    if (receipt) |got| {
+        link.applied(a, got.draftId, got.messageId, now_ms) catch return error.UnknownOutcome;
+    } else if (@import("send_outcome.zig").rejected(failure.?)) {
+        link.rejected(a, @errorName(failure.?)) catch |err| return if (err == error.OutOfMemory) error.UnknownOutcome else err;
+    } else link.errorCode = a.dupe(u8, @errorName(failure.?)) catch return error.UnknownOutcome;
+    retained.* = link;
+    store.save() catch return error.UnknownOutcome;
+    // Upload completion has crossed the provider boundary. The saved link or
+    // unknown fence remains authoritative when the response cannot allocate.
+    return response(a, draft, store.state.account, link, @tagName(link.phase), receipt) catch |err| return if (err == error.OutOfMemory) error.UnknownOutcome else err;
+}
 /// Called while the account is locked, both when staging and immediately before
 /// sending. The acknowledgement belongs to exactly the reviewed content.
 pub fn permitSend(store: *storage.Store, a: std.mem.Allocator, req: j.Value, draft: t.Draft, digest: []const u8) !void {
@@ -145,7 +160,7 @@ pub fn readResponse(a: std.mem.Allocator, store: *storage.Store, draft: t.Draft)
     var value = try j.value(a, draft);
     const digest = try links.contentDigest(a, draft, store.state.account);
     try value.object.put(a, "contentDigest", .{ .string = try a.dupe(u8, &digest) });
-    if (links.find(store.state.draftLinks, draft.id)) |index| try value.object.put(a, "gmailLink", try j.value(a, store.state.draftLinks[index]));
+    if (try @import("operation_history.zig").gmailLink(store, a, draft.id)) |link| try value.object.put(a, "gmailLink", try j.value(a, link));
     return value;
 }
 pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) !j.Value {
@@ -156,7 +171,7 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
         var store = try s.openStore(a, account, true);
         defer store.close();
         const draft = try store.draft(id);
-        return response(a, draft, account, if (links.find(store.state.draftLinks, id)) |index| store.state.draftLinks[index] else null, "local", null);
+        return response(a, draft, account, try @import("operation_history.zig").gmailLink(&store, a, id), "local", null);
     }
     const creating = std.mem.eql(u8, cmd, "draft.gmail-save");
     const taking_back = std.mem.eql(u8, cmd, "draft.gmail-take-back");
@@ -169,8 +184,10 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
     defer if (!s.options.fixtures) network.close();
     var store = try s.openStore(a, account, false);
     defer store.close();
+    try store.requireActiveDraft(id);
     var draft = try store.draft(id);
     if (creating) {
+        if (try @import("operation_history.zig").immutableSource(&store, id)) return error.ArchivedDraftReadOnly;
         try ensureDraftIdle(&store, id);
         const previous = if (links.find(store.state.draftLinks, id)) |index| store.state.draftLinks[index] else null;
         if (expected != (if (previous) |link| link.version else @as(u64, 0))) return error.GmailDraftChanged;
@@ -184,7 +201,9 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
             store.release();
             try network.validateSender(a, draft);
             try reopen(s, a, &store, account);
+            try store.requireActiveDraft(id);
             draft = try store.draft(id);
+            if (try @import("operation_history.zig").immutableSource(&store, id)) return error.ArchivedDraftReadOnly;
             if (!std.mem.eql(u8, &digest, &(try links.contentDigest(a, draft, account)))) return error.DraftChanged;
             const current = if (links.find(store.state.draftLinks, id)) |index| store.state.draftLinks[index].version else 0;
             if (current != expected) return error.GmailDraftChanged;
@@ -195,7 +214,7 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
         const attempt = try std.fmt.allocPrint(a, "<omagma-draft-{s}@mail.invalid>", .{identity});
         var source: ?@import("send_spool.zig").Spool = try @import("draft_gmail_spool.zig").create(&store, draft, attempt);
         defer if (source) |*spooled| spooled.close();
-        var link: links.Link = .{ .draftId = try a.dupe(u8, id), .attemptMessageId = attempt, .uploadedDigest = try a.dupe(u8, &digest), .version = std.math.add(u64, expected, 1) catch return error.DraftLinkLimitReached };
+        const link: links.Link = .{ .draftId = try a.dupe(u8, id), .attemptMessageId = attempt, .uploadedDigest = try a.dupe(u8, &digest), .version = std.math.add(u64, expected, 1) catch return error.DraftLinkLimitReached };
         if (links.find(store.state.draftLinks, id)) |index| store.state.draftLinks[index] = link else {
             const new_links = try a.alloc(links.Link, store.state.draftLinks.len + 1);
             @memcpy(new_links[0..store.state.draftLinks.len], store.state.draftLinks);
@@ -212,16 +231,7 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
         source.?.close();
         source = null;
         reopen(s, a, &store, account) catch return error.UnknownOutcome;
-        const retained = find(&store, id) catch return error.UnknownOutcome;
-        if (retained.version != link.version or !std.mem.eql(u8, retained.attemptMessageId, attempt)) return error.UnknownOutcome;
-        if (receipt) |got| {
-            link.applied(a, got.draftId, got.messageId, std.Io.Timestamp.now(s.io, .real).toMilliseconds()) catch return error.UnknownOutcome;
-        } else if (@import("send_outcome.zig").rejected(failure.?)) {
-            try link.rejected(a, @errorName(failure.?));
-        } else link.errorCode = try a.dupe(u8, @errorName(failure.?));
-        retained.* = link;
-        store.save() catch return error.UnknownOutcome;
-        return response(a, draft, account, link, @tagName(link.phase), receipt);
+        return finishCreate(a, &store, draft, link, receipt, failure, std.Io.Timestamp.now(s.io, .real).toMilliseconds());
     }
     const original = (try find(&store, id)).*;
     try original.expectVersion(expected);
@@ -273,4 +283,51 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value) 
         return response(a, draft, account, link.*, "local", result.remote);
     }
     return response(a, draft, account, link.*, if (result.remote == null) "missing" else if (!std.mem.eql(u8, result.remote.?.messageId, original.remoteMessageId)) "changed" else "linked", result.remote);
+}
+
+fn testCreateReceipt(applied: bool) !void {
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/gmail-receipt", .{tmp.sub_path});
+        const account = "self@example.test";
+        var store = try storage.Store.open(std.testing.io, a, root, account, .{ .fixtures = true });
+        defer store.close();
+        const draft = try store.putDraft(.{ .bodyText = "Unfinished local source" }, null);
+        const digest = try links.contentDigest(a, draft, account);
+        const initial: links.Link = .{ .draftId = draft.id, .attemptMessageId = "<fixed-upload@mail.invalid>", .uploadedDigest = &digest };
+        store.state.draftLinks = try a.dupe(links.Link, &.{initial});
+        try store.save(); // The same durable unknown fence that precedes create.
+        // Applied completion copies exactly two provider identities before
+        // saving. Fail its next allocation while constructing the receipt.
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = if (applied) 2 else 0 });
+        const received: ?remote.Remote = if (applied) .{ .draftId = "provider-draft", .messageId = "provider-message" } else null;
+        const failure: ?anyerror = if (applied) null else error.ConnectionResetByPeer;
+        try std.testing.expectError(error.UnknownOutcome, finishCreate(failing.allocator(), &store, draft, initial, received, failure, 1000));
+        try std.testing.expect(failing.has_induced_failure);
+        store.close();
+        store = try storage.Store.openCached(std.testing.io, a, root, account, .{ .fixtures = true });
+        const retained = (try find(&store, draft.id)).*;
+        try std.testing.expectEqual(if (applied) links.Phase.linked else links.Phase.unknown, retained.phase);
+        try std.testing.expect(retained.paused);
+        try std.testing.expectEqualStrings(initial.attemptMessageId, retained.attemptMessageId);
+        try std.testing.expectEqualStrings(initial.uploadedDigest, retained.uploadedDigest);
+        try std.testing.expectEqualStrings(if (applied) "provider-draft" else "", retained.remoteDraftId);
+        try std.testing.expectEqualStrings(if (applied) "provider-message" else "", retained.remoteMessageId);
+        try std.testing.expectError(error.DraftPausedInGmail, retained.permitSend(&digest));
+        const recovered = try response(a, draft, account, retained, @tagName(retained.phase), received);
+        try std.testing.expectEqualStrings(draft.id, j.text(recovered, "draftId"));
+        try std.testing.expectEqualStrings(if (applied) "linked" else "unknown", j.text(recovered, "outcome"));
+        var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        try std.testing.expectError(error.OutOfMemory, response(unavailable.allocator(), draft, account, null, "local", null));
+    }
+}
+test "native mutation receipt: Gmail draft completion preserves unknown upload identity on OOM" {
+    try testCreateReceipt(false);
+}
+test "native mutation receipt: Gmail draft completion preserves applied upload identity on OOM" {
+    try testCreateReceipt(true);
 }

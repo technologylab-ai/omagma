@@ -10,7 +10,9 @@ pub const Limits = struct {
     pub const source_properties = 1024;
     pub const source_line_bytes = 4096;
     pub const recurrence_lines = 64;
-    pub const calendars = 24;
+    pub const calendar_page = if (@import("types.zig").Limits.native) 250 else 24;
+    /// Bounded discovery pages; explicit named targets remain addressable.
+    pub const calendars = if (@import("types.zig").Limits.native) calendar_page * pages else 24;
     pub const page_events = 100;
     pub const snapshot_events = 500;
     pub const response_bytes = 1024 * 1024;

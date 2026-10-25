@@ -188,9 +188,7 @@ fn validateFields(request: j.Value, command: []const u8) !void {
 }
 
 fn selectedCalendar(service: svc.Service, target: t.Target) !t.Calendar {
-    const result = try service.list();
-    for (result.calendars) |calendar| if (calendar.target.eql(target)) return calendar;
-    return if (result.complete) error.CalendarNotFound else error.CalendarListIncomplete;
+    return service.loadCalendar(target);
 }
 
 fn executeReview(service: svc.Service, request: j.Value, host: HostInputs, target: t.Target, command: []const u8) !j.Value {
@@ -345,7 +343,9 @@ fn eventReviewValue(a: std.mem.Allocator, review: svc.Review) !j.Value {
 }
 
 fn appliedValue(a: std.mem.Allocator, target: t.Target, result: svc.Applied) !j.Value {
-    return j.value(a, .{ .account = target.account, .calendarId = target.calendar_id, .operationId = result.operation.intent.operation_id, .uid = result.operation.intent.identity.uid, .state = @tagName(result.operation.state), .providerId = result.operation.provider_id, .reconciled = result.reconciled, .errorCode = if (result.failure) |failure| @errorName(svc.failureError(failure)) else result.operation.error_code, .event = result.event, .attempt = result.operation.attempt, .nextAttempt = result.operation.attempt +| 1, .retryPossible = result.retry_possible, .recoveryReason = result.recovery_reason });
+    // The operation may already be applied or durably uncertain. Losing its
+    // command DTO must retain that ambiguity before Core encodes the envelope.
+    return j.value(a, .{ .account = target.account, .calendarId = target.calendar_id, .operationId = result.operation.intent.operation_id, .uid = result.operation.intent.identity.uid, .state = @tagName(result.operation.state), .providerId = result.operation.provider_id, .reconciled = result.reconciled, .errorCode = if (result.failure) |failure| @errorName(svc.failureError(failure)) else result.operation.error_code, .event = result.event, .attempt = result.operation.attempt, .nextAttempt = result.operation.attempt +| 1, .retryPossible = result.retry_possible, .recoveryReason = result.recovery_reason }) catch return error.UnknownOutcome;
 }
 
 fn present(value: j.Value, field: []const u8) bool {

@@ -63,7 +63,12 @@ pub const Provider = struct {
             try save(&store, a, value);
             break :initial value;
         };
-        if (request.kind == .calendar_list) return response(out, self.config.account, 200, try calendars(a, self.config.account, self.config.options.fixture_scenario));
+        if (request.kind == .calendar_list) {
+            const listing = try calendars(a, self.config.account, self.config.options.fixture_scenario);
+            if (std.mem.startsWith(u8, request.url, provider.base_url ++ "/users/me/calendarList?")) return response(out, self.config.account, 200, listing);
+            for (j.get(listing, "items").?.array.items) |item| if (std.mem.eql(u8, j.text(item, "id"), request.target.calendar_id) or (std.mem.eql(u8, request.target.calendar_id, "primary") and try j.boolean(item, "primary", false))) return response(out, self.config.account, 200, item);
+            return failure(out, self.config.account, 404, "notFound");
+        }
         const access = calendarAccess(self.config.account, request.target.calendar_id, self.config.options.fixture_scenario) orelse return failure(out, self.config.account, 404, "notFound");
         if (request.kind.mutating() and (access == .reader or !self.grants().write_shared)) return failure(out, self.config.account, 403, "forbidden");
         if (request.kind.mutating()) {
@@ -298,7 +303,10 @@ fn validateRequest(a: std.mem.Allocator, request: provider.Request) ![]const u8 
     const body = request.kind == .free_busy or request.kind == .import_event or request.kind == .insert_event or request.kind == .update_event;
     if (conditional != (request.if_match != null) or body != (request.body != null)) return error.InvalidCalendarRequest;
     if (request.kind == .calendar_list) {
-        if (!std.mem.startsWith(u8, request.url, provider.base_url ++ "/users/me/calendarList?")) return error.InvalidCalendarPath;
+        if (!std.mem.startsWith(u8, request.url, provider.base_url ++ "/users/me/calendarList?")) {
+            const bound = try provider.getCalendar(a, request.target);
+            if (!std.mem.eql(u8, request.url, bound.url)) return error.InvalidCalendarPath;
+        }
         return "";
     }
     if (request.kind == .free_busy) {

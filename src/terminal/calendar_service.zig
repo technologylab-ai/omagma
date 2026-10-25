@@ -77,6 +77,7 @@ pub const Cache = struct {
     saveFn: *const fn (*anyopaque, t.Snapshot) anyerror!void,
     loadCalendarsFn: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!?CalendarList = null,
     saveCalendarsFn: ?*const fn (*anyopaque, CalendarList) anyerror!void = null,
+    saveCalendarFn: ?*const fn (*anyopaque, t.Calendar) anyerror!void = null,
 };
 pub const CalendarList = struct { calendars: []const t.Calendar, complete: bool, cache_error: []const u8 = "" };
 pub const Agenda = struct { snapshot: t.Snapshot, refresh_error: []const u8 = "", cache_error: []const u8 = "" };
@@ -142,8 +143,11 @@ pub const Service = struct {
         if (!self.grants.calendar_list) return error.CalendarPermissionRequired;
         var calendars: std.ArrayList(t.Calendar) = .empty;
         var pages: Pages = .{};
+        var bytes: usize = 0;
         while (try pages.next()) |token| {
             const response = try self.read(try p.listCalendars(self.a, self.grants.account, token));
+            bytes += response.body.len;
+            if (bytes > t.Limits.snapshot_bytes) return .{ .calendars = calendars.items, .complete = false };
             const page = try p.decodeCalendars(self.a, self.grants.account, response.body);
             for (page.calendars) |calendar| {
                 for (calendars.items) |previous| if (calendar.target.eql(previous.target)) return error.CalendarPageOverlap;
@@ -159,6 +163,19 @@ pub const Service = struct {
             };
         };
         return result;
+    }
+
+    pub fn loadCalendar(self: Service, target: t.Target) !t.Calendar {
+        if (!self.grants.calendar_list) return error.CalendarPermissionRequired;
+        try self.requireAccount(target);
+        const response = try self.read(try p.getCalendar(self.a, target));
+        const value = try p.decodeCalendar(self.a, target, response.body);
+        if (self.persist_cache) if (self.cache) |cache| if (cache.saveCalendarFn) |save| {
+            // Metadata caching must not turn a usable provider read into a
+            // failure. The agenda's snapshot save reports its own cache error.
+            save(cache.context, value) catch {};
+        };
+        return value;
     }
 
     /// UID lookup includes hidden invitations and deleted records. Reaching any

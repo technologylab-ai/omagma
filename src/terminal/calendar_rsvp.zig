@@ -24,9 +24,12 @@ pub fn failed(err: anyerror) Result {
 }
 
 pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInputs, response: provider.RsvpResponse) !Result {
-    const listed = try instance.list();
-    if (!listed.complete) return error.CalendarListIncomplete;
-    const calendar = try selectCalendar(listed.calendars, instance.grants.account, j.text(request, "calendarId"));
+    const explicit_id = j.text(request, "calendarId");
+    const calendar = if (explicit_id.len != 0) try instance.loadCalendar(.{ .account = instance.grants.account, .calendar_id = explicit_id }) else selected: {
+        const listed = try instance.list();
+        if (!listed.complete) return error.CalendarListIncomplete;
+        break :selected try selectCalendar(listed.calendars, instance.grants.account, "");
+    };
     if (!calendar.writable()) return error.CalendarReadOnly;
     if (!instance.grants.canWrite(calendar)) return error.CalendarWritePermissionRequired;
     const digest_input = try std.fmt.allocPrint(instance.a, "{s}\x00{s}\x00{s}\x00{s}", .{ instance.grants.account, calendar.target.calendar_id, try j.required(request, "operationId"), @tagName(response) });

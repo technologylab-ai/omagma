@@ -8,6 +8,7 @@ const mail = @import("types.zig");
 const t = @import("calendar_types.zig");
 const plan = @import("calendar_plan.zig");
 const svc = @import("calendar_service.zig");
+const history = @import("calendar_identity_history.zig");
 
 pub const max_identities = 256;
 pub const state_bytes = 4 * 1024 * 1024;
@@ -15,20 +16,8 @@ pub const max_snapshots = 4;
 pub const cache_bytes = 8 * 1024 * 1024;
 const state_name = "calendar-state.json";
 const cache_name = "calendar-agenda.json";
-const Entry = struct {
-    identity: plan.Identity,
-    state: svc.State = .{},
-    review: ?svc.Review = null,
-    /// Ordinary event IDs and ETags prevent duplicate writes independently of
-    /// invitation UID tracking. Their settled receipts may be pruned, whereas
-    /// invitation identities survive a provider-side deletion.
-    ordinary: bool = false,
-    receipt_hash: ?[32]u8 = null,
-    /// Older journals had no reservation. Do not retroactively charge their
-    /// unknown entries and block the very finalization that frees that space.
-    receipt_reserved: bool = false,
-};
-const StateFile = struct { schema: u8 = 1, account: []const u8, entries: []Entry = &.{} };
+const Entry = history.Entry;
+const StateFile = struct { schema: u8 = 1, account: []const u8, entries: []Entry = &.{}, history: history.Root = .{} };
 const CacheFile = struct { schema: u8 = 1, account: []const u8, snapshots: []const t.Snapshot = &.{}, calendars: ?svc.CalendarList = null };
 
 // A final invitation receipt may add the bounded tracked identity plus a
@@ -50,7 +39,7 @@ pub const Host = struct {
         return .{ .context = self, .journal = .{ .context = self, .claimFn = claim, .recordFn = record, .retryFn = retry }, .loadFn = load, .preserveFn = preserve };
     }
     pub fn cache(self: *Host) svc.Cache {
-        return .{ .context = self, .loadFn = cacheLoad, .saveFn = cacheSave, .loadCalendarsFn = calendarsLoad, .saveCalendarsFn = calendarsSave };
+        return .{ .context = self, .loadFn = cacheLoad, .saveFn = cacheSave, .loadCalendarsFn = calendarsLoad, .saveCalendarsFn = calendarsSave, .saveCalendarFn = calendarSave };
     }
     fn cast(context: *anyopaque) *Host {
         return @ptrCast(@alignCast(context));
@@ -65,7 +54,9 @@ pub const Host = struct {
     fn readState(self: *Host, store: *storage.Store, a: std.mem.Allocator) !StateFile {
         const raw = try store.readDocument(a, state_name, state_bytes) orelse return .{ .account = self.account };
         var state = try std.json.parseFromSliceLeaky(StateFile, a, raw, .{ .allocate = .alloc_if_needed });
-        if (state.schema != 1 or !std.mem.eql(u8, state.account, self.account) or state.entries.len > max_identities) return error.CalendarStoreCorrupt;
+        if ((state.schema != 1 and (state.schema != 2 or !mail.Limits.native)) or !std.mem.eql(u8, state.account, self.account) or state.entries.len > max_identities) return error.CalendarStoreCorrupt;
+        try history.validate(state.history);
+        if (state.schema == 1 and !history.empty(state.history)) return error.CalendarStoreCorrupt;
         for (state.entries, 0..) |entry, index| {
             try self.check(entry.identity.target);
             try t.text(entry.identity.uid, 1024, false);
@@ -88,13 +79,41 @@ pub const Host = struct {
         compact(&state);
         return state;
     }
-    fn writeState(store: *storage.Store, a: std.mem.Allocator, state: StateFile) !void {
+    fn writeState(store: *storage.Store, a: std.mem.Allocator, input: StateFile) !void {
+        var state = input;
+        if (mail.Limits.native) state.schema = 2;
         if (@import("gmail_decode.zig").serializedBytes(state) > state_bytes) return error.CalendarStoreFull;
-        try store.writeDocument(state_name, try std.json.Stringify.valueAlloc(a, state, .{}));
+        const raw = try std.json.Stringify.valueAlloc(a, state, .{});
+        if (mail.Limits.native) try store.publishDocumentRecords(state_name, raw) else try store.writeDocument(state_name, raw);
     }
     fn findEntry(state: *StateFile, identity: plan.Identity) ?*Entry {
         for (state.entries) |*value| if (value.identity.eql(identity)) return value;
         return null;
+    }
+    fn archivedEntry(store: *storage.Store, a: std.mem.Allocator, state: StateFile, identity: plan.Identity) !?Entry {
+        return if (mail.Limits.native) history.loadIdentity(store, a, state.history, identity) else null;
+    }
+    fn activate(store: *storage.Store, a: std.mem.Allocator, state: *StateFile, identity: plan.Identity) !*Entry {
+        if (findEntry(state, identity) != null) return ensure(state, a, identity);
+        const retained = try archivedEntry(store, a, state.*, identity);
+        const current = try ensure(state, a, identity);
+        if (retained) |entry| current.* = entry;
+        return current;
+    }
+    fn archiveSettled(store: *storage.Store, a: std.mem.Allocator, state: *StateFile, protected: ?plan.Identity) !void {
+        if (!mail.Limits.native) return;
+        compact(state);
+        if (state.entries.len < 64 and @import("gmail_decode.zig").serializedBytes(state.*) + reservedBytes(state.*) <= state_bytes) return;
+        var retained: std.ArrayList(Entry) = .empty;
+        var settled: std.ArrayList(Entry) = .empty;
+        for (state.entries) |entry| {
+            const pending = entry.review != null or (entry.state.operation != null and entry.state.operation.?.state == .unknown);
+            const selected = if (protected) |key| key.eql(entry.identity) else false;
+            if (!pending and !selected and (entry.state.tracked != null or entry.state.operation != null)) try settled.append(a, entry) else try retained.append(a, entry);
+        }
+        if (settled.items.len == 0) return;
+        state.history = try history.append(store, state.history, settled.items);
+        state.entries = retained.items;
     }
     fn compact(state: *StateFile) void {
         for (state.entries) |*entry| {
@@ -110,6 +129,7 @@ pub const Host = struct {
         }
     }
     fn evictable(entry: Entry) bool {
+        if (mail.Limits.native) return entry.state.tracked == null and entry.state.operation == null;
         return entry.state.tracked == null and (entry.state.operation == null or entry.state.operation.?.state != .unknown);
     }
     fn reservedBytes(state: StateFile) usize {
@@ -124,8 +144,9 @@ pub const Host = struct {
         state.entries = state.entries[0 .. state.entries.len - 1];
     }
     /// Admission accounts for every in-flight final receipt. A new draft may
-    /// evict old unclaimed reviews and settled ordinary receipts by bytes as
-    /// well as count, but never its own review or another pending operation.
+    /// evict old unclaimed reviews by bytes as well as count, but never its
+    /// own review or another pending operation. Native settled receipts page
+    /// before admission; the portable demo retains its original bounded policy.
     fn fit(state: *StateFile, protected: plan.Identity) !void {
         compact(state);
         while (state.entries.len > max_identities or @import("gmail_decode.zig").serializedBytes(state.*) + reservedBytes(state.*) > state_bytes) {
@@ -142,8 +163,8 @@ pub const Host = struct {
             if (!removed) return error.CalendarStoreFull;
         }
     }
-    /// Recent reviews lead the table. Unknown outcomes and tracked invitation
-    /// identities are never pruned: provider deletion must not resurrect mail.
+    /// Recent reviews lead the active table. Unknown outcomes are never pruned;
+    /// native tracked identities can leave this table only through history.
     fn ensure(state: *StateFile, a: std.mem.Allocator, identity: plan.Identity) !*Entry {
         for (state.entries, 0..) |existing, index| if (existing.identity.eql(identity)) {
             std.mem.copyBackwards(Entry, state.entries[1 .. index + 1], state.entries[0..index]);
@@ -182,8 +203,8 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         var state = try self.readState(&store, a);
-        const current = findEntry(&state, identity) orelse return .{};
-        return clone(svc.State, out, current.state);
+        if (findEntry(&state, identity)) |current| return clone(svc.State, out, current.state);
+        return if (try archivedEntry(&store, a, state, identity)) |entry| clone(svc.State, out, entry.state) else .{};
     }
     pub fn loadReview(self: *Host, out: std.mem.Allocator, target: t.Target, operation_id: []const u8) !svc.Review {
         try self.check(target);
@@ -210,6 +231,10 @@ pub const Host = struct {
             const operation = entry.state.operation orelse return error.CalendarStoreCorrupt;
             if (operation.intent.identity.target.eql(target) and std.mem.eql(u8, operation.intent.operation_id, operation_id))
                 return try clone(svc.Receipt, out, .{ .operation = operation, .review_hash = hash, .ordinary = entry.ordinary });
+        };
+        if (mail.Limits.native) if (try history.receipt(&store, a, state.history, operation_id)) |entry| {
+            const operation = entry.state.operation orelse return error.CalendarStoreCorrupt;
+            if (operation.intent.identity.target.eql(target)) if (entry.receipt_hash) |hash| return try clone(svc.Receipt, out, .{ .operation = operation, .review_hash = hash, .ordinary = entry.ordinary });
         };
         return null;
     }
@@ -241,6 +266,12 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         var state = try self.readState(&store, a);
+        store.beginHistory();
+        errdefer store.abortHistory();
+        if (mail.Limits.native) if (try history.receipt(&store, a, state.history, review.intent.operation_id)) |entry| {
+            const operation = entry.state.operation orelse return error.CalendarStoreCorrupt;
+            if (!operation.intent.eql(review.intent) or (entry.receipt_hash != null and !std.mem.eql(u8, &entry.receipt_hash.?, &review.review_hash))) return error.OperationConflict;
+        };
         for (state.entries) |prior| {
             if (prior.review) |saved| if (std.mem.eql(u8, saved.intent.operation_id, review.intent.operation_id)) {
                 if (!saved.intent.eql(review.intent) or !std.mem.eql(u8, &saved.review_hash, &review.review_hash)) return error.OperationConflict;
@@ -251,9 +282,17 @@ pub const Host = struct {
                 if (operation.state == .unknown and operation.intent.kind == .insert_event and review.intent.kind == .insert_event and prior.identity.target.eql(review.intent.identity.target) and !operation.intent.eql(review.intent)) return error.CalendarOperationPending;
             }
         }
-        const current = try ensure(&state, a, review.intent.identity);
+        try archiveSettled(&store, a, &state, review.intent.identity);
+        const current = try activate(&store, a, &state, review.intent.identity);
+        if (mail.Limits.native) if (current.state.operation) |operation| if (operation.state != .unknown and !operation.intent.eql(review.intent) and try history.receipt(&store, a, state.history, operation.intent.operation_id) == null) {
+            var previous = current.*;
+            previous.review = null;
+            previous.receipt_reserved = false;
+            state.history = try history.append(&store, state.history, &.{previous});
+        };
         current.review = review;
         current.ordinary = review.ordinary_event != null;
+        try archiveSettled(&store, a, &state, review.intent.identity);
         try fit(&state, review.intent.identity);
         try writeState(&store, a, state);
     }
@@ -267,6 +306,13 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         var state = try self.readState(&store, a);
+        store.beginHistory();
+        errdefer store.abortHistory();
+        if (mail.Limits.native) if (try history.receipt(&store, a, state.history, intent.operation_id)) |entry| {
+            const operation = entry.state.operation orelse return error.CalendarStoreCorrupt;
+            if (!operation.intent.eql(intent)) return error.OperationConflict;
+            return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = false };
+        };
         if (intent.kind == .insert_event) for (state.entries) |prior| if (prior.state.operation) |operation| {
             if (operation.state == .unknown and operation.intent.kind == .insert_event and prior.identity.target.eql(intent.identity.target) and !operation.intent.eql(intent)) return error.CalendarOperationPending;
         };
@@ -288,10 +334,19 @@ pub const Host = struct {
         } else if (current.state.tracked) |tracked| {
             if (intent.kind == .import_event or (if (review.response_only) intent.version.order(tracked.version) == .lt else intent.version.order(tracked.version) != .gt) or !std.mem.eql(u8, intent.event_id, tracked.event_id)) return error.CalendarReviewStale;
         } else if (intent.kind != .import_event and !review.response_only) return error.CalendarReviewStale;
+        if (mail.Limits.native and current.state.operation != null and try history.receipt(&store, a, state.history, current.state.operation.?.intent.operation_id) == null) {
+            // Preserve the old operation identity before a reviewed revision
+            // replaces this identity's active receipt with an unknown claim.
+            var previous = current.*;
+            previous.review = null;
+            previous.receipt_reserved = false;
+            state.history = try history.append(&store, state.history, &.{previous});
+        }
         const operation: plan.Operation = .{ .intent = intent };
         current.state.operation = operation;
         current.receipt_hash = null;
         current.receipt_reserved = true;
+        try archiveSettled(&store, a, &state, intent.identity);
         try fit(&state, intent.identity);
         try writeState(&store, a, state);
         return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = true };
@@ -308,7 +363,14 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         var state = try self.readState(&store, a);
-        const current = findEntry(&state, operation.intent.identity) orelse return error.CalendarOperationNotFound;
+        store.beginHistory();
+        errdefer store.abortHistory();
+        const current = findEntry(&state, operation.intent.identity) orelse {
+            const retained = if (mail.Limits.native) try history.receipt(&store, a, state.history, operation.intent.operation_id) else null;
+            const previous = if (retained) |entry| entry.state.operation orelse return error.CalendarOperationNotFound else return error.CalendarOperationNotFound;
+            if (!previous.intent.eql(operation.intent) or previous.state != operation.state or !std.mem.eql(u8, previous.provider_id, operation.provider_id) or operation.attempt > previous.attempt) return error.OperationConflict;
+            return;
+        };
         const previous = current.state.operation orelse return error.CalendarOperationNotFound;
         if (!previous.intent.eql(operation.intent) or operation.attempt > previous.attempt) return error.OperationConflict;
         // A late refusal from an earlier attempt cannot settle a newer send.
@@ -322,6 +384,7 @@ pub const Host = struct {
         var final_operation = operation;
         final_operation.attempt = previous.attempt;
         current.state.operation = final_operation;
+        try archiveSettled(&store, a, &state, null);
         try fit(&state, operation.intent.identity);
         try writeState(&store, a, state);
     }
@@ -336,7 +399,14 @@ pub const Host = struct {
         var store = try self.open(a);
         defer store.close();
         var state = try self.readState(&store, a);
-        const entry = findEntry(&state, intent.identity) orelse return error.CalendarOperationNotFound;
+        store.beginHistory();
+        errdefer store.abortHistory();
+        const entry = findEntry(&state, intent.identity) orelse {
+            const retained = if (mail.Limits.native) try history.receipt(&store, a, state.history, intent.operation_id) else null;
+            const operation = if (retained) |value| value.state.operation orelse return error.CalendarOperationNotFound else return error.CalendarOperationNotFound;
+            if (!operation.intent.eql(intent)) return error.OperationConflict;
+            return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = false };
+        };
         var operation = entry.state.operation orelse return error.CalendarOperationNotFound;
         if (!operation.intent.eql(intent)) return error.OperationConflict;
         if (operation.state != .unknown or next_attempt <= operation.attempt)
@@ -347,6 +417,7 @@ pub const Host = struct {
         operation.attempt = next_attempt;
         entry.state.operation = operation;
         entry.receipt_reserved = true;
+        try archiveSettled(&store, a, &state, intent.identity);
         try fit(&state, intent.identity);
         try writeState(&store, a, state);
         return .{ .operation = try clone(plan.Operation, self.result_allocator, operation), .fresh = true };
@@ -405,7 +476,7 @@ pub const Host = struct {
     }
 
     fn validateCalendars(self: *Host, values: svc.CalendarList) !void {
-        if (!values.complete or values.calendars.len > t.Limits.calendars) return error.CalendarCacheMismatch;
+        if (values.calendars.len > t.Limits.calendars) return error.CalendarCacheMismatch;
         for (values.calendars, 0..) |calendar, index| {
             try self.check(calendar.target);
             try t.text(calendar.summary, 4096, true);
@@ -426,6 +497,7 @@ pub const Host = struct {
     }
     fn calendarsSave(context: *anyopaque, values: svc.CalendarList) anyerror!void {
         const self = cast(context);
+        if (!values.complete) return error.CalendarCacheMismatch;
         try self.validateCalendars(values);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -440,6 +512,49 @@ pub const Host = struct {
         }
         try store.writeDocument(cache_name, try std.json.Stringify.valueAlloc(a, file, .{}));
     }
+    /// A named GET proves one source, never complete account membership.
+    /// Retain its metadata for exact offline windows without a discovery read.
+    fn calendarSave(context: *anyopaque, calendar: t.Calendar) anyerror!void {
+        const self = cast(context);
+        try self.validateCalendars(.{ .calendars = &.{calendar}, .complete = false });
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var store = try self.open(a);
+        defer store.close();
+        var file = try self.readCache(&store, a);
+        const previous = file.calendars orelse svc.CalendarList{ .calendars = &.{}, .complete = false };
+        try self.validateCalendars(previous);
+        const values = try a.alloc(t.Calendar, @min(previous.calendars.len + 1, t.Limits.calendars));
+        values[0] = calendar;
+        var count: usize = 1;
+        var replaced = false;
+        var dropped = false;
+        for (previous.calendars) |old| {
+            if (old.target.eql(calendar.target)) {
+                replaced = true;
+                continue;
+            }
+            if (count == values.len) {
+                dropped = true;
+                continue;
+            }
+            values[count] = old;
+            count += 1;
+        }
+        file.calendars = .{ .calendars = values[0..count], .complete = previous.complete and replaced and !dropped };
+        while (@import("gmail_decode.zig").serializedBytes(file) > cache_bytes) {
+            if (file.snapshots.len > 0) {
+                file.snapshots = file.snapshots[0 .. file.snapshots.len - 1];
+            } else if (count > 1) {
+                count -= 1;
+                file.calendars.?.calendars = values[0..count];
+                file.calendars.?.complete = false;
+            } else return error.CalendarSnapshotTooLarge;
+        }
+        try store.writeDocument(cache_name, try std.json.Stringify.valueAlloc(a, file, .{}));
+    }
+
     /// Only already-downloaded detail is available offline. Do not synthesize
     /// an event GET or claim that an absent event was deleted by its provider.
     pub fn cachedEvent(self: *Host, out: std.mem.Allocator, target: t.Target, event_id: []const u8) !?t.Event {
@@ -464,6 +579,18 @@ pub const Host = struct {
     }
 };
 
+/// Migration verifies all paged records before publishing a destination.
+/// Schema-1 documents without paged roots retain their previous opaque-copy
+/// treatment; native Host.readState still validates active entries on use.
+pub fn verifyHistory(store: *storage.Store, a: std.mem.Allocator) !void {
+    const raw = try store.readDocument(a, state_name, state_bytes) orelse return;
+    const value = try std.json.parseFromSliceLeaky(@import("json.zig").Value, a, raw, .{ .allocate = .alloc_if_needed });
+    const roots = @import("json.zig").get(value, "history") orelse return;
+    const root = try @import("json.zig").decode(history.Root, a, roots);
+    if (!history.empty(root) and try @import("json.zig").integer(value, "schema", 1) != 2) return error.CalendarHistoryCorrupt;
+    try history.verify(store, root);
+}
+
 fn sameWindow(a: t.Window, b: t.Window) bool {
     return a.start_ms == b.start_ms and a.end_ms == b.end_ms and std.mem.eql(u8, a.time_zone, b.time_zone);
 }
@@ -487,6 +614,11 @@ test "calendar store: bounded identity retention never discards an unknown outco
     try std.testing.expectError(error.CalendarStoreFull, Host.ensure(&state, a, newcomer));
     try std.testing.expectEqual(max_identities, state.entries.len);
     state.entries[max_identities - 2].state.operation.?.state = .rejected;
+    if (mail.Limits.native) {
+        // Native settled receipts must be paged before a slot can be reused.
+        try std.testing.expectError(error.CalendarStoreFull, Host.ensure(&state, a, newcomer));
+        state.entries[max_identities - 2].state.operation = null;
+    }
     const removed = state.entries[max_identities - 2].identity;
     const oldest_unknown = state.entries[max_identities - 1].identity;
     _ = try Host.ensure(&state, a, newcomer);

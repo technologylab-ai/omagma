@@ -25,6 +25,34 @@ def private_json(path, value):
     path.chmod(0o600)
 
 
+def active_draft_source(cache, draft_id, account=ACCOUNT):
+    """Resolve the exact synthetic source through its committed pin record."""
+    directory = cache / 'fixtures' / hashlib.sha256(account.encode()).hexdigest()
+    index = json.loads((directory / 'index.json').read_bytes())
+    require(index['schema'] == 2 and index['account'] == account,
+            'migration source has the wrong account/index generation')
+    require(sum(row['id'] == draft_id for row in index['drafts']) == 1,
+            'migration source draft is not uniquely active')
+    references = [row for row in index['relatedDraftBlobs'] if row['draftId'] == draft_id]
+    require(len(references) == 1, 'migration source lacks its exact committed pin')
+
+    def handle(value):
+        require(isinstance(value, str) and len(value) == 64
+                and all(char in '0123456789abcdef' for char in value),
+                'migration source has an invalid immutable handle')
+        return value
+
+    pins = json.loads((directory / f"history-pins-{handle(references[0]['handle'])}.json").read_bytes())
+    require(pins['schema'] == 1 and pins['account'] == account and pins['draftId'] == draft_id,
+            'migration source pin crossed account or draft identity')
+    source = directory / f"history-active-{handle(pins['source'])}.json"
+    raw = source.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == handle(pins['hash']),
+            'migration source bytes do not match the committed hash')
+    require(json.loads(raw)['id'] == draft_id, 'migration source contains a different draft')
+    return source
+
+
 def digest_parts(*parts):
     return hashlib.sha256(b''.join(part.encode() + b'\0' for part in parts)).hexdigest()
 
@@ -253,11 +281,23 @@ def run(binary, root, evidence=None):
     require(b'VaultMigrationIncomplete' in refused, 'incomplete migration published activation')
     require(not (Path(env['XDG_CONFIG_HOME']) / 'omagma' / 'native-vault.json').exists(),
             'failed activation published a marker')
-    source_record = next(cache.rglob('draft-*.json'))
+    source_record = active_draft_source(cache, draft['id'])
     original = source_record.read_bytes()
-    source_record.write_bytes(original + b' ')
-    prompt(binary, [*migrate, '--resume'], env, [(b'Vault password: ', PASSWORD)], success=False)
-    source_record.write_bytes(original)
+    try:
+        source_record.write_bytes(original + b' ')
+        refused = prompt(binary, [*migrate, '--resume'], env, [], success=False)
+        require(b'MigrationSourceChanged' in refused and b'Vault password:' not in refused,
+                'changed immutable source was not refused before unlocking the migration')
+        require(source_record.read_bytes() == original + b' ',
+                'refused migration rewrote the deliberately changed source')
+        for relative, digest in baseline.items():
+            if source / relative != source_record:
+                require(hashlib.sha256((source / relative).read_bytes()).digest() == digest,
+                        'refused migration changed another original source file')
+    finally:
+        source_record.write_bytes(original)
+    require(active_draft_source(cache, draft['id']) == source_record,
+            'restored source no longer matches its committed identity and hash')
     completed = prompt(binary, [*migrate, '--resume'], env, [(b'Vault password: ', PASSWORD)])
     reports = [json.loads(line) for line in completed.splitlines() if line.startswith(b'{"preflight":')]
     require(len(reports) == 1, 'migration omitted its preflight count report')

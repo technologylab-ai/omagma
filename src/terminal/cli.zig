@@ -11,6 +11,28 @@ const HtmlMetrics = struct {
     htmlFallbacks: u64,
 };
 
+/// Discovery must precede account/vault routing in main. Keep the same
+/// value-aware scan as run(), so a literal "--help" field is never an option.
+pub fn discovery(io: std.Io, a: std.mem.Allocator, mode: []const u8, args: *std.process.Args.Iterator) !bool {
+    var scan = args.*;
+    var operation: ?[]const u8 = null;
+    if (!eq(mode, "tui") and !eq(mode, "cli") and !eq(mode, "agent")) {
+        const verb = scan.next() orelse return error.CommandRequired;
+        if (eq(verb, "--help") or eq(verb, "-h") or eq(verb, "--help-all")) {
+            try help_info.family(io, mode);
+            if (eq(verb, "--help-all")) try help_info.options(io);
+            return true;
+        }
+        if (eq(verb, "--help-options")) {
+            try help_info.options(io);
+            return true;
+        }
+        if (!knownVerb(mode, verb)) return error.UnknownCommand;
+        operation = verb;
+    }
+    return helpBeforeInput(io, a, mode, operation, &scan);
+}
+
 pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []const u8, args: *std.process.Args.Iterator) !void {
     const cap = init.meter;
     const a = cap.allocator();
@@ -216,7 +238,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             has_draft = true;
         } else if (eq(arg, "--attach-file")) {
             if (interactive or jsonl) return error.AttachmentsRequireDraftSource;
-            if (attachment_paths.items.len == 16) return error.TooManyAttachments;
+            if (attachment_paths.items.len == @import("types.zig").Limits.attachments) return error.TooManyAttachments;
             try attachment_paths.append(sa, v);
             has_draft = true;
         } else if (eq(arg, "--body-file")) {

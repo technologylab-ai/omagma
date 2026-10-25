@@ -5,7 +5,7 @@ const Store = @import("store.zig").Store;
 const storage = @import("vault_storage.zig");
 const vt = @import("vault_types.zig");
 const stream = @import("vault_stream.zig");
-pub const Object = struct { name: []const u8, kind: vt.RecordKind, size: usize, sha256: [32]u8, handle: storage.Handle };
+pub const Object = struct { name: []const u8, kind: vt.RecordKind, size: usize, sha256: [32]u8, handle: storage.Handle, mapped: bool = true };
 /// The Store lock is already held. Pin and validate the exact private index
 /// descriptor, so disappearance or replacement cannot become an empty source.
 pub fn readIndex(io: std.Io, dir: std.Io.Dir, a: std.mem.Allocator) ![]const u8 {
@@ -110,7 +110,7 @@ fn validateRecords(s: *Store, objects: []const Object) !void {
             .draft => {
                 const draft = try std.json.parseFromTokenSourceLeaky(Draft, a, &parser, options);
                 const name = try std.fmt.allocPrint(a, "draft-{s}.json", .{Store.hash(draft.id)});
-                if (!std.mem.eql(u8, name, object.name)) return error.CacheIdentityMismatch;
+                if (!@import("operation_history.zig").direct(object.name) and !std.mem.eql(u8, name, object.name)) return error.CacheIdentityMismatch;
                 try attachmentReferences(a, objects, draft.attachments);
                 if (draft.original) |original| try attachmentReferences(a, objects, original.resources);
             },
@@ -129,18 +129,71 @@ fn validateRecords(s: *Store, objects: []const Object) !void {
         if (object.size != entry.bytes or !std.mem.eql(u8, &std.fmt.bytesToHex(object.sha256, .lower), entry.bodyHash)) return error.MigrationSourceChanged;
         if (entry.bodyBlobIds) |ids| try blobReferences(a, objects, ids);
     };
-    for (s.state.drafts) |draft| if (objectNamed(objects, try std.fmt.allocPrint(a, "draft-{s}.json", .{Store.hash(draft.id)})) == null) return error.MigrationRecordMissing;
+    for (s.state.drafts) |draft| {
+        const source = objectNamed(objects, try s.activeDraftSourceName(a, draft.id)) orelse return error.MigrationRecordMissing;
+        if (try @import("draft_pins.zig").load(s, a, draft.id)) |pins| {
+            if (!std.mem.eql(u8, pins.hash, &std.fmt.bytesToHex(source.sha256, .lower))) return error.MigrationSourceChanged;
+            try blobReferences(a, objects, pins.blobs);
+        }
+    }
     for (s.state.outbox) |message| if (objectNamed(objects, try std.fmt.allocPrint(a, "outbox-{s}.json", .{Store.hash(message.id)})) == null) return error.MigrationRecordMissing;
-    for (s.state.relatedDraftBlobs) |references| try blobReferences(a, objects, references.blobs);
+    for (s.state.relatedDraftBlobs) |references| {
+        try blobReferences(a, objects, references.blobs);
+        if (references.handle.len != 0 and objectNamed(objects, try @import("operation_history.zig").fileName(a, "pins", references.handle)) == null) return error.MigrationRecordMissing;
+    }
+    try validateHistory(s, objects);
+}
+fn validateHistory(s: *Store, objects: []const Object) !void {
+    const history = @import("operation_history.zig");
+    var next = s.state.history.head;
+    var next_buffer: [64]u8 = undefined;
+    var remaining = s.state.history.pages;
+    while (next.len != 0) {
+        var phase: std.heap.ArenaAllocator = .init(if (@import("send_memory.zig").native) @import("send_memory.zig").allocator() else s.allocator);
+        defer phase.deinit();
+        const a = phase.allocator();
+        const page = try history.readPage(s, a, next);
+        if (remaining == 0 or page.sequence != remaining) return error.InvalidHistory;
+        remaining -= 1;
+        for (page.records) |record| switch (record) {
+            .draft => |retained| {
+                const current = (try history.source(s, a, retained.summary.id)) orelse return error.InvalidHistory;
+                if (!current.deleted) {
+                    const source = objectNamed(objects, try history.fileName(a, "draft", current.handle)) orelse return error.MigrationRecordMissing;
+                    if (source.kind != .draft or !std.mem.eql(u8, current.hash, &std.fmt.bytesToHex(source.sha256, .lower))) return error.MigrationSourceChanged;
+                    try blobReferences(a, objects, current.blobs);
+                }
+            },
+            .operation => |op| {
+                if (try history.operation(s, a, op.id) == null) return error.InvalidHistory;
+            },
+            .queue => |entry| {
+                if (try history.get(s, a, .queue, entry.queueId) == null) return error.InvalidHistory;
+            },
+            .blob => |entry| {
+                const current = (try history.findBlob(s, a, entry.id)) orelse return error.InvalidHistory;
+                if (!current.deleted) {
+                    const object = objectNamed(objects, try @import("attachment_blob.zig").filename(a, entry.id)) orelse return error.MigrationRecordMissing;
+                    if (object.kind != .attachment or object.size != current.size or !std.mem.eql(u8, &(try storage.Handle.parse(current.handle)).bytes, &object.handle.bytes)) return error.MigrationSourceChanged;
+                }
+            },
+        };
+        if (page.previous.len == 0) next = "" else {
+            @memcpy(&next_buffer, page.previous);
+            next = &next_buffer;
+        }
+    }
+    if (remaining != 0) return error.InvalidHistory;
 }
 pub fn inventory(s: *Store, a: std.mem.Allocator) ![]Object {
     s.migration_inventory = null;
     try s.migrationSourceReady();
     if (s.vault != null) return error.MigrationSourceRequired;
+    if (try s.diskBytes() > @import("types.zig").Limits.disk_hard) return error.MigrationDiskQuotaExceeded;
     var rows: std.ArrayList(Object) = .empty;
     var scratch: [64 * 1024]u8 = undefined;
     defer std.crypto.secureZero(u8, &scratch);
-    var blobs: usize = 0;
+    var legacy_blobs: usize = 0;
     var iterator = s.dir.iterate();
     while (try iterator.next(s.io)) |entry| {
         if (entry.kind != .file) return error.MigrationSourceInvalid;
@@ -154,19 +207,34 @@ pub fn inventory(s: *Store, a: std.mem.Allocator) ![]Object {
         if (std.mem.eql(u8, entry.name, "index.json")) continue;
         const kind = Store.migrationRecordKind(entry.name) catch return error.MigrationSourceInvalid;
         const bound = try s.migrationRecordLimit(entry.name);
-        if (before.size > bound or rows.items.len >= @import("store.zig").vault_object_limit) return error.CacheLimitExceeded;
+        if (before.size > bound) return error.CacheLimitExceeded;
         const size: usize = @intCast(before.size);
         const digest = try hashFile(s.io, file, size, &scratch);
         if (!same(before, try file.stat(s.io))) return error.MigrationSourceChanged;
+        var blob: ?@import("operation_history.zig").Blob = null;
         if (kind == .attachment) {
-            blobs += 1;
-            if (blobs > @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
             if (!std.mem.eql(u8, entry.name[5..69], &std.fmt.bytesToHex(digest, .lower))) return error.MigrationSourceChanged;
-        }
-        try rows.append(a, .{ .name = try a.dupe(u8, entry.name), .kind = kind, .size = size, .sha256 = digest, .handle = try storage.Handle.create(s.io) });
+            var phase: std.heap.ArenaAllocator = .init(if (@import("send_memory.zig").native) @import("send_memory.zig").allocator() else a);
+            defer phase.deinit();
+            if (try @import("operation_history.zig").findBlob(s, phase.allocator(), entry.name[5..69])) |value| {
+                if (!value.deleted) {
+                    if (value.size != size) return error.MigrationSourceChanged;
+                    blob = value;
+                }
+            }
+            // Only old unindexed files require the bounded legacy map. New
+            // imports have permanent paged identities, including empty files.
+            if (blob == null) {
+                legacy_blobs += 1;
+                if (legacy_blobs > @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
+            }
+            const planned_handle = if (blob) |value| try storage.Handle.parse(value.handle) else try storage.Handle.create(s.io);
+            try rows.append(a, .{ .name = try a.dupe(u8, entry.name), .kind = kind, .size = size, .sha256 = digest, .handle = planned_handle, .mapped = blob == null });
+        } else try rows.append(a, .{ .name = try a.dupe(u8, entry.name), .kind = kind, .size = size, .sha256 = digest, .handle = if (@import("operation_history.zig").direct(entry.name)) try @import("operation_history.zig").handleOf(entry.name) else try storage.Handle.create(s.io) });
     }
     std.sort.heap(Object, rows.items, {}, namesLess);
     try validateRecords(s, rows.items);
+    try @import("calendar_store.zig").verifyHistory(s, a);
     const result = try rows.toOwnedSlice(a);
     _ = try s.migrationCapacity(result);
     s.migration_inventory = result;
@@ -176,11 +244,12 @@ pub fn validatePlan(source: *const Store, objects: []const Object) !void {
     const inventoried = source.migration_inventory orelse return error.MigrationInventoryRequired;
     if (inventoried.len != objects.len) return error.MigrationSourceChanged;
     for (inventoried, objects) |current, planned| {
-        if (!std.mem.eql(u8, current.name, planned.name) or current.kind != planned.kind or current.size != planned.size or !std.mem.eql(u8, &current.sha256, &planned.sha256)) return error.MigrationSourceChanged;
+        if (!std.mem.eql(u8, current.name, planned.name) or current.kind != planned.kind or current.size != planned.size or current.mapped != planned.mapped or !std.mem.eql(u8, &current.sha256, &planned.sha256)) return error.MigrationSourceChanged;
     }
 }
 pub fn verifyCiphertext(destination: *Store, object: *const Object) !void {
     const account = try destination.vaultContext();
+    try account.requireSharedWorkspace();
     if (!destination.migration_destination or object.kind != try Store.migrationRecordKind(object.name) or object.size > try destination.migrationRecordLimit(object.name)) return error.MigrationDestinationRequired;
     if (std.mem.eql(u8, &account.entry.index.bytes, &object.handle.bytes)) return error.MigrationSourceInvalid;
     defer std.crypto.secureZero(u8, &account.owner.workspace.plaintext);
@@ -203,6 +272,7 @@ pub fn copy(destination: *Store, source: *Store, object: *const Object) !void {
     const planned = objectNamed(inventoried, object.name) orelse return error.MigrationSourceChanged;
     if (planned.kind != object.kind or planned.size != object.size or !std.mem.eql(u8, &planned.sha256, &object.sha256)) return error.MigrationSourceChanged;
     const account = try destination.vaultContext();
+    try account.requireSharedWorkspace();
     if (!destination.migration_destination or object.kind != try Store.migrationRecordKind(object.name) or object.size > try source.migrationRecordLimit(object.name)) return error.MigrationDestinationRequired;
     if (std.mem.eql(u8, &account.entry.index.bytes, &object.handle.bytes)) return error.MigrationSourceInvalid;
     const file = try privateFile(source, object.name);
@@ -215,7 +285,7 @@ pub fn copy(destination: *Store, source: *Store, object: *const Object) !void {
     } else |err| if (err != error.FileNotFound) return err;
     try destination.reserveVaultCiphertext(try vt.sealedSize(object.size));
     var output: stream.Writer = undefined;
-    try output.initInPlace(&account.directory, account.owner.key, account.record(object.kind, object.handle), object.size, &account.owner.workspace.plaintext);
+    try output.initOwnedInPlace(&account.directory, account.owner.key, account.record(object.kind, object.handle), object.size, &account.owner.workspace.plaintext, &account.writer_owner, @import("vault_catalog.zig").Account.releaseWriter);
     defer output.deinit();
     defer std.crypto.secureZero(u8, &account.owner.workspace.ciphertext);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});

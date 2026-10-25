@@ -214,16 +214,32 @@ def countdown_due(binary, directory, capture_dir=None):
     try:
         compose(terminal, subject="Explicit due fixture")
         send_review(terminal)
+        reviewed = read_draft(binary, directory, extra)
         activate_button(terminal, "[y Send]")
         terminal.until(lambda: countdown_active(terminal))
         require(stats(binary, directory, extra)["fixtureSends"] == 0,
                 "configured grace submitted synchronously on confirmation")
         terminal.until(lambda: "Send complete · provider accepted" in terminal.text() and not countdown_active(terminal))
-        require(stats(binary, directory, extra)["fixtureSends"] == 1,
-                "expired countdown did not submit exactly one fixture message")
-        queued = queue_entries(binary, directory, extra)
-        require(len(queued) == 1 and queued[0]["state"] == "applied"
-                and queued[0]["operation"]["outcome"] == "applied",
+        # The one-second timer is already proven above. Resolve its exact
+        # durable intent after completion rather than racing a second CLI
+        # process against that short pending window on native CI hosts.
+        with Client(binary, directory, extra=extra) as client:
+            history = client.request("history.queues")
+            require(len(history["items"]) == 1 and not history["nextCursor"],
+                    "expired countdown did not retain exactly one durable intent")
+            intent = history["items"][0]
+            require(intent["draftId"] == reviewed["id"] and intent["operationId"]
+                    and intent["dueAtMs"] - intent["createdAtMs"] == 1000,
+                    "expired countdown changed its reviewed source or one-second grace")
+            require(client.request("draft.read", draftId=reviewed["id"]) == reviewed,
+                    "expired countdown changed the exact reviewed source")
+        applied = queued_snapshot(binary, directory, extra, settled=intent)
+        require(applied["fixtureSends"] == 1 and not applied["queue"] and not applied["operations"],
+                "expired countdown did not submit once and retire its active entries")
+        same_intent(intent, applied["retainedQueue"])
+        require(applied["retainedQueue"]["state"] == "applied"
+                and applied["retainedOperation"]["outcome"] == "applied"
+                and applied["retainedQueue"]["operation"] == applied["retainedOperation"],
                 "expired countdown omitted its final durable submission receipt")
         terminal.gap(.2)
         terminal.send(b"\x1a")
@@ -244,11 +260,13 @@ def countdown_controls(terminal):
     return labels
 
 
-def queued_snapshot(binary, directory, extra):
+def queued_snapshot(binary, directory, extra, settled=None):
     with Client(binary, directory, extra=extra) as client:
         return {"queue": client.request("queue.list")["queue"],
                 "operations": client.request("operation.list")["operations"],
-                "fixtureSends": client.request("cache.stats")["fixtureSends"]}
+                "fixtureSends": client.request("cache.stats")["fixtureSends"],
+                "retainedQueue": client.request("queue.read", queueId=settled["queueId"]) if settled else None,
+                "retainedOperation": client.request("operation.read", operationId=settled["operationId"]) if settled else None}
 
 
 def same_intent(before, after):
@@ -338,20 +356,21 @@ def countdown_send_now_case(binary, directory, capture_dir, activation, narrow=F
             click(terminal, *positions[send_now])
             click(terminal, *positions[send_now])
         terminal.until(lambda: "Send complete" in terminal.text() and not countdown_active(terminal))
-        applied = queued_snapshot(binary, directory, extra)
-        require(len(applied["queue"]) == 1 and applied["queue"][0]["state"] == "applied"
-                and applied["fixtureSends"] == 1 and len(applied["operations"]) == 1,
-                "Send now did not produce exactly one intent, journal row and fixture submission")
-        same_intent(queued, applied["queue"][0])
-        require(applied["operations"][0]["id"] == queued["operationId"]
-                and applied["queue"][0]["operation"] == applied["operations"][0],
+        applied = queued_snapshot(binary, directory, extra, settled=queued)
+        require(not applied["queue"] and not applied["operations"]
+                and applied["retainedQueue"]["state"] == "applied" and applied["fixtureSends"] == 1,
+                "Send now did not retain its receipt and retire exactly one accepted intent")
+        same_intent(queued, applied["retainedQueue"])
+        require(applied["retainedOperation"]["id"] == queued["operationId"]
+                and applied["retainedOperation"]["outcome"] == "applied"
+                and applied["retainedQueue"]["operation"] == applied["retainedOperation"],
                 "Send now journaled a different operation")
         terminal.send(b"\x13\x13")
         terminal.gap(.08)
         # Cross the original deadline with the TUI still alive. Both repeated
         # input and the original timer must reuse the already completed intent.
         terminal.gap(max(0, queued["dueAtMs"] / 1000 - time.time()) + .2)
-        require(queued_snapshot(binary, directory, extra) == applied,
+        require(queued_snapshot(binary, directory, extra, settled=queued) == applied,
                 "repeated Send now input or the original timer submitted again")
         if next_message:
             compose(terminal, subject="Default still ten", body="Keep this next note local.")
@@ -360,15 +379,19 @@ def countdown_send_now_case(binary, directory, capture_dir, activation, narrow=F
             undo, send_now = countdown_controls(terminal)
             require(focused(terminal, undo) and not focused(terminal, send_now),
                     "the next countdown inherited Send now focus")
-            second = queued_snapshot(binary, directory, extra)
+            second = queued_snapshot(binary, directory, extra, settled=queued)
             pending = [entry for entry in second["queue"] if entry["state"] == "queued"]
-            require(len(second["queue"]) == 2 and len(pending) == 1
+            require(len(second["queue"]) == 1 and len(pending) == 1
+                    and second["retainedQueue"] == applied["retainedQueue"]
+                    and second["retainedOperation"] == applied["retainedOperation"]
                     and pending[0]["dueAtMs"] - pending[0]["createdAtMs"] == 10000,
                     "per-message Send now changed the next default countdown")
             terminal.send(ENTER)  # Bare Enter activates the initially selected Undo.
             terminal.until(lambda: not countdown_active(terminal) and "Subject:" in terminal.text())
-            final = queued_snapshot(binary, directory, extra)
+            final = queued_snapshot(binary, directory, extra, settled=queued)
             require(final["fixtureSends"] == 1 and final["operations"] == applied["operations"]
+                    and final["retainedQueue"] == applied["retainedQueue"]
+                    and final["retainedOperation"] == applied["retainedOperation"]
                     and sum(entry["state"] == "canceled" for entry in final["queue"]) == 1,
                     "bare Enter submitted the next countdown instead of undoing it")
         terminal.finish(expected_sends=1)

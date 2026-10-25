@@ -19,8 +19,11 @@ pub fn run(s: anytype, a: std.mem.Allocator, account: []const u8, req: j.Value, 
     const source_index = links.find(store.state.draftLinks, original.draftId) orelse return error.GmailDraftNotLinked;
     try store.state.draftLinks[source_index].expectVersion(original.version);
     if (store.state.draftLinks.len == links.limit or store.state.drafts.len == 128) return error.DraftLimitExceeded;
-    var incoming: [t.Limits.attachments + 1]blob.Incoming = undefined;
-    var slots: [t.Limits.attachments + 1]?usize = @splat(null);
+    const incoming = try a.alloc(blob.Incoming, loaded.draft.attachments.len);
+    defer a.free(incoming);
+    const slots = try a.alloc(?usize, loaded.draft.attachments.len);
+    defer a.free(slots);
+    @memset(slots, null);
     var incoming_count: usize = 0;
     defer for (incoming[0..incoming_count]) |*item| item.close();
     var reservation: usize = 0;
@@ -158,7 +161,7 @@ fn downloadOne(s: anytype, a: std.mem.Allocator, backing: std.mem.Allocator, acc
     const digest = try incomingDigest(&incoming);
     const id = try a.dupe(u8, &digest);
     const exists = if (store.vault != null)
-        store.hasVaultBlob(try blob.filename(temporary, id))
+        try store.hasVaultBlob(try blob.filename(temporary, id))
     else exists: {
         const current = blob.open(&store, id, file.size) catch |err| {
             if (err == error.AttachmentHandleNotFound) break :exists false;

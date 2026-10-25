@@ -214,8 +214,18 @@ def incoming_large(binary, directory, capture_dir=None):
         capture(terminal, capture_dir, "ux-incoming-large-streamed-save")
         with Client(binary, directory, extra=extra) as client:
             require(client.request("cache.stats")["fixtureSends"] == 1, "saving received files sent mail")
-            require(len(client.request("operation.list")["operations"]) == 1,
-                    "saving/opening received files dispatched another provider write")
+            history = client.request("history.operations")
+            require(client.request("operation.list")["operations"] == []
+                    and history["items"] == [sent] and not history["nextCursor"]
+                    and client.request("operation.read", operationId="seed-large-received") == sent,
+                    "saving/opening received files changed, lost, or added a provider receipt")
+            before = client.request("cache.stats")
+            require(client.request("draft.send", draftId=draft["id"], operationId="seed-large-received") == sent,
+                    "retained seed operation did not replay exactly")
+            after = client.request("cache.stats")
+            require((after["fixtureCalls"], after["fixtureSends"]) ==
+                    (before["fixtureCalls"], before["fixtureSends"]),
+                    "retained seed replay contacted the provider")
         terminal.finish(expected_sends=1)
     except Exception:
         diagnose(terminal)

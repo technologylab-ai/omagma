@@ -13,6 +13,13 @@ pub fn verifyOwner(io: std.Io, a: std.mem.Allocator, socket_path: []const u8, ex
     if (!try platform.deadline(io, platform.seconds(5), Check.probe, .{&check})) return error.BackendStopped;
 }
 
+/// Safe controls must remain available to stop an incompatible old backend.
+/// Identity checks remain mandatory for an activated vault.
+pub fn verifyControlOwner(io: std.Io, a: std.mem.Allocator, socket_path: []const u8, expected: vt.Id) !void {
+    var check: Check = .{ .io = io, .a = a, .client = .{ .io = io, .socket_path = socket_path }, .expected = expected, .require_protocol = false };
+    if (!try platform.deadline(io, platform.seconds(5), Check.probe, .{&check})) return error.BackendStopped;
+}
+
 pub fn start(io: std.Io, a: std.mem.Allocator, vault_path: []const u8, socket_path: []const u8, options: t.Options) !void {
     const expected = blk: {
         var saved = try header.Store.open(io, vault_path, false);
@@ -49,6 +56,7 @@ const Check = struct {
     a: std.mem.Allocator,
     client: transport.Client,
     expected: vt.Id,
+    require_protocol: bool = true,
     pid: ?i32 = null,
     fn probe(self: *Check) !bool {
         const bytes = self.client.request(self.a, .status, "") catch |err| switch (err) {
@@ -68,6 +76,7 @@ const Check = struct {
         if (!ok.bool) return error.BackendStartFailed;
         const data = j.get(value, "data") orelse return error.InvalidBackendFrame;
         if (!std.mem.eql(u8, j.text(data, "vaultId"), &std.fmt.bytesToHex(self.expected, .lower))) return error.VaultIdentityMismatch;
+        if (self.require_protocol) try transport.requireExecutionProtocol(data);
         return true;
     }
     fn wait(self: *Check) !void {
@@ -117,7 +126,7 @@ test "vault launch: owned socket permissions become ready before the first statu
             try std.testing.expectEqual(@as(usize, 0), frame.body.len);
             _ = requests.fetchAdd(1, .release);
             var bytes: [128]u8 = undefined;
-            const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"}}}}", .{std.fmt.bytesToHex(id, .lower)});
+            const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\",\"executionProtocol\":2}}}}", .{std.fmt.bytesToHex(id, .lower)});
             try transport.writeFrame(peer_io, stream, .response, response, transport.response_limit);
         }
     };
@@ -159,4 +168,42 @@ test "vault launch: unsafe path kinds never become trusted during owned readines
         try std.testing.expect(!try check.probe());
         try std.testing.expectError(error.UnsafeBackendSocket, check.client.request(a, .status, ""));
     }
+}
+
+test "vault protocol: startup requires compatible generation while control ownership keeps identity checks" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const path = try std.fmt.allocPrint(a, "{s}/socket", .{root});
+    defer a.free(path);
+    const expected: vt.Id = @splat(0x37);
+    var listener = try transport.Listener.init(io, path);
+    defer listener.deinit();
+    const Peer = struct {
+        fn run(server: *transport.Listener, id: vt.Id) !void {
+            for (0..5) |index| {
+                const stream = try server.server.accept(std.testing.io);
+                defer stream.close(std.testing.io);
+                var frame = try transport.readFrame(std.testing.io, std.testing.allocator, stream, transport.request_limit);
+                defer frame.deinit(std.testing.allocator);
+                try std.testing.expectEqual(transport.Kind.status, frame.kind);
+                var bytes: [160]u8 = undefined;
+                const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"{s}}}}}", .{ std.fmt.bytesToHex(id, .lower), if (index == 4) ",\"executionProtocol\":2" else "" });
+                try transport.writeFrame(std.testing.io, stream, .response, response, transport.response_limit);
+            }
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &listener, expected });
+    defer peer.cancel(io) catch {};
+    var check: Check = .{ .io = io, .a = a, .client = .{ .io = io, .socket_path = path }, .expected = expected };
+    try std.testing.expectError(error.BackendProtocolMismatch, check.probe());
+    try std.testing.expectError(error.BackendProtocolMismatch, verifyOwner(io, a, path, expected));
+    try verifyControlOwner(io, a, path, expected);
+    try std.testing.expectError(error.VaultIdentityMismatch, verifyControlOwner(io, a, path, @splat(0x38)));
+    try verifyOwner(io, a, path, expected);
+    try peer.await(io);
 }

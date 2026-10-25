@@ -47,11 +47,10 @@ pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []con
     const target = try filename(store.allocator, id);
     if (store.vault != null) {
         const descriptor: t.Attachment = .{ .id = id, .filename = name, .mimeType = mime_type, .size = size, .blobId = id };
-        if (store.hasVaultBlob(target)) {
+        if (try store.hasVaultBlob(target)) {
             try verify(store, descriptor);
             return descriptor;
         }
-        if (store.vaultBlobCount() >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         var output: @import("vault_stream.zig").Writer = undefined;
         const handle = try store.beginVaultStream(&output, .attachment, size);
         defer output.deinit();
@@ -76,12 +75,6 @@ pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []con
     }
     const existing = store.dir.statFile(store.io, target, .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) null else return err;
     if (existing == null) {
-        var iterator = store.dir.iterate();
-        var blobs: usize = 0;
-        while (try iterator.next(store.io)) |entry| if (std.mem.startsWith(u8, entry.name, "blob-")) {
-            blobs += 1;
-        };
-        if (blobs >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         try store.reserveBytes(size);
         var atomic = try store.dir.createFileAtomic(store.io, target, .{ .permissions = .fromMode(0o600), .replace = false });
         defer atomic.deinit(store.io);
@@ -110,6 +103,7 @@ pub fn importFile(store: *storage.Store, path: []const u8, requested_mime: []con
         defer file.close(store.io);
         if (!std.mem.eql(u8, &try digestFile(store.io, file, size), id)) return error.AttachmentChanged;
     }
+    try store.adoptPlainBlob(target, size);
     return .{ .id = id, .filename = name, .mimeType = mime_type, .size = size, .blobId = id };
 }
 pub fn open(store: *storage.Store, id: []const u8, size: usize) !std.Io.File {
@@ -128,6 +122,7 @@ pub fn discard(store: *storage.Store, id: []const u8) !void {
     const path = try filename(store.allocator, id);
     if (try store.blobReferencedVerified(id)) return error.AttachmentInUse;
     if (store.vault != null) return store.discardVaultBlob(path);
+    if (try @import("operation_history.zig").deleteBlob(store, id)) return;
     const stat = try store.dir.statFile(store.io, path, .{ .follow_symlinks = false });
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return error.InsecureAttachmentFile;
     try store.dir.deleteFile(store.io, path);
@@ -323,11 +318,10 @@ pub const Incoming = struct {
         var result = expected;
         result.data = "";
         result.blobId = id;
-        if (store.hasVaultBlob(name)) {
+        if (try store.hasVaultBlob(name)) {
             try verify(store, result);
             return result;
         }
-        if (store.vaultBlobCount() >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
         var source = try self.reader();
         defer source.close();
         var output: @import("vault_stream.zig").Writer = undefined;
@@ -351,11 +345,6 @@ pub const Incoming = struct {
         const digest = try digestFile(self.io, self.file.?, self.size);
         const id = try store.allocator.dupe(u8, &digest);
         const target = try filename(store.allocator, id);
-        const exists = store.dir.statFile(store.io, target, .{ .follow_symlinks = false }) catch |err| if (err == error.FileNotFound) null else return err;
-        if (exists == null) {
-            if ((try store.blobStats()).count >= @import("store.zig").blob_limit) return error.AttachmentLimitExceeded;
-        }
-
         self.dir.renamePreserve(self.name, store.dir, target, self.io) catch |err| {
             if (err != error.PathAlreadyExists) return err;
             const existing = try open(store, id, self.size);
@@ -364,11 +353,13 @@ pub const Incoming = struct {
             var result = expected;
             result.data = "";
             result.blobId = id;
+            try store.adoptPlainBlob(target, self.size);
             return result;
         };
         self.moved = true;
         const parent: std.Io.File = .{ .handle = store.dir.handle, .flags = .{ .nonblocking = false } };
         try parent.sync(self.io);
+        try store.adoptPlainBlob(target, self.size);
         var result = expected;
         result.data = "";
         result.blobId = id;

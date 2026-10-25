@@ -10,6 +10,7 @@ pub const Writer = struct {
     output: storage.AtomicFile,
     sealer: crypto.PushSealer,
     failure: ?anyerror = null,
+    workspace_lease: ?struct { owner: *?storage.Handle, token: storage.Handle, release: *const fn (*?storage.Handle, storage.Handle) void } = null,
 
     pub fn init(self: *Writer, directory: *storage.Directory, key: *const t.DataKey, record: storage.Record, size: usize, workspace: *t.StreamWorkspace, replace: bool, faults: storage.Faults) !void {
         errdefer workspace.wipe();
@@ -19,6 +20,7 @@ pub const Writer = struct {
         self.sealer = try crypto.PushSealer.init(directory.io, key, storage.binding(record, &handle_text), size, self.output.sink(), workspace);
         self.interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} };
         self.failure = null;
+        self.workspace_lease = null;
     }
     pub fn initInPlace(self: *Writer, directory: *storage.Directory, key: *const t.DataKey, record: storage.Record, size: usize, buffer: *[t.chunk_bytes]u8) !void {
         errdefer std.crypto.secureZero(u8, buffer);
@@ -28,19 +30,41 @@ pub const Writer = struct {
         self.sealer = try crypto.PushSealer.initInPlace(directory.io, key, storage.binding(record, &handle_text), size, self.output.sink(), buffer);
         self.interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} };
         self.failure = null;
+        self.workspace_lease = null;
+    }
+    /// Register the plaintext half while the ciphertext half remains available
+    /// for sequential source readers. A value token avoids a lease pointing at
+    /// a temporary Writer. The account and owner must outlive the stream.
+    pub fn initOwnedInPlace(self: *Writer, directory: *storage.Directory, key: *const t.DataKey, record: storage.Record, size: usize, buffer: *[t.chunk_bytes]u8, owner: *?storage.Handle, release: *const fn (*?storage.Handle, storage.Handle) void) !void {
+        if (owner.* != null) return error.VaultBusy;
+        try self.initInPlace(directory, key, record, size, buffer);
+        self.workspace_lease = .{ .owner = owner, .token = record.handle, .release = release };
+        owner.* = record.handle;
+    }
+    fn releaseWorkspace(self: *Writer) void {
+        if (self.workspace_lease) |lease| {
+            if (lease.owner.*) |token| if (std.mem.eql(u8, &token.bytes, &lease.token.bytes)) {
+                lease.release(lease.owner, lease.token);
+            };
+            self.workspace_lease = null;
+        }
     }
     pub fn deinit(self: *Writer) void {
         self.sealer.abort();
         self.output.deinit();
+        self.releaseWorkspace();
     }
     pub fn finish(self: *Writer) !void {
+        errdefer if (!self.sealer.active) self.releaseWorkspace();
         if (self.failure) |err| return err;
         try self.interface.flush();
         try self.sealer.finish();
+        self.releaseWorkspace();
     }
     fn part(self: *Writer, bytes: []const u8) std.Io.Writer.Error!void {
         self.sealer.write(bytes) catch |err| {
             self.failure = err;
+            if (!self.sealer.active) self.releaseWorkspace();
             return error.WriteFailed;
         };
     }

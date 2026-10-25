@@ -17,7 +17,7 @@ pub const Rendered = struct { plain: []const u8, html: []const u8, logoOffset: u
 pub const Prepared = struct { plain: []const u8, html: ?[]const u8 = null, logoOffset: ?usize = null, resources: []const t.Attachment = &.{} };
 pub fn prepare(a: std.mem.Allocator, draft: t.Draft) !Prepared {
     const source = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText;
-    if (draft.original) |original| {
+    if (if (draft.includeOriginal) draft.original else null) |original| {
         const note = try renderNote(a, source, draft.bodyFormat);
         defer a.free(note.plain);
         defer a.free(note.html);

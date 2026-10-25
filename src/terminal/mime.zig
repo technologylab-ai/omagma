@@ -1182,14 +1182,60 @@ pub fn threading(message_id: []const u8, references: []const u8, in_reply_to: []
     if (!validMessageId(message_id)) return error.MissingMessageId;
     try validateReferences(references);
     const chain = if (references.len > 0) references else if (validMessageId(in_reply_to)) in_reply_to else "";
-    const joined = if (chain.len > 0) try std.fmt.allocPrint(allocator, "{s} {s}", .{ chain, message_id }) else try allocator.dupe(u8, message_id);
+    const joined = try replyReferences(allocator, chain, message_id);
     try validateReferences(joined);
     return .{ .in_reply_to = try allocator.dupe(u8, message_id), .references = joined };
 }
 
+fn replyReferences(a: std.mem.Allocator, chain: []const u8, parent: []const u8) ![]const u8 {
+    var ids: [mail_limits.reference_count][]const u8 = undefined;
+    var count: usize = 0;
+    var words = std.mem.tokenizeAny(u8, chain, " \t");
+    while (words.next()) |id| {
+        // threading validates the incoming chain before this bounded builder.
+        ids[count] = id;
+        count += 1;
+    }
+    // RFC 5322 section 3.6.4's ordinary append remains byte-for-byte unchanged.
+    if (count < mail_limits.reference_count and chain.len + @intFromBool(chain.len > 0) + parent.len <= mail_limits.references_bytes) {
+        return if (chain.len > 0) std.fmt.allocPrint(a, "{s} {s}", .{ chain, parent }) else a.dupe(u8, parent);
+    }
+    // Our local header quota must not prevent replying to an accepted source.
+    // Keep the root and newest contiguous ancestors, then the direct parent.
+    // Only technical threading metadata is bounded; source bodies are untouched.
+    if (count == 0) return a.dupe(u8, parent);
+    var bytes = ids[0].len + 1 + parent.len;
+    var retained: usize = 2;
+    var start = count;
+    while (start > 1 and retained < mail_limits.reference_count) {
+        const size = ids[start - 1].len + 1;
+        if (size > mail_limits.references_bytes - bytes) break;
+        bytes += size;
+        retained += 1;
+        start -= 1;
+    }
+    const result = try a.alloc(u8, bytes);
+    errdefer a.free(result);
+    var writer: std.Io.Writer = .fixed(result);
+    try writer.writeAll(ids[0]);
+    for (ids[start..count]) |id| {
+        try writer.writeByte(' ');
+        try writer.writeAll(id);
+    }
+    try writer.writeByte(' ');
+    try writer.writeAll(parent);
+    return writer.buffered();
+}
+
+pub const AddressEnvelope = struct {
+    to: []const types.Address = &.{},
+    cc: []const types.Address = &.{},
+    bcc: []const types.Address = &.{},
+};
 pub const Compose = struct {
     from: recipients.Mailbox,
-    envelope: *const recipients.Envelope,
+    envelope: ?*const recipients.Envelope = null,
+    destinations: ?AddressEnvelope = null,
     /// Draft upload may omit all recipients; the send path keeps this false.
     allow_empty_recipients: bool = false,
     subject: []const u8,
@@ -1265,6 +1311,43 @@ pub fn writeAddressHeader(writer: *std.Io.Writer, name: []const u8, list: *const
     }
     try writer.writeAll("\r\n");
 }
+fn writeAddressSlice(writer: *std.Io.Writer, name: []const u8, addresses: []const types.Address) !void {
+    var written: usize = 0;
+    for (addresses, 0..) |address, index| {
+        var duplicate = false;
+        for (addresses[0..index]) |previous| duplicate = duplicate or recipients.sameAddress(previous.address, address.address);
+        if (duplicate) continue;
+        if (written == 0) try writer.print("{s}: ", .{name}) else try writer.writeAll(",\r\n ");
+        var mailbox: recipients.Mailbox = .{};
+        try mailbox.address.set(address.address);
+        try mailbox.name.set(address.name);
+        try writeMailbox(writer, &mailbox);
+        written += 1;
+    }
+    if (written != 0) try writer.writeAll("\r\n");
+}
+fn validateDestinations(compose: Compose) !void {
+    if (compose.destinations) |destinations| {
+        if (compose.envelope != null) return error.AmbiguousEnvelope;
+        const count = destinations.to.len + destinations.cc.len + destinations.bcc.len;
+        if (count > types.Limits.recipients) return error.TooManyRecipients;
+        if (count == 0 and !compose.allow_empty_recipients) return error.MissingRecipient;
+        for ([_][]const types.Address{ destinations.to, destinations.cc, destinations.bcc }) |list| for (list) |address| {
+            try recipients.validateAddress(address.address);
+            try recipients.validateHeader(address.name);
+            if (address.name.len > mail_limits.display_name_bytes) return error.HeaderTooLarge;
+        };
+    } else if (compose.envelope) |envelope_out| {
+        recipients.validateEnvelope(envelope_out) catch |err| {
+            if (err != error.MissingRecipient or !compose.allow_empty_recipients) return err;
+        };
+    } else if (!compose.allow_empty_recipients) return error.MissingRecipient;
+}
+/// Count the exact serialization without the upload ceiling. Validation and
+/// immutable source verification remain identical to the actual send path.
+pub fn measureTo(compose: Compose, writer: *std.Io.Writer) !void {
+    try encodeInto(compose, writer, std.math.maxInt(usize));
+}
 fn writeReferences(writer: *std.Io.Writer, refs: []const u8) !void {
     if (refs.len == 0) return;
     try writer.writeAll("References:");
@@ -1334,7 +1417,7 @@ pub fn validateMimeType(mime_type: []const u8) !void {
 pub fn composeAttachments(input: []const types.Attachment, a: std.mem.Allocator) ![]const Attachment {
     // Both the ordinary and related collections use this decoder. Their
     // separate category counts are checked by the composer before encoding.
-    if (input.len > types.Limits.related_resources) return error.TooManyAttachments;
+    if (input.len > @max(types.Limits.attachments, types.Limits.related_resources)) return error.TooManyAttachments;
     const attachments = try a.alloc(Attachment, input.len);
     var total: usize = 0;
     for (input, attachments) |item, *dest| {
@@ -1534,9 +1617,15 @@ fn writeGeneratedHeaders(compose: Compose, writer: *std.Io.Writer, boundary: []c
     try writer.writeAll("From: ");
     try writeMailbox(writer, &compose.from);
     try writer.writeAll("\r\n");
-    try writeAddressHeader(writer, "To", &compose.envelope.to);
-    try writeAddressHeader(writer, "Cc", &compose.envelope.cc);
-    try writeAddressHeader(writer, "Bcc", &compose.envelope.bcc);
+    if (compose.destinations) |destinations| {
+        try writeAddressSlice(writer, "To", destinations.to);
+        try writeAddressSlice(writer, "Cc", destinations.cc);
+        try writeAddressSlice(writer, "Bcc", destinations.bcc);
+    } else if (compose.envelope) |envelope_out| {
+        try writeAddressHeader(writer, "To", &envelope_out.to);
+        try writeAddressHeader(writer, "Cc", &envelope_out.cc);
+        try writeAddressHeader(writer, "Bcc", &envelope_out.bcc);
+    }
     try writer.writeAll("Subject: ");
     try encodedWords(writer, compose.subject, false);
     try writer.print("\r\nDate: {s}\r\nMessage-ID: {s}\r\nMIME-Version: 1.0\r\n", .{ compose.date, compose.message_id });
@@ -1550,9 +1639,7 @@ fn writeGeneratedHeaders(compose: Compose, writer: *std.Io.Writer, boundary: []c
     try writer.writeAll("\r\n");
 }
 fn encodeInto(compose: Compose, writer: *std.Io.Writer, attachment_limit: usize) !void {
-    recipients.validateEnvelope(compose.envelope) catch |err| {
-        if (err != error.MissingRecipient or !compose.allow_empty_recipients) return err;
-    };
+    try validateDestinations(compose);
     try recipients.validateAddress(compose.from.address.slice());
     try recipients.validateHeader(compose.from.name.slice());
     try recipients.validateHeader(compose.subject);
@@ -1565,7 +1652,7 @@ fn encodeInto(compose: Compose, writer: *std.Io.Writer, attachment_limit: usize)
     if (compose.calendar) |calendar| try validateBody(calendar);
     if (compose.html != null and compose.calendar != null) return error.UnsupportedComposeParts;
     if ((compose.inline_logo or compose.related.len > 0) and compose.html == null) return error.UnsupportedComposeParts;
-    if (compose.attachments.len > types.Limits.attachments or compose.related.len > types.Limits.related_resources) return error.TooManyAttachments;
+    if (attachment_limit != std.math.maxInt(usize)) try types.Limits.validateComposeParts(compose.attachments.len, compose.related.len) else if (compose.attachments.len > types.Limits.attachments or compose.related.len > types.Limits.related_resources) return error.TooManyAttachments;
     var attachment_bytes: usize = 0;
     for ([_][]const Attachment{ compose.attachments, compose.related }) |list| for (list) |attachment| {
         try validateAttachment(attachment.filename, attachment.mime_type);
@@ -2033,7 +2120,7 @@ test "growing chain MIME: over sixty four embedded images retain exact octets be
         resource.* = .{ .filename = "screenshot.png", .mime_type = "image/png", .content_id = cid, .size = bytes.len, .data = bytes };
         try html.appendSlice(a, try std.fmt.allocPrint(a, "<img src='cid:{s}'>", .{cid}));
     }
-    const files: [types.Limits.attachments]Attachment = @splat(.{ .filename = "ordinary.txt", .mime_type = "text/plain", .data = "ordinary bytes" });
+    const files: [types.Limits.portable_attachments]Attachment = @splat(.{ .filename = "ordinary.txt", .mime_type = "text/plain", .data = "ordinary bytes" });
     var sender: recipients.Mailbox = .{};
     try sender.address.set("sender@example.test");
     var envelope_out: recipients.Envelope = .{};
@@ -2048,9 +2135,10 @@ test "growing chain MIME: over sixty four embedded images retain exact octets be
         try std.testing.expectEqualSlices(u8, expected.data, actual.data);
     }
     for (parsed.attachments[related.len..]) |file| try std.testing.expectEqualStrings("ordinary bytes", file.data);
-    var too_many_files: [types.Limits.attachments + 1]Attachment = @splat(files[0]);
+    const too_many_files = try a.alloc(Attachment, types.Limits.attachments + 1);
+    @memset(too_many_files, files[0]);
     var invalid = compose;
-    invalid.attachments = &too_many_files;
+    invalid.attachments = too_many_files;
     try std.testing.expectError(error.TooManyAttachments, encode(invalid, output));
 }
 
@@ -2399,7 +2487,7 @@ test "mail metadata: long subject names and filename round-trip as folded MIME" 
     try std.testing.expectError(error.HeaderTooLarge, encode(.{ .from = sender, .envelope = &targets, .subject = oversized, .body = "Body", .message_id = "<metadata@example.test>", .date = "Mon, 12 Oct 2026 12:00:00 +0000" }, output));
 }
 
-test "mail metadata: reference count reserves the appended parent explicitly" {
+test "mail metadata: reply reference count preserves root recent ancestors and direct parent" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2415,9 +2503,14 @@ test "mail metadata: reference count reserves the appended parent explicitly" {
     while (words.next() != null) count += 1;
     try std.testing.expectEqual(mail_limits.reference_count, count);
     try std.testing.expectEqualStrings("<parent@example.test>", reply.in_reply_to);
-    try std.testing.expectError(error.TooManyReferences, threading("<next@example.test>", reply.references, "", a));
-    // Failure never edits, truncates or selects a subset of the saved chain.
+    const next = try threading("<next@example.test>", reply.references, "", a);
+    try validateReferences(next.references);
+    try std.testing.expectEqualStrings("<next@example.test>", next.in_reply_to);
+    const expected = try std.fmt.allocPrint(a, "<m0@example.test> {s} <next@example.test>", .{reply.references["<m0@example.test> <m1@example.test> ".len..]});
+    try std.testing.expectEqualStrings(expected, next.references);
+    // Building the bounded reply never edits the source's saved chain.
     try std.testing.expect(std.mem.startsWith(u8, reply.references, refs.items));
+    try std.testing.expectError(error.TooManyReferences, validateReferences(try std.fmt.allocPrint(a, "{s} <one-too-many@example.test>", .{reply.references})));
 }
 
 test "mail metadata: exact reference byte limit survives raw and Gmail folding" {
@@ -2448,7 +2541,43 @@ test "mail metadata: exact reference byte limit survives raw and Gmail folding" 
     const encoded = try std.json.Stringify.valueAlloc(a, .{ .headers = [_]Header{.{ .name = "References", .value = storage["References:".len..field_end] }} }, .{});
     const payload = try GmailSizeOracle.json(a, encoded);
     try std.testing.expectEqualStrings(refs, try header(try gmailHeaders(payload, a), "References"));
-    try std.testing.expectError(error.ReferencesTooLarge, threading("<next@example.test>", refs, "", a));
+    const reply = try threading("<next@example.test>", refs, "", a);
+    try validateReferences(reply.references);
+    try std.testing.expectEqualStrings("<next@example.test>", reply.in_reply_to);
+    const expected = try std.fmt.allocPrint(a, "{s} {s} <next@example.test>", .{ refs[0..512], refs[1025..] });
+    try std.testing.expectEqualStrings(expected, reply.references);
+    try std.testing.expectError(error.ReferencesTooLarge, threading("<next@example.test>", try std.fmt.allocPrint(a, "{s} ", .{refs}), "", a));
+}
+
+test "mail metadata: bounded reply references preserve ordinary bytes and reject invalid chains" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parent = "<parent@example.test>";
+    const ordinary = "\t<root@example.test>  <recent@example.test>\t";
+    const reply = try threading(parent, ordinary, "", a);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s} {s}", .{ ordinary, parent }), reply.references);
+    try std.testing.expectEqualStrings("<fallback@example.test> <parent@example.test>", (try threading(parent, "", "<fallback@example.test>", a)).references);
+    try std.testing.expectEqualStrings(parent, (try threading(parent, "", "invalid fallback", a)).references);
+    try std.testing.expectError(error.InvalidMessageId, threading(parent, "<root@example.test> malformed", "", a));
+    const whitespace = try a.alloc(u8, mail_limits.references_bytes);
+    @memset(whitespace, ' ');
+    try std.testing.expectEqualStrings(parent, (try threading(parent, whitespace, "", a)).references);
+    var largest: [mail_limits.message_id_bytes]u8 = @splat('x');
+    largest[0] = '<';
+    largest[largest.len - 3] = '@';
+    largest[largest.len - 2] = 'b';
+    largest[largest.len - 1] = '>';
+    var full: std.ArrayList(u8) = .empty;
+    for (0..66) |index| {
+        if (index != 0) try full.append(a, ' ');
+        try full.appendSlice(a, &largest);
+    }
+    const large_reply = try threading(&largest, full.items, "", a);
+    try validateReferences(large_reply.references);
+    try std.testing.expect(std.mem.startsWith(u8, large_reply.references, &largest));
+    try std.testing.expect(std.mem.endsWith(u8, large_reply.references, &largest));
+    try std.testing.expectEqual(@as(usize, 66), std.mem.count(u8, large_reply.references, ">"));
 }
 
 const GmailSizeOracle = struct {

@@ -367,6 +367,8 @@ pub const Account = struct {
     active: bool = false,
     workspace_pinned: bool = false,
     reader_owner: ?*anyopaque = null,
+    /// Immutable object token, independent of the Writer's stack address.
+    writer_owner: ?storage.Handle = null,
     closed: bool = false,
     pub fn claim(self: *Account) !void {
         if (self.closed) return error.VaultLocked;
@@ -377,21 +379,31 @@ pub const Account = struct {
     pub fn release(self: *Account) void {
         if (!self.active) return;
         self.active = false;
-        if (!self.workspace_pinned) self.owner.release();
+        if (!self.workspace_pinned and self.writer_owner == null) self.owner.release();
     }
     /// Pins only bounded crypto scratch across an unlocked network operation.
     /// The owner and account must outlive the pin. Finish/abort before reopening
     /// a Store transaction; no nested Directory.open or Store lock is needed.
     pub fn pinWorkspace(self: *Account) !void {
         if (self.closed or self.owner.closed) return error.VaultLocked;
-        if (self.workspace_pinned or self.reader_owner != null) return error.VaultBusy;
+        if (self.workspace_pinned or self.reader_owner != null or self.writer_owner != null) return error.VaultBusy;
         if (!self.active) try self.owner.claim();
         self.workspace_pinned = true;
     }
     pub fn unpinWorkspace(self: *Account) void {
         if (!self.workspace_pinned) return;
         self.workspace_pinned = false;
-        if (!self.active) self.owner.release();
+        if (!self.active and self.writer_owner == null) self.owner.release();
+    }
+    /// The account outlives the in-place stream. Releasing a Store may drop
+    /// its transaction while the stream still owns scratch; keep other
+    /// accounts out until the matching stream finishes or aborts.
+    pub fn releaseWriter(owner: *?storage.Handle, token: storage.Handle) void {
+        const self: *Account = @alignCast(@fieldParentPtr("writer_owner", owner));
+        const current = owner.* orelse return;
+        if (!std.mem.eql(u8, &current.bytes, &token.bytes)) return;
+        owner.* = null;
+        if (!self.active and !self.workspace_pinned) self.owner.release();
     }
     pub fn close(self: *Account) void {
         if (self.closed) return;
@@ -407,12 +419,25 @@ pub const Account = struct {
     pub fn record(self: *const Account, kind: t.RecordKind, handle: storage.Handle) storage.Record {
         return .{ .account = self.entry.address(), .kind = kind, .handle = handle };
     }
-    pub fn read(self: *Account, allocator: std.mem.Allocator, kind: t.RecordKind, handle: storage.Handle, limit: usize) ![]u8 {
+    pub fn requireSharedWorkspace(self: *const Account) !void {
         try self.requireActive();
+        if (self.workspace_pinned or self.reader_owner != null or self.writer_owner != null) return error.VaultBusy;
+    }
+    pub fn read(self: *Account, allocator: std.mem.Allocator, kind: t.RecordKind, handle: storage.Handle, limit: usize) ![]u8 {
+        return self.readWithWorkspace(allocator, kind, handle, limit, self.owner.workspace);
+    }
+    /// Metadata lookups can run between writes to an in-place sealed stream.
+    /// Such callers must supply disjoint scratch instead of wiping the stream's
+    /// partially buffered plaintext. All scratch is wiped before returning.
+    pub fn readWithWorkspace(self: *Account, allocator: std.mem.Allocator, kind: t.RecordKind, handle: storage.Handle, limit: usize, workspace: *t.StreamWorkspace) ![]u8 {
+        try self.requireActive();
+        if (self.workspace_pinned or self.reader_owner != null) return error.VaultBusy;
+        if (workspace == self.owner.workspace) try self.requireSharedWorkspace();
+        defer workspace.wipe();
         var reader = try self.directory.reader(handle);
         defer reader.close();
         const identity = self.record(kind, handle);
-        const size = try reader.verify(self.owner.key, identity, self.owner.workspace);
+        const size = try reader.verify(self.owner.key, identity, workspace);
         if (size > limit) return error.CacheLimitExceeded;
         const output = try allocator.alloc(u8, size);
         errdefer {
@@ -424,12 +449,12 @@ pub const Account = struct {
         reader.offset = 0;
         var sink: MemorySink = .{ .bytes = output };
         const handle_text = handle.text();
-        try crypto.openStream(self.directory.io, self.owner.key, storage.binding(identity, &handle_text), reader.source(), sink.sink(), self.owner.workspace);
+        try crypto.openStream(self.directory.io, self.owner.key, storage.binding(identity, &handle_text), reader.source(), sink.sink(), workspace);
         if (sink.count != size) return error.VaultRecordChanged;
         return output;
     }
     pub fn write(self: *Account, kind: t.RecordKind, handle: storage.Handle, bytes: []const u8, replace: bool) !void {
-        try self.requireActive();
+        try self.requireSharedWorkspace();
         var source: SliceSource = .{ .bytes = bytes };
         try self.directory.seal(self.owner.key, self.record(kind, handle), bytes.len, source.source(), self.owner.workspace, replace);
     }

@@ -60,6 +60,17 @@ fn requestedPrefetch(options: t.Options, request: Value) !i64 {
 fn operationPayload(a: std.mem.Allocator, draft: t.Draft, account: []const u8, calendar: ?[]const u8) ![]const u8 {
     return @import("send_outcome.zig").payload(a, draft, account, if (calendar) |ics| try calendarIdentity(a, ics) else null);
 }
+fn operationDigest(a: std.mem.Allocator, draft: t.Draft, account: []const u8, calendar: ?[]const u8) ![64]u8 {
+    return @import("send_outcome.zig").digest(a, draft, account, if (calendar) |ics| try calendarIdentity(a, ics) else null);
+}
+fn requireReviewedDigest(request: Value, digest: []const u8) !void {
+    if (j.get(request, "expectedContentDigest")) |value| {
+        const expected = try j.string(value);
+        if (expected.len != 64) return error.InvalidContentDigest;
+        for (expected) |byte| if (!std.ascii.isHex(byte)) return error.InvalidContentDigest;
+        if (!std.mem.eql(u8, expected, digest)) return error.ReviewedDraftChanged;
+    }
+}
 const CacheWindow = struct { start: usize, end: usize, direction: []const u8 = "head", fallback: bool = false };
 fn adjacentCacheWindow(store: *storage.Store, candidates: []const t.Message, request: Value, limit: usize, offset: usize) !CacheWindow {
     const before = j.text(request, "beforeMessageId");
@@ -289,6 +300,11 @@ pub const Session = struct {
             error.FollowUpMetadataUnavailableOffline => "Message metadata is no longer cached; reconnect to create this follow-up. Existing reminders remain available offline.",
             error.UnknownOutcome => "Outcome is unknown; do not automatically retry",
             error.OperationConflict => "This operation identity was already used for different content",
+            error.ReviewedDraftChanged => "The draft changed after review; review its current recipients, content and size before sending",
+            error.ArchivedDraftReadOnly => "This retained sent source is read-only; use draft.clone to create a new editable draft",
+            error.CloneRequiresSettledSource => "Only a settled sent source can be cloned; finish or resolve the source draft's pending work first",
+            error.ArchivedSourceDeleted => "The retained source was explicitly deleted; its operation receipt and replay protection remain available",
+            error.DiskQuotaExceeded => "The account disk quota is full; review history.drafts and explicitly delete retained sources, discard unused files, or increase the disk quota. Operation receipts and unknown outcomes remain protected.",
             error.CacheBusy => "Another client is using this account cache; retry later",
             error.UnknownQueryOperator, error.InvalidQueryDate, error.InvalidQueryValue, error.InvalidQuery, error.TimezoneUnavailable, error.TimezoneRangeUnavailable => cache_query.diagnostic(err),
             else => @errorName(err),
@@ -457,7 +473,7 @@ pub const Session = struct {
             return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, request });
         }
         if (std.mem.eql(u8, cmd, "mail.refresh")) return @import("../platform.zig").deadline(s.io, @import("../platform.zig").seconds(30), refreshJob, .{ s, a, address, req });
-        var store = try s.openStore(a, address, std.mem.eql(u8, cmd, "invitation.inspect") and try j.boolean(req, "cacheOnly", false));
+        var store = try s.openStore(a, address, std.mem.eql(u8, cmd, "draft.measure") or (std.mem.eql(u8, cmd, "invitation.inspect") and try j.boolean(req, "cacheOnly", false)));
         defer store.close();
         if (std.mem.eql(u8, cmd, "attachment.import")) return j.value(a, try @import("attachment_blob.zig").importFile(&store, try j.required(req, "path"), j.text(req, "mimeType")));
         if (std.mem.eql(u8, cmd, "attachment.discard")) {
@@ -513,14 +529,39 @@ pub const Session = struct {
             return j.value(a, .{ .cleared = true, .draftsPreserved = true, .operationsPreserved = true, .followUpsPreserved = true });
         }
         if (std.mem.eql(u8, cmd, "operation.list")) return j.value(a, .{ .operations = store.state.operations });
+        if (std.mem.eql(u8, cmd, "history.operations") or std.mem.eql(u8, cmd, "history.drafts") or std.mem.eql(u8, cmd, "history.queues")) {
+            const limit = try j.integer(req, "limit", 50);
+            if (limit < 1 or limit > 100) return error.InvalidPageLimit;
+            return @import("operation_history.zig").list(&store, a, if (std.mem.eql(u8, cmd, "history.operations")) .operation else if (std.mem.eql(u8, cmd, "history.drafts")) .draft else .queue, j.text(req, "cursor"), @intCast(limit));
+        }
+        if (std.mem.eql(u8, cmd, "history.delete-source")) {
+            if (!try j.boolean(req, "confirm", false)) return error.HistoryDeletionRequiresConfirmation;
+            const draft_id = try j.required(req, "draftId");
+            const discard_files = try j.boolean(req, "discardFiles", false);
+            const history = @import("operation_history.zig");
+            if (try history.source(&store, a, draft_id) == null and try history.immutableSource(&store, draft_id)) try history.compact(&store, true);
+            const deleted = try history.deleteSource(&store, draft_id);
+            return j.value(a, .{ .deleted = deleted, .filesDeleted = if (discard_files) try @import("operation_history.zig").pruneSourceFiles(&store, draft_id) else @as(usize, 0), .receiptPreserved = true });
+        }
         if (std.mem.eql(u8, cmd, "operation.read")) {
             const operation_id = try j.required(req, "operationId");
-            for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) return j.value(a, operation);
+            if (try store.findOperation(a, operation_id)) |operation| return j.value(a, operation);
             return error.OperationNotFound;
         }
-        if (std.mem.eql(u8, cmd, "draft.list")) return j.value(a, .{ .drafts = store.state.drafts, .gmailLinks = store.state.draftLinks });
+        if (std.mem.eql(u8, cmd, "draft.list")) {
+            const limit = try j.integer(req, "limit", 100);
+            if (limit < 1 or limit > 100) return error.InvalidPageLimit;
+            return draft_summary.list(a, store.state.drafts, store.state.draftLinks, j.text(req, "cursor"), @intCast(limit));
+        }
         if (std.mem.eql(u8, cmd, "draft.queue") or std.mem.startsWith(u8, cmd, "queue.")) return s.queuedSend(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.read")) return @import("draft_gmail_commands.zig").readResponse(a, &store, try store.draft(try j.required(req, "draftId")));
+        if (std.mem.eql(u8, cmd, "draft.clone")) {
+            const draft_id = try j.required(req, "draftId");
+            try guardRecoveryCopy(&store, draft_id);
+            if (!try @import("operation_history.zig").cloneableSource(&store, draft_id)) return error.CloneRequiresSettledSource;
+            const source = try store.draft(draft_id);
+            return draft_summary.savedResponse(a, try store.putDraft(source, null), false);
+        }
         if (std.mem.eql(u8, cmd, "draft.open-preview")) {
             try s.capability(a, address, req, "mail-read");
             const draft = try store.draft(try j.required(req, "draftId"));
@@ -547,8 +588,17 @@ pub const Session = struct {
             const prepared = try markdown_mail.prepare(a, draft);
             return j.value(a, .{ .bodyFormat = draft.bodyFormat, .bodyText = if (draft.recoveryFields) |fields| fields[4] else draft.bodyText, .plainText = prepared.plain, .bodyHtml = prepared.html });
         }
+        if (std.mem.eql(u8, cmd, "draft.measure")) return @import("draft_measure_commands.zig").run(a, &store, req);
         if (std.mem.eql(u8, cmd, "draft.recovery-save")) {
             const acknowledgement_only = try j.boolean(req, "acknowledgementOnly", false);
+            const previous_id = j.text(req, "draftId");
+            const copy_source = if (j.get(req, "copyFromDraftId")) |value| (if (value == .null) "" else try j.required(req, "copyFromDraftId")) else "";
+            const fork_if_settled = try j.boolean(req, "forkIfSettled", false);
+            if (copy_source.len != 0) {
+                if (previous_id.len != 0 or fork_if_settled) return error.InvalidRequest;
+                try guardRecoveryCopy(&store, copy_source);
+            }
+            const source_id = if (copy_source.len != 0) copy_source else previous_id;
             const input = j.get(req, "draft") orelse return error.MissingField;
             const fields = try j.decode([]const []const u8, a, j.get(input, "recoveryFields") orelse return error.MissingField);
             if (fields.len != 5) return error.InvalidRecovery;
@@ -565,14 +615,24 @@ pub const Session = struct {
             try clean.object.put(a, "subject", .{ .string = fields[3] });
             try clean.object.put(a, "bodyText", .{ .string = fields[4] });
             var draft = try decodeDraft(a, clean);
-            if (j.get(input, "bodyFormat") == null and j.text(req, "draftId").len != 0) draft.bodyFormat = (try store.draft(j.text(req, "draftId"))).bodyFormat;
-            if (j.get(input, "original") == null and j.text(req, "draftId").len != 0) draft.original = (try store.draft(j.text(req, "draftId"))).original;
+            if (j.get(input, "bodyFormat") == null and source_id.len != 0) draft.bodyFormat = (try store.draft(source_id)).bodyFormat;
+            if (j.get(input, "includeOriginal") == null and source_id.len != 0) draft.includeOriginal = (try store.draft(source_id)).includeOriginal;
+            if (j.get(input, "original") == null and source_id.len != 0) draft.original = (try store.draft(source_id)).original;
             try validateDraft(draft, false);
             draft.recoveryFields = fields;
             // The recovery body lives in the raw fields once, while the index
             // retains only its subject. Normal drafts keep bodyText as before.
             draft.bodyText = "";
-            return draft_summary.savedResponse(a, try store.putDraft(draft, if (j.text(req, "draftId").len != 0) j.text(req, "draftId") else null), acknowledgement_only);
+            const forked = previous_id.len != 0 and fork_if_settled and try recoveryForkAllowed(&store, previous_id);
+            const saved = if (copy_source.len != 0 or forked) try store.putRecoveryCopy(draft, source_id) else try store.putDraft(draft, if (previous_id.len != 0) previous_id else null);
+            var response = try draft_summary.savedResponse(a, saved, acknowledgement_only);
+            if (forked) try response.object.put(a, "forkedFrom", .{ .string = previous_id });
+            if (copy_source.len != 0) try response.object.put(a, "copiedFrom", .{ .string = copy_source });
+            if (copy_source.len != 0 or forked) if (try @import("operation_history.zig").gmailLink(&store, a, saved.id)) |link| {
+                try response.object.put(a, "gmailLink", try j.value(a, link));
+                try response.object.put(a, "contentDigest", .{ .string = try a.dupe(u8, &(try @import("draft_link.zig").contentDigest(a, saved, address))) });
+            };
+            return response;
         }
         if (std.mem.eql(u8, cmd, "draft.discard")) {
             try store.discardDraft(try j.required(req, "draftId"));
@@ -583,11 +643,22 @@ pub const Session = struct {
             const input = j.get(req, "draft") orelse return error.MissingField;
             var draft = try decodeDraft(a, input);
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "bodyFormat") == null) draft.bodyFormat = (try store.draft(try j.required(req, "draftId"))).bodyFormat;
+            if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "includeOriginal") == null) draft.includeOriginal = (try store.draft(try j.required(req, "draftId"))).includeOriginal;
             if (std.mem.eql(u8, cmd, "draft.update") and j.get(input, "original") == null) draft.original = (try store.draft(try j.required(req, "draftId"))).original;
             try validateDraft(draft, false);
             return draft_summary.savedResponse(a, try store.putDraft(draft, if (std.mem.eql(u8, cmd, "draft.update")) try j.required(req, "draftId") else null), acknowledgement_only);
         }
         if (std.mem.eql(u8, cmd, "mail.send") or std.mem.eql(u8, cmd, "draft.send")) {
+            if (std.mem.eql(u8, cmd, "draft.send")) {
+                const draft_id = try j.required(req, "draftId");
+                if (try @import("operation_history.zig").source(&store, a, draft_id) != null) {
+                    try s.capability(a, address, req, "mail-send");
+                    const old = (try store.findOperation(a, try j.required(req, "operationId"))) orelse return error.ArchivedDraftReadOnly;
+                    if (!std.mem.eql(u8, old.draftId, draft_id) or old.icalendar.len != 0 or old.kind.len != 0) return error.OperationConflict;
+                    try requireReviewedDigest(req, old.hash);
+                    return mutationReceipt(a, old);
+                }
+            }
             const draft = if (std.mem.eql(u8, cmd, "draft.send")) try store.draft(try j.required(req, "draftId")) else try decodeDraft(a, j.get(req, "draft") orelse return error.MissingField);
             return s.send(a, &store, req, draft, null, false);
         }
@@ -845,17 +916,8 @@ pub const Session = struct {
     // evidence of rejection: indexing may lag, so this path never resubmits.
     fn reconcileInvitation(s: *Session, a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value) !void {
         const source_hash = storage.Store.hash(ics);
-        const selected = selected: {
-            var index = store.state.operations.len;
-            while (index > 0) {
-                index -= 1;
-                const operation = store.state.operations[index];
-                if (!std.mem.eql(u8, operation.sourceInvitationHash, &source_hash) or operation.icalendar.len == 0 or std.mem.eql(u8, operation.outcome, "rejected")) continue;
-                if (!std.mem.eql(u8, operation.outcome, "unknown")) return;
-                break :selected operation;
-            }
-            return;
-        };
+        const selected = (try @import("operation_history.zig").latestInvitation(store, a, &source_hash)) orelse return;
+        if (!std.mem.eql(u8, selected.outcome, "unknown")) return;
         if (selected.rfcMessageId.len == 0) return;
         try @import("invitation_receipt.zig").validateMessageId(selected.rfcMessageId);
         var matched: ?[]const u8 = null;
@@ -919,11 +981,11 @@ pub const Session = struct {
         for (store.state.identities, result) |identity, *address| address.* = identity.address;
         return result;
     }
-    fn invitationReceipt(a: std.mem.Allocator, store: *const storage.Store, ics: []const u8, req: Value) !?Value {
+    fn invitationReceipt(a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value) !?Value {
         const id = try j.required(req, "operationId");
         const status = std.meta.stringToEnum(invitation.Status, try j.required(req, "status")) orelse return error.InvalidInvitationStatus;
         const hash = storage.Store.hash(ics);
-        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, id)) {
+        if (try store.findOperation(a, id)) |operation| {
             if (!std.mem.eql(u8, operation.sourceInvitationHash, &hash)) return error.OperationConflict;
             if (!std.mem.eql(u8, operation.invitationCalendarId, j.text(req, "calendarId"))) return error.OperationConflict;
             var previous: invitation.Invitation = .{};
@@ -934,26 +996,20 @@ pub const Session = struct {
             const expected_source = j.text(req, "sourceHash");
             if (expected_source.len > 0 and !std.mem.eql(u8, expected_source, &hash)) return error.OperationConflict;
             return try j.value(a, operation);
-        };
+        }
         return null;
     }
     const ConfirmedInvitationResponse = struct { status: []const u8 = "", outcome: []const u8 = "", calendarSync: ?@import("calendar_rsvp.zig").Result = null };
-    fn confirmedInvitationResponse(a: std.mem.Allocator, store: *const storage.Store, ics: []const u8, account: []const u8, aliases: []const []const u8) !ConfirmedInvitationResponse {
+    fn confirmedInvitationResponse(a: std.mem.Allocator, store: *storage.Store, ics: []const u8, account: []const u8, aliases: []const []const u8) !ConfirmedInvitationResponse {
         const source_hash = storage.Store.hash(ics);
-        var index = store.state.operations.len;
-        while (index > 0) {
-            index -= 1;
-            const operation = store.state.operations[index];
-            if (!std.mem.eql(u8, operation.sourceInvitationHash, &source_hash) or operation.icalendar.len == 0 or std.mem.eql(u8, operation.outcome, "rejected")) continue;
-            if (!std.mem.eql(u8, operation.outcome, "applied")) return .{ .outcome = "unknown" };
-            var sent: invitation.Invitation = .{};
-            invitation.parseDisplay(operation.icalendar, account, &.{}, &sent) catch continue;
-            var original: invitation.Invitation = .{};
-            invitation.parseDisplay(ics, account, aliases, &original) catch continue;
-            if (sent.method != .reply or !std.mem.eql(u8, sent.uid.slice(), original.uid.slice()) or !std.mem.eql(u8, sent.recurrence_id.slice(), original.recurrence_id.slice()) or !std.mem.eql(u8, sent.recurrence_parameters.slice(), original.recurrence_parameters.slice())) continue;
-            return .{ .outcome = "applied", .status = try a.dupe(u8, sent.attendee_status.slice()), .calendarSync = operation.calendarSync };
-        }
-        return .{};
+        const operation = (try @import("operation_history.zig").latestInvitation(store, a, &source_hash)) orelse return .{};
+        if (!std.mem.eql(u8, operation.outcome, "applied")) return .{ .outcome = "unknown" };
+        var sent: invitation.Invitation = .{};
+        invitation.parseDisplay(operation.icalendar, account, &.{}, &sent) catch return .{};
+        var original: invitation.Invitation = .{};
+        invitation.parseDisplay(ics, account, aliases, &original) catch return .{};
+        if (sent.method != .reply or !std.mem.eql(u8, sent.uid.slice(), original.uid.slice()) or !std.mem.eql(u8, sent.recurrence_id.slice(), original.recurrence_id.slice()) or !std.mem.eql(u8, sent.recurrence_parameters.slice(), original.recurrence_parameters.slice())) return .{};
+        return .{ .outcome = "applied", .status = try a.dupe(u8, sent.attendee_status.slice()), .calendarSync = operation.calendarSync };
     }
     fn calendarJob(s: *Session, a: std.mem.Allocator, req: Value) !Value {
         return s.calendarHost(a).run(req);
@@ -1040,25 +1096,20 @@ pub const Session = struct {
             break;
         };
         try result.object.put(a, "calendarSync", try j.value(a, outcome));
+        if (outcome.state != .unknown) settleAcceptedSource(store);
         return result;
     }
     fn resumeInvitationCalendar(s: *Session, a: std.mem.Allocator, store: *storage.Store, ics: []const u8, req: Value) !void {
         const hash = storage.Store.hash(ics);
-        var index = store.state.operations.len;
-        while (index > 0) {
-            index -= 1;
-            const operation = store.state.operations[index];
-            if (!std.mem.eql(u8, operation.sourceInvitationHash, &hash) or operation.icalendar.len == 0 or std.mem.eql(u8, operation.outcome, "rejected")) continue;
-            if (!std.mem.eql(u8, operation.outcome, "applied")) return;
-            var previous: invitation.Invitation = .{};
-            invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return;
-            var request = try j.copyObject(a, req);
-            try request.object.put(a, "operationId", .{ .string = operation.id });
-            try request.object.put(a, "status", .{ .string = if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "ACCEPTED")) "accepted" else if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "TENTATIVE")) "tentative" else "declined" });
-            if (operation.invitationCalendarId.len != 0) try request.object.put(a, "calendarId", .{ .string = operation.invitationCalendarId });
-            _ = try s.syncInvitationCalendar(a, store, ics, request, try j.value(a, operation));
-            return;
-        }
+        const operation = (try @import("operation_history.zig").latestInvitation(store, a, &hash)) orelse return;
+        if (!std.mem.eql(u8, operation.outcome, "applied")) return;
+        var previous: invitation.Invitation = .{};
+        invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return;
+        var request = try j.copyObject(a, req);
+        try request.object.put(a, "operationId", .{ .string = operation.id });
+        try request.object.put(a, "status", .{ .string = if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "ACCEPTED")) "accepted" else if (std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), "TENTATIVE")) "tentative" else "declined" });
+        if (operation.invitationCalendarId.len != 0) try request.object.put(a, "calendarId", .{ .string = operation.invitationCalendarId });
+        _ = try s.syncInvitationCalendar(a, store, ics, request, try j.value(a, operation));
     }
     fn calendarSource(context: *anyopaque, a: std.mem.Allocator, account: []const u8, request: Value) anyerror!@import("calendar_commands.zig").InvitationInput {
         const s: *Session = @ptrCast(@alignCast(context));
@@ -1093,7 +1144,7 @@ pub const Session = struct {
             } else {
                 try s.ensureFixtureLabels(a, store, try s.fixture(a, store.state.account));
             }
-            if (store.state.labels.len > 512) return error.TooManyLabels;
+            if (store.state.labels.len > t.Limits.labels) return error.TooManyLabels;
             for (store.state.labels) |label| {
                 try @import("../bounded.zig").identifier(label.id);
                 if (label.name.len > 512) return error.InvalidLabel;
@@ -1143,7 +1194,7 @@ pub const Session = struct {
     fn ensureFixtureLabels(_: *Session, a: std.mem.Allocator, store: *storage.Store, source: Value) !void {
         if (store.state.fixtureLabelsReady) return;
         store.state.labels = try j.decode([]storage.Label, a, try fixtureLabelDefinitions(a, source));
-        if (store.state.labels.len > 512) return error.TooManyLabels;
+        if (store.state.labels.len > t.Limits.labels) return error.TooManyLabels;
         for (store.state.labels) |label| {
             try @import("../bounded.zig").identifier(label.id);
             if (label.name.len > 512 or !std.unicode.utf8ValidateSlice(label.name)) return error.InvalidLabel;
@@ -1151,8 +1202,13 @@ pub const Session = struct {
         }
     }
 
+    fn mutationReceipt(a: std.mem.Allocator, value: anytype) !Value {
+        // Receipt cloning runs after a durable operation exists. Preserve its
+        // uncertainty even if Core never reaches successResponse's encoder.
+        return j.value(a, value) catch |err| return if (err == error.OutOfMemory) error.UnknownOutcome else err;
+    }
     fn labelReceipt(a: std.mem.Allocator, operation: storage.Operation) !Value {
-        return j.value(a, .{ .outcome = operation.outcome, .operationId = operation.id, .labelId = operation.labelId, .label = if (operation.label) |label| try j.value(a, label) else @as(Value, .null), .deleted = operation.deleted, .errorCode = operation.errorCode });
+        return mutationReceipt(a, .{ .outcome = operation.outcome, .operationId = operation.id, .labelId = operation.labelId, .label = if (operation.label) |label| try mutationReceipt(a, label) else @as(Value, .null), .deleted = operation.deleted, .errorCode = operation.errorCode });
     }
 
     fn manageLabels(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
@@ -1178,35 +1234,37 @@ pub const Session = struct {
         if (color) |value| try intent.object.put(a, "color", try j.value(a, value));
         const payload = try std.json.Stringify.valueAlloc(a, intent, .{});
         const digest = storage.Store.hash(payload);
-        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+        if (try store.findOperation(a, operation_id)) |operation| {
             if (!std.mem.eql(u8, operation.hash, &digest) or !std.mem.eql(u8, operation.kind, cmd)) return error.OperationConflict;
             return labelReceipt(a, operation);
-        };
+        }
         // An uncertain collection mutation must be reconciled explicitly; a
         // fresh identity must not silently cause a second provider request.
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and std.mem.startsWith(u8, operation.kind, "labels.")) {
             if (std.mem.eql(u8, operation.hash, &digest) or (!create and std.mem.eql(u8, operation.labelId, id))) return labelReceipt(a, operation);
         };
-        if (store.state.operations.len == 1000) return error.OperationJournalFull;
+        try store.compactHistory();
+        if (store.state.operations.len >= 1000) return error.OperationJournalFull;
         _ = try s.loadLabels(a, store, req, false);
         // The live list temporarily releases the store; another client may
         // have journaled this identity while the GET was in progress.
-        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+        if (try store.findOperation(a, operation_id)) |operation| {
             if (!std.mem.eql(u8, operation.hash, &digest) or !std.mem.eql(u8, operation.kind, cmd)) return error.OperationConflict;
             return labelReceipt(a, operation);
-        };
+        }
         for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and std.mem.startsWith(u8, operation.kind, "labels.")) {
             if (std.mem.eql(u8, operation.hash, &digest) or (!create and std.mem.eql(u8, operation.labelId, id))) return labelReceipt(a, operation);
         };
-        if (store.state.operations.len == 1000) return error.OperationJournalFull;
+        try store.compactHistory();
+        if (store.state.operations.len >= 1000) return error.OperationJournalFull;
         const old = if (!create) try label_collection.custom(store.state.labels, id) else storage.Label{ .id = "", .name = "" };
         const final_name = if (coloring) old.name else name;
         if (deleting) {
             if (!std.mem.eql(u8, confirmation, old.name)) return error.InvalidLabelConfirmation;
-            if (s.options.fixtures and store.state.fixtureDeletedLabels.len == 512) return error.TooManyDeletedLabels;
+            if (s.options.fixtures and store.state.fixtureDeletedLabels.len >= t.Limits.labels) return error.TooManyDeletedLabels;
         } else {
             try label_collection.unique(store.state.labels, final_name, id);
-            if (create and store.state.labels.len == 512) return error.TooManyLabels;
+            if (create and store.state.labels.len >= t.Limits.labels) return error.TooManyLabels;
         }
         var operations: std.ArrayList(storage.Operation) = .empty;
         try operations.appendSlice(a, store.state.operations);
@@ -1323,7 +1381,7 @@ pub const Session = struct {
                 const source = try s.fixture(a, store.state.account);
                 store.state.identities = if (j.get(source, "identities")) |value| try j.decode([]storage.Identity, a, value) else try a.dupe(storage.Identity, &.{primary});
             }
-            if (store.state.identities.len > 32) return error.TooManyAliases;
+            if (store.state.identities.len > (if (@import("send_memory.zig").native) @as(usize, 1024) else 32)) return error.TooManyAliases;
             for (store.state.identities) |*identity| {
                 try recipients.validateAddress(identity.address);
                 try recipients.validateHeader(identity.name);
@@ -1442,7 +1500,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "mail.recipients")) {
             var known = @import("recipient_cache.zig").Builder.init(a, address);
             defer known.deinit();
-            var aliases: [32][]const u8 = undefined;
+            const aliases = try a.alloc([]const u8, store.state.identities.len);
             for (store.state.identities, 0..) |identity, index| aliases[index] = identity.address;
             known.self_aliases = aliases[0..store.state.identities.len];
             for (store.state.entries) |entry| {
@@ -2560,28 +2618,47 @@ pub const Session = struct {
     fn reserveIncoming(s: *Session, a: std.mem.Allocator, store: *storage.Store, size: usize) !@import("attachment_blob.zig").Incoming {
         const account = store.state.account;
         store.release();
-        var phase = std.heap.ArenaAllocator.init(s.allocator);
-        defer phase.deinit();
-        var latest = try s.openStore(phase.allocator(), account, false);
-        defer latest.close();
-        var incoming = try @import("attachment_blob.zig").Incoming.create(&latest, size);
+        var name: [64]u8 = undefined;
+        var incoming = blk: {
+            var phase = std.heap.ArenaAllocator.init(s.allocator);
+            defer phase.deinit();
+            var latest = try s.openStore(phase.allocator(), account, false);
+            defer latest.close();
+            var pending = try @import("attachment_blob.zig").Incoming.create(&latest, size);
+            errdefer pending.close();
+            if (pending.name.len > name.len) return error.InvalidAttachmentHandle;
+            @memcpy(name[0..pending.name.len], pending.name);
+            pending.name = name[0..pending.name.len];
+            break :blk pending;
+        };
         errdefer incoming.close();
-        // The lease owns its file/directory handles; only its tiny name needs
-        // to escape the temporary index arena across the unlocked download.
+        // Handles belong to Incoming. Retain its generated name only after
+        // releasing the temporary cache snapshot and its allocator chunks.
         incoming.name = try a.dupe(u8, incoming.name);
         return incoming;
     }
     fn commitIncoming(s: *Session, a: std.mem.Allocator, store: *storage.Store, incoming: *@import("attachment_blob.zig").Incoming, attachment: t.Attachment, reopen_after: bool) !t.Attachment {
         store.release();
+        var blob_id: [64]u8 = undefined;
         const result = blk: {
             var phase = std.heap.ArenaAllocator.init(s.allocator);
             defer phase.deinit();
             var latest = try s.openStore(phase.allocator(), store.state.account, false);
             defer latest.close();
-            break :blk try @import("gmail.zig").retainAttachment(a, try incoming.commit(&latest, attachment));
+            var committed = try incoming.commit(&latest, attachment);
+            const id = committed.blobId orelse return error.InvalidAttachmentHandle;
+            try @import("draft_codec.zig").validateAttachmentHandle(id);
+            @memcpy(&blob_id, id);
+            committed.blobId = &blob_id;
+            break :blk committed;
         };
+        // Incoming.commit preserves caller-owned descriptor fields, replacing
+        // only data and the verified blob ID. Reclaim the entire cache snapshot
+        // before retaining that tiny result in the command arena; interleaving
+        // the two arenas prevents in-place growth and retains oversized slabs.
+        const retained = try @import("gmail.zig").retainAttachment(a, result);
         if (reopen_after) try s.reopenBody(a, store);
-        return result;
+        return retained;
     }
     fn spillAttachment(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, message_id: []const u8, attachment: t.Attachment, reopen_after: bool) !t.Attachment {
         var incoming = try s.reserveIncoming(a, store, attachment.size);
@@ -2833,6 +2910,14 @@ pub const Session = struct {
         try destination.link(s.io);
         return j.value(a, .{ .saved = true, .path = path, .filename = attachment.filename, .size = attachment.size });
     }
+    fn retryComposeSizeRefusal(command: []const u8, body_error: []const u8) bool {
+        if (!@import("send_memory.zig").native) return false;
+        if (!std.mem.eql(u8, command, "mail.reply") and !std.mem.eql(u8, command, "mail.forward")) return false;
+        for ([_][]const u8{ "BodyTooLarge", "DecodedMessageTooLarge", "MessageTooLarge", "ResponseTooLarge", "MessageBudgetExceeded", "ThreadBodyBudgetExceeded", "JsonTooManyTokens", "ComposeSourceRequired" }) |code| {
+            if (std.mem.eql(u8, body_error, code)) return true;
+        }
+        return false;
+    }
     fn readMessage(s: *Session, a: std.mem.Allocator, store: *storage.Store, id: []const u8, req: Value, allow_cached: bool) !t.Message {
         try s.capability(a, store.state.account, req, "mail-read");
         var fixture_source: ?Value = null;
@@ -2840,7 +2925,11 @@ pub const Session = struct {
             if (if (@import("send_memory.zig").command(j.text(req, "cmd"))) try store.readOutboxExpandedWithAllocator(a, id) else try store.readOutbox(id)) |sent| return sent;
             if (store.state.fixtureProvider.len != 0) fixture_source = try s.fixtureProviderSource(a, store);
         }
-        if (if (allow_cached) (if (@import("send_memory.zig").command(j.text(req, "cmd"))) try store.readExpandedWithAllocator(a, id) else try store.read(id)) orelse store.refusedMessage(id) else null) |cached| {
+        if (if (allow_cached) (if (@import("send_memory.zig").command(j.text(req, "cmd"))) try store.readExpandedWithAllocator(a, id) else try store.read(id)) orelse store.refusedMessage(id) else null) |cached| retained: {
+            // A normal reader's size/scratch refusal is not the native compose
+            // tier's limit. Explicit reply/forward gets one fresh complete
+            // source read; the normal decoder and integrity refusals stay strict.
+            if (retryComposeSizeRefusal(j.text(req, "cmd"), cached.bodyCacheError)) break :retained;
             var m = cached;
             if (store.find(id)) |entry| {
                 copyMembership(&m, entry.message);
@@ -3091,6 +3180,40 @@ pub const Session = struct {
         try store.save();
         return j.value(a, c);
     }
+    fn recoveryForkAllowed(store: *storage.Store, draft_id: []const u8) !bool {
+        const history = @import("operation_history.zig");
+        if (try history.source(store, store.allocator, draft_id) == null and !try history.immutableSource(store, draft_id)) return false;
+        try guardRecoveryCopy(store, draft_id);
+        return true;
+    }
+    fn guardRecoveryCopy(store: *storage.Store, draft_id: []const u8) !void {
+        var found = false;
+        for (store.state.drafts) |draft| found = found or std.mem.eql(u8, draft.id, draft_id);
+        if (!found and try @import("operation_history.zig").source(store, store.allocator, draft_id) == null) return error.DraftNotFound;
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.draftId, draft_id) and std.mem.eql(u8, operation.outcome, "unknown")) return error.UnknownOutcome;
+        for (store.state.sendQueue) |entry| if (std.mem.eql(u8, entry.draftId, draft_id)) switch (entry.state) {
+            .queued => return error.DraftQueued,
+            .submitting, .unknown => return error.UnknownOutcome,
+            else => {},
+        };
+        for (store.state.draftLinks) |link| if (std.mem.eql(u8, link.draftId, draft_id)) {
+            if (link.paused) return error.DraftPausedInGmail;
+            if (link.phase == .unknown) return error.GmailDraftOutcomeUnknown;
+        };
+    }
+    fn queuedMutationReceipt(a: std.mem.Allocator, store: *storage.Store, entry: storage.QueuedSend) !Value {
+        const result = send_queue.receipt(a, store, entry) catch |err| {
+            // A send may already exist for these durable states. Keep that
+            // uncertainty through the second, queue-level receipt encoder.
+            if (err == error.OutOfMemory) switch (entry.state) {
+                .submitting, .unknown, .applied => return error.UnknownOutcome,
+                else => {},
+            };
+            return err;
+        };
+        if (entry.state == .applied) settleAcceptedSource(store);
+        return result;
+    }
     fn queuedSend(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value) !Value {
         const cmd = j.text(req, "cmd");
         if (std.mem.eql(u8, cmd, "queue.list")) {
@@ -3100,10 +3223,27 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, cmd, "draft.queue")) {
             try s.capability(a, store.state.account, req, "mail-send");
-            const draft = try store.draft(try j.required(req, "draftId"));
+            const draft_id = try j.required(req, "draftId");
+            const operation_id = try j.required(req, "operationId");
+            const retained_source = try @import("operation_history.zig").source(store, a, draft_id) != null;
+            if (retained_source or try @import("operation_history.zig").immutableSource(store, draft_id)) {
+                var previous: ?storage.QueuedSend = null;
+                for (store.state.sendQueue) |entry| if (std.mem.eql(u8, entry.operationId, operation_id)) {
+                    previous = entry;
+                    break;
+                };
+                if (previous == null) previous = try @import("operation_history.zig").queueOperation(store, a, operation_id);
+                const entry = previous orelse return error.ArchivedDraftReadOnly;
+                if (!std.mem.eql(u8, entry.draftId, draft_id)) return error.OperationConflict;
+                try requireReviewedDigest(req, entry.hash);
+                return queuedMutationReceipt(a, store, entry);
+            }
+            try store.requireActiveDraft(draft_id);
+            const draft = try store.draft(draft_id);
             try validateDraft(draft, true);
             _ = try markdown_mail.prepare(a, draft);
-            const digest = storage.Store.hash(try operationPayload(a, draft, store.state.account, null));
+            const digest = try operationDigest(a, draft, store.state.account, null);
+            try requireReviewedDigest(req, &digest);
             try @import("draft_gmail_commands.zig").permitSend(store, a, req, draft, &digest);
             const entry = try send_queue.stage(store, draft.id, try j.required(req, "operationId"), &digest, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), try send_queue.delay(req));
             return send_queue.receipt(a, store, entry.*);
@@ -3113,6 +3253,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, cmd, "queue.cancel")) return send_queue.receipt(a, store, (try send_queue.cancel(store, id)).*);
         if (std.mem.eql(u8, cmd, "queue.resume")) {
             try s.capability(a, store.state.account, req, "mail-send");
+            try requireReviewedDigest(req, (try send_queue.find(store, id)).hash);
             return send_queue.receipt(a, store, (try send_queue.resumeEntry(store, id, std.Io.Timestamp.now(s.io, .real).toMilliseconds(), try send_queue.delay(req))).*);
         }
         const send_now = std.mem.eql(u8, cmd, "queue.send-now");
@@ -3121,7 +3262,8 @@ pub const Session = struct {
         if (send_now and wait_for_due) return error.WaitRequiresQueueProcess;
         try s.capability(a, store.state.account, req, "mail-send");
         var entry = try send_queue.find(store, id);
-        if (entry.state != .queued or (entry.resumeRequired and !send_now)) return send_queue.receipt(a, store, entry.*);
+        try requireReviewedDigest(req, entry.hash);
+        if (entry.state != .queued or (entry.resumeRequired and !send_now)) return queuedMutationReceipt(a, store, entry.*);
         const remaining = entry.dueAtMs - std.Io.Timestamp.now(s.io, .real).toMilliseconds();
         // Send now claims the same reviewed intent through the normal durable
         // submission path. It skips only the countdown, never the draft hash,
@@ -3133,26 +3275,29 @@ pub const Session = struct {
             try (std.Io.Clock.Duration{ .clock = .awake, .raw = .fromMilliseconds(remaining) }).sleep(s.io);
             try s.reopenBody(a, store);
             entry = try send_queue.find(store, id);
-            if (entry.state != .queued or entry.resumeRequired) return send_queue.receipt(a, store, entry.*);
+            if (entry.state != .queued or entry.resumeRequired) return queuedMutationReceipt(a, store, entry.*);
             if (entry.dueAtMs > std.Io.Timestamp.now(s.io, .real).toMilliseconds()) return error.QueueNotDue;
         }
         const draft = try store.draft(entry.draftId);
-        const digest = storage.Store.hash(try operationPayload(a, draft, store.state.account, null));
+        const digest = try operationDigest(a, draft, store.state.account, null);
         if (!std.mem.eql(u8, entry.hash, &digest)) {
             entry.state = .canceled;
             entry.errorCode = "DraftChanged";
             try store.save();
             return send_queue.receipt(a, store, entry.*);
         }
+        // Prepare the derived request while the queue is still safely queued.
+        // An allocation failure here cannot have submitted anything and must
+        // not strand the entry behind a durable submitting fence.
+        var request = try j.copyObject(a, req);
+        try request.object.put(a, "cmd", .{ .string = "draft.send" });
+        try request.object.put(a, "draftId", .{ .string = entry.draftId });
+        try request.object.put(a, "operationId", .{ .string = entry.operationId });
         // The durable claim precedes any send code. After a crash, submitting
         // remains fenced even if the operation journal was not written yet.
         entry.resumeRequired = false;
         entry.state = .submitting;
         try store.save();
-        var request = try j.copyObject(a, req);
-        try request.object.put(a, "cmd", .{ .string = "draft.send" });
-        try request.object.put(a, "draftId", .{ .string = entry.draftId });
-        try request.object.put(a, "operationId", .{ .string = entry.operationId });
         const sent = s.send(a, store, request, draft, null, true) catch |err| {
             entry = try send_queue.find(store, id);
             entry.state = .rejected;
@@ -3162,13 +3307,27 @@ pub const Session = struct {
                 break;
             };
             store.save() catch return error.UnknownOutcome;
-            return send_queue.receipt(a, store, entry.*);
+            return queuedMutationReceipt(a, store, entry.*);
         };
         entry = try send_queue.find(store, id);
         entry.state = if (std.mem.eql(u8, j.text(sent, "outcome"), "applied")) .applied else if (std.mem.eql(u8, j.text(sent, "outcome"), "rejected")) .rejected else .unknown;
         entry.errorCode = j.text(sent, "errorCode");
         store.save() catch return error.UnknownOutcome;
-        return send_queue.receipt(a, store, entry.*);
+        return queuedMutationReceipt(a, store, entry.*);
+    }
+    fn settleAcceptedSource(store: *storage.Store) void {
+        const previous_protected = store.history_protected_draft;
+        store.history_protected_draft = "";
+        defer store.history_protected_draft = previous_protected;
+        // The applied receipt is already durable. A housekeeping failure must
+        // not turn acceptance into a retryable failure; Store's immutable
+        // source guard preserves it until a later successful archive.
+        @import("operation_history.zig").compact(store, true) catch {};
+    }
+    fn settledMutationReceipt(a: std.mem.Allocator, store: *storage.Store, operation: storage.Operation, final: bool) !Value {
+        const result = try mutationReceipt(a, operation);
+        if (final and std.mem.eql(u8, operation.outcome, "applied")) settleAcceptedSource(store);
+        return result;
     }
     fn reopenSendOperation(s: *Session, a: std.mem.Allocator, store: *storage.Store, previous: *storage.Operation) !*storage.Operation {
         if (store.vault == null or store.lockHeld) return previous;
@@ -3180,13 +3339,16 @@ pub const Session = struct {
         return error.UnknownOutcome;
     }
     fn send(s: *Session, a: std.mem.Allocator, store: *storage.Store, req: Value, draft: t.Draft, calendar: ?[]const u8, claimed_queue: bool) !Value {
+        const previous_protected = store.history_protected_draft;
+        store.history_protected_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft.id else "";
+        defer store.history_protected_draft = previous_protected;
         try s.capability(a, store.state.account, req, if (calendar != null) "calendar-rsvp" else "mail-send");
         try validateDraft(draft, true);
         const operation_id = try j.required(req, "operationId");
         if (operation_id.len > 256) return error.InvalidOperationId;
         try recipients.validateHeader(operation_id);
-        const payload = try operationPayload(a, draft, store.state.account, calendar);
-        const digest = storage.Store.hash(payload);
+        const digest = try operationDigest(a, draft, store.state.account, calendar);
+        try requireReviewedDigest(req, &digest);
         try @import("draft_gmail_commands.zig").permitSend(store, a, req, draft, &digest);
         for (store.state.sendQueue) |entry| {
             const same_operation = std.mem.eql(u8, entry.operationId, operation_id);
@@ -3198,12 +3360,14 @@ pub const Session = struct {
             const claimed = claimed_queue and same_operation and same_content and same_draft and std.mem.eql(u8, entry.queueId, j.text(req, "queueId"));
             if (entry.state == .unknown or (entry.state == .submitting and !claimed)) return error.UnknownOutcome;
         }
-        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.id, operation_id)) {
+        if (try store.findOperation(a, operation_id)) |operation| {
             if (!std.mem.eql(u8, operation.hash, &digest)) return error.OperationConflict;
-            return j.value(a, operation);
-        };
-        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and (std.mem.eql(u8, operation.hash, &digest) or (draft.id.len > 0 and std.mem.eql(u8, operation.draftId, draft.id)))) return j.value(a, operation);
-        if (store.state.operations.len == 1000) return error.OperationJournalFull;
+            return settledMutationReceipt(a, store, operation, !claimed_queue and calendar == null);
+        }
+        for (store.state.operations) |operation| if (std.mem.eql(u8, operation.outcome, "unknown") and (std.mem.eql(u8, operation.hash, &digest) or (draft.id.len > 0 and std.mem.eql(u8, operation.draftId, draft.id)))) return settledMutationReceipt(a, store, operation, !claimed_queue and calendar == null);
+        if (draft.id.len != 0 and try @import("operation_history.zig").immutableSource(store, draft.id)) return error.ArchivedDraftReadOnly;
+        try store.compactHistory();
+        if (store.state.operations.len >= 1000) return error.OperationJournalFull;
         const prepared = try markdown_mail.prepare(a, draft);
         // The RSVP's verified attendee may be a send-as alias. Keep this wire
         // identity out of the canonical draft/fingerprint used by old receipts.
@@ -3216,7 +3380,6 @@ pub const Session = struct {
         }
         // Persist uncertainty before dispatch, including on process failure.
         var operations: std.ArrayList(storage.Operation) = .empty;
-        try operations.appendSlice(a, store.state.operations);
         const wire_identity = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ store.state.account, operation_id });
         const wire_hash = storage.Store.hash(wire_identity);
         var fixture_raw: ?[]const u8 = null;
@@ -3235,17 +3398,8 @@ pub const Session = struct {
             }
             try from.address.set(sender.address);
             try from.name.set(sender.name);
-            var envelope: recipients.Envelope = .{};
-            const lists = [_][]const t.Address{ draft.to, draft.cc, draft.bcc };
-            const targets = [_]*recipients.List{ &envelope.to, &envelope.cc, &envelope.bcc };
-            for (lists, targets) |addresses, target| for (addresses) |address| {
-                var mailbox: recipients.Mailbox = .{};
-                try mailbox.address.set(address.address);
-                try mailbox.name.set(address.name);
-                try target.append(mailbox);
-            };
             const mime = @import("mime.zig");
-            var compose: mime.Compose = .{ .from = from, .envelope = &envelope, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = if (s.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(s.io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references };
+            var compose: mime.Compose = .{ .from = from, .destinations = .{ .to = draft.to, .cc = draft.cc, .bcc = draft.bcc }, .subject = draft.subject, .body = prepared.plain, .html = prepared.html, .inline_logo = prepared.html != null, .logo_offset = prepared.logoOffset, .calendar = calendar, .message_id = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .date = if (s.options.fixtures) "Mon, 05 Oct 2026 12:00:00 +0000" else try @import("gmail.zig").date(s.io, a, false), .in_reply_to = draft.inReplyTo, .references = draft.references };
             // Production sends always consume this one validated MIME spool.
             // Rebuilding the draft in the provider retained two renders plus
             // MIME/base64/JSON copies inside the same operation arena.
@@ -3293,6 +3447,7 @@ pub const Session = struct {
         };
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
         const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
+        try operations.appendSlice(a, store.state.operations);
         try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "", .sourceInvitationHash = if (calendar != null) j.text(req, "_sourceInvitationHash") else "", .invitationCalendarId = if (calendar != null) j.text(req, "calendarId") else "" });
         store.state.operations = operations.items;
         try store.save();
@@ -3303,22 +3458,22 @@ pub const Session = struct {
                 operation = s.reopenSendOperation(a, store, operation) catch |reopen_error| {
                     operation.errorCode = @errorName(reopen_error);
                     operation.outcome = "unknown";
-                    return j.value(a, operation.*);
+                    return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
                 };
-                if (!std.mem.eql(u8, operation.outcome, "unknown")) return j.value(a, operation.*);
+                if (!std.mem.eql(u8, operation.outcome, "unknown")) return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
                 operation.errorCode = @errorName(err);
                 operation.outcome = if (@import("send_outcome.zig").rejected(err)) "rejected" else "unknown";
                 store.save() catch {
                     operation.outcome = "unknown";
                 };
-                return j.value(a, operation.*);
+                return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
             };
             operation = s.reopenSendOperation(a, store, operation) catch |reopen_error| {
                 operation.errorCode = @errorName(reopen_error);
                 operation.outcome = "unknown";
-                return j.value(a, operation.*);
+                return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
             };
-            if (!std.mem.eql(u8, operation.outcome, "unknown")) return j.value(a, operation.*);
+            if (!std.mem.eql(u8, operation.outcome, "unknown")) return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
             const outcome = j.text(result, "outcome");
             operation.outcome = if (std.mem.eql(u8, outcome, "applied")) "applied" else if (std.mem.eql(u8, outcome, "rejected")) "rejected" else "unknown";
             operation.messageId = j.text(result, "messageId");
@@ -3326,7 +3481,7 @@ pub const Session = struct {
             store.save() catch {
                 operation.outcome = "unknown";
             };
-            return j.value(a, operation.*);
+            return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
         }
         store.state.fixtureCalls += 1;
         if (s.scenario("rejected-mutation")) operation.outcome = "rejected" else if (s.scenario("unknown-send")) operation.outcome = "unknown" else {
@@ -3350,7 +3505,7 @@ pub const Session = struct {
         store.save() catch {
             operation.outcome = "unknown";
         };
-        return j.value(a, operation.*);
+        return settledMutationReceipt(a, store, operation.*, !claimed_queue and calendar == null);
     }
 };
 
@@ -3612,6 +3767,124 @@ test "post-dispatch allocation failure preserves live mutation ambiguity" {
     try std.testing.expect(failing.has_induced_failure);
 }
 
+fn testMutationReceipt(kind: enum { send, label, queue_applied, queue_unknown }) !void {
+    const label = kind == .label;
+    const queued = kind == .queue_applied or kind == .queue_unknown;
+    const ReceiptFailure = struct {
+        backing: std.mem.Allocator,
+        store: *storage.Store,
+        wait_for_queue: bool,
+        failed: bool = false,
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn afterDispatch(self: *@This()) bool {
+            return self.store.state.operations.len != 0 and self.store.state.fixtureCalls != 0 and
+                (!self.wait_for_queue or self.store.state.sendQueue[0].state == .applied);
+        }
+        fn alloc(context: *anyopaque, length: usize, alignment: std.mem.Alignment, address: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.afterDispatch()) {
+                self.failed = true;
+                return null;
+            }
+            return self.backing.rawAlloc(length, alignment, address);
+        }
+        fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (length > memory.len and self.afterDispatch()) return false;
+            return self.backing.rawResize(memory, alignment, length, address);
+        }
+        fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (length > memory.len and self.afterDispatch()) return null;
+            return self.backing.rawRemap(memory, alignment, length, address);
+        }
+        fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, address: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.backing.rawFree(memory, alignment, address);
+        }
+    };
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/mutation-receipt", .{tmp.sub_path});
+        const account = "personal@example.com";
+        const options: t.Options = .{ .fixtures = true, .cache_dir = root, .fixture_scenario = if (label) "unknown-send" else "normal" };
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", root);
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+        defer session.deinit();
+        var store = try storage.Store.open(std.testing.io, a, root, account, options);
+        defer store.close();
+        var draft: t.Draft = .{ .to = &.{.{ .address = "recipient@example.test" }}, .bodyText = "Small normal mail" };
+        const queue_id = if (queued) staged: {
+            draft = try store.putDraft(draft, null);
+            const digest = storage.Store.hash(try operationPayload(a, draft, account, null));
+            break :staged (try send_queue.stage(&store, draft.id, "stable-operation", &digest, 0, 0)).queueId;
+        } else "";
+        const request = try j.value(a, .{ .cmd = if (queued) @as([]const u8, "queue.send-now") else if (label) "labels.create" else "mail.send", .account = account, .operationId = "stable-operation", .name = "New fixture label", .queueId = queue_id });
+        var failing: ReceiptFailure = .{ .backing = a, .store = &store, .wait_for_queue = kind == .queue_applied };
+        const call = if (queued) session.queuedSend(failing.allocator(), &store, request) else if (label) session.manageLabels(failing.allocator(), &store, request) else session.send(failing.allocator(), &store, request, draft, null, false);
+        try std.testing.expectError(error.UnknownOutcome, call);
+        try std.testing.expect(failing.failed);
+        store.close();
+        store = try storage.Store.open(std.testing.io, a, root, account, options);
+        try std.testing.expectEqual(@as(usize, 1), store.state.operations.len);
+        const operation = store.state.operations[0];
+        try std.testing.expectEqualStrings("stable-operation", operation.id);
+        try std.testing.expectEqualStrings(if (label) "unknown" else "applied", operation.outcome);
+        const writes = store.state.fixtureCalls;
+        const recovered = if (queued) try session.queuedSend(a, &store, request) else if (label) try session.manageLabels(a, &store, request) else try session.send(a, &store, request, draft, null, false);
+        const receipt = if (queued) j.get(recovered, "operation").? else recovered;
+        try std.testing.expectEqualStrings(if (label) "unknown" else "applied", j.text(receipt, "outcome"));
+        try std.testing.expectEqualStrings(operation.id, j.text(receipt, if (label) "operationId" else "id"));
+        try std.testing.expectEqual(writes, store.state.fixtureCalls);
+        if (queued) {
+            const entry = try send_queue.find(&store, queue_id);
+            try std.testing.expectEqualStrings(operation.id, entry.operationId);
+            try std.testing.expectEqual(if (kind == .queue_applied) storage.SendState.applied else .unknown, entry.state);
+            try std.testing.expectEqualStrings(@tagName(entry.state), j.text(recovered, "state"));
+            var replay_failure = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+            try std.testing.expectError(error.UnknownOutcome, session.queuedSend(replay_failure.allocator(), &store, request));
+            var read_failure = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+            try std.testing.expectError(error.OutOfMemory, session.queuedSend(read_failure.allocator(), &store, try j.value(a, .{ .cmd = "queue.read", .queueId = queue_id })));
+            // A different queued intent that cannot even hash its draft has
+            // not reached dispatch and must still report ordinary OOM.
+            draft = try store.putDraft(.{ .to = draft.to, .bodyText = "Not dispatched" }, null);
+            const digest = storage.Store.hash(try operationPayload(a, draft, account, null));
+            const fresh = try send_queue.stage(&store, draft.id, "preflight-operation", &digest, 0, 0);
+            var preflight_failure = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+            try std.testing.expectError(error.OutOfMemory, session.queuedSend(preflight_failure.allocator(), &store, try j.value(a, .{ .cmd = "queue.send-now", .queueId = fresh.queueId })));
+            try std.testing.expectEqual(storage.SendState.queued, fresh.state);
+            try std.testing.expectEqual(writes, store.state.fixtureCalls);
+            return;
+        }
+        var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        const preflight = if (label) session.manageLabels(unavailable.allocator(), &store, request) else session.send(unavailable.allocator(), &store, request, draft, null, false);
+        try std.testing.expectError(error.OutOfMemory, preflight);
+        try std.testing.expectEqual(writes, store.state.fixtureCalls);
+    }
+}
+test "native mutation receipt: sent DTO failure preserves durable identity without replay" {
+    try testMutationReceipt(.send);
+}
+test "native mutation receipt: uncertain label DTO failure preserves durable identity without replay" {
+    try testMutationReceipt(.label);
+}
+test "native mutation receipt: queued send applied DTO failure keeps its durable identity" {
+    try testMutationReceipt(.queue_applied);
+}
+test "native mutation receipt: queued send error DTO failure keeps its durable identity" {
+    try testMutationReceipt(.queue_unknown);
+}
+
 test "mock provider label state survives eviction clear restart and newer typed history wins" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3717,6 +3990,21 @@ test "cache search has K account query mode cursors and metadata-only predicates
 test "message refusal classification keeps integrity bounds and excludes systemic failures" {
     for ([_]anyerror{ error.BodySizeMismatch, error.TooManyHeaders, error.InvalidEncodedWord, error.MalformedMessage, error.BodyTooLarge, error.CalendarTooLarge, error.JsonTooManyTokens, error.JsonTooDeep }) |err| try std.testing.expect(Session.messageRefusal(err));
     for ([_]anyerror{ error.OutOfMemory, error.Canceled, error.Timeout, error.InvalidGrant, error.PermissionDenied, error.TokenRefreshFailed, error.RateLimited, error.CacheBusy, error.CacheIdentityMismatch }) |err| try std.testing.expect(!Session.messageRefusal(err));
+}
+
+test "reply boundaries: fresh native compose reads retry only cached reader size refusals" {
+    const native = @import("send_memory.zig").native;
+    for ([_][]const u8{ "mail.reply", "mail.forward" }) |command| {
+        for ([_][]const u8{ "BodyTooLarge", "DecodedMessageTooLarge", "MessageTooLarge", "ResponseTooLarge", "MessageBudgetExceeded", "ThreadBodyBudgetExceeded", "JsonTooManyTokens", "ComposeSourceRequired" }) |code| {
+            try std.testing.expectEqual(native, Session.retryComposeSizeRefusal(command, code));
+        }
+        for ([_][]const u8{ "", "UnsupportedCharset", "InvalidRecipients", "BodySizeMismatch", "InvalidBase64", "CacheIdentityMismatch", "TooManyReferences" }) |code| {
+            try std.testing.expect(!Session.retryComposeSizeRefusal(command, code));
+        }
+    }
+    for ([_][]const u8{ "mail.read", "mail.thread", "mail.list", "mail.sync", "draft.read", "draft.preview", "unknown" }) |command| {
+        try std.testing.expect(!Session.retryComposeSizeRefusal(command, "BodyTooLarge"));
+    }
 }
 
 test "cached contacts distinguish absent empty and loaded data without granting readonly contacts" {
@@ -4033,13 +4321,16 @@ test "UX backend: send grace cancel edit restart and uncertainty never duplicate
     _ = try session.dispatch(a, process);
     const stats = try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account }));
     try std.testing.expectEqual(@as(i64, 1), try j.integer(stats, "fixtureSends", 0));
+    try std.testing.expectError(error.ArchivedDraftReadOnly, session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = draft_id, .operationId = "grace-new-sent-source", .delaySeconds = 0 })));
+    const unknown_copy = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = draft_id }));
+    const unknown_draft_id = j.text(unknown_copy, "id");
     session.options.fixture_scenario = "unknown-send";
-    const next = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = draft_id, .operationId = "grace-unknown", .delaySeconds = 0 }));
+    const next = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = unknown_draft_id, .operationId = "grace-unknown", .delaySeconds = 0 }));
     const unknown_process = try j.value(a, .{ .cmd = "queue.process", .account = account, .queueId = j.text(next, "queueId") });
     try std.testing.expectEqualStrings("unknown", j.text(try session.dispatch(a, unknown_process), "state"));
     try std.testing.expectEqualStrings("unknown", j.text(try session.dispatch(a, unknown_process), "state"));
-    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = draft_id })));
-    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft_id, .queueId = j.text(next, "queueId"), .operationId = "grace-unknown" })));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = unknown_draft_id })));
+    try std.testing.expectError(error.UnknownOutcome, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = unknown_draft_id, .queueId = j.text(next, "queueId"), .operationId = "grace-unknown" })));
     const interrupted_draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "other@example.test", .bodyText = "A distinct approved draft" } }));
     const interrupted = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(interrupted_draft, "id"), .operationId = "grace-interrupted", .delaySeconds = 0 }));
     {
@@ -4081,7 +4372,7 @@ test "send grace: send now preserves the reviewed intent and fences repeats canc
     session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
     defer session.deinit();
     const account = "personal@example.com";
-    const draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Reviewed note" } }));
+    var draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Reviewed note" } }));
     const queued = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-reviewed", .delaySeconds = 30 }));
     const queue_id = j.text(queued, "queueId");
     const request = try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = queue_id });
@@ -4097,6 +4388,8 @@ test "send grace: send now preserves the reviewed intent and fences repeats canc
     for ([_]Value{ request, due_request, request }) |replay| try std.testing.expectEqualStrings("applied", j.text(try session.dispatch(a, replay), "state"));
     try std.testing.expectEqual(@as(i64, 1), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
 
+    try std.testing.expectError(error.ArchivedDraftReadOnly, session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "fresh-operation-sent-source" })));
+    draft = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = j.text(draft, "id") }));
     const canceled = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = j.text(draft, "id"), .operationId = "send-now-canceled", .delaySeconds = 30 }));
     _ = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.cancel", .account = account, .queueId = j.text(canceled, "queueId") }));
     try std.testing.expectEqualStrings("canceled", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(canceled, "queueId") })), "state"));
@@ -4133,12 +4426,12 @@ test "send grace: send now checks content hash and a submitting claim before sen
     {
         var store = try storage.Store.open(std.testing.io, a, root, account, options);
         defer store.close();
-        // Modify the complete draft record, bypassing putDraft's automatic
-        // cancellation, so this reaches the reviewed-content hash guard.
-        var changed = try store.draft(j.text(draft, "id"));
-        changed.subject = "Changed outside the reviewed intent";
-        try store.write(try store.fileName("draft", changed.id), try std.json.Stringify.valueAlloc(a, changed, .{}));
-        try std.testing.expectEqualStrings(changed.subject, (try store.draft(changed.id)).subject);
+        // Simulate a stale persisted review without going through the editor,
+        // which normally cancels its queue. Immutable source hashes remain
+        // intact; this reaches the independent queue-to-content digest guard.
+        const entry = try send_queue.find(&store, j.text(queued, "queueId"));
+        entry.hash = try a.dupe(u8, &storage.Store.hash("stale reviewed content"));
+        try store.save();
     }
     const rejected = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(queued, "queueId") }));
     try std.testing.expectEqualStrings("canceled", j.text(rejected, "state"));
@@ -4222,7 +4515,7 @@ test "UX backend: formatted forward preserves 32 CID resources and an ordinary P
     };
     try std.testing.expect(pdf_found);
     var too_many = draft;
-    const ordinary: [17]t.Attachment = @splat(draft.attachments[0]);
+    const ordinary: [t.Limits.attachments + 1]t.Attachment = @splat(draft.attachments[0]);
     too_many.attachments = &ordinary;
     try std.testing.expectError(error.TooManyAttachments, validateDraft(too_many, false));
     too_many = draft;
@@ -4531,6 +4824,7 @@ test "forward memory: large blob reservations release each 2000-entry cache snap
     var heap = @import("../fixed_heap.zig").Heap.init(reservation);
     var cap: @import("capped_allocator.zig").CappedAllocator = .{ .backing = heap.allocator(), .limit = 64 * 1024 * 1024, .reservation_bytes = reservation.len };
     session.allocator = cap.allocator();
+
     defer session.allocator = std.testing.allocator;
     {
         var command = std.heap.ArenaAllocator.init(cap.allocator());
@@ -4566,7 +4860,8 @@ test "forward memory: large blob reservations release each 2000-entry cache snap
         defer reopened.close();
         const retained = try reopened.draft(draft.id);
         try std.testing.expectEqual(@as(usize, 8), retained.attachments.len);
-        for (retained.attachments, 0..) |attachment, index| {
+        for (retained.attachments, attachments, 0..) |attachment, original, index| {
+            try std.testing.expectEqualDeep(original, attachment);
             var stream = try @import("attachment_blob.zig").Stream.init(&reopened, attachment);
             defer stream.close();
             var size: usize = 0;
@@ -4837,6 +5132,8 @@ test "UX backend: large immutable attachments forward save send and reject wrong
     }
     const sent = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft.id, .operationId = "large-fixture-send" }));
     try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+    try std.testing.expectError(error.ArchivedDraftReadOnly, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft.id, .operationId = "fresh-sent-source" })));
+    const corruption_copy = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = draft.id }));
     {
         var store = try storage.Store.open(std.testing.io, a, root, account, session.options);
         defer store.close();
@@ -4845,7 +5142,7 @@ test "UX backend: large immutable attachments forward save send and reject wrong
         defer corrupt.close(std.testing.io);
         try corrupt.writeStreamingAll(std.testing.io, "changed");
     }
-    try std.testing.expectError(error.AttachmentChanged, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = draft.id, .operationId = "corrupt-fixture-send" })));
+    try std.testing.expectError(error.AttachmentChanged, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = j.text(corruption_copy, "id"), .operationId = "corrupt-fixture-send" })));
     const stats = try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account }));
     try std.testing.expectEqual(@as(i64, 1), try j.integer(stats, "fixtureSends", 0));
 }
@@ -5366,5 +5663,600 @@ test "calendar browser: native commands open exact account profile after source-
         const state = try std.json.parseFromSliceLeaky(Value, a, bytes, .{});
         try std.testing.expectEqual(@as(i64, 0), try j.integer(state, "writes", -1));
         try std.testing.expectEqual(@as(u64, 0), store.state.fixtureSends);
+    }
+}
+
+test "send grace: request preparation OOM never strands an unsubmitted queue claim" {
+    var completed = false;
+    var observed_preflight = false;
+    for (0..192) |failure_index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/queue-preclaim", .{tmp.sub_path});
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", root);
+        const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        try session.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+        defer session.deinit();
+        var store = try storage.Store.open(std.testing.io, a, root, "personal@example.com", options);
+        defer store.close();
+        const draft = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Queue request preparation" }, null);
+        const digest = try operationDigest(a, draft, store.state.account, null);
+        const entry = try send_queue.stage(&store, draft.id, "queue-preclaim-operation", &digest, 0, 0);
+        const request = try j.value(a, .{ .cmd = "queue.send-now", .account = store.state.account, .queueId = entry.queueId });
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = failure_index });
+        _ = session.queuedSend(failing.allocator(), &store, request) catch |err| {
+            if (err == error.OutOfMemory and store.state.fixtureCalls == 0) {
+                observed_preflight = true;
+                try std.testing.expect(store.state.sendQueue[0].state != .submitting);
+                // Restart sees the same queued/rejected safe preflight state.
+                store.close();
+                store = try storage.Store.openCached(std.testing.io, a, root, "personal@example.com", options);
+                try std.testing.expect(store.state.sendQueue[0].state != .submitting);
+            } else try std.testing.expect(err == error.UnknownOutcome);
+        };
+        if (!failing.has_induced_failure) {
+            try std.testing.expectEqual(@as(u64, 1), store.state.fixtureCalls);
+            completed = true;
+            break;
+        }
+    }
+    try std.testing.expect(completed and observed_preflight);
+}
+
+test "reviewed draft: another session cannot replace measured content before send or queue" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/reviewed-content", .{tmp.sub_path});
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const reviewer = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(reviewer);
+    reviewer.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer reviewer.deinit();
+    const editor = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(editor);
+    editor.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer editor.deinit();
+    const account = "personal@example.com";
+    const original: t.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Reviewed", .bodyText = "Authored note", .original = .{ .bodyText = "Retained original", .bodyHtml = "<p>Retained original</p>" } };
+    const created = try reviewer.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = original }));
+    const id = j.text(created, "id");
+    for (0..5) |change| {
+        _ = try editor.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = original }));
+        const operation = try std.fmt.allocPrint(a, "reviewed-{d}", .{change});
+        const measured = try reviewer.dispatch(a, try j.value(a, .{ .cmd = "draft.measure", .account = account, .draftId = id, .operationId = operation }));
+        const digest = j.text(measured, "contentDigest");
+        try std.testing.expectEqual(@as(usize, 64), digest.len);
+        var changed = original;
+        switch (change) {
+            0 => changed.bodyText = "Changed after review",
+            1 => changed.subject = "Changed subject",
+            2 => changed.from = .{ .address = account, .name = "Changed sender" },
+            3 => changed.includeOriginal = false,
+            4 => changed.attachments = &.{.{ .id = "new-file", .filename = "added.txt", .mimeType = "text/plain", .size = 3, .data = "YWJj" }},
+            else => unreachable,
+        }
+        _ = try editor.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = changed }));
+        for ([_][]const u8{ "draft.send", "draft.queue" }) |cmd| try std.testing.expectError(error.ReviewedDraftChanged, reviewer.dispatch(a, try j.value(a, .{ .cmd = cmd, .account = account, .draftId = id, .operationId = operation, .expectedContentDigest = digest, .delaySeconds = 0 })));
+        const stats = try reviewer.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account }));
+        try std.testing.expectEqual(@as(i64, 0), try j.integer(stats, "fixtureSends", 0));
+        try std.testing.expectEqual(@as(usize, 0), j.get(try reviewer.dispatch(a, try j.value(a, .{ .cmd = "queue.list", .account = account })), "queue").?.array.items.len);
+        try std.testing.expectError(error.OperationNotFound, reviewer.dispatch(a, try j.value(a, .{ .cmd = "operation.read", .account = account, .operationId = operation })));
+    }
+    const measured = try reviewer.dispatch(a, try j.value(a, .{ .cmd = "draft.measure", .account = account, .draftId = id, .operationId = "reviewed-approved" }));
+    const digest = j.text(measured, "contentDigest");
+    const queued = try reviewer.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = id, .operationId = "reviewed-approved", .expectedContentDigest = digest, .delaySeconds = 0 }));
+    const wrong = storage.Store.hash("unreviewed-content");
+    try std.testing.expectError(error.ReviewedDraftChanged, reviewer.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(queued, "queueId"), .expectedContentDigest = wrong[0..] })));
+    const receipt = try reviewer.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(queued, "queueId"), .expectedContentDigest = digest }));
+    try std.testing.expectEqualStrings("applied", j.text(receipt, "state"));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(try reviewer.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+}
+
+test "retained history: schema one draft lists stay compact while exact large sources remain readable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/legacy-list", .{tmp.sub_path});
+    const account = "personal@example.com";
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const large = try a.alloc(u8, 2 * 1024 * 1024);
+    @memset(large, 'x');
+    var store = try storage.Store.open(std.testing.io, a, root, account, options);
+    const saved = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Legacy source", .bodyText = large, .original = .{ .bodyText = large, .bodyHtml = "<p>Exact retained HTML</p>" } }, null);
+    // Public 0.2.12 already kept payloads in separate draft files. Recreate
+    // its schema-1 index and exact draft shape, without the new fields.
+    var state = store.state;
+    state.schema = 1;
+    var old_preview = saved;
+    old_preview.bodyText = "";
+    old_preview.original = null;
+    old_preview.summaryCounts = null;
+    state.drafts = try a.dupe(t.Draft, &.{old_preview});
+    state.relatedDraftBlobs = &.{};
+    var index = try std.json.parseFromSliceLeaky(Value, a, try std.json.Stringify.valueAlloc(a, state, .{}), .{ .allocate = .alloc_if_needed });
+    _ = index.object.orderedRemove("history");
+    for (index.object.getPtr("drafts").?.array.items) |*value| {
+        _ = value.object.orderedRemove("includeOriginal");
+        _ = value.object.orderedRemove("summaryCounts");
+    }
+    const encoded_index = try std.json.Stringify.valueAlloc(a, index, .{});
+    try std.testing.expect(encoded_index.len < 16 * 1024);
+    try store.write("index.json", encoded_index);
+    var full = try std.json.parseFromSliceLeaky(Value, a, try std.json.Stringify.valueAlloc(a, saved, .{}), .{ .allocate = .alloc_if_needed });
+    _ = full.object.orderedRemove("includeOriginal");
+    _ = full.object.orderedRemove("summaryCounts");
+    try store.write(try store.fileName("draft", saved.id), try std.json.Stringify.valueAlloc(a, full, .{}));
+    store.close();
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/synthetic-omagma-home");
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    session.* = try Session.init(std.testing.io, std.testing.allocator, &env, options);
+    defer session.deinit();
+    const list = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account }));
+    try std.testing.expect((try std.json.Stringify.valueAlloc(a, list, .{})).len < 16 * 1024);
+    const loaded = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = saved.id }));
+    try std.testing.expectEqualStrings(large, j.text(loaded, "bodyText"));
+    try std.testing.expectEqualStrings(large, j.text(j.get(loaded, "original").?, "bodyText"));
+    try std.testing.expectEqualStrings("<p>Exact retained HTML</p>", j.text(j.get(loaded, "original").?, "bodyHtml"));
+}
+
+test "retained history: accepted direct and queued drafts archive immediately and clone explicitly" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/accepted-immutable", .{tmp.sub_path});
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    try session.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer session.deinit();
+    const account = "personal@example.com";
+    const input: t.Draft = .{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Exact accepted authored text", .includeOriginal = false, .original = .{ .bodyText = "Retained excluded original" } };
+    for ([_]bool{ false, true }, 0..) |queued, index| {
+        const saved = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = input }));
+        const id = j.text(saved, "id");
+        const operation = try std.fmt.allocPrint(a, "immediately-retained-{d}", .{index});
+        const send_request = try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = id, .operationId = operation });
+        if (queued) {
+            const queue = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = id, .operationId = operation, .delaySeconds = 0 }));
+            const result = try session.dispatch(a, try j.value(a, .{ .cmd = "queue.send-now", .account = account, .queueId = j.text(queue, "queueId") }));
+            try std.testing.expectEqualStrings("applied", j.text(result, "state"));
+            try std.testing.expectEqualStrings("applied", j.text(try session.dispatch(a, try j.value(a, .{ .cmd = "queue.read", .account = account, .queueId = j.text(queue, "queueId") })), "state"));
+        } else try std.testing.expectEqualStrings("applied", j.text(try session.dispatch(a, send_request), "outcome"));
+        const listed = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.list", .account = account }));
+        try std.testing.expectEqual(@as(usize, 0), j.get(listed, "drafts").?.array.items.len);
+        var changed = input;
+        changed.bodyText = "Changed after acceptance";
+        try std.testing.expectError(error.ArchivedDraftReadOnly, session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = id, .draft = changed })));
+        try std.testing.expectError(error.ArchivedDraftReadOnly, session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = id })));
+        session.deinit();
+        try session.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+        const exact = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = id }));
+        try std.testing.expectEqualStrings(input.bodyText, j.text(exact, "bodyText"));
+        try std.testing.expectEqualStrings(input.original.?.bodyText, j.text(j.get(exact, "original").?, "bodyText"));
+        try std.testing.expect(!try j.boolean(exact, "includeOriginal", true));
+        const cloned = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = id }));
+        try std.testing.expect(!std.mem.eql(u8, id, j.text(cloned, "id")));
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = j.text(cloned, "id"), .draft = changed }));
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.discard", .account = account, .draftId = j.text(cloned, "id") }));
+        _ = try session.dispatch(a, send_request);
+        try std.testing.expectEqual(@as(i64, @intCast(index + 1)), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "history.delete-source", .account = account, .draftId = id, .confirm = true }));
+        try std.testing.expectEqualStrings("applied", j.text(try session.dispatch(a, send_request), "outcome"));
+        if (queued) {
+            const repeated = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = id, .operationId = operation, .delaySeconds = 0 }));
+            try std.testing.expectEqualStrings("applied", j.text(repeated, "state"));
+            try std.testing.expectEqual(@as(i64, @intCast(index + 1)), try j.integer(try session.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+        }
+    }
+}
+
+test "retained history: accepted receipt survives archive failure without allowing source reuse" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/archive-after-accept", .{tmp.sub_path});
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    try session.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer session.deinit();
+    var store = try session.openStore(a, "personal@example.com", false);
+    defer store.close();
+    const original = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Accepted before archive failure" }, null);
+    const request = try j.value(a, .{ .cmd = "draft.send", .account = store.state.account, .draftId = original.id, .operationId = "accepted-archive-failure" });
+    store.history_fault = .before_publication;
+    const result = try session.send(a, &store, request, original, null, false);
+    try std.testing.expectEqualStrings("applied", j.text(result, "outcome"));
+    try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+    try std.testing.expectEqual(@as(usize, 1), store.state.drafts.len);
+    store.close();
+    store = try session.openStore(a, "personal@example.com", false);
+    var other = try j.copyObject(a, request);
+    try other.object.put(a, "operationId", .{ .string = "fresh-id-must-not-resend" });
+    try std.testing.expectError(error.ArchivedDraftReadOnly, session.send(a, &store, other, original, null, false));
+    try std.testing.expectEqualStrings("applied", j.text(try session.send(a, &store, request, original, null, false), "outcome"));
+    try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+    try std.testing.expectEqual(@as(usize, 0), store.state.drafts.len);
+    try std.testing.expectEqualStrings(original.bodyText, (try store.draft(original.id)).bodyText);
+}
+
+test "retained history: explicit recovery fork preserves unsaved text after another session sends" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/concurrent-recovery", .{tmp.sub_path});
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const editor = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(editor);
+    try editor.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer editor.deinit();
+    const sender = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(sender);
+    try sender.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer sender.deinit();
+    const account = "personal@example.com";
+    const created = try editor.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Saved and sent source", .original = .{ .bodyText = "Exact retained original", .bodyHtml = "<p>Exact retained original</p>" } } }));
+    const old_id = j.text(created, "id");
+    _ = try sender.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = old_id, .operationId = "other-session-accepted" }));
+    const fields: [5][]const u8 = .{ "unfinished recipient <", "", "hidden@example.test", "Unsaved subject", "Exact unsaved note\nwith unfinished **Markdown" };
+    var recovery = try j.value(a, .{ .cmd = "draft.recovery-save", .account = account, .draftId = old_id, .acknowledgementOnly = true, .draft = .{ .bodyFormat = "markdown", .includeOriginal = false, .recoveryFields = fields, .attachments = .{.{ .id = "unsaved-file", .filename = "note.txt", .mimeType = "text/plain", .size = 3, .data = "YWJj" }} } });
+    try recovery.object.put(a, "copyFromDraftId", .null);
+    try std.testing.expectError(error.ArchivedDraftReadOnly, editor.dispatch(a, recovery));
+    try recovery.object.put(a, "forkIfSettled", .{ .bool = true });
+    const saved = try editor.dispatch(a, recovery);
+    try std.testing.expectEqualStrings(old_id, j.text(saved, "forkedFrom"));
+    const new_id = j.text(saved, "id");
+    try std.testing.expect(!std.mem.eql(u8, old_id, new_id));
+    editor.deinit();
+    try editor.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    const restored = try editor.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = new_id }));
+    for (fields, j.get(restored, "recoveryFields").?.array.items) |expected, actual| try std.testing.expectEqualStrings(expected, actual.string);
+    try std.testing.expect(!try j.boolean(restored, "includeOriginal", true));
+    try std.testing.expectEqualStrings("Exact retained original", j.text(j.get(restored, "original").?, "bodyText"));
+    try std.testing.expectEqualStrings("note.txt", j.text(j.get(restored, "attachments").?.array.items[0], "filename"));
+    const original = try editor.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = old_id }));
+    try std.testing.expectEqualStrings("Saved and sent source", j.text(original, "bodyText"));
+    try std.testing.expect(try j.boolean(original, "includeOriginal", true));
+    try std.testing.expectEqual(@as(i64, 1), try j.integer(try editor.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+    // The explicit fork never bypasses unresolved external ownership, even
+    // if a prior applied source also exists for the same historical identity.
+    var store = try editor.openStore(a, account, false);
+    defer store.close();
+    store.state.operations = try a.dupe(storage.Operation, &.{.{ .id = "pending", .hash = "pending", .draftId = old_id }});
+    try std.testing.expectError(error.UnknownOutcome, Session.recoveryForkAllowed(&store, old_id));
+    store.state.operations = &.{};
+    store.state.sendQueue = try a.dupe(storage.QueuedSend, &.{.{ .queueId = "queued", .draftId = old_id, .operationId = "queued", .hash = "queued", .createdAtMs = 0, .dueAtMs = 0 }});
+    try std.testing.expectError(error.DraftQueued, Session.recoveryForkAllowed(&store, old_id));
+    store.state.sendQueue[0].state = .submitting;
+    try std.testing.expectError(error.UnknownOutcome, Session.recoveryForkAllowed(&store, old_id));
+    store.state.sendQueue = &.{};
+    store.state.draftLinks = try a.dupe(@import("draft_link.zig").Link, &.{.{ .draftId = old_id, .paused = true, .attemptMessageId = "<pending@example.test>", .uploadedDigest = &storage.Store.hash("pending") }});
+    try std.testing.expectError(error.DraftPausedInGmail, Session.recoveryForkAllowed(&store, old_id));
+}
+
+test "retained history: queue finalization survives cleanup failure without restoring retired sources" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/queue-cleanup-boundary", .{tmp.sub_path});
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const session = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(session);
+    try session.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer session.deinit();
+    var store = try session.openStore(a, "personal@example.com", false);
+    defer store.close();
+    const older = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Prior applied source" }, null);
+    const older_hash = try operationDigest(a, older, store.state.account, null);
+    store.state.operations = try a.dupe(storage.Operation, &.{.{ .id = "prior-applied", .hash = &older_hash, .draftId = older.id, .outcome = "applied" }});
+    const draft = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Queued accepted source" }, null);
+    const digest = try operationDigest(a, draft, store.state.account, null);
+    var entry = try send_queue.stage(&store, draft.id, "queue-cleanup", &digest, 0, 0);
+    const queue_id = entry.queueId;
+    entry.state = .submitting;
+    try store.save();
+    store.history_fault = .after_cleanup;
+    const request = try j.value(a, .{ .cmd = "draft.send", .account = store.state.account, .draftId = draft.id, .operationId = entry.operationId, .queueId = queue_id });
+    const sent = try session.send(a, &store, request, draft, null, true);
+    try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+    // Intermediate mail acceptance cannot perform unrelated archival while
+    // the outer queue still has to persist its final state.
+    try std.testing.expectEqual(@as(u64, 0), store.state.history.pages);
+    try std.testing.expectEqual(@as(usize, 2), store.state.drafts.len);
+    entry = try send_queue.find(&store, queue_id);
+    entry.state = .applied;
+    try store.save();
+    try std.testing.expectEqualStrings("applied", j.text(try Session.queuedMutationReceipt(a, &store, entry.*), "state"));
+    try std.testing.expectEqual(@as(usize, 0), store.state.drafts.len);
+    try std.testing.expect(store.state.history.cleanup.len != 0);
+    try store.save();
+    store.close();
+    store = try session.openStore(a, "personal@example.com", false);
+    try std.testing.expectEqualStrings(older.bodyText, (try store.draft(older.id)).bodyText);
+    try std.testing.expectEqualStrings(draft.bodyText, (try store.draft(draft.id)).bodyText);
+    try std.testing.expectEqual(storage.SendState.applied, (try send_queue.find(&store, queue_id)).state);
+    try std.testing.expectEqualStrings("applied", (try store.findOperation(a, "queue-cleanup")).?.outcome);
+    try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+}
+
+test "retained history: explicit recovery copy preserves a conflicted local snapshot without changing saved source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/conflicted-copy", .{tmp.sub_path});
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    const options: t.Options = .{ .fixtures = true, .cache_dir = root };
+    const local = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(local);
+    try local.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer local.deinit();
+    const other = try std.testing.allocator.create(Session);
+    defer std.testing.allocator.destroy(other);
+    try other.initInto(std.testing.io, std.testing.allocator, &env, options, null);
+    defer other.deinit();
+    const account = "personal@example.com";
+    const original: t.Original = .{ .bodyText = "Local retained quote", .bodyHtml = "<p>Local retained quote</p>" };
+    const initial = try local.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Initial saved text", .original = original } }));
+    const old_id = j.text(initial, "id");
+    _ = try other.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = old_id, .draft = .{ .to = "peer@example.test", .bodyText = "Other session saved text", .original = .{ .bodyText = "Other session quote" } } }));
+    const fields: [5][]const u8 = .{ "unfinished recipient <", "", "", "Local unsaved subject", "Exact local dirty text" };
+    const request = try j.value(a, .{ .cmd = "draft.recovery-save", .account = account, .draftId = "", .copyFromDraftId = old_id, .acknowledgementOnly = true, .draft = .{ .recoveryFields = fields, .includeOriginal = false, .original = original } });
+    const copied = try local.dispatch(a, request);
+    try std.testing.expectEqualStrings(old_id, j.text(copied, "copiedFrom"));
+    const new_id = j.text(copied, "id");
+    try std.testing.expect(!std.mem.eql(u8, old_id, new_id));
+    const exact = try local.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = new_id }));
+    for (fields, j.get(exact, "recoveryFields").?.array.items) |wanted, got| try std.testing.expectEqualStrings(wanted, got.string);
+    try std.testing.expectEqualStrings(original.bodyText, j.text(j.get(exact, "original").?, "bodyText"));
+    try std.testing.expect(!try j.boolean(exact, "includeOriginal", true));
+    const unchanged = try other.dispatch(a, try j.value(a, .{ .cmd = "draft.read", .account = account, .draftId = old_id }));
+    try std.testing.expectEqualStrings("Other session saved text", j.text(unchanged, "bodyText"));
+    try std.testing.expectEqualStrings("Other session quote", j.text(j.get(unchanged, "original").?, "bodyText"));
+    var crossed = try j.copyObject(a, request);
+    try crossed.object.put(a, "account", .{ .string = "work@example.com" });
+    try std.testing.expectError(error.DraftNotFound, local.dispatch(a, crossed));
+    const queued = try other.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = old_id, .operationId = "protected-conflict-copy", .delaySeconds = 30 }));
+    try std.testing.expectError(error.DraftQueued, local.dispatch(a, request));
+    _ = try other.dispatch(a, try j.value(a, .{ .cmd = "queue.cancel", .account = account, .queueId = j.text(queued, "queueId") }));
+    other.options.fixture_scenario = "unknown-send";
+    _ = try other.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = old_id, .operationId = "unknown-conflict-source" }));
+    try std.testing.expectError(error.UnknownOutcome, local.dispatch(a, request));
+    try std.testing.expectEqual(@as(i64, 0), try j.integer(try local.dispatch(a, try j.value(a, .{ .cmd = "cache.stats", .account = account })), "fixtureSends", 0));
+}
+
+test "retained clone: active ownership and unfinished work cannot become independent drafts" {
+    const Scenario = enum { ordinary, queued, submitting, queue_unknown, send_unknown, gmail_paused, gmail_unknown, gmail_taken_back, gmail_missing, calendar_pending };
+    for ([_]Scenario{ .ordinary, .queued, .submitting, .queue_unknown, .send_unknown, .gmail_paused, .gmail_unknown, .gmail_taken_back, .gmail_missing, .calendar_pending }) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/clone-ownership", .{tmp.sub_path});
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", root);
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        try session.initInto(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root }, null);
+        defer session.deinit();
+        const account = "personal@example.com";
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        const source = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .subject = "Protected source", .bodyText = "Exact source remains owned", .includeOriginal = false, .original = .{ .bodyText = "Retained quote" } }, null);
+        const calendar = "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n";
+        const digest = try operationDigest(a, source, account, if (scenario == .calendar_pending) calendar else null);
+        switch (scenario) {
+            .ordinary => {},
+            .queued, .submitting, .queue_unknown => store.state.sendQueue = try a.dupe(storage.QueuedSend, &.{.{ .queueId = "owned-queue", .draftId = source.id, .operationId = "owned-send", .hash = try a.dupe(u8, &digest), .state = switch (scenario) {
+                .queued => .queued,
+                .submitting => .submitting,
+                else => .unknown,
+            }, .createdAtMs = 0, .dueAtMs = 0 }}),
+            .send_unknown => store.state.operations = try a.dupe(storage.Operation, &.{.{ .id = "owned-send", .draftId = source.id, .hash = try a.dupe(u8, &digest) }}),
+            .calendar_pending => {
+                store.state.operations = try a.dupe(storage.Operation, &.{.{ .id = "owned-rsvp", .draftId = source.id, .hash = try a.dupe(u8, &digest), .outcome = "applied", .icalendar = calendar, .calendarSync = .{ .state = .unknown, .errorCode = "CalendarSyncPending", .canRetry = true } }});
+                try std.testing.expect(try @import("operation_history.zig").immutableSource(&store, source.id));
+            },
+            .gmail_paused, .gmail_unknown, .gmail_taken_back, .gmail_missing => store.state.draftLinks = try a.dupe(@import("draft_link.zig").Link, &.{.{ .draftId = source.id, .phase = switch (scenario) {
+                .gmail_unknown => .unknown,
+                .gmail_missing => .missing,
+                else => .linked,
+            }, .paused = scenario == .gmail_paused or scenario == .gmail_unknown, .remoteDraftId = "remote-draft", .remoteMessageId = "remote-message", .attemptMessageId = "<owned-upload@example.test>", .uploadedDigest = try a.dupe(u8, &digest), .possiblySentElsewhere = scenario == .gmail_missing }}),
+        }
+        try store.save();
+        const before = try j.encodeAlloc(a, store.state, .{});
+        store.close();
+        const expected: anyerror = switch (scenario) {
+            .queued => error.DraftQueued,
+            .submitting, .queue_unknown, .send_unknown => error.UnknownOutcome,
+            .gmail_paused, .gmail_unknown => error.DraftPausedInGmail,
+            else => error.CloneRequiresSettledSource,
+        };
+        try std.testing.expectError(expected, session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = source.id })));
+        store = try session.openStore(a, account, false);
+        try std.testing.expectEqualStrings(before, try j.encodeAlloc(a, store.state, .{}));
+        try std.testing.expectEqualDeep(source, try store.draft(source.id));
+        try std.testing.expectEqual(@as(u64, 0), store.state.fixtureCalls);
+        try std.testing.expectEqual(@as(u64, 0), store.state.fixtureSends);
+    }
+}
+
+test "retained clone: settled archived and active fallback sources copy exactly while deletion stays final" {
+    for ([_]bool{ false, true }) |fallback| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/clone-settled", .{tmp.sub_path});
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", root);
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        try session.initInto(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root }, null);
+        defer session.deinit();
+        const account = "personal@example.com";
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        const source = try store.putDraft(.{ .to = &.{.{ .address = "peer@example.test" }}, .bodyText = "Known accepted source", .includeOriginal = false, .original = .{ .bodyText = "Complete retained quote" }, .attachments = &.{.{ .id = "file", .filename = "note.txt", .mimeType = "text/plain", .size = 3, .data = "YWJj" }} }, null);
+        if (fallback) store.history_fault = .before_publication;
+        const sent = try session.send(a, &store, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = source.id, .operationId = "clone-source-accepted" }), source, null, false);
+        try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+        try std.testing.expectEqual(@as(usize, if (fallback) 1 else 0), store.state.drafts.len);
+        store.close();
+        const copy = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = source.id }));
+        const copy_id = j.text(copy, "id");
+        try std.testing.expect(!std.mem.eql(u8, source.id, copy_id));
+        store = try session.openStore(a, account, false);
+        const restored = try store.draft(copy_id);
+        var expected = source;
+        expected.id = restored.id;
+        try std.testing.expectEqualDeep(expected, restored);
+        try std.testing.expectEqualDeep(source, try store.draft(source.id));
+        try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+        try std.testing.expect(@import("draft_link.zig").find(store.state.draftLinks, copy_id) == null);
+        store.close();
+        try std.testing.expectError(error.DraftNotFound, session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = "work@example.com", .draftId = source.id })));
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "history.delete-source", .account = account, .draftId = source.id, .confirm = true }));
+        try std.testing.expectError(error.ArchivedSourceDeleted, session.dispatch(a, try j.value(a, .{ .cmd = "draft.clone", .account = account, .draftId = source.id })));
+        store = try session.openStore(a, account, false);
+        try std.testing.expectEqual(@as(usize, 1), store.state.drafts.len);
+        try std.testing.expectEqualStrings(copy_id, store.state.drafts[0].id);
+        try std.testing.expectEqual(@as(u64, 1), store.state.fixtureSends);
+        try std.testing.expectEqualStrings("applied", (try store.findOperation(a, "clone-source-accepted")).?.outcome);
+    }
+}
+
+test "retained recovery: local copies inherit Gmail warnings and require a fresh send acknowledgement" {
+    const Case = struct { missing: bool = false, forked: bool = false };
+    for ([_]Case{ .{}, .{ .missing = true }, .{ .forked = true } }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/recovery-gmail-warning", .{tmp.sub_path});
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", root);
+        const session = try std.testing.allocator.create(Session);
+        defer std.testing.allocator.destroy(session);
+        try session.initInto(std.testing.io, std.testing.allocator, &env, .{ .fixtures = true, .cache_dir = root }, null);
+        defer session.deinit();
+        const account = "personal@example.com";
+        const created = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Uploaded local source", .includeOriginal = false, .original = .{ .bodyText = "Complete protected original" } } }));
+        const source_id = j.text(created, "id");
+        const info = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.gmail-info", .account = account, .draftId = source_id }));
+        const uploaded = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.gmail-save", .account = account, .draftId = source_id, .expectedVersion = 0, .expectedDigest = j.text(info, "contentDigest") }));
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.gmail-take-back", .account = account, .draftId = source_id, .expectedVersion = try j.integer(j.get(uploaded, "link").?, "version", 0) }));
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        const source = try store.draft(source_id);
+        const digest = try operationDigest(a, source, account, null);
+        const links = @import("draft_link.zig");
+        const original_link = &store.state.draftLinks[links.find(store.state.draftLinks, source_id).?];
+        if (case.missing) {
+            original_link.phase = .missing;
+            original_link.possiblySentElsewhere = true;
+        }
+        try original_link.acknowledgeSend(a, &digest);
+        try store.save();
+        if (case.forked) {
+            const sent = try session.send(a, &store, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = source_id, .operationId = "source-was-sent" }), source, null, false);
+            try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+            try std.testing.expectEqual(@as(usize, 0), store.state.drafts.len);
+        }
+        const history = @import("operation_history.zig");
+        const source_link = (try history.gmailLink(&store, a, source_id)).?;
+        const provider_before = try a.dupe(u8, (try store.readDocument(a, "fixture-gmail-drafts.json", 4 * 1024 * 1024)).?);
+        store.close();
+        const fields: [5][]const u8 = .{ "peer@example.test", "", "", "Independent local subject", "Exact unsaved note after the remote copy" };
+        var request = try j.value(a, .{ .cmd = "draft.recovery-save", .account = account, .draftId = if (case.forked) source_id else "", .acknowledgementOnly = true, .draft = .{ .recoveryFields = fields, .includeOriginal = false } });
+        if (case.forked) try request.object.put(a, "forkIfSettled", .{ .bool = true }) else try request.object.put(a, "copyFromDraftId", .{ .string = source_id });
+        const copied = try session.dispatch(a, request);
+        const copy_id = j.text(copied, "id");
+        try std.testing.expectEqualStrings(source_id, j.text(copied, if (case.forked) "forkedFrom" else "copiedFrom"));
+        try std.testing.expect(!std.mem.eql(u8, source_id, copy_id));
+        const response_link = try j.decode(links.Link, a, j.get(copied, "gmailLink").?);
+        var expected_link = source_link;
+        expected_link.draftId = copy_id;
+        expected_link.version = 1;
+        expected_link.paused = false;
+        expected_link.sendAcknowledgedDigest = "";
+        expected_link.lastImportedMessageId = "";
+        expected_link.lastImportedDraftId = "";
+        try std.testing.expectEqualDeep(expected_link, response_link);
+        store = try session.openStore(a, account, false);
+        var recovered = try store.draft(copy_id);
+        try std.testing.expectEqualDeep(@as([]const []const u8, &fields), recovered.recoveryFields.?);
+        try std.testing.expectEqualDeep(source.original, recovered.original);
+        try std.testing.expect(!recovered.includeOriginal);
+        try std.testing.expectEqualStrings(j.text(copied, "contentDigest"), &(try links.contentDigest(a, recovered, account)));
+        try std.testing.expectEqualDeep(source_link, (try history.gmailLink(&store, a, source_id)).?);
+        try std.testing.expectEqualDeep(source, try store.draft(source_id));
+        try std.testing.expect(!try history.immutableSource(&store, copy_id));
+        try std.testing.expectEqual(@as(u64, if (case.forked) 1 else 0), store.state.fixtureSends);
+        store.close();
+        // Normal editor save resolves valid raw fields. It keeps the remote
+        // warning while changing the exact content to be acknowledged.
+        recovered.recoveryFields = null;
+        recovered.to = &.{.{ .address = "peer@example.test" }};
+        recovered.subject = fields[3];
+        recovered.bodyText = fields[4];
+        _ = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.update", .account = account, .draftId = copy_id, .draft = recovered }));
+        try std.testing.expectError(error.GmailCopyUnchecked, session.dispatch(a, try j.value(a, .{ .cmd = "draft.queue", .account = account, .draftId = copy_id, .operationId = "unacknowledged-copy-queue", .delaySeconds = 0 })));
+        try std.testing.expectError(error.GmailCopyUnchecked, session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = copy_id, .operationId = "copy-explicit-send" })));
+        const current = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.gmail-info", .account = account, .draftId = copy_id }));
+        const sent = try session.dispatch(a, try j.value(a, .{ .cmd = "draft.send", .account = account, .draftId = copy_id, .operationId = "copy-explicit-send", .acknowledgeGmailCopy = true, .gmailCopyDigest = j.text(current, "contentDigest") }));
+        try std.testing.expectEqualStrings("applied", j.text(sent, "outcome"));
+        store = try session.openStore(a, account, false);
+        try std.testing.expectEqual(@as(u64, if (case.forked) 2 else 1), store.state.fixtureSends);
+        try std.testing.expectEqualStrings(provider_before, (try store.readDocument(a, "fixture-gmail-drafts.json", 4 * 1024 * 1024)).?);
+        try std.testing.expectEqualDeep(source_link, (try history.gmailLink(&store, a, source_id)).?);
+        try std.testing.expectEqualDeep(source, try store.draft(source_id));
     }
 }

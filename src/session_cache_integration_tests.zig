@@ -67,6 +67,10 @@ const Oracle = struct {
     drop_write: std.atomic.Value(bool) = .init(false),
     invalid_refresh: std.atomic.Value(bool) = .init(false),
     draft_flow: bool = false,
+    history_flow: bool = false,
+    history_blob_flow: bool = false,
+    verified_history_files: std.atomic.Value(usize) = .init(0),
+    history_failure: std.atomic.Value(bool) = .init(false),
     draft_status_reads: std.atomic.Value(usize) = .init(0),
     draft_race: std.atomic.Value(bool) = .init(false),
     fn run(self: *Oracle) anyerror!void {
@@ -74,10 +78,46 @@ const Oracle = struct {
             const stream = try self.listener.accept(io);
             defer stream.close(io);
             self.respond(stream) catch |err| {
+                if (self.history_flow and err != error.Canceled) self.history_failure.store(true, .release);
                 std.debug.print("HTTP fixture error: {s}\n", .{@errorName(err)});
                 return err;
             };
         }
+    }
+    fn verifyHistoryMedia(self: *Oracle, media: []const u8) !void {
+        errdefer self.history_failure.store(true, .release);
+        if (std.mem.indexOf(u8, media, "Message-ID: <omagma-") == null) return error.MissingSyntheticMessageId;
+        if (std.mem.indexOf(u8, media, "U3ludGhldGljIGV4YWN0IHNwb29sIGJvZHkg") == null) return error.MissingSyntheticAuthoredNote;
+        if (self.writes.load(.acquire) == 1) {
+            try std.testing.expectEqual(@as(usize, 40), std.mem.count(u8, media, "<peer-"));
+            try std.testing.expectEqual(@as(usize, 40), std.mem.count(u8, media, "Content-Disposition: attachment;"));
+        }
+        if (self.history_blob_flow) {
+            var phase: std.heap.ArenaAllocator = .init(a);
+            defer phase.deinit();
+            const alloc = phase.allocator();
+            const first_line_end = std.mem.indexOf(u8, media, "\r\n") orelse return error.MissingSyntheticBoundary;
+            const suffix = try std.fmt.allocPrint(alloc, "\r\n{s}--\r\n", .{media[0..first_line_end]});
+            try std.testing.expect(std.mem.endsWith(u8, media, suffix));
+            const header = "Content-Type: message/rfc822\r\n\r\n";
+            const start = (std.mem.indexOf(u8, media, header) orelse return error.MissingSyntheticMime) + header.len;
+            const parsed = try @import("terminal/mime.zig").parse(media[start .. media.len - suffix.len], alloc);
+            const index = self.writes.load(.acquire) - 1;
+            const expected_note = if (index == 6) "Synthetic exact spool body uncertain" else try std.fmt.allocPrint(alloc, "Synthetic exact spool body {d}", .{index});
+            try std.testing.expectEqualStrings(expected_note, std.mem.trimEnd(u8, parsed.body_text, "\r\n"));
+            try std.testing.expectEqual(@as(usize, if (index == 0) 40 else if (index <= 4) 1000 else if (index == 5) 57 else 0), parsed.attachments.len);
+            const first = self.verified_history_files.load(.acquire);
+            for (parsed.attachments, first..) |file, number| {
+                try std.testing.expectEqualStrings(try std.fmt.allocPrint(alloc, "tiny-{d}.bin", .{number}), file.filename);
+                var expected: [4]u8 = undefined;
+                std.mem.writeInt(u32, &expected, @intCast(number), .little);
+                try std.testing.expectEqualSlices(u8, &expected, file.data);
+            }
+            _ = self.verified_history_files.fetchAdd(parsed.attachments.len, .acq_rel);
+        }
+    }
+    fn requireHistorySuccess(self: *const Oracle) !void {
+        if (self.history_failure.load(.acquire)) return error.SyntheticHttpOracleFailed;
     }
     fn respond(self: *Oracle, stream: std.Io.net.Stream) !void {
         var input: [8192]u8 = undefined;
@@ -93,7 +133,7 @@ const Oracle = struct {
         const path = path_buffer[0..request.head.target.len];
         const content_type = request.head.content_type orelse "";
         const multipart = std.mem.startsWith(u8, content_type, "multipart/related;");
-        var body: [64 * 1024]u8 = undefined;
+        var body: [512 * 1024]u8 = undefined;
         const body_size = if (method.requestHasBody()) try request.readerExpectNone(&.{}).readSliceShort(&body) else 0;
         if (body_size == body.len) return error.InvalidFixtureRequest;
         var status: std.http.Status = .ok;
@@ -141,7 +181,9 @@ const Oracle = struct {
             _ = self.writes.fetchAdd(1, .acq_rel);
             if (multipart) {
                 _ = self.spools.fetchAdd(1, .acq_rel);
-                try std.testing.expect(std.mem.indexOf(u8, body[0..body_size], "Synthetic exact spool body") != null);
+                if (self.history_flow) {
+                    try self.verifyHistoryMedia(body[0..body_size]);
+                } else try std.testing.expect(std.mem.indexOf(u8, body[0..body_size], "Synthetic exact spool body") != null);
             }
             if (self.drop_write.load(.acquire)) return;
             status = @fromBackingInt(@intCast(self.write_status.load(.acquire)));
@@ -150,6 +192,25 @@ const Oracle = struct {
         try request.respond(response, .{ .status = status, .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json" }} });
     }
 };
+test "retained history HTTP oracle: unknown request is exact and receiver failures reach foreground" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var oracle: Oracle = .{ .listener = undefined, .history_flow = true, .history_blob_flow = true, .writes = .init(7), .verified_history_files = .init(4097) };
+    const mime = @import("terminal/mime.zig");
+    var sender: @import("terminal/recipients.zig").Mailbox = .{};
+    try sender.address.set(account);
+    var buffer: [4096]u8 = undefined;
+    const raw = try mime.encode(.{ .from = sender, .destinations = .{ .to = &.{.{ .address = "peer@example.test" }} }, .subject = "", .body = "Synthetic exact spool body uncertain", .message_id = "<omagma-oracle@example.test>", .date = "Thu, 08 Oct 2026 12:00:00 +0000" }, &buffer);
+    const media = try std.fmt.allocPrint(allocator, "--probe\r\nContent-Type: application/json\r\n\r\n{{}}\r\n--probe\r\nContent-Type: message/rfc822\r\n\r\n{s}\r\n--probe--\r\n", .{raw});
+    try oracle.verifyHistoryMedia(media);
+    try oracle.requireHistorySuccess();
+    try std.testing.expectEqual(@as(usize, 4097), oracle.verified_history_files.load(.acquire));
+    media[std.mem.indexOf(u8, media, "Message-ID:").?] = 'X';
+    try std.testing.expectError(error.MissingSyntheticMessageId, oracle.verifyHistoryMedia(media));
+    try std.testing.expectError(error.SyntheticHttpOracleFailed, oracle.requireHistorySuccess());
+}
+
 fn invoke(config: *const Config, method: std.http.Method) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -710,10 +771,12 @@ fn sendMemoryScenario(html_bytes: usize, plain_bytes: usize, note_bytes: usize, 
     try std.testing.expectEqual(@as(usize, 1), oracle.writes.load(.acquire));
     const preview = try sendMemoryCall(session, allocator, .{ .cmd = "draft.preview", .account = account, .draftId = draft_id });
     try std.testing.expect(std.mem.indexOf(u8, j.text(preview, "bodyHtml"), original) != null);
-    // Upload the saved source by ID, including when its complete JSON is larger
-    // than the IPC frame limit. Its bytes never need a new request-frame copy.
-    const info = try sendMemoryCall(session, allocator, .{ .cmd = "draft.gmail-info", .account = account, .draftId = draft_id });
-    const saved = try sendMemoryCall(session, allocator, .{ .cmd = "draft.gmail-save", .account = account, .draftId = draft_id, .expectedVersion = 0, .expectedDigest = j.text(info, "contentDigest") });
+    // A completed source is immutable. Explicitly clone it for a new Gmail
+    // draft; even oversized complete JSON never needs a request-frame copy.
+    const copied = try sendMemoryCall(session, allocator, .{ .cmd = "draft.clone", .account = account, .draftId = draft_id });
+    const copied_id = j.text(copied, "id");
+    const info = try sendMemoryCall(session, allocator, .{ .cmd = "draft.gmail-info", .account = account, .draftId = copied_id });
+    const saved = try sendMemoryCall(session, allocator, .{ .cmd = "draft.gmail-save", .account = account, .draftId = copied_id, .expectedVersion = 0, .expectedDigest = j.text(info, "contentDigest") });
     try std.testing.expectEqualStrings("linked", j.text(saved, "outcome"));
     try std.testing.expectEqual(@as(usize, 2), oracle.writes.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), oracle.uploads.load(.acquire));
@@ -1012,8 +1075,14 @@ pub fn growingNativeThreadScenario() !void {
             try std.testing.expect(oracle.last_mime_bytes.load(.acquire) <= types.Limits.mime_upload_bytes);
             const repeated = try sendMemoryCall(session, temp, .{ .cmd = "draft.send", .account = account, .draftId = id, .operationId = "growing-thread-final-send" });
             try std.testing.expectEqualStrings("applied", j.text(repeated, "outcome"));
-            const info = try sendMemoryCall(session, temp, .{ .cmd = "draft.gmail-info", .account = account, .draftId = id });
-            const uploaded = try sendMemoryCall(session, temp, .{ .cmd = "draft.gmail-save", .account = account, .draftId = id, .expectedVersion = 0, .expectedDigest = j.text(info, "contentDigest") });
+            const refused_raw = try session.execute(temp, try j.encodeAlloc(temp, .{ .cmd = "draft.gmail-save", .account = account, .draftId = id, .expectedVersion = 0 }, .{}));
+            const refused = try std.json.parseFromSliceLeaky(j.Value, temp, refused_raw, .{});
+            try std.testing.expectEqualStrings("ArchivedDraftReadOnly", j.text(j.get(refused, "error").?, "code"));
+            try std.testing.expectEqual(@as(usize, 0), oracle.uploads.load(.acquire));
+            const copied = try sendMemoryCall(session, temp, .{ .cmd = "draft.clone", .account = account, .draftId = id });
+            const copied_id = j.text(copied, "id");
+            const info = try sendMemoryCall(session, temp, .{ .cmd = "draft.gmail-info", .account = account, .draftId = copied_id });
+            const uploaded = try sendMemoryCall(session, temp, .{ .cmd = "draft.gmail-save", .account = account, .draftId = copied_id, .expectedVersion = 0, .expectedDigest = j.text(info, "contentDigest") });
             try std.testing.expectEqualStrings("linked", j.text(uploaded, "outcome"));
             try std.testing.expect(oracle.last_mime_bytes.load(.acquire) > 34 * 1024 * 1024);
             try std.testing.expect(oracle.last_mime_bytes.load(.acquire) <= types.Limits.mime_upload_bytes);
@@ -1048,4 +1117,167 @@ pub fn growingNativeThreadScenario() !void {
         oracle.source = null;
     }
     std.debug.print("growing native thread compiler={s} optimize={s} rounds=21 resources=146 uniqueBlobs={d} decodedImages={d} mimeBytes={d} httpMediaBytes={d} fixedPeak={d} transientPeak={d} posts={d} attachmentGets={d} elapsedMs={d}\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode), image_identities.count(), 146 * 160000, oracle.last_mime_bytes.load(.acquire), oracle.last_media_bytes.load(.acquire), cap.snapshot().allocatorPeakBytes, @import("terminal/send_memory.zig").snapshot().allocatorPeakBytes, oracle.writes.load(.acquire), oracle.attachment_reads.load(.acquire), started.untilNow(io, .awake).toMilliseconds() });
+}
+
+pub fn retainedSendLifecycle(encrypted: bool, many_blobs: bool) !void {
+    const operation_count: usize = if (many_blobs) 6 else 1001;
+    const storage = @import("terminal/store.zig");
+    const Core = @import("terminal/core.zig").Session;
+    const VaultOwner = @import("terminal/vault_owner.zig").Owner;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var identity = try Identity.init(allocator);
+    const config = try allocator.create(Config);
+    try config.defaults("/nonexistent/synthetic-history-home");
+    config.count = 1;
+    try config.accounts[0].address.set(account);
+    config.credential_store = .vault;
+    config.runtime_provider = identity.provider();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    const root = try std.fmt.allocPrint(allocator, "{s}/cache", .{base});
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", base);
+    const sealed_owner: ?*VaultOwner = if (encrypted) try a.create(VaultOwner) else null;
+    defer if (sealed_owner) |owner| {
+        owner.deinit();
+        a.destroy(owner);
+    };
+    if (sealed_owner) |owner| {
+        owner.* = try VaultOwner.init(io, a, &env, try std.fmt.allocPrint(allocator, "{s}/sealed", .{base}), .{});
+        var directory = try @import("keyring_file.zig").directory(io, owner.path, true);
+        directory.close(io);
+        owner.key = try @import("terminal/vault_crypto.zig").createDataKey(io);
+        const descriptor: @import("terminal/vault_header.zig").Header = .{ .vault_id = owner.key.vault_id, .key_id = owner.key.key_id, .root_record = try @import("terminal/vault_storage.zig").Handle.create(io), .password = @splat(0), .recovery = @splat(0) };
+        owner.catalog_owner = try @import("terminal/vault_catalog.zig").Owner.create(io, owner.data_path, descriptor, &owner.key, &owner.workspace);
+        try storage.Store.createVaultAccount(&owner.catalog_owner.?, allocator, account, .{ .fixtures = true });
+        owner.catalog_owner.?.live_enabled = true;
+    }
+    var oracle: Oracle = .{ .listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .kernel_backlog = 4 }), .write_status = .init(200), .history_flow = true, .history_blob_flow = many_blobs };
+    defer oracle.listener.deinit(io);
+    http.TestRoute.origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{oracle.listener.socket.address.getPort()});
+    defer http.TestRoute.origin = null;
+    var task = try io.concurrent(Oracle.run, .{&oracle});
+    var oracle_joined = false;
+    defer if (!oracle_joined) task.cancel(io) catch {};
+    const session = try a.create(Core);
+    defer a.destroy(session);
+    try session.initInto(io, a, &env, .{ .cache_dir = root }, config);
+    defer session.deinit();
+    session.vault_owner = sealed_owner;
+    const types = @import("terminal/types.zig");
+    var broad: [40]types.Address = undefined;
+    var files: [40]types.Attachment = undefined;
+    for (&broad, &files, 0..) |*destination, *attachment, index| {
+        destination.* = .{ .address = try std.fmt.allocPrint(allocator, "peer-{d}@example.test", .{index}) };
+        attachment.* = .{ .id = try std.fmt.allocPrint(allocator, "file-{d}", .{index}), .filename = try std.fmt.allocPrint(allocator, "tiny-{d}.txt", .{index}), .mimeType = "text/plain", .size = 1, .data = "eA" };
+    }
+    var first_draft: []const u8 = "";
+    var first_hash: []const u8 = "";
+    var imported_files: usize = 0;
+    for (0..operation_count) |index| {
+        var phase: std.heap.ArenaAllocator = .init(a);
+        defer phase.deinit();
+        const alloc = phase.allocator();
+        const file_count: usize = if (!many_blobs) 0 else if (index == 0) 40 else if (index <= 4) 1000 else if (index == 5) 57 else 0;
+        const selected_files = if (index == 0) @as([]types.Attachment, &files) else try alloc.alloc(types.Attachment, file_count);
+        const descriptor_allocator = if (index == 0) allocator else alloc;
+        if (many_blobs) for (selected_files) |*file| {
+            var file_arena: std.heap.ArenaAllocator = .init(a);
+            defer file_arena.deinit();
+            var store = try session.openStore(file_arena.allocator(), account, false);
+            defer store.close();
+            var content: [4]u8 = undefined;
+            std.mem.writeInt(u32, &content, @intCast(imported_files), .little);
+            var incoming = try @import("terminal/attachment_blob.zig").Incoming.create(&store, content.len);
+            defer incoming.close();
+            try incoming.write(&content);
+            try incoming.finish(content.len);
+            file.* = try incoming.commit(&store, .{ .id = try std.fmt.allocPrint(descriptor_allocator, "file-{d}", .{imported_files}), .filename = try std.fmt.allocPrint(descriptor_allocator, "tiny-{d}.bin", .{imported_files}), .mimeType = "application/octet-stream", .size = content.len });
+            file.blobId = try descriptor_allocator.dupe(u8, file.blobId.?);
+            imported_files += 1;
+            if (imported_files % 512 == 0) std.debug.print("retained blob progress encrypted={} imported={d}\n", .{ encrypted, imported_files });
+            if (encrypted) try std.testing.expectEqual(@as(usize, 0), store.vaultBlobCount());
+        };
+        const result = try sendMemoryCall(session, alloc, .{ .cmd = "mail.send", .account = account, .operationId = try std.fmt.allocPrint(alloc, "history-operation-{d}", .{index}), .draft = .{ .to = if (index == 0) @as([]const types.Address, &broad) else @as([]const types.Address, &.{.{ .address = "peer@example.test" }}), .attachments = selected_files, .bodyText = try std.fmt.allocPrint(alloc, "Synthetic exact spool body {d}", .{index}) } });
+        try std.testing.expectEqualStrings("applied", j.text(result, "outcome"));
+        if ((index + 1) % 250 == 0 or many_blobs) std.debug.print("retained send progress encrypted={} accepted={d}/{d}\n", .{ encrypted, index + 1, operation_count });
+        if (index == 0) {
+            first_draft = try allocator.dupe(u8, j.text(result, "draftId"));
+            first_hash = try allocator.dupe(u8, j.text(result, "hash"));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, if (many_blobs) 4097 else 0), imported_files);
+    try std.testing.expectEqual(imported_files, oracle.verified_history_files.load(.acquire));
+    if (many_blobs) {
+        var store = try session.openStore(allocator, account, false);
+        defer store.close();
+        try @import("terminal/operation_history.zig").compact(&store, true);
+    }
+    try std.testing.expectEqual(operation_count, oracle.writes.load(.acquire));
+    try std.testing.expectEqual(operation_count, oracle.spools.load(.acquire));
+    session.deinit();
+    try session.initInto(io, a, &env, .{ .cache_dir = root }, config);
+    session.vault_owner = sealed_owner;
+    const original = try sendMemoryCall(session, allocator, .{ .cmd = "operation.read", .account = account, .operationId = "history-operation-0" });
+    try std.testing.expectEqualStrings(first_hash, j.text(original, "hash"));
+    _ = try sendMemoryCall(session, allocator, .{ .cmd = "mail.send", .account = account, .operationId = "history-operation-0", .draft = .{ .to = &broad, .attachments = &files, .bodyText = "Synthetic exact spool body 0" } });
+    try std.testing.expectEqual(operation_count, oracle.writes.load(.acquire));
+    const conflict = try session.execute(allocator, try j.encodeAlloc(allocator, .{ .cmd = "mail.send", .account = account, .operationId = "history-operation-0", .draft = .{ .to = "peer@example.test", .bodyText = "Changed content" } }, .{}));
+    const conflict_value = try std.json.parseFromSliceLeaky(j.Value, allocator, conflict, .{});
+    try std.testing.expectEqualStrings("OperationConflict", j.text(j.get(conflict_value, "error").?, "code"));
+    try std.testing.expectEqual(operation_count, oracle.writes.load(.acquire));
+    const recovered = try sendMemoryCall(session, allocator, .{ .cmd = "draft.read", .account = account, .draftId = first_draft });
+    try std.testing.expectEqualStrings("Synthetic exact spool body 0", j.text(recovered, "bodyText"));
+    try std.testing.expectEqual(@as(usize, 40), j.get(recovered, "to").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 40), j.get(recovered, "attachments").?.array.items.len);
+    _ = try sendMemoryCall(session, allocator, .{ .cmd = "cache.clear", .account = account });
+    if (many_blobs) {
+        const shared = try sendMemoryCall(session, allocator, .{ .cmd = "draft.create", .account = account, .draft = .{ .to = "peer@example.test", .bodyText = "Unsent shared file pin", .attachments = files[0..1] } });
+        {
+            var store = try session.openStore(allocator, account, false);
+            defer store.close();
+            try std.testing.expectEqual(@as(usize, 4097), (try store.blobStats()).count);
+            try @import("terminal/attachment_blob.zig").verify(&store, files[0]);
+            try std.testing.expectError(error.AttachmentInUse, @import("terminal/attachment_blob.zig").discard(&store, files[0].blobId.?));
+        }
+        const deleted = try sendMemoryCall(session, allocator, .{ .cmd = "history.delete-source", .account = account, .draftId = first_draft, .confirm = true, .discardFiles = true });
+        try std.testing.expectEqual(@as(i64, 39), try j.integer(deleted, "filesDeleted", 0));
+        {
+            var store = try session.openStore(allocator, account, false);
+            defer store.close();
+            try @import("terminal/attachment_blob.zig").verify(&store, files[0]);
+            try std.testing.expectEqual(@as(usize, 4097 - 39), (try store.blobStats()).count);
+        }
+        _ = try sendMemoryCall(session, allocator, .{ .cmd = "draft.discard", .account = account, .draftId = j.text(shared, "id") });
+        const pruned = try sendMemoryCall(session, allocator, .{ .cmd = "history.delete-source", .account = account, .draftId = first_draft, .confirm = true, .discardFiles = true });
+        try std.testing.expectEqual(@as(i64, 1), try j.integer(pruned, "filesDeleted", 0));
+    } else _ = try sendMemoryCall(session, allocator, .{ .cmd = "history.delete-source", .account = account, .draftId = first_draft, .confirm = true });
+    _ = try sendMemoryCall(session, allocator, .{ .cmd = "draft.send", .account = account, .draftId = first_draft, .operationId = "history-operation-0" });
+    try std.testing.expectEqual(operation_count, oracle.writes.load(.acquire));
+    // A genuine ambiguous provider completion remains active through explicit
+    // compaction/restart and cannot be retried under a fresh operation ID.
+    oracle.drop_write.store(true, .release);
+    const uncertain = try sendMemoryCall(session, allocator, .{ .cmd = "mail.send", .account = account, .operationId = "history-unknown", .draft = .{ .to = "peer@example.test", .bodyText = "Synthetic exact spool body uncertain" } });
+    try std.testing.expectEqualStrings("unknown", j.text(uncertain, "outcome"));
+    oracle.drop_write.store(false, .release);
+    {
+        var store = try session.openStore(allocator, account, false);
+        defer store.close();
+        try @import("terminal/operation_history.zig").compact(&store, true);
+        try std.testing.expectEqual(@as(usize, 1), store.state.operations.len);
+        try std.testing.expectEqualStrings("history-unknown", store.state.operations[0].id);
+        try std.testing.expectEqual(@as(usize, 1), store.state.drafts.len);
+        try std.testing.expectEqual(@as(u64, operation_count), store.state.history.operations);
+        try std.testing.expectEqual(@as(usize, 0), store.state.outbox.len);
+        if (encrypted) try std.testing.expect(store.vaultObjects.len < 8);
+    }
+    _ = try sendMemoryCall(session, allocator, .{ .cmd = "mail.send", .account = account, .operationId = "fresh-id-same-uncertain-body", .draft = .{ .to = "peer@example.test", .bodyText = "Synthetic exact spool body uncertain" } });
+    try std.testing.expectEqual(operation_count + 1, oracle.writes.load(.acquire));
+    oracle_joined = true;
+    task.cancel(io) catch |err| if (err != error.Canceled) return err;
+    try oracle.requireHistorySuccess();
 }

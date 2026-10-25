@@ -63,24 +63,23 @@ pub fn inventory(io: std.Io, a: std.mem.Allocator, backing: std.mem.Allocator, m
         var source = if (leases) |held| try held.open(io, scratch, configured.address.slice(), options) else try storage.Store.openMigration(io, scratch, metadata.source.cache, configured.address.slice(), options, allow_create_leases);
         defer if (source) |*value| value.close();
         if (source == null and !metadata.source.allow_empty_cache) return error.VaultMigrationAccountRequired;
-        output.* = .{ .account = try a.dupe(u8, configured.address.slice()), .present = source != null, .state_sha256 = @splat(0), .target_state_sha256 = try journal.digest(storage.State{ .account = configured.address.slice(), .metadataPolicy = options.metadata_limit, .diskPolicy = options.disk_limit, .decoderRevision = storage.decoder_revision }), .objects = &.{} };
+        output.* = .{ .account = try a.dupe(u8, configured.address.slice()), .present = source != null, .state_sha256 = @splat(0), .target_state_sha256 = try journal.stateDigest(storage.State{ .account = configured.address.slice(), .metadataPolicy = options.metadata_limit, .diskPolicy = options.disk_limit, .decoderRevision = storage.decoder_revision }), .objects = &.{} };
         if (source) |*value| {
-            output.state_sha256 = try journal.digest(value.state);
+            output.state_sha256 = try journal.stateDigest(value.state);
             const objects = try value.migrationObjects(scratch);
-            output.target_state_sha256 = try journal.digest(try value.migrationTargetState(scratch));
+            output.target_state_sha256 = try journal.stateDigest(try value.migrationTargetState(scratch));
             output.mail_count = value.state.entries.len;
             output.draft_count = value.state.drafts.len;
             for (value.state.sendQueue) |queued| if (queued.state == .queued) {
                 output.queued_count += 1;
             };
-            if (objects.len > journal.max_objects - total) return error.VaultMigrationPlanTooLarge;
             const copied = try a.alloc(journal.Object, objects.len);
             for (objects, copied) |object, *copied_object| {
-                copied_object.* = .{ .name = try a.dupe(u8, object.name), .kind = object.kind, .size = object.size, .sha256 = object.sha256, .handle = object.handle };
+                copied_object.* = .{ .name = try a.dupe(u8, object.name), .kind = object.kind, .size = object.size, .sha256 = object.sha256, .handle = object.handle, .mapped = object.mapped };
                 bytes = try std.math.add(usize, bytes, object.size);
             }
             output.objects = copied;
-            total += objects.len;
+            total = try std.math.add(usize, total, objects.len);
         }
     }
     return .{ .accounts = accounts, .object_count = total, .plaintext_bytes = bytes };
@@ -118,15 +117,18 @@ pub fn copy(owner: *Owner, a: std.mem.Allocator, metadata: identity.Metadata, ca
         // Missing plan is only restartable while all initial indexes remain
         // empty. No orphaned/copy-created account object can be discarded.
         try requireEmpty(owner, a);
+        try log.discardIncompletePlan();
         var journal_entries = log.directory.dir.iterate();
         while (try journal_entries.next(owner.io)) |entry| {
             if (entry.kind != .file or !std.mem.eql(u8, entry.name, ".vault-lock")) return error.VaultMigrationPlanRequired;
         }
         _ = try identityReady(owner, captured);
-        const plan = try inventory(owner.io, a, owner.allocator, metadata, owner.options, true, leases);
+        var preparing: std.heap.ArenaAllocator = .init(owner.private_allocator.allocator());
+        defer preparing.deinit();
+        const plan = try inventory(owner.io, preparing.allocator(), owner.allocator, metadata, owner.options, true, leases);
         const initial: journal.Manifest = .{ .vault_id = owner.key.vault_id, .source = metadata.source, .identity_sha256 = captured.digest, .accounts = plan.accounts };
         try log.createManifest(initial);
-        break :blk initial;
+        break :blk try log.readManifest(a);
     } else return err;
     if (!std.mem.eql(u8, &manifest.identity_sha256, &captured.digest) or !sourceEqual(manifest.source, metadata.source)) return error.VaultMigrationSourceChanged;
     var progress = try log.readProgress(a, manifest);
@@ -134,7 +136,7 @@ pub fn copy(owner: *Owner, a: std.mem.Allocator, metadata: identity.Metadata, ca
         var temporary: std.heap.ArenaAllocator = .init(owner.private_allocator.allocator());
         defer temporary.deinit();
         const current = try inventory(owner.io, temporary.allocator(), owner.allocator, metadata, owner.options, true, leases);
-        try sameAccounts(temporary.allocator(), current.accounts, manifest.accounts);
+        try sameAccounts(&log, temporary.allocator(), current.accounts, manifest.accounts);
         return verify(owner, a, &log, manifest, progress);
     }
     // The plan commits before identity publication. A restart can complete
@@ -149,7 +151,7 @@ pub fn copy(owner: *Owner, a: std.mem.Allocator, metadata: identity.Metadata, ca
         // A published snapshot is parsed alone. Reopening a large source and
         // an already-published destination together doubles the bounded peak.
         if (try alreadyPublished(owner, planned)) {
-            global_index += planned.objects.len;
+            global_index += planned.objectCount();
             progress.next_object = @max(progress.next_object, global_index);
             progress.published_accounts |= @as(u8, 1) << @as(u3, @intCast(account_index));
             try log.saveProgress(progress, manifest);
@@ -162,29 +164,34 @@ pub fn copy(owner: *Owner, a: std.mem.Allocator, metadata: identity.Metadata, ca
         defer if (source) |*value| value.close();
         if ((source != null) != planned.present) return error.VaultMigrationSourceChanged;
         if (source) |*value| {
-            const current_digest = try journal.digest(value.state);
+            const current_digest = try journal.stateDigest(value.state);
             if (!std.mem.eql(u8, &current_digest, &planned.state_sha256)) return error.VaultMigrationSourceChanged;
             const current = try value.migrationObjects(scratch);
-            try sameObjects(scratch, current, planned.objects);
+            try sameObjects(&log, scratch, current, planned);
             var target_options = value.options;
             target_options.disk_limit = (try value.migrationCapacity(current)).disk_limit;
             var destination = try storage.Store.openMigrationDestination(owner.io, scratch, &owner.catalog_owner.?, planned.account, target_options);
             defer destination.close();
-            const descriptors = try scratch.alloc(storage.MigrationObject, planned.objects.len);
-            for (planned.objects, descriptors) |object, *descriptor| {
-                descriptor.* = .{ .name = object.name, .kind = object.kind, .size = object.size, .sha256 = object.sha256, .handle = object.handle };
-                // Verification is unconditional even for checkpointed objects.
-                // A durable handle already present must authenticate exactly.
-                try destination.copyMigrationObject(value, descriptor);
-                global_index += 1;
-                if (global_index > progress.next_object) {
-                    progress.next_object = global_index;
-                    const stop = if (options.fixture_stop_after) |limit| global_index >= limit else false;
-                    if (stop or global_index % 1024 == 0) try log.saveProgress(progress, manifest);
-                    if (stop) return error.VaultMigrationInterrupted;
+            const page_count = std.math.divCeil(usize, planned.objectCount(), journal.objects_per_page) catch unreachable;
+            for (0..page_count) |page_index| {
+                var page_arena: std.heap.ArenaAllocator = .init(owner.private_allocator.allocator());
+                defer page_arena.deinit();
+                for (try log.objectPage(page_arena.allocator(), planned, page_index)) |object| {
+                    const descriptor = &current[try objectIndex(current, object.name)];
+                    descriptor.handle = object.handle;
+                    // Verification is unconditional even for checkpointed
+                    // objects; only a complete verified account is published.
+                    try destination.copyMigrationObject(value, descriptor);
+                    global_index += 1;
+                    if (global_index > progress.next_object) {
+                        progress.next_object = global_index;
+                        const stop = if (options.fixture_stop_after) |limit| global_index >= limit else false;
+                        if (stop or global_index % 1024 == 0) try log.saveProgress(progress, manifest);
+                        if (stop) return error.VaultMigrationInterrupted;
+                    }
                 }
             }
-            try destination.publishMigrationSnapshot(value, descriptors);
+            try destination.publishMigrationSnapshot(value, current);
         }
         progress.published_accounts |= @as(u8, 1) << @as(u3, @intCast(account_index));
         try log.saveProgress(progress, manifest);
@@ -198,7 +205,7 @@ pub fn copy(owner: *Owner, a: std.mem.Allocator, metadata: identity.Metadata, ca
         const fresh = try identity.capture(owner.io, temporary.allocator(), fresh_meta);
         if (!std.mem.eql(u8, &fresh.digest, &manifest.identity_sha256)) return error.VaultMigrationSourceChanged;
         const fresh_inventory = try inventory(owner.io, temporary.allocator(), owner.allocator, fresh_meta, owner.options, true, leases);
-        try sameAccounts(temporary.allocator(), fresh_inventory.accounts, manifest.accounts);
+        try sameAccounts(&log, temporary.allocator(), fresh_inventory.accounts, manifest.accounts);
     }
     // Verify destination independently before publishing completion.
     progress.verified = true;
@@ -210,8 +217,8 @@ fn alreadyPublished(owner: *Owner, planned: journal.Account) !bool {
     defer temporary.deinit();
     var destination = try storage.Store.openMigrationDestination(owner.io, temporary.allocator(), &owner.catalog_owner.?, planned.account, owner.options);
     defer destination.close();
-    const actual = try journal.digest(destination.state);
-    if (std.mem.eql(u8, &actual, &planned.target_state_sha256) and destination.vaultObjects.len == planned.objects.len) return true;
+    const actual = try journal.stateDigest(destination.state);
+    if (std.mem.eql(u8, &actual, &planned.target_state_sha256) and destination.vaultObjects.len == planned.mappedCount()) return true;
     if (destination.vaultObjects.len != 0) return error.InvalidVaultMigration;
     return false;
 }
@@ -238,7 +245,7 @@ pub fn activationFreshness(owner: *Owner, manifest: journal.Manifest) !Freshness
             defer temporary.deinit();
             var source = try storage.Store.openMigrationLeased(owner.io, temporary.allocator(), lease, planned.account, owner.options);
             defer source.close();
-            const current = try journal.digest(source.state);
+            const current = try journal.stateDigest(source.state);
             if (!std.mem.eql(u8, &current, &planned.state_sha256)) return error.VaultMigrationSourceChanged;
         } else if (planned.present) result.unavailable = true;
     }
@@ -262,25 +269,36 @@ fn identityReady(owner: *Owner, captured: identity.Capture) !bool {
 fn sourceEqual(left: journal.Source, right: journal.Source) bool {
     return std.mem.eql(u8, left.config, right.config) and std.mem.eql(u8, left.grants, right.grants) and std.mem.eql(u8, left.cache, right.cache) and std.mem.eql(u8, left.preferences orelse "", right.preferences orelse "") and left.allow_empty_cache == right.allow_empty_cache and left.allow_missing_grants == right.allow_missing_grants and left.allow_missing_tokens == right.allow_missing_tokens;
 }
-fn sameObjects(a: std.mem.Allocator, current: anytype, planned: []const journal.Object) !void {
-    if (current.len != planned.len) return error.VaultMigrationSourceChanged;
-    var names: std.StringHashMap(usize) = .init(a);
-    defer names.deinit();
-    for (current, 0..) |object, index| {
-        const result = try names.getOrPut(object.name);
-        if (result.found_existing) return error.VaultMigrationSourceChanged;
-        result.value_ptr.* = index;
+fn objectIndex(current: anytype, name: []const u8) !usize {
+    var low: usize = 0;
+    var high = current.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        switch (std.mem.order(u8, current[middle].name, name)) {
+            .eq => return middle,
+            .lt => low = middle + 1,
+            .gt => high = middle,
+        }
     }
-    for (planned) |expected| {
-        const object = current[names.get(expected.name) orelse return error.VaultMigrationSourceChanged];
-        if (object.kind != expected.kind or object.size != expected.size or !std.mem.eql(u8, &object.sha256, &expected.sha256)) return error.VaultMigrationSourceChanged;
+    return error.VaultMigrationSourceChanged;
+}
+fn sameObjects(log: *journal.Journal, a: std.mem.Allocator, current: anytype, planned: journal.Account) !void {
+    if (current.len != planned.objectCount()) return error.VaultMigrationSourceChanged;
+    const page_count = std.math.divCeil(usize, planned.objectCount(), journal.objects_per_page) catch unreachable;
+    for (0..page_count) |index| {
+        var phase: std.heap.ArenaAllocator = .init(a);
+        defer phase.deinit();
+        for (try log.objectPage(phase.allocator(), planned, index)) |expected| {
+            const object = current[try objectIndex(current, expected.name)];
+            if (object.kind != expected.kind or object.size != expected.size or object.mapped != expected.mapped or !std.mem.eql(u8, &object.sha256, &expected.sha256)) return error.VaultMigrationSourceChanged;
+        }
     }
 }
-fn sameAccounts(a: std.mem.Allocator, current: []const journal.Account, planned: []const journal.Account) !void {
+fn sameAccounts(log: *journal.Journal, a: std.mem.Allocator, current: []const journal.Account, planned: []const journal.Account) !void {
     if (current.len != planned.len) return error.VaultMigrationSourceChanged;
     for (current, planned) |actual, expected| {
         if (!std.mem.eql(u8, actual.account, expected.account) or actual.present != expected.present or !std.mem.eql(u8, &actual.state_sha256, &expected.state_sha256) or !std.mem.eql(u8, &actual.target_state_sha256, &expected.target_state_sha256)) return error.VaultMigrationSourceChanged;
-        try sameObjects(a, actual.objects, expected.objects);
+        try sameObjects(log, a, actual.objects, expected);
     }
 }
 fn requireEmpty(owner: *Owner, a: std.mem.Allocator) !void {
@@ -290,8 +308,8 @@ fn requireEmpty(owner: *Owner, a: std.mem.Allocator) !void {
         defer temporary.deinit();
         var destination = try storage.Store.openMigrationDestination(owner.io, temporary.allocator(), &owner.catalog_owner.?, entry.address(), owner.options);
         defer destination.close();
-        const initial = try journal.digest(storage.State{ .account = entry.address(), .metadataPolicy = owner.options.metadata_limit, .diskPolicy = owner.options.disk_limit, .decoderRevision = storage.decoder_revision });
-        const actual = try journal.digest(destination.state);
+        const initial = try journal.stateDigest(storage.State{ .account = entry.address(), .metadataPolicy = owner.options.metadata_limit, .diskPolicy = owner.options.disk_limit, .decoderRevision = storage.decoder_revision });
+        const actual = try journal.stateDigest(destination.state);
         if (destination.vaultObjects.len != 0 or !std.mem.eql(u8, &initial, &actual)) return error.VaultMigrationPlanRequired;
         const index_name = entry.index.filename();
         var files = destination.dir.iterate();
@@ -303,7 +321,6 @@ fn requireEmpty(owner: *Owner, a: std.mem.Allocator) !void {
 /// Verify the authenticated destination independently of the source. Activation
 /// additionally calls activationFreshness before publishing its marker.
 pub fn verify(owner: *Owner, a: std.mem.Allocator, log: *journal.Journal, manifest: journal.Manifest, progress: journal.Progress) !void {
-    _ = log;
     if (!progress.verified or progress.next_object != manifest.objectCount() or manifest.accounts.len != owner.catalog_owner.?.count) return error.VaultMigrationIncomplete;
     const identity_digest = try journal.digest(owner.identity.?.entries);
     if (!std.mem.eql(u8, &identity_digest, &manifest.identity_sha256)) return error.InvalidVaultMigration;
@@ -313,8 +330,8 @@ pub fn verify(owner: *Owner, a: std.mem.Allocator, log: *journal.Journal, manife
         defer temporary.deinit();
         var destination = try storage.Store.openMigrationDestination(owner.io, temporary.allocator(), &owner.catalog_owner.?, planned.account, owner.options);
         defer destination.close();
-        if (destination.vaultObjects.len != planned.objects.len) return error.InvalidVaultMigration;
-        const state_digest = try journal.digest(destination.state);
+        if (destination.vaultObjects.len != planned.mappedCount()) return error.InvalidVaultMigration;
+        const state_digest = try journal.stateDigest(destination.state);
         if (!std.mem.eql(u8, &state_digest, &planned.target_state_sha256)) return error.InvalidVaultMigration;
         const account = destination.vault.?;
         var names: std.StringHashMap(usize) = .init(temporary.allocator());
@@ -324,24 +341,34 @@ pub fn verify(owner: *Owner, a: std.mem.Allocator, log: *journal.Journal, manife
             if (result.found_existing) return error.InvalidVaultMigration;
             result.value_ptr.* = index;
         }
-        for (planned.objects) |object| {
-            const mapped = destination.vaultObjects[names.get(object.name) orelse return error.InvalidVaultMigration];
-            if (mapped.kind != object.kind or !std.mem.eql(u8, mapped.handle, &object.handle.text())) return error.InvalidVaultMigration;
-            var occupied: ?*anyopaque = null;
-            var input = try stream.Reader.init(&account.directory, &owner.key, account.record(object.kind, object.handle), &owner.workspace.plaintext, &occupied);
-            defer input.close();
-            if (input.size != object.size) return error.InvalidVaultMigration;
-            var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
-            var buffer: [4096]u8 = undefined;
-            defer std.crypto.secureZero(u8, &buffer);
-            while (true) {
-                const count = try input.read(&buffer);
-                if (count == 0) break;
-                hash.update(buffer[0..count]);
+        const page_count = std.math.divCeil(usize, planned.objectCount(), journal.objects_per_page) catch unreachable;
+        for (0..page_count) |page_index| {
+            var page_arena: std.heap.ArenaAllocator = .init(owner.private_allocator.allocator());
+            defer page_arena.deinit();
+            for (try log.objectPage(page_arena.allocator(), planned, page_index)) |object| {
+                if (object.mapped and !@import("operation_history.zig").direct(object.name)) {
+                    const mapped = destination.vaultObjects[names.get(object.name) orelse return error.InvalidVaultMigration];
+                    if (mapped.kind != object.kind or !std.mem.eql(u8, mapped.handle, &object.handle.text())) return error.InvalidVaultMigration;
+                } else if (object.kind == .attachment and !object.mapped) {
+                    const blob = (try @import("operation_history.zig").findBlob(&destination, page_arena.allocator(), object.name[5..69])) orelse return error.InvalidVaultMigration;
+                    if (blob.deleted or blob.size != object.size or !std.mem.eql(u8, blob.handle, &object.handle.text())) return error.InvalidVaultMigration;
+                } else if (!std.mem.eql(u8, &(try @import("operation_history.zig").handleOf(object.name)).bytes, &object.handle.bytes)) return error.InvalidVaultMigration;
+                var occupied: ?*anyopaque = null;
+                var input = try stream.Reader.init(&account.directory, &owner.key, account.record(object.kind, object.handle), &owner.workspace.plaintext, &occupied);
+                defer input.close();
+                if (input.size != object.size) return error.InvalidVaultMigration;
+                var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
+                var buffer: [4096]u8 = undefined;
+                defer std.crypto.secureZero(u8, &buffer);
+                while (true) {
+                    const count = try input.read(&buffer);
+                    if (count == 0) break;
+                    hash.update(buffer[0..count]);
+                }
+                var digest: [32]u8 = undefined;
+                hash.final(&digest);
+                if (!std.mem.eql(u8, &digest, &object.sha256)) return error.InvalidVaultMigration;
             }
-            var digest: [32]u8 = undefined;
-            hash.final(&digest);
-            if (!std.mem.eql(u8, &digest, &object.sha256)) return error.InvalidVaultMigration;
         }
     }
 }

@@ -189,7 +189,7 @@ def entries(state):
 
 
 def preserved(state, legacy, additional_drafts=()):
-    require(state["account"] == ACCOUNT and state["schema"] == 1, "decoder migration changed cache identity")
+    require(state["account"] == ACCOUNT and state["schema"] == 2, "decoder migration changed cache identity or missed its schema upgrade")
     require(state["historyId"] == legacy["historyId"], "decoder recovery reset the history checkpoint")
     require(state["inboxArrivalCount"] == legacy["inboxArrivalCount"], "decoder recovery counted old mail as an arrival")
     require(state["generation"] > legacy["generation"] and state["serial"] >= legacy["serial"],

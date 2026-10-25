@@ -89,7 +89,10 @@ pub fn validateRequest(a: std.mem.Allocator, grants: service.Grants, request: p.
     switch (request.kind) {
         .calendar_list => {
             if (!grants.calendar_list) return error.CalendarPermissionRequired;
-            if (!std.mem.startsWith(u8, request.url, p.base_url ++ "/users/me/calendarList?")) return error.InvalidCalendarPath;
+            if (!std.mem.startsWith(u8, request.url, p.base_url ++ "/users/me/calendarList?")) {
+                const bound = try p.getCalendar(a, request.target);
+                if (!std.mem.eql(u8, request.url, bound.url)) return error.InvalidCalendarPath;
+            }
         },
         .free_busy => {
             if (!grants.free_busy) return error.CalendarFreeBusyPermissionRequired;

@@ -60,11 +60,13 @@ necessary and is wiped and released on success, failure or joined cancellation;
 it never becomes a Session or access-token-cache allocator. Message, attachment,
 MIME and disk quotas remain enforced. Native source text/rendering can reach
 35 MiB; the final MIME spool is checked against Gmail's exact 35 MiB maximum
-before submission. Decoded files retain their combined 25 MiB limit, with at
-most 16 ordinary outgoing files and 1,024 retained related resources. Formatted
+before submission. Native ordinary files and included original resources share
+1,040 outgoing parts and 25 MiB decoded; up to 1,024 original resources are
+retained. The browser demo keeps 16 ordinary outgoing files. Formatted
 captures save resources as immutable blobs from the first image, so further
 replies exchange handles instead of copying base64 screenshots through JSON.
-The native store supports 4,096 blobs under the same account disk quota. Larger
+Native blob metadata uses paged immutable records under the account disk quota;
+the legacy 4,096-entry flat map remains readable. Larger
 source fetches grow from received bytes, and large native draft/IPC records
 have separate serialization ceilings rather than preallocated buffers. The
 ordinary reader can retain a source envelope without expanding an oversized
@@ -87,12 +89,29 @@ External libc/pthread, Keychain and subprocess internals remain outside this
 application-owned guarantee. Reservations describe capacity, not resident RSS
 or PSS; demand faults can make reserved pages resident later.
 
+Native account indexes keep compact active draft counts and navigation data.
+Exact draft sources and their attachment pins publish as immutable records;
+settled sources, receipts and queues move to paged history. The 128-draft and
+1,000-operation active bounds protect ongoing work rather than limiting
+lifetime use. Unknown, queued and unresolved Gmail/Calendar work stays active.
+Explicit settled-source deletion preserves permanent operation fingerprints.
+Calendar publishes its active document and settled identity/receipt roots in
+one transaction, retaining UID/version and cancellation fences. Migration
+inventories also page their authenticated records.
+
+An encrypted stream owns a handle-token lease until finish or abort. Shared
+workspace operations fail while that writer is live; nested history reads use
+separate bounded, wiped scratch. Source reads can use the ciphertext half while
+the writer retains buffered plaintext. Releasing a Store keeps the owner lease
+until the stream completes, including across account handoffs.
+
 The shared metadata policy permits 16 KiB subjects plus 16 bytes of prefix
 headroom, 1 KiB display names and received addresses, 512-byte outgoing
 addresses and filenames, and 128 KiB of aggregate headers. All counts are UTF-8
 bytes. Preview snippets are bounded separately at 16 KiB; clipping them leaves
 the full body available and reports a warning. Outgoing envelopes remain
-limited to 32 recipients. Extended addresses produce a portable-SMTP warning
+limited to 500 recipients natively and 32 in the browser demo. Extended
+addresses produce a portable-SMTP warning
 in send review; Gmail and downstream delivery may still reject them. Encoded
 aggregate header limits are checked before a spool/provider receives any bytes;
 combining every individual maximum can still exceed those aggregate limits.

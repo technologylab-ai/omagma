@@ -105,14 +105,17 @@ pub fn parseInto(result: *Preferences, allocator: std.mem.Allocator, bytes: []co
     if (wire.contexts.len > 3 or wire.bindings.len > 24) return error.UiPreferencesTooManyEntries;
     if (wire.sendGraceSeconds > 30) return error.InvalidSendGrace;
     result.* = .{};
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(result));
+    errdefer {
+        result.calendar.deinit();
+        std.crypto.secureZero(u8, std.mem.asBytes(result));
+    }
     result.theme = wire.theme;
     result.sendGraceSeconds = wire.sendGraceSeconds;
     result.readerLayout = wire.readerLayout;
     result.density = wire.density;
     result.listWidthPercent = wire.listWidthPercent;
     result.listHeightPercent = wire.listHeightPercent;
-    result.calendar = try calendar_sources.fromWire(wire.calendar orelse .{});
+    result.calendar = try calendar_sources.fromWire(allocator, wire.calendar orelse .{});
     try parseSearches(wire.searchHistory, &result.searchHistory, false);
     try parseSearches(wire.savedSearches, &result.savedSearches, true);
     if (wire.lastAccount.len > 0) try b.address(wire.lastAccount);
@@ -161,18 +164,25 @@ pub fn encode(allocator: std.mem.Allocator, value: *const Preferences) ![]const 
         saved[saved_count] = .{ .account = entry.account.slice(), .name = entry.name.slice(), .query = entry.query.slice(), .mode = entry.mode };
         saved_count += 1;
     };
-    var calendar_storage: [calendar_sources.max_sources]calendar_sources.ChoiceWire = undefined;
-    const calendar_wire = calendar_sources.toWire(&value.calendar, &calendar_storage);
-    return std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count], .calendar = if (calendar_wire.scope == .account and calendar_wire.sources.len == 0 and calendar_wire.preferred == null) null else calendar_wire }, .{ .emit_null_optional_fields = false });
+    const calendar_wire = try calendar_sources.toWire(allocator, &value.calendar);
+    defer allocator.free(calendar_wire.sources);
+    const bytes = try std.json.Stringify.valueAlloc(allocator, Wire{ .theme = value.theme, .sendGraceSeconds = value.sendGraceSeconds, .readerLayout = value.readerLayout, .density = value.density, .listWidthPercent = value.listWidthPercent, .listHeightPercent = value.listHeightPercent, .lastAccount = value.lastAccount.slice(), .contexts = contexts[0..context_count], .bindings = bindings[0..binding_count], .searchHistory = history[0..history_count], .savedSearches = saved[0..saved_count], .calendar = if (calendar_wire.scope == .account and calendar_wire.sources.len == 0 and calendar_wire.preferred == null) null else calendar_wire }, .{ .emit_null_optional_fields = false });
+    if (bytes.len > max_bytes) {
+        allocator.free(bytes);
+        return error.UiPreferencesTooLarge;
+    }
+    return bytes;
 }
 
 test "calendar sources: preferences retain scope source visibility and color without changing old settings" {
     const a = std.testing.allocator;
     try std.testing.expectEqual(calendar_sources.Scope.account, (try parse(a, "{\"schema\":1}")).calendar.scope);
     var value = try parse(a, "{\"calendar\":{\"scope\":\"all_accounts\",\"sources\":[{\"account\":\"work@example.test\",\"calendarId\":\"holidays\",\"visible\":false,\"color\":\"green\"}]}}");
+    defer value.calendar.deinit();
     const encoded = try encode(a, &value);
     defer a.free(encoded);
-    const restored = try parse(a, encoded);
+    var restored = try parse(a, encoded);
+    defer restored.calendar.deinit();
     try std.testing.expectEqual(calendar_sources.Scope.all_accounts, restored.calendar.scope);
     const choice = restored.calendar.find(.{ .account = "work@example.test", .calendar_id = "holidays" }).?;
     try std.testing.expect(!choice.visible);
@@ -211,7 +221,7 @@ test "calendar sources: priority-only preferences survive private and daemon par
     try std.testing.expectEqual(@as(u8, 63), decoded.listWidthPercent);
     try std.testing.expectEqual(layout.ReaderLayout.below, decoded.readerLayout);
     try std.testing.expectEqual(calendar_sources.Scope.account, decoded.calendar.scope);
-    for (decoded.calendar.choices) |choice| try std.testing.expect(choice == null);
+    try std.testing.expectEqual(@as(usize, 0), decoded.calendar.choices.items.len);
     const remote_roundtrip = try encode(a, decoded);
     defer a.free(remote_roundtrip);
     try std.testing.expect((try parse(a, remote_roundtrip)).calendar.isPreferred(source));
@@ -264,7 +274,8 @@ pub fn save(io: std.Io, allocator: std.mem.Allocator, filename: []const u8, valu
     if (!std.fs.path.isAbsolute(filename) or filename.len > 4096 or std.mem.indexOfScalar(u8, filename, 0) != null) return error.InvalidUiPreferencesPath;
     // Revalidate an existing file: malformed or insecure settings are never
     // silently replaced merely because the running UI chose its fallback.
-    _ = try load(io, allocator, filename);
+    var previous = try load(io, allocator, filename);
+    defer previous.calendar.deinit();
     const parent = std.fs.path.dirname(filename) orelse return error.InvalidUiPreferencesPath;
     const basename = std.fs.path.basename(filename);
     if (basename.len == 0 or std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) return error.InvalidUiPreferencesPath;

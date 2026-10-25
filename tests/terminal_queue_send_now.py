@@ -54,9 +54,17 @@ def applied(binary, directory):
         identity(queued, receipt)
         require(receipt["state"] == "applied" and receipt["operation"]["id"] == queued["operationId"]
                 and receipt["operation"]["outcome"] == "applied", "Send now did not apply its original reviewed operation")
-        require(client.request("queue.list")["queue"] == [receipt]
-                and client.request("operation.list")["operations"] == [receipt["operation"]],
-                "Send now duplicated the queue or submission journal")
+        retained_queues = client.request("history.queues")
+        retained_operations = client.request("history.operations")
+        expected_queue_record = {key: value for key, value in receipt.items() if key != "operation"}
+        expected_queue_record["hash"] = receipt["operation"]["hash"]
+        require(client.request("queue.list")["queue"] == []
+                and client.request("operation.list")["operations"] == []
+                and retained_queues["items"] == [expected_queue_record] and not retained_queues["nextCursor"]
+                and retained_operations["items"] == [receipt["operation"]] and not retained_operations["nextCursor"]
+                and client.request("queue.read", queueId=queued["queueId"]) == receipt
+                and client.request("operation.read", operationId=queued["operationId"]) == receipt["operation"],
+                "Send now lost, changed, or duplicated its retained queue/operation receipts")
         sent = client.request("mail.read", messageId=receipt["operation"]["messageId"], cacheOnly=True)
         require(sent["subject"] == source["subject"] and sent["bodyText"] == source["bodyText"],
                 "Send now changed the reviewed draft")
@@ -70,11 +78,9 @@ def applied(binary, directory):
         client.restart()
         require(client.request("queue.send-now", queueId=queued["queueId"]) == receipt
                 and counters(client) == before, "restart or mixed-interface replay redispatched a completed Send now")
-        retained = client.request("draft.list")["drafts"]
-        require({item["id"] for item in retained} <= {source["id"]}, "Send now cloned the reviewed draft")
-        if retained:
-            require(client.request("draft.read", draftId=source["id"]) == source,
-                    "Send now changed the retained reviewed draft")
+        require(client.request("draft.list")["drafts"] == []
+                and client.request("draft.read", draftId=source["id"]) == source,
+                "Send now cloned or changed the exact retained reviewed draft")
         next_source = draft(client, "Next message still waits")
         next_queue = stage(client, next_source, "send-now-next-default")
         client.request("queue.cancel", queueId=next_queue["queueId"])

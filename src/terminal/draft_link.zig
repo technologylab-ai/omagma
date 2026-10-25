@@ -135,9 +135,5 @@ test "Gmail draft link: uncertain upload stays paused and remote changes require
 }
 
 pub fn contentDigest(a: std.mem.Allocator, draft: @import("types.zig").Draft, account: []const u8) ![64]u8 {
-    const bytes = try @import("send_outcome.zig").payload(a, draft, account, null);
-    defer a.free(bytes);
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
-    return std.fmt.bytesToHex(hash, .lower);
+    return @import("send_outcome.zig").digest(a, draft, account, null);
 }

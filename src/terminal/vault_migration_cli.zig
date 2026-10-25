@@ -21,8 +21,12 @@ pub const Arguments = struct {
     fixture_stop_after: ?usize = null,
     allow_unavailable_source: bool = false,
 };
-pub fn run(io: std.Io, allocator: std.mem.Allocator, env: *const std.process.Environ.Map, verb: []const u8, vault_path: ?[]const u8, socket_path: []const u8, options: t.Options, args: Arguments, prompts: Prompts) !void {
+pub fn run(io: std.Io, normal_allocator: std.mem.Allocator, env: *const std.process.Environ.Map, verb: []const u8, vault_path: ?[]const u8, socket_path: []const u8, options: t.Options, args: Arguments, prompts: Prompts) !void {
     if (args.fixture_stop_after != null and !options.fixtures) return error.InvalidFixtureControl;
+    // A local one-off migration inventories metadata for all retained files.
+    // Keep that transient work outside the daemon/UI heap; all arenas below
+    // are wiped and released before this synchronous command returns.
+    const allocator = if (@import("send_memory.zig").native) @import("send_memory.zig").allocator() else normal_allocator;
     var wiping: @import("vault_allocator.zig").WipingAllocator = .{ .backing = allocator };
     var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer arena.deinit();

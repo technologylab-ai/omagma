@@ -62,7 +62,7 @@ pub fn listCalendars(a: std.mem.Allocator, account: []const u8, page_token: []co
     const target: t.Target = .{ .account = account, .calendar_id = "primary" };
     try target.validate();
     const suffix = try tokenSuffix(a, page_token);
-    return .{ .target = target, .kind = .calendar_list, .method = .GET, .url = try std.fmt.allocPrint(a, base_url ++ "/users/me/calendarList?maxResults=24&showHidden=true&fields=items(id,summary,timeZone,accessRole,dataOwner,primary,selected,conferenceProperties),nextPageToken{s}", .{suffix}) };
+    return .{ .target = target, .kind = .calendar_list, .method = .GET, .url = try std.fmt.allocPrint(a, base_url ++ "/users/me/calendarList?maxResults={d}&showHidden=true&fields=items(id,summary,timeZone,accessRole,dataOwner,primary,selected,conferenceProperties),nextPageToken{s}", .{ t.Limits.calendar_page, suffix }) };
 }
 
 pub fn lookup(a: std.mem.Allocator, target: t.Target, uid: []const u8, page_token: []const u8) !Request {
@@ -202,25 +202,38 @@ pub fn decodeCalendars(a: std.mem.Allocator, account: []const u8, bytes: []const
     try b.address(account);
     const value = try parseJson(a, bytes);
     const items = j.get(value, "items") orelse return error.InvalidCalendarResponse;
-    if (items != .array or items.array.items.len > t.Limits.calendars) return error.TooManyCalendars;
+    if (items != .array or items.array.items.len > t.Limits.calendar_page) return error.TooManyCalendars;
     const calendars = try a.alloc(t.Calendar, items.array.items.len);
     const owned_account = try a.dupe(u8, account);
-    for (items.array.items, calendars) |item, *calendar| {
-        const role = try field(a, item, "accessRole", 32, false);
-        const access: t.Access = if (std.mem.eql(u8, role, "owner")) .owner else if (std.mem.eql(u8, role, "writer")) .writer else if (std.mem.eql(u8, role, "writerWithoutPrivateAccess")) .writer_without_private else if (std.mem.eql(u8, role, "reader")) .reader else if (std.mem.eql(u8, role, "freeBusyReader")) .free_busy else if (std.mem.eql(u8, role, "none")) .none else return error.InvalidCalendarResponse;
-        calendar.* = .{ .target = .{ .account = owned_account, .calendar_id = try field(a, item, "id", 1024, false) }, .summary = try field(a, item, "summary", 1024, true), .time_zone = try field(a, item, "timeZone", 512, false), .access = access, .primary = try j.boolean(item, "primary", false), .selected = try j.boolean(item, "selected", false) };
-        if (j.get(item, "conferenceProperties")) |properties| if (j.get(properties, "allowedConferenceSolutionTypes")) |allowed| {
-            if (allowed != .array or allowed.array.items.len > 16) return error.InvalidCalendarResponse;
-            for (allowed.array.items) |solution| if (std.mem.eql(u8, try j.string(solution), "hangoutsMeet")) {
-                calendar.supports_meet = true;
-            };
-        };
-        calendar.data_owner = try field(a, item, "dataOwner", 512, true);
-        if (calendar.data_owner.len != 0) try b.address(calendar.data_owner);
-        calendar.owned_scope_verified = calendar.primary or std.ascii.eqlIgnoreCase(calendar.data_owner, account);
-        try time.validateZoneName(calendar.time_zone);
-    }
+    for (items.array.items, calendars) |item, *calendar| calendar.* = try decodeCalendarValue(a, owned_account, item);
     return .{ .calendars = calendars, .next_page_token = try field(a, value, "nextPageToken", 4096, true) };
+}
+
+pub fn getCalendar(a: std.mem.Allocator, target: t.Target) !Request {
+    try target.validate();
+    return .{ .target = target, .kind = .calendar_list, .method = .GET, .url = try std.fmt.allocPrint(a, base_url ++ "/users/me/calendarList/{s}", .{try encode(a, target.calendar_id)}) };
+}
+pub fn decodeCalendar(a: std.mem.Allocator, target: t.Target, bytes: []const u8) !t.Calendar {
+    const calendar = try decodeCalendarValue(a, target.account, try parseJson(a, bytes));
+    if (!calendar.target.eql(target) and !(std.mem.eql(u8, target.calendar_id, "primary") and calendar.primary)) return error.CalendarIdentityMismatch;
+    return calendar;
+}
+fn decodeCalendarValue(a: std.mem.Allocator, account: []const u8, item: j.Value) !t.Calendar {
+    try b.address(account);
+    const role = try field(a, item, "accessRole", 32, false);
+    const access: t.Access = if (std.mem.eql(u8, role, "owner")) .owner else if (std.mem.eql(u8, role, "writer")) .writer else if (std.mem.eql(u8, role, "writerWithoutPrivateAccess")) .writer_without_private else if (std.mem.eql(u8, role, "reader")) .reader else if (std.mem.eql(u8, role, "freeBusyReader")) .free_busy else if (std.mem.eql(u8, role, "none")) .none else return error.InvalidCalendarResponse;
+    var calendar: t.Calendar = .{ .target = .{ .account = try a.dupe(u8, account), .calendar_id = try field(a, item, "id", 1024, false) }, .summary = try field(a, item, "summary", 1024, true), .time_zone = try field(a, item, "timeZone", 512, false), .access = access, .primary = try j.boolean(item, "primary", false), .selected = try j.boolean(item, "selected", false) };
+    if (j.get(item, "conferenceProperties")) |properties| if (j.get(properties, "allowedConferenceSolutionTypes")) |allowed| {
+        if (allowed != .array or allowed.array.items.len > 16) return error.InvalidCalendarResponse;
+        for (allowed.array.items) |solution| if (std.mem.eql(u8, try j.string(solution), "hangoutsMeet")) {
+            calendar.supports_meet = true;
+        };
+    };
+    calendar.data_owner = try field(a, item, "dataOwner", 512, true);
+    if (calendar.data_owner.len != 0) try b.address(calendar.data_owner);
+    calendar.owned_scope_verified = calendar.primary or std.ascii.eqlIgnoreCase(calendar.data_owner, account);
+    try time.validateZoneName(calendar.time_zone);
+    return calendar;
 }
 
 pub const EventDocument = struct { event: t.Event, value: j.Value };

@@ -135,6 +135,8 @@ jobs:
           python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
       - name: Debug growing native mail stress
         run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Debug retained native history stress
+        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Debug current terminal and agent feature acceptance
         run: |
           .verification-debug/bin/omagma build-info
@@ -162,6 +164,14 @@ jobs:
           do
             python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
           done
+      - name: Debug Linux retained draft and compose acceptance
+        run: |
+          python3 tests/terminal_compose_actions.py --binary .verification-debug/bin/omagma
+          python3 tests/terminal_draft_conflict.py --binary .verification-debug/bin/omagma
+          python3 tests/terminal_draft_paging.py --binary .verification-debug/bin/omagma
+          python3 tests/terminal_quote_policy.py --binary .verification-debug/bin/omagma
+          python3 tests/terminal_reply_boundaries.py --binary .verification-debug/bin/omagma
+          python3 tests/terminal_settled_recovery.py --binary .verification-debug/bin/omagma
       - name: Debug first-use mail, Calendar and vault workflows
         run: python3 tests/terminal_workflow_regressions.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/workflows-linux-debug.json
       - name: Debug independent HTML preservation oracle
@@ -182,6 +192,8 @@ jobs:
           python3 tests/calendar_native_http.py --probe .verification-safe/bin/calendar_http_probe
       - name: Safe growing native mail stress
         run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Safe retained native history stress
+        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
@@ -259,6 +271,14 @@ jobs:
           do
             python3 "tests/$suite.py" --binary "dist/omagma-linux-$RELEASE_ARCH"
           done
+      - name: Safe Linux retained draft and compose acceptance
+        run: |
+          python3 tests/terminal_compose_actions.py --binary dist/omagma-linux-${{ matrix.arch }}
+          python3 tests/terminal_draft_conflict.py --binary dist/omagma-linux-${{ matrix.arch }}
+          python3 tests/terminal_draft_paging.py --binary dist/omagma-linux-${{ matrix.arch }}
+          python3 tests/terminal_quote_policy.py --binary dist/omagma-linux-${{ matrix.arch }}
+          python3 tests/terminal_reply_boundaries.py --binary dist/omagma-linux-${{ matrix.arch }}
+          python3 tests/terminal_settled_recovery.py --binary dist/omagma-linux-${{ matrix.arch }}
       - name: Safe packaged first-use mail, Calendar and vault workflows
         run: python3 tests/terminal_workflow_regressions.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/workflows-linux-safe.json
       - name: Safe packaged independent HTML preservation oracle
@@ -390,6 +410,8 @@ jobs:
           python3 tests/calendar_native_http.py --probe .verification-macos-debug/bin/calendar_http_probe
       - name: Debug growing native mail stress
         run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Debug retained native history stress
+        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Debug portable Markdown, invitation and command acceptance
         run: |
           python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
@@ -402,6 +424,14 @@ jobs:
           python3 tests/terminal_queue_send_now.py --binary .verification-macos-debug/bin/omagma
           python3 tests/credential_storage.py --binary .verification-macos-debug/bin/omagma
           python3 tests/updates.py --binary .verification-macos-debug/bin/omagma
+      - name: Debug macOS retained draft and compose acceptance
+        run: |
+          python3 tests/terminal_compose_actions.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_draft_conflict.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_draft_paging.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_quote_policy.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_reply_boundaries.py --binary .verification-macos-debug/bin/omagma
+          python3 tests/terminal_settled_recovery.py --binary .verification-macos-debug/bin/omagma
       - name: Debug native first-use mail, Calendar and vault workflows
         run: python3 tests/terminal_workflow_regressions.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/workflows-macos-debug.json
       - name: Debug native terminal, Keychain and detached lifecycle
@@ -438,6 +468,8 @@ jobs:
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
       - name: Safe growing native mail stress
         run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Safe retained native history stress
+        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
       - name: Validate macOS archive and native executable
@@ -481,6 +513,14 @@ jobs:
           python3 tests/terminal_queue_send_now.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/credential_storage.py --binary dist/omagma-macos-$RELEASE_ARCH
           python3 tests/updates.py --binary dist/omagma-macos-$RELEASE_ARCH
+      - name: Safe macOS retained draft and compose acceptance
+        run: |
+          python3 tests/terminal_compose_actions.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_draft_conflict.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_draft_paging.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_quote_policy.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_reply_boundaries.py --binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/terminal_settled_recovery.py --binary dist/omagma-macos-${{ matrix.arch }}
       - name: Safe packaged first-use mail, Calendar and vault workflows
         run: python3 tests/terminal_workflow_regressions.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/workflows-macos-safe.json
       - name: Native Keychain survives the packaged binary upgrade

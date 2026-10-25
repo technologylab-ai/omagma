@@ -90,9 +90,12 @@ def resize_compose(terminal, columns, rows):
         current = terminal.text()
         bounds = rectangle(terminal, "Compose ·", required=False)
         if (terminal.screen.full_physical_clears <= clears
-                or bounds is None or bounds[0] != 0 or bounds[2:] != (2, terminal.rows - 3)
+                or bounds is None or bounds[0] != 0 or bounds[2:] != (2, terminal.rows - 5)
                 or "Compose" not in terminal.screen.lines()[0]
                 or "Subject:" not in current or "Body:" not in current
+                or "Preview in browser" not in terminal.screen.lines()[-3]
+                or "Continue in Gmail" not in terminal.screen.lines()[-3]
+                or not terminal.screen.lines()[-4].startswith(("Message size", "MIME:"))
                 or "Ctrl+S Review" not in terminal.screen.lines()[-2]):
             return False
         # Physical resize preserves old cells. The previous Compose/Body text
@@ -100,7 +103,7 @@ def resize_compose(terminal, columns, rows):
         if terminal.columns < 90:
             return bounds[1] == terminal.columns - 1
         return any(rectangle(terminal, title, required=False)
-                   == (bounds[1] + 1, terminal.columns - 1, 2, terminal.rows - 3)
+                   == (bounds[1] + 1, terminal.columns - 1, 2, terminal.rows - 5)
                    for title in ("Outgoing preview", "Draft preview", "Original message", "Plain-text alternative"))
     terminal.until(ready)
 
@@ -134,10 +137,16 @@ def confirm_and_check(terminal, client, expected_source, original, kind, expecte
     require(client.request("cache.stats")["fixtureSends"] == 0, "mail was submitted before explicit confirmation")
     terminal.send(b"y")
     terminal.until(lambda: "Saved by mock provider" in terminal.text())
-    operations = client.request("operation.list")["operations"]
-    applied = [operation for operation in operations if operation["outcome"] == "applied"]
-    require(len(applied) == 1, "explicit confirmation did not create exactly one applied fixture operation")
-    sent = client.request("mail.read", messageId=applied[0]["messageId"])
+    history = client.request("history.operations")
+    require(not client.request("operation.list")["operations"] and not history["nextCursor"]
+            and len(history["items"]) == 1, "explicit confirmation did not retain exactly one applied fixture operation")
+    applied = history["items"][0]
+    require(applied["outcome"] == "applied" and applied["draftId"] == saved["id"]
+            and client.request("operation.read", operationId=applied["id"]) == applied,
+            "retained operation lost its exact source association or receipt")
+    require(client.request("draft.read", draftId=saved["id"]) == saved,
+            "submission changed the exact retained Markdown source")
+    sent = client.request("mail.read", messageId=applied["messageId"])
     require(sent["bodyHtml"] == preview["bodyHtml"] and sent["bodyText"] == preview["plainText"], "rendered review/send alternatives differed")
     require(len(sent["attachments"]) == (1 if expected_file else 0), "submission changed genuine user attachment count")
     if expected_file:

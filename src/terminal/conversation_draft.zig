@@ -62,11 +62,11 @@ pub fn reply(a: std.mem.Allocator, message: t.Message, options: ReplyOptions) !t
     // A display-only fallback never supplies an implicit outgoing recipient.
     if (message.decodeWarning.len > 0 and message.from.address.len == 0) return error.UnsafeReplyMetadata;
     const threading = try mime.threading(message.messageId, message.references, message.inReplyTo, a);
-    var envelope: recipients.Envelope = .{};
-    try recipients.replyIncoming(a, options.account, options.aliases, try addressHeader(a, &.{message.from}), try addressHeader(a, message.replyTo), try addressHeader(a, message.to), try addressHeader(a, message.cc), options.all, &envelope);
+    const envelope = try recipients.replyAddresses(a, options.account, options.aliases, message.from, message.replyTo, message.to, message.cc, options.all);
+    errdefer envelope.deinit(a);
     return .{
-        .to = try listAddresses(a, &envelope.to),
-        .cc = try listAddresses(a, &envelope.cc),
+        .to = envelope.to,
+        .cc = envelope.cc,
         .subject = try prefixedSubject(a, message.subject, "Re:"),
         .bodyText = if (options.original != null) "" else try quote(a, if (options.format == .markdown) try markdown.escapeSource(a, message.bodyText) else message.bodyText),
         .bodyFormat = options.format,

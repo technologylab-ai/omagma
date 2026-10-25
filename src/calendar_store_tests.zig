@@ -265,7 +265,18 @@ test "calendar store: ordinary completed events recycle count capacity and prese
         try std.testing.expectEqualSlices(u8, &prepared.review_hash, &receipt.review_hash);
         try std.testing.expectError(error.CalendarReviewNotFound, current.loadReview(ia, target, prepared.intent.operation_id));
     }
-    try std.testing.expect(try saved.loadReceipt(a, target, "ordinary-0") == null);
+    if (@import("terminal/types.zig").Limits.native) {
+        const old_receipt = (try saved.loadReceipt(a, target, "ordinary-0")).?;
+        try std.testing.expect(!(try backend.journal.claim(old_receipt.operation.intent)).fresh);
+        try std.testing.expect(!(try backend.journal.claim(imported.intent)).fresh);
+        try backend.journal.record(imported_operation);
+        var conflicting = imported.intent;
+        conflicting.identity.target.calendar_id = "different-calendar";
+        try std.testing.expectError(error.OperationConflict, backend.journal.claim(conflicting));
+        conflicting = imported.intent;
+        conflicting.payload_hash[0] ^= 1;
+        try std.testing.expectError(error.OperationConflict, backend.journal.claim(conflicting));
+    } else try std.testing.expect(try saved.loadReceipt(a, target, "ordinary-0") == null);
     const retained = try backend.load(a, imported.intent.identity);
     try std.testing.expectEqualStrings("imported-provider-id", retained.tracked.?.event_id);
     try std.testing.expectEqualSlices(u8, &imported.intent.source_hash, &retained.tracked.?.source_hash);
@@ -287,6 +298,12 @@ test "calendar store: large notes evict drafts by bytes while an unknown request
     @memset(notes, 'n');
     var saved = host(a, root);
     const backend = saved.persistence();
+    const earlier = try ordinaryReview(a, &saved, "settled-before-byte-pressure", target.calendar_id, "");
+    try backend.preserveFn(backend.context, earlier);
+    var earlier_operation = (try backend.journal.claim(earlier.intent)).operation;
+    earlier_operation.state = .applied;
+    earlier_operation.provider_id = earlier.intent.event_id;
+    try backend.journal.record(earlier_operation);
     const pending = try ordinaryReview(a, &saved, "pending-large-notes", "pending-calendar", notes);
     try backend.preserveFn(backend.context, pending);
     var operation = (try backend.journal.claim(pending.intent)).operation;
@@ -299,6 +316,7 @@ test "calendar store: large notes evict drafts by bytes while an unknown request
         const persistence_api = current.persistence();
         try persistence_api.preserveFn(persistence_api.context, prepared);
     }
+    if (@import("terminal/types.zig").Limits.native) try std.testing.expect(try saved.loadReceipt(a, target, earlier.intent.operation_id) != null);
     try std.testing.expectError(error.CalendarReviewNotFound, saved.loadReview(a, target, "large-draft-0"));
     const pending_target: t.Target = .{ .account = target.account, .calendar_id = "pending-calendar" };
     const exact = try saved.loadReview(a, pending_target, "pending-large-notes");

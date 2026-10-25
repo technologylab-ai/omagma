@@ -8,23 +8,58 @@ const t = @import("calendar_types.zig");
 pub const View = enum { agenda, day, week };
 pub const Page = enum { compose, event_review, main, calendars, detail, review, permissions, help, actions, overlaps };
 pub const Document = struct {
-    arena: ?std.heap.ArenaAllocator = null,
+    // Value.array retains its allocator. Keep its arena at a stable address
+    // when Documents move during catalogue growth or transactional replacement.
+    arena: ?*std.heap.ArenaAllocator = null,
     value: j.Value = .null,
     bytes: usize = 0,
     pub fn deinit(self: *Document) void {
-        if (self.arena) |*arena| arena.deinit();
+        if (self.arena) |arena| {
+            const backing = arena.child_allocator;
+            arena.deinit();
+            backing.destroy(arena);
+        }
         self.* = .{};
     }
     pub fn replace(self: *Document, a: std.mem.Allocator, value: j.Value) !void {
-        var next: Document = .{ .arena = .init(a) };
+        // Count the wire representation without retaining a serialized copy.
+        // Event descriptions often contain escaped newlines or HTML, so the
+        // old stringify + parse path could retain several copies of each one.
+        var scratch: [4096]u8 = undefined;
+        var counter = std.Io.Writer.Discarding.init(&scratch);
+        try std.json.Stringify.value(value, .{}, &counter.writer);
+        const bytes = counter.fullCount();
+        if (bytes > t.Limits.snapshot_bytes) return error.CalendarTooLarge;
+        const arena = try a.create(std.heap.ArenaAllocator);
+        arena.* = .init(a);
+        var next: Document = .{ .arena = arena };
         errdefer next.deinit();
         const owned = next.arena.?.allocator();
-        const raw = try std.json.Stringify.valueAlloc(owned, value, .{});
-        if (raw.len > t.Limits.snapshot_bytes) return error.CalendarTooLarge;
-        next.bytes = raw.len;
-        next.value = try std.json.parseFromSliceLeaky(j.Value, owned, raw, .{ .allocate = .alloc_always });
+        next.bytes = @intCast(bytes);
+        next.value = try ownValue(owned, value, 0);
         self.deinit();
         self.* = next;
+    }
+    fn ownValue(a: std.mem.Allocator, value: j.Value, depth: usize) !j.Value {
+        if (depth > 128) return error.CalendarTooDeep;
+        return switch (value) {
+            .string => .{ .string = try a.dupe(u8, value.string) },
+            .number_string => .{ .number_string = try a.dupe(u8, value.number_string) },
+            .array => result: {
+                var out: std.json.Array = .init(a);
+                try out.ensureTotalCapacity(value.array.items.len);
+                for (value.array.items) |item| out.appendAssumeCapacity(try ownValue(a, item, depth + 1));
+                break :result .{ .array = out };
+            },
+            .object => result: {
+                var out = j.object(a);
+                try out.object.ensureTotalCapacity(a, value.object.count());
+                var it = value.object.iterator();
+                while (it.next()) |entry| try out.object.put(a, try a.dupe(u8, entry.key_ptr.*), try ownValue(a, entry.value_ptr.*, depth + 1));
+                break :result out;
+            },
+            else => value,
+        };
     }
 };
 pub const State = struct {
@@ -64,8 +99,8 @@ pub const State = struct {
     notice: b.Text(256) = .{},
     calendars: Document = .{},
     source_lists: [3]Document = @splat(.{}),
-    source_snapshots: [72]Document = @splat(.{}),
-    source_errors: [72]b.Text(128) = @splat(.{}),
+    source_snapshots: []Document = &.{},
+    source_errors: []b.Text(128) = &.{},
     list_errors: [3]b.Text(128) = @splat(.{}),
     list_cursor: usize = 0,
     source_cursor: usize = 0,
@@ -89,10 +124,33 @@ pub const State = struct {
     zone: tz.Zone = .{},
     card_zone: tz.Zone = .{},
     card_zone_name: b.Text(512) = .{},
+    /// Allocate before changing the active catalogue; allocation failure leaves
+    /// its prior documents and index mapping intact.
+    pub fn resizeSources(self: *State, a: std.mem.Allocator, count: usize) !void {
+        if (count == self.source_snapshots.len) return;
+        if (count > @import("calendar_sources.zig").max_sources) return error.TooManyCalendarSources;
+        const snapshots = try a.alloc(Document, count);
+        errdefer a.free(snapshots);
+        const errors = try a.alloc(b.Text(128), count);
+        @memset(snapshots, .{});
+        @memset(errors, .{});
+        for (self.source_snapshots) |*document| document.deinit();
+        a.free(self.source_snapshots);
+        a.free(self.source_errors);
+        self.source_snapshots = snapshots;
+        self.source_errors = errors;
+    }
+    pub fn clearPendingSelection(self: *State) void {
+        if (self.pending_selection) |*pending| pending.deinit();
+        self.pending_selection = null;
+    }
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
         self.calendars.deinit();
         for (&self.source_lists) |*document| document.deinit();
-        for (&self.source_snapshots) |*document| document.deinit();
+        for (self.source_snapshots) |*document| document.deinit();
+        a.free(self.source_snapshots);
+        a.free(self.source_errors);
+        self.clearPendingSelection();
         self.agenda.deinit();
         self.card.deinit();
         self.review.deinit();
@@ -283,6 +341,65 @@ test "calendar UI: replaced view owns its source and never appends event history
     defer arena.deinit();
     try view.replace(a, try j.value(arena.allocator(), .{ .summary = "Removed", .cancelled = true }));
     try std.testing.expect(!matches(view.value, ""));
+}
+
+test "memory UX: Calendar owns escaped descriptions once without a serialized duplicate" {
+    const a = std.testing.allocator;
+    const description = try a.alloc(u8, 1024 * 1024);
+    defer a.free(description);
+    @memset(description, '\n');
+    // Arena growth needs slack, but this is still smaller than the escaped
+    // JSON plus its decoded string (over three times the description length).
+    const backing = try a.alloc(u8, description.len * 2);
+    defer a.free(backing);
+    var fixed: std.heap.FixedBufferAllocator = .init(backing);
+    var input = j.object(a);
+    defer input.object.deinit(a);
+    try input.object.put(a, "description", .{ .string = description });
+    var view: Document = .{};
+    defer view.deinit();
+    try view.replace(fixed.allocator(), input);
+    try std.testing.expectEqual(description.len * 2 + "{\"description\":\"\"}".len, view.bytes);
+    @memset(description, 'x');
+    const saved = j.text(view.value, "description");
+    try std.testing.expectEqual(description.len, saved.len);
+    for (saved) |byte| try std.testing.expectEqual(@as(u8, '\n'), byte);
+}
+
+test "memory UX: Calendar replacement allocation failure preserves the old owned snapshot" {
+    const Probe = struct {
+        fn run(a: std.mem.Allocator) !void {
+            var view: Document = .{};
+            defer view.deinit();
+            var input_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer input_arena.deinit();
+            const inputs = input_arena.allocator();
+            try view.replace(std.testing.allocator, try j.value(inputs, .{ .summary = "Kept", .events = .{.{ .id = "old" }} }));
+            const next = try j.value(inputs, .{ .summary = "Replacement", .events = .{ .{ .id = "new-a" }, .{ .id = "new-b" } } });
+            view.replace(a, next) catch |err| {
+                try std.testing.expectEqualStrings("Kept", j.text(view.value, "summary"));
+                return err;
+            };
+            try std.testing.expectEqualStrings("Replacement", j.text(view.value, "summary"));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "memory UX: moved Calendar documents keep a stable allocator for later array growth" {
+    const a = std.testing.allocator;
+    var source: std.json.Array = .init(a);
+    defer source.deinit();
+    try source.append(.{ .string = "Owned event" });
+    var original: Document = .{};
+    try original.replace(a, .{ .array = source });
+    var moved = original;
+    original = .{};
+    defer moved.deinit();
+    for (0..64) |_| try moved.value.array.append(.{ .integer = 42 });
+    try std.testing.expectEqual(@as(usize, 65), moved.value.array.items.len);
+    try std.testing.expectEqualStrings("Owned event", moved.value.array.items[0].string);
+    for (moved.value.array.items[1..]) |item| try std.testing.expectEqual(@as(i64, 42), item.integer);
 }
 
 /// User-facing wording stays independent of persistence/command enum names.

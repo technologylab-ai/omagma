@@ -29,8 +29,9 @@ const Host = struct {
     review: ?service.Review = null,
     ignore_review_binding: bool = false,
     last_request: ?provider.Request = null,
+    fail_after_record: ?*std.testing.FailingAllocator = null,
 
-    fn send(context: *anyopaque, _: std.mem.Allocator, request: provider.Request) anyerror!service.Response {
+    fn send(context: *anyopaque, a: std.mem.Allocator, request: provider.Request) anyerror!service.Response {
         const self: *Host = @ptrCast(@alignCast(context));
         if (self.index >= self.steps.len) return error.UnexpectedCalendarRequest;
         const step = self.steps[self.index];
@@ -46,6 +47,11 @@ const Host = struct {
             self.writes += 1;
         }
         if (step.lost) return error.ConnectionResetByPeer;
+        if (request.kind == .calendar_list and std.mem.startsWith(u8, request.url, provider.base_url ++ "/users/me/calendarList/")) {
+            const listed = try std.json.parseFromSliceLeaky(j.Value, a, step.body, .{});
+            for (j.get(listed, "items").?.array.items) |item| if (std.mem.eql(u8, j.text(item, "id"), request.target.calendar_id)) return .{ .account = target.account, .status = 200, .body = try j.encodeAlloc(a, item, .{}) };
+            return .{ .account = target.account, .status = 404, .body = "{}" };
+        }
         return .{ .account = target.account, .status = 200, .body = step.body };
     }
     fn loadSource(context: *anyopaque, _: std.mem.Allocator, account: []const u8, request: j.Value) anyerror!commands.InvitationInput {
@@ -85,6 +91,7 @@ const Host = struct {
         const self: *Host = @ptrCast(@alignCast(context));
         self.state.operation = operation;
         if (operation.state == .applied) self.state.tracked = .{ .identity = operation.intent.identity, .event_id = operation.provider_id, .version = operation.intent.version, .source_hash = operation.intent.source_hash };
+        if (self.fail_after_record) |allocator| allocator.fail_index = allocator.alloc_index;
     }
     fn instance(self: *Host, a: std.mem.Allocator) service.Service {
         return .{ .a = a, .grants = .{ .account = target.account, .calendar_list = true, .read_events = true, .write_owned = true, .free_busy = true }, .transport = .{ .context = self, .sendFn = send }, .persistence = .{ .context = self, .loadFn = loadState, .preserveFn = preserve, .journal = .{ .context = self, .claimFn = claim, .recordFn = record } }, .now_ms = 1000 };
@@ -200,6 +207,11 @@ test "calendar commands: nonpersistent polls of five calendars preserve foregrou
         defer account_store.close();
         break :blk (try account_store.readDocument(a, "calendar-agenda.json", persistence.cache_bytes)).?;
     };
+    // Named reads prove only the exact calendars visited, while preserving
+    // their offline binding. They must never invent complete discovery.
+    const visited = (try cache.loadCalendarsFn.?(cache.context, a)).?;
+    try std.testing.expect(!visited.complete);
+    try std.testing.expectEqual(requests.len, visited.calendars.len);
     instance.now_ms = 2000;
     const discovery = try commands.dispatch(instance, try j.value(a, .{ .cmd = "calendar.list", .account = target.account, .persistCache = false }), inputs);
     try std.testing.expect(try j.boolean(discovery, "complete", false));
@@ -252,6 +264,35 @@ test "calendar commands: review persists exact request and one accepted import s
     try std.testing.expectEqualStrings("applied", j.text(try commands.dispatch(instance, confirmed, inputs), "state"));
     try std.testing.expectEqual(@as(usize, 1), host.writes);
     try std.testing.expectEqual(host.steps.len, host.index);
+}
+
+test "post-dispatch receipt: Calendar DTO allocation failure keeps applied identity and never replays" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    defer env.deinit();
+    var host: Host = .{ .source = try fixture(a, "single-utc.ics"), .steps = &.{ .{ .kind = .calendar_list, .body = list }, .{ .kind = .event_lookup }, .{ .kind = .calendar_list, .body = list }, .{ .kind = .event_lookup }, .{ .kind = .import_event, .body = try fixture(a, "service-imported.json") }, .{ .kind = .calendar_list, .body = list } } };
+    const inputs = host.inputs(&env);
+    const review = try commands.dispatch(host.instance(a), try reviewRequest(a), inputs);
+    const confirmed = try applyRequest(a, review);
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    host.fail_after_record = &failing;
+    try std.testing.expectError(error.UnknownOutcome, commands.dispatch(host.instance(failing.allocator()), confirmed, inputs));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), host.writes);
+    try std.testing.expectEqual(.applied, host.state.operation.?.state);
+    try std.testing.expectEqualStrings(j.text(confirmed, "operationId"), host.state.operation.?.intent.operation_id);
+    const recovered = try commands.dispatch(host.instance(a), confirmed, inputs);
+    try std.testing.expectEqualStrings("applied", j.text(recovered, "state"));
+    try std.testing.expectEqualStrings(j.text(confirmed, "operationId"), j.text(recovered, "operationId"));
+    try std.testing.expectEqual(@as(usize, 1), host.writes);
+
+    // Failure before any Calendar request remains a normal allocation error.
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var unread: Host = .{};
+    try std.testing.expectError(error.OutOfMemory, commands.dispatch(unread.instance(unavailable.allocator()), try j.value(a, .{ .cmd = "calendar.list", .account = target.account }), unread.inputs(&env)));
+    try std.testing.expectEqual(@as(usize, 0), unread.writes + unread.index);
 }
 
 test "calendar commands: review hash account calendar operation and action bind before network" {

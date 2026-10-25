@@ -18,7 +18,7 @@ pub const Target = struct {
 };
 pub const Record = struct {
     key: Key,
-    target: u8,
+    target: usize,
     start: i64,
     end: i64,
     title: b.Text(512) = .{},
@@ -53,11 +53,24 @@ pub fn validateCalendars(address: []const u8, result: j.Value) !CalendarListShap
     return .{ .complete = complete, .cached = cached, .stale = stale, .entries = entries };
 }
 pub const State = struct {
-    targets: [max_targets]Target = @splat(.{}),
+    targets: []Target = &.{},
     records: [max_records]?Record = @splat(null),
     list_after: [3]i64 = @splat(0),
     cursor: usize = 0,
 
+    pub fn deinit(self: *State, a: std.mem.Allocator) void {
+        a.free(self.targets);
+        self.* = .{};
+    }
+    pub fn ensureTargets(self: *State, a: std.mem.Allocator, needed: usize) !void {
+        if (needed <= self.targets.len) return;
+        if (needed > max_targets) return error.TooManyCalendarSources;
+        const expanded = try a.alloc(Target, needed);
+        @memset(expanded, .{});
+        @memcpy(expanded[0..self.targets.len], self.targets);
+        a.free(self.targets);
+        self.targets = expanded;
+    }
     pub fn expire(self: *State, now: i64) void {
         for (&self.records) |*record| if (record.*) |*value| {
             if (value.end <= now) record.* = null else if (value.present and !value.stale and now - value.observed_at <= 120000 and value.start <= now +| lead_ms) value.announced = true;
@@ -110,16 +123,27 @@ pub const State = struct {
             if (value.dismissed) value.present = false else record.* = null;
         };
     }
-    pub fn calendars(self: *State, account: u8, address: []const u8, result: j.Value) !void {
+    pub fn calendars(self: *State, a: std.mem.Allocator, account: u8, address: []const u8, result: j.Value) !void {
         const validated = try validateCalendars(address, result);
         const complete = validated.complete;
         const cached = validated.cached;
         const stale = validated.stale;
         const entries = validated.entries;
         if (!complete or cached or stale) return;
+        var needed: usize = 0;
+        for (self.targets) |target| needed += @intFromBool(target.active and target.account != account);
+        for (entries.array.items) |entry| {
+            const value = j.get(entry, "calendar").?;
+            if (try j.boolean(entry, "canRead", false) and (try j.boolean(value, "primary", false) or try j.boolean(value, "selected", false))) needed += 1;
+        }
+        // Allocate every fallible workspace before changing existing targets.
+        try self.ensureTargets(a, needed);
+        const seen = try a.alloc(bool, self.targets.len);
+        defer a.free(seen);
+        @memset(seen, false);
         // Release obsolete owned slots first, including at full capacity. Other
         // accounts retain their slots; identity-keyed dismissal records survive.
-        for (&self.targets, 0..) |*old, index| {
+        for (self.targets, 0..) |*old, index| {
             if (!old.active or old.account != account) continue;
             var retained = false;
             for (entries.array.items) |entry| {
@@ -131,7 +155,6 @@ pub const State = struct {
             }
             if (!retained) self.deactivate(index);
         }
-        var seen: [max_targets]bool = @splat(false);
         for (entries.array.items) |entry| {
             const value = j.get(entry, "calendar").?;
             if (!try j.boolean(entry, "canRead", false) or !(try j.boolean(value, "primary", false) or try j.boolean(value, "selected", false))) continue;
@@ -149,11 +172,11 @@ pub const State = struct {
                 try self.targets[index].id.set(id);
                 break;
             };
-            const index = selected orelse continue;
+            const index = selected orelse return error.TooManyCalendarSources;
             seen[index] = true;
             self.targets[index].name.display(j.text(value, "summary"));
         }
-        for (&self.targets, 0..) |*target, index| if (target.account == account and target.active and !seen[index]) {
+        for (self.targets, 0..) |*target, index| if (target.account == account and target.active and !seen[index]) {
             self.deactivate(index);
         };
     }
@@ -213,7 +236,7 @@ pub const State = struct {
             const index = slot orelse continue;
             const dismissed = if (self.records[index]) |old| old.dismissed else false;
             const announced = (if (self.records[index]) |old| old.announced else false) or start <= now +| lead_ms;
-            self.records[index] = .{ .key = key, .target = @intCast(target_index), .start = start, .end = end, .dismissed = dismissed, .announced = announced, .observed_at = now };
+            self.records[index] = .{ .key = key, .target = target_index, .start = start, .end = end, .dismissed = dismissed, .announced = announced, .observed_at = now };
             const record = &self.records[index].?;
             record.title.display(if (j.text(event, "summary").len > 0) j.text(event, "summary") else "Untitled event");
             record.location.display(j.text(event, "location"));
@@ -263,9 +286,34 @@ fn testSnapshot(a: std.mem.Allocator, events: []const j.Value, cached: bool) !j.
 }
 fn testState() !State {
     var state: State = .{};
+    errdefer state.deinit(std.testing.allocator);
+    try state.ensureTargets(std.testing.allocator, 2);
     state.targets[0].active = true;
     try state.targets[0].id.set("primary");
     return state;
+}
+
+test "memory UX: meeting targets above 255 stay heap owned and retain exact notification identity" {
+    if (!@import("types.zig").Limits.native) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rows: std.json.Array = .init(a);
+    for (0..300) |index| try rows.append(try j.value(a, .{ .canRead = true, .calendar = .{ .target = .{ .account = "work@example.test", .calendar_id = try std.fmt.allocPrint(a, "calendar-{d}", .{index}) }, .selected = true } }));
+    var result = j.object(a);
+    try result.object.put(a, "account", .{ .string = "work@example.test" });
+    try result.object.put(a, "complete", .{ .bool = true });
+    try result.object.put(a, "calendars", .{ .array = rows });
+    var state: State = .{};
+    defer state.deinit(std.testing.allocator);
+    try state.calendars(std.testing.allocator, 0, "work@example.test", result);
+    try std.testing.expectEqual(@as(usize, 300), state.targets.len);
+    const target = .{ .account = "work@example.test", .calendar_id = "calendar-299" };
+    const event = try j.value(a, .{ .target = target, .id = "last-calendar-meeting", .summary = "Correct account and calendar", .start = .{ .kind = "instant", .value = @as(i64, 2100000) }, .end = .{ .kind = "instant", .value = @as(i64, 5500000) }, .join_url = "https://meet.example.test/last" });
+    try state.ingest(299, "work@example.test", try j.value(a, .{ .snapshot = .{ .target = target, .complete = true, .events = .{event} } }), 2000000);
+    const index = state.first() orelse return error.MissingNotification;
+    try std.testing.expectEqual(@as(usize, 299), state.records[index].?.target);
+    try std.testing.expectEqualStrings("calendar-299", state.targets[state.records[index].?.target].id.slice());
 }
 
 test "meeting notifications: exact lead boundary and until versus remaining use epoch instants" {
@@ -273,6 +321,7 @@ test "meeting notifications: exact lead boundary and until versus remaining use 
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     const start = 2000000;
     const end = start + 3600000;
     const event = try testEvent(a, "one", start, end);
@@ -296,6 +345,7 @@ test "meeting notifications: dismissal survives refresh while moved and recurrin
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     const start = 2000000;
     var event = try testEvent(a, "one", start, start + 3600000);
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{event}, false), start - lead_ms);
@@ -326,6 +376,7 @@ test "meeting notifications: cached snapshots cannot announce and failed refresh
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     const start = 2000000;
     var event = try testEvent(a, "one", start, start + 3600000);
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{event}, true), start - lead_ms);
@@ -350,6 +401,7 @@ test "meeting notifications: declined and all-day events are skipped and unsafe 
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     const start = 2000000;
     var declined = try testEvent(a, "declined", start, start + 60000);
     try declined.object.put(a, "response", .{ .string = "declined" });
@@ -367,6 +419,7 @@ test "meeting notifications: bounded dismissal records never evict and full cale
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     var events: [max_records]j.Value = undefined;
     for (&events, 0..) |*event, index| event.* = try testEvent(a, try std.fmt.allocPrint(a, "event-{d}", .{index}), 2000000, 5600000);
     const snapshot = try testSnapshot(a, &events, false);
@@ -376,13 +429,14 @@ test "meeting notifications: bounded dismissal records never evict and full cale
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{try testEvent(a, "overflow", 2000000, 5600000)}, false), 2000000);
     try state.ingest(0, "work@example.test", snapshot, 2000000);
     try std.testing.expectEqual(@as(usize, 0), state.count());
-    for (&state.targets, 0..) |*target, index| {
+    try state.ensureTargets(std.testing.allocator, 3);
+    for (state.targets, 0..) |*target, index| {
         target.active = true;
-        target.account = @intCast(index / calendar.Limits.calendars);
+        target.account = @intCast(index);
         try target.id.set(try std.fmt.allocPrint(a, "old-{d}", .{index}));
     }
     const list = try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{.{ .canRead = true, .calendar = .{ .target = .{ .account = "work@example.test", .calendar_id = "replacement" }, .summary = "New", .selected = true } }} });
-    try state.calendars(0, "work@example.test", list);
+    try state.calendars(a, 0, "work@example.test", list);
     var owned: usize = 0;
     var other: usize = 0;
     for (state.targets) |target| if (target.active) {
@@ -392,7 +446,7 @@ test "meeting notifications: bounded dismissal records never evict and full cale
         } else other += 1;
     };
     try std.testing.expectEqual(@as(usize, 1), owned);
-    try std.testing.expectEqual(@as(usize, 2 * calendar.Limits.calendars), other);
+    try std.testing.expectEqual(@as(usize, 2), other);
     for (state.records) |record| try std.testing.expect(record != null and record.?.dismissed);
 }
 
@@ -401,6 +455,7 @@ test "meeting notifications: discovery honors selected primary read access and a
     defer arena.deinit();
     const a = arena.allocator();
     var state: State = .{};
+    defer state.deinit(a);
     const list = try std.json.parseFromSliceLeaky(j.Value, a,
         \\{"account":"work@example.test","complete":true,"calendars":[
         \\{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"primary"},"primary":true,"selected":false}},
@@ -408,7 +463,7 @@ test "meeting notifications: discovery honors selected primary read access and a
         \\{"canRead":true,"calendar":{"target":{"account":"work@example.test","calendar_id":"hidden"},"selected":false}},
         \\{"canRead":false,"calendar":{"target":{"account":"work@example.test","calendar_id":"unreadable"},"selected":true}}]}
     , .{});
-    try state.calendars(0, "work@example.test", list);
+    try state.calendars(a, 0, "work@example.test", list);
     var active_count: usize = 0;
     for (state.targets) |target| if (target.active) {
         active_count += 1;
@@ -416,7 +471,7 @@ test "meeting notifications: discovery honors selected primary read access and a
     };
     try std.testing.expectEqual(@as(usize, 2), active_count);
     const bad = try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{.{ .canRead = true, .calendar = .{ .target = .{ .account = "other@example.test", .calendar_id = "wrong" }, .primary = true } }} });
-    try std.testing.expectError(error.CalendarAccountMismatch, state.calendars(0, "work@example.test", bad));
+    try std.testing.expectError(error.CalendarAccountMismatch, state.calendars(a, 0, "work@example.test", bad));
     try std.testing.expect(state.targets[0].active and state.targets[1].active);
 }
 
@@ -426,6 +481,7 @@ test "meeting notifications: authoritative replacements reclaim absent records b
     const a = arena.allocator();
     for ([_]bool{ false, true }) |moved| {
         var state = try testState();
+        defer state.deinit(std.testing.allocator);
         var events: [max_records]j.Value = undefined;
         for (&events, 0..) |*event, index| event.* = try testEvent(a, try std.fmt.allocPrint(a, "event-{d}", .{index}), 2000000, 5600000);
         try state.ingest(0, "work@example.test", try testSnapshot(a, &events, false), 2000000);
@@ -455,6 +511,7 @@ test "meeting notifications: removed calendars release capacity without losing d
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     state.targets[1].active = true;
     try state.targets[1].id.set("retained");
     var events: [max_records]j.Value = undefined;
@@ -463,7 +520,7 @@ test "meeting notifications: removed calendars release capacity without losing d
     const dismissed_key = state.records[0].?.key;
     state.dismiss(dismissed_key);
     const retained_entry = .{ .canRead = true, .calendar = .{ .target = .{ .account = "work@example.test", .calendar_id = "retained" }, .selected = true } };
-    try state.calendars(0, "work@example.test", try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{retained_entry} }));
+    try state.calendars(a, 0, "work@example.test", try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{retained_entry} }));
     try std.testing.expect(!state.targets[0].active and state.targets[1].active);
     var remaining: usize = 0;
     for (state.records) |record| if (record) |value| {
@@ -477,7 +534,7 @@ test "meeting notifications: removed calendars release capacity without losing d
     try state.ingest(1, "work@example.test", try j.value(a, .{ .snapshot = .{ .target = retained_entry.calendar.target, .complete = true, .events = .{next} } }), 2000000);
     try std.testing.expectEqual(@as(usize, 1), state.count());
     // Re-select the original calendar without resurfacing the dismissed event.
-    try state.calendars(0, "work@example.test", try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{ retained_entry, .{ .canRead = true, .calendar = .{ .target = .{ .account = "work@example.test", .calendar_id = "primary" }, .selected = true } } } }));
+    try state.calendars(a, 0, "work@example.test", try j.value(a, .{ .account = "work@example.test", .complete = true, .calendars = .{ retained_entry, .{ .canRead = true, .calendar = .{ .target = .{ .account = "work@example.test", .calendar_id = "primary" }, .selected = true } } } }));
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{events[0]}, false), 2000000);
     try std.testing.expectEqual(@as(usize, 1), state.count());
 }
@@ -487,6 +544,7 @@ test "meeting notifications: malformed later event leaves an existing stale remi
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     const old = try testEvent(a, "retained", 2000000, 5600000);
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{old}, false), 2000000);
     state.fail(0);
@@ -509,6 +567,7 @@ test "meeting notifications: permission deactivation frees records and retains d
     defer arena.deinit();
     const a = arena.allocator();
     var state = try testState();
+    defer state.deinit(std.testing.allocator);
     const dismissed = try testEvent(a, "dismissed", 2000000, 5600000);
     const visible = try testEvent(a, "visible", 2000000, 5600000);
     try state.ingest(0, "work@example.test", try testSnapshot(a, &.{ dismissed, visible }, false), 2000000);

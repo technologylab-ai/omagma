@@ -58,6 +58,10 @@ const Server = struct {
                 continue;
             };
             var frame = received.?;
+            if (transport.protectedKind(frame.kind) and frame.generation != transport.execution_protocol) {
+                self.sendError(stream, &frame, error.BackendProtocolMismatch) catch |err| if (err == error.Canceled) return error.Canceled;
+                continue;
+            }
             const lane = frame.kind == .execute;
             // deadline joins its operation even when timeout/cancel wins.
             // Retain acquisition ownership outside its discarded result.
@@ -101,6 +105,7 @@ const Server = struct {
         }
     }
     fn dispatch(self: *Server, frame: *transport.Frame, response: *?[]const u8, stream: std.Io.net.Stream) !void {
+        if (transport.protectedKind(frame.kind) and frame.generation != transport.execution_protocol) return error.BackendProtocolMismatch;
         switch (frame.kind) {
             .execute => return self.executeFrame(frame, response, stream),
             .unlock => {
@@ -133,7 +138,7 @@ const Server = struct {
             id_text = std.fmt.bytesToHex(id, .lower);
             break :blk &id_text;
         } else null;
-        response.* = try std.json.Stringify.valueAlloc(self.a, .{ .version = @as(u8, 1), .ok = true, .data = .{ .unlocked = self.owner.unlocked(), .vaultId = vault_id } }, .{});
+        response.* = try std.json.Stringify.valueAlloc(self.a, .{ .version = @as(u8, 1), .ok = true, .data = .{ .unlocked = self.owner.unlocked(), .vaultId = vault_id, .executionProtocol = transport.execution_protocol } }, .{});
     }
     fn readFrameInto(io: std.Io, a: std.mem.Allocator, stream: std.Io.net.Stream, output: *?transport.Frame) !void {
         output.* = try transport.readFrame(io, a, stream, transport.request_limit);
@@ -228,7 +233,7 @@ const Server = struct {
         var bytes: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &bytes);
         var out: std.Io.Writer = .fixed(&bytes);
-        try std.json.Stringify.value(.{ .version = @as(u8, 1), .id = meta.id, .ok = false, .account = meta.account, .@"error" = .{ .code = @errorName(err), .message = @errorName(err) } }, .{}, &out);
+        try std.json.Stringify.value(.{ .version = @as(u8, 1), .id = meta.id, .ok = false, .account = meta.account, .@"error" = .{ .code = @errorName(err), .message = transport.errorMessage(err) } }, .{}, &out);
         try platform.deadline(self.io, platform.seconds(5), transport.writeFrame, .{ self.io, stream, .response, out.buffered(), transport.response_limit });
     }
 };
@@ -529,7 +534,9 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, args: *std
     }
     if (vault_path != null or options.fixtures or options.fixture_root != null or !std.mem.eql(u8, options.fixture_scenario, "normal")) return error.UnknownOption;
     const kind: transport.Kind = if (std.mem.eql(u8, verb, "unlock")) .unlock else if (std.mem.eql(u8, verb, "lock")) .lock else if (std.mem.eql(u8, verb, "status")) .status else if (std.mem.eql(u8, verb, "stop")) .stop else if (std.mem.eql(u8, verb, "password")) .password_change else if (std.mem.eql(u8, verb, "recovery-key")) .recovery_change else if (std.mem.eql(u8, verb, "recover")) .recover else return error.UnknownCommand;
-    if (expected_id) |id| try @import("vault_launch.zig").verifyOwner(io, a, socket_path, id);
+    if (expected_id) |id| {
+        if (transport.protectedKind(kind)) try @import("vault_launch.zig").verifyOwner(io, a, socket_path, id) else try @import("vault_launch.zig").verifyControlOwner(io, a, socket_path, id);
+    }
     var secret: [32 + vt.max_password_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &secret);
     const body: []const u8 = switch (kind) {
@@ -553,7 +560,7 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, args: *std
         },
         else => "",
     };
-    var client: transport.Client = .{ .io = io, .socket_path = socket_path };
+    var client: transport.Client = .{ .io = io, .socket_path = socket_path, .expected_vault_id = expected_id };
     const response = try client.request(a, kind, body);
     defer {
         std.crypto.secureZero(u8, @constCast(response));
@@ -586,19 +593,21 @@ test "vault daemon: observer admission failure after dispatch is unknown without
         fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
             if (current) |self| {
                 self.calls += 1;
-                // worker first admits the frame-read and lane-acquisition
-                // deadline pairs. executeFrame then admits the operation and
+                // The read-only protocol status first uses frame-read and
+                // response-write deadline pairs (four admissions). The data
+                // frame then uses frame-read and lane-acquisition pairs.
+                // executeFrame admits the operation and
                 // attempts its first observer. Complete the actual operation
                 // callback before failing that observer: no timing assumption
                 // or inline substitute for the encrypted command is involved.
-                if (self.calls == 5) self.operation_start = start;
+                if (self.calls == 9) self.operation_start = start;
                 // Count every matching callback admission, including any
                 // unexpected internal retry. The ordinal positions only
                 // locate the injected fault, not the no-replay assertion.
                 if (self.operation_start) |operation_start| {
                     if (start == operation_start) _ = self.operation_admissions.fetchAdd(1, .release);
                 }
-                if (self.calls == 6) {
+                if (self.calls == 10) {
                     group.await(std.testing.io) catch return error.ConcurrencyUnavailable;
                     self.completed_before_failure += 1;
                     self.failures += 1;

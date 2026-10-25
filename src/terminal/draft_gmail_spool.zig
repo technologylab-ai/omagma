@@ -16,16 +16,9 @@ pub fn create(store: *storage.Store, draft: t.Draft, attempt: []const u8) !spool
     const sender = draft.from orelse t.Address{ .address = store.state.account };
     try from.address.set(sender.address);
     try from.name.set(sender.name);
-    var envelope: recipients.Envelope = .{};
-    for ([_][]const t.Address{ draft.to, draft.cc, draft.bcc }, [_]*recipients.List{ &envelope.to, &envelope.cc, &envelope.bcc }) |addresses, target| for (addresses) |address| {
-        var mailbox: recipients.Mailbox = .{};
-        try mailbox.address.set(address.address);
-        try mailbox.name.set(address.name);
-        try target.append(mailbox);
-    };
     return spool.create(store, .{
         .from = from,
-        .envelope = &envelope,
+        .destinations = .{ .to = draft.to, .cc = draft.cc, .bcc = draft.bcc },
         .allow_empty_recipients = true,
         .subject = draft.subject,
         .body = prepared.plain,

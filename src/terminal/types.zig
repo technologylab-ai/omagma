@@ -7,13 +7,21 @@ pub const Limits = struct {
     /// member IDs remain visible as small explicit metadata placeholders.
     pub const thread_bytes: usize = 4 * 1024 * 1024;
     pub const metadata_batch_bytes: usize = 4 * 1024 * 1024;
-    pub const attachments: usize = 16;
+    pub const native = @import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos;
+    pub const portable_attachments: usize = 16;
     /// Accumulated inline images are independent of user-added file slots.
     /// Bound metadata work while allowing long screenshot-rich reply chains;
     /// decoded-byte and encoded-MIME quotas still govern actual payload size.
     pub const related_resources: usize = 1024;
     /// Incoming descriptors include the sender's generated signature image.
-    pub const message_attachments: usize = attachments + related_resources + 1;
+    pub const message_attachments: usize = portable_attachments + related_resources + 1;
+    /// Native files share the existing MIME descriptor budget with related
+    /// parts. Payload admission still uses decoded and encoded byte limits.
+    pub const attachments: usize = if (native) message_attachments - 1 else portable_attachments;
+    pub fn validateComposeParts(files: usize, related: usize) !void {
+        if (files > attachments or related > related_resources) return error.TooManyAttachments;
+        if (native and files > message_attachments - 1 - related) return error.TooManyAttachments;
+    }
     /// Informational source files excluded from a text-only forward.
     pub const omitted_attachment_count: usize = message_attachments;
     /// Combined decoded ordinary outgoing files. Incoming saves have their own cap.
@@ -28,7 +36,10 @@ pub const Limits = struct {
         else => body_bytes,
     };
     pub const page: usize = 100;
-    pub const recipients: usize = 32;
+    /// Gmail API submission allows 500 total To/Cc/Bcc destinations.
+    pub const recipients: usize = if (native) 500 else 32;
+    /// Gmail supports 10,000 mailbox labels; browser storage remains bounded.
+    pub const labels: usize = if (native) 10000 else 512;
     pub const metadata: usize = 2000;
     pub const metadata_hard: usize = 10000;
     pub const disk_bytes: usize = 256 * 1024 * 1024;
@@ -175,9 +186,14 @@ pub const Original = struct {
     bodyHtml: []const u8 = "",
     resources: []const Attachment = &.{},
 };
+pub const DraftSummaryCounts = struct { to: usize, cc: usize, bcc: usize, attachments: usize };
 pub const Draft = struct {
     id: []const u8 = "",
     from: ?Address = null,
+    /// Internal navigation metadata only. Exact saved draft sources omit it.
+    summaryCounts: ?DraftSummaryCounts = null,
+    /// Preserve the immutable source while optionally omitting it from wire MIME.
+    includeOriginal: bool = true,
     /// Incomplete composer fields retained by local autosave. Such a draft
     /// requires a normal validated update before it can be submitted.
     recoveryFields: ?[]const []const u8 = null,

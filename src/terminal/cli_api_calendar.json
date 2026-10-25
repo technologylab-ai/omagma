@@ -26,7 +26,7 @@
       "notes": [
         "mail-read is required by the current terminal grant. Among the listed Calendar capabilities, any one is sufficient to enter this command; event access still follows the selected calendar's ACL and exact granted OAuth scope. Owned-only scope requires verified primary/dataOwner evidence and does not cover every calendar whose ACL role is owner.",
         "Returns account, calendars and complete. Each entry contains calendar, canRead, canWrite and canFreeBusy. Calendar fields include target.account, target.calendar_id, summary, time_zone, access, primary and owned_scope_verified.",
-        "Includes hidden calendars. At most 24 calendars and 16 pages are retained; complete:false is not proof that an omitted calendar does not exist. CalendarList read scope is required with all Calendar capability sets.",
+        "Includes hidden calendars. Native discovery uses pages of up to 250 calendars, at most 16 pages and 4 MiB aggregate metadata. complete:false is not proof that an omitted calendar does not exist. Explicit calendarId requests resolve the named CalendarList entry directly. The browser demo retains its 24-calendar bound. CalendarList read permission remains required.",
         "Read-only provider operation. This does not change calendar subscriptions or the bar.",
         "Cached reads still validate the current local account grant. Cached calendar permissions cannot authorize writes or assert availability. Transient connection failures may return retained data with refreshError; revoked authorization is never hidden by that fallback."
       ],
@@ -340,6 +340,7 @@
         "calendarId is the exact provider ID from calendar.list, not an assumption derived from the account or a display name. Account, calendar, UID, source version, source hash, operation ID, request hash and event/ETag stay bound.",
         "Load the saved review for this account/calendar/operation and pass its exact returned reviewHash. Do not send a review object, source, request body or ETag override; these are refused. A wrong hash or identity fails before provider access.",
         "Refreshes calendar metadata and checks current UID absence or ETag. The host durably records unknown before the single provider dispatch. Returns state applied/rejected/unknown, providerId, reconciled, errorCode and any event; inspect state even when the outer envelope is ok.",
+        "Native storage retains settled UID/version, cancellation and operation fences in immutable pages under the account disk quota. The 256-entry active document protects reviews and uncertain work rather than limiting lifetime imports. The browser demo keeps its bounded storage tier.",
         "Updates preserve unrelated event properties and do not replace attendee, recurrence, attachment or conference arrays. Cancellation uses conditional deletion with sendUpdates=none; import uses the attendee-copy import endpoint.",
         "Unknown outcomes must be reconciled; an interrupted response never authorizes automatic replay. A pending unknown operation also prevents bypass by choosing another operationId. Calendar 404 is not a Gmail authorization error.",
         "Saved sources, reviews and outcomes use the selected host's private durable account storage. Legacy private storage is plaintext; encryption applies only when the actual host adapter uses the unlocked vault."
@@ -666,7 +667,7 @@
     },
     {
       "cmd": "calendar.open",
-      "summary": "Open Google Calendar in this account\u2019s configured Chrome profile.",
+      "summary": "Open Google Calendar in this account’s configured Chrome profile.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -684,12 +685,12 @@
       },
       "required": [],
       "notes": [
-        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account\u2019s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
+        "Without calendarId opens the account calendar; with calendarId selects an exact calendar from the account’s available calendars. Profile launch is explicit and uses the existing configured account profile. Returns opened, fixture, url, profile and cached/stale metadata."
       ]
     },
     {
       "cmd": "calendar.event-open",
-      "summary": "Open an exact Calendar event in this account\u2019s configured Chrome profile.",
+      "summary": "Open an exact Calendar event in this account’s configured Chrome profile.",
       "capabilities": [
         "mail-read",
         "calendar-read",
@@ -713,7 +714,7 @@
         "eventId"
       ],
       "notes": [
-        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account\u2019s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
+        "Reads the exact account/calendar/event and validates its Google Calendar htmlLink before launching the account’s configured Chrome profile. Returns opened, fixture, url, profile and cached/stale metadata."
       ]
     },
     {
