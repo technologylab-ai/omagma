@@ -79,19 +79,19 @@ def body_snapshot(directory, accounts=(ACCOUNTS[0],)):
 
 
 def rewrite_legacy(directory, accounts=(ACCOUNTS[0],)):
-    """Create valid old-schema synthetic bodies, never alter a user's cache."""
+    """Create old body provenance within the current synthetic account index."""
     expectations = {}
     for account in accounts:
         base = Path(directory) / "cache/fixtures" / hashlib.sha256(account.encode()).hexdigest()
         index_path = base / "index.json"
         state = json.loads(index_path.read_bytes())
-        require(state["account"] == account and state["schema"] == 1, "legacy fixture has wrong cache identity")
+        require(state["account"] == account and state["schema"] == 2, "legacy body fixture has wrong current cache identity")
         for number, source in ((96, "unknown"), (95, "plain"), (94, "unknown")):
             identity = f"shared-msg-{number:03}"
             path = base / ("mail-" + hashlib.sha256(identity.encode()).hexdigest() + ".json")
             record = json.loads(path.read_bytes())
-            require(record["account"] == account and record["message"]["id"] == identity,
-                    "legacy fixture body has wrong account/message identity")
+            require(record["schema"] == 1 and record["account"] == account and record["message"]["id"] == identity,
+                    "legacy fixture body has wrong schema/account/message identity")
             message = record["message"]
             message["bodyHtml"] = document("legacy", account)
             message["bodyText"] = substitute(MANIFEST["plainMismatchTemplate"] if number == 94 else MANIFEST["legacyTextTemplate"], account)

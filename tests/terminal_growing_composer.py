@@ -179,7 +179,9 @@ def exercise(binary, root):
         require("Preview unavailable" not in terminal.text(),
                 "semantic screen limit incorrectly prevented a valid long note from review")
         wait("return-from-review", lambda: "Compose" in terminal.text().splitlines()[0], keys=b"n")
-        wait("save-and-close-composer", lambda: "Compose" not in terminal.text().splitlines()[0], keys=b"q")
+        # Closing persists the full multi-MiB draft and verifies its retained
+        # blobs, so use the same large-save budget as the editor return above.
+        wait("save-and-close-composer", lambda: "Compose" not in terminal.text().splitlines()[0], keys=b"q", seconds=30)
         with stages.step("verify-saved-original-and-note"), Client(binary, root, extra=("--fixture-root", str(fixtures))) as client:
             summaries = client.request("draft.list")["drafts"]
             require(len(summaries) == 1, "large reply was not retained exactly once")
