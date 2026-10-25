@@ -44,10 +44,15 @@ def screen_capture(terminal):
             if x == len(styles) or styles[x] != styles[run_start]:
                 runs.append([y, run_start, x, styles[run_start]])
                 run_start = x
-    return {"currentCells": ["".join(row) for row in terminal.screen.cells],
-            "cellGrid": [row[:] for row in terminal.screen.cells],
-            "currentStyleRuns": runs, "readerRectangle": reader_rectangle(terminal.screen),
-            "processExitCode": terminal.process.poll(), "stage": getattr(terminal, "html_stage", "unspecified")}
+    captured = {"currentCells": ["".join(row) for row in terminal.screen.cells],
+                "cellGrid": [row[:] for row in terminal.screen.cells],
+                "currentStyleRuns": runs, "readerRectangle": reader_rectangle(terminal.screen),
+                "processExitCode": terminal.process.poll(), "stage": getattr(terminal, "html_stage", "unspecified")}
+    if hasattr(terminal, "html_navigation_original"):
+        captured["navigation"] = {"cycle": terminal.html_navigation_cycle,
+                                  "key": terminal.html_navigation_key,
+                                  "originalReaderRows": terminal.html_navigation_original}
+    return captured
 
 
 def failed_view(failure, terminal, metrics_path):
@@ -454,11 +459,22 @@ def resource_case(binary, directory, cycles, idle):
             terminal.html_stage = "home-visible-head"
             terminal.send(b"\x1b[H")
             terminal.until(lambda: reader_contains(terminal.screen, "Fictional large HTML"))
+            # Background labels.list replaces the fallback "Inbox" with this
+            # fixture's provider name "INBOX", independently of reader scroll.
+            # Settle that header before comparing complete reader projections.
+            terminal.html_stage = "loaded-label-metadata"
+            terminal.until(lambda: within_reader(terminal, "Labels: INBOX") is not None)
             original = [text for _, text in reader_rows(terminal.screen)]
+            terminal.html_navigation_original = original
+            terminal.html_navigation_cycle = 0
+            terminal.html_navigation_key = None
 
             def navigate():
+                terminal.html_navigation_cycle += 1
+                terminal.html_navigation_key = "j"
                 terminal.send(b"j")
                 terminal.until(lambda: [text for _, text in reader_rows(terminal.screen)] != original)
+                terminal.html_navigation_key = "k"
                 terminal.send(b"k")
                 terminal.until(lambda: [text for _, text in reader_rows(terminal.screen)] == original)
 
