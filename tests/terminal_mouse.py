@@ -107,8 +107,8 @@ def snapshot(binary,directory,fixture):
     return result
 
 
-def start(binary,directory,fixture,extra=(),environment=None,columns=160,rows=40):
-    return MouseTerminal(binary,directory,extra=fixture.options(*extra),screen_type=MouseScreen,
+def start(binary,directory,fixture,extra=(),environment=None,columns=160,rows=40,screen_type=MouseScreen):
+    return MouseTerminal(binary,directory,extra=fixture.options(*extra),screen_type=screen_type,
         environment={'NO_COLOR':None,'COLORTERM':'truecolor',**(environment or {})},columns=columns,rows=rows)
 
 

@@ -19,6 +19,7 @@ from terminal_invitations import InvitationFixture
 from terminal_mouse import start, MouseTerminal
 from terminal_mouse_screen import MouseScreen
 from terminal_pty import send_review_ready
+from terminal_compose_screen import ComposerScreen
 
 
 TAB = b"\t"
@@ -161,7 +162,7 @@ def contacts_alias_and_send(binary, directory):
     preferences.write_text(json.dumps({"schema": 1, "sendGraceSeconds": 0}) + "\n")
     preferences.chmod(0o600)
     terminal = MouseTerminal(binary, directory, extra=(*extra, "--ui-file", str(preferences)), columns=160, rows=40,
-                             screen_type=MouseScreen, environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
+                             screen_type=ComposerScreen, environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     terminal.until(lambda: body["bodyText"].splitlines()[0] in terminal.text())
     try:
         terminal.send(b"a")
@@ -208,7 +209,7 @@ def contacts_alias_and_send(binary, directory):
         with Client(binary, directory, extra=extra) as client:
             require(client.request("cache.stats")["fixtureSends"] == 0, "safe initial review Enter sent mail")
         terminal.resize(80, 30)
-        terminal.until(lambda: "[Preview p]" in terminal.text())
+        terminal.until(lambda: terminal.screen.compose_geometry_ready() and "[Preview p]" in terminal.text())
         terminal.send(b"p")
         terminal.until(lambda: "[Back]" in terminal.text() and "Subject:" not in terminal.text())
         focus(terminal, TAB, "[Preview p]")
@@ -216,7 +217,7 @@ def contacts_alias_and_send(binary, directory):
         terminal.send(ENTER)
         terminal.until(lambda: "Subject:" in terminal.text())
         terminal.resize(160, 40)
-        terminal.until(lambda: "Outgoing preview" in terminal.text())
+        terminal.until(lambda: terminal.screen.compose_geometry_ready() and "Outgoing preview" in terminal.text())
         terminal.send(b"\x13")
         terminal.until(lambda: "Review send" in terminal.text() and focused(terminal, "[Back]")
                        and send_review_ready(terminal))

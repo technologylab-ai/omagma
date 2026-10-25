@@ -77,6 +77,12 @@ port. Keep archive metadata, package pin, source guard, scripts and CI in sync.
 
 The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. Current-feature acceptance also covers account-scoped bulk/undo, cached-window navigation/search, forwarding/files, composer recovery/completion, reader context, actual loading/progress, mouse/wheel routing, compact layouts and local timezone displays. The fixture timezone database is installed and checked before either native suite. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After all required native platform jobs succeed, the candidate is ready for approval. Manual promotion later collects those saved bundles, raw binaries and combined `SHA256SUMS` for the package version.
 
+Each native job runs the complete short acceptance suites against its Debug build
+and actual Safe bundle before compiling the full unit suites or starting long
+stress and resource checks. This order is enforced by the offline qualification
+policy test. Every existing gate remains required, and no artifact is publishable
+until the complete four-platform qualification has succeeded.
+
 After explicit approval, the promotion workflow downloads the successful run's four release artifacts, verifies their checksums and uses the GitHub CLI to upload all ten assets through an internal draft before publishing. It cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The publisher refuses to replace an existing release, draft or tag and does not expose an incomplete release as latest.
 
 Mac jobs run natively on Apple Silicon and Intel hosts and verify the actual

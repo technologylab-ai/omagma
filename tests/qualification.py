@@ -84,6 +84,44 @@ class Qualification(unittest.TestCase):
             for suite in suites:
                 self.assertEqual(job.count(f"python3 tests/terminal_{suite}.py --binary "), 1)
 
+    def test_complete_short_native_preflight_precedes_slow_qualification(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        for matrix in release.split("  macos-build:", 1):
+            lines = matrix.splitlines()
+            commands = [line.strip().removeprefix("run: ") for line in lines]
+            slow = [index for index, command in enumerate(commands)
+                    if command.startswith(("zig build test probes ", "zig build test-browser-export ",
+                                           "zig build test-native-send-stress ", "zig build test-native-history-stress "))]
+            self.assertEqual(len(slow), 8)
+            first_slow = min(slow)
+            prepared = [command for command in commands if command.startswith("zig build probes ")]
+            self.assertEqual(len(prepared), 2)
+            self.assertTrue(all("-Dtest-watchdog=true" in command for command in prepared))
+            # Both modes' complete draft and first-use suites must fail before
+            # expensive unit compilation, retained-history stress or soaks.
+            for script in ("terminal_compose_actions.py", "terminal_draft_conflict.py",
+                           "terminal_draft_paging.py", "terminal_quote_policy.py",
+                           "terminal_reply_boundaries.py", "terminal_settled_recovery.py",
+                           "terminal_workflow_regressions.py"):
+                positions = [index for index, line in enumerate(lines)
+                             if f"python3 tests/{script} --binary " in line]
+                self.assertEqual(len(positions), 2, script)
+                self.assertTrue(all(index < first_slow for index in positions), script)
+            for index, line in enumerate(lines):
+                if "python3 tests/terminal_mouse.py --binary " in line:
+                    self.assertLess(index, first_slow)
+            linux = "dist/omagma-linux-" in matrix
+            resources = (("--resource-cycles 1000", 1 if linux else 0),
+                         ("tests/terminal_measure", 2),
+                         ("tests/terminal_markdown_lifecycle.py", 2),
+                         ("python3 tests/measure.py ", 1 if linux else 0),
+                         ("python3 tests/background_measure.py ", 1 if linux else 0))
+            for marker, expected in resources:
+                positions = [index for index, line in enumerate(lines) if marker in line]
+                self.assertEqual(len(positions), expected, marker)
+                self.assertTrue(all(index > first_slow for index in positions), marker)
+            self.assertIn("python3 tests/terminal_compose_screen.py", matrix)
+
     def test_new_pty_suites_use_the_owned_darwin_guardian_factory(self):
         # Import all factories as Darwin without opening any PTY or desktop.
         # This catches accidentally binding the raw Linux-only factory again.

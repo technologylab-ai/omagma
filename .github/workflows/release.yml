@@ -90,6 +90,7 @@ jobs:
           python3 tests/release_binary.py
           python3 tests/publication_privacy.py
           python3 tests/release_notes.py
+          python3 tests/terminal_compose_screen.py
       - name: Ensure the timezone fixture database is available
         run: |
           sudo apt-get update
@@ -97,12 +98,15 @@ jobs:
           test -f /etc/localtime
           test -f /usr/share/zoneinfo/Europe/Vienna
           test -f /usr/share/zoneinfo/Asia/Kathmandu
-      - name: Debug correctness checks
+      - name: Build Debug backend and probes for short preflight
         run: |
           zig version
           python3 tests/zig_test_guard_check.py --zig "$(command -v zig)"
-          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug --test-timeout 120s -Dtest-watchdog=true
+          zig build probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug -Dtest-watchdog=true
           zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-debug
+
+      - name: Debug short CLI, TUI and fixture acceptance
+        run: |
           python3 tests/integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/zig017-debug-integration.json
           python3 tests/probes/transport_check.py --binary .verification-debug/bin/omagma --build-mode debug --https --output tests/results/zig017-debug-transport.json
           .verification-debug/bin/auth_probe launch
@@ -134,10 +138,7 @@ jobs:
           python3 tests/terminal_html.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-html.json
           python3 tests/terminal_repaint.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-repaint.json
           python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
-      - name: Debug growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Debug retained native history stress
-        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+
       - name: Debug current terminal and agent feature acceptance
         run: |
           .verification-debug/bin/omagma build-info
@@ -178,23 +179,15 @@ jobs:
       - name: Debug independent HTML preservation oracle
         if: matrix.arch == 'x86_64'
         run: python3 tests/terminal_html_compatibility.py --binary .verification-debug/bin/omagma --browser "$(command -v google-chrome)" --receipt tests/results/terminal-debug-html-compatibility.json
-      - name: Shared mail, contacts and browser adapter correctness
+      - name: Safe standalone probe preflight
         run: |
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-      - name: Safe correctness and standalone probes
-        run: |
-          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe --test-timeout 120s -Dtest-watchdog=true
+          zig build probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe -Dtest-watchdog=true
           .verification-safe/bin/auth_probe launch
           .verification-safe/bin/auth_probe callback
           .verification-safe/bin/callback_budget
           .verification-safe/bin/transport_probe
           python3 tests/terminal_attachment_streams.py --probe .verification-safe/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-safe/bin/calendar_http_probe
-      - name: Safe growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Safe retained native history stress
-        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Build static release bundle
         run: python3 scripts/release.py --arch ${{ matrix.arch }}
       - name: Validate archive and executable
@@ -285,7 +278,7 @@ jobs:
       - name: Safe packaged independent HTML preservation oracle
         if: matrix.arch == 'x86_64'
         run: python3 tests/terminal_html_compatibility.py --binary dist/omagma-linux-x86_64 --browser "$(command -v google-chrome)" --receipt tests/results/terminal-safe-html-compatibility.json
-      - name: Safe terminal workflows and memory
+      - name: Safe short terminal workflows
         run: |
           python3 tests/terminal_cache.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-cache-safe.json
           python3 tests/terminal_ui.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-ui-safe.json
@@ -295,11 +288,42 @@ jobs:
           python3 tests/terminal_transport.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-transport.json
           python3 tests/terminal_pty.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-pty.json
           python3 tests/terminal_mail_acceptance.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --receipt tests/results/terminal-safe-mail-acceptance.json
-          python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html.json --resource-cycles 1000 --idle-seconds 60
           python3 tests/terminal_repaint.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-repaint.json
           python3 tests/terminal_mouse.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-mouse.json
+
+      - name: Safe short HTML acceptance
+        run: |
+          python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html-preflight.json
+
+      - name: Debug full native unit correctness
+        run: |
+          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug --test-timeout 120s -Dtest-watchdog=true
+
+      - name: Shared mail, contacts and browser adapter correctness
+        run: |
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+      - name: Safe full native unit correctness
+        run: |
+          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe --test-timeout 120s -Dtest-watchdog=true
+
+      - name: Debug growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Safe growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Debug retained native history stress
+        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+      - name: Safe retained native history stress
+        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+      - name: Safe HTML allocation lifecycle
+        run: |
+          python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html.json --resource-cycles 1000 --idle-seconds 60
+
+      - name: Safe terminal memory gates
+        run: |
           python3 tests/terminal_measure.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-cli-memory.json
           python3 tests/terminal_measure.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-tui-memory.json
+
       - name: Safe Markdown preview allocation lifecycle
         run: |
           python3 tests/terminal_markdown_lifecycle.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-cli-memory.json
@@ -375,6 +399,7 @@ jobs:
           python3 tests/release_binary.py
           python3 tests/publication_privacy.py
           python3 tests/release_notes.py
+          python3 tests/terminal_compose_screen.py
       - name: Verify native host, SDK and timezone fixtures
         run: |
           test "$(uname -m)" = '${{ matrix.machine }}'
@@ -385,12 +410,15 @@ jobs:
           test -f /etc/localtime
           test -f /usr/share/zoneinfo/Europe/Vienna
           test -f /usr/share/zoneinfo/Asia/Kathmandu
-      - name: Debug native correctness and synthetic fixtures
+      - name: Build Debug backend and probes for short preflight
         run: |
           zig version
           python3 tests/zig_test_guard_check.py --zig "$(command -v zig)"
-          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug --test-timeout 120s -Dtest-watchdog=true
+          zig build probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug -Dtest-watchdog=true
           zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-macos-debug
+
+      - name: Debug short native acceptance
+        run: |
           .verification-macos-debug/bin/omagma build-info
           shasum -a 256 .verification-macos-debug/bin/omagma
           python3 tests/terminal_fixture_check.py
@@ -412,10 +440,7 @@ jobs:
           python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-debug/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-macos-debug/bin/calendar_http_probe
-      - name: Debug growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Debug retained native history stress
-        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+
       - name: Debug portable Markdown, invitation and command acceptance
         run: |
           python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
@@ -456,13 +481,9 @@ jobs:
           .verification-macos-debug/bin/auth_probe callback
           .verification-macos-debug/bin/callback_budget
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode debug
-      - name: Shared mail, contacts and browser adapter correctness
+      - name: Safe standalone probe preflight
         run: |
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-      - name: Safe native correctness and standalone probes
-        run: |
-          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe --test-timeout 120s -Dtest-watchdog=true
+          zig build probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe -Dtest-watchdog=true
           .verification-macos-safe/bin/auth_probe keyring
           .verification-macos-safe/bin/auth_probe launch
           .verification-macos-safe/bin/auth_probe callback
@@ -470,10 +491,6 @@ jobs:
           python3 tests/terminal_attachment_streams.py --probe .verification-macos-safe/bin/terminal_stream_probe
           python3 tests/calendar_native_http.py --probe .verification-macos-safe/bin/calendar_http_probe
           python3 tests/keyring_default_macos.py --ephemeral-default --build-mode safe
-      - name: Safe growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Safe retained native history stress
-        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Build stripped native macOS release bundle
         run: python3 scripts/release.py --os macos --arch ${{ matrix.arch }}
       - name: Validate macOS archive and native executable
@@ -561,22 +578,42 @@ jobs:
           Path('tests/results/macos-credential-free-https.json').write_text(json.dumps({'passed': True, 'credentialsUsed': False, 'checks': checks}, indent=2) + '\n')
           print('PASS native Debug and packaged Safe HTTPS: credential-free401 and bounded storage')
           PY
+      - name: Debug full native unit correctness
+        run: |
+          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug --test-timeout 120s -Dtest-watchdog=true
+
+      - name: Shared mail, contacts and browser adapter correctness
+        run: |
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+      - name: Safe full native unit correctness
+        run: |
+          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe --test-timeout 120s -Dtest-watchdog=true
+
+      - name: Debug growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Safe growing native mail stress
+        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: Debug retained native history stress
+        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+      - name: Safe retained native history stress
+        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Native macOS memory and quiet CPU gates
         run: |
           python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind cli --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-cli-memory.json
           python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind tui --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-tui-memory.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-macos-${{ matrix.arch }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 30
       - name: Safe native Markdown preview allocation lifecycle
         env:
           RELEASE_ARCH: ${{ matrix.arch }}
         run: |
           python3 tests/terminal_markdown_lifecycle.py --kind cli --binary dist/omagma-macos-$RELEASE_ARCH --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-cli-memory.json
           python3 tests/terminal_markdown_lifecycle.py --kind tui --binary dist/omagma-macos-$RELEASE_ARCH --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-tui-memory.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
       - name: Preserve synthetic macOS verification receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

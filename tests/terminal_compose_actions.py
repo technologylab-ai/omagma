@@ -8,17 +8,19 @@ import tempfile
 from build_info import read_build_info
 from terminal_integration import Client, require
 from terminal_mouse import click, point
-from terminal_reader_editor import MouseTerminal, ReaderScreen
+from terminal_reader_editor import MouseTerminal
+from terminal_compose_screen import ComposerScreen, check_compose_resize_oracle
 from terminal_reader_next_ux import capture
 
 
 def exercise(binary, root, captures):
+    check_compose_resize_oracle()
     body = "## Visible preview\n\nComplete fictional body.\nLast line."
     with Client(binary, root) as client:
         draft = client.request("draft.create", draft={
             "to": [{"address": "reader@example.test"}], "subject": "Visible composer actions",
             "bodyText": body, "bodyFormat": "markdown"})
-    terminal = MouseTerminal(binary, root, screen_type=ReaderScreen, columns=120, rows=40,
+    terminal = MouseTerminal(binary, root, screen_type=ComposerScreen, columns=120, rows=40,
                              environment={"NO_COLOR": None, "COLORTERM": "truecolor"})
     try:
         terminal.until(lambda: "Ready" in terminal.text())
@@ -33,11 +35,13 @@ def exercise(binary, root, captures):
         sizes = ((38, 24), (64, 24), (90, 30), (120, 40), (180, 50))
         for columns, rows in sizes:
             terminal.resize(columns, rows)
-            terminal.until(lambda: "[P Preview in browser]" in terminal.text()
+            terminal.until(lambda: terminal.screen.compose_geometry_ready()
+                           and "[P Preview in browser]" in terminal.text()
                            and "[g Continue in Gmail]" in terminal.text())
             capture(terminal, captures, f"compose-actions-{columns}x{rows}")
         terminal.resize(64, 24)
-        terminal.until(lambda: "[P Preview in browser]" in terminal.text())
+        terminal.until(lambda: terminal.screen.compose_geometry_ready()
+                       and "[P Preview in browser]" in terminal.text())
         terminal.send(b"p")
         terminal.until(lambda: "[Back]" in terminal.text())
         require("[P Preview in browser]" in terminal.text()
@@ -96,7 +100,8 @@ def exercise(binary, root, captures):
         terminal.send(b"\x1b")
         terminal.until(lambda: "[g Gmail status]" in terminal.text())
         terminal.resize(120, 40)
-        terminal.until(lambda: "[g Gmail status]" in terminal.text())
+        terminal.until(lambda: terminal.screen.compose_geometry_ready(gmail_status=True)
+                       and "[g Gmail status]" in terminal.text())
         terminal.send(b"P")
         terminal.until(lambda: "Gmail may be newer" in terminal.text())
         capture(terminal, captures, "compose-actions-paused-local-preview")

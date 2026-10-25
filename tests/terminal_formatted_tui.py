@@ -23,6 +23,7 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import click, point, start
 from terminal_polish_compose import panel_text
 from terminal_pty import saved_compose_frame
+from terminal_compose_screen import ComposerScreen
 
 
 CASES = ("chooser", "lifecycle", "modes", "queued")
@@ -233,7 +234,7 @@ def lifecycle_one(binary, directory, forward):
     fixture.save()
     with Client(binary, directory, extra=fixture.options()) as client:
         client.request("cache.clear")
-    terminal = start(binary, directory, fixture, columns=160, rows=42)
+    terminal = start(binary, directory, fixture, columns=160, rows=42, screen_type=ComposerScreen)
     try:
         terminal.until(lambda: terminal.screen.locate("Drafts") is not None)
         click(terminal, *point(terminal, "Drafts"))
@@ -248,7 +249,7 @@ def lifecycle_one(binary, directory, forward):
         terminal.until(lambda: "Original message · saved snapshot" in terminal.text()
                        and "Original layout" in panel_text(terminal, "Original message"))
         terminal.resize(70, 24)
-        terminal.until(lambda: terminal.screen.cells[2][69] in "╮┐╗")
+        terminal.until(lambda: terminal.screen.compose_geometry_ready() and terminal.screen.cells[2][69] in "╮┐╗")
         terminal.send(b"p")
         terminal.until(lambda: "Original message · saved snapshot" in terminal.text() and "[Back]" in terminal.text())
         terminal.send(b"\t\t\r")
