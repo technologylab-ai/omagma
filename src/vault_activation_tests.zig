@@ -4,14 +4,16 @@ comptime {
 }
 
 const std = @import("std");
+const test_allocator = @import("cancel_neutral_test_allocator.zig");
 const runtime_module = @import("fixed_runtime.zig");
 const platform = @import("platform.zig");
 const launch = @import("terminal/vault_launch.zig");
 const transport = @import("terminal/vault_transport.zig");
 const test_io = std.testing.io;
-const a = std.testing.allocator;
+const a = test_allocator.allocator;
 
 test "vault launch: nested identity deadlines tolerate joined control worker retirement" {
+    test_allocator.install();
     const Gate = struct {
         backing: std.mem.Allocator,
         io: std.Io,

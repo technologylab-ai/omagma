@@ -1,13 +1,15 @@
 //! Real private Unix sockets and synthetic account data; no production paths.
 const std = @import("std");
+const test_allocator = @import("cancel_neutral_test_allocator.zig");
 const owner_module = @import("terminal/vault_owner.zig");
 const daemon = @import("terminal/vault_daemon.zig");
 const transport = @import("terminal/vault_transport.zig");
 const j = @import("terminal/json.zig");
 const io = std.testing.io;
-const a = std.testing.allocator;
+const a = test_allocator.allocator;
 
 test {
+    test_allocator.install();
     std.testing.refAllDecls(daemon);
     std.testing.refAllDecls(transport);
     std.testing.refAllDecls(@import("terminal/vault_allocator.zig"));
@@ -29,6 +31,7 @@ fn command(client: *transport.Client, allocator: std.mem.Allocator, request: any
 }
 
 test "vault protocol: old clients cannot mutate current daemon and current clients retain normal dispatch" {
+    test_allocator.install();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
@@ -116,6 +119,7 @@ test "vault protocol: old clients cannot mutate current daemon and current clien
 }
 
 test "vault daemon: create unlock account mail draft lock and restart through private socket" {
+    test_allocator.install();
     std.debug.print("vault daemon compiler={s} mode={s} target={s}-{s}\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode), @tagName(@import("builtin").os.tag), @tagName(@import("builtin").cpu.arch) });
     var random: [12]u8 = undefined;
     try io.randomSecure(&random);
@@ -281,6 +285,7 @@ test "vault daemon: create unlock account mail draft lock and restart through pr
 }
 
 test "vault daemon: private listener refuses unsafe paths and competing servers" {
+    test_allocator.install();
     var random: [8]u8 = undefined;
     try io.randomSecure(&random);
     const root = try std.fmt.allocPrint(a, "{s}/omagma-peer-test-{s}", .{ @import("terminal/vault_paths.zig").temporary_root, std.fmt.bytesToHex(random, .lower) });
@@ -298,6 +303,7 @@ test "vault daemon: private listener refuses unsafe paths and competing servers"
 }
 
 test "vault daemon: caller retains and wipes a completed allocation during deadline cancellation" {
+    test_allocator.install();
     const Race = struct {
         allocated: std.Io.Event = .unset,
         output: ?[]u8 = null,
@@ -334,6 +340,7 @@ test "vault daemon: caller retains and wipes a completed allocation during deadl
 }
 
 test "vault daemon: repeated stop signal and cancellation join workers before listener reuse" {
+    test_allocator.install();
     var random: [8]u8 = undefined;
     try io.randomSecure(&random);
     const root = try std.fmt.allocPrint(a, "{s}/omagma-stop-test-{s}", .{ @import("terminal/vault_paths.zig").temporary_root, std.fmt.bytesToHex(random, .lower) });

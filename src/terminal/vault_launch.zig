@@ -1,6 +1,7 @@
 //! Same-binary detached launch using the project's existing raw-only child
 //! path. No allocation, locks or std.Io execute after fork in that primitive.
 const std = @import("std");
+const test_allocator = @import("../cancel_neutral_test_allocator.zig");
 const transport = @import("vault_transport.zig");
 const header = @import("vault_header.zig");
 const vt = @import("vault_types.zig");
@@ -88,9 +89,10 @@ const Check = struct {
 };
 
 test "vault launch: owned socket permissions become ready before the first status exchange" {
+    test_allocator.install();
     if (!@import("send_memory.zig").native) return error.SkipZigTest;
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.parent_dir.setFilePermissions(io, &temporary.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
@@ -117,7 +119,7 @@ test "vault launch: owned socket permissions become ready before the first statu
     const Peer = struct {
         fn respond(server: *transport.Listener, id: vt.Id, requests: *std.atomic.Value(usize)) !void {
             const peer_io = std.testing.io;
-            const peer_a = std.testing.allocator;
+            const peer_a = test_allocator.allocator;
             const stream = try server.server.accept(peer_io);
             defer stream.close(peer_io);
             var frame = try transport.readFrame(peer_io, peer_a, stream, transport.request_limit);
@@ -142,9 +144,10 @@ test "vault launch: owned socket permissions become ready before the first statu
 }
 
 test "vault launch: unsafe path kinds never become trusted during owned readiness" {
+    test_allocator.install();
     if (!@import("send_memory.zig").native) return error.SkipZigTest;
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.parent_dir.setFilePermissions(io, &temporary.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
@@ -171,8 +174,9 @@ test "vault launch: unsafe path kinds never become trusted during owned readines
 }
 
 test "vault protocol: startup requires compatible generation while control ownership keeps identity checks" {
+    test_allocator.install();
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
@@ -188,8 +192,8 @@ test "vault protocol: startup requires compatible generation while control owner
             for (0..5) |index| {
                 const stream = try server.server.accept(std.testing.io);
                 defer stream.close(std.testing.io);
-                var frame = try transport.readFrame(std.testing.io, std.testing.allocator, stream, transport.request_limit);
-                defer frame.deinit(std.testing.allocator);
+                var frame = try transport.readFrame(std.testing.io, test_allocator.allocator, stream, transport.request_limit);
+                defer frame.deinit(test_allocator.allocator);
                 try std.testing.expectEqual(transport.Kind.status, frame.kind);
                 var bytes: [160]u8 = undefined;
                 const response = try std.fmt.bufPrint(&bytes, "{{\"ok\":true,\"data\":{{\"vaultId\":\"{s}\"{s}}}}}", .{ std.fmt.bytesToHex(id, .lower), if (index == 4) ",\"executionProtocol\":2" else "" });

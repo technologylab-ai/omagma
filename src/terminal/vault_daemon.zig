@@ -1,6 +1,7 @@
 //! Same-binary vault service. Two bounded connections share one network lane.
 //! Control/unlock jobs do not consume that lane; a lock drains the active job.
 const std = @import("std");
+const test_allocator = @import("../cancel_neutral_test_allocator.zig");
 const builtin = @import("builtin");
 const transport = @import("vault_transport.zig");
 const Owner = @import("vault_owner.zig").Owner;
@@ -577,8 +578,9 @@ test "vault daemon: interrupted invitation reconciliation keeps unknown outcome"
 }
 
 test "vault daemon: observer admission failure after dispatch is unknown without replay" {
+    test_allocator.install();
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     const j = @import("json.zig");
     const Admission = struct {
         // Only this owned server worker uses the adapter. Owner/provider I/O,
@@ -703,14 +705,15 @@ test "vault daemon: observer admission failure after dispatch is unknown without
 }
 
 test "vault daemon: timed out and canceled lane acquisition retain exact ownership" {
+    test_allocator.install();
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     const PendingRequest = struct {
         client: *transport.Client,
         response: ?[]const u8 = null,
         failure: ?anyerror = null,
         fn run(self: *@This()) void {
-            self.response = self.client.request(std.testing.allocator, .execute, "{\"cmd\":\"accounts.list\"}") catch |err| {
+            self.response = self.client.request(test_allocator.allocator, .execute, "{\"cmd\":\"accounts.list\"}") catch |err| {
                 self.failure = err;
                 return;
             };

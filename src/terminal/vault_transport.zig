@@ -1,6 +1,7 @@
 //! Private same-user Unix transport. One request per connection; never retry.
 //! The wire carries command DTOs, never the daemon's data key or OAuth tokens.
 const std = @import("std");
+const test_allocator = @import("../cancel_neutral_test_allocator.zig");
 const builtin = @import("builtin");
 const t = @import("types.zig");
 const platform = @import("../platform.zig");
@@ -729,8 +730,9 @@ test "vault protocol: canceled legacy metadata reads propagate without a second 
 }
 
 test "vault protocol: new client refuses old peers before execute but keeps status lock and stop" {
+    test_allocator.install();
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
@@ -776,8 +778,9 @@ test "vault protocol: new client refuses old peers before execute but keeps stat
 }
 
 test "vault protocol: daemon swap after preflight still cannot dispatch new semantics to an old peer" {
+    test_allocator.install();
     const io = std.testing.io;
-    const a = std.testing.allocator;
+    const a = test_allocator.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.parent_dir.setFilePermissions(io, &tmp.sub_path, .fromMode(0o700), .{ .follow_symlinks = false });
@@ -793,8 +796,8 @@ test "vault protocol: daemon swap after preflight still cannot dispatch new sema
             {
                 const stream = try server.server.accept(peer_io);
                 defer stream.close(peer_io);
-                var frame = try readFrame(peer_io, std.testing.allocator, stream, request_limit);
-                defer frame.deinit(std.testing.allocator);
+                var frame = try readFrame(peer_io, test_allocator.allocator, stream, request_limit);
+                defer frame.deinit(test_allocator.allocator);
                 try std.testing.expectEqual(Kind.status, frame.kind);
                 try writeFrame(peer_io, stream, .response, "{\"ok\":true,\"data\":{\"executionProtocol\":2}}", response_limit);
             }
