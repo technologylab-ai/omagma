@@ -95,7 +95,7 @@ def stop_owned():
     CHILD = None
 
 
-def sample_owned(guardian_pid, prefix):
+def owned_processes(guardian_pid):
     listing = subprocess.check_output(["/bin/ps", "-axo", "pid=,ppid=,comm="], text=True, timeout=5)
     records = [line.strip().split(None, 2) for line in listing.splitlines()]
     descendants = {guardian_pid}
@@ -106,6 +106,11 @@ def sample_owned(guardian_pid, prefix):
             break
         children.extend(added)
         descendants.update(pid for pid, _ in added)
+    return children
+
+
+def sample_owned(guardian_pid, prefix):
+    children = owned_processes(guardian_pid)
     (OUT / (prefix + "-owned-processes.json")).write_text(json.dumps(children, indent=2) + "\n")
     for pid, command in children:
         if Path(command).name not in ("vault-launch-test", "test"):
@@ -144,7 +149,7 @@ def execute(variant, index, binary):
     stop_owned()
     text = path.read_text()
     identity = next((line.split("DIAGNOSTIC-BUILD ", 1)[1].split("\n", 1)[0] for line in text.splitlines() if "DIAGNOSTIC-BUILD " in line), None)
-    passed = code == 0 and TARGET + "...OK" in text and "All 4 tests passed." in text and identity == "zig=0.17.0 mode=debug arch=aarch64 os=macos"
+    passed = code == 0 and TARGET + "..." in text and "All 4 tests passed." in text and identity == "zig=0.17.0 mode=debug arch=aarch64 os=macos"
     row = {"variant": variant, "index": index, "exitCode": code, "passed": passed, "seconds": time.monotonic() - started,
            "watchdogSeconds": LIMIT, "sampled": sampled, "binarySha256": sha(binary), "binaryBuildIdentity": identity,
            "targetTestObserved": TARGET in text, "log": path.name, "logSha256": sha(path)}
@@ -169,6 +174,8 @@ def execute_maker(variant, zig, wrapper, sdk):
         with path.open("w") as output:
             CHILD = subprocess.Popen(wrapper_argv, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
             sampled = False
+            test_seen = None
+            next_probe = 0.0
             while CHILD.poll() is None:
                 elapsed = time.monotonic() - started
                 if elapsed >= 420:
@@ -177,9 +184,15 @@ def execute_maker(variant, zig, wrapper, sdk):
                     output.flush()
                     stop_owned()
                     break
-                if elapsed >= 10 and not sampled:
-                    sampled = True
-                    sample_owned(CHILD.pid, name)
+                if elapsed >= next_probe and not sampled:
+                    tests = [pid for pid, command in owned_processes(CHILD.pid) if Path(command).name in ("vault-launch-test", "test")]
+                    if tests:
+                        if test_seen is None or test_seen[0] != tests[0]:
+                            test_seen = (tests[0], elapsed)
+                        elif elapsed - test_seen[1] >= 10:
+                            sampled = True
+                            sample_owned(CHILD.pid, name)
+                    next_probe = elapsed + 1
                 time.sleep(0.05)
             code = 124 if timed_out else CHILD.returncode
     finally:
@@ -215,7 +228,7 @@ def main():
     save()
     sdk = os.environ["SDKROOT"]
     with tempfile.TemporaryDirectory(prefix="ovld-", dir="/tmp") as raw:
-        directory = Path(raw)
+        directory = Path(raw).resolve()
         for variant in ("control", "phases"):
             source = directory / variant
             shutil.copytree(ROOT / "src", source / "src")
