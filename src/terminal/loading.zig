@@ -84,14 +84,14 @@ test "loading rows: bounded immutable metadata becomes a ready body without borr
     var subject: [1200]u8 = @splat('A');
     mailbox.publish(.{ .kind = .page, .index = 0, .total = 100, .message = .{ .id = "mail-a", .threadId = "thread-a", .subject = &subject } });
     @memset(&subject, 'B');
-    try std.testing.expectEqual(@as(usize,32), mailbox.count());
+    try std.testing.expectEqual(@as(usize, 32), mailbox.count());
     const row = mailbox.slots[0].metadata().?;
-    try std.testing.expectEqual(@as(usize,1024), row.subject.value().len);
-    try std.testing.expectEqual(@as(u8,'A'), row.subject.value()[0]);
+    try std.testing.expectEqual(@as(usize, 1024), row.subject.value().len);
+    try std.testing.expectEqual(@as(u8, 'A'), row.subject.value()[0]);
     mailbox.publish(.{ .kind = .page, .index = 0, .total = 100, .message = .{ .id = "wrong-mail", .threadId = "wrong-thread", .subject = "must not overwrite" } });
     try std.testing.expectEqualStrings("mail-a", row.id.value());
     mailbox.publish(.{ .kind = .body, .message = .{ .id = "mail-a", .threadId = "thread-a", .bodyText = "Actual downloaded body" } });
-    try std.testing.expectEqual(@as(u8,1), mailbox.slots[0].bodyState());
+    try std.testing.expectEqual(@as(u8, 1), mailbox.slots[0].bodyState());
     try std.testing.expectEqualStrings("Actual downloaded body", mailbox.slots[0].body_excerpt.value());
     mailbox.publish(.{ .kind = .body, .message = .{ .id = "mail-a", .threadId = "thread-a", .bodyText = "second publication ignored" } });
     try std.testing.expectEqualStrings("Actual downloaded body", mailbox.slots[0].body_excerpt.value());
@@ -100,11 +100,11 @@ test "loading rows: bounded immutable metadata becomes a ready body without borr
 test "loading rows: UTF8 truncation stays valid and unknown bodies never replace another row" {
     var bytes: Bytes(5) = .{};
     bytes.set("ab🌋cd");
-    try std.testing.expectEqualStrings("ab",bytes.value());
+    try std.testing.expectEqualStrings("ab", bytes.value());
     var mailbox: Mailbox = .{};
-    mailbox.publish(.{ .kind = .view, .total = 1, .message = .{ .id="one", .threadId="thread" } });
-    mailbox.publish(.{ .kind = .body, .message = .{ .id="other", .threadId="thread", .bodyText="other private body" } });
-    try std.testing.expectEqual(@as(u8,0),mailbox.slots[0].bodyState());
-    mailbox.publish(.{ .kind=.body, .failed=true, .message=.{ .id="one", .threadId="thread" } });
-    try std.testing.expectEqual(@as(u8,2),mailbox.slots[0].bodyState());
+    mailbox.publish(.{ .kind = .view, .total = 1, .message = .{ .id = "one", .threadId = "thread" } });
+    mailbox.publish(.{ .kind = .body, .message = .{ .id = "other", .threadId = "thread", .bodyText = "other private body" } });
+    try std.testing.expectEqual(@as(u8, 0), mailbox.slots[0].bodyState());
+    mailbox.publish(.{ .kind = .body, .failed = true, .message = .{ .id = "one", .threadId = "thread" } });
+    try std.testing.expectEqual(@as(u8, 2), mailbox.slots[0].bodyState());
 }

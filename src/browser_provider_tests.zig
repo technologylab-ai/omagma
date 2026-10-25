@@ -186,9 +186,14 @@ test "browser provider: native Calendar grants connect without advertising unsup
     const auth = @import("terminal/auth.zig");
     const scopes = try auth.scopesFor(a, &auth.allowed_capabilities);
     const metadata = try std.json.Stringify.valueAlloc(a, .{
-        .session = @as(u32, 11), .nonce = nonce, .account = account, .clientId = client_id,
-        .grantId = &auth.grantIdentity(scopes), .capabilities = auth.allowed_capabilities,
-        .scopes = scopes, .actualScopes = scopes,
+        .session = @as(u32, 11),
+        .nonce = nonce,
+        .account = account,
+        .clientId = client_id,
+        .grantId = &auth.grantIdentity(scopes),
+        .capabilities = auth.allowed_capabilities,
+        .scopes = scopes,
+        .actualScopes = scopes,
     }, .{});
     resetHost(&.{.{ .url = profile_url, .body = "{\"emailAddress\":\"ada@example.test\"}" }});
     var session = try live.connect(a, metadata);
@@ -211,9 +216,14 @@ test "browser provider: native compose scope preserves explicitly granted mail s
     const caps = [_][]const u8{ "mail-read", "mail-drafts", "mail-send", "calendar-read" };
     const scopes = try auth.scopesFor(a, &caps);
     const metadata = try std.json.Stringify.valueAlloc(a, .{
-        .session = @as(u32, 11), .nonce = nonce, .account = account, .clientId = client_id,
-        .grantId = &auth.grantIdentity(scopes), .capabilities = caps,
-        .scopes = scopes, .actualScopes = scopes,
+        .session = @as(u32, 11),
+        .nonce = nonce,
+        .account = account,
+        .clientId = client_id,
+        .grantId = &auth.grantIdentity(scopes),
+        .capabilities = caps,
+        .scopes = scopes,
+        .actualScopes = scopes,
     }, .{});
     resetHost(&.{.{ .url = profile_url, .body = "{\"emailAddress\":\"ada@example.test\"}" }});
     const session = try live.connect(a, metadata);
