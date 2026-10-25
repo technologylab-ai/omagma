@@ -149,11 +149,12 @@ def execute(variant, index, binary):
     stop_owned()
     text = path.read_text()
     identity = next((line.split("DIAGNOSTIC-BUILD ", 1)[1].split("\n", 1)[0] for line in text.splitlines() if "DIAGNOSTIC-BUILD " in line), None)
-    summary = "4 passed; 1 skipped; 0 failed." if variant == "fp-only" else "All 2 tests passed."
-    required_test = TARGET if variant == "fp-only" else "vault launch: diagnostic allocator unwind cancellation control"
-    required_names = [required_test] if variant != "fp-only" else [
+    summary = "All 5 tests passed."
+    required_test = TARGET
+    required_names = [
         TARGET, "vault launch: nested identity deadlines tolerate joined control worker retirement",
-        "vault launch: unsafe path kinds never become trusted during owned readiness"]
+        "vault launch: unsafe path kinds never become trusted during owned readiness",
+        "vault launch: allocator calls preserve cancellation during native stack tracing"]
     names_observed = {name: name + "..." in text for name in required_names}
     passed = code == 0 and all(names_observed.values()) and summary in text and identity == "zig=0.17.0 mode=debug arch=aarch64 os=macos"
     row = {"variant": variant, "index": index, "exitCode": code, "passed": passed, "seconds": time.monotonic() - started,
@@ -204,12 +205,12 @@ def execute_maker(variant, zig, wrapper, sdk):
     finally:
         stop_owned()
     text = path.read_text()
-    count = "4 pass, 1 skip (5 total)" if variant == "fp-only" else "2 pass (2 total)"
+    count = "5 pass (5 total)"
     passed = code == 0 and count in text and "DIAGNOSTIC-BUILD zig=0.17.0 mode=debug arch=aarch64 os=macos" in text
     row = {"variant": variant, "runnerMode": "Maker server plus unchanged production guardian", "argv": argv, "outerGuardianArgv": wrapper_argv,
            "exitCode": code, "passed": passed, "seconds": time.monotonic() - started,
            "makerPerTestTimeoutSeconds": 120, "compileAndRunOuterSeconds": 420,
-           "targetPresenceBasis": "same source/filter as standalone named-target assertion; proof-only2tests; FP-only5tests with intentional MachO manipulation skipped and original readiness targets required",
+           "targetPresenceBasis": "same source/filter as standalone: original three readiness tests, actual helper cancellation preservation, binary identity; stock runner with full SelfInfo",
            "log": path.name, "logSha256": sha(path)}
     RECEIPT.setdefault("makerRuns", []).append(row)
     save()
@@ -227,31 +228,30 @@ def main():
         raise AssertionError(version)
     original = (ROOT / "src/terminal/vault_launch.zig").read_text()
     baseline = subprocess.check_output(["git", "show", "HEAD:src/terminal/vault_launch.zig"], cwd=ROOT, text=True)
-    if original != baseline or sha(ROOT / "src/terminal/vault_launch.zig") != BASE_SOURCE_SHA256:
+    if original != baseline:
         raise AssertionError("Working source differs from diagnostic commit")
     RECEIPT.update({"diagnosticCommit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "baseCommit": BASE,
                     "host": platform.platform(), "compilerVersion": version, "compilerSha256": sha(zig), "sourceSha256": sha(ROOT / "src/terminal/vault_launch.zig"),
-                    "target": "aarch64-macos.13.0", "backend": "LLVM", "repetitionsPerVariant": {"proof": 1, "fp-only": REPEATS}, "runs": ROWS, "variants": []})
+                    "target": "aarch64-macos.13.0", "backend": "LLVM", "repetitionsPerVariant": {"cancel-neutral": REPEATS}, "runs": ROWS, "variants": []})
     save()
     sdk = os.environ["SDKROOT"]
     with tempfile.TemporaryDirectory(prefix="ovld-", dir="/tmp") as raw:
         directory = Path(raw).resolve()
-        for variant in ("proof", "fp-only"):
+        for variant in ("cancel-neutral",):
             source = directory / variant
             shutil.copytree(ROOT / "src", source / "src")
             if variant == "phases":
                 (source / "src/terminal/vault_launch.zig").write_text(marked_source(original))
-            shutil.copyfile(ROOT / "tests/vault_allocator_cancel_diagnostic.zig", source / "src/vault_allocator_cancel_diagnostic.zig")
             wrapper = source / "src/diagnostic_root.zig"
             wrapper.write_text('''const std = @import("std");
 const builtin = @import("builtin");
-comptime { _ = @import("vault_allocator_cancel_diagnostic.zig"); }
 test "vault launch: diagnostic build identity" {
     std.debug.print("DIAGNOSTIC-BUILD zig={s} mode={s} arch={s} os={s}\\n", .{builtin.zig_version_string, @tagName(builtin.mode), @tagName(builtin.cpu.arch), @tagName(builtin.os.tag)});
 }
 ''')
-            if variant == "fp-only":
-                wrapper.write_text('pub const debug = @import("fixed_runtime.zig").debug;\ncomptime { _ = @import("vault_activation_tests.zig"); }\n' + wrapper.read_text())
+            wrapper.write_text('comptime { if (@import("std").debug.SelfInfo == void) @compileError("candidate must preserve full SelfInfo"); _ = @import("vault_activation_tests.zig"); }\n' + wrapper.read_text())
+            RECEIPT["stockRunnerSha256"] = sha(Path(zig).resolve().parent / "lib/compiler/test_runner.zig")
+            RECEIPT["allocatorHelperSha256"] = sha(source / "src/cancel_neutral_test_allocator.zig")
             options = source / "options.zig"
             options.write_text('pub const version: []const u8 = "0.2.13";\npub const tui = true;\npub const browser = false;\n')
             binary = source / "vault-launch-test"
@@ -274,10 +274,10 @@ test "vault launch: diagnostic build identity" {
                 print(f"{variant}: compilation failed; preserved log", flush=True)
                 continue
             execute_maker(variant, zig, wrapper, sdk)
-            for index in range(REPEATS if variant == "fp-only" else 1):
+            for index in range(REPEATS):
                 if not execute(variant, index, binary):
                     break
-    RECEIPT["passed"] = len(ROWS) == REPEATS + 1 and all(row["passed"] for row in ROWS) and len(RECEIPT.get("makerRuns", [])) == 2 and all(row["passed"] for row in RECEIPT["makerRuns"])
+    RECEIPT["passed"] = len(ROWS) == REPEATS and all(row["passed"] for row in ROWS) and len(RECEIPT.get("makerRuns", [])) == 1 and all(row["passed"] for row in RECEIPT["makerRuns"])
     save()
     return 0 if RECEIPT["passed"] else 1
 

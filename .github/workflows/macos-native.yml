@@ -27,7 +27,7 @@ jobs:
           test -d "$task_sdk/System/Library/Frameworks/Security.framework"
           test -d "$task_sdk/System/Library/Frameworks/CoreFoundation.framework"
           echo "SDKROOT=$task_sdk" >> "$GITHUB_ENV"
-      - name: Focused unchanged and phase-marked readiness controls
+      - name: Focused cancellation-neutral allocator candidate and preserved readiness deadlines
         run: python3 tests/vault_launch_diagnostic.py
       - name: Preserve synthetic phase, watchdog and native stack evidence
         if: always()
