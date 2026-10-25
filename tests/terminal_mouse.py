@@ -202,7 +202,13 @@ def run_case(binary,directory,name):
             # A local draft is allowed; provider writes remain forbidden.
             fixture.release();terminal.until(lambda:'Up to date' in terminal.text())
             terminal.send(b'c');terminal.until(lambda:'Compose' in terminal.text() and 'Subject:' in terminal.text())
-            terminal.send(b'a');terminal.until(lambda:contacts[ACCOUNTS[0]][0]['name'] in terminal.text())
+            terminal.send(b'a')
+            # The cached list has two status rows that disappear on refresh.
+            # Resolve the click only from the complete current picker frame;
+            # the earlier held-refresh phase already exercises cached clicks.
+            terminal.until(lambda: terminal.screen.lines()[1].strip() == f'Contacts available · {len(contacts[ACCOUNTS[0]])} available'
+                and 'Choose recipient' in terminal.screen.lines()[2]
+                and contacts[ACCOUNTS[0]][0]['name'] in terminal.text())
             target=contacts[ACCOUNTS[0]][0]
             click(terminal,*point(terminal,target['name']))
             terminal.until(lambda:'Compose' in terminal.text() and target['emails'][0]['address'] in terminal.text())
