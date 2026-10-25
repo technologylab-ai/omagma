@@ -22,7 +22,7 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import start
 from terminal_polish_compose import panel_text
 from terminal_file_dialog import capture, rectangle
-from terminal_pty import wait_saved_compose
+from terminal_pty import wait_saved_compose, send_review_ready
 
 ORIGINAL = "ORIGINAL-MARKDOWN-MARKER\nLiteral **stars** and [unsafe](javascript:alert(1)).\nSecond original line.\n"
 FILE_BYTES = b"\x00\xff\x80\r\n"
@@ -123,7 +123,7 @@ def confirm_and_check(terminal, client, expected_source, original, kind, expecte
     terminal.until(lambda: "| Review send |" in terminal.screen.lines()[0]
                    and "Format: Markdown → HTML + plain text" in terminal.text()
                    and rendered_body in terminal.text() and raw_body not in terminal.text()
-                   and "y Explicit send" in terminal.text())
+                   and "y Explicit send" in terminal.text() and send_review_ready(terminal))
     terminal.html_stage = f"{kind}: validate complete rendered review"
     saved = latest_draft(client)
     require(saved["bodyFormat"] == "markdown" and saved["bodyText"] == expected_source, "review changed Markdown source or interpretation")

@@ -240,6 +240,17 @@ def wait_saved_compose(terminal, attachment_count=None):
     terminal.gap(.05)  # Drain the rest of this VT frame, not an application delay.
 
 
+def send_review_ready(terminal):
+    """Observe an admitted exact MIME receipt before one deliberate send."""
+    current = terminal.text()
+    if (terminal.screen.frame_open or "Review send" not in current
+            or "[y Send]" not in current or "Send unavailable" in current
+            or "OVER LIMIT" in current):
+        return False
+    receipt = re.search(r"\bMIME:\s+(\d+)\s*/\s*(\d+)\s+bytes\s+·\s+exact\b", current)
+    return receipt is not None and 0 < int(receipt[1]) <= int(receipt[2])
+
+
 def body_bounds(terminal):
     label = terminal.screen.locate("Body:")
     if label is None:
@@ -632,7 +643,8 @@ def exercise(terminal, action):
         terminal.send(b"\x13")
         terminal.until(lambda: "Sending account:" in terminal.text()
                        and "recipient@example.org" in terminal.text()
-                       and "Reviewed synthetic PTY body." in terminal.text())
+                       and "Reviewed synthetic PTY body." in terminal.text()
+                       and (action == "review-cancel" or send_review_ready(terminal)))
         require("recipient@example.org" in terminal.text() and "Reviewed synthetic PTY body." in terminal.text(),
                 "send review did not show the actual recipient and complete short body")
         if action == "review-cancel":
@@ -650,7 +662,7 @@ def exercise(terminal, action):
     if action == "unknown-send-reopen":
         compose_fixture(terminal)
         terminal.send(b"\x13")
-        terminal.until(lambda: "Sending account:" in terminal.text())
+        terminal.until(lambda: "Sending account:" in terminal.text() and send_review_ready(terminal))
         terminal.send(b"y")
         terminal.until(lambda: "Outcome unknown" in terminal.text())
         with Client(terminal.binary, terminal.directory) as client:

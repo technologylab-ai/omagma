@@ -140,8 +140,19 @@ def main():
         run("draft", "send", "--draft-id", small["id"], "--operation-id", "attachment-refusal", "--attach-file", tiny, error="AttachmentsRequireDraftSource")
         run("mail", "read", "--wait", error="WaitRequiresQueueProcess")
         run("mail", "read", "--message-id", "demo-1", "--browser", error="BrowserRequiresPreview")
-        assert run("draft", "discard", "--draft-id", small["id"])["discarded"]
-        assert not artifact.exists(), "discarded draft content remained in browser preview file"
+        run("draft", "discard", "--draft-id", small["id"], error="ArchivedDraftReadOnly")
+        retained = run("draft", "read", "--draft-id", small["id"])
+        assert {key: retained[key] for key in small} == small
+        assert len(retained["contentDigest"]) == 64 and all(c in "0123456789abcdef" for c in retained["contentDigest"])
+        assert artifact.read_text() == html, "retained sent source lost its exact preview"
+        disposable_draft = run("draft", "create", "--to", "peer@example.test", "--body", "Unsent preview cleanup")
+        disposable_preview = Path(run("draft", "preview", "--draft-id", disposable_draft["id"], "--browser")["path"])
+        assert disposable_preview == artifact and "Unsent preview cleanup" in disposable_preview.read_text()
+        assert run("draft", "discard", "--draft-id", disposable_draft["id"])["discarded"]
+        assert not disposable_preview.exists(), "discarded draft content remained in browser preview file"
+        assert run("draft", "read", "--draft-id", small["id"]) == retained
+        assert Path(run("draft", "preview", "--draft-id", small["id"], "--browser")["path"]) == artifact
+        assert artifact.read_text() == html and run("cache", "stats")["fixtureSends"] == 3
         print(json.dumps({"suite": "terminal-ux-backend-cli", "synthetic": True, "liveProviderWrites": 0,
                           **build, "calls": calls, "passed": True}))
 

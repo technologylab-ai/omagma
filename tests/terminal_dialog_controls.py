@@ -18,6 +18,7 @@ from terminal_integration import ACCOUNTS, Client, require
 from terminal_invitations import InvitationFixture
 from terminal_mouse import start, MouseTerminal
 from terminal_mouse_screen import MouseScreen
+from terminal_pty import send_review_ready
 
 
 TAB = b"\t"
@@ -185,6 +186,8 @@ def contacts_alias_and_send(binary, directory):
         terminal.until(lambda: "Contacts ·" not in terminal.text())
         terminal.send(b"c")
         terminal.until(lambda: "Subject:" in terminal.text() and "[f Alias]" in terminal.text())
+        focus(terminal, BACKTAB, "[g Continue in Gmail]")
+        focus(terminal, BACKTAB, "[P Preview in browser]")
         focus(terminal, BACKTAB, "[f Alias]")
         terminal.send(ENTER)
         terminal.until(lambda: "Choose sender" in terminal.text() and "Verified sending identity" in terminal.text())
@@ -193,6 +196,8 @@ def contacts_alias_and_send(binary, directory):
         reach(terminal, "[Use]")
         activate(terminal)
         terminal.until(lambda: "From: alias@example.test" in terminal.text() and "Choose sender" not in terminal.text())
+        focus(terminal, TAB, "[P Preview in browser]")
+        focus(terminal, TAB, "[g Continue in Gmail]")
         terminal.send(TAB + b"irecipient@example.test\t\t\tKeyboard-only send\tThis is a fixture body.")
         terminal.send(b"\x1b")
         terminal.gap(.06)
@@ -213,7 +218,8 @@ def contacts_alias_and_send(binary, directory):
         terminal.resize(160, 40)
         terminal.until(lambda: "Outgoing preview" in terminal.text())
         terminal.send(b"\x13")
-        terminal.until(lambda: "Review send" in terminal.text() and focused(terminal, "[Back]"))
+        terminal.until(lambda: "Review send" in terminal.text() and focused(terminal, "[Back]")
+                       and send_review_ready(terminal))
         focus(terminal, TAB, "[y Send]")
         focus(terminal, BACKTAB, "[Back]")
         focus(terminal, TAB, "[y Send]")

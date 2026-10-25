@@ -203,10 +203,11 @@ pub const Session = struct {
     }
     pub fn executeWithProgress(s: *Session, out_allocator: std.mem.Allocator, raw: []const u8, sink: t.ProgressSink) ![]const u8 {
         // The Session includes its large inline Config. Copy directly to a
-        // tracked heap wrapper, never through a temporary stack Session.
+        // tracked heap wrapper. An aggregate assignment still creates a
+        // large temporary in Debug; copy between the stable pointers directly.
         const worker = try s.allocator.create(Session);
         defer s.allocator.destroy(worker);
-        worker.* = s.*;
+        @memcpy(std.mem.asBytes(worker), std.mem.asBytes(s));
         // Only the parent retains access tokens between jobs. The progress
         // wrapper borrows that cache and wipes its incidental struct copy.
         worker.access_cache.clear();
@@ -1955,7 +1956,7 @@ pub const Session = struct {
         }
         const worker = try s.allocator.create(Session);
         defer s.allocator.destroy(worker);
-        worker.* = s.*;
+        @memcpy(std.mem.asBytes(worker), std.mem.asBytes(s));
         if (automatic) worker.options.use_persisted_policy = true;
         var result = try worker.refreshOwned(a, address, request);
         try result.object.put(a, "coalesced", .{ .bool = false });

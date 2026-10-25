@@ -16,6 +16,7 @@ from terminal_file_dialog import capture
 from terminal_integration import ACCOUNTS, Client, require
 from terminal_mouse import MouseTerminal
 from terminal_mouse_screen import MouseScreen
+from terminal_pty import send_review_ready
 
 TAB = b"\t"
 BACKTAB = b"\x1b[Z"
@@ -178,6 +179,8 @@ def focus_button(terminal, label, backwards=False, limit=32):
 
 
 def activate_button(terminal, label, backwards=False):
+    if label == "[y Send]":
+        terminal.until(lambda: send_review_ready(terminal))
     focus_button(terminal, label, backwards)
     # This is a deliberate activation after reviewing the focused control,
     # separate from held-key/repeat guards at a newly opened write surface.

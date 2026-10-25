@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
+import re
 import shlex
 import shutil
 import sys
@@ -157,7 +158,10 @@ def exercise(binary, root):
                     and "Keep formatting unavailable" not in terminal.text(),
                     "large-source formatting choice did not retain all 146 resources")
         wait("capture-formatted-original", lambda: "Compose" in terminal.text().splitlines()[0]
-             and "original is protected" in terminal.text() and saved_compose_frame(terminal),
+             and "Included [Q Reply without original]" in terminal.text()
+             and "Original message · protected" in terminal.text()
+             and "Embedded resources: 146 · saved snapshot" in terminal.text()
+             and saved_compose_frame(terminal),
              keys=b"k", seconds=CAPTURE_SECONDS)
         # The editor notice appears before its asynchronous draft save starts.
         # Composer commands are ignored until that save has returned: require
@@ -197,7 +201,12 @@ def exercise(binary, root):
              and "Re: Growing chain source" in terminal.text() and "Ready" in terminal.text(), keys=b"\r")
         wait("reopen-saved-composer", lambda: "Compose" in terminal.text().splitlines()[0]
              and "Local draft · no mail sent" in terminal.text().splitlines()[1], keys=b"\r", seconds=30)
-        wait("reopened-send-review", lambda: "Sending account:" in terminal.text(), keys=b"\x13", seconds=30)
+        # Review is visible before its asynchronous size receipt arrives.
+        # Wait for the measured sendable frame before one deliberate Send.
+        wait("reopened-send-review", lambda: "Sending account:" in terminal.text()
+             and re.search(r"MIME: [0-9]+ / [0-9]+ bytes · exact", terminal.text()) is not None
+             and "OVER LIMIT" not in terminal.text() and "Send unavailable" not in terminal.text()
+             and "[y Send]" in terminal.text(), keys=b"\x13", seconds=30)
         wait("confirmed-fixture-send", lambda: "Saved by mock provider" in terminal.text(), keys=b"y", seconds=30)
         with stages.step("verify-single-send-and-terminal-restoration"):
             finished = terminal.finish(expected_sends=1)
