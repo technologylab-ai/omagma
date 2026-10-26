@@ -68,6 +68,12 @@ assert.equal(htmlFiles.length, manifest.pages.length, 'Unexpected documentation 
 // Public entry points must show the current Mail + Calendar product, including
 // the native workflows that otherwise disappear into ignored launch films.
 const homepage = html.get(path.join(dist, 'index.html'));
+const packageDeclaration = await fs.readFile(path.join(here, '..', 'build.zig.zon'), 'utf8');
+const packageVersion = packageDeclaration.match(/\.version\s*=\s*"([0-9A-Za-z.-]+)"/)?.[1];
+assert(packageVersion, 'Missing package version');
+const currentReleaseRoute = `docs/release-notes/${packageVersion}/`;
+assert(manifest.pages.includes(currentReleaseRoute), 'Missing current release notes from site');
+assert(homepage.includes(`href="${manifest.base}${currentReleaseRoute}"`), 'Homepage release link is outdated');
 for (const [label, pattern] of [
   ['title', /<title>([\s\S]*?)<\/title>/],
   ['headline', /<h1\b[^>]*>([\s\S]*?)<\/h1>/],

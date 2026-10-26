@@ -25,6 +25,10 @@ Publication creates only a new version and never replaces a release, draft or ta
 
 Review `docs/release-notes/VERSION.md` before requesting publication. The publisher uses that version's highlights and appends matching compiler, download and setup links; a generic description is available when no versioned notes exist. Release notes describe the complete current application, including its experimental terminal status.
 
+The website requires notes for the current package version and links them from
+the homepage. Add each published note to the reviewed historical list in
+`website/build.mjs` so its permalink remains available after the next version bump.
+
 ## Local packaging
 
 From a source checkout with the declared Zig compiler and Python 3, stage or commit the intended public changes first. The packager uses audited tracked files and rejects unstaged tracked changes; ignored or untracked files are not bundled. On shared hosts, reserve the complete build/check workload using the [cooperative lock](VERIFICATION.md#cooperative-host-measurement-lock) before starting.
