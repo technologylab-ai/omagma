@@ -8,7 +8,11 @@ pub const time = @import("calendar_time.zig");
 pub const Limits = struct {
     pub const source_bytes = 128 * 1024;
     pub const source_properties = 1024;
-    pub const source_line_bytes = 4096;
+    // RFC 5545 folds physical lines; a logical DESCRIPTION or X-ALT-DESC
+    // routinely exceeds 4 KiB in Outlook/Teams invitations. Unfolding already
+    // allocates at most the complete source budget, so no smaller line cap
+    // should reject an otherwise supported invitation.
+    pub const source_line_bytes = source_bytes;
     pub const recurrence_lines = 64;
     pub const calendar_page = if (@import("types.zig").Limits.native) 250 else 24;
     /// Bounded discovery pages; explicit named targets remain addressable.

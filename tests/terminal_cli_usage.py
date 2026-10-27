@@ -18,7 +18,7 @@ import tempfile
 import traceback
 
 from build_info import build_mode, read_build_info
-from terminal_integration import no_core_dump, require
+from terminal_integration import ACCOUNTS, FIXTURES, no_core_dump, require
 
 
 HINT = b"Try omagma --help for available commands and options."
@@ -126,6 +126,10 @@ def options(runner):
     runner.usage(["mail", "list", "--config", str(runner.invalid_config), "--fictional-unknown-option"], "UnknownOption")
     for flag in VALUE_FLAGS:
         runner.usage(["mail", "list", flag], "ValueRequired")
+    for arguments in (["cli"], ["tui"], ["mail", "send"], ["invitations", "inspect"]):
+        result = runner.run([*arguments, "--rsvp-only"], without_home=True)
+        require(result.returncode != 0 and result.stdout == b"" and b"omagma: InvalidRequest" in result.stderr,
+                "misplaced RSVP-only override was not rejected before account/configuration access")
     require(not list((runner.directory / "cache").iterdir()), "unknown/missing option initialized an account cache")
 
 
@@ -168,6 +172,10 @@ def help_paths(runner):
     detailed = runner.run(["mail", "read", "--help"]).stdout
     require(b"--message-id" in detailed and b"messageId" in detailed and b"draft queue" not in detailed,
             "message help omitted its fields or leaked unrelated command details")
+    invitation = runner.run(["invitations", "reply", "--help"], without_home=True).stdout
+    require(all(value in invitation for value in (b"--rsvp-only", b"rsvpOnly", b"outcome:blocked",
+                                                  b"Decline is email-only")),
+            "RSVP help omitted Calendar preflight, its explicit override or email-only Decline")
     jsonl_help = runner.run(["cli", "--help", "mail.read"], without_home=True)
     require(jsonl_help.returncode == 0 and b'"messageId"' in jsonl_help.stdout and not jsonl_help.stderr,
             "JSONL operation discovery omitted its actual request field")
@@ -287,6 +295,10 @@ def discovery(runner):
             and "beforeMessageId" in commands["mail.list"]["properties"]
             and "includeSpamTrash" in commands["mail.search"]["properties"],
             "schema omitted ordinary optional navigation/search fields")
+    reply_fields = commands["invitation.reply"]["properties"]
+    require(reply_fields.get("rsvpOnly", {}).get("type") == "boolean"
+            and "rsvpOnly" not in commands["invitation.reply"].get("required", []),
+            "RSVP schema omitted the optional explicit mail-only override")
     require("Draft" in catalogue["$defs"] and "Contact" in catalogue["$defs"]
             and "original" in catalogue["$defs"]["Draft"]["properties"],
             "schema omitted nested compose/contact/original fields")
@@ -397,6 +409,53 @@ def protocol(runner):
             "known operational configuration failure received an unrelated argv hint")
 
 
+def rsvp_contract(runner):
+    cache = runner.directory / "rsvp-cache"
+    common = ["--fixtures", "--fixture-root", str(FIXTURES), "--cache-dir", str(cache),
+              "--account", ACCOUNTS[0]]
+    invitation = ["--message-id", "shared-msg-009"]
+
+    def request(family, verb, *arguments):
+        result = runner.run([family, verb, *common, *arguments])
+        reply = json.loads(result.stdout)
+        require(result.returncode == 0 and not result.stderr and reply.get("ok") is True,
+                "one-shot RSVP command lost its successful JSON result contract")
+        return reply["data"]
+
+    def counts(sends):
+        require(request("cache", "stats")["fixtureSends"] == sends,
+                "one-shot RSVP did not preserve its explicit send count")
+        states = [json.loads(path.read_text()) for path in cache.rglob("calendar-provider-fixture.json")]
+        require(all(state["writes"] == 0 for state in states), "one-shot mail-only RSVP wrote Calendar")
+
+    for status in ("accepted", "tentative"):
+        blocked = request("invitations", "reply", *invitation, "--status", status,
+                          "--operation-id", "one-shot-" + status,
+                          "--fixture-scenario", "calendar-no-grant")
+        require(blocked["outcome"] == "blocked"
+                and blocked["calendarSync"]["errorCode"] == "CalendarPermissionRequired",
+                "one-shot RSVP did not return its known Calendar blocker before submission")
+        counts(0)
+
+    reply_args = [*invitation, "--status", "tentative", "--operation-id", "one-shot-tentative", "--rsvp-only"]
+    sent = request("invitations", "reply", *reply_args, "--fixture-scenario", "calendar-no-grant")
+    require(sent["outcome"] == "applied" and sent["calendarSync"]["errorCode"] == "RsvpOnlyRequested"
+            and "PARTSTAT=TENTATIVE:mailto:" + ACCOUNTS[0] in sent["icalendar"],
+            "--rsvp-only lost its explicit response or persisted Calendar policy")
+    require(request("invitations", "reply", *reply_args) == sent,
+            "one-shot mail-only replay changed after Calendar access recovered")
+    checked = request("invitations", "inspect", *invitation, "--reconcile")
+    require(checked["confirmedResponse"] == "TENTATIVE" and checked["calendarSync"] == sent["calendarSync"],
+            "one-shot reconciliation changed its durable mail-only response")
+    counts(1)
+
+    declined = request("invitations", "reply", *invitation, "--status", "declined",
+                       "--operation-id", "one-shot-declined", "--fixture-scenario", "calendar-no-grant")
+    require(declined["outcome"] == "applied" and declined["calendarSync"]["errorCode"] == "DeclinedReplyOnly",
+            "default Decline incorrectly required Calendar access or lost its email-only policy")
+    counts(2)
+
+
 def version(runner, expected):
     results = [runner.run([verb], without_home=True) for verb in ("version", "--version")]
     require(all(result.returncode == 0 and not result.stderr for result in results), "version alias needed configured accounts")
@@ -424,7 +483,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="omagma-cli-usage-") as temporary:
         runner = Runner(binary, Path(temporary))
         for name, exercise in (("guidance", guidance), ("options", options), ("help", help_paths), ("discovery", discovery), ("help-examples", help_examples),
-                               ("protocol", protocol), ("version", lambda runner: version(runner, info["appVersion"]))):
+                               ("protocol", protocol), ("rsvp-contract", rsvp_contract),
+                               ("version", lambda runner: version(runner, info["appVersion"]))):
             try:
                 exercise(runner)
             except Exception:

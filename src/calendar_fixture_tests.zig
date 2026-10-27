@@ -36,13 +36,21 @@ const Harness = struct {
         return commands.dispatch(instance, request, .{ .io = std.testing.io, .env = &env, .context = &inputs, .loadInvitationFn = Inputs.source, .loadReviewFn = Inputs.review, .loadReceiptFn = Inputs.receipt, .loadPendingFn = Inputs.pending });
     }
     fn rsvp(self: *Harness, operation: []const u8, status: provider.RsvpResponse, explicit_calendar: []const u8) !@import("terminal/calendar_rsvp.zig").Result {
+        return (try self.rsvpRun(operation, status, explicit_calendar, true)).?;
+    }
+    fn preflightRsvp(self: *Harness, operation: []const u8, status: provider.RsvpResponse, explicit_calendar: []const u8) !?@import("terminal/calendar_rsvp.zig").Result {
+        return self.rsvpRun(operation, status, explicit_calendar, false);
+    }
+    fn rsvpRun(self: *Harness, operation: []const u8, status: provider.RsvpResponse, explicit_calendar: []const u8, apply: bool) !?@import("terminal/calendar_rsvp.zig").Result {
         var backend = try self.transport();
         var local = self.storeHost();
         var inputs: Inputs = .{ .harness = self, .store = &local };
         var env: std.process.Environ.Map = .init(self.a);
         defer env.deinit();
         const instance: service.Service = .{ .a = self.a, .grants = backend.grants(), .transport = backend.transport(), .persistence = local.persistence(), .cache = local.cache(), .now_ms = now };
-        return @import("terminal/calendar_rsvp.zig").sync(instance, try j.value(self.a, .{ .account = self.selected_account, .messageId = "synthetic-invitation", .operationId = operation, .calendarId = explicit_calendar }), .{ .io = std.testing.io, .env = &env, .context = &inputs, .loadInvitationFn = Inputs.source, .loadReviewFn = Inputs.review, .loadReceiptFn = Inputs.receipt, .loadPendingFn = Inputs.pending }, status);
+        const request = try j.value(self.a, .{ .account = self.selected_account, .messageId = "synthetic-invitation", .operationId = operation, .calendarId = explicit_calendar });
+        const callbacks: commands.HostInputs = .{ .io = std.testing.io, .env = &env, .context = &inputs, .loadInvitationFn = Inputs.source, .loadReviewFn = Inputs.review, .loadReceiptFn = Inputs.receipt, .loadPendingFn = Inputs.pending };
+        return if (apply) try @import("terminal/calendar_rsvp.zig").sync(instance, request, callbacks, status) else try @import("terminal/calendar_rsvp.zig").preflight(instance, request, callbacks, status);
     }
     fn send(self: *Harness, request: provider.Request) !service.Response {
         var backend = try self.transport();
@@ -339,6 +347,30 @@ test "calendar RSVP: accepted imports once and tentative changes only the attend
     try std.testing.expectEqualStrings(before.event.summary, after.event.summary);
     try std.testing.expectEqual(before.event.start.?.value, after.event.start.?.value);
     try std.testing.expectEqual(before.event.sequence, after.event.sequence);
+}
+
+test "calendar RSVP: preflight persists without writes and binds both reviews and receipts to source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = try source(a, 1, false);
+    var h: Harness = .{ .a = a, .root = try temporaryRoot(a, tmp), .source = original };
+    try std.testing.expect(try h.preflightRsvp("mail-preflight", .accepted, "") == null);
+    try std.testing.expectEqual(@as(i64, 0), try h.writes());
+    h.source = try source(a, 2, false);
+    try std.testing.expectError(error.CalendarReviewMismatch, h.preflightRsvp("mail-preflight", .accepted, ""));
+    try std.testing.expectError(error.CalendarReviewMismatch, h.rsvp("mail-preflight", .accepted, ""));
+    try std.testing.expectEqual(@as(i64, 0), try h.writes());
+    h.source = original;
+    const applied = try h.rsvp("mail-preflight", .accepted, "");
+    try std.testing.expectEqual(.applied, applied.state);
+    try std.testing.expectEqual(@as(i64, 1), try h.writes());
+    h.source = try source(a, 2, false);
+    try std.testing.expectError(error.CalendarReviewMismatch, h.preflightRsvp("mail-preflight", .accepted, ""));
+    try std.testing.expectError(error.CalendarReviewMismatch, h.rsvp("mail-preflight", .accepted, ""));
+    try std.testing.expectEqual(@as(i64, 1), try h.writes());
 }
 
 test "calendar RSVP: lost mutation response reconciles read-only after reopen" {

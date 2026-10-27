@@ -365,7 +365,10 @@ pub const Service = struct {
 
     /// Only an exact confirmed review and a fresh durable unknown claim can
     /// reach sendFn. Repeated calls reconcile or return the existing receipt.
-    pub fn apply(self: Service, review: Review, confirmation: Confirmation) !Applied {
+    /// Validate current provider state and persist the exact action without
+    /// claiming or dispatching a mutation. Existing operations are returned
+    /// for their caller to reconcile; this never repeats a provider write.
+    pub fn preflight(self: Service, review: Review, confirmation: Confirmation) !?planner.Operation {
         try self.validateReview(review, confirmation);
         try self.requireWrite(review.calendar);
         const store = self.persistence orelse return error.CalendarPersistenceRequired;
@@ -373,7 +376,7 @@ pub const Service = struct {
         if (state.operation) |operation| {
             if (std.mem.eql(u8, operation.intent.operation_id, review.intent.operation_id)) {
                 if (!operation.intent.eql(review.intent)) return error.OperationConflict;
-                return self.reconcileOperation(review, operation);
+                return operation;
             }
             if (operation.state == .unknown) return error.CalendarOperationPending;
         }
@@ -401,6 +404,12 @@ pub const Service = struct {
             if (!ordinary.canEdit(review.calendar, current) or !std.mem.eql(u8, current.event.etag, review.intent.expected_etag)) return error.CalendarReviewStale;
         }
         try store.preserveFn(store.context, review);
+        return null;
+    }
+
+    pub fn apply(self: Service, review: Review, confirmation: Confirmation) !Applied {
+        if (try self.preflight(review, confirmation)) |operation| return self.reconcileOperation(review, operation);
+        const store = self.persistence orelse return error.CalendarPersistenceRequired;
         const claim = try store.journal.claim(review.intent);
         if (!claim.fresh) return self.reconcileOperation(review, claim.operation);
         return self.dispatchClaimed(review, claim.operation, false);

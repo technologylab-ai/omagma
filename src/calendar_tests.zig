@@ -110,6 +110,77 @@ test "calendar: independent parser rejects ambiguous identity and unfolds split 
     try std.testing.expectError(error.CalendarEndRequiresReview, invitation.resolveSpan(zero_length, null, null));
 }
 
+test "calendar RSVP: long folded Outlook descriptions fit the complete source budget" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:long-description@example.test\r\nDTSTAMP:20261013T080000Z\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nDTSTART:20261013T100000Z\r\nDTEND:20261013T110000Z\r\nSUMMARY:Teams planning\r\n";
+    const suffix = "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    for ([_][]const u8{ "DESCRIPTION:", "X-ALT-DESC;FMTTYPE=text/html:" }) |property_name| {
+        for ([_]usize{ 4095, 4096, 4097, 16 * 1024, 64 * 1024, 120 * 1024 }) |length| {
+            const content = try a.alloc(u8, length);
+            @memset(content, 'x');
+            const raw = try std.mem.concat(a, u8, &.{ prefix, property_name, content, suffix });
+            const parsed = try invitation.parse(a, raw, target.account, &.{});
+            try std.testing.expectEqualStrings(raw, parsed.source);
+            if (std.mem.eql(u8, property_name, "DESCRIPTION:")) try std.testing.expectEqualSlices(u8, content, parsed.description);
+            try std.testing.expectEqualStrings("Teams planning", parsed.summary);
+            const span = try invitation.resolveSpan(parsed, null, null);
+            try std.testing.expectEqual(try t.time.rfc3339("2026-10-13T10:00:00Z"), span.start.value);
+            // A compliant sender folds physical lines; neither their count nor
+            // the unfolded description may impose the former 4 KiB limit.
+            if (length == 16 * 1024) {
+                var folded: std.ArrayList(u8) = .empty;
+                try folded.appendSlice(a, prefix);
+                try folded.appendSlice(a, property_name);
+                var pos: usize = 0;
+                while (pos < content.len) {
+                    const end = @min(pos + 60, content.len);
+                    if (pos != 0) try folded.appendSlice(a, "\r\n ");
+                    try folded.appendSlice(a, content[pos..end]);
+                    pos = end;
+                }
+                try folded.appendSlice(a, suffix);
+                const unfolded = try invitation.parse(a, folded.items, target.account, &.{});
+                try std.testing.expectEqualSlices(u8, parsed.unfolded, unfolded.unfolded);
+            }
+        }
+    }
+    const exact = try a.alloc(u8, t.Limits.source_bytes);
+    @memcpy(exact[0..prefix.len], prefix);
+    @memcpy(exact[prefix.len..][0.."DESCRIPTION:".len], "DESCRIPTION:");
+    @memset(exact[prefix.len + "DESCRIPTION:".len .. exact.len - suffix.len], 'x');
+    @memcpy(exact[exact.len - suffix.len ..], suffix);
+    _ = try invitation.parse(a, exact, target.account, &.{});
+    const excessive = try std.mem.concat(a, u8, &.{ exact, "x" });
+    try std.testing.expectError(error.CalendarTooLarge, invitation.parse(a, excessive, target.account, &.{}));
+}
+
+test "calendar RSVP: prepared imports also fit provider read and reconciliation bounds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var value = try source(a, "single-utc.ics");
+    const description = try a.alloc(u8, 64 * 1024 + 1);
+    @memset(description, 'x');
+    value.description = description[0 .. 64 * 1024];
+    value.join_url = "";
+    _ = try provider.prepareImport(a, value, intent(value), null, null);
+    value.description = description;
+    try std.testing.expectError(error.CalendarDescriptionTooLarge, provider.prepareImport(a, value, intent(value), null, null));
+    value.description = description[0 .. 64 * 1024];
+    value.join_url = "https://teams.microsoft.com/meet/123456";
+    try std.testing.expectError(error.CalendarDescriptionTooLarge, provider.prepareImport(a, value, intent(value), null, null));
+    value.description = "Normal description";
+    const text = try a.alloc(u8, 4097);
+    @memset(text, 'x');
+    value.summary = text;
+    try std.testing.expectError(error.CalendarSummaryTooLarge, provider.prepareImport(a, value, intent(value), null, null));
+    value.summary = "Normal title";
+    value.location = text;
+    try std.testing.expectError(error.CalendarLocationTooLarge, provider.prepareImport(a, value, intent(value), null, null));
+}
+
 test "calendar: duplicate update cancellation and account decisions cannot create a second event" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -866,7 +866,7 @@ test "native send memory HTTP: encrypted store preserves uncertain receipts and 
     try sendMemoryScenario(32288, 6773, 6642, true);
 }
 
-test "native send memory HTTP: RSVP spool preserves the verified alias and calendar-only send capability" {
+test "native send memory HTTP: explicit mail-only RSVP preserves the verified alias and calendar-only send capability" {
     const storage = @import("terminal/store.zig");
     const Core = @import("terminal/core.zig").Session;
     var arena: std.heap.ArenaAllocator = .init(a);
@@ -905,9 +905,14 @@ test "native send memory HTTP: RSVP spool preserves the verified alias and calen
     const session = try allocator.create(Core);
     try session.initInto(io, allocator, &env, .{ .cache_dir = root }, config);
     defer session.deinit();
+    const blocked = try sendMemoryCall(session, allocator, .{ .cmd = "invitation.reply", .account = account, .messageId = "synthetic-invitation", .status = "accepted", .operationId = "synthetic-rsvp-blocked", .attendee = "alias@example.test" });
+    try std.testing.expectEqualStrings("blocked", j.text(blocked, "outcome"));
+    try std.testing.expectEqualStrings("CalendarPermissionRequired", j.text(blocked, "errorCode"));
+    try std.testing.expectEqual(@as(usize, 0), oracle.writes.load(.acquire));
     for (0..2) |_| {
-        const result = try sendMemoryCall(session, allocator, .{ .cmd = "invitation.reply", .account = account, .messageId = "synthetic-invitation", .status = "accepted", .operationId = "synthetic-rsvp", .attendee = "alias@example.test" });
+        const result = try sendMemoryCall(session, allocator, .{ .cmd = "invitation.reply", .account = account, .messageId = "synthetic-invitation", .status = "accepted", .operationId = "synthetic-rsvp", .attendee = "alias@example.test", .rsvpOnly = true });
         try std.testing.expectEqualStrings("applied", j.text(result, "outcome"));
+        try std.testing.expectEqualStrings("RsvpOnlyRequested", j.text(j.get(result, "calendarSync").?, "errorCode"));
         try std.testing.expectEqual(@as(usize, 1), oracle.writes.load(.acquire));
     }
     try std.testing.expectEqual(@as(usize, 0), @import("terminal/send_memory.zig").snapshot().allocatorUsedBytes);

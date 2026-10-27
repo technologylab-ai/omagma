@@ -856,6 +856,7 @@ pub const Session = struct {
             if (j.get(req, "calendarId")) |value| try @import("calendar_types.zig").text(try j.string(value), 1024, false);
             const cache_only = try j.boolean(req, "cacheOnly", false);
             const reconcile = try j.boolean(req, "reconcile", false);
+            const rsvp_only = try j.boolean(req, "rsvpOnly", false);
             if (reconcile and (cache_only or !std.mem.eql(u8, cmd, "invitation.inspect"))) return error.InvalidRequest;
             var m = if (cache_only) (try store.read(message_id)) orelse return error.CacheMiss else try s.read(a, &store, message_id, req);
             // Repair old metadata-only calendar attachments only when the
@@ -905,6 +906,23 @@ pub const Session = struct {
             const buf = try a.alloc(u8, invitation.max_calendar_bytes);
             const reply = try invitation.reply(&invite, status, try utcStamp(s.io, a), buf);
             const d: t.Draft = .{ .to = &.{.{ .address = invite.organizer.slice() }}, .subject = try std.fmt.allocPrint(a, "{s}: {s}", .{ @tagName(status), m.subject }), .bodyText = try std.fmt.allocPrint(a, "Invitation response: {s}", .{@tagName(status)}) };
+            if (status != .declined and !rsvp_only) {
+                // Release the mail transaction before opening Calendar's
+                // account transaction. Preflight never sends mail or writes
+                // an event; a known blocker leaves both providers untouched.
+                store.release();
+                const blocker = s.calendarHost(a).preflightRsvp(req, .{ .source = ics, .verified_aliases = aliases }, if (status == .accepted) .accepted else .tentative) catch |err| switch (err) {
+                    error.Canceled, error.OutOfMemory => return err,
+                    else => @import("calendar_rsvp.zig").failed(err),
+                };
+                try s.reopenBody(a, &store);
+                // Another client may have submitted while Calendar held the
+                // account lease. Recheck both replay and source-wide unknown
+                // fences before trusting our preflight result or sending.
+                if (try invitationReceipt(a, &store, ics, req)) |receipt| return s.syncInvitationCalendar(a, &store, ics, req, receipt);
+                if (std.mem.eql(u8, (try confirmedInvitationResponse(a, &store, ics, address, aliases)).outcome, "unknown")) return error.UnknownOutcome;
+                if (blocker) |reason| return j.value(a, .{ .outcome = "blocked", .errorCode = reason.errorCode, .calendarSync = reason });
+            }
             var responding = try j.copyObject(a, req);
             const source_hash = storage.Store.hash(ics);
             try responding.object.put(a, "_sourceInvitationHash", .{ .string = try a.dupe(u8, &source_hash) });
@@ -989,6 +1007,8 @@ pub const Session = struct {
         if (try store.findOperation(a, id)) |operation| {
             if (!std.mem.eql(u8, operation.sourceInvitationHash, &hash)) return error.OperationConflict;
             if (!std.mem.eql(u8, operation.invitationCalendarId, j.text(req, "calendarId"))) return error.OperationConflict;
+            const previous_rsvp_only = if (operation.calendarSync) |result| std.mem.eql(u8, result.errorCode, "RsvpOnlyRequested") else false;
+            if (status != .declined and previous_rsvp_only != try j.boolean(req, "rsvpOnly", false)) return error.OperationConflict;
             var previous: invitation.Invitation = .{};
             invitation.parseDisplay(operation.icalendar, store.state.account, &.{}, &previous) catch return error.OperationConflict;
             if (previous.method != .reply or !std.ascii.eqlIgnoreCase(previous.attendee_status.slice(), @tagName(status))) return error.OperationConflict;
@@ -1010,7 +1030,11 @@ pub const Session = struct {
         var original: invitation.Invitation = .{};
         invitation.parseDisplay(ics, account, aliases, &original) catch return .{};
         if (sent.method != .reply or !std.mem.eql(u8, sent.uid.slice(), original.uid.slice()) or !std.mem.eql(u8, sent.recurrence_id.slice(), original.recurrence_id.slice()) or !std.mem.eql(u8, sent.recurrence_parameters.slice(), original.recurrence_parameters.slice())) return .{};
-        return .{ .outcome = "applied", .status = try a.dupe(u8, sent.attendee_status.slice()), .calendarSync = operation.calendarSync };
+        var calendar_sync = operation.calendarSync;
+        if (calendar_sync) |*result| if (result.state == .skipped and std.mem.eql(u8, result.errorCode, "CalendarLineTooLarge")) {
+            result.canRetry = true;
+        };
+        return .{ .outcome = "applied", .status = try a.dupe(u8, sent.attendee_status.slice()), .calendarSync = calendar_sync };
     }
     fn calendarJob(s: *Session, a: std.mem.Allocator, req: Value) !Value {
         return s.calendarHost(a).run(req);
@@ -1057,6 +1081,10 @@ pub const Session = struct {
         }
         const status = std.meta.stringToEnum(invitation.Status, j.text(req, "status")) orelse return error.InvalidInvitationStatus;
         if (j.get(receipt, "calendarSync")) |saved| if (saved != .null and !std.mem.eql(u8, j.text(saved, "state"), "unknown")) {
+            if (std.mem.eql(u8, j.text(saved, "errorCode"), "RsvpOnlyRequested")) {
+                settleAcceptedSource(store);
+                return result;
+            }
             if (!try j.boolean(req, "reconcile", false) or !std.mem.eql(u8, j.text(saved, "state"), "skipped")) return result;
         };
         var outcome: sync.Result = .{ .errorCode = "DeclinedReplyOnly" };
@@ -3449,7 +3477,7 @@ pub const Session = struct {
         // Keep direct-send content as a recoverable draft before uncertainty is recorded.
         const saved_draft = if (std.mem.eql(u8, j.text(req, "cmd"), "draft.send")) draft else try store.putDraft(draft, null);
         try operations.appendSlice(a, store.state.operations);
-        try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "", .sourceInvitationHash = if (calendar != null) j.text(req, "_sourceInvitationHash") else "", .invitationCalendarId = if (calendar != null) j.text(req, "calendarId") else "" });
+        try operations.append(a, .{ .id = operation_id, .hash = try a.dupe(u8, &digest), .draftId = saved_draft.id, .rfcMessageId = try std.fmt.allocPrint(a, "<omagma-{s}@mail.invalid>", .{wire_hash}), .icalendar = calendar orelse "", .sourceInvitationHash = if (calendar != null) j.text(req, "_sourceInvitationHash") else "", .invitationCalendarId = if (calendar != null) j.text(req, "calendarId") else "", .calendarSync = if (calendar != null and !std.mem.eql(u8, j.text(req, "status"), "declined") and try j.boolean(req, "rsvpOnly", false)) .{ .errorCode = "RsvpOnlyRequested" } else null });
         store.state.operations = operations.items;
         try store.save();
         var operation = &store.state.operations[store.state.operations.len - 1];
@@ -5528,13 +5556,14 @@ test "calendar RSVP: mail receipt survives calendar failures and reply replay ne
     try env.put("HOME", root);
     try env.put("TZ", "UTC");
     const account = "personal@example.com";
-    const cases = [_]struct { scenario: []const u8, status: []const u8, mail: []const u8, sync: []const u8, writes: i64 }{
+    const cases = [_]struct { scenario: []const u8, status: []const u8, mail: []const u8, sync: []const u8, writes: i64, description_bytes: usize = 0 }{
         .{ .scenario = "", .status = "accepted", .mail = "applied", .sync = "applied", .writes = 1 },
         .{ .scenario = "", .status = "tentative", .mail = "applied", .sync = "applied", .writes = 1 },
         .{ .scenario = "", .status = "declined", .mail = "applied", .sync = "skipped", .writes = 0 },
-        .{ .scenario = "calendar-no-grant", .status = "accepted", .mail = "applied", .sync = "skipped", .writes = 0 },
-        .{ .scenario = "calendar-readonly", .status = "accepted", .mail = "applied", .sync = "skipped", .writes = 0 },
-        .{ .scenario = "calendar-offline", .status = "accepted", .mail = "applied", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-no-grant", .status = "accepted", .mail = "blocked", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-readonly", .status = "accepted", .mail = "blocked", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "calendar-offline", .status = "accepted", .mail = "blocked", .sync = "skipped", .writes = 0 },
+        .{ .scenario = "", .status = "accepted", .mail = "blocked", .sync = "skipped", .writes = 0, .description_bytes = 64 * 1024 + 1 },
         .{ .scenario = "calendar-lost-response", .status = "accepted", .mail = "applied", .sync = "unknown", .writes = 1 },
         .{ .scenario = "unknown-send", .status = "accepted", .mail = "unknown", .sync = "skipped", .writes = 0 },
     };
@@ -5542,7 +5571,13 @@ test "calendar RSVP: mail receipt survives calendar failures and reply replay ne
         const session = try a.create(Session);
         session.* = try Session.init(io, a, &env, .{ .fixtures = true, .fixture_scenario = case.scenario, .cache_dir = try std.fmt.allocPrint(a, "{s}/case-{d}", .{ root, index }) });
         defer session.deinit();
-        const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:auto-rsvp@example.test\r\nDTSTAMP:20261013T100000Z\r\nSEQUENCE:3\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z\r\nSUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        const base_ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:auto-rsvp@example.test\r\nDTSTAMP:20261013T100000Z\r\nSEQUENCE:3\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261014T100000Z\r\nDTEND:20261014T110000Z\r\nSUMMARY:Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        const ics = if (case.description_bytes == 0) base_ics else blk: {
+            const description = try a.alloc(u8, case.description_bytes);
+            @memset(description, 'x');
+            const replacement = try std.mem.concat(a, u8, &.{ "DESCRIPTION:", description, "\r\nEND:VEVENT" });
+            break :blk try std.mem.replaceOwned(u8, a, base_ics, "END:VEVENT", replacement);
+        };
         {
             var store = try session.openStore(a, account, false);
             defer store.close();
@@ -5554,6 +5589,34 @@ test "calendar RSVP: mail receipt survives calendar failures and reply replay ne
         if (!std.mem.eql(u8, case.sync, j.text(j.get(receipt, "calendarSync").?, "state"))) std.debug.print("Calendar RSVP fixture case {d}: {s}\n", .{ index, j.text(j.get(receipt, "calendarSync").?, "errorCode") });
         try std.testing.expectEqualStrings(case.mail, j.text(receipt, "outcome"));
         try std.testing.expectEqualStrings(case.sync, j.text(j.get(receipt, "calendarSync").?, "state"));
+        if (std.mem.eql(u8, case.mail, "blocked")) {
+            if (case.description_bytes != 0) try std.testing.expectEqualStrings("CalendarDescriptionTooLarge", j.text(j.get(receipt, "calendarSync").?, "errorCode"));
+            {
+                var untouched = try session.openStore(a, account, false);
+                defer untouched.close();
+                try std.testing.expectEqual(@as(u64, 0), untouched.state.fixtureSends);
+                try std.testing.expectEqual(@as(usize, 0), untouched.state.operations.len);
+            }
+            const blocked_again = try session.dispatch(a, request);
+            try std.testing.expectEqualStrings("blocked", j.text(blocked_again, "outcome"));
+            var mail_only = try j.copyObject(a, request);
+            try mail_only.object.put(a, "rsvpOnly", .{ .bool = true });
+            const overridden = try session.dispatch(a, mail_only);
+            try std.testing.expectEqualStrings("applied", j.text(overridden, "outcome"));
+            try std.testing.expectEqualStrings("RsvpOnlyRequested", j.text(j.get(overridden, "calendarSync").?, "errorCode"));
+            session.options.fixture_scenario = "";
+            // Replaying or checking the confirmed override must not later
+            // invent a Calendar write or resend the confirmed mail.
+            _ = try session.dispatch(a, mail_only);
+            const checked = try session.dispatch(a, try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "auto-invitation", .reconcile = true }));
+            try std.testing.expectEqualStrings("RsvpOnlyRequested", j.text(j.get(checked, "calendarSync").?, "errorCode"));
+            var after = try session.openStore(a, account, false);
+            defer after.close();
+            try std.testing.expectEqual(@as(u64, 1), after.state.fixtureSends);
+            const calendar_document = try after.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes);
+            if (calendar_document) |raw| try std.testing.expectEqual(@as(i64, 0), try j.integer(try std.json.parseFromSliceLeaky(Value, a, raw, .{}), "writes", -1));
+            continue;
+        }
         if (std.mem.eql(u8, case.scenario, "calendar-lost-response")) {
             session.options.fixture_scenario = "calendar-offline";
             const unavailable = try session.dispatch(a, request);
@@ -5578,6 +5641,66 @@ test "calendar RSVP: mail receipt survives calendar failures and reply replay ne
         const writes = if (calendar_state) |raw| try j.integer(try std.json.parseFromSliceLeaky(Value, a, raw, .{}), "writes", -1) else 0;
         try std.testing.expectEqual(case.writes, writes);
     }
+}
+
+test "calendar RSVP: long description recovery updates Calendar without resending confirmed mail" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("TZ", "UTC");
+    const session = try a.create(Session);
+    session.* = try Session.init(io, a, &env, .{ .fixtures = true, .cache_dir = try std.fmt.allocPrint(a, "{s}/cache", .{root}) });
+    defer session.deinit();
+    const account = "personal@example.com";
+    const description = try a.alloc(u8, 16 * 1024);
+    @memset(description, 'x');
+    const ics = try std.mem.concat(a, u8, &.{ "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:long-teams@example.test\r\nDTSTAMP:20261013T100000Z\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:personal@example.com\r\nDTSTART:20261026T113000Z\r\nDTEND:20261026T123000Z\r\nSUMMARY:Teams meeting\r\nDESCRIPTION:", description, "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n" });
+    var parsed: invitation.Invitation = .{};
+    try invitation.parse(ics, account, &.{}, &parsed);
+    const response = try invitation.reply(&parsed, .accepted, "20261026T101300Z", try a.alloc(u8, invitation.max_calendar_bytes));
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try store.put(.{ .id = "long-invitation", .threadId = "long-thread", .bodyText = "Planning", .invitation = ics }, true);
+        const hash = storage.Store.hash(ics);
+        store.state.operations = try a.dupe(storage.Operation, &.{.{ .id = "already-sent", .hash = "synthetic", .outcome = "applied", .icalendar = response, .sourceInvitationHash = try a.dupe(u8, &hash), .calendarSync = .{ .errorCode = "CalendarLineTooLarge" } }});
+        try store.save();
+    }
+    const check = try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "long-invitation", .reconcile = true });
+    for (0..2) |_| {
+        const recovered = try session.dispatch(a, check);
+        try std.testing.expectEqualStrings("ACCEPTED", j.text(recovered, "confirmedResponse"));
+        try std.testing.expectEqualStrings("applied", j.text(j.get(recovered, "calendarSync").?, "state"));
+    }
+    {
+        var store = try session.openStore(a, account, false);
+        defer store.close();
+        try std.testing.expectEqual(@as(u64, 0), store.state.fixtureSends);
+        const raw = (try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes)).?;
+        try std.testing.expectEqual(@as(i64, 1), try j.integer(try std.json.parseFromSliceLeaky(Value, a, raw, .{}), "writes", -1));
+        try std.testing.expect(std.mem.indexOf(u8, raw, "long-teams@example.test") != null);
+        const next_ics = try std.mem.replaceOwned(u8, a, ics, "long-teams@example.test", "next-teams@example.test");
+        try store.put(.{ .id = "next-long-invitation", .threadId = "next-long-thread", .bodyText = "Planning", .invitation = next_ics }, true);
+        try store.save();
+    }
+    const accept = try j.value(a, .{ .cmd = "invitation.reply", .account = account, .messageId = "next-long-invitation", .status = "accepted", .operationId = "new-long-accept" });
+    for (0..2) |_| {
+        const accepted = try session.dispatch(a, accept);
+        try std.testing.expectEqualStrings("applied", j.text(accepted, "outcome"));
+        try std.testing.expectEqualStrings("applied", j.text(j.get(accepted, "calendarSync").?, "state"));
+    }
+    var after = try session.openStore(a, account, false);
+    defer after.close();
+    try std.testing.expectEqual(@as(u64, 1), after.state.fixtureSends);
+    const after_raw = (try after.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes)).?;
+    try std.testing.expectEqual(@as(i64, 2), try j.integer(try std.json.parseFromSliceLeaky(Value, a, after_raw, .{}), "writes", -1));
 }
 
 test "calendar RSVP: Check Sent resumes calendar only after confirming the reply" {
@@ -5609,7 +5732,12 @@ test "calendar RSVP: Check Sent resumes calendar only after confirming the reply
     {
         var store = try session.openStore(a, account, false);
         defer store.close();
-        try std.testing.expect(try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes) == null);
+        // Preflight reads Calendar before mail is submitted. The fixture may
+        // now exist, but an uncertain mail send must still cause zero writes.
+        const raw = (try store.readDocument(a, @import("calendar_fixture.zig").document_name, @import("calendar_fixture.zig").document_bytes)).?;
+        const provider_state = try std.json.parseFromSliceLeaky(Value, a, raw, .{});
+        try std.testing.expectEqual(@as(i64, 0), try j.integer(provider_state, "writes", -1));
+        try std.testing.expect(std.mem.indexOf(u8, raw, "reconcile-rsvp@example.test") == null);
     }
     session.options.fixture_scenario = "calendar-offline";
     const check = try j.value(a, .{ .cmd = "invitation.inspect", .account = account, .messageId = "reconcile-invitation", .reconcile = true });

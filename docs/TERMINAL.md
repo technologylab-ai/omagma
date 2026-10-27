@@ -466,15 +466,21 @@ Gmail draft or message, and pending/unknown submissions remain protected.
 
 `I` inspects the focused calendar invitation and offers `a` Accept, `t` Tentative or `d` Decline. The reply is a standard scheduling email to the organizer, retaining the meeting's UID, sequence and recurrence instance. This works with Gmail, Outlook/Teams and other providers that include a valid iCalendar request; named `invite.ics` attachments and common calendar MIME types are supported. Older cached calendar attachments are refreshed only when you explicitly inspect them.
 
-**Accept** and **Tentative** also save supported
-invitations and your response to the same account's primary calendar when
-Calendar write access is enabled. The RSVP review shows this before confirmation.
-An existing event is matched by its invitation identity to avoid duplicates.
-Mail and Calendar outcomes are shown separately: a Calendar failure never
-resends your RSVP. **C · Check status** checks an uncertain Calendar result or retries a temporary
-Calendar failure without resending the RSVP.
-Without Calendar access, RSVP email continues to work as before. Unsupported
-recurring changes or ambiguous times remain explicit rather than guessed.
+**Accept** and **Tentative** first check the Calendar action, then send your
+response and save the event to the same account's primary calendar. An existing
+event is matched by its invitation identity to avoid duplicates. A known blocker
+such as missing Calendar write access, an unsupported recurrence or an ambiguous
+time leaves the RSVP unsent and shows the reason. Fix it and retry, review
+Calendar separately with **A**, or explicitly choose **s · Accept/Tentative
+without Calendar**. Pressing Accept again never silently enables that override.
+Decline remains email-only. The one-shot CLI offers the same explicit choice as
+`omagma invitations reply ... --rsvp-only`; JSONL uses `rsvpOnly:true`.
+
+Mail and Calendar are separate services: a failure after mail submission may
+still leave Calendar incomplete. Their durable outcomes remain separate, and a
+Calendar failure never resends your RSVP. **C · Check status** checks an uncertain
+Calendar result or retries its recoverable failure without sending another email.
+An explicit RSVP-only choice also remains email-only when checked later.
 
 ## Calendar
 

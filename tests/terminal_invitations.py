@@ -17,7 +17,7 @@ import re
 import shutil
 import tempfile
 
-from terminal_integration import ACCOUNTS, Client, FIXTURES, addresses, require
+from terminal_integration import ACCOUNTS, Client, FIXTURES, addresses, fixture_calendar_writes, require
 
 
 POSITIVE = ("named-calendar", "named-octet", "named-application", "duplicate", "wide")
@@ -242,8 +242,12 @@ def formats(binary, directory, source):
                 require(wire == invitation(case, ACCOUNTS[0]), "calendar discovery changed downloadable .ics bytes")
             for status in STATUSES:
                 operation_id = f"rsvp-{case}-{status}"
-                result = client.request("invitation.reply", messageId=message["id"], status=status, operationId=operation_id)
+                result = client.request("invitation.reply", messageId=message["id"], status=status,
+                                        operationId=operation_id, rsvpOnly=True)
                 require(result["outcome"] == "applied", "fixture RSVP did not apply")
+                require(result["calendarSync"]["errorCode"] ==
+                        ("DeclinedReplyOnly" if status == "declined" else "RsvpOnlyRequested"),
+                        "email-only MIME RSVP lost its saved Calendar policy")
                 reply_identity(result, case, ACCOUNTS[0], status, operation_id)
                 require(client.request("operation.read", operationId=operation_id) == result, "RSVP receipt was not journaled")
                 sent = client.request("mail.read", messageId=result["messageId"], cacheOnly=True)
@@ -251,16 +255,19 @@ def formats(binary, directory, source):
                 require(sent["from"]["address"] == ACCOUNTS[0] and sent["messageId"] == result["rfcMessageId"], "sent wire identity changed")
                 require(sent["invitation"] == result["icalendar"], "outbox lost its reviewed calendar response")
         require(client.request("cache.stats")["fixtureSends"] == 15, "format cases submitted an unexpected number of replies")
+        require(fixture_calendar_writes(client) == 0, "email-only MIME format cases changed Calendar")
         inspect_identity(client.request("invitation.inspect", ACCOUNTS[1], messageId="invite-named-calendar"), "named-calendar", ACCOUNTS[1])
         require(client.request("cache.stats", ACCOUNTS[1])["fixtureSends"] == 0, "another account inherited sends")
         require(client.request("operation.list", ACCOUNTS[1])["operations"] == [], "another account inherited RSVP receipts")
         operation_id = "rsvp-named-calendar-accepted"
         personal = client.request("operation.read", operationId=operation_id)
-        work = client.request("invitation.reply", ACCOUNTS[1], messageId="invite-named-calendar", status="accepted", operationId=operation_id)
+        work = client.request("invitation.reply", ACCOUNTS[1], messageId="invite-named-calendar", status="accepted",
+                              operationId=operation_id, rsvpOnly=True)
         reply_identity(work, "named-calendar", ACCOUNTS[1], "accepted", operation_id)
         require(work["rfcMessageId"] != personal["rfcMessageId"], "equal operation IDs across accounts shared a wire identity")
         require(client.request("operation.read", operationId=operation_id) == personal, "another account overwrote the personal receipt")
         require(client.request("cache.stats")["fixtureSends"] == 15, "work RSVP altered personal send accounting")
+        require(fixture_calendar_writes(client, ACCOUNTS[1]) == 0, "another account's email-only RSVP changed Calendar")
     finished(client)
 
 
@@ -285,7 +292,7 @@ def refusals(binary, directory, source):
                     check_conflicting_attachment(downloaded, item["filename"], files)
                 ordinary = client.request("mail.read", messageId=ordinary["id"], cacheOnly=True)
                 ordinary_digest = body_digest(directory, ordinary["id"])
-            for command, params in (("invitation.inspect", {}), ("invitation.reply", {"status": "accepted", "operationId": "refused-" + case})):
+            for command, params in (("invitation.inspect", {}), ("invitation.reply", {"status": "accepted", "operationId": "refused-" + case, "rsvpOnly": True})):
                 if command == "invitation.inspect" and case in ("foreign", "publish", "multi-event"):
                     # Displaying an event is allowed without permission to RSVP.
                     # Keep the mutation refusal below as the independent oracle.
@@ -309,7 +316,7 @@ def refusals(binary, directory, source):
             require(body_digest(directory, good["id"]) == digest, "refusal rewrote immutable cached body bytes")
         require(client.request("cache.stats")["fixtureSends"] == 0, "refused invitation sent a response")
         error = client.request("invitation.reply", ACCOUNTS[1], messageId="invite-foreign", status="accepted",
-                               operationId="wrong-selected-account", ok=False)
+                               operationId="wrong-selected-account", rsvpOnly=True, ok=False)
         require(error["code"] == "NotAnAttendee", "foreign configured attendee authorized the selected account")
         require(client.request("operation.list", ACCOUNTS[1])["operations"] == [], "foreign account rejection created a receipt")
     finished(client)
@@ -317,8 +324,10 @@ def refusals(binary, directory, source):
 
 def replay(binary, directory, source):
     with Client(binary, directory, extra=source.options()) as client:
-        params = {"messageId": "invite-named-calendar", "status": "accepted", "operationId": "known-rsvp"}
+        params = {"messageId": "invite-named-calendar", "status": "accepted", "operationId": "known-rsvp", "rsvpOnly": True}
         first = client.request("invitation.reply", **params)
+        require(first["outcome"] == "applied" and first["calendarSync"]["errorCode"] == "RsvpOnlyRequested",
+                "email-only RSVP did not apply with its durable Calendar policy")
         reply_identity(first, "named-calendar", ACCOUNTS[0], "accepted", params["operationId"])
         before = client.request("cache.stats")
         require(client.request("invitation.reply", **params) == first, "completed RSVP replay changed the receipt")
@@ -329,14 +338,18 @@ def replay(binary, directory, source):
         require(client.request("invitation.reply", **params) == first, "restart replay changed the receipt")
         after = client.request("cache.stats")
         require(after["fixtureSends"] == 1 and after["fixtureCalls"] == before["fixtureCalls"], "restart redispatched a completed RSVP")
-        require(client.request("operation.list")["operations"] == [first], "known RSVP duplicated its journal entry")
+        retained = client.request("history.operations")
+        require(not retained["nextCursor"]
+                and client.request("operation.list")["operations"] + retained["items"] == [first],
+                "known RSVP lost or duplicated its exact active/retained journal entry")
+        require(fixture_calendar_writes(client) == 0, "email-only RSVP replay wrote Calendar")
     finished(client)
 
 
 def unknown(binary, directory, source):
     for scenario, sends in (("unknown-send", 0), ("applied-lost", 1)):
         with Client(binary, directory / scenario, scenario=scenario, extra=source.options()) as client:
-            params = {"messageId": "invite-named-octet", "status": "tentative", "operationId": "uncertain-rsvp"}
+            params = {"messageId": "invite-named-octet", "status": "tentative", "operationId": "uncertain-rsvp", "rsvpOnly": True}
             first = client.request("invitation.reply", **params)
             require(first["outcome"] == "unknown", "lost response claimed a known outcome")
             reply_identity(first, "named-octet", ACCOUNTS[0], "tentative", params["operationId"])
@@ -345,6 +358,8 @@ def unknown(binary, directory, source):
             journal = client.request("operation.list")["operations"]
             require(len(journal) == 1 and journal[0]["id"] == params["operationId"]
                     and journal[0]["outcome"] == "unknown", "unknown RSVP lost its durable receipt")
+            require(journal[0]["calendarSync"]["errorCode"] == "RsvpOnlyRequested",
+                    "unknown RSVP lost the explicit mail-only policy needed after reconciliation")
             require(client.request("invitation.reply", **params) == first, "same-ID unknown RSVP replay changed its receipt")
             refused = client.request("invitation.reply", **{**params, "operationId": "new-id-same-uncertain-rsvp"}, ok=False)
             require(refused["code"] == "UnknownOutcome", "new ID bypassed the uncertain RSVP guard")
@@ -356,6 +371,7 @@ def unknown(binary, directory, source):
             require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == sends,
                     "uncertain RSVP retry reached the provider")
             require(client.request("operation.list")["operations"] == journal, "unknown RSVP changed or duplicated its journal")
+            require(fixture_calendar_writes(client) == 0, "unknown email-only RSVP changed Calendar")
         finished(client)
 
 

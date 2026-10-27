@@ -105,6 +105,11 @@ pub fn run(init: @import("../fixed_runtime.zig").Context, io: std.Io, mode: []co
             try req.object.put(sa, "reconcile", .{ .bool = true });
             continue;
         }
+        if (eq(arg, "--rsvp-only")) {
+            if (interactive or jsonl or !eq(j.text(req, "cmd"), "invitation.reply")) return error.InvalidRequest;
+            try req.object.put(sa, "rsvpOnly", .{ .bool = true });
+            continue;
+        }
         if (eq(arg, "--server")) {
             if (interactive or jsonl or !eq(j.text(req, "cmd"), "mail.search")) return error.ServerFlagRequiresSearch;
             if (j.get(req, "cacheOnly")) |prior| if (prior == .bool and prior.bool) return error.ConflictingSearchMode;
@@ -398,7 +403,7 @@ fn helpBeforeInput(io: std.Io, a: std.mem.Allocator, mode: []const u8, operation
     return false;
 }
 fn booleanOption(arg: []const u8) bool {
-    for ([_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin" }) |flag| if (eq(arg, flag)) return true;
+    for ([_][]const u8{ "--fixtures", "--no-mouse", "--cached", "--server", "--json", "--browser", "--wait", "--original", "--preserve-formatting", "--all", "--reply-all", "--unread", "--read", "--starred", "--unstarred", "--body-stdin", "--rsvp-only" }) |flag| if (eq(arg, flag)) return true;
     return false;
 }
 fn eq(a: []const u8, b: []const u8) bool {

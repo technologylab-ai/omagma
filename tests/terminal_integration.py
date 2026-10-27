@@ -249,6 +249,15 @@ def cache_limits(client, account):
     return stats
 
 
+def fixture_calendar_writes(client, account=ACCOUNTS[0]):
+    states = [json.loads(path.read_text())
+              for path in (client.directory / "cache").rglob("calendar-provider-fixture.json")]
+    selected = [state for state in states if state["account"] == account]
+    require(len(selected) <= 1, "Calendar fixture account storage was duplicated")
+    # Grant rejection can happen before a Calendar provider is initialized.
+    return selected[0]["writes"] if selected else 0
+
+
 def pagination_and_isolation(client):
     results = {account: list_all(client, account) for account in ACCOUNTS}
     require([m["id"] for m in results[ACCOUNTS[0]]] == [m["id"] for m in results[ACCOUNTS[1]]], "fixture IDs did not collide")
@@ -1048,16 +1057,31 @@ def rsvp_semantics(client):
             and inspected["attendee"] == ACCOUNTS[0] and inspected["recurrenceId"] == "20261107T100000Z",
             "invitation inspection lost recipient or recurring identity")
     require(cache_limits(client, ACCOUNTS[0])["fixtureSends"] == before, "invitation inspection sent an RSVP")
+    for status in ["accepted", "tentative"]:
+        blocked = client.request("invitation.reply", messageId="shared-msg-009", status=status,
+                                 operationId=f"fixture-rsvp-blocked-{status}")
+        require(blocked["outcome"] == "blocked"
+                and blocked["calendarSync"]["errorCode"] == "UnsupportedCalendarRecurrence",
+                "recurring RSVP did not disclose its Calendar preflight blocker")
+        require(cache_limits(client, ACCOUNTS[0])["fixtureSends"] == before
+                and fixture_calendar_writes(client) == 0,
+                "blocked recurring RSVP submitted mail or changed Calendar")
     for status in ["accepted", "tentative", "declined"]:
         result = client.request("invitation.reply", messageId="shared-msg-009", status=status,
-                                operationId=f"fixture-rsvp-{status}")
+                                operationId=f"fixture-rsvp-{status}", rsvpOnly=status != "declined")
         require(result["outcome"] == "applied", "RSVP outcome not explicit")
+        require(result["calendarSync"]["errorCode"] ==
+                ("DeclinedReplyOnly" if status == "declined" else "RsvpOnlyRequested"),
+                "email-only RSVP lost its explicit Calendar policy")
         calendar = result["icalendar"].replace("\r\n", "\n")
         for value in ["METHOD:REPLY", "UID:fixture-meeting@example.org", "SEQUENCE:4",
                       "RECURRENCE-ID:20261107T100000Z", "ORGANIZER:mailto:organizer@example.org",
                       f"PARTSTAT={status.upper()}:mailto:{ACCOUNTS[0]}"]:
             require(value in calendar, "RSVP lost invitation identity/status")
         require(calendar.count("ATTENDEE;") == 1, "RSVP included other attendees")
+    require(cache_limits(client, ACCOUNTS[0])["fixtureSends"] == before + 3
+            and fixture_calendar_writes(client) == 0,
+            "email-only recurring RSVP did not send exactly once per response without Calendar writes")
     client.request("invitation.reply", messageId="shared-msg-009", status="cancelled", operationId="fixture-bad-rsvp", ok=False)
 
 
@@ -1169,16 +1193,25 @@ def reopening_lower_limits(client):
 
 
 def rsvp_replay_persistence(client):
-    params = {"messageId": "shared-msg-009", "status": "accepted", "operationId": "fixture-rsvp-replay"}
+    params = {"messageId": "shared-msg-009", "status": "accepted", "operationId": "fixture-rsvp-replay", "rsvpOnly": True}
     first = client.request("invitation.reply", **params)
+    require(first["outcome"] == "applied" and first["calendarSync"]["errorCode"] == "RsvpOnlyRequested",
+            "explicit mail-only RSVP did not persist its policy")
     before = cache_limits(client, ACCOUNTS[0])["fixtureSends"]
     # A regenerated reply has a different creation timestamp; operation meaning stays identical.
     time.sleep(1.1)
     require(client.request("invitation.reply", **params) == first, "RSVP replay regenerated or resent a completed operation")
     client.restart()
     require(client.request("invitation.reply", **params) == first, "RSVP replay changed across restart")
+    checked = client.request("invitation.inspect", messageId=params["messageId"], reconcile=True)
+    require(checked["confirmedResponse"] == "ACCEPTED"
+            and checked["calendarSync"]["errorCode"] == "RsvpOnlyRequested",
+            "reconciliation lost the durable mail-only response")
     require(cache_limits(client, ACCOUNTS[0])["fixtureSends"] == before, "RSVP replay dispatched again")
+    require(fixture_calendar_writes(client) == 0, "mail-only replay/reconciliation wrote Calendar")
     client.request("invitation.reply", **{**params, "status": "declined"}, ok=False)
+    conflict = client.request("invitation.reply", **{**params, "rsvpOnly": False}, ok=False)
+    require(conflict["code"] == "OperationConflict", "replay changed the accepted mail-only policy")
 
 
 def cached_body_identity(client):
@@ -1418,7 +1451,7 @@ def denied_mutations(client):
     client.request("contacts.upsert", contact={"name": "Denied Fixture", "emails": ["denied@example.org"]},
                    operationId="fixture-denied-contact", ok=False)
     client.request("invitation.reply", messageId="shared-msg-009", status="accepted",
-                   operationId="fixture-denied-rsvp", ok=False)
+                   operationId="fixture-denied-rsvp", rsvpOnly=True, ok=False)
     after = cache_limits(client, ACCOUNTS[0])
     require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == before["fixtureSends"],
             "permission rejection reached provider")

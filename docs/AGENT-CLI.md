@@ -214,8 +214,8 @@ Send lines such as:
 | attachment.import / discard | import takes path and optional mimeType, returning immutable account blobId metadata; discard takes blobId and refuses referenced content |
 | contacts.list / search | live list pages accept limit 1..100 and cursor; search accepts query (live up to 30); cacheOnly uses downloaded contacts; results include resourceName,etag,name,emails and live nextCursor |
 | contacts.upsert | contact; editing requires resourceName and expectedEtag or contact.etag; omitted emails on name-only updates preserve all supported addresses/provider metadata |
-| invitation.inspect | messageId; optional cacheOnly or reconcile; identities, friendly time displays, joinUrl, attendeeStatus, confirmedResponse and responseOutcome |
-| invitation.reply | messageId,status accepted/tentative/declined,operationId |
+| invitation.inspect | messageId; optional cacheOnly or reconcile; identities, friendly time displays, joinUrl, attendeeStatus, confirmedResponse, responseOutcome and calendarSync |
+| invitation.reply | messageId,status accepted/tentative/declined,operationId; optional rsvpOnly:true explicitly sends email without Calendar; default Accept/Tentative can return outcome:blocked before submission |
 | operation.list / read | read requires operationId; recorded outcome, recovery draftId and RFC Message-ID |
 | cache.stats / clear | limits/residency; clear preserves drafts,contacts,operations |
 | cache.refresh-status | refreshInProgress for this account; no mail or token data |
@@ -546,7 +546,13 @@ Contact updates use CONTACT-source etags and reject conflicts. Supported edits p
 
 **Meeting invitations:** JSONL `invitation.inspect`/`invitation.reply` and one-shot `invitations inspect`/`invitations reply` share calendar recognition and receipts. Recognized MIME forms are `text/calendar`, `application/ics`, and `application/octet-stream` with a `.ics` filename, including named external Outlook/Teams attachments. Calendar data is limited to 128 KiB. Inspection displays requests, responses, published events and cancellations; a multi-event or ambiguous-attendee notice remains read-only. Sending a response requires exactly one requested event or recurrence instance and an attendee belonging to the selected account or a verified send-as alias. Matching duplicate MIME representations are accepted; conflicting calendars are refused. Inspection requires `mail-read`; reply additionally requires `calendar-rsvp` and an operation ID. If an older cached message retained only a calendar attachment reference, explicit inspection or reply refreshes that one message and preserves unrelated cached bodies.
 
-Reply sends a standard iTIP email response to the calendar organizer, preserving UID, sequence and recurrence identity; email From/Reply-To do not choose the destination. The three states are `accepted`, `tentative` and `declined`, mapped to the corresponding attendee PARTSTAT. A copied Zoom/Teams join link alone is not a calendar request and cannot be given an invented RSVP. Calendar API access is unnecessary. Unknown submissions are not retried automatically. Inspection can fetch mail or verified identities; `invitations inspect --cached` or JSONL `cacheOnly:true` instead uses only retained source and identities. After an uncertain RSVP, `invitations inspect --reconcile` or JSONL `reconcile:true` checks Sent for the recorded Message-ID and exact RSVP identity. Positive evidence confirms the local receipt; absence leaves it unknown and never resends. The TUI offers **C Check Sent** for this case. Cached inspection and reconciliation cannot be combined.
+Reply sends a standard iTIP email response to the calendar organizer, preserving UID, sequence and recurrence identity; email From/Reply-To do not choose the destination. The three states are `accepted`, `tentative` and `declined`, mapped to the corresponding attendee PARTSTAT. A copied Zoom/Teams join link alone is not a calendar request and cannot be given an invented RSVP.
+
+Accept/Tentative first checks Calendar access, the selected calendar and whether the event can be saved, then prepares the Calendar action before sending the email. The default target is the primary calendar. A known blocker, including missing Calendar permission, an offline provider or unsupported recurrence, returns `outcome:"blocked"` with a reason in `calendarSync.errorCode`: no RSVP email is sent and no Calendar event is written. Resolve the reason and retry, or explicitly choose JSONL `rsvpOnly:true` / one-shot `--rsvp-only` to send only the email. Repeating ordinary Accept/Tentative never opts into this override. In the TUI, the blocked card offers **s Accept without Calendar** or **s Tentative without Calendar**; **C** cannot submit a blocked RSVP. Decline is email-only by default. Decline and the explicit mail-only override need no Calendar grant, but still require the mail-read and calendar-rsvp capabilities. A mail-only choice is saved as `calendarSync.errorCode:"RsvpOnlyRequested"` and stays mail-only across reopening and reconciliation, even if Calendar access later becomes available.
+
+Email and Calendar form a coordinated workflow with separately recorded outcomes. After the preflight, a later failure can leave the RSVP email confirmed while Calendar is unconfirmed or unfinished. `outcome:"applied"` confirms the email submission; inspect `calendarSync` for the Calendar result. Do not send another RSVP to repair a partial result. `invitations inspect --reconcile` or JSONL `invitation.inspect` with `reconcile:true` checks or resumes the saved Calendar action without resending mail. The TUI offers **C Check status** for this recovery, including an already-confirmed RSVP whose Calendar step previously failed with `CalendarLineTooLarge`.
+
+Unknown email submissions are not retried automatically. Inspection can fetch mail or verified identities; `invitations inspect --cached` or JSONL `cacheOnly:true` instead uses only retained source and identities. For an uncertain RSVP email, reconciliation checks Sent for the recorded Message-ID and exact RSVP identity. Positive evidence confirms the local receipt; absence leaves it unknown and never resends. The TUI offers **C Check Sent** for this case. Cached inspection and reconciliation cannot be combined.
 
 Configurable body prefetch defaults to the smaller of the display page and 32. `prefetchLimit` or `--prefetch-bodies N` explicitly selects 0..64; 64 can fill a larger retained head while the display page stays 32. Zero disables automatic body filling. TUI startup and the background `cache-refresh` command share this policy, fixed message/disk quotas and old-tail eviction. Cached mail remains readable while refresh runs.
 
@@ -585,6 +591,7 @@ omagma contacts upsert --account personal@example.com --contact-file /absolute/p
 omagma invitations inspect --account personal@example.com --message-id INVITATION_ID
 omagma invitations reply --account personal@example.com --message-id INVITATION_ID \
   --status accepted --operation-id RSVP_TASK_ID
+omagma invitations inspect --account personal@example.com --message-id INVITATION_ID --reconcile
 omagma cache stats --account personal@example.com --cached
 ```
 
@@ -641,6 +648,7 @@ accepted for compatibility.
 | `--cached`, `--server` | Local-only one-shot lookup; `--server` applies only to mail search. JSONL uses cacheOnly instead |
 | `--message-id ID` / `--id ID`, `--thread-id ID`, `--attachment-id ID` | Returned provider identities for read/thread/attachment operations |
 | `--draft-id ID`, `--operation-id ID` | Local draft/receipt identities; sends and RSVP require a stable operation ID |
+| `--rsvp-only` | Explicit email-only invitation reply; bypasses the default Accept/Tentative Calendar preflight and save. Its saved policy survives reconciliation |
 | `--to LIST`, `--cc LIST`, `--bcc LIST`, `--subject TEXT` | Outgoing address lists and subject |
 | `--body-file FILE`, `--body-stdin`, `--body TEXT` | UTF-8 source body; file/stdin avoids putting it in argv |
 | `--format markdown\|plain` | Explicit source interpretation for compose/create/update/direct send/reply/forward or supplied-source preview; new CLI source defaults to plain |

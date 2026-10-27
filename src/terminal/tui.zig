@@ -1576,6 +1576,8 @@ const App = struct {
     invitation_response_unknown: bool = false,
     invitation_calendar_sync_available: bool = false,
     invitation_calendar_can_retry: bool = false,
+    invitation_calendar_blocked: bool = false,
+    invitation_pending_status: @import("../bounded.zig").Text(16) = .{},
     invitation_calendar_sync_state: @import("../bounded.zig").Text(32) = .{},
     invitation_calendar_sync_error: @import("../bounded.zig").Text(128) = .{},
     invitation_calendar_sync_target: @import("../bounded.zig").Text(1024) = .{},
@@ -6697,6 +6699,18 @@ const App = struct {
                     return err;
                 };
                 const outcome = text(get(result, "outcome"));
+                if (kind == .invitation and same(outcome, "blocked")) {
+                    self.invitation_unknown = false;
+                    self.invitation_calendar_blocked = true;
+                    try self.invitation_operation_id.set(self.allocator, "");
+                    try self.invitation_operation_error.set(self.allocator, "");
+                    try self.loadInvitationCalendarSync(get(result, "calendarSync"));
+                    self.mode = .invitation;
+                    self.dialog_focus.reset(.invitation, 0);
+                    self.say(true, "RSVP not sent · Calendar needs attention · review or explicitly send RSVP only", .{});
+                    return;
+                }
+                if (kind == .invitation) self.invitation_calendar_blocked = false;
                 const operation_id = text(get(result, "id"));
                 if (operation_id.len > 0) try (if (kind == .send) &self.compose.operation_id else &self.invitation_operation_id).set(self.allocator, operation_id);
                 try (if (kind == .send) &self.compose.operation_error else &self.invitation_operation_error).set(self.allocator, text(get(result, "errorCode")));
@@ -6719,7 +6733,9 @@ const App = struct {
                         try self.loadInvitationCalendarSync(get(result, "calendarSync"));
                         const calendar_state = self.invitation_calendar_sync_state.slice();
                         const calendar_notice = self.invitationCalendarNotice();
-                        if (same(calendar_state, "applied") or same(calendar_state, "existing")) {
+                        if (same(self.invitation_calendar_sync_error.slice(), "RsvpOnlyRequested")) {
+                            self.sayAction(false, "RSVP sent · Calendar left unchanged as requested", .{});
+                        } else if (same(calendar_state, "applied") or same(calendar_state, "existing")) {
                             self.sayAction(false, "RSVP sent · {s}", .{calendar_notice});
                         } else if (calendar_notice.len > 0) {
                             self.sayAction(true, "RSVP sent · Calendar {s} · I for details", .{if (self.invitationCalendarUnknown()) @as([]const u8, "not confirmed") else "not updated"});
@@ -10363,7 +10379,9 @@ const App = struct {
             }
             return;
         }
-        if (key.matches('C', .{}) or key.matches('c', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 7)) {
+        const rsvp_only = self.invitation_calendar_blocked and (key.matches('s', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 7));
+        if (!rsvp_only and (key.matches('C', .{}) or key.matches('c', .{ .shift = true }) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 7))) {
+            if (self.invitation_calendar_blocked) return;
             if ((self.invitationControlMask() & 0b10000000) == 0) return;
             try self.start(.invitation_reconcile, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.inspect", .messageId = self.invitation_inspected_id.value(), .reconcile = true });
             self.say(false, "{s}", .{if (self.invitationCalendarCheckNeeded()) "Checking RSVP and Calendar status…" else "Checking Sent for the previous RSVP…"});
@@ -10385,8 +10403,8 @@ const App = struct {
             return;
         }
         if (key.matches('j', .{}) or key.matches(Key.down, .{})) self.invitation_scroll +|= 1 else if (key.matches('k', .{}) or key.matches(Key.up, .{})) self.invitation_scroll -|= 1 else if (key.matches(Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) self.invitation_scroll +|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) self.invitation_scroll -|= @max(self.invitation_height / 2, 1) else if (key.matches(Key.home, .{}) or key.matches('g', .{ .ctrl = true })) self.invitation_scroll = 0 else if (key.matches(Key.end, .{}) or key.matches('G', .{}) or key.matches('g', .{ .shift = true })) self.invitation_scroll = self.invitation_lines -| self.invitation_height else {
-            if (!self.invitation_review.canRespond() or self.invitation_response_unknown or self.invitationCalendarUnknown()) return;
-            const status = if (key.matches('a', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) "accepted" else if (key.matches('t', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) "tentative" else if (key.matches('d', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) "declined" else return;
+            if (!self.invitation_review.canRespond() or self.invitation_response_unknown or (!self.invitation_calendar_blocked and self.invitationCalendarUnknown())) return;
+            const status = if (rsvp_only) self.invitation_pending_status.slice() else if (key.matches('a', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 1)) "accepted" else if (key.matches('t', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 2)) "tentative" else if (key.matches('d', .{}) or (key.matches(Key.enter, .{}) and self.dialog_focus.index == 3)) "declined" else return;
             if (!self.invitation_confirm_ready) {
                 self.say(true, "Resize to review RSVP identity before confirmation", .{});
                 return;
@@ -10402,7 +10420,11 @@ const App = struct {
             try self.invitation_message_id.set(self.allocator, self.invitation_inspected_id.value());
             try self.invitation_account.set(self.allocator, self.invitation_inspected_account.value());
             self.invitation_unknown = false;
-            try self.start(.invitation, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.reply", .messageId = self.invitation_inspected_id.value(), .status = status, .operationId = id, .attendee = self.invitation_review.attendee.slice(), .sourceHash = self.invitation_source_hash.slice() });
+            // Keep the previous response choice for the separately labelled
+            // RSVP-only override. Repeating Accept never enables that override.
+            if (!rsvp_only) try self.invitation_pending_status.set(status);
+            try self.start(.invitation, .{ .account = self.invitation_inspected_account.value(), .cmd = "invitation.reply", .messageId = self.invitation_inspected_id.value(), .status = status, .operationId = id, .attendee = self.invitation_review.attendee.slice(), .sourceHash = self.invitation_source_hash.slice(), .rsvpOnly = rsvp_only });
+            self.say(false, "{s}", .{if (rsvp_only) @as([]const u8, "Sending RSVP only · Calendar will stay unchanged…") else if (same(status, "declined")) "Sending decline…" else "Checking Calendar before sending RSVP…"});
         }
     }
     fn pasteInto(self: *App, field: *Field, key: Key, multiline: bool, limit: usize) !void {
@@ -12778,7 +12800,7 @@ const App = struct {
             .review => if (self.job.future != null and self.job.kind == .send) " Submission pending · awaiting receipt · q Draft" else " Tab Controls · Enter Activate · y Explicit send · j/k Scroll · Esc/q Draft",
             .help => if (self.help_searching) " Type to find help · Enter Keep · Esc Clear · q is text" else " / Search help  n/N Match  j/k Scroll  Ctrl+D/U Half  Esc/q Return",
             .trash_confirm => " Tab Controls · Enter Activate · y Confirm Trash · n/Esc/q Cancel",
-            .invitation => if (!browser_target and self.invitationCalendarCheckNeeded()) " Tab Controls · Enter Activate · C Check status · v Details · Esc/q Back" else if (!browser_target and (self.invitation_response_unknown or self.invitationUncertain())) " Tab Controls · Enter Activate · C Check Sent · v Details · Esc/q Back" else if (self.invitation_review.canRespond() and !self.invitation_response_unknown) " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel" else " Tab Controls · Enter Activate · v Details · Esc/q Back",
+            .invitation => if (self.invitation_calendar_blocked) " Tab Controls · Enter Activate · a/t Retry · s RSVP only · A Calendar · Esc/q Cancel" else if (!browser_target and self.invitationCalendarCheckNeeded()) " Tab Controls · Enter Activate · C Check status · v Details · Esc/q Back" else if (!browser_target and (self.invitation_response_unknown or self.invitationUncertain())) " Tab Controls · Enter Activate · C Check Sent · v Details · Esc/q Back" else if (self.invitation_review.canRespond() and !self.invitation_response_unknown) " Tab Controls · Enter Activate · a Accept · t Tentative · d Decline · Esc/q Cancel" else " Tab Controls · Enter Activate · v Details · Esc/q Back",
             .browse => if (self.expanded) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  z/q Shrink  ? Help" else if (self.focus == .reader) " j/k Scroll  r/R Reply  f Forward  c Compose  m Labels  s Star  u Unread  J/K Mail  I RSVP  L Links  B Files  Q Quotes  S Signature  q List  ? Help" else if (self.focus == .navigation) " j/k Navigate  Enter Choose  1–3 Accounts  a Contacts  T Theme  l/Esc/q Mail  ? Help" else if (self.cacheSearch()) " Cache subset · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else if (self.query.value().len > 0) " Gmail search · r Reply  f Forward  c Compose  m Labels  / Cache  \\ Gmail  T Theme  q Clear search  ? Help" else " j/k Mail  r/R Reply  f Forward  c Compose  Enter Read  m Labels  s Star  u Unread  x Archive  D Trash  a Contacts  T Theme  / Cache  \\ Gmail  ? Help  q Quit",
             else => " Esc Back",
         };
@@ -13145,6 +13167,8 @@ const App = struct {
         } else try self.line(inner, inner.height - 1, try self.fitLine(inner, footer, inner.width), .muted);
     }
     fn loadInvitationPresentation(self: *App, result: Value) !void {
+        self.invitation_calendar_blocked = false;
+        self.invitation_pending_status.len = 0;
         self.invitation_review.method = std.meta.stringToEnum(invitation.Method, text(get(result, "method"))) orelse .publish;
         self.invitation_review.response_blocked = !truth(get(result, "canReply"));
         self.invitation_review.additional_events = @intCast(@max(0, integer(get(result, "additionalEvents"))));
@@ -13179,6 +13203,9 @@ const App = struct {
         self.invitation_calendar_can_retry = truth(get(result, "canRetry"));
         try self.invitation_calendar_sync_state.set(text(get(result, "state")));
         try self.invitation_calendar_sync_error.set(text(get(result, "errorCode")));
+        // Earlier releases saved this now-repaired parser failure as final.
+        // Expose Calendar-only recovery without creating another mail reply.
+        if (same(self.invitation_calendar_sync_state.slice(), "skipped") and same(self.invitation_calendar_sync_error.slice(), "CalendarLineTooLarge")) self.invitation_calendar_can_retry = true;
         self.invitation_calendar_sync_target.display(text(get(result, "calendarId")));
     }
     fn invitationCalendarUnknown(self: *const App) bool {
@@ -13187,11 +13214,26 @@ const App = struct {
     fn invitationCalendarCheckNeeded(self: *const App) bool {
         return self.invitationCalendarUnknown() or self.invitation_calendar_can_retry;
     }
+    fn calendarRsvpReason(code: []const u8) []const u8 {
+        if (same(code, "CalendarLineTooLarge")) return "Long invitation description · retry Calendar with this version";
+        if (same(code, "CalendarPermissionRequired") or same(code, "CalendarWritePermissionRequired")) return "Calendar write permission is missing";
+        if (same(code, "CalendarReadOnly")) return "The selected calendar is read-only";
+        if (same(code, "UnsupportedCalendarRecurrence")) return "This repeating invitation needs a separate Calendar review";
+        if (same(code, "CalendarDescriptionTooLarge")) return "The event description is too large for Calendar import";
+        if (same(code, "CalendarSummaryTooLarge") or same(code, "CalendarLocationTooLarge")) return "The event title or location is too large for Calendar import";
+        if (same(code, "CalendarReviewStale") or same(code, "stale_source")) return "The event changed · review the latest invitation";
+        if (same(code, "time_review_required")) return "The invitation's date or timezone needs review";
+        if (same(code, "ConnectionRefused") or same(code, "CalendarUnavailable") or same(code, "ConnectionTimedOut")) return "Calendar could not be reached";
+        if (same(code, "EmbeddedTimezoneUnresolved") or same(code, "AmbiguousLocalTime") or same(code, "FloatingTimeRequiresReview")) return "The invitation's timezone needs review";
+        return code;
+    }
     fn invitationCalendarNotice(self: *const App) []const u8 {
+        if (self.invitation_calendar_blocked) return "RSVP not sent · Calendar check failed · a/t retries";
         const state = self.invitation_calendar_sync_state.slice();
         const code = self.invitation_calendar_sync_error.slice();
         if (same(state, "applied")) return "Calendar updated with your response";
         if (same(state, "existing")) return "Your response is already saved in Calendar";
+        if (same(code, "RsvpOnlyRequested")) return "RSVP only · Calendar left unchanged as requested";
         if (same(state, "unknown")) return "Calendar outcome unknown · C Check status · do not send another RSVP";
         if (self.invitation_calendar_can_retry) return "Calendar was not updated · C retries Calendar without resending your RSVP";
         if (same(state, "rejected")) return "Calendar was not updated · A reviews Calendar separately";
@@ -13208,7 +13250,7 @@ const App = struct {
         if ((self.invitation_review.method != .request and self.invitation_review.method != .cancel) or self.invitation_review.additional_events > 0) mask &= 0b0111111;
         if (reader_tools.safeUrl(self.invitation_join_url.slice())) mask |= 0b100000;
         if (self.invitationCalendarUnknown()) mask &= 0b10110001;
-        if (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded())) mask |= 0b10000000;
+        if (self.invitation_calendar_blocked or (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded()))) mask |= 0b10000000;
         return mask;
     }
     fn invitationDraw(self: *App, win: vaxis.Window) !void {
@@ -13233,14 +13275,16 @@ const App = struct {
         if (self.invitation_review.attendee.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Attendee: {s}", .{self.invitation_review.attendee.slice()}), .tone = .text });
         if (self.invitation_review.organizer.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Organizer: {s}", .{self.invitation_review.organizer.slice()}), .tone = .muted });
         if (self.invitation_review.cancelled) try pinned.append(a, .{ .text = "Meeting cancelled · RSVP unavailable", .tone = .warning }) else if (self.invitation_review.method == .reply) try pinned.append(a, .{ .text = "Attendee's RSVP · nothing to answer", .tone = .muted }) else if (self.invitation_review.method == .publish) try pinned.append(a, .{ .text = "Published event · no RSVP requested", .tone = .muted });
-        if (self.invitation_calendar_sync_available and self.invitation_review.canRespond()) try pinned.append(a, .{ .text = "Accept/Tentative also adds supported events to your primary calendar.", .tone = .muted });
+        if (self.invitation_review.canRespond()) try pinned.append(a, .{ .text = if (self.invitation_calendar_sync_available) @as([]const u8, "Accept/Tentative also adds supported events to your primary calendar.") else "Accept/Tentative checks Calendar first · unavailable? Choose RSVP only explicitly.", .tone = .muted });
         if (self.invitation_confirmed_status.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Your confirmed RSVP: {s}", .{self.invitation_confirmed_status.slice()}), .tone = .current });
         if (self.invitation_response_unknown or self.invitationUncertain()) try pinned.append(a, .{ .text = "Previous RSVP outcome unknown · C checks Sent without resending", .tone = .warning }) else if (self.invitation_operation_error.value().len > 0 and same(self.invitation_account.value(), self.invitation_inspected_account.value()) and same(self.invitation_message_id.value(), self.invitation_inspected_id.value())) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Previous RSVP rejected: {s}", .{self.invitation_operation_error.value()}), .tone = .warning });
         const calendar_notice = self.invitationCalendarNotice();
         if (calendar_notice.len > 0) {
-            const success = same(self.invitation_calendar_sync_state.slice(), "applied") or same(self.invitation_calendar_sync_state.slice(), "existing");
+            const success = same(self.invitation_calendar_sync_state.slice(), "applied") or same(self.invitation_calendar_sync_state.slice(), "existing") or same(self.invitation_calendar_sync_error.slice(), "RsvpOnlyRequested");
             try pinned.append(a, .{ .text = calendar_notice, .tone = if (self.invitationCalendarUnknown()) .warning else if (success) .current else .offline });
             if (self.invitation_calendar_sync_target.len > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar: {s}", .{self.invitation_calendar_sync_target.slice()}), .tone = .muted });
+            const code = self.invitation_calendar_sync_error.slice();
+            if (!success and code.len > 0 and !same(code, "RsvpOnlyRequested")) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "Reason: {s}", .{calendarRsvpReason(code)}), .tone = .offline });
         }
         if (self.invitation_review.additional_events > 0) try pinned.append(a, .{ .text = try std.fmt.allocPrint(a, "First event shown · {d} additional occurrences · respond in your calendar", .{self.invitation_review.additional_events}), .tone = .warning });
         if (self.invitation_review.response_blocked and self.invitation_review.method == .request and !self.invitation_review.cancelled) try pinned.append(a, .{ .text = "No single verified attendee · RSVP unavailable", .tone = .warning });
@@ -13260,11 +13304,11 @@ const App = struct {
             try details.append(a, .{ .text = "\nPROTOCOL", .tone = .muted });
             try details.append(a, .{ .text = try std.fmt.allocPrint(a, "UID: {s}\nSequence: {d}\nRecurrence: {s}\nRecurrence ID: {s}", .{ self.invitation_review.uid.slice(), self.invitation_review.sequence, self.invitation_recurrence_display.slice(), self.invitation_review.recurrence_id.slice() }), .tone = .muted });
             if (self.invitation_calendar_sync_error.len > 0) try details.append(a, .{ .text = try std.fmt.allocPrint(a, "Calendar detail: {s}", .{self.invitation_calendar_sync_error.slice()}), .tone = .muted });
-            try details.append(a, .{ .text = if (self.invitation_calendar_sync_available) @as([]const u8, "Accept/Tentative sends your RSVP and saves supported events to your primary calendar. A reviews a separate Calendar action.") else "Reply sends an RSVP email. A reviews an optional Calendar action.", .tone = .muted });
+            try details.append(a, .{ .text = "Accept/Tentative checks Calendar before sending. A known blocker leaves the RSVP unsent; s explicitly replies without Calendar. A reviews a separate Calendar action.", .tone = .muted });
         }
         const detail_rows = try self.measureCardBlocks(measure, details.items);
-        const controls = [_][]const u8{ if (self.invitation_review.canRespond()) "[Esc Cancel]" else "[Esc Close]", "[a Accept]", "[t Tentative]", "[d Decline]", if (self.invitation_details) "[v Less]" else "[v Details]", "[o Join]", "[A Calendar]", if (self.invitationCalendarCheckNeeded()) "[C Check status]" else "[C Check Sent]" };
-        const show = [_]bool{ true, self.invitation_review.canRespond(), self.invitation_review.canRespond(), self.invitation_review.canRespond(), true, joinable and !hero_join, !browser_target and (self.invitation_review.method == .request or self.invitation_review.method == .cancel) and self.invitation_review.additional_events == 0, !browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded()) };
+        const controls = [_][]const u8{ if (self.invitation_review.canRespond()) "[Esc Cancel]" else "[Esc Close]", "[a Accept]", "[t Tentative]", "[d Decline]", if (self.invitation_details) "[v Less]" else "[v Details]", "[o Join]", "[A Calendar]", if (self.invitation_calendar_blocked) (if (same(self.invitation_pending_status.slice(), "tentative")) @as([]const u8, "[s Tentative without Calendar]") else "[s Accept without Calendar]") else if (self.invitationCalendarCheckNeeded()) "[C Check status]" else "[C Check Sent]" };
+        const show = [_]bool{ true, self.invitation_review.canRespond(), self.invitation_review.canRespond(), self.invitation_review.canRespond(), true, joinable and !hero_join, !browser_target and (self.invitation_review.method == .request or self.invitation_review.method == .cancel) and self.invitation_review.additional_events == 0, self.invitation_calendar_blocked or (!browser_target and (self.invitationUncertain() or self.invitation_response_unknown or self.invitationCalendarCheckNeeded())) };
         const gap: u16 = if (measure.width < 26) 1 else 2;
         var button_rows: usize = 1;
         var button_x: usize = 0;
@@ -17056,6 +17100,75 @@ test "invitation UX: friendly details and explicit join preserve the inspected a
     try std.testing.expect(!app.invitation_confirm_ready);
     try std.testing.expectEqual(@as(u8, 1), app.invitationControlMask());
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
+}
+
+test "invitation UX: Calendar blockers keep RSVP unsent and require a distinct override" {
+    const Capture = struct {
+        calls: usize = 0,
+        replies: usize = 0,
+        fn call(context: *anyopaque, a: Allocator, raw: []const u8) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const request = try readerInvitationTestValue(a, raw);
+            try std.testing.expectEqualStrings("invitation.reply", text(get(request, "cmd")));
+            try std.testing.expectEqualStrings("work@example.test", text(get(request, "account")));
+            try std.testing.expectEqualStrings("meeting", text(get(request, "messageId")));
+            try std.testing.expectEqualStrings("accepted", text(get(request, "status")));
+            self.calls += 1;
+            if (!truth(get(request, "rsvpOnly"))) return a.dupe(u8, "{\"ok\":true,\"data\":{\"outcome\":\"blocked\",\"calendarSync\":{\"state\":\"skipped\",\"errorCode\":\"CalendarWritePermissionRequired\"}}}");
+            self.replies += 1;
+            return a.dupe(u8, "{\"ok\":true,\"data\":{\"outcome\":\"applied\",\"calendarSync\":{\"state\":\"skipped\",\"errorCode\":\"RsvpOnlyRequested\"}}}");
+        }
+    };
+    const a = std.testing.allocator;
+    var capture: Capture = .{};
+    var client: CacheTestClient = .{};
+    var app = client.app(a);
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    const loop = try a.create(Loop);
+    defer a.destroy(loop);
+    loop.init(std.testing.io, a, &tty, &vx);
+    defer loop.deinit();
+    app.loop = loop;
+    app.client = .{ .ctx = &capture, .callFn = Capture.call };
+    defer app.deinit();
+    try app.invitation_inspected_account.set(a, "work@example.test");
+    try app.invitation_inspected_id.set(a, "meeting");
+    try app.invitation_review.organizer.set("host@example.test");
+    try app.invitation_review.attendee.set("work@example.test");
+    try app.invitation_review.summary.set("Planning meeting");
+    try app.loadInvitationPresentation(try readerInvitationTestValue(app.frame.allocator(), "{\"method\":\"request\",\"canReply\":true,\"startDisplay\":\"2026-10-26 12:30 CET\"}"));
+    app.mode = .invitation;
+    var screen = try vaxis.Screen.init(a, .{ .cols = 110, .rows = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(a);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 110, .height = 40, .screen = &screen };
+    // Repeating the ordinary Accept gesture never becomes an override.
+    for (0..2) |_| {
+        try app.invitationDraw(win);
+        try app.onConfirmationKey(.{ .codepoint = 'a' });
+        app.job.future.?.await(app.io);
+        try app.finish();
+        try std.testing.expectEqual(Mode.invitation, app.mode);
+        try std.testing.expect(app.invitation_calendar_blocked and !app.invitation_unknown);
+        try std.testing.expectEqual(@as(usize, 0), capture.replies);
+    }
+    screen.clear();
+    try app.invitationDraw(win);
+    const shown = try helpTestScreenText(a, &screen);
+    defer a.free(shown);
+    for ([_][]const u8{ "RSVP not sent", "Calendar write permission is missing", "[s Accept without Calendar]" }) |label| try std.testing.expect(std.mem.indexOf(u8, shown, label) != null);
+    app.dialog_focus.reset(.invitation, 0);
+    try app.onConfirmationKey(.{ .codepoint = Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 7), app.dialog_focus.index);
+    try app.onConfirmationKey(.{ .codepoint = Key.enter });
+    app.job.future.?.await(app.io);
+    try app.finish();
+    try std.testing.expectEqual(@as(usize, 1), capture.replies);
+    try std.testing.expectEqual(@as(usize, 3), capture.calls);
+    try std.testing.expect(!app.invitation_calendar_blocked and !app.invitation_unknown);
+    // Old confirmed replies expose Calendar-only recovery after this fix.
+    try app.loadInvitationCalendarSync(try readerInvitationTestValue(app.frame.allocator(), "{\"state\":\"skipped\",\"errorCode\":\"CalendarLineTooLarge\",\"canRetry\":false}"));
+    try std.testing.expect(app.invitationCalendarCheckNeeded());
 }
 
 test "invitation UX: sticky metadata converts local time and invalidates on refreshed calendar identity" {

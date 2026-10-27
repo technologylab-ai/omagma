@@ -14,7 +14,7 @@ import sys
 
 from terminal_composer_workflow import setup as composer_setup
 from terminal_file_dialog import fixture_setup, start_ready, open_popup, popup_text
-from terminal_integration import ACCOUNTS, Client, require
+from terminal_integration import ACCOUNTS, Client, fixture_calendar_writes, require
 from terminal_invitations import InvitationFixture
 from terminal_mouse import start, MouseTerminal
 from terminal_mouse_screen import MouseScreen
@@ -295,13 +295,35 @@ def invitation_review(binary, directory):
         reach(terminal, "[d Decline]")
         reach(terminal, "[t Tentative]", backwards=True)
         activate(terminal)
-        terminal.until(lambda: "RSVP sent" in terminal.text() and "Meeting · review reply" not in terminal.text())
+        terminal.until(lambda: "RSVP not sent" in terminal.text()
+                       and "[s Tentative without Calendar]" in terminal.text()
+                       and focused(terminal, "[Esc Cancel]"))
+        require("Reason:" in terminal.text(), "blocked Tentative omitted its Calendar reason")
         with Client(binary, directory, extra=source.options()) as client:
-            operations = client.request("operation.list")["operations"]
-            require(len(operations) == 1 and "PARTSTAT=TENTATIVE" in operations[0]["icalendar"], "focused Tentative changed reviewed RSVP choice")
+            require(client.request("cache.stats")["fixtureSends"] == 0
+                    and fixture_calendar_writes(client) == 0,
+                    "normal Tentative submitted mail or Calendar despite its known preflight blocker")
+            require(not client.request("operation.list")["operations"]
+                    and not client.request("history.operations")["items"],
+                    "blocked Tentative created a submitted RSVP receipt")
+        reach(terminal, "[s Tentative without Calendar]")
+        reach(terminal, "[Esc Cancel]", backwards=True)
+        reach(terminal, "[s Tentative without Calendar]")
+        activate(terminal)
+        terminal.until(lambda: "RSVP sent" in terminal.text() and "Meeting · review reply" not in terminal.text())
+        require("Calendar left unchanged as requested" in terminal.text(), "mail-only Tentative result was not disclosed")
+        with Client(binary, directory, extra=source.options()) as client:
+            retained = client.request("history.operations")
+            operations = client.request("operation.list")["operations"] + retained["items"]
+            require(not retained["nextCursor"] and len(operations) == 1
+                    and "PARTSTAT=TENTATIVE" in operations[0]["icalendar"],
+                    "focused Tentative changed reviewed RSVP choice or duplicated its active/retained receipt")
+            require(operations[0]["calendarSync"]["errorCode"] == "RsvpOnlyRequested",
+                    "focused mail-only Tentative lost its durable Calendar policy")
             require(client.request("cache.stats")["fixtureSends"] == 1, "focused RSVP Enter submitted more than once")
+            require(fixture_calendar_writes(client) == 0, "focused mail-only Tentative wrote Calendar")
         terminal.finish(expected_sends=1)
-        print("PASS dialog controls: every RSVP button, safe Cancel default and exactly one explicitly chosen Tentative reply")
+        print("PASS dialog controls: safe Cancel, blocked Tentative and exactly one explicitly focused mail-only reply")
     except Exception:
         print(terminal.text(), file=sys.stderr)
         raise

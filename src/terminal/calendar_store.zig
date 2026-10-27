@@ -148,8 +148,11 @@ pub const Host = struct {
     /// own review or another pending operation. Native settled receipts page
     /// before admission; the portable demo retains its original bounded policy.
     fn fit(state: *StateFile, protected: plan.Identity) !void {
+        return fitWithExtra(state, protected, 0);
+    }
+    fn fitWithExtra(state: *StateFile, protected: plan.Identity, extra_bytes: usize) !void {
         compact(state);
-        while (state.entries.len > max_identities or @import("gmail_decode.zig").serializedBytes(state.*) + reservedBytes(state.*) > state_bytes) {
+        while (state.entries.len > max_identities or @import("gmail_decode.zig").serializedBytes(state.*) + reservedBytes(state.*) + extra_bytes > state_bytes) {
             var index = state.entries.len;
             var removed = false;
             while (index > 0) {
@@ -163,6 +166,60 @@ pub const Host = struct {
             if (!removed) return error.CalendarStoreFull;
         }
     }
+    /// Check the inevitable claim footprint without publishing an unknown
+    /// operation. Payload strings are immutable; only entry descriptors need
+    /// copying because compact/fit can replace or move them.
+    fn admitClaim(a: std.mem.Allocator, state: StateFile, intent: plan.Intent) !void {
+        var projected = state;
+        const entries = try a.dupe(Entry, state.entries);
+        defer a.free(entries);
+        projected.entries = entries;
+        const current = findEntry(&projected, intent.identity) orelse return error.CalendarReviewNotFound;
+        if (current.state.operation) |operation| {
+            if (std.mem.eql(u8, operation.intent.operation_id, intent.operation_id)) {
+                if (!operation.intent.eql(intent)) return error.OperationConflict;
+                return; // The journal returns the existing claim unchanged.
+            }
+            if (operation.state == .unknown) return error.CalendarOperationPending;
+        }
+        current.state.operation = .{ .intent = intent };
+        current.receipt_hash = null;
+        current.receipt_reserved = true;
+        compact(&projected);
+        var extra_bytes: usize = 0;
+        if (mail.Limits.native and (projected.entries.len >= 64 or @import("gmail_decode.zig").serializedBytes(projected) + reservedBytes(projected) > state_bytes)) {
+            // claim's archiveSettled can page these exact siblings. Project
+            // removal only; the real transaction still owns every receipt.
+            var kept: usize = 0;
+            var identities: usize = 0;
+            var receipts: usize = 0;
+            for (projected.entries) |entry| {
+                const pending = entry.review != null or (entry.state.operation != null and entry.state.operation.?.state == .unknown);
+                if (!pending and !entry.identity.eql(intent.identity) and (entry.state.tracked != null or entry.state.operation != null)) {
+                    identities += 1;
+                    if (entry.state.operation != null) receipts += 1;
+                } else {
+                    projected.entries[kept] = entry;
+                    kept += 1;
+                }
+            }
+            projected.entries = projected.entries[0..kept];
+            // Each appended record can grow its count by at most one decimal
+            // digit and fill one previously empty 64-hex-character head.
+            // A small conservative bound avoids reproducing the paging format.
+            var identity_heads: usize = 0;
+            var receipt_heads: usize = 0;
+            for (state.history.identities.heads) |head| if (head.len == 0) {
+                identity_heads += 1;
+            };
+            for (state.history.receipts.heads) |head| if (head.len == 0) {
+                receipt_heads += 1;
+            };
+            extra_bytes = identities + receipts + 64 * (@min(identities, identity_heads) + @min(receipts, receipt_heads));
+        }
+        try fitWithExtra(&projected, intent.identity, extra_bytes);
+    }
+
     /// Recent reviews lead the active table. Unknown outcomes are never pruned;
     /// native tracked identities can leave this table only through history.
     fn ensure(state: *StateFile, a: std.mem.Allocator, identity: plan.Identity) !*Entry {
@@ -294,6 +351,7 @@ pub const Host = struct {
         current.ordinary = review.ordinary_event != null;
         try archiveSettled(&store, a, &state, review.intent.identity);
         try fit(&state, review.intent.identity);
+        try admitClaim(a, state, review.intent);
         try writeState(&store, a, state);
     }
     fn claim(context: *anyopaque, intent: plan.Intent) anyerror!plan.Claim {
@@ -657,4 +715,82 @@ test "calendar store: final reservation exceeds maximum escaped receipt growth a
     entries[0].state.tracked = .{ .identity = identity, .event_id = &quoted, .version = intent.version, .source_hash = intent.source_hash };
     entries[0].receipt_hash = @splat(255);
     try std.testing.expect(@import("gmail_decode.zig").serializedBytes(entries[0]) - initial_bytes < final_receipt_reserve);
+}
+
+test "calendar store: review admission projects claim bytes without publishing or losing settled receipts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const encoded = @import("gmail_decode.zig").serializedBytes;
+    const target: t.Target = .{ .account = "self@example.test", .calendar_id = "primary" };
+    const payload = try a.alloc(u8, t.Limits.source_bytes - 512);
+    @memset(payload, 'x');
+    const Factory = struct {
+        fn review(out: std.mem.Allocator, selected: t.Target, uid: []const u8, content: []const u8) !svc.Review {
+            const raw = try std.fmt.allocPrint(out, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{s}\r\nDTSTAMP:20261026T120000Z\r\nORGANIZER:mailto:host@example.test\r\nATTENDEE:mailto:self@example.test\r\nDTSTART:20261027T120000Z\r\nDTEND:20261027T130000Z\r\nDESCRIPTION:{s}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", .{ uid, content });
+            const source = try @import("calendar_invitation.zig").parse(out, raw, selected.account, &.{});
+            const request: @import("calendar_provider.zig").Request = .{ .target = selected, .kind = .import_event, .method = .POST, .url = "https://www.googleapis.com/calendar/v3/calendars/primary/events/import", .body = try std.fmt.allocPrint(out, "{{\"description\":\"{s}\"}}", .{content}) };
+            const intent = try request.bindIntent(.{ .operation_id = uid, .identity = .{ .target = selected, .uid = uid }, .version = source.version, .kind = .import_event, .source_hash = source.source_hash, .payload_hash = @splat(0) });
+            return .{ .calendar = .{ .target = selected, .summary = "Personal", .time_zone = "UTC", .access = .owner }, .source = source, .span = try @import("calendar_invitation.zig").resolveSpan(source, null, null), .intent = intent, .request = request, .review_hash = @splat(1), .rsvp_response = .accepted };
+        }
+    };
+    const entries = try a.alloc(Entry, 9);
+    for (entries[0..7], 0..) |*entry, index| {
+        const review = try Factory.review(a, target, try std.fmt.allocPrint(a, "pending-{d}", .{index}), payload);
+        entry.* = .{ .identity = review.intent.identity, .review = review, .state = .{ .operation = .{ .intent = review.intent } }, .receipt_reserved = true };
+    }
+    var next = try Factory.review(a, target, "prospective", payload);
+    // Tune only opaque serialized review payload sizes; the admission check
+    // does not parse or send them. Every field remains within source bounds.
+    next.source.description = "";
+    next.request.body = payload[0 .. 32 * 1024];
+    entries[7] = .{ .identity = next.intent.identity, .review = next };
+    const quoted: [1024]u8 = @splat('"');
+    const retained: plan.Identity = .{ .target = .{ .account = target.account, .calendar_id = &quoted }, .uid = &quoted, .recurrence_key = &quoted };
+    const retained_intent: plan.Intent = .{ .operation_id = "retained", .identity = retained, .version = .{ .sequence = 1, .dtstamp_ms = 1 }, .kind = .update_event, .source_hash = @splat(1), .payload_hash = @splat(2), .event_id = &quoted, .expected_etag = &quoted };
+    entries[8] = .{ .identity = retained, .state = .{ .operation = .{ .intent = retained_intent, .provider_id = &quoted }, .tracked = .{ .identity = retained, .event_id = &quoted, .version = retained_intent.version, .source_hash = retained_intent.source_hash } } };
+    var state: StateFile = .{ .account = target.account, .entries = entries };
+    const fixed_bytes = encoded(state) + Host.reservedBytes(state);
+    try std.testing.expect(fixed_bytes < state_bytes);
+    const available = state_bytes - fixed_bytes;
+    try std.testing.expect(available > final_receipt_reserve + 4096 and available <= payload.len);
+    entries[7].review.?.source.description = payload[0..available];
+    try std.testing.expectEqual(state_bytes, encoded(state) + Host.reservedBytes(state));
+    try Host.fit(&state, next.intent.identity); // The review itself fits exactly.
+    const before = try a.dupe(Entry, state.entries);
+    const roots_before = state.history;
+    try std.testing.expectError(error.CalendarStoreFull, Host.admitClaim(a, state, next.intent));
+    try std.testing.expectEqualDeep(before, state.entries);
+    try std.testing.expectEqualDeep(roots_before, state.history);
+    try std.testing.expect(state.entries[7].state.operation == null);
+    try std.testing.expect(!state.entries[7].receipt_reserved);
+
+    // Sufficient space admits the same review, and the actual claim footprint
+    // then passes the existing gate without changing its reservation or limit.
+    entries[7].review.?.source.description = payload[0 .. available - final_receipt_reserve - 4096];
+    try Host.admitClaim(a, state, next.intent);
+    const claimed_entries = try a.dupe(Entry, state.entries);
+    var claimed = state;
+    claimed.entries = claimed_entries;
+    claimed.entries[7].state.operation = .{ .intent = next.intent };
+    claimed.entries[7].receipt_hash = null;
+    claimed.entries[7].receipt_reserved = true;
+    try Host.fit(&claimed, next.intent.identity);
+    try std.testing.expect(encoded(claimed) + Host.reservedBytes(claimed) <= state_bytes);
+    try std.testing.expect(state.entries[7].state.operation == null);
+
+    if (mail.Limits.native) {
+        // Settling a large escaped receipt makes it page-eligible. Projection
+        // must count this reclaimable space, yet leave the real receipt/root
+        // untouched until the real claim transaction publishes its pages.
+        entries[7].review.?.source.description = payload[0..available];
+        entries[8].state.operation.?.state = .applied;
+        try std.testing.expect(encoded(entries[8]) > final_receipt_reserve + 4096 + 130);
+        const settled_before = try a.dupe(Entry, state.entries);
+        try Host.admitClaim(a, state, next.intent);
+        try std.testing.expectEqualDeep(settled_before, state.entries);
+        try std.testing.expectEqualDeep(roots_before, state.history);
+        try std.testing.expectEqual(@as(usize, 9), state.entries.len);
+        try std.testing.expect(state.entries[8].state.operation.?.state == .applied);
+    }
 }

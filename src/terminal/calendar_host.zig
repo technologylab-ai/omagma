@@ -28,6 +28,14 @@ pub const Host = struct {
     /// this continuation. Its source is supplied before the Calendar client
     /// opens, preserving the one-network-workspace rule.
     pub fn syncRsvp(self: Host, request: j.Value, source: commands.InvitationInput, response: @import("calendar_provider.zig").RsvpResponse) !@import("calendar_rsvp.zig").Result {
+        return (try self.rsvp(request, source, response, true)).?;
+    }
+
+    pub fn preflightRsvp(self: Host, request: j.Value, source: commands.InvitationInput, response: @import("calendar_provider.zig").RsvpResponse) !?@import("calendar_rsvp.zig").Result {
+        return self.rsvp(request, source, response, false);
+    }
+
+    fn rsvp(self: Host, request: j.Value, source: commands.InvitationInput, response: @import("calendar_provider.zig").RsvpResponse, apply: bool) !?@import("calendar_rsvp.zig").Result {
         const account = try j.required(request, "account");
         if (self.options.fixtures and std.mem.eql(u8, self.options.fixture_scenario, "calendar-no-grant")) return error.CalendarPermissionRequired;
         if (!self.options.fixtures) _ = try self.checkGrant(request, "calendar.review", account);
@@ -38,14 +46,16 @@ pub const Host = struct {
         if (self.options.fixtures) {
             var transport = try @import("calendar_fixture.zig").Provider.init(.{ .io = self.io, .allocator = self.backing_allocator, .root = self.cache_root, .account = account, .options = self.options, .now_ms = now, .access = self.access });
             if (std.mem.eql(u8, self.options.fixture_scenario, "calendar-offline")) return error.ConnectionRefused;
-            return @import("calendar_rsvp.zig").sync(.{ .a = self.allocator, .grants = transport.grants(), .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now }, request, callbacks, response);
+            const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants(), .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+            return if (apply) try @import("calendar_rsvp.zig").sync(instance, request, callbacks, response) else try @import("calendar_rsvp.zig").preflight(instance, request, callbacks, response);
         }
         const transport = try self.backing_allocator.create(native.Native);
         defer self.backing_allocator.destroy(transport);
         transport.* = .{};
         try transport.init(self.io, self.allocator, self.backing_allocator, self.config, account, "calendar.review", request);
         defer transport.close();
-        return @import("calendar_rsvp.zig").sync(.{ .a = self.allocator, .grants = transport.grants, .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now }, request, callbacks, response);
+        const instance: service.Service = .{ .a = self.allocator, .grants = transport.grants, .transport = transport.transport(), .persistence = store.persistence(), .cache = store.cache(), .now_ms = now };
+        return if (apply) try @import("calendar_rsvp.zig").sync(instance, request, callbacks, response) else try @import("calendar_rsvp.zig").preflight(instance, request, callbacks, response);
     }
 
     pub fn canSyncRsvp(self: Host, request: j.Value, account: []const u8) bool {

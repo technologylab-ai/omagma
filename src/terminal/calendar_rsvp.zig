@@ -24,6 +24,19 @@ pub fn failed(err: anyerror) Result {
 }
 
 pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInputs, response: provider.RsvpResponse) !Result {
+    return run(instance, request, host, response, true);
+}
+
+/// Prepare and persist the exact Calendar action before sending the RSVP.
+/// This performs reads and local review persistence, never a provider write.
+/// A null result means the action is ready; a result explains its blocker.
+pub fn preflight(instance: service.Service, request: j.Value, host: commands.HostInputs, response: provider.RsvpResponse) !?Result {
+    const result = try run(instance, request, host, response, false);
+    if (result.state == .applied or result.state == .existing or (result.state == .skipped and result.errorCode.len == 0)) return null;
+    return result;
+}
+
+fn run(instance: service.Service, request: j.Value, host: commands.HostInputs, response: provider.RsvpResponse, apply: bool) !Result {
     const explicit_id = j.text(request, "calendarId");
     const calendar = if (explicit_id.len != 0) try instance.loadCalendar(.{ .account = instance.grants.account, .calendar_id = explicit_id }) else selected: {
         const listed = try instance.list();
@@ -32,6 +45,9 @@ pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInpu
     };
     if (!calendar.writable()) return error.CalendarReadOnly;
     if (!instance.grants.canWrite(calendar)) return error.CalendarWritePermissionRequired;
+    const load_source = host.loadInvitationFn orelse return error.CalendarInvitationSourceRequired;
+    const input = try load_source(host.context, instance.a, instance.grants.account, request);
+    const current = try @import("calendar_invitation.zig").parse(instance.a, input.source, instance.grants.account, input.verified_aliases);
     const digest_input = try std.fmt.allocPrint(instance.a, "{s}\x00{s}\x00{s}\x00{s}", .{ instance.grants.account, calendar.target.calendar_id, try j.required(request, "operationId"), @tagName(response) });
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(digest_input, &digest, .{});
@@ -40,6 +56,7 @@ pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInpu
     if (host.loadReceiptFn) |load_receipt| if (try load_receipt(host.context, instance.a, calendar.target, operation_id)) |receipt| {
         const operation = receipt.operation;
         if (receipt.ordinary or !operation.intent.identity.target.eql(calendar.target) or !std.mem.eql(u8, operation.intent.operation_id, operation_id) or (operation.intent.kind != .import_event and operation.intent.kind != .update_event)) return error.CalendarReviewMismatch;
+        if (!std.mem.eql(u8, &operation.intent.source_hash, &current.source_hash) or !std.mem.eql(u8, operation.intent.identity.uid, current.uid)) return error.CalendarReviewMismatch;
         return .{ .state = switch (operation.state) {
             .applied => .applied,
             .rejected => .rejected,
@@ -62,7 +79,17 @@ pub fn sync(instance: service.Service, request: j.Value, host: commands.HostInpu
         break :blk try instance.prepareRsvpReview(planned, operation_id, response);
     };
     if (review.rsvp_response != response) return error.OperationConflict;
+    if (!std.mem.eql(u8, &review.intent.source_hash, &current.source_hash) or !std.mem.eql(u8, review.intent.identity.uid, current.uid) or !std.ascii.eqlIgnoreCase(review.source.attendee, current.attendee)) return error.CalendarReviewMismatch;
     review.calendar = calendar;
+    if (!apply) {
+        if (try instance.preflight(review, review.confirmation())) |operation| return .{ .state = switch (operation.state) {
+            .applied => .applied,
+            .rejected => .rejected,
+            .unknown => .unknown,
+            .archived => return error.CalendarReviewMismatch,
+        }, .calendarId = calendar.target.calendar_id, .eventId = operation.provider_id, .operationId = operation_id, .errorCode = operation.error_code, .canRetry = operation.state == .unknown };
+        return .{ .calendarId = calendar.target.calendar_id, .operationId = operation_id };
+    }
     const applied = instance.apply(review, review.confirmation()) catch |err| {
         var result = failed(err);
         result.calendarId = calendar.target.calendar_id;

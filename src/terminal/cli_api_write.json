@@ -1729,6 +1729,11 @@
           "type": "string",
           "description": "Optional explicit writable calendar within the same account. Omit to use its uniquely identified primary calendar. The original choice binds operationId and cannot change on retry."
         },
+        "rsvpOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly send only the RSVP email, leaving Calendar unchanged. Normally accepted/tentative replies first require a successful Calendar preflight. Use this override only after reviewing the Calendar blocker."
+        },
         "operationId": {
           "$ref": "#/$defs/WriteOperationId"
         }
@@ -1739,12 +1744,13 @@
         "operationId"
       ],
       "notes": [
-        "Real email send: reads and validates the received invitation, identifies this account/verified alias attendee and organizer, and generates a METHOD:REPLY message. After a confirmed accepted/tentative reply, authorized Calendar access adds or updates the attendee event. Decline remains email-only.",
+        "Real email send: reads and validates the received invitation, identifies this account/verified alias attendee and organizer, and generates a METHOD:REPLY message. Accepted/tentative responses preflight and persist the Calendar action before sending, then apply it after confirmed mail acceptance. Decline remains email-only.",
         "Requires calendar-rsvp plus mail-read for the source/alias reads. It does not require the ordinary mail-send capability in place of calendar-rsvp.",
         "No caller-supplied organizer, raw ICS, preparedCalendar, arbitrary draft or recipient field is applied. Optional attendee and sourceHash are comparison guards, never replacement identities. Use invitation.inspect first, then the same source messageId and selected status.",
         "Uses the durable send operation journal. Inspect applied/rejected/unknown, retain the same operationId for the same reviewed RSVP, and reconcile unknown results instead of sending a second response with a new identity.",
-        "The mail outcome and optional calendarSync receipt are independent: Calendar skipped/rejected/unknown never changes an applied mail outcome. calendarSync includes state, calendarId, eventId, errorCode and canRetry. Use invitation.inspect with reconcile=true for Calendar-only recovery; it never resends the RSVP.",
-        "Calendar writes require a separate Calendar write grant, complete UID/organizer lookup, safe source time resolution and conditional updates. Existing attendee responses use attendeesOmitted=true; unsupported recurrence and ambiguous or stale events are surfaced without blocking the email reply.",
+        "A known Calendar blocker returns outcome:blocked and calendarSync with its reason before any email submission or Calendar mutation. Review the reason; retry after fixing it, or explicitly pass rsvpOnly:true to send the response without Calendar. Repeating the normal request never implicitly enables this override. The first submitted rsvpOnly choice binds operationId; changing it afterward returns OperationConflict.",
+        "Mail and Calendar use separate providers, so a failure after submission can still leave a confirmed email with Calendar incomplete. The durable calendarSync receipt includes state, calendarId, eventId, errorCode and canRetry. Use invitation.inspect with reconcile=true for Calendar-only recovery; it never resends the RSVP. An explicit RSVP-only choice is retained across replay and reconciliation.",
+        "Calendar writes require a separate Calendar write grant, complete UID/organizer lookup, safe source time resolution and conditional updates. Existing attendee responses use attendeesOmitted=true; unsupported recurrence, missing permissions and ambiguous or stale events block ordinary accepted/tentative submission until explicitly overridden.",
         "Does not use the queue/countdown API; submission starts immediately. Normal message, calendar, account and MIME bounds apply."
       ],
       "examples": [

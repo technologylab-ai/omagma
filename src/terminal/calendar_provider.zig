@@ -101,6 +101,7 @@ pub fn prepareResolvedImport(a: std.mem.Allocator, source: t.Invitation, intent:
     if (source.isRecurring()) return error.UnsupportedCalendarRecurrence;
     try validSpan(span);
     const description = if (source.join_url.len != 0 and std.mem.indexOf(u8, source.description, source.join_url) == null) try std.fmt.allocPrint(a, "{s}\n\nJoin: {s}", .{ source.description, source.join_url }) else source.description;
+    try validateInvitationText(source, description);
     const source_hex = std.fmt.bytesToHex(source.source_hash, .lower);
     const body = try std.json.Stringify.valueAlloc(a, .{
         .iCalUID = source.uid,
@@ -142,7 +143,16 @@ pub fn prepareInvitationPatch(a: std.mem.Allocator, source: t.Invitation, intent
     try private.object.put(a, "omagmaSource", .{ .string = try a.dupe(u8, &source_hex) });
     try properties.object.put(a, "private", private);
     const description = if (source.join_url.len != 0 and std.mem.indexOf(u8, source.description, source.join_url) == null) try std.fmt.allocPrint(a, "{s}\n\nJoin: {s}", .{ source.description, source.join_url }) else source.description;
+    try validateInvitationText(source, description);
     return preparePatch(a, intent, try j.value(a, .{ .summary = source.summary, .description = description, .location = source.location, .start = try googleTime(a, span.start), .end = try googleTime(a, span.end), .sequence = source.version.sequence, .extendedProperties = properties }));
+}
+
+fn validateInvitationText(source: t.Invitation, description: []const u8) !void {
+    // A prepared event must also fit our provider read/reconciliation model.
+    // Reject before RSVP submission rather than write an unreadable event.
+    if (source.summary.len > 4096) return error.CalendarSummaryTooLarge;
+    if (source.location.len > 4096) return error.CalendarLocationTooLarge;
+    if (description.len > 64 * 1024) return error.CalendarDescriptionTooLarge;
 }
 
 fn validSpan(span: invitation.Span) !void {

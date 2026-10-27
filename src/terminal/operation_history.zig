@@ -319,7 +319,7 @@ pub fn settled(operation_value: storage.Operation) bool {
     if (!std.mem.eql(u8, operation_value.outcome, "applied") and !std.mem.eql(u8, operation_value.outcome, "rejected")) return false;
     if (operation_value.icalendar.len != 0 and std.mem.eql(u8, operation_value.outcome, "applied")) {
         const result = operation_value.calendarSync orelse return false;
-        if (result.canRetry or result.state == .unknown or (result.state == .skipped and !std.mem.eql(u8, result.errorCode, "DeclinedReplyOnly"))) return false;
+        if (result.canRetry or result.state == .unknown or (result.state == .skipped and !std.mem.eql(u8, result.errorCode, "DeclinedReplyOnly") and !std.mem.eql(u8, result.errorCode, "RsvpOnlyRequested"))) return false;
     }
     return true;
 }

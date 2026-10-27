@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from build_info import build_mode, read_build_info
 from terminal_integration import (
     ACCOUNTS, Client, FIXTURES, MANIFEST, MAX_FRAME, ROOT, addresses,
-    no_core_dump, one_shot_cached_server_search, read_saved_draft, require,
+    fixture_calendar_writes, no_core_dump, one_shot_cached_server_search, read_saved_draft, require,
 )
 from terminal_invitations import (
     InvitationFixture, check_conflicting_attachment, check_conflicting_mail,
@@ -78,19 +78,38 @@ def invitations(binary, directory):
             inspect_identity(inspected, case, ACCOUNTS[0])
             require(client.request("invitation.inspect", messageId="invite-" + case) == inspected,
                     "one-shot invitation inspection differed from JSONL")
+            if case == "named-calendar":
+                for status in ("accepted", "tentative"):
+                    operation_id = "blocked-default-" + status
+                    blocked = one_shot(client, "invitations", "reply",
+                                       [*flags, "--status", status, "--operation-id", operation_id])
+                    require(blocked["outcome"] == "blocked" and blocked["calendarSync"]["errorCode"]
+                            and blocked["errorCode"] == blocked["calendarSync"]["errorCode"],
+                            "default one-shot RSVP did not disclose its Calendar preflight blocker")
+                    require(client.request("invitation.reply", messageId="invite-" + case, status=status,
+                                           operationId=operation_id) == blocked,
+                            "default JSONL RSVP disagreed with the one-shot Calendar blocker")
+                    require(client.request("cache.stats")["fixtureSends"] == 0
+                            and fixture_calendar_writes(client) == 0
+                            and client.request("operation.list")["operations"] == [],
+                            "blocked RSVP wrote mail, Calendar or a submitted mail receipt")
             for status in ("accepted", "tentative", "declined"):
                 operation_id = f"one-shot-{case}-{status}"
-                parameters = {"messageId": "invite-" + case, "status": status, "operationId": operation_id}
+                parameters = {"messageId": "invite-" + case, "status": status,
+                              "operationId": operation_id, "rsvpOnly": True}
                 result = one_shot(client, "invitations", "reply",
-                                  [*flags, "--status", status, "--operation-id", operation_id])
+                                  [*flags, "--status", status, "--operation-id", operation_id, "--rsvp-only"])
                 require(result["outcome"] == "applied", "one-shot fixture RSVP did not apply")
+                require(result["calendarSync"]["errorCode"] ==
+                        ("DeclinedReplyOnly" if status == "declined" else "RsvpOnlyRequested"),
+                        "one-shot email-only RSVP lost its saved Calendar policy")
                 expected_operations[operation_id] = result
                 reply_identity(result, case, ACCOUNTS[0], status, operation_id)
                 before = client.request("cache.stats")
                 require(client.request("invitation.reply", **parameters) == result,
                         "JSONL replay did not reuse the one-shot RSVP receipt")
                 require(one_shot(client, "invitations", "reply",
-                                 [*flags, "--status", status, "--operation-id", operation_id]) == result,
+                                 [*flags, "--status", status, "--operation-id", operation_id, "--rsvp-only"]) == result,
                         "separate one-shot process did not replay the completed RSVP receipt")
                 require(one_shot(client, "operation", "read", ["--operation-id", operation_id]) == result,
                         "one-shot operation read lost the journaled RSVP")
@@ -102,16 +121,17 @@ def invitations(binary, directory):
                 require(client.request("cache.stats")["fixtureSends"] == before["fixtureSends"],
                         "receipt inspection or mixed-interface replay resent RSVP")
         require(client.request("cache.stats")["fixtureSends"] == 9, "one-shot statuses submitted wrong reply count")
+        require(fixture_calendar_writes(client) == 0, "email-only parity replies changed Calendar")
         shared_operation = "one-shot-named-calendar-accepted"
         personal = client.request("operation.read", operationId=shared_operation)
         work = one_shot(client, "invitations", "reply", ["--message-id", "invite-named-calendar",
-                        "--status", "accepted", "--operation-id", shared_operation], account=ACCOUNTS[1])
+                        "--status", "accepted", "--operation-id", shared_operation, "--rsvp-only"], account=ACCOUNTS[1])
         reply_identity(work, "named-calendar", ACCOUNTS[1], "accepted", shared_operation)
         require(work["rfcMessageId"] != personal["rfcMessageId"], "equal operation IDs leaked wire identity across accounts")
         require(client.request("operation.read", operationId=shared_operation) == personal,
                 "one-shot reply overwrote another account's journal")
         one_shot(client, "invitations", "reply", ["--message-id", "invite-named-calendar", "--status", "declined",
-                 "--operation-id", shared_operation], error="OperationConflict")
+                 "--operation-id", shared_operation, "--rsvp-only"], error="OperationConflict")
         # A conflicting invitation stays ordinary readable mail in both public
         # interfaces. Every named calendar and ordinary file remains available.
         before_operations = client.request("operation.list")["operations"]
@@ -132,12 +152,12 @@ def invitations(binary, directory):
             check_conflicting_attachment(command, item["filename"], expected_files)
             require(command == downloaded, "one-shot conflicting attachment download differed from JSONL")
         for command, params in (("invitation.inspect", {}),
-                                ("invitation.reply", {"status": "accepted", "operationId": "refused-conflicting-jsonl"})):
+                                ("invitation.reply", {"status": "accepted", "operationId": "refused-conflicting-jsonl", "rsvpOnly": True})):
             require(client.request(command, messageId=ordinary["id"], ok=False, **params)["code"] == "NotInvitation",
                     "JSONL guessed an event identity for conflicting ordinary mail")
         one_shot(client, "invitations", "inspect", flags, error="NotInvitation")
         one_shot(client, "invitations", "reply", [*flags, "--status", "accepted",
-                 "--operation-id", "refused-conflicting-one-shot"], error="NotInvitation")
+                 "--operation-id", "refused-conflicting-one-shot", "--rsvp-only"], error="NotInvitation")
         require(client.request("operation.list")["operations"] == before_operations
                 and client.request("cache.stats")["fixtureSends"] == before_sends,
                 "conflicting invitation actions submitted an extra RSVP or journal row")
@@ -147,10 +167,10 @@ def invitations(binary, directory):
         for case, error in (("html-only", "NotInvitation"), ("foreign", "NotAnAttendee"),
                             ("publish", "NotInvitationRequest"), ("multi-event", "AmbiguousInvitation")):
             one_shot(client, "invitations", "reply", ["--message-id", "invite-" + case, "--status", "accepted",
-                     "--operation-id", "refused-" + case], error=error)
+                     "--operation-id", "refused-" + case, "--rsvp-only"], error=error)
         for flags, error in ((["--message-id", "invite-named-calendar", "--status", "cancelled", "--operation-id", "bad-status"], "InvalidInvitationStatus"),
                              (["--message-id", "invite-named-calendar", "--status", "accepted"], "MissingField")):
-            one_shot(client, "invitations", "reply", flags, error=error)
+            one_shot(client, "invitations", "reply", [*flags, "--rsvp-only"], error=error)
         require(client.request("cache.stats")["fixtureSends"] == 9, "invalid one-shot RSVP sent a response")
         retained = client.request("history.operations")
         operations = client.request("operation.list")["operations"] + retained["items"]
@@ -167,7 +187,7 @@ def uncertainty(binary, directory):
     source = InvitationFixture(directory)
     for scenario, sends in (("unknown-send", 0), ("applied-lost", 1)):
         with Client(binary, directory / scenario, scenario=scenario, extra=source.options()) as client:
-            flags = ["--message-id", "invite-named-octet", "--status", "tentative"]
+            flags = ["--message-id", "invite-named-octet", "--status", "tentative", "--rsvp-only"]
             first = one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"])
             require(first["outcome"] == "unknown", "one-shot lost-response scenario claimed certainty")
             reply_identity(first, "named-octet", ACCOUNTS[0], "tentative", "uncertain-one-shot")
@@ -175,26 +195,28 @@ def uncertainty(binary, directory):
                                             "operationId": "", "errorCode": "MailReplyNotConfirmed", "canRetry": False},
                     "uncertain mail RSVP allowed a Calendar continuation")
             journal = client.request("operation.list")["operations"]
-            # The response explains why Calendar cannot run; no continuation
-            # is persisted until mail delivery is confirmed. All mail receipt
-            # fields and the complete journal must remain unchanged on retry.
-            require(journal == [{key: value for key, value in first.items() if key != "calendarSync"}],
-                    "unknown RSVP lost its durable mail receipt")
+            # The response explains why Calendar cannot run. The journal also
+            # retains the explicit mail-only policy while mail is uncertain,
+            # so later confirmation cannot turn it into a Calendar submission.
+            stored = {**first, "calendarSync": {"state": "skipped", "calendarId": "", "eventId": "",
+                                               "operationId": "", "errorCode": "RsvpOnlyRequested", "canRetry": False}}
+            require(journal == [stored], "unknown RSVP lost its durable mail receipt or mail-only policy")
             before = client.request("cache.stats")
             require(one_shot(client, "invitations", "reply", [*flags, "--operation-id", "uncertain-one-shot"]) == first,
                     "same-ID one-shot retry changed the uncertain RSVP receipt")
             one_shot(client, "invitations", "reply", [*flags, "--operation-id", "changed-id-one-shot"], error="UnknownOutcome")
             client.restart()
             require(client.request("invitation.reply", messageId="invite-named-octet", status="tentative",
-                                   operationId="uncertain-one-shot") == first,
+                                   operationId="uncertain-one-shot", rsvpOnly=True) == first,
                     "restart/mixed-interface retry changed the uncertain RSVP receipt")
             require(client.request("invitation.reply", messageId="invite-named-octet", status="tentative",
-                                   operationId="changed-id-jsonl", ok=False)["code"] == "UnknownOutcome",
+                                   operationId="changed-id-jsonl", rsvpOnly=True, ok=False)["code"] == "UnknownOutcome",
                     "restart/mixed-interface retry bypassed the uncertain RSVP guard")
             after = client.request("cache.stats")
             require(after["fixtureCalls"] == before["fixtureCalls"] and after["fixtureSends"] == sends,
                     "unknown RSVP retry reached provider")
             require(client.request("operation.list")["operations"] == journal, "unknown RSVP changed or duplicated journal entry")
+            require(fixture_calendar_writes(client) == 0, "uncertain mail-only RSVP wrote Calendar")
         finished(client)
 
 
@@ -210,7 +232,7 @@ def permissions(binary, directory):
         for account in ACCOUNTS:
             account_before = client.request("cache.stats", account)
             one_shot(client, "invitations", "reply", ["--message-id", "invite-named-calendar", "--status", "accepted",
-                     "--operation-id", "readonly-rsvp"], account=account, error="PermissionDenied")
+                     "--operation-id", "readonly-rsvp", "--rsvp-only"], account=account, error="PermissionDenied")
             require(client.request("operation.list", account)["operations"] == [], "denied RSVP created a receipt")
             account_after = client.request("cache.stats", account)
             require(account_after["fixtureCalls"] == account_before["fixtureCalls"] and account_after["fixtureSends"] == 0,

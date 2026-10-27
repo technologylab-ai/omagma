@@ -129,6 +129,9 @@ def start(binary, directory, source, *, no_color=False, columns=160, rows=40):
                              columns=columns, rows=rows)
     terminal.until(lambda: "Synthetic personal message 096" in terminal.text())
     source.wait_entered(terminal.process, pump=terminal.pump)
+    # Waiting for the provider can pump part of a newer redraw. Re-establish
+    # a complete visible frame before callers inspect its theme and controls.
+    terminal.until(lambda: "Synthetic personal message 096" in terminal.text())
     return terminal
 
 
