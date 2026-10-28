@@ -41,6 +41,7 @@ jobs:
           python3 tests/correctness_inventory.py
           python3 tests/ci_toolchain.py
           python3 tests/ci_cache_key.py
+          python3 tests/ci_cache_prepare.py
           python3 tests/terminal_editor_readiness.py
           python3 tests/release_binary.py
           python3 tests/publication_privacy.py
@@ -125,6 +126,8 @@ jobs:
         with:
           path: .zig-cache
           key: zig-preflight-app-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-${{ steps.cache-inputs.outputs.app_key }}
+      - name: Prepare restored cache directories
+        run: python3 .github/ci_cache_prepare.py
       - name: Install the declared Zig compiler
         run: python3 .github/install_zig.py
       - name: Select the browser packaging toolchain
@@ -165,7 +168,7 @@ jobs:
       - name: Validate archive and executable
         run: python3 tests/release_check.py --arch ${{ matrix.arch }}
       - name: Exclude temporary data from preflight build cache
-        run: python3 -c "import shutil; shutil.rmtree('.zig-cache/tmp', ignore_errors=True)"
+        run: python3 .github/ci_cache_prepare.py --clean
       - name: Save completed app and probe compilation before functional tests
         if: steps.preflight-build-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -297,12 +300,7 @@ jobs:
           retention-days: 30
       - name: Exclude temporary test data from compilation caches
         if: always()
-        run: |
-          python3 - <<'PY'
-          import shutil
-          for path in ('.zig-cache/tmp', '.ci-zig/global/tmp'):
-              shutil.rmtree(path, ignore_errors=True)
-          PY
+        run: python3 .github/ci_cache_prepare.py --clean
       - name: Save reusable compiler and dependency cache
         if: always() && steps.zig-cache.outputs.cache-matched-key == ''
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -357,6 +355,8 @@ jobs:
         with:
           path: .zig-cache
           key: zig-preflight-app-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-${{ steps.cache-inputs.outputs.app_key }}
+      - name: Prepare restored cache directories
+        run: python3 .github/ci_cache_prepare.py
       - name: Install the declared native Zig compiler
         run: python3 .github/install_zig.py
       - name: Select the browser packaging toolchain
@@ -404,7 +404,7 @@ jobs:
           /usr/bin/xcrun vtool -show-build dist/omagma-macos-${{ matrix.arch }}
           dist/omagma-macos-${{ matrix.arch }} build-info
       - name: Exclude temporary data from preflight build cache
-        run: python3 -c "import shutil; shutil.rmtree('.zig-cache/tmp', ignore_errors=True)"
+        run: python3 .github/ci_cache_prepare.py --clean
       - name: Save completed app and probe compilation before functional tests
         if: steps.preflight-build-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -507,12 +507,7 @@ jobs:
           retention-days: 30
       - name: Exclude temporary test data from compilation caches
         if: always()
-        run: |
-          python3 - <<'PY'
-          import shutil
-          for path in ('.zig-cache/tmp', '.ci-zig/global/tmp'):
-              shutil.rmtree(path, ignore_errors=True)
-          PY
+        run: python3 .github/ci_cache_prepare.py --clean
       - name: Save reusable compiler and dependency cache
         if: always() && steps.zig-cache.outputs.cache-matched-key == ''
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4

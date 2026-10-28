@@ -32,6 +32,8 @@ jobs:
           key: zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
           restore-keys: |
             zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
+      - name: Prepare restored cache directories
+        run: python3 .github/ci_cache_prepare.py
       - name: Install exact Linux compiler
         run: python3 .github/install_zig.py
       - name: Preserve the Linux static-musl CLI and TUI
@@ -89,6 +91,8 @@ jobs:
           key: zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
           restore-keys: |
             zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
+      - name: Prepare restored cache directories
+        run: python3 .github/ci_cache_prepare.py
       - name: Install exact compiler from checked native archive metadata
         run: python3 .github/install_zig.py
       - name: Native correctness and probes

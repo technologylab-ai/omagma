@@ -83,7 +83,8 @@ class CorrectnessInventory(unittest.TestCase):
         self.assertRegex(build, r'b\.option\(HistoryCase, "history-case",[^\n]+\) orelse \.all;')
         stress = build.split('const history_stress =', 1)[1].split('const prepare_tests =', 1)[0]
         self.assertIn('.filters = &.{"native history stress:"}', stress)
-        self.assertIn('history_run.setEnvironmentVariable("OMAGMA_HISTORY_CASE", @tagName(history_case));', stress)
+        self.assertIn('prependRunEnvironment(b, history_run, "OMAGMA_HISTORY_CASE", @tagName(history_case));', stress)
+        self.assertNotIn("setEnvironmentVariable(", build)
         self.assertEqual(build.count("history_case"), 2, "Runtime selection must not change compilation inputs")
         wrapper = (ROOT / "src/native_history_stress_tests.zig").read_text()
         tests = re.findall(r'^test "(native history stress:[^"]+)" \{\n    try selected\(\.(?:@"([^"]+)"|(\w+))\);',
@@ -122,6 +123,17 @@ class CorrectnessInventory(unittest.TestCase):
         self.assertEqual(prepare.count(".dependOn("), 1)
         for execution in ("guardedTestRun(", "addRunArtifact(", "addSystemCommand("):
             self.assertNotIn(execution, prepare)
+
+    def test_public_selector_prefix_keeps_the_current_worker_environment(self):
+        build = (ROOT / "build.zig").read_text()
+        prefix = build.split("pub fn prependRunEnvironment(", 1)[1].split("fn embeddedAssetSource(", 1)[0]
+        self.assertIn("std.debug.assert(run.environ_map == null);", prefix)
+        self.assertIn("run.argv.toOwnedSlice(b.allocator)", prefix)
+        self.assertIn('run.addArg("/usr/bin/env");', prefix)
+        self.assertIn('run.addArg(b.fmt("{s}={s}", .{ name, value }));', prefix)
+        self.assertIn("run.argv.appendSlice(b.allocator, original)", prefix)
+        self.assertNotRegex(prefix, r"run\.(?:environ_map|stdio)\s*=(?!=)")
+        self.assertNotIn("getEnvMap(", prefix)
 
 
 if __name__ == "__main__":

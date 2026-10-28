@@ -193,10 +193,8 @@ class Qualification(unittest.TestCase):
         self.assertIn("if: success()", complete)
         self.assertIn("if: (failure() || cancelled())", partial)
         self.assertIn("${{ github.sha }}-progress-${{ github.run_id }}-${{ github.run_attempt }}", partial)
-        cleanup = next(step for step in steps if "shutil.rmtree" in step)
+        cleanup = next(step for step in steps if "ci_cache_prepare.py --clean" in step)
         self.assertIn("if: always() && " + writers, cleanup)
-        self.assertIn("'.zig-cache/tmp'", cleanup)
-        self.assertIn("'.ci-zig/global/tmp'", cleanup)
         self.assertLess(gate.index(cleanup), gate.index(complete))
         self.assertLess(gate.index(cleanup), gate.index(partial))
         for workflow in ("macos-native.yml",):
@@ -217,7 +215,18 @@ class Qualification(unittest.TestCase):
             self.assertIn("steps.preflight-build-cache.outputs.cache-primary-key", save)
             self.assertLess(job.index("python3 tests/release_check.py"), job.index(save))
             self.assertLess(job.index(save), job.index("python3 tests/terminal_workflow_regressions.py"))
-            self.assertLess(job.index("shutil.rmtree('.zig-cache/tmp'"), job.index(save))
+            self.assertLess(job.index("python3 .github/ci_cache_prepare.py --clean"), job.index(save))
+
+    def test_restored_caches_have_required_empty_directories_before_zig_build(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  compile:", 1)[0]
+        for job in release.split("  macos-build:", 1):
+            repair = job.index("run: python3 .github/ci_cache_prepare.py\n")
+            self.assertLess(job.index("id: preflight-build-cache"), repair)
+            self.assertLess(repair, job.index("zig build "))
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        repair = gate.index("run: python3 .github/ci_cache_prepare.py\n")
+        self.assertLess(gate.index("id: local-cache"), repair)
+        self.assertLess(repair, gate.index("zig build prepare-history"))
 
     def test_resource_shards_reuse_the_bundle_and_preserve_every_existing_measurement(self):
         gate = (ROOT / ".github/workflows/native-gate.yml").read_text()

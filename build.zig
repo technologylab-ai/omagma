@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
     history_stress.root_module.addOptions("build_options", options);
     if (macos_sdk) |sdk| linkNativeKeychain(history_stress.root_module, sdk);
     const history_run = guardedTestRun(b, history_stress, test_watchdog);
-    history_run.setEnvironmentVariable("OMAGMA_HISTORY_CASE", @tagName(history_case));
+    prependRunEnvironment(b, history_run, "OMAGMA_HISTORY_CASE", @tagName(history_case));
     b.step("test-native-history-stress", "Verify retained mail, blob and Calendar histories across restart and replay").dependOn(&history_run.step);
 
     const prepare_tests = b.step("prepare-tests", "Compile all native test artifacts without running tests or probes");
@@ -183,6 +183,16 @@ pub fn guardedTestRun(b: *std.Build, artifact: *std.Build.Step.Compile, enabled:
         run.argv.appendSlice(b.allocator, original) catch @panic("OOM");
     }
     return run;
+}
+
+/// Apply a public runtime selector without serializing the configure process's
+/// environment. Maker still supplies the current worker's environment and progress.
+pub fn prependRunEnvironment(b: *std.Build, run: *std.Build.Step.Run, name: []const u8, value: []const u8) void {
+    std.debug.assert(run.environ_map == null);
+    const original = run.argv.toOwnedSlice(b.allocator) catch @panic("OOM");
+    run.addArg("/usr/bin/env");
+    run.addArg(b.fmt("{s}={s}", .{ name, value }));
+    run.argv.appendSlice(b.allocator, original) catch @panic("OOM");
 }
 
 fn embeddedAssetSource(enabled: bool) []const u8 {

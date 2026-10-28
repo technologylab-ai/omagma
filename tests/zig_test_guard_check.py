@@ -275,7 +275,8 @@ class GuardTests(unittest.TestCase):
         self.assertIn('orelse .all', build)
         self.assertIn('b.path("src/native_history_stress_tests.zig")', stress)
         self.assertIn('guardedTestRun(b, history_stress, test_watchdog)', stress)
-        self.assertIn('history_run.setEnvironmentVariable("OMAGMA_HISTORY_CASE", @tagName(history_case));', stress)
+        self.assertIn('prependRunEnvironment(b, history_run, "OMAGMA_HISTORY_CASE", @tagName(history_case));', stress)
+        self.assertNotIn(".setEnvironmentVariable(", build)
         self.assertIn('std.testing.environ.getPosix("OMAGMA_HISTORY_CASE") orelse "all"', wrapper)
         for case in (".calendar", '.@"sends-plain"', '.@"sends-vault"', '.@"files-plain"', '.@"files-vault"'):
             self.assertEqual(wrapper.count(f"try selected({case});"), 1)
@@ -353,7 +354,7 @@ def entered_tests(directory):
     return sorted(path.name for path in directory.glob("entered-*"))
 
 
-def run_maker_phase(argv, directory, phase, budget):
+def run_maker_phase(argv, directory, phase, budget, *, env=None):
     started = time.monotonic()
 
     def receipt(event, **details):
@@ -367,7 +368,7 @@ def run_maker_phase(argv, directory, phase, budget):
 
     receipt("start", argv=argv)
     child = subprocess.Popen(argv, cwd=directory, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, start_new_session=True)
+                             stderr=subprocess.STDOUT, start_new_session=True, env=env)
     try:
         out, _ = child.communicate(timeout=budget)
     except BaseException as error:
@@ -419,12 +420,19 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host, .optimize = .safe, .link_libc = true,
         }) });
         prepare.dependOn(&t.step);
-        b.step(name, name).dependOn(&project.guardedTestRun(b, t, true).step);
+        const run = project.guardedTestRun(b, t, true);
+        project.prependRunEnvironment(b, run, "OMAGMA_HISTORY_CASE", "calendar");
+        b.step(name, name).dependOn(&run.step);
     }
 }
 ''')
         (directory / "healthy.zig").write_text('const std = @import("std");\n' + "\n".join(
-            f'test "healthy {index}" {{ try std.Io.Dir.cwd().writeFile(std.testing.io, '
+            f'test "healthy {index}" {{ '
+            'try std.testing.expectEqualStrings("worker-test-only", '
+            'std.testing.environ.getPosix("OMAGMA_ENV_CACHE_SENTINEL") orelse "missing"); '
+            'try std.testing.expectEqualStrings("calendar", '
+            'std.testing.environ.getPosix("OMAGMA_HISTORY_CASE") orelse "missing"); '
+            'try std.Io.Dir.cwd().writeFile(std.testing.io, '
             f'.{{ .sub_path = "entered-healthy-{index}", .data = "yes" }}); '
             'try (std.Io.Clock.Duration{ .clock = .awake, '
             '.raw = .fromMilliseconds(600) }).sleep(std.testing.io); }' for index in range(4)))
@@ -445,14 +453,28 @@ test "guard following test still runs" {
         # Cold compiler/toolchain setup has its own budget. Neither compile
         # step may execute a test; cached Maker runs keep the short deadline.
         prepare_argv = [zig, "build", "prepare", "-j2", "--summary", "all"]
-        code, text = run_maker_phase(prepare_argv, directory, "prepare", 900)
+        producer_env = dict(os.environ, OMAGMA_ENV_CACHE_SENTINEL="producer-test-only")
+        worker_env = dict(os.environ, OMAGMA_ENV_CACHE_SENTINEL="worker-test-only")
+        code, text = run_maker_phase(prepare_argv, directory, "prepare", 900, env=producer_env)
         assert code == 0, text
         assert entered_tests(directory) == [], "prepare must compile without running tests"
         assert not (directory / "following-ran").exists()
+
+        def check_configuration_sentinel():
+            files = sorted(path for path in (directory / ".zig-cache/c").iterdir() if path.is_file())
+            assert files, "Maker must produce cached configuration for the handoff check"
+            for path in files:
+                # Inspect only the harmless sentinel we supplied. Never print
+                # configuration contents or inspect other environment values.
+                assert b"producer-test-only" not in path.read_bytes(), \
+                    "Build configuration retained the producer environment sentinel"
+            return [path.name for path in files]
+
+        prepared_configurations = check_configuration_sentinel()
         results = []
         for name, timeout in (("healthy", "2s"), ("timeout", "1s")):
             argv = [zig, "build", name, "-j2", "--summary", "all", "--test-timeout", timeout]
-            code, text = run_maker_phase(argv, directory, name, 180)
+            code, text = run_maker_phase(argv, directory, name, 180, env=worker_env)
             results.append({"case": name, "exitCode": code})
             healthy_markers = [f"entered-healthy-{index}" for index in range(4)]
             if name == "healthy":
@@ -463,7 +485,8 @@ test "guard following test still runs" {
                 # Run step would leave these external observation files absent.
                 for marker in healthy_markers:
                     (directory / marker).unlink()
-                repeat_code, repeat_text = run_maker_phase(argv, directory, "healthy-cached", 180)
+                repeat_code, repeat_text = run_maker_phase(argv, directory, "healthy-cached", 180,
+                                                         env=worker_env)
                 assert repeat_code == 0 and "4/4 tests passed" in repeat_text, repeat_text
                 assert entered_tests(directory) == healthy_markers, "Compilation cache suppressed test execution"
                 results.append({"case": "healthy-cached", "exitCode": repeat_code,
@@ -474,7 +497,50 @@ test "guard following test still runs" {
                 assert "1/2 tests passed" in text and "1 timed out" in text, text
                 assert entered_tests(directory) == sorted([*healthy_markers, "entered-timeout", "entered-following"])
                 assert (directory / "following-ran").read_text() == "yes"
+        assert check_configuration_sentinel() == prepared_configurations, \
+            "Worker must exercise the producer's cached configuration"
+        results.append({"case": "runtime-environment", "producerSentinelCached": False,
+                        "workerEnvironmentInherited": True, "publicSelectorApplied": True})
         return results
+
+
+def cache_handoff_oracle(zig):
+    """Exercise restored configuration caches in isolated, disposable paths."""
+    if subprocess.check_output([zig, "version"], text=True, timeout=10).strip() != "0.17.0":
+        raise AssertionError("Cache handoff oracle requires exact Zig 0.17.0")
+    with tempfile.TemporaryDirectory(prefix="omagma-cache-handoff-") as temporary:
+        directory = Path(temporary)
+        source = directory / "source"
+        source.mkdir()
+        (source / "build.zig").write_text('''const std = @import("std");
+pub fn build(b: *std.Build) void {
+    _ = b.standardOptimizeOption(.{});
+    _ = b.option(bool, "different", "Request a fresh build configuration");
+    _ = b.step("empty", "No application compilation or test execution");
+}
+''')
+
+        def run(path, phase, *options):
+            argv = [zig, "build", "empty", "-Doptimize=safe", "-j2", "--summary", "all", *options]
+            env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=str(path / ".ci-zig/global"))
+            return run_maker_phase(argv, path, phase, 180, env=env)
+
+        code, text = run(source, "cache-prime")
+        assert code == 0, text
+        # Reproduce the old CI cleanup, but only within this disposable fixture.
+        for relative in (".zig-cache/tmp", ".ci-zig/global/tmp"):
+            shutil.rmtree(source / relative, ignore_errors=True)
+        restored = directory / "restored"
+        shutil.copytree(source, restored)
+        code, text = run(restored, "cache-missing-tmp", "-Ddifferent=true")
+        assert code != 0 and "configuration failed: FileNotFound" in text, text
+        # Keep all failed-case cache contents until the fixture ends. The repair
+        # must only create missing directories, without invalidation/recompile.
+        subprocess.run([sys.executable, str(ROOT / ".github/ci_cache_prepare.py")],
+                       cwd=restored, check=True, timeout=10)
+        code, text = run(restored, "cache-restored-tmp", "-Ddifferent=true")
+        assert code == 0 and "1/1 steps succeeded" in text, text
+        return {"missingTmpRejected": True, "restoredTmpSucceeded": True}
 
 
 if __name__ == "__main__":
@@ -485,4 +551,5 @@ if __name__ == "__main__":
     if not result.wasSuccessful():
         raise SystemExit(1)
     if args.zig:
-        print(json.dumps({"maker": maker_oracle(str(Path(args.zig).resolve()))}))
+        zig = str(Path(args.zig).resolve())
+        print(json.dumps({"maker": maker_oracle(zig), "cacheHandoff": cache_handoff_oracle(zig)}))
