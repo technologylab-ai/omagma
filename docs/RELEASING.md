@@ -79,13 +79,50 @@ port. Keep archive metadata, package pin, source guard, scripts and CI in sync.
 
 ## Continuous release checks
 
-The workflow uses native Ubuntu 24.04 x86_64 and ARM runners for backend tests and architecture-specific packaging. Both `debug` and `safe` run unit tests, standalone probes, full integration and transport checks, terminal CLI workflows and isolated PTY editor/lifecycle tests. Current-feature acceptance also covers account-scoped bulk/undo, cached-window navigation/search, forwarding/files, composer recovery/completion, reader context, actual loading/progress, mouse/wheel routing, compact layouts and local timezone displays. The fixture timezone database is installed and checked before either native suite. `safe` additionally validates the release artifacts, 1,000-job backend/background workloads and separate 1,000-cycle CLI/TUI memory gates. Receipts identify the compiler version and optimization mode reported by the binary. A separate session bus and temporary keyring hold synthetic secrets for the Secret Service check. After all required native platform jobs succeed, the candidate is ready for approval. Manual promotion later collects those saved bundles, raw binaries and combined `SHA256SUMS` for the package version.
+CI uses **Safe only**, the optimized mode shipped to users. Debug is built on
+demand for local work or investigations. Four native platform preflights build
+the bundles and run the complete applicable short CLI/TUI, fixture, integration,
+transport, editor, first-use and credential acceptance suites. Platform-independent
+source checks run once before those builds. Linux uses native Ubuntu 24.04 x86_64
+and ARM runners; macOS uses native Apple Silicon and Intel runners.
 
-Each native job runs the complete short acceptance suites against its Debug build
-and actual Safe bundle before compiling the full unit suites or starting long
-stress and resource checks. This order is enforced by the offline qualification
-policy test. Every existing gate remains required, and no artifact is publishable
-until the complete four-platform qualification has succeeded.
+After all short preflights pass, each platform primes the shared history test
+executable without running tests. The remaining unique test executables compile
+and run in parallel in their own jobs. Each platform fans out into eleven
+independently retryable gates: three correctness groups, shared mail/contacts/browser adapters,
+growing-mail stress, five separate retained-history lifecycles, and resource
+measurements. The three correctness groups preserve the original test roots
+while compiling shared dependencies together; the real worker-stack regression
+retains its separate LLVM executable. Resource checks run sequentially on their
+own runner, preserving the 1,000-cycle workloads, quiet intervals and thresholds.
+All five history lifecycles share one compiled executable, selected at runtime;
+each shard must admit its own case and skip the other four. Unknown selectors
+fail. Each lifecycle retains its 1,200-second per-test watchdog. Source and
+policy tests enforce the inventory and preflight dependency order.
+
+Compiler archives are cached and revalidated against the pinned official hash
+before extraction. The shared compiler/dependency cache includes native OS/CPU,
+compiler, dependency pins and SDK identity, independently of the application
+version. A version bump therefore preserves that cache. Completed test objects
+are cached once per compilation group for the exact source commit; failed or
+cancelled compilation saves separate partial progress for a retry. History
+execution jobs share the primed binary without writing duplicate caches. Temporary
+test data is excluded, and PRs never cache their local test-output directories.
+Tests always execute, including with a warm cache; cached compilation is never
+accepted as a fresh test result. Each attempt preserves its own failed receipts.
+
+Use `gh run rerun RUN_ID --failed` after diagnosing a transient failed gate.
+Successful gates and bundles from earlier attempts may be reused only within
+that same run and exact source commit. The verifier selects the newest execution
+of every required gate, rejects a newer failure instead of falling back to an
+older success, binds artifacts to the latest successful platform preflight, and
+requires compilation and execution to follow their prerequisites. Rerunning a
+platform preflight reruns the dependent compilation and gate matrices; rerunning
+one failed execution preserves successful preflights and compilation. A code fix
+needs a new qualification run. Every four-platform preflight and compile stage
+and all 44 Safe execution gates must pass before promotion.
+The entire run must have succeeded, and artifact expiry and provenance checks
+still apply.
 
 After explicit approval, the promotion workflow downloads the successful run's four release artifacts, verifies their checksums and uses the GitHub CLI to upload all ten assets through an internal draft before publishing. It cleans up that draft on ordinary upload failures. If a terminated job leaves an unpublished draft, inspect its version, commit and assets before removing it and retrying. The publisher refuses to replace an existing release, draft or tag and does not expose an incomplete release as latest.
 

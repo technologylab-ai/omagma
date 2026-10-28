@@ -6,7 +6,7 @@ Node, PTYs or offscreen GUI checks. [Development](DEVELOPMENT.md) describes the
 short local iteration loop. Select checks appropriate to the change; full
 qualification and memory soaks belong to release/resource work.
 
-Use Zig **0.17.0 exactly**. `debug` checks correctness; `safe` also establishes release allocator/runtime evidence. Omarchy may still ship a 0.16.x compiler. Download and verify the [exact 0.17.0 archive](https://ziglang.org/download/0.17.0/) for the execution host's OS/CPU, extract it into a task-owned directory, and select it for this shell:
+Use Zig **0.17.0 exactly**. `safe` checks correctness and establishes release allocator/runtime evidence. CI builds and tests Safe only; Debug is optional for local development or investigations. Omarchy may still ship a 0.16.x compiler. Download and verify the [exact 0.17.0 archive](https://ziglang.org/download/0.17.0/) for the execution host's OS/CPU, extract it into a task-owned directory, and select it for this shell:
 
 ```sh
 omagma_zig_dir=/absolute/path/to/extracted-zig-0.17.0
@@ -33,15 +33,6 @@ This is cooperative exclusion, not CPU isolation or proof of a quiet host. Reche
 The following commands use synthetic accounts and never authorize Gmail or edit installed desktop configuration:
 
 ```sh
-zig build test probes -Doptimize=debug -j2 --prefix .verification-zig017-debug
-zig build -Doptimize=debug -j2 --prefix .verification-zig017-debug
-.verification-zig017-debug/bin/omagma build-info
-.verification-zig017-debug/bin/auth_probe launch
-.verification-zig017-debug/bin/auth_probe callback
-.verification-zig017-debug/bin/callback_budget
-.verification-zig017-debug/bin/transport_probe
-python3 tests/integration.py --binary .verification-zig017-debug/bin/omagma --build-mode debug
-python3 tests/probes/transport_check.py --binary .verification-zig017-debug/bin/omagma --build-mode debug --https
 zig build test probes -Doptimize=safe -j2
 zig build -Doptimize=safe -j2
 zig-out/bin/omagma build-info
@@ -58,9 +49,28 @@ Python 3 and Node.js are needed for the harnesses; UI checks also need Quickshel
 
 `zig build probes` installs the standalone launch/FD, callback, callback-budget and transport executables. The HTTPS checks make an unauthenticated Google request expecting an unauthorized response; they do not read a mailbox or use OAuth credentials. Run keyring probes only with a separate session bus and temporary synthetic keyring, as in the [release workflow](../.github/workflows/release.yml), rather than against the desktop's account credentials.
 
-Give cold compilation, each probe and the complete suite adequate outer watchdog budgets. Release CI first builds the Debug backend and Safe release bundle and runs their short CLI/TUI, fixture, integration and first-use acceptance suites. Only after both modes pass does it run full native unit compilation, growing-mail and retained-history stress, and allocation/memory soaks. An offline policy test enforces that order; moving a check earlier does not remove it from qualification.
+Release CI first builds each native Safe bundle and runs the complete applicable
+short CLI/TUI, fixture, integration and first-use suites. Only after all four
+preflights pass does each platform prime its shared history executable, followed
+by independent correctness, growing-mail, retained-history and resource jobs.
+Unique test executables compile in parallel in their owning jobs. An offline policy test enforces that dependency order.
+The default `zig build test` includes all three correctness groups; CI runs them
+as `test-main`, `test-extra` and `test-native-memory` on separate runners.
+Shared dependencies compile together rather than in 31 separate extra roots.
+History shards select their case at runtime and share a single executable.
+Every test executes even when restored compilation caches are warm.
 
-Release CI allows 360 minutes for each native build/test job, covering both preflight and full qualification. Individual test watchdogs remain 120 seconds for ordinary tests, 300 seconds for growing-mail stress and 1,200 seconds for each retained-history stress case; memory gates remain unchanged. That outer limit is separate from the application's 10-second request deadline, 30-second refresh deadline and 180-second consent deadline. Leave time for expected timeout cases, 1,000-cycle workloads, the 60-second quiet interval and child cleanup; preserve receipts from an interrupted gate. Terminal workflows have separate [correctness and memory checks](TERMINAL-VERIFICATION.md); their allocation ceiling and measurements do not replace the bar gates below.
+Native preflights have a 90-minute outer allowance; individual heavy gates have
+60 minutes. These are failure bounds, not target durations. Individual test
+watchdogs remain 120 seconds for ordinary tests, 300 seconds for growing-mail
+stress and 1,200 seconds for each retained-history case. Each resource job runs
+its checks serially without another gate competing on the runner. The existing
+thresholds, 1,000-cycle workloads, 60-second quiet windows and child cleanup
+remain required. These budgets are separate from application request deadlines.
+Preserve failed receipts; retry the failed job in the same source run, retaining
+successful gates. See [release provenance and retries](RELEASING.md#continuous-release-checks).
+Terminal workflows have separate [correctness and memory checks](TERMINAL-VERIFICATION.md);
+their allocation ceiling and measurements do not replace the bar gates below.
 
 Backend integration covers bounded configuration, account isolation, empty and failed fetches, cancellation, background scheduling, owner exit and stdout backpressure. Model checks cover arbitrary configured domains, one-account handshakes, unknown identities, duplicate accounts, invalid frames, plain-text bounds, stale generations and 1,000 replacements. The UI harness exercises service restart, state changes, selection persistence, 1,000 Loader lifetimes and a quiet interval.
 
@@ -71,7 +81,7 @@ exact requests, target identities and write counts. Cover omitted/null optional
 fields, malformed cosmetic metadata and empty repeated fields; keep outbound
 write validation and uncertain-result protections strict. The live label
 metadata regressions run with the ordinary unit suite, or separately with
-`zig build test -Doptimize=debug -Dtest-filter="live label metadata:"`.
+`zig build test -Doptimize=safe -Dtest-filter="live label metadata:"`.
 Real-account read-only checks can supplement these tests when authorized;
 production mailbox/contact writes require their own explicit authorization.
 
@@ -84,7 +94,7 @@ mark in their declared body size. These failures need independent literal
 provider responses, rather than fixtures produced by the application's encoder
 or a generator that computes every declared size from the delivered data.
 
-`src/terminal_mail_acceptance_tests.zig` runs with the ordinary Debug and Safe
+`src/terminal_mail_acceptance_tests.zig` runs with the ordinary Safe
 unit gates on every native release platform. Its production-dispatcher checks
 assert requests, identities, full body and attachment bytes, cache persistence
 and later cached reads. A bounded set of 64 deterministic structure mutations
@@ -141,8 +151,8 @@ submission, and check uncertain receipts and scoped-memory cleanup. These
 correctness checks supplement the fixed browsing workloads; they do not impose
 the browsing heap ceiling on an explicitly expanded native compose operation.
 The complete 21-stage growing-store chain runs separately with
-`zig build test-native-send-stress --test-timeout 300s -Dtest-watchdog=true`,
-in both Debug and Safe on all four release platforms. Its dedicated deadline
+`zig build test-native-send-stress -Doptimize=safe --test-timeout 300s -Dtest-watchdog=true`,
+in Safe on all four release platforms. Its dedicated deadline
 keeps the full chain intact on slower native runners; ordinary correctness
 tests retain their existing 120-second timeout.
 

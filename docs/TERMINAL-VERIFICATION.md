@@ -53,16 +53,16 @@ python3 tests/terminal_html_screen.py
 python3 tests/terminal_html_fixture_check.py
 python3 tests/terminal_repaint_screen.py
 python3 tests/terminal_mouse_screen.py
-python3 tests/terminal_cache.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_ui.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_cache_max.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_background.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_pty.py --binary zig-out/bin/omagma --build-mode debug
-python3 tests/terminal_transport.py --binary zig-out/bin/omagma --build-mode debug
+python3 tests/terminal_cache.py --binary zig-out/bin/omagma --build-mode safe
+python3 tests/terminal_ui.py --binary zig-out/bin/omagma --build-mode safe
+python3 tests/terminal_cache_max.py --binary zig-out/bin/omagma --build-mode safe
+python3 tests/terminal_background.py --binary zig-out/bin/omagma --build-mode safe
+python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode safe
+python3 tests/terminal_pty.py --binary zig-out/bin/omagma --build-mode safe
+python3 tests/terminal_transport.py --binary zig-out/bin/omagma --build-mode safe
 ```
 
-`tests/terminal_html.py --binary PATH --build-mode debug|safe` checks native HTML-only rendering with fictional mail, MIME alternative preference, legacy cache compatibility, responsive tables/styles, control filtering and retained parse/layout reuse. It uses owned PTYs and no installed desktop window.
+`tests/terminal_html.py --binary PATH --build-mode safe` checks native HTML-only rendering with fictional mail, MIME alternative preference, legacy cache compatibility, responsive tables/styles, control filtering and retained parse/layout reuse. It uses owned PTYs and no installed desktop window.
 
 For a focused reader iteration, select `--case html-reader-ux` and a fresh `--output` path. This checks malformed marketing markup, compact cyan/underlined URLs in HTML and plain text, explicit image placeholders, unchanged source bytes and absence of remote resource requests. It does not run the separate resource soak case.
 
@@ -123,40 +123,39 @@ provide detailed JSON receipts write them beside the runner's receipt.
 For focused changes, select the relevant complete suites, for example:
 
 ```sh
-python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe \
   --suite terminal_attachment_lifecycle --suite terminal_reader_next_ux \
-  --output tests/results/workflows-reader-debug.json
-python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+  --output tests/results/workflows-reader-safe.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe \
   --suite terminal_calendar --suite terminal_calendar_tui --suite terminal_calendar_compose \
   --suite terminal_calendar_slots \
   --suite terminal_calendar_review_stale \
   --suite terminal_calendar_notifications \
   --suite terminal_invitation_notices --suite terminal_invitation_reconcile \
-  --output tests/results/workflows-calendar-debug.json
-python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
+  --output tests/results/workflows-calendar-safe.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe \
   --suite terminal_follow_ups --suite terminal_foreground_priority --suite terminal_gmail_drafts \
-  --output tests/results/workflows-drafts-debug.json
-python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug \
-  --suite vault_migration --suite vault_daemon --output tests/results/workflows-vault-debug.json
+  --output tests/results/workflows-drafts-safe.json
+python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe \
+  --suite vault_migration --suite vault_daemon --output tests/results/workflows-vault-safe.json
 ```
 
 Omit `--suite` for all 20 suites. The release workflow requires the full runner
-once in Debug and once against the packaged Safe executable on native Linux
-x86_64/arm64 and macOS x86_64/arm64. The native macOS pull-request workflow also
-runs it in both modes on Linux x86_64 and both Mac architectures. Existing
+against the packaged Safe executable on native Linux x86_64/arm64 and macOS
+x86_64/arm64 before any expensive qualification gates start. The native macOS
+pull-request workflow also runs it in Safe on Linux x86_64 and both Mac architectures. Existing
 correctness, lifecycle and resource gates remain required; receipts are uploaded
 even after failure. Local equivalent commands are:
 
 ```sh
-python3 tests/terminal_workflow_regressions.py --binary /path/to/debug/omagma --build-mode debug --output tests/results/workflows-all-debug.json
 python3 tests/terminal_workflow_regressions.py --binary /path/to/safe/omagma --build-mode safe --output tests/results/workflows-all-safe.json
 ```
 
 The `probes` build also installs `calendar_http_probe`. All four native release
-platforms run `tests/calendar_native_http.py --probe PATH` in Debug and Safe to
+platforms run `tests/calendar_native_http.py --probe PATH` in Safe to
 check Calendar HTTP methods, conditional updates, error mapping and no-replay
 behavior. Linux x86_64 additionally runs `terminal_html_compatibility.py` against
-an isolated headless browser in both modes to validate preserved HTML with an
+an isolated headless browser in Safe to validate preserved HTML with an
 independent renderer.
 
 Use this runner on macOS so shared cases use the existing Darwin guardian PTY

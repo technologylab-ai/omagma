@@ -133,7 +133,7 @@ def main():
                 'direct worker bypassed parent/private-pipe guard')
     require(subprocess.check_output(['/usr/bin/security', 'list-keychains', '-d', 'user'], timeout=5) == before_search, 'synthetic probe changed user keychain search list')
     require(not (security_windows() - before), 'Keychain operation mapped a security/unlock dialog')
-    print('PASS macOS Keychain:positive ACK, isolated account/client/grant,4096-byte boundary, Debug→Safe/public-raw alias upgrade/update/clear, locked refusal/no new dialog, parent guard, cleanup')
+    print('PASS macOS Keychain:positive ACK, isolated account/client/grant,4096-byte boundary, distinct Safe/public-raw alias upgrade/update/clear, locked refusal/no new dialog, parent guard, cleanup')
 
 
 if __name__ == '__main__':

@@ -197,54 +197,62 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(status, 7)
         self.assertEqual(calls, [("wait", .1)])
 
-    def test_release_preserves_all_eight_unit_timeouts_and_opts_in(self):
-        commands = [line for line in (ROOT / ".github/workflows/release.yml").read_text().splitlines()
+    def test_release_preserves_all_safe_unit_timeouts_and_opts_in(self):
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        commands = [line for line in gate.splitlines()
                     if "--test-timeout" in line and "test-native-send-stress" not in line
                     and "test-native-history-stress" not in line]
-        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(commands), 2)
         for command in commands:
             self.assertIn("--test-timeout 120s", command)
             self.assertIn("-Dtest-watchdog=true", command)
+            self.assertIn("-Doptimize=safe", command)
+        self.assertEqual(sum('zig build "$task_step" ' in command for command in commands), 1)
+        self.assertEqual(sum("zig build test-browser-export " in command for command in commands), 1)
+        for group, target in (("main", "test-main"), ("extra", "test-extra"), ("memory", "test-native-memory")):
+            self.assertIn(f"unit-{group}) task_step={target} ;;", gate)
 
-    def test_release_runs_growing_stress_separately_on_both_native_matrices(self):
-        linux, macos = (ROOT / ".github/workflows/release.yml").read_text().split("  macos-build:", 1)
-        for matrix in (linux, macos):
-            commands = [line for line in matrix.splitlines() if "test-native-send-stress" in line]
-            self.assertEqual(len(commands), 2)
-            self.assertEqual(sum("-Doptimize=debug" in command for command in commands), 1)
-            self.assertEqual(sum("-Doptimize=safe" in command for command in commands), 1)
-            for command in commands:
-                self.assertIn("--test-timeout 300s", command)
-                self.assertIn("-Dtarget=${{ matrix.target }}", command)
-                self.assertIn("-Dtest-watchdog=true", command)
+    def test_release_runs_growing_stress_separately_on_all_native_platforms(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  gates:", 1)[1]
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", release)
+        self.assertIn(", send,", release)
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        commands = [line for line in gate.splitlines() if "zig build test-native-send-stress " in line]
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--test-timeout 300s", commands[0])
+        self.assertIn("-Dtarget=", commands[0])
+        self.assertIn("-Doptimize=safe", commands[0])
+        self.assertIn("-Dtest-watchdog=true", commands[0])
 
 
-    def test_retained_history_stress_is_mandatory_in_both_modes_and_native_matrices(self):
-        release = (ROOT / ".github/workflows/release.yml").read_text()
-        linux, macos = release.split("  macos-build:", 1)
-        for matrix in (linux, macos):
-            steps = matrix.split("      - name:")
-            stress = [step for step in steps if "run: zig build test-native-history-stress " in step]
-            self.assertEqual(len(stress), 2)
-            self.assertEqual(sum("-Doptimize=debug" in step for step in stress), 1)
-            self.assertEqual(sum("-Doptimize=safe" in step for step in stress), 1)
-            for step in stress:
-                self.assertNotIn("if:", step, "History qualification must not be conditional")
-                self.assertNotIn("continue-on-error", step)
-                self.assertIn("--test-timeout 1200s", step)
-                self.assertIn("-Dtarget=${{ matrix.target }}", step)
-                self.assertIn("-Dtest-watchdog=true", step)
+    def test_retained_history_stress_is_mandatory_on_all_safe_native_platforms(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  gates:", 1)[1]
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", release)
+        for case in ("calendar", "sends-plain", "sends-vault", "files-plain", "files-vault"):
+            self.assertIn("history-" + case, release)
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        stress = [line for line in gate.splitlines() if "zig build test-native-history-stress " in line]
+        self.assertEqual(len(stress), 1)
+        self.assertIn("-Dhistory-case=", stress[0])
+        self.assertIn("--test-timeout 1200s", stress[0])
+        self.assertIn("-Dtarget=", stress[0])
+        self.assertIn("-Doptimize=safe", stress[0])
+        self.assertIn("-Dtest-watchdog=true", stress[0])
+        self.assertNotIn("continue-on-error", gate)
         native = (ROOT / ".github/workflows/macos-native.yml").read_text()
         for job in native.split("  native:", 1):
-            self.assertIn("for mode in debug safe; do", job)
+            self.assertNotIn("for mode in debug", job)
             commands = [line for line in job.splitlines() if "zig build test-native-history-stress " in line]
             self.assertEqual(len(commands), 1)
-            self.assertIn('-Doptimize="$mode"', commands[0])
+            self.assertTrue('-Doptimize="$mode"' in commands[0] or "-Doptimize=safe" in commands[0])
             self.assertIn("--test-timeout 1200s", commands[0])
             self.assertIn("-Dtest-watchdog=true", commands[0])
-            ordinary = [line for line in job.splitlines() if "zig build test probes " in line]
+            ordinary = [line for line in job.splitlines() if "zig build test " in line]
             self.assertEqual(len(ordinary), 1)
             self.assertIn("--test-timeout 120s", ordinary[0])
+            self.assertIn("-Doptimize=safe", ordinary[0])
+            self.assertLess(job.index("python3 tests/terminal_workflow_regressions.py"),
+                            job.index("zig build test "))
 
     def test_history_stress_runs_only_the_five_extracted_lifecycles(self):
         wrapper = (ROOT / "src/native_history_stress_tests.zig").read_text()
@@ -263,8 +271,45 @@ class GuardTests(unittest.TestCase):
         self.assertNotIn("native_history_stress_tests.zig", ordinary)
         stress = build.split('const history_stress =', 1)[1].split('const probes =', 1)[0]
         self.assertIn('.filters = &.{"native history stress:"}', stress)
+        self.assertIn('b.option(HistoryCase, "history-case",', build)
+        self.assertIn('orelse .all', build)
         self.assertIn('b.path("src/native_history_stress_tests.zig")', stress)
         self.assertIn('guardedTestRun(b, history_stress, test_watchdog)', stress)
+        self.assertIn('history_run.setEnvironmentVariable("OMAGMA_HISTORY_CASE", @tagName(history_case));', stress)
+        self.assertIn('std.testing.environ.getPosix("OMAGMA_HISTORY_CASE") orelse "all"', wrapper)
+        for case in (".calendar", '.@"sends-plain"', '.@"sends-vault"', '.@"files-plain"', '.@"files-vault"'):
+            self.assertEqual(wrapper.count(f"try selected({case});"), 1)
+
+    def test_prepare_tests_compiles_all_roots_without_running_them(self):
+        build = (ROOT / "build.zig").read_text()
+        prepare = build.split("const prepare_tests =", 1)[1].split("const probes =", 1)[0]
+        self.assertIn('b.step("prepare-tests",', prepare)
+        for artifact in ("t", "extra_tests", "memory_tests", "browser_export_tests", "browser_server_tests",
+                         "browser_cache_tests", "browser_provider_tests", "contact_isolation_tests",
+                         "mailbox_tests", "send_stress", "history_stress"):
+            self.assertIn(artifact, prepare)
+        self.assertIn("prepare_tests.dependOn(&artifact.step)", prepare)
+        self.assertNotIn("guardedTestRun", prepare)
+        self.assertNotIn("addRunArtifact", prepare)
+        self.assertNotIn("addSystemCommand", prepare)
+
+    def test_ci_prepares_only_the_shared_history_artifact_without_running_it(self):
+        build = (ROOT / "build.zig").read_text()
+        prepare = build.split("const prepare_history =", 1)[1].split("const probes =", 1)[0]
+        self.assertIn('b.step("prepare-history",', prepare)
+        self.assertEqual(prepare.count(".dependOn("), 1)
+        self.assertIn("prepare_history.dependOn(&history_stress.step)", prepare)
+        self.assertNotIn("guardedTestRun", prepare)
+        self.assertNotIn("addRunArtifact", prepare)
+        self.assertNotIn("addSystemCommand", prepare)
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        self.assertNotIn("zig build prepare-tests ", gate)
+        prepared = [step for step in gate.split("      - name:") if "zig build prepare-history " in step]
+        self.assertEqual(len(prepared), 1)
+        self.assertIn("if: inputs.gate == 'compile'", prepared[0])
+        self.assertIn("-Doptimize=safe", prepared[0])
+        self.assertIn("-Dtarget=", prepared[0])
+        self.assertIn("-Dcpu=baseline", prepared[0])
 
     def test_maker_timeout_preserves_phase_markers_and_partial_output(self):
         failure = subprocess.TimeoutExpired(["synthetic-maker"], 180,
@@ -371,7 +416,7 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "healthy", "timeout" }) |name| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("{s}.zig", .{name})),
-            .target = b.graph.host, .optimize = .Debug, .link_libc = true,
+            .target = b.graph.host, .optimize = .safe, .link_libc = true,
         }) });
         prepare.dependOn(&t.step);
         b.step(name, name).dependOn(&project.guardedTestRun(b, t, true).step);
@@ -413,6 +458,16 @@ test "guard following test still runs" {
             if name == "healthy":
                 assert code == 0 and "4/4 tests passed" in text, text
                 assert entered_tests(directory) == healthy_markers
+                # Leave compiler/build inputs unchanged and reuse their cache,
+                # but require every test to execute again. A cached successful
+                # Run step would leave these external observation files absent.
+                for marker in healthy_markers:
+                    (directory / marker).unlink()
+                repeat_code, repeat_text = run_maker_phase(argv, directory, "healthy-cached", 180)
+                assert repeat_code == 0 and "4/4 tests passed" in repeat_text, repeat_text
+                assert entered_tests(directory) == healthy_markers, "Compilation cache suppressed test execution"
+                results.append({"case": "healthy-cached", "exitCode": repeat_code,
+                                "executedTests": len(healthy_markers)})
             else:
                 assert code != 0, text
                 assert "guard caught TERM must time out" in text and "timed out after" in text, text

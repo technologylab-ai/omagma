@@ -7,9 +7,12 @@ on:
 permissions:
   contents: read
 
+env:
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.ci-zig/global
+
 concurrency:
   group: omagma-macos-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   linux-regression:
@@ -17,14 +20,25 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compiler, dependencies and SDK cache inputs
+        id: cache-inputs
+        run: python3 .github/ci_cache_key.py
+      - name: Cache the verified compiler archive and Safe compilation
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ${{ runner.tool_cache }}/omagma-zig
+            .ci-zig/global
+          key: zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
+          restore-keys: |
+            zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
       - name: Install exact Linux compiler
         run: python3 .github/install_zig.py
       - name: Preserve the Linux static-musl CLI and TUI
         run: |
           set -e
-          for mode in debug safe; do
-            zig build test probes -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --prefix ".verification-linux-$mode" --test-timeout 120s -Dtest-watchdog=true
-            zig build test-native-history-stress -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+          for mode in safe; do
+            zig build probes -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --summary all --prefix ".verification-linux-$mode" --test-timeout 120s -Dtest-watchdog=true
             zig build -Doptimize="$mode" -Dtarget=x86_64-linux-musl -j2 --prefix ".verification-linux-$mode"
             python3 tests/calendar_native_http.py --probe ".verification-linux-$mode/bin/calendar_http_probe"
             python3 tests/terminal_integration.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode"
@@ -37,9 +51,13 @@ jobs:
           done
       - name: Linux first-use mail, Calendar and vault workflows
         run: |
-          for mode in debug safe; do
+          for mode in safe; do
             python3 tests/terminal_workflow_regressions.py --binary ".verification-linux-$mode/bin/omagma" --build-mode "$mode" --output "tests/results/workflows-linux-$mode.json"
           done
+      - name: Safe native unit correctness and retained-history stress
+        run: |
+          zig build test -Doptimize=safe -Dtarget=x86_64-linux-musl -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+          zig build test-native-history-stress -Doptimize=safe -Dtarget=x86_64-linux-musl -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Preserve synthetic workflow receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -59,6 +77,18 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compiler, dependencies and SDK cache inputs
+        id: cache-inputs
+        run: python3 .github/ci_cache_key.py
+      - name: Cache the verified compiler archive and Safe compilation
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ${{ runner.tool_cache }}/omagma-zig
+            .ci-zig/global
+          key: zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
+          restore-keys: |
+            zig-safe-pr-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}
       - name: Install exact compiler from checked native archive metadata
         run: python3 .github/install_zig.py
       - name: Native correctness and probes
@@ -66,9 +96,8 @@ jobs:
           set -e
           zig version
           uname -m
-          for mode in debug safe; do
-            zig build test probes -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode" --summary all --test-timeout 120s -Dtest-watchdog=true
-            zig build test-native-history-stress -Doptimize="$mode" -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+          for mode in safe; do
+            zig build probes -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode" --summary all --test-timeout 120s -Dtest-watchdog=true
             zig build -Doptimize="$mode" -j2 --prefix ".verification-macos-$mode"
             binary=".verification-macos-$mode/bin/omagma"
             "$binary" build-info
@@ -89,19 +118,24 @@ jobs:
           done
       - name: Native first-use mail, Calendar and vault workflows
         run: |
-          for mode in debug safe; do
+          for mode in safe; do
             python3 tests/terminal_workflow_regressions.py --binary ".verification-macos-$mode/bin/omagma" --build-mode "$mode" --output "tests/results/workflows-macos-$mode.json"
           done
       - name: Native credential upgrade boundary
         run: |
-          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary .verification-macos-safe/bin/omagma
-          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary .verification-macos-safe/bin/omagma --homebrew-resign
+          zig build -Doptimize=safe -Dstrip=true -j2 --prefix .verification-macos-upgrade
+          python3 tests/keyring_macos.py --binary .verification-macos-safe/bin/omagma --upgrade-binary .verification-macos-upgrade/bin/omagma
+          python3 tests/keyring_macos.py --binary .verification-macos-safe/bin/omagma --upgrade-binary .verification-macos-upgrade/bin/omagma --homebrew-resign
       - name: Ephemeral CI production default-Keychain dispatch
         run: |
           set -e
-          for mode in debug safe; do
+          for mode in safe; do
             python3 tests/keyring_default_macos.py --ephemeral-default --build-mode "$mode"
           done
+      - name: Safe native unit correctness and retained-history stress
+        run: |
+          zig build test -Doptimize=safe -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+          zig build test-native-history-stress -Doptimize=safe -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
       - name: Native Safe lifecycle and quiet gates
         run: |
           set -e

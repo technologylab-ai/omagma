@@ -61,11 +61,12 @@ not establish runtime behavior on a different architecture or oldest OS.
 ## Local changes
 
 Use a separate development prefix and focused checks for the changed
-behavior. `debug` verifies correctness; `safe` retains assertions with
-optimization and is used for installed binaries and release checks.
+behavior. `safe` retains runtime safety checks with optimization and is used for
+correctness, installed binaries and CI. Debug builds are optional for local
+development or investigations; CI never builds Debug.
 
 ```sh
-zig build test -Doptimize=debug
+zig build test -Doptimize=safe
 zig build -Doptimize=safe --prefix .verification-local
 ```
 
@@ -130,12 +131,12 @@ keychain; they are maintainer tasks rather than installation steps. Reserve the
 host and preserve source/binary/SDK identity as for the other native platforms.
 
 ```sh
-zig build test probes -Doptimize=debug -j2
-zig build -Doptimize=debug -j2
+zig build test probes -Doptimize=safe -j2
+zig build -Doptimize=safe -j2
 zig-out/bin/omagma probe-keyring
 python3 tests/terminal_macos.py --binary zig-out/bin/omagma
 python3 tests/launch_macos.py --binary zig-out/bin/omagma
-python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode debug
+python3 tests/terminal_integration.py --binary zig-out/bin/omagma --build-mode safe
 ```
 
 Run the corresponding Safe checks and packaging gates for release qualification.

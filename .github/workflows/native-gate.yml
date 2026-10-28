@@ -1,0 +1,184 @@
+name: Native Safe gate
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      target:
+        type: string
+        required: true
+      os:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      gate:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.ci-zig/global
+      GATE: ${{ inputs.gate }}
+      CACHE_ROLE: ${{ (inputs.gate == 'compile' || startsWith(inputs.gate, 'history-')) && 'history' || inputs.gate }}
+      TARGET: ${{ inputs.target }}
+      RELEASE_OS: ${{ inputs.os }}
+      RELEASE_ARCH: ${{ inputs.arch }}
+      BINARY: dist/omagma-${{ inputs.platform }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Identify compiler, dependencies and SDK cache inputs
+        id: cache-inputs
+        run: python3 .github/ci_cache_key.py
+      - name: Restore verified compiler archive
+        if: inputs.gate != 'resources'
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.tool_cache }}/omagma-zig
+          key: zig-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/zig-release.json') }}
+      - name: Install exact compiler
+        if: inputs.gate != 'resources'
+        run: python3 .github/install_zig.py
+      - name: Restore shared content-addressed compiler cache
+        if: inputs.gate != 'resources'
+        id: zig-cache
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-zig/global
+          key: zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-tests
+          restore-keys: |
+            zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-preflight
+      - name: Restore exact-source compiled tests
+        if: inputs.gate != 'resources'
+        id: local-cache
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .zig-cache
+          key: zig-local-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-${{ env.CACHE_ROLE }}-${{ github.sha }}-complete
+          restore-keys: |
+            zig-local-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-${{ env.CACHE_ROLE }}-${{ github.sha }}-progress-
+            zig-local-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-history-${{ github.sha }}-complete
+      - name: Verify native SDK and timezone fixtures
+        run: |
+          case "$RELEASE_OS:$RELEASE_ARCH" in
+            linux:x86_64) test "$(uname -s):$(uname -m)" = Linux:x86_64 ;;
+            linux:arm64) test "$(uname -s):$(uname -m)" = Linux:aarch64 ;;
+            macos:x86_64) test "$(uname -s):$(uname -m)" = Darwin:x86_64 ;;
+            macos:arm64) test "$(uname -s):$(uname -m)" = Darwin:arm64 ;;
+            *) exit 1 ;;
+          esac
+          if [ "$RELEASE_OS" = linux ] && [ ! -f /usr/share/zoneinfo/Europe/Vienna ]; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y tzdata
+          fi
+          if [ "$RELEASE_OS" = macos ]; then
+            task_sdk=$(/usr/bin/xcrun --show-sdk-path)
+            test -d "$task_sdk/System/Library/Frameworks/Security.framework"
+            test -d "$task_sdk/System/Library/Frameworks/CoreFoundation.framework"
+            echo "SDKROOT=$task_sdk" >> "$GITHUB_ENV"
+          fi
+          test -f /usr/share/zoneinfo/Europe/Vienna
+          test -f /usr/share/zoneinfo/Asia/Kathmandu
+      - name: Compile the shared history executable once without running tests
+        if: inputs.gate == 'compile'
+        run: zig build prepare-history -Doptimize=safe -Dtarget="$TARGET" -Dcpu=baseline -j2 --summary all
+      - name: Native correctness group
+        if: startsWith(inputs.gate, 'unit-')
+        run: |
+          case "$GATE" in
+            unit-main) task_step=test-main ;;
+            unit-extra) task_step=test-extra ;;
+            unit-memory) task_step=test-native-memory ;;
+            *) exit 1 ;;
+          esac
+          zig build "$task_step" -Doptimize=safe -Dtarget="$TARGET" -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+      - name: Shared mail, contacts and browser adapter correctness
+        if: inputs.gate == 'adapters'
+        run: |
+          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget="$TARGET" -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
+      - name: Growing native mail stress
+        if: inputs.gate == 'send'
+        run: zig build test-native-send-stress -Doptimize=safe -Dtarget="$TARGET" -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
+      - name: One retained-history lifecycle
+        if: startsWith(inputs.gate, 'history-')
+        run: |
+          zig build test-native-history-stress -Dhistory-case="${GATE#history-}" -Doptimize=safe -Dtarget="$TARGET" -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
+      - name: Download the exact preflight bundle for resource measurements
+        if: inputs.gate == 'resources'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ inputs.platform }}
+          path: dist
+      - name: Check artifact bytes before executing
+        if: inputs.gate == 'resources'
+        run: |
+          python3 tests/release_check.py --os "$RELEASE_OS" --arch "$RELEASE_ARCH"
+          chmod +x "$BINARY"
+          "$BINARY" build-info
+      - name: Linux resource gates on an otherwise idle runner
+        if: inputs.gate == 'resources' && inputs.os == 'linux'
+        run: |
+          python3 tests/terminal_html.py --binary "$BINARY" --build-mode safe --output tests/results/terminal-safe-html.json --resource-cycles 1000 --idle-seconds 60
+          python3 tests/terminal_measure.py --kind cli --binary "$BINARY" --output tests/results/terminal-safe-cli-memory.json
+          python3 tests/terminal_measure.py --kind tui --binary "$BINARY" --output tests/results/terminal-safe-tui-memory.json
+          python3 tests/terminal_markdown_lifecycle.py --kind cli --binary "$BINARY" --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-cli-memory.json
+          python3 tests/terminal_markdown_lifecycle.py --kind tui --binary "$BINARY" --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-tui-memory.json
+          python3 tests/measure.py --binary "$BINARY" --output tests/results/zig017-safe-memory.json
+          python3 tests/background_measure_check.py
+          python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary "$BINARY" --output tests/results/zig017-safe-background.json
+      - name: Native macOS resource gates on an otherwise idle runner
+        if: inputs.gate == 'resources' && inputs.os == 'macos'
+        run: |
+          python3 tests/terminal_measure_macos.py --binary "$BINARY" --kind cli --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-cli-memory.json
+          python3 tests/terminal_measure_macos.py --binary "$BINARY" --kind tui --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-tui-memory.json
+          python3 tests/terminal_markdown_lifecycle.py --kind cli --binary "$BINARY" --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-cli-memory.json
+          python3 tests/terminal_markdown_lifecycle.py --kind tui --binary "$BINARY" --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-tui-memory.json
+      - name: Exclude temporary test data from compilation caches
+        if: always() && (inputs.gate == 'compile' || startsWith(inputs.gate, 'unit-') || inputs.gate == 'adapters' || inputs.gate == 'send')
+        run: |
+          python3 - <<'PY'
+          import shutil
+          for path in ('.zig-cache/tmp', '.ci-zig/global/tmp'):
+              shutil.rmtree(path, ignore_errors=True)
+          PY
+      - name: Save complete exact-source compiled tests
+        if: success() && (inputs.gate == 'compile' || startsWith(inputs.gate, 'unit-') || inputs.gate == 'adapters' || inputs.gate == 'send') && steps.local-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .zig-cache
+          key: zig-local-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-${{ env.CACHE_ROLE }}-${{ github.sha }}-complete
+      - name: Save partial compilation after an interrupted compile
+        if: (failure() || cancelled()) && (inputs.gate == 'compile' || startsWith(inputs.gate, 'unit-') || inputs.gate == 'adapters' || inputs.gate == 'send')
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .zig-cache
+          key: zig-local-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-${{ env.CACHE_ROLE }}-${{ github.sha }}-progress-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save shared compiler and dependency cache
+        if: success() && inputs.gate == 'compile' && steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-zig/global
+          key: zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-tests
+      - name: Preserve this gate's synthetic receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-${{ inputs.platform }}-${{ inputs.gate }}-${{ github.run_attempt }}
+          path: tests/results/*.json
+          if-no-files-found: warn
+          retention-days: 30

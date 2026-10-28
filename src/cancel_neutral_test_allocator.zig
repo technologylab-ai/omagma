@@ -1,4 +1,4 @@
-//! Allocator calls are not cancellation points. Zig 0.17 Debug SafeAllocator
+//! Allocator calls are not cancellation points. Zig 0.17 SafeAllocator
 //! stack tracing can consume cancellation in MachO's unwind mutex. Protect
 //! only each backing call; keep its full diagnostics, checks and return address.
 const std = @import("std");
@@ -43,11 +43,19 @@ fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) v
 // allocation and release must leave that cancellation pending for checkCancel.
 test "vault launch: allocator calls preserve cancellation during native stack tracing" {
     const builtin = @import("builtin");
-    if (builtin.os.tag != .macos or builtin.mode != .debug) return error.SkipZigTest;
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     if (std.debug.SelfInfo == void) return error.TestRequiresSymbolizedStackTraces;
     install();
     const io = std.testing.io;
+    // Safe mode disables tracing in std.testing.allocator by default. Force
+    // the same native unwinder and cancellation wrapper in both test modes.
+    var traced: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 7 });
+    defer std.debug.assert(traced.deinit() == 0);
+    const traced_backing = traced.allocator();
+    std.debug.assert(traced_backing.vtable == backing.vtable);
+    const traced_allocator: std.mem.Allocator = .{ .ptr = traced_backing.ptr, .vtable = allocator.vtable };
     const State = struct {
+        allocator: std.mem.Allocator,
         gate: std.atomic.Value(bool) = .init(false),
         started: std.atomic.Value(bool) = .init(false),
         id: std.atomic.Value(std.Thread.Id) = .init(0),
@@ -60,10 +68,10 @@ test "vault launch: allocator calls preserve cancellation during native stack tr
             while (!state.gate.load(.acquire)) std.Thread.yield() catch {};
             state.started.store(true, .release);
             if (state.release) {
-                allocator.free(state.bytes.?);
+                state.allocator.free(state.bytes.?);
                 state.bytes = null;
             } else {
-                state.bytes = allocator.alloc(u8, 113) catch {
+                state.bytes = state.allocator.alloc(u8, 113) catch {
                     state.failed.store(true, .release);
                     return;
                 };
@@ -94,8 +102,8 @@ test "vault launch: allocator calls preserve cancellation during native stack tr
         }
     };
     for ([_]bool{ false, true }) |release| {
-        var state: State = .{ .release = release, .bytes = if (release) try allocator.alloc(u8, 113) else null };
-        defer if (state.bytes) |bytes| allocator.free(bytes);
+        var state: State = .{ .allocator = traced_allocator, .release = release, .bytes = if (release) try traced_allocator.alloc(u8, 113) else null };
+        defer if (state.bytes) |bytes| traced_allocator.free(bytes);
         var future = try io.concurrent(State.work, .{&state});
         defer future.cancel(io);
         const info = try std.debug.getSelfDebugInfo();

@@ -32,6 +32,12 @@ def fixture():
     jobs = [{"id": 100 + index, "name": name, "run_id": RUN_ID, "run_attempt": 2, "head_sha": SHA,
              "status": "completed", "conclusion": "success", "started_at": "2026-10-09T18:00:00Z",
              "completed_at": "2026-10-09T18:20:00Z"} for index, name in enumerate(policy.PLATFORMS)]
+    jobs += [{"id": 500 + index, "name": name, "run_id": RUN_ID, "run_attempt": 2, "head_sha": SHA,
+              "status": "completed", "conclusion": "success", "started_at": "2026-10-09T18:20:00Z",
+              "completed_at": "2026-10-09T18:25:00Z"} for index, name in enumerate(policy.COMPILE_JOBS)]
+    jobs += [{"id": 1000 + index, "name": name, "run_id": RUN_ID, "run_attempt": 2, "head_sha": SHA,
+              "status": "completed", "conclusion": "success", "started_at": "2026-10-09T18:25:00Z",
+              "completed_at": "2026-10-09T18:29:00Z"} for index, name in enumerate(policy.GATE_JOBS)]
     artifacts = [{"id": 200 + index, "name": name, "expired": False, "size_in_bytes": 4096,
                   "created_at": "2026-10-09T18:15:00Z", "expires_at": "2026-11-08T18:15:00Z",
                   "workflow_run": {"id": RUN_ID, "repository_id": 99, "head_repository_id": 99,
@@ -62,65 +68,166 @@ class Qualification(unittest.TestCase):
         self.assertIn("github-token: ${{ github.token }}", promotion)
         self.assertNotIn("pattern: release-*", promotion)
 
-    def test_native_draft_acceptance_is_required_in_each_release_mode(self):
+    def test_native_draft_acceptance_is_required_for_every_shipped_safe_binary(self):
         suites = ("compose_actions", "draft_conflict", "draft_paging", "quote_policy",
                   "reply_boundaries", "settled_recovery")
-        release = (ROOT / ".github/workflows/release.yml").read_text()
+        release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  compile:", 1)[0]
         for os_name, matrix in zip(("linux", "macos"), release.split("  macos-build:", 1)):
-            for mode in ("debug", "safe"):
-                binary = (f"dist/omagma-{os_name}-${{{{ matrix.arch }}}}" if mode == "safe" else
-                          ".verification-debug/bin/omagma" if os_name == "linux" else
-                          ".verification-macos-debug/bin/omagma")
-                steps = [step for step in matrix.split("      - name:")
-                         if f"python3 tests/terminal_compose_actions.py --binary {binary}" in step]
-                self.assertEqual(len(steps), 1)
-                self.assertNotIn("if:", steps[0])
-                self.assertNotIn("continue-on-error", steps[0])
-                for suite in suites:
-                    self.assertIn(f"python3 tests/terminal_{suite}.py --binary {binary}", steps[0])
+            binary = f"dist/omagma-{os_name}-${{{{ matrix.arch }}}}"
+            steps = [step for step in matrix.split("      - name:")
+                     if f"python3 tests/terminal_compose_actions.py --binary {binary}" in step]
+            self.assertEqual(len(steps), 1)
+            self.assertNotIn("if:", steps[0])
+            self.assertNotIn("continue-on-error", steps[0])
+            for suite in suites:
+                self.assertIn(f"python3 tests/terminal_{suite}.py --binary {binary}", steps[0])
         native = (ROOT / ".github/workflows/macos-native.yml").read_text()
         for job in native.split("  native:", 1):
-            self.assertIn("for mode in debug safe; do", job)
             for suite in suites:
                 self.assertEqual(job.count(f"python3 tests/terminal_{suite}.py --binary "), 1)
 
-    def test_complete_short_native_preflight_precedes_slow_qualification(self):
+    def test_complete_short_native_preflight_precedes_all_slow_qualification(self):
         release = (ROOT / ".github/workflows/release.yml").read_text()
-        for matrix in release.split("  macos-build:", 1):
-            lines = matrix.splitlines()
-            commands = [line.strip().removeprefix("run: ") for line in lines]
-            slow = [index for index, command in enumerate(commands)
-                    if command.startswith(("zig build test probes ", "zig build test-browser-export ",
-                                           "zig build test-native-send-stress ", "zig build test-native-history-stress "))]
-            self.assertEqual(len(slow), 8)
-            first_slow = min(slow)
-            prepared = [command for command in commands if command.startswith("zig build probes ")]
-            self.assertEqual(len(prepared), 2)
-            self.assertTrue(all("-Dtest-watchdog=true" in command for command in prepared))
-            # Both modes' complete draft and first-use suites must fail before
-            # expensive unit compilation, retained-history stress or soaks.
+        preflight, heavy = release.split("\n  compile:", 1)
+        prepared, heavy = heavy.split("\n  gates:", 1)
+        gates, final = heavy.split("\n  qualified:", 1)
+        self.assertIn("needs: [version, build, macos-build]", prepared)
+        self.assertIn("name: Compile ${{ matrix.platform }}", prepared)
+        self.assertIn("gate: compile", prepared)
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", prepared)
+        self.assertIn("uses: ./.github/workflows/native-gate.yml", prepared)
+        self.assertNotIn("continue-on-error", prepared)
+        self.assertIn("needs: [version, build, macos-build, compile]", gates)
+        self.assertIn("needs: [version, build, macos-build, compile, gates]", final)
+        self.assertIn("fail-fast: false", gates)
+        self.assertIn("uses: ./.github/workflows/native-gate.yml", gates)
+        self.assertIn("name: Gate ${{ matrix.platform }} ${{ matrix.gate }}", gates)
+        self.assertNotIn("continue-on-error", gates)
+        self.assertIn("platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]", gates)
+        matrix_gates = [line.strip().removeprefix("gate: [").removesuffix("]").split(", ")
+                        for line in gates.splitlines() if line.strip().startswith("gate: [")]
+        self.assertEqual(len(matrix_gates), 1)
+        self.assertCountEqual(matrix_gates[0], policy.GATES)
+        source_checks = preflight.split("\n  build:", 1)[0]
+        # These platform-independent checks formerly lived inside Debug steps.
+        for script in ("terminal_compose_screen", "terminal_fixture_check", "terminal_cache_fixture_check",
+                       "terminal_screen", "terminal_ux_focus", "terminal_status_screen", "terminal_theme_screen",
+                       "terminal_reader", "terminal_html_screen", "terminal_html_fixture_check",
+                       "terminal_repaint_screen", "terminal_mouse_screen", "publication_gif", "homebrew_formula"):
+            self.assertIn(f"python3 tests/{script}.py", source_checks)
+        for matrix in preflight.split("  macos-build:", 1):
+            self.assertIn("needs: version", matrix)
+            commands = [line.strip().removeprefix("run: ") for line in matrix.splitlines()]
+            slow = [command for command in commands if command.startswith((
+                "zig build prepare-tests ", "zig build prepare-history ", "zig build test ",
+                "zig build test-", "python3 tests/terminal_measure",
+                "python3 tests/terminal_markdown_lifecycle.py", "python3 tests/measure.py ",
+                "python3 tests/background_measure.py "))]
+            self.assertEqual(slow, [], "All expensive qualification must depend on complete short preflight")
+            self.assertNotIn("--resource-cycles 1000", matrix)
+            prepared = [command for command in commands
+                        if command.startswith(("zig build probes ", "zig build install probes "))]
+            self.assertEqual(len(prepared), 1)
+            self.assertIn("-Dtest-watchdog=true", prepared[0])
+            self.assertIn("-Doptimize=safe", prepared[0])
             for script in ("terminal_compose_actions.py", "terminal_draft_conflict.py",
                            "terminal_draft_paging.py", "terminal_quote_policy.py",
                            "terminal_reply_boundaries.py", "terminal_settled_recovery.py",
                            "terminal_workflow_regressions.py"):
-                positions = [index for index, line in enumerate(lines)
-                             if f"python3 tests/{script} --binary " in line]
-                self.assertEqual(len(positions), 2, script)
-                self.assertTrue(all(index < first_slow for index in positions), script)
-            for index, line in enumerate(lines):
-                if "python3 tests/terminal_mouse.py --binary " in line:
-                    self.assertLess(index, first_slow)
-            linux = "dist/omagma-linux-" in matrix
-            resources = (("--resource-cycles 1000", 1 if linux else 0),
-                         ("tests/terminal_measure", 2),
-                         ("tests/terminal_markdown_lifecycle.py", 2),
-                         ("python3 tests/measure.py ", 1 if linux else 0),
-                         ("python3 tests/background_measure.py ", 1 if linux else 0))
-            for marker, expected in resources:
-                positions = [index for index, line in enumerate(lines) if marker in line]
-                self.assertEqual(len(positions), expected, marker)
-                self.assertTrue(all(index > first_slow for index in positions), marker)
-            self.assertIn("python3 tests/terminal_compose_screen.py", matrix)
+                self.assertEqual(matrix.count(f"python3 tests/{script} --binary "), 1, script)
+        self.assertIn("node tests/ui_model.mjs", preflight)
+        self.assertIn("python3 tests/terminal_mouse.py --binary dist/omagma-linux-", preflight)
+
+    def test_ci_never_builds_debug_and_keeps_every_gate_mandatory(self):
+        for workflow in (ROOT / ".github/workflows").glob("*.yml"):
+            text = workflow.read_text()
+            self.assertNotIn("-Doptimize=debug", text, str(workflow))
+            self.assertNotIn("--build-mode debug", text, str(workflow))
+            self.assertNotIn("for mode in debug", text, str(workflow))
+            self.assertNotIn(".verification-debug/", text, str(workflow))
+            self.assertNotIn(".verification-macos-debug/", text, str(workflow))
+            for line in text.splitlines():
+                if "zig build " not in line:
+                    continue
+                if '-Doptimize="$mode"' in line:
+                    self.assertIn("for mode in safe; do", text, str(workflow))
+                else:
+                    self.assertIn("-Doptimize=safe", line,
+                                  f"CI build must select Safe explicitly: {workflow}")
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        self.assertIn("name: Check", gate)
+        self.assertNotIn("continue-on-error", gate)
+        self.assertNotIn("-Dtest-filter=", gate)
+
+    def test_history_and_resource_shards_never_write_compilation_caches(self):
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        steps = gate.split("      - name:")
+        writers = "(inputs.gate == 'compile' || startsWith(inputs.gate, 'unit-') || inputs.gate == 'adapters' || inputs.gate == 'send')"
+        self.assertIn("CACHE_ROLE: ${{ (inputs.gate == 'compile' || startsWith(inputs.gate, 'history-')) && 'history' || inputs.gate }}", gate)
+        local_restores = [step for step in steps if "actions/cache/restore@" in step
+                          and "path: .zig-cache" in step]
+        self.assertEqual(len(local_restores), 1)
+        self.assertIn("${{ env.CACHE_ROLE }}-${{ github.sha }}-complete", local_restores[0])
+        self.assertIn("${{ env.CACHE_ROLE }}-${{ github.sha }}-progress-", local_restores[0])
+        self.assertIn("-history-${{ github.sha }}-complete", local_restores[0])
+        self.assertNotIn("${{ inputs.gate }}", local_restores[0])
+        local_saves = [step for step in steps if "actions/cache/save@" in step
+                       and "path: .zig-cache" in step]
+        self.assertEqual(len(local_saves), 2)
+        for step in local_saves:
+            self.assertIn(writers, step)
+            self.assertIn("${{ env.CACHE_ROLE }}-${{ github.sha }}", step)
+            self.assertNotIn("${{ inputs.gate }}", step)
+        shared_saves = [step for step in steps if "actions/cache/save@" in step
+                        and "path: .ci-zig/global" in step]
+        self.assertEqual(len(shared_saves), 1)
+        self.assertIn("if: success() && inputs.gate == 'compile'", shared_saves[0])
+        complete = next(step for step in local_saves if "-complete" in step)
+        partial = next(step for step in local_saves if "-progress-" in step)
+        self.assertIn("if: success()", complete)
+        self.assertIn("if: (failure() || cancelled())", partial)
+        self.assertIn("${{ github.sha }}-progress-${{ github.run_id }}-${{ github.run_attempt }}", partial)
+        cleanup = next(step for step in steps if "shutil.rmtree" in step)
+        self.assertIn("if: always() && " + writers, cleanup)
+        self.assertIn("'.zig-cache/tmp'", cleanup)
+        self.assertIn("'.ci-zig/global/tmp'", cleanup)
+        self.assertLess(gate.index(cleanup), gate.index(complete))
+        self.assertLess(gate.index(cleanup), gate.index(partial))
+        for workflow in ("release.yml", "macos-native.yml"):
+            text = (ROOT / ".github/workflows" / workflow).read_text()
+            self.assertNotIn("path: .zig-cache", text, workflow)
+            self.assertNotIn("            .zig-cache\n", text, workflow)
+
+    def test_resource_shards_reuse_the_bundle_and_preserve_every_existing_measurement(self):
+        gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
+        self.assertIn("name: release-${{ inputs.platform }}", gate)
+        self.assertIn("BINARY: dist/omagma-${{ inputs.platform }}", gate)
+        self.assertNotIn("python3 scripts/release.py", gate, "A resource shard must not rebuild its candidate")
+        check = gate.index('python3 tests/release_check.py --os "$RELEASE_OS" --arch "$RELEASE_ARCH"')
+        self.assertLess(check, gate.index("python3 tests/terminal_html.py"))
+        self.assertLess(check, gate.index("python3 tests/terminal_measure_macos.py"))
+        resources = [step for step in gate.split("      - name:")
+                     if "python3 tests/terminal_markdown_lifecycle.py" in step]
+        self.assertEqual(len(resources), 2)
+        for step, os_name in zip(resources, ("linux", "macos")):
+            self.assertIn(f"if: inputs.gate == 'resources' && inputs.os == '{os_name}'", step)
+            markdown = [line for line in step.splitlines() if "python3 tests/terminal_markdown_lifecycle.py" in line]
+            self.assertEqual(len(markdown), 2)
+            for kind, command in zip(("cli", "tui"), markdown):
+                self.assertIn(f"--kind {kind}", command)
+                self.assertIn("--cycles 1000 --warmup 100 --idle-seconds 60", command)
+                self.assertIn('--binary "$BINARY"', command)
+        linux, macos = resources
+        self.assertEqual(linux.count("python3 tests/terminal_measure.py "), 2)
+        self.assertIn("--resource-cycles 1000 --idle-seconds 60", linux)
+        self.assertIn('python3 tests/measure.py --binary "$BINARY"', linux)
+        self.assertIn("python3 tests/background_measure_check.py", linux)
+        self.assertIn('python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary "$BINARY"', linux)
+        native = [line for line in macos.splitlines() if "python3 tests/terminal_measure_macos.py" in line]
+        self.assertEqual(len(native), 2)
+        for kind, command in zip(("cli", "tui"), native):
+            self.assertIn(f"--kind {kind}", command)
+            self.assertIn("--cycles 1000 --warmup 100 --idle-seconds 60", command)
 
     def test_new_pty_suites_use_the_owned_darwin_guardian_factory(self):
         # Import all factories as Darwin without opening any PTY or desktop.
@@ -164,10 +271,13 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
             with self.assertRaises(policy.QualificationError):
                 verify(data)
 
-    def test_all_four_current_attempt_native_jobs_must_succeed(self):
-        for index in range(4):
+    def test_all_native_preflights_compile_jobs_and_gates_must_succeed(self):
+        for index in range(len(fixture()[2])):
             for field, value in (("status", "queued"), ("conclusion", "failure"), ("conclusion", "skipped"),
-                                 ("run_attempt", 1), ("run_id", RUN_ID + 1), ("head_sha", "b" * 40)):
+                                 ("run_attempt", 3), ("run_attempt", 0), ("run_attempt", True),
+                                 ("run_id", RUN_ID + 1), ("head_sha", "b" * 40),
+                                 ("started_at", "2026-10-09T19:00:01Z"),
+                                 ("completed_at", "2026-10-09T19:00:01Z")):
                 with self.subTest(platform=index, field=field):
                     data = fixture()
                     data[2][index][field] = value
@@ -236,15 +346,82 @@ for name in ('compose_actions', 'draft_conflict', 'draft_paging', 'quote_policy'
                 verify(data)
             self.assertNotIn("private-token-not-a-time", str(caught.exception))
 
-    def test_rerun_failed_jobs_cannot_mix_prior_attempt_jobs_or_artifacts(self):
+    def test_failed_only_rerun_reuses_successes_and_exact_artifacts_from_same_run(self):
         data = fixture()
-        data[2][1]["run_attempt"] = 1
-        with self.assertRaisesRegex(policy.QualificationError, "current run attempt"):
-            verify(data)
+        for job in data[2]:
+            job["run_attempt"] = 1
+        # One resource gate failed in the original attempt; all other work,
+        # including the four exact package artifacts, remains valid.
+        previous = deepcopy(data[2][-1])
+        previous["id"] += 10000
+        previous["conclusion"] = "failure"
+        data[2][-1]["run_attempt"] = 2
+        data[2].append(previous)
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+        # GitHub's list order is not a provenance ordering contract.
+        data[2].reverse()
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+
+    def test_latest_failed_execution_cannot_fall_back_to_an_old_success(self):
+        for index in (0, 4, len(fixture()[2]) - 1):
+            for conclusion in ("failure", "cancelled", "skipped", "neutral"):
+                with self.subTest(index=index, conclusion=conclusion):
+                    data = fixture()
+                    previous = deepcopy(data[2][index])
+                    previous.update(id=previous["id"] + 10000, run_attempt=1)
+                    data[2][index]["conclusion"] = conclusion
+                    data[2].append(previous)
+                    with self.assertRaisesRegex(policy.QualificationError, "did not succeed"):
+                        verify(data)
+
+    def test_preflight_rerun_invalidates_older_package_and_gate_evidence(self):
         data = fixture()
         data[3][1]["created_at"] = "2026-10-08T18:15:00Z"
         with self.assertRaisesRegex(policy.QualificationError, "successful platform attempt"):
             verify(data)
+        data = fixture()
+        previous = deepcopy(data[2][0])
+        previous.update(id=9999, run_attempt=1)
+        data[2].append(previous)
+        data[2][0]["started_at"] = "2026-10-09T18:16:00Z"
+        with self.assertRaisesRegex(policy.QualificationError, "latest successful platform attempt"):
+            verify(data)
+        # Even with a fresh package, a successful gate from before the rebuild
+        # cannot qualify the rebuilt candidate.
+        for field, value in (("run_attempt", 1), ("started_at", "2026-10-09T18:19:59Z")):
+            data = fixture()
+            data[2][4][field] = value
+            with self.assertRaisesRegex(policy.QualificationError, "predates"):
+                verify(data)
+
+    def test_compile_rerun_invalidates_older_gates_without_invalidating_frozen_bundles(self):
+        compile_name, platform = next(iter(policy.COMPILE_JOBS.items()))
+        gate_name = next(name for name, owner in policy.GATE_JOBS.items() if owner == platform)
+        for field, value in (("run_attempt", 1), ("started_at", "2026-10-09T18:24:59Z")):
+            data = fixture()
+            gate = next(job for job in data[2] if job["name"] == gate_name)
+            gate[field] = value
+            with self.assertRaisesRegex(policy.QualificationError, "predates"):
+                verify(data)
+        # A compile retry and its fresh gates can keep the same already-tested
+        # package; only rerunning the package preflight requires a new artifact.
+        data = fixture()
+        for job in data[2][:4]:
+            job["run_attempt"] = 1
+        old_compile = deepcopy(next(job for job in data[2] if job["name"] == compile_name))
+        old_compile.update(id=9999, run_attempt=1, conclusion="failure")
+        data[2].append(old_compile)
+        self.assertEqual(verify(data)["artifact_ids"], "200,201,202,203")
+
+    def test_historical_job_cannot_introduce_a_foreign_source_or_duplicate_metadata(self):
+        for field, value in (("head_sha", "b" * 40), ("run_id", RUN_ID + 1), ("id", 100)):
+            data = fixture()
+            old = deepcopy(data[2][4])
+            old.update(id=9999, run_attempt=1)
+            old[field] = value
+            data[2].append(old)
+            with self.assertRaises(policy.QualificationError):
+                verify(data)
 
     def test_verification_receipts_do_not_become_publishable_artifacts(self):
         data = fixture()
@@ -256,7 +433,10 @@ class ApiPolicy(unittest.TestCase):
     def test_fixed_host_approved_paths_and_no_redirects(self):
         client = policy.Api(REPOSITORY, "private-synthetic-token")
         for endpoint in ("https://foreign.example/path", "../outside", "actions/runs/123/artifacts?token=secret",
-                         "actions/runs/123/attempts/2/jobs?per_page=100&page=4"):
+                         "actions/runs/123/attempts/2/jobs?per_page=100&page=1",
+                         "actions/runs/123/jobs?filter=latest&per_page=100&page=1",
+                         "actions/runs/123/jobs?filter=all&per_page=100&page=31",
+                         "actions/runs/123/artifacts?per_page=100&page=31"):
             with self.assertRaises(policy.QualificationError) as caught:
                 client.get(endpoint)
             self.assertNotIn("private-synthetic-token", str(caught.exception))
@@ -289,12 +469,14 @@ class ApiPolicy(unittest.TestCase):
             page = int(endpoint[-1])
             return {"total_count": 105, "jobs": list(range(100)) if page == 1 else list(range(100, 105))}
         client.get = get
-        self.assertEqual(len(client.collection("actions/runs/123/attempts/2/jobs", "jobs")), 105)
+        self.assertEqual(len(client.collection("actions/runs/123/jobs?filter=all", "jobs")), 105)
         self.assertEqual(len(calls), 2)
-        for data in ({"total_count": 301, "jobs": []}, {"total_count": 5, "jobs": []}):
+        self.assertEqual(calls[0], "actions/runs/123/jobs?filter=all&per_page=100&page=1")
+        for data in ({"total_count": policy.MAX_PAGES * policy.PAGE_SIZE + 1, "jobs": []},
+                     {"total_count": 5, "jobs": []}):
             client.get = lambda _endpoint, data=data: data
             with self.assertRaises(policy.QualificationError):
-                client.collection("actions/runs/123/attempts/2/jobs", "jobs")
+                client.collection("actions/runs/123/jobs?filter=all", "jobs")
 
     def test_run_attempt_change_while_fetching_is_rejected(self):
         run, workflow, jobs, artifacts = fixture()
@@ -315,7 +497,7 @@ class ApiPolicy(unittest.TestCase):
         api = CapturedApi(changed)
         with self.assertRaisesRegex(policy.QualificationError, "changed during"):
             policy.fetch(api, RUN_ID, repository=REPOSITORY, expected_sha=SHA, now=NOW)
-        self.assertIn("/attempts/2/jobs", api.jobs_endpoint)
+        self.assertEqual(api.jobs_endpoint, f"actions/runs/{RUN_ID}/jobs?filter=all")
 
 
 class ExistingPublisherGuards(unittest.TestCase):

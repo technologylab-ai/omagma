@@ -1,5 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
+const HistoryCase = enum { all, calendar, @"sends-plain", @"sends-vault", @"files-plain", @"files-vault" };
+
 pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, builtin.zig_version_string, "0.17.0")) @panic("Use exact Zig 0.17.0");
     const target = b.standardTargetOptions(.{});
@@ -9,6 +12,7 @@ pub fn build(b: *std.Build) void {
     const test_watchdog = b.option(bool, "test-watchdog", "Supervise native test timeout cleanup (requires Python 3)") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Run only correctness tests containing this text");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
+    const history_case = b.option(HistoryCase, "history-case", "Run one retained-history lifecycle, or all five") orelse .all;
     const tui_enabled = b.option(bool, "tui", "Include the libvaxis terminal client") orelse true;
     const browser_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
     const browser_enabled = b.option(bool, "browser", "Build WebAssembly and embed its page for omagma server") orelse false;
@@ -90,15 +94,27 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run omagma").dependOn(&run.step);
     const t = b.addTest(.{ .root_module = m, .filters = test_filters, .use_llvm = if (vaxis != null) true else null });
     const correctness = b.step("test", "Run correctness tests");
-    correctness.dependOn(&guardedTestRun(b, t, test_watchdog).step);
-    for ([_][]const u8{ "src/terminal_codec_tests.zig", "src/terminal_provider_tests.zig", "src/terminal_mail_acceptance_tests.zig", "src/terminal_ux_backend_tests.zig", "src/terminal_ux_helper_tests.zig", "src/platform_tests.zig", "src/updates_tests.zig", "src/calendar_tests.zig", "src/calendar_service_tests.zig", "src/calendar_native_tests.zig", "src/calendar_commands_tests.zig", "src/calendar_embedded_tests.zig", "src/calendar_duration_tests.zig", "src/calendar_fixture_tests.zig", "src/calendar_store_tests.zig", "src/calendar_identity_history_tests.zig", "src/calendar_vault_grants_tests.zig", "src/vault_crypto_tests.zig", "src/vault_storage_tests.zig", "src/vault_catalog_tests.zig", "src/vault_store_tests.zig", "src/retained_history_tests.zig", "src/native_capacity_tests.zig", "src/native_memory_ux_tests.zig", "src/vault_mail_tests.zig", "src/vault_daemon_tests.zig", "src/vault_identity_tests.zig", "src/vault_activation_tests.zig", "src/vault_migration_tests.zig", "src/vault_migration_store_tests.zig", "src/session_cache_integration_tests.zig", "src/draft_continuity_tests.zig" }) |path| {
-        // This root exercises the application's real one-MiB worker stack;
-        // use its LLVM code generation so aggregate-copy regressions are gated.
-        const terminal_test = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }), .use_llvm = if (std.mem.eql(u8, path, "src/native_memory_ux_tests.zig")) true else null });
-        terminal_test.root_module.addOptions("build_options", options);
-        if (macos_sdk) |sdk| linkNativeKeychain(terminal_test.root_module, sdk);
-        correctness.dependOn(&guardedTestRun(b, terminal_test, test_watchdog).step);
-    }
+    const main_correctness = b.step("test-main", "Run application and TUI correctness tests");
+    main_correctness.dependOn(&guardedTestRun(b, t, test_watchdog).step);
+    correctness.dependOn(main_correctness);
+
+    // Import the extra suites into one root so shared modules and their tests
+    // are compiled and run once instead of in thirty-one separate binaries.
+    const extra_tests = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path("src/correctness_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }) });
+    extra_tests.root_module.addOptions("build_options", options);
+    if (macos_sdk) |sdk| linkNativeKeychain(extra_tests.root_module, sdk);
+    const extra_correctness = b.step("test-extra", "Run shared terminal, Calendar and vault correctness tests");
+    extra_correctness.dependOn(&guardedTestRun(b, extra_tests, test_watchdog).step);
+    correctness.dependOn(extra_correctness);
+
+    // This root exercises the application's real one-MiB worker stack;
+    // retain separate LLVM code generation so aggregate-copy regressions are gated.
+    const memory_tests = b.addTest(.{ .filters = test_filters, .root_module = b.createModule(.{ .root_source_file = b.path("src/native_memory_ux_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }), .use_llvm = true });
+    memory_tests.root_module.addOptions("build_options", options);
+    if (macos_sdk) |sdk| linkNativeKeychain(memory_tests.root_module, sdk);
+    const memory_correctness = b.step("test-native-memory", "Run native worker stack correctness tests with LLVM");
+    memory_correctness.dependOn(&guardedTestRun(b, memory_tests, test_watchdog).step);
+    correctness.dependOn(memory_correctness);
 
     // This complete growing-store chain intentionally performs many large
     // operations. Qualification gives this new stress target its own bounded
@@ -114,13 +130,24 @@ pub fn build(b: *std.Build) void {
     // Disk-backed lifetime histories deliberately cross the former admission
     // ceilings. Keep these mandatory qualification cases out of ordinary
     // correctness roots, whose per-test deadline remains 120 seconds.
+    // Select the lifecycle at runtime so all five shards share one binary.
     const history_stress = b.addTest(.{
         .filters = &.{"native history stress:"},
         .root_module = b.createModule(.{ .root_source_file = b.path("src/native_history_stress_tests.zig"), .target = target, .optimize = optimize, .link_libc = target.result.abi == .musl or target.result.os.tag == .macos }),
     });
     history_stress.root_module.addOptions("build_options", options);
     if (macos_sdk) |sdk| linkNativeKeychain(history_stress.root_module, sdk);
-    b.step("test-native-history-stress", "Verify retained mail, blob and Calendar histories across restart and replay").dependOn(&guardedTestRun(b, history_stress, test_watchdog).step);
+    const history_run = guardedTestRun(b, history_stress, test_watchdog);
+    history_run.setEnvironmentVariable("OMAGMA_HISTORY_CASE", @tagName(history_case));
+    b.step("test-native-history-stress", "Verify retained mail, blob and Calendar histories across restart and replay").dependOn(&history_run.step);
+
+    const prepare_tests = b.step("prepare-tests", "Compile all native test artifacts without running tests or probes");
+    for ([_]*std.Build.Step.Compile{ t, extra_tests, memory_tests, browser_export_tests, browser_server_tests, browser_cache_tests, browser_provider_tests, contact_isolation_tests, mailbox_tests, send_stress, history_stress }) |artifact| {
+        prepare_tests.dependOn(&artifact.step);
+    }
+
+    const prepare_history = b.step("prepare-history", "Compile the shared retained-history test artifact without running tests");
+    prepare_history.dependOn(&history_stress.step);
 
     const probes = b.step("probes", "Compile all standalone transport/auth/budget probes");
     for ([_][]const u8{ "src/auth_probe.zig", "src/transport_probe.zig", "src/terminal_stream_probe.zig", "src/calendar_http_probe.zig", "tests/probes/callback_budget.zig" }) |path| {
@@ -141,6 +168,9 @@ pub fn build(b: *std.Build) void {
 /// Public so the tiny test-tooling oracle exercises this exact build wiring.
 pub fn guardedTestRun(b: *std.Build, artifact: *std.Build.Step.Compile, enabled: bool) *std.Build.Step.Run {
     const run = b.addRunArtifact(artifact);
+    // Compile results may be restored from CI caches; test execution must
+    // produce fresh evidence even when the binary and inputs are unchanged.
+    run.has_side_effects = true;
     if (enabled) {
         switch (run.stdio) {
             .zig_test => {},

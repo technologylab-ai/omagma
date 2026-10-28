@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.ci-zig/global
+
 concurrency:
   group: omagma-release-${{ github.ref }}
   cancel-in-progress: false
@@ -27,6 +30,35 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Qualification and manual promotion policy checks
         run: python3 tests/qualification.py
+      - name: Select the source-check Node toolchain
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Source, fixture and publication checks
+        run: |
+          python3 tests/zig_test_guard_check.py
+          python3 tests/correctness_inventory.py
+          python3 tests/ci_toolchain.py
+          python3 tests/ci_cache_key.py
+          python3 tests/release_binary.py
+          python3 tests/publication_privacy.py
+          python3 tests/release_notes.py
+          python3 tests/terminal_compose_screen.py
+          node tests/ui_model.mjs
+          python3 tests/terminal_fixture_check.py
+          python3 tests/terminal_screen.py
+          python3 tests/terminal_ux_focus.py
+          python3 tests/terminal_cache_fixture_check.py
+          python3 tests/terminal_status_screen.py
+          python3 tests/terminal_theme_screen.py
+          python3 tests/terminal_reader.py
+          python3 tests/terminal_html_screen.py
+          python3 tests/terminal_html_fixture_check.py
+          python3 tests/terminal_repaint_screen.py
+          python3 tests/terminal_mouse_screen.py
+          python3 tests/publication_gif.py
+          python3 tests/homebrew_formula.py
       - name: Check package version
         if: github.ref == 'refs/heads/main'
         id: version
@@ -67,11 +99,25 @@ jobs:
             zig_arch: aarch64
             target: aarch64-linux-musl
     runs-on: ${{ matrix.runner }}
-    # Cold Debug/Safe compilation and retained-history gates can exceed three hours.
-    # Keep each test watchdog and memory gate unchanged inside this outer allowance.
-    timeout-minutes: 360
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compiler, dependencies and SDK cache inputs
+        id: cache-inputs
+        run: python3 .github/ci_cache_key.py
+      - name: Restore verified compiler archive
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.tool_cache }}/omagma-zig
+          key: zig-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/zig-release.json') }}
+      - name: Restore shared content-addressed compiler cache
+        id: zig-cache
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-zig/global
+          key: zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-tests
+          restore-keys: |
+            zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-preflight
       - name: Install the declared Zig compiler
         run: python3 .github/install_zig.py
       - name: Select the browser packaging toolchain
@@ -85,102 +131,21 @@ jobs:
         run: |
           npm ci --prefix web-demo --ignore-scripts --no-audit --no-fund
           npm test --prefix web-demo
-      - name: Release format and architecture oracles
-        run: |
-          python3 tests/release_binary.py
-          python3 tests/publication_privacy.py
-          python3 tests/release_notes.py
-          python3 tests/terminal_compose_screen.py
       - name: Ensure the timezone fixture database is available
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y tzdata
+          if [ ! -f /usr/share/zoneinfo/Europe/Vienna ]; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y tzdata
+          fi
           test -f /etc/localtime
           test -f /usr/share/zoneinfo/Europe/Vienna
           test -f /usr/share/zoneinfo/Asia/Kathmandu
-      - name: Build Debug backend and probes for short preflight
-        run: |
-          zig version
-          python3 tests/zig_test_guard_check.py --zig "$(command -v zig)"
-          zig build probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug -Dtest-watchdog=true
-          zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-debug
-
-      - name: Debug short CLI, TUI and fixture acceptance
-        run: |
-          python3 tests/integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/zig017-debug-integration.json
-          python3 tests/probes/transport_check.py --binary .verification-debug/bin/omagma --build-mode debug --https --output tests/results/zig017-debug-transport.json
-          .verification-debug/bin/auth_probe launch
-          .verification-debug/bin/auth_probe callback
-          .verification-debug/bin/callback_budget
-          .verification-debug/bin/transport_probe
-          python3 tests/terminal_attachment_streams.py --probe .verification-debug/bin/terminal_stream_probe
-          python3 tests/calendar_native_http.py --probe .verification-debug/bin/calendar_http_probe
-          node tests/ui_model.mjs
-          python3 tests/terminal_fixture_check.py
-          python3 tests/terminal_screen.py
-          python3 tests/terminal_ux_focus.py
-          python3 tests/terminal_cache_fixture_check.py
-          python3 tests/terminal_status_screen.py
-          python3 tests/terminal_theme_screen.py
-          python3 tests/terminal_reader.py
-          python3 tests/terminal_html_screen.py
-          python3 tests/terminal_html_fixture_check.py
-          python3 tests/terminal_repaint_screen.py
-          python3 tests/terminal_mouse_screen.py
-          python3 tests/terminal_cache.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-cache-debug.json
-          python3 tests/terminal_ui.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-ui-debug.json
-          python3 tests/terminal_cache_max.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-cache-max-debug.json
-          python3 tests/terminal_background.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-background-debug.json
-          python3 tests/terminal_integration.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-integration.json
-          python3 tests/terminal_transport.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-transport.json
-          python3 tests/terminal_pty.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-pty.json
-          python3 tests/terminal_mail_acceptance.py --binary .verification-debug/bin/omagma --build-mode debug --receipt tests/results/terminal-debug-mail-acceptance.json
-          python3 tests/terminal_html.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-html.json
-          python3 tests/terminal_repaint.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-repaint.json
-          python3 tests/terminal_mouse.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-mouse.json
-
-      - name: Debug current terminal and agent feature acceptance
-        run: |
-          .verification-debug/bin/omagma build-info
-          sha256sum .verification-debug/bin/omagma
-          python3 tests/terminal_exit_refresh.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/terminal-debug-exit-refresh.json
-          python3 tests/publication_gif.py
-          python3 tests/homebrew_formula.py
-          for suite in \
-            terminal_wishlist_backend terminal_cache_windows terminal_arrivals \
-            terminal_composer_workflow terminal_compose_attachments \
-            terminal_triage_ui terminal_reader_context \
-            terminal_scroll_progress terminal_loading terminal_fetch_wheel \
-            terminal_local_ui terminal_polish_reader terminal_polish_compose \
-            terminal_polish_status terminal_timezone terminal_recipient_preview \
-            terminal_editor_notice terminal_reader_copy terminal_reader_editor \
-            terminal_file_dialog terminal_invitations terminal_cli_parity \
-            terminal_cli_usage terminal_forward_ux \
-            terminal_markdown_mail terminal_markdown_compose \
-            terminal_label_management terminal_label_transport terminal_label_manager \
-            terminal_help_search terminal_dialog_controls terminal_theme_picker \
-            terminal_forward_original terminal_invitation_banner \
-            terminal_ux_backend_cli terminal_queue_send_now credential_storage terminal_ux_batch_navigation \
-            terminal_ux_batch_compose terminal_ux_batch_files_contacts \
-            terminal_ux_helpers_ui terminal_ux_adversarial updates terminal_updates
-          do
-            python3 "tests/$suite.py" --binary .verification-debug/bin/omagma
-          done
-      - name: Debug Linux retained draft and compose acceptance
-        run: |
-          python3 tests/terminal_compose_actions.py --binary .verification-debug/bin/omagma
-          python3 tests/terminal_draft_conflict.py --binary .verification-debug/bin/omagma
-          python3 tests/terminal_draft_paging.py --binary .verification-debug/bin/omagma
-          python3 tests/terminal_quote_policy.py --binary .verification-debug/bin/omagma
-          python3 tests/terminal_reply_boundaries.py --binary .verification-debug/bin/omagma
-          python3 tests/terminal_settled_recovery.py --binary .verification-debug/bin/omagma
-      - name: Debug first-use mail, Calendar and vault workflows
-        run: python3 tests/terminal_workflow_regressions.py --binary .verification-debug/bin/omagma --build-mode debug --output tests/results/workflows-linux-debug.json
-      - name: Debug independent HTML preservation oracle
-        if: matrix.arch == 'x86_64'
-        run: python3 tests/terminal_html_compatibility.py --binary .verification-debug/bin/omagma --browser "$(command -v google-chrome)" --receipt tests/results/terminal-debug-html-compatibility.json
       - name: Safe standalone probe preflight
         run: |
+          zig version
+          zig fmt --check build.zig src
+          zig test src/native_history_stress_tests.zig -Osafe -target ${{ matrix.target }} -mcpu=baseline --test-filter "native history selector:"
+          python3 tests/zig_test_guard_check.py --zig "$(command -v zig)"
           zig build probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe -Dtest-watchdog=true
           .verification-safe/bin/auth_probe launch
           .verification-safe/bin/auth_probe callback
@@ -223,7 +188,6 @@ jobs:
             done
             test "$task_keyring_ready" = true
             dist/omagma-linux-$RELEASE_ARCH probe-keyring
-            .verification-debug/bin/auth_probe keyring
             .verification-safe/bin/auth_probe keyring
           '
       - name: Verify the packaged browser server and synthetic browser workflows
@@ -295,47 +259,9 @@ jobs:
         run: |
           python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html-preflight.json
 
-      - name: Debug full native unit correctness
-        run: |
-          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-debug --test-timeout 120s -Dtest-watchdog=true
-
-      - name: Shared mail, contacts and browser adapter correctness
-        run: |
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-      - name: Safe full native unit correctness
-        run: |
-          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-safe --test-timeout 120s -Dtest-watchdog=true
-
-      - name: Debug growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Safe growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Debug retained native history stress
-        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
-      - name: Safe retained native history stress
-        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
-      - name: Safe HTML allocation lifecycle
-        run: |
-          python3 tests/terminal_html.py --binary dist/omagma-linux-${{ matrix.arch }} --build-mode safe --output tests/results/terminal-safe-html.json --resource-cycles 1000 --idle-seconds 60
-
-      - name: Safe terminal memory gates
-        run: |
-          python3 tests/terminal_measure.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-cli-memory.json
-          python3 tests/terminal_measure.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/terminal-safe-tui-memory.json
-
-      - name: Safe Markdown preview allocation lifecycle
-        run: |
-          python3 tests/terminal_markdown_lifecycle.py --kind cli --binary dist/omagma-linux-${{ matrix.arch }} --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-cli-memory.json
-          python3 tests/terminal_markdown_lifecycle.py --kind tui --binary dist/omagma-linux-${{ matrix.arch }} --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/terminal-safe-markdown-tui-memory.json
-      - name: Safe memory gate
-        run: python3 tests/measure.py --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-memory.json
-      - name: Safe background scheduling memory gate
-        run: |
-          python3 tests/background_measure_check.py
-          python3 tests/background_measure.py --fixtures --config tests/fixtures/all-accounts.json --binary dist/omagma-linux-${{ matrix.arch }} --output tests/results/zig017-safe-background.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          overwrite: true
           name: release-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
@@ -344,7 +270,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verification-linux-${{ matrix.arch }}
+          name: verification-linux-${{ matrix.arch }}-${{ github.run_attempt }}
           path: |
             tests/results/*.json
             tests/results/browser-safe-server/server-acceptance.json
@@ -354,6 +280,21 @@ jobs:
             tests/results/browser-safe-server/connect-browser/connect-acceptance.json
           if-no-files-found: warn
           retention-days: 30
+      - name: Exclude temporary test data from compilation caches
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import shutil
+          for path in ('.zig-cache/tmp', '.ci-zig/global/tmp'):
+              shutil.rmtree(path, ignore_errors=True)
+          PY
+      - name: Save reusable compiler and dependency cache
+        if: always() && steps.zig-cache.outputs.cache-matched-key == ''
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-zig/global
+          key: zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-preflight
+
 
   macos-build:
     name: macOS ${{ matrix.arch }} qualification
@@ -369,18 +310,32 @@ jobs:
             runner: macos-15
             machine: arm64
             target: aarch64-macos.13.0
-            job_timeout: 360
+            job_timeout: 90
           - arch: x86_64
             runner: macos-15-intel
             machine: x86_64
             target: x86_64-macos.13.0
-            job_timeout: 360
+            job_timeout: 90
     runs-on: ${{ matrix.runner }}
-    # Allow cold compilation and all Debug/Safe retained-history and packaged gates.
-    # This outer allowance does not change the individual test watchdogs.
     timeout-minutes: ${{ matrix.job_timeout }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compiler, dependencies and SDK cache inputs
+        id: cache-inputs
+        run: python3 .github/ci_cache_key.py
+      - name: Restore verified compiler archive
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.tool_cache }}/omagma-zig
+          key: zig-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/zig-release.json') }}
+      - name: Restore shared content-addressed compiler cache
+        id: zig-cache
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-zig/global
+          key: zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-tests
+          restore-keys: |
+            zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-preflight
       - name: Install the declared native Zig compiler
         run: python3 .github/install_zig.py
       - name: Select the browser packaging toolchain
@@ -394,12 +349,6 @@ jobs:
         run: |
           npm ci --prefix web-demo --ignore-scripts --no-audit --no-fund
           npm test --prefix web-demo
-      - name: Release format and architecture oracles
-        run: |
-          python3 tests/release_binary.py
-          python3 tests/publication_privacy.py
-          python3 tests/release_notes.py
-          python3 tests/terminal_compose_screen.py
       - name: Verify native host, SDK and timezone fixtures
         run: |
           test "$(uname -m)" = '${{ matrix.machine }}'
@@ -410,80 +359,13 @@ jobs:
           test -f /etc/localtime
           test -f /usr/share/zoneinfo/Europe/Vienna
           test -f /usr/share/zoneinfo/Asia/Kathmandu
-      - name: Build Debug backend and probes for short preflight
-        run: |
-          zig version
-          python3 tests/zig_test_guard_check.py --zig "$(command -v zig)"
-          zig build probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug -Dtest-watchdog=true
-          zig build -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --prefix .verification-macos-debug
-
-      - name: Debug short native acceptance
-        run: |
-          .verification-macos-debug/bin/omagma build-info
-          shasum -a 256 .verification-macos-debug/bin/omagma
-          python3 tests/terminal_fixture_check.py
-          python3 tests/terminal_cache_fixture_check.py
-          python3 tests/terminal_screen.py
-          python3 tests/terminal_ux_focus.py
-          python3 tests/terminal_status_screen.py
-          python3 tests/terminal_theme_screen.py
-          python3 tests/terminal_reader.py
-          python3 tests/terminal_html_screen.py
-          python3 tests/terminal_html_fixture_check.py
-          python3 tests/terminal_repaint_screen.py
-          python3 tests/terminal_mouse_screen.py
-          python3 tests/publication_gif.py
-          python3 tests/homebrew_formula.py
-          python3 tests/terminal_integration.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-cli.json
-          python3 tests/terminal_wishlist_backend.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_cache_windows.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_transport.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-transport.json
-          python3 tests/terminal_attachment_streams.py --probe .verification-macos-debug/bin/terminal_stream_probe
-          python3 tests/calendar_native_http.py --probe .verification-macos-debug/bin/calendar_http_probe
-
-      - name: Debug portable Markdown, invitation and command acceptance
-        run: |
-          python3 tests/terminal_cli_usage.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-usage.json
-          python3 tests/terminal_cli_parity.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-cli-parity.json
-          python3 tests/terminal_markdown_mail.py --binary .verification-macos-debug/bin/omagma --receipt tests/results/macos-debug-markdown.json
-          python3 tests/terminal_forward_original.py --binary .verification-macos-debug/bin/omagma --receipt tests/results/macos-debug-forward-original.json
-          python3 tests/terminal_label_management.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_label_transport.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_ux_backend_cli.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_queue_send_now.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/credential_storage.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/updates.py --binary .verification-macos-debug/bin/omagma
-      - name: Debug macOS retained draft and compose acceptance
-        run: |
-          python3 tests/terminal_compose_actions.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_draft_conflict.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_draft_paging.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_quote_policy.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_reply_boundaries.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_settled_recovery.py --binary .verification-macos-debug/bin/omagma
-      - name: Debug native first-use mail, Calendar and vault workflows
-        run: python3 tests/terminal_workflow_regressions.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/workflows-macos-debug.json
-      - name: Debug native terminal, Keychain and detached lifecycle
-        run: |
-          # This guardian keeps the owned Darwin PTY alive for termios checks.
-          # Linux /proc resource and stock session-leader PTY harnesses stay in
-          # the Linux job; these checks do not establish a macOS memory baseline.
-          python3 tests/terminal_macos.py --binary .verification-macos-debug/bin/omagma
-          python3 tests/terminal_macos_features.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-features.json
-          python3 tests/terminal_mail_acceptance.py --binary .verification-macos-debug/bin/omagma --build-mode debug --receipt tests/results/macos-debug-mail-acceptance.json
-          python3 tests/terminal_ux_macos.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-ux.json
-          python3 tests/terminal_reader_copy.py --binary .verification-macos-debug/bin/omagma --output tests/results/macos-debug-reader-copy.json
-          python3 tests/terminal_reader_editor.py --binary .verification-macos-debug/bin/omagma --build-mode debug --output tests/results/macos-debug-reader-editor.json
-          python3 tests/launch_macos.py --binary .verification-macos-debug/bin/omagma
-          .verification-macos-debug/bin/omagma probe-keyring
-          .verification-macos-debug/bin/auth_probe keyring
-          .verification-macos-debug/bin/auth_probe launch
-          .verification-macos-debug/bin/auth_probe callback
-          .verification-macos-debug/bin/callback_budget
-          python3 tests/keyring_default_macos.py --ephemeral-default --build-mode debug
       - name: Safe standalone probe preflight
         run: |
-          zig build probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe -Dtest-watchdog=true
+          zig version
+          zig fmt --check build.zig src
+          zig test src/native_history_stress_tests.zig -Osafe -target ${{ matrix.target }} -mcpu=baseline --test-filter "native history selector:"
+          python3 tests/zig_test_guard_check.py --zig "$(command -v zig)"
+          zig build install probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe -Dtest-watchdog=true
           .verification-macos-safe/bin/auth_probe keyring
           .verification-macos-safe/bin/auth_probe launch
           .verification-macos-safe/bin/auth_probe callback
@@ -546,8 +428,8 @@ jobs:
         run: python3 tests/terminal_workflow_regressions.py --binary dist/omagma-macos-${{ matrix.arch }} --build-mode safe --output tests/results/workflows-macos-safe.json
       - name: Native Keychain survives the packaged binary upgrade
         run: |
-          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}
-          python3 tests/keyring_macos.py --binary .verification-macos-debug/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }} --homebrew-resign
+          python3 tests/keyring_macos.py --binary .verification-macos-safe/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }}
+          python3 tests/keyring_macos.py --binary .verification-macos-safe/bin/omagma --upgrade-binary dist/omagma-macos-${{ matrix.arch }} --homebrew-resign
       - name: Native credential-free HTTPS with system CA certificates
         env:
           RELEASE_ARCH: ${{ matrix.arch }}
@@ -556,8 +438,7 @@ jobs:
           import hashlib, json, os, signal, subprocess
           from pathlib import Path
           checks = []
-          for mode, binary in [('debug', Path('.verification-macos-debug/bin/omagma')),
-                               ('safe', Path('dist/omagma-macos-' + os.environ['RELEASE_ARCH']))]:
+          for mode, binary in [('safe', Path('dist/omagma-macos-' + os.environ['RELEASE_ARCH']))]:
               info = json.loads(subprocess.check_output([str(binary.resolve()), 'build-info'], text=True, timeout=10))
               assert info['zigVersion'] == '0.17.0' and info['optimizeMode'] == mode, info
               child = subprocess.Popen([str(binary.resolve()), 'probe-https'], stdin=subprocess.DEVNULL,
@@ -576,40 +457,11 @@ jobs:
               checks.append({'buildInfo': info, 'binarySha256': hashlib.sha256(binary.read_bytes()).hexdigest(), **frame})
           Path('tests/results').mkdir(parents=True, exist_ok=True)
           Path('tests/results/macos-credential-free-https.json').write_text(json.dumps({'passed': True, 'credentialsUsed': False, 'checks': checks}, indent=2) + '\n')
-          print('PASS native Debug and packaged Safe HTTPS: credential-free401 and bounded storage')
+          print('PASS packaged Safe HTTPS: credential-free401 and bounded storage')
           PY
-      - name: Debug full native unit correctness
-        run: |
-          zig build test probes -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-debug --test-timeout 120s -Dtest-watchdog=true
-
-      - name: Shared mail, contacts and browser adapter correctness
-        run: |
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-          zig build test-browser-export test-browser-server test-browser-cache test-browser-provider test-contacts test-browser-mail-actions -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 120s -Dtest-watchdog=true
-      - name: Safe full native unit correctness
-        run: |
-          zig build test probes -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --prefix .verification-macos-safe --test-timeout 120s -Dtest-watchdog=true
-
-      - name: Debug growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Safe growing native mail stress
-        run: zig build test-native-send-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 300s -Dtest-watchdog=true
-      - name: Debug retained native history stress
-        run: zig build test-native-history-stress -Doptimize=debug -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
-      - name: Safe retained native history stress
-        run: zig build test-native-history-stress -Doptimize=safe -Dtarget=${{ matrix.target }} -Dcpu=baseline -j2 --summary all --test-timeout 1200s -Dtest-watchdog=true
-      - name: Native macOS memory and quiet CPU gates
-        run: |
-          python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind cli --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-cli-memory.json
-          python3 tests/terminal_measure_macos.py --binary dist/omagma-macos-${{ matrix.arch }} --kind tui --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-tui-memory.json
-      - name: Safe native Markdown preview allocation lifecycle
-        env:
-          RELEASE_ARCH: ${{ matrix.arch }}
-        run: |
-          python3 tests/terminal_markdown_lifecycle.py --kind cli --binary dist/omagma-macos-$RELEASE_ARCH --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-cli-memory.json
-          python3 tests/terminal_markdown_lifecycle.py --kind tui --binary dist/omagma-macos-$RELEASE_ARCH --cycles 1000 --warmup 100 --idle-seconds 60 --output tests/results/macos-safe-markdown-tui-memory.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
+          overwrite: true
           name: release-macos-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
@@ -618,16 +470,108 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verification-macos-${{ matrix.arch }}
+          name: verification-macos-${{ matrix.arch }}-${{ github.run_attempt }}
           path: |
             tests/results/*.json
             tests/results/browser-safe-server/server-acceptance.json
           if-no-files-found: warn
           retention-days: 30
+      - name: Exclude temporary test data from compilation caches
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import shutil
+          for path in ('.zig-cache/tmp', '.ci-zig/global/tmp'):
+              shutil.rmtree(path, ignore_errors=True)
+          PY
+      - name: Save reusable compiler and dependency cache
+        if: always() && steps.zig-cache.outputs.cache-matched-key == ''
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-zig/global
+          key: zig-global-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-inputs.outputs.key }}-preflight
+
+
+  compile:
+    name: Compile ${{ matrix.platform }}
+    needs: [version, build, macos-build]
+    if: needs.version.outputs.needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-linux-musl
+            os: linux
+            arch: x86_64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-linux-musl
+            os: linux
+            arch: arm64
+          - platform: macos-arm64
+            runner: macos-15
+            target: aarch64-macos.13.0
+            os: macos
+            arch: arm64
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-macos.13.0
+            os: macos
+            arch: x86_64
+    uses: ./.github/workflows/native-gate.yml
+    with:
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      gate: compile
+
+  gates:
+    name: Gate ${{ matrix.platform }} ${{ matrix.gate }}
+    needs: [version, build, macos-build, compile]
+    if: needs.version.outputs.needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [history-files-plain, history-files-vault, history-sends-plain, history-sends-vault, history-calendar, send, unit-main, unit-extra, unit-memory, adapters, resources]
+        platform: [linux-x86_64, linux-arm64, macos-arm64, macos-x86_64]
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-linux-musl
+            os: linux
+            arch: x86_64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-linux-musl
+            os: linux
+            arch: arm64
+          - platform: macos-arm64
+            runner: macos-15
+            target: aarch64-macos.13.0
+            os: macos
+            arch: arm64
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-macos.13.0
+            os: macos
+            arch: x86_64
+    uses: ./.github/workflows/native-gate.yml
+    with:
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      gate: ${{ matrix.gate }}
 
   qualified:
     name: Ready for approval
-    needs: [version, build, macos-build]
+    needs: [version, build, macos-build, compile, gates]
     if: github.ref == 'refs/heads/main' && needs.version.outputs.needed == 'true'
     runs-on: ubuntu-24.04
     steps:
@@ -640,6 +584,6 @@ jobs:
           from pathlib import Path
           repo, run, commit = (os.environ[name] for name in ('GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_SHA'))
           version = os.environ['QUALIFIED_VERSION']
-          summary = f"## Candidate {version} qualified\n\nAll four native platform checks passed. No release has been published.\n\nCommit: `{commit}`\n\nQualification run: [{run}](https://github.com/{repo}/actions/runs/{run})\n\nAfter explicit approval, run **Publish qualified release** with this run ID. The verified artifacts are retained for 30 days; a changed revision needs fresh qualification.\n"
+          summary = f"## Candidate {version} qualified\n\nAll four native preflights and all 44 independent Safe gates passed. No release has been published.\n\nCommit: `{commit}`\n\nQualification run: [{run}](https://github.com/{repo}/actions/runs/{run})\n\nAfter explicit approval, run **Publish qualified release** with this run ID. The verified artifacts are retained for 30 days; a changed revision needs fresh qualification.\n"
           Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary)
           PY

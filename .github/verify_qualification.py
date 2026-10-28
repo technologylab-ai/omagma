@@ -24,8 +24,19 @@ PLATFORMS = {
     "macOS arm64 qualification": "release-macos-arm64",
     "macOS x86_64 qualification": "release-macos-x86_64",
 }
+GATES = (
+    "unit-main", "unit-extra", "unit-memory", "adapters", "send",
+    "history-calendar", "history-sends-plain", "history-sends-vault",
+    "history-files-plain", "history-files-vault", "resources",
+)
+COMPILE_JOBS = {f"Compile {artifact.removeprefix('release-')} / Check": platform
+                for platform, artifact in PLATFORMS.items()}
+GATE_JOBS = {f"Gate {artifact.removeprefix('release-')} {gate} / Check": platform
+             for platform, artifact in PLATFORMS.items() for gate in GATES}
 MAX_METADATA_BYTES = 2 * 1024 * 1024
-MAX_PAGES = 3
+# Include prior attempts when only a failed shard is rerun. The fixed bound
+# accommodates all 50 GitHub attempts of the complete native matrix.
+MAX_PAGES = 30
 PAGE_SIZE = 100
 
 
@@ -88,26 +99,44 @@ def verify(run, workflow, jobs, artifacts, *, repository, expected_sha, run_id, 
             "Invalid qualification artifacts")
     now = now or datetime.now(timezone.utc)
     require(now.tzinfo is not None, "Qualification time must include a timezone")
-    selected_jobs = {}
+    required_jobs = set(PLATFORMS) | set(COMPILE_JOBS) | set(GATE_JOBS)
+    latest_jobs = {}
     job_ids = set()
+    job_attempts = set()
     for job in jobs:
         require(isinstance(job, dict), "Invalid qualification job")
         job_id = positive(job.get("id"), "job ID")
         require(job_id not in job_ids, "Duplicate qualification job metadata")
         job_ids.add(job_id)
-        require(job.get("run_id") == run_id and job.get("run_attempt") == attempt
-                and job.get("head_sha") == expected_sha, "Job provenance differs from the current run attempt")
+        job_attempt = positive(job.get("run_attempt"), "job attempt")
+        require(job.get("run_id") == run_id and job_attempt <= attempt
+                and job.get("head_sha") == expected_sha, "Job provenance differs from the verified source run")
         name = job.get("name")
         require(isinstance(name, str) and len(name) <= 256, "Invalid qualification job name")
-        if name in PLATFORMS:
-            require(name not in selected_jobs, "Duplicate native platform qualification job")
-            require(job.get("status") == "completed" and job.get("conclusion") == "success",
-                    f"Native qualification did not succeed: {name}")
-            started = timestamp(job.get("started_at"), "job start time")
-            completed = timestamp(job.get("completed_at"), "job completion time")
-            require(started <= completed <= now, "Invalid qualification job time range")
-            selected_jobs[name] = (started, completed)
-    require(set(selected_jobs) == set(PLATFORMS), "All four native platform qualifications are required")
+        if name in required_jobs:
+            require((name, job_attempt) not in job_attempts, "Duplicate qualification job in one attempt")
+            job_attempts.add((name, job_attempt))
+            # A newer failed, cancelled or skipped execution invalidates an
+            # earlier success. Never search backwards for a passing result.
+            if name not in latest_jobs or job_attempt > latest_jobs[name]["run_attempt"]:
+                latest_jobs[name] = job
+    require(set(latest_jobs) == required_jobs,
+            "All four native preflights, compile jobs and every qualification gate are required")
+    selected_jobs = {}
+    for name, job in latest_jobs.items():
+        require(job.get("status") == "completed" and job.get("conclusion") == "success",
+                f"Native qualification did not succeed: {name}")
+        started = timestamp(job.get("started_at"), "job start time")
+        completed = timestamp(job.get("completed_at"), "job completion time")
+        require(started <= completed <= now, "Invalid qualification job time range")
+        selected_jobs[name] = (started, completed)
+    platform_compile = {platform: name for name, platform in COMPILE_JOBS.items()}
+    dependencies = {**COMPILE_JOBS,
+                    **{name: platform_compile[platform] for name, platform in GATE_JOBS.items()}}
+    for name, dependency in dependencies.items():
+        require(latest_jobs[name]["run_attempt"] >= latest_jobs[dependency]["run_attempt"]
+                and selected_jobs[name][0] >= selected_jobs[dependency][1],
+                "Qualification job predates its latest native prerequisite")
     by_name = {}
     artifact_ids = set()
     for artifact in artifacts:
@@ -133,7 +162,7 @@ def verify(run, workflow, jobs, artifacts, *, repository, expected_sha, run_id, 
         platform = next(platform for platform, expected in PLATFORMS.items() if expected == name)
         started, completed = selected_jobs[platform]
         require(started <= timestamp(artifact.get("created_at"), "artifact creation") <= completed,
-                "Release artifact was not created during this successful platform attempt")
+                "Release artifact was not created during the latest successful platform attempt")
         by_name[name] = artifact_id
     require(set(by_name) == set(PLATFORMS.values()), "All four unexpired release artifacts are required")
     return {"run_id": run_id, "head_sha": expected_sha, "run_attempt": attempt,
@@ -157,8 +186,15 @@ class Api:
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def get(self, endpoint):
-        require(re.fullmatch(r"actions/(?:workflows/release\.yml|runs/[0-9]+(?:/attempts/[0-9]+/jobs|/artifacts)?)(?:\?per_page=100&page=[123])?", endpoint) is not None,
+        approved = re.fullmatch(
+            r"actions/(?:workflows/release\.yml|runs/[0-9]+(?:"
+            r"/artifacts(?:\?per_page=100&page=(?P<artifact_page>[1-9][0-9]*))?"
+            r"|/jobs\?filter=all(?:&per_page=100&page=(?P<job_page>[1-9][0-9]*))?"
+            r")?)", endpoint)
+        require(approved is not None,
                 "Unapproved GitHub API endpoint")
+        require(all(int(page) <= MAX_PAGES for page in approved.groupdict().values() if page is not None),
+                "Unapproved GitHub API page")
         request = urllib.request.Request(self.base + endpoint, headers={
             "Authorization": "Bearer " + self.token, "Accept": "application/vnd.github+json",
             "Accept-Encoding": "identity", "X-GitHub-Api-Version": "2022-11-28",
@@ -182,7 +218,8 @@ class Api:
     def collection(self, endpoint, key):
         values, total = [], None
         for page in range(1, MAX_PAGES + 1):
-            data = self.get(f"{endpoint}?per_page={PAGE_SIZE}&page={page}")
+            separator = "&" if "?" in endpoint else "?"
+            data = self.get(f"{endpoint}{separator}per_page={PAGE_SIZE}&page={page}")
             require(isinstance(data, dict), "Invalid GitHub collection metadata")
             count, items = data.get("total_count"), data.get(key)
             require(type(count) is int and 0 <= count <= PAGE_SIZE * MAX_PAGES
@@ -201,11 +238,11 @@ def fetch(api, run_id, *, repository, expected_sha, now=None):
     run = api.get(f"actions/runs/{run_id}")
     workflow = api.get("actions/workflows/release.yml")
     _, attempt = verify_run(run, workflow, repository, expected_sha, run_id)
-    jobs = api.collection(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+    jobs = api.collection(f"actions/runs/{run_id}/jobs?filter=all", "jobs")
     artifacts = api.collection(f"actions/runs/{run_id}/artifacts", "artifacts")
     result = verify(run, workflow, jobs, artifacts, repository=repository, expected_sha=expected_sha, run_id=run_id, now=now)
-    # A rerun/cancellation must not combine jobs from one attempt with another
-    # attempt's whole-run conclusion while API calls are in flight.
+    # Prior successful jobs may be reused only within this exact source run.
+    # Reject any rerun/cancellation that races the captured whole-run result.
     final = api.get(f"actions/runs/{run_id}")
     _, final_attempt = verify_run(final, workflow, repository, expected_sha, run_id)
     require(final_attempt == attempt and final.get("updated_at") == run.get("updated_at"),
