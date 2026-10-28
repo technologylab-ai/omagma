@@ -505,7 +505,7 @@ test "guard following test still runs" {
 
 
 def cache_handoff_oracle(zig):
-    """Exercise restored configuration caches in isolated, disposable paths."""
+    """Exercise restored local configuration in isolated, disposable paths."""
     if subprocess.check_output([zig, "version"], text=True, timeout=10).strip() != "0.17.0":
         raise AssertionError("Cache handoff oracle requires exact Zig 0.17.0")
     with tempfile.TemporaryDirectory(prefix="omagma-cache-handoff-") as temporary:
@@ -522,14 +522,15 @@ pub fn build(b: *std.Build) void {
 
         def run(path, phase, *options):
             argv = [zig, "build", "empty", "-Doptimize=safe", "-j2", "--summary", "all", *options]
-            env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=str(path / ".ci-zig/global"))
-            return run_maker_phase(argv, path, phase, 180, env=env)
+            # maker_oracle has already verified the compiler and primed its
+            # global objects. Reuse them: this regression concerns the local
+            # configuration handoff, not another cold compiler bootstrap.
+            return run_maker_phase(argv, path, phase, 180)
 
         code, text = run(source, "cache-prime")
         assert code == 0, text
         # Reproduce the old CI cleanup, but only within this disposable fixture.
-        for relative in (".zig-cache/tmp", ".ci-zig/global/tmp"):
-            shutil.rmtree(source / relative, ignore_errors=True)
+        shutil.rmtree(source / ".zig-cache/tmp", ignore_errors=True)
         restored = directory / "restored"
         shutil.copytree(source, restored)
         code, text = run(restored, "cache-missing-tmp", "-Ddifferent=true")
