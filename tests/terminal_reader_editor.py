@@ -272,11 +272,19 @@ def start(binary, directory, extra, script, outside):
     return terminal, literal
 
 
+def editor_input_ready(terminal, output_start):
+    # The receipt is written before setraw(). Earlier editor prompts remain
+    # on the normal screen across TUI takeovers, so only a newly emitted
+    # prompt proves this editor has completed its raw-input handoff.
+    return (terminal.editor_log.exists()
+            and b"OWNED RECEIVED SNAPSHOT EDITOR:" in terminal.output[output_start:])
+
+
 def enter_editor(terminal, directory, literal, via_command=False):
     terminal.editor_log.unlink(missing_ok=True)
+    output_start = len(terminal.output)
     terminal.send(b":view-editor\r" if via_command else b"e")
-    wait(terminal, "external editor entered", lambda: terminal.editor_log.exists()
-         and "OWNED RECEIVED SNAPSHOT EDITOR:" in terminal.text())
+    wait(terminal, "external editor entered", lambda: editor_input_ready(terminal, output_start))
     entry = json.loads(terminal.editor_log.read_text())
     snapshot = Path(entry["path"])
     require(snapshot.name == "message.txt" and snapshot.parent.name.startswith("omagma-reader-"),

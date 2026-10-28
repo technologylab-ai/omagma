@@ -21,6 +21,9 @@ option only builds and verifies a candidate; it neither
 changes the existing release nor authorizes publication. The publisher's
 existing-release and tag protections still apply.
 
+A newer source run cancels obsolete qualification on the same branch instead
+of waiting behind it. Publication has its own protected concurrency group.
+
 Publication creates only a new version and never replaces a release, draft or tag. A prerelease version remains a prerelease rather than becoming latest. Homebrew and documentation deployment follow publication.
 
 Review `docs/release-notes/VERSION.md` before requesting publication. The publisher uses that version's highlights and appends matching compiler, download and setup links; a generic description is available when no versioned notes exist. Release notes describe the complete current application, including its experimental terminal status.
@@ -101,7 +104,10 @@ fail. Each lifecycle retains its 1,200-second per-test watchdog. Source and
 policy tests enforce the inventory and preflight dependency order.
 
 Compiler archives are cached and revalidated against the pinned official hash
-before extraction. The shared compiler/dependency cache includes native OS/CPU,
+before extraction. Completed app/probe compilation is saved before functional
+tests and keyed by its actual build inputs, so a Python harness fix preserves
+that work. Bundles and tests are still rebuilt or rerun as appropriate; cached
+compilation is never qualification evidence. The shared compiler/dependency cache includes native OS/CPU,
 compiler, dependency pins and SDK identity, independently of the application
 version. A version bump therefore preserves that cache. Completed test objects
 are cached once per compilation group for the exact source commit; failed or

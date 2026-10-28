@@ -51,6 +51,12 @@ def verify(data):
 
 
 class Qualification(unittest.TestCase):
+    def test_superseded_qualification_cancels_but_publication_is_protected(self):
+        qualification = (ROOT / ".github/workflows/release.yml").read_text()
+        promotion = (ROOT / ".github/workflows/publish-qualified.yml").read_text()
+        self.assertIn("  cancel-in-progress: true", qualification.split("\njobs:", 1)[0])
+        self.assertIn("  cancel-in-progress: false", promotion.split("\njobs:", 1)[0])
+
     def test_check_only_workflow_cannot_publish_and_promotion_is_manual(self):
         qualification = (ROOT / ".github/workflows/release.yml").read_text()
         for line in qualification.splitlines():
@@ -193,10 +199,25 @@ class Qualification(unittest.TestCase):
         self.assertIn("'.ci-zig/global/tmp'", cleanup)
         self.assertLess(gate.index(cleanup), gate.index(complete))
         self.assertLess(gate.index(cleanup), gate.index(partial))
-        for workflow in ("release.yml", "macos-native.yml"):
+        for workflow in ("macos-native.yml",):
             text = (ROOT / ".github/workflows" / workflow).read_text()
             self.assertNotIn("path: .zig-cache", text, workflow)
             self.assertNotIn("            .zig-cache\n", text, workflow)
+
+    def test_preflight_build_cache_survives_harness_fixes_and_is_saved_before_tests(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text().split("\n  compile:", 1)[0]
+        for job in release.split("  macos-build:", 1):
+            steps = job.split("      - name:")
+            restore = next(step for step in steps if "id: preflight-build-cache" in step)
+            save = next(step for step in steps if "Save completed app and probe compilation" in step)
+            self.assertIn("path: .zig-cache", restore)
+            self.assertIn("${{ steps.cache-inputs.outputs.app_key }}", restore)
+            self.assertNotIn("${{ github.sha }}", restore)
+            self.assertNotIn("restore-keys:", restore)
+            self.assertIn("steps.preflight-build-cache.outputs.cache-primary-key", save)
+            self.assertLess(job.index("python3 tests/release_check.py"), job.index(save))
+            self.assertLess(job.index(save), job.index("python3 tests/terminal_workflow_regressions.py"))
+            self.assertLess(job.index("shutil.rmtree('.zig-cache/tmp'"), job.index(save))
 
     def test_resource_shards_reuse_the_bundle_and_preserve_every_existing_measurement(self):
         gate = (ROOT / ".github/workflows/native-gate.yml").read_text()
